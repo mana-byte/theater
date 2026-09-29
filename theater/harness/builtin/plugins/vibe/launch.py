@@ -25,6 +25,12 @@ from .constants import (
 )
 from .identity import participant_root
 from .isolation import _canonical, isolation_marker_text, validate_isolated_domain
+from .version import installed_vibe_version
+
+# Verified against real wheels: `ask` replaces `default` as the builtin
+# approval-per-tool profile in 2.24.1; `--yolo` exists from 2.17.0.
+_ASK_FLOOR = (2, 24, 1)
+_YOLO_FLOOR = (2, 17, 0)
 
 
 def plan_launch(
@@ -37,17 +43,23 @@ def plan_launch(
     approval = context.approval
     model = context.model
     resume = context.resume
+    # Undeterminable version keeps today's argv; never guess from a probe failure.
+    version = installed_vibe_version(context.binary)
     # No --experimental-harness: the observer reads both the classic session log
     # and the Unified Session Store that flag opts into, so neither is required.
     argv = ["vibe"]
     if approval == "yolo":
-        argv.append("--yolo")
+        if version is None or version >= _YOLO_FLOOR:
+            argv.append("--yolo")
+        else:
+            argv += ["--agent", "auto-approve"]
     elif approval == "edits":
         argv += ["--agent", "accept-edits"]
     elif approval == "manual":
-        # Explicit, since without --agent vibe falls back to `default_agent` (may auto-approve);
-        # `ask` is the builtin profile requiring approval for every tool.
-        argv.append("--agent=ask")
+        # Explicit, since without --agent vibe falls back to `default_agent` (may
+        # auto-approve). `ask`/`default` are the same approval-per-tool profile.
+        agent = "ask" if version is None or version >= _ASK_FLOOR else "default"
+        argv.append(f"--agent={agent}")
     # --resume appends to the same messages.jsonl, keeps the session id; prompt still honoured.
     if resume is not None:
         argv += ["--resume", resume]

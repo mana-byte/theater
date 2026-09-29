@@ -150,7 +150,7 @@ def manifest_for_roots(
         models=ModelDiscoveryManifest(discoverer=discover_models),
         mcp=McpRenderingManifest(renderer=render_mcp_servers),
         native_compatibility=NativeCompatibilityManifest(
-            qualified_range=">=2.25.0,<3",
+            qualified_range=">=2.24.0,<3",
             probe=probe_vibe_compatibility,
         ),
     )

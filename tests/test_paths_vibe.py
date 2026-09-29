@@ -11,12 +11,19 @@ from __future__ import annotations
 
 import json
 
-from shipped import VibeHarness, VibeObserver
+import pytest
+from shipped import VibeHarness, VibeObserver, pin_installed_vibe_version
 
 from theater.harness import EventPath, plan_launch
 from theater.harness.base import EventKind
 
 REPO = "/home/alice/project"
+
+
+@pytest.fixture(autouse=True)
+def _modern_vibe(monkeypatch):
+    """Pin a modern Vibe: these plans must not depend on the installed CLI."""
+    pin_installed_vibe_version(monkeypatch, (2, 25, 8))
 
 
 def _assistant_with_tools(*calls: dict) -> str:

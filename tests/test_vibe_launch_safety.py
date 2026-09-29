@@ -5,9 +5,16 @@ from __future__ import annotations
 import argparse
 
 import pytest
+from shipped import pin_installed_vibe_version
 
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.vibe.constants import VIBE_BYPASS_TOOL_PERMISSIONS_ENV
+
+
+@pytest.fixture(autouse=True)
+def _modern_vibe(monkeypatch):
+    """Pin a modern Vibe: these plans must not depend on the installed CLI."""
+    pin_installed_vibe_version(monkeypatch, (2, 25, 8))
 
 
 @pytest.mark.parametrize("approval", ["manual", "edits"])

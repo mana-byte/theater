@@ -70,3 +70,19 @@ OpenCodeObserver = _OpenCodeObserver
 VibeHarness = _vibe_harness
 VibeHarness.resume_strategy = "continue"  # type: ignore[attr-defined]
 VibeObserver = _VibeObserver
+
+
+def pin_installed_vibe_version(monkeypatch, version) -> None:
+    """Pin the vibe version in both import worlds (canonical and isolated).
+
+    The registry loads shipped plugins through an isolated package import, so
+    the canonical module and the live planner see different module objects.
+    """
+    from theater.harness import HARNESSES
+    from theater.harness.builtin.plugins.vibe import launch
+
+    monkeypatch.setattr(launch, "installed_vibe_version", lambda binary=None: version)
+    planner = HARNESSES["vibe"]._launch.planner
+    while hasattr(planner, "func"):
+        planner = planner.func
+    monkeypatch.setitem(planner.__globals__, "installed_vibe_version", lambda binary=None: version)

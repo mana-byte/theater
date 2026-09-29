@@ -17,9 +17,10 @@ from theater.harness.manifests.validation import validate_manifest
     ("stdout", "supported", "version", "reason"),
     [
         ("vibe 2.25.8", True, "2.25.8", None),
-        ("vibe 2.24.0", False, "2.24.0", "Vibe harness support requires >=2.25.0,<3"),
-        ("2.25.8", False, None, "Vibe did not report a stable CLI version"),
-        ("vibe 3.0.0", False, "3.0.0", "Vibe harness support requires >=2.25.0,<3"),
+        ("vibe 2.24.0", True, "2.24.0", None),
+        ("vibe 2.20.0", False, "2.20.0", "Vibe harness support requires >=2.24.0,<3"),
+        ("2.24.0", False, None, "Vibe did not report a stable CLI version"),
+        ("vibe 3.0.0", False, "3.0.0", "Vibe harness support requires >=2.24.0,<3"),
     ],
 )
 def test_vibe_version_parse_table(stdout, supported, version, reason, monkeypatch):
@@ -31,7 +32,7 @@ def test_vibe_version_parse_table(stdout, supported, version, reason, monkeypatc
     assert result.supported is supported
     assert result.native_version == version
     assert result.reason == reason
-    assert result.policy == "vibe-harness-2.25.0-compatible"
+    assert result.policy == "vibe-harness-2.24.0-compatible"
 
 
 def test_nonzero_exit_is_not_a_stable_version(monkeypatch):

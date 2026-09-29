@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
-from shipped import VibeHarness
+from shipped import VibeHarness, pin_installed_vibe_version
 
 from theater import paths
 from theater.harness import (
@@ -28,6 +28,12 @@ from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
 from theater.harness.builtin.plugins.vibe.isolation import validate_isolated_domain
 from theater.mcp_plugins import McpServerSpec
 from theater.models import BadRequest
+
+
+@pytest.fixture(autouse=True)
+def _modern_vibe(monkeypatch):
+    """Pin a modern Vibe: these plans must not depend on the installed CLI."""
+    pin_installed_vibe_version(monkeypatch, (2, 25, 8))
 
 
 def test_vibe_carries_the_id_in_an_env_override(tmp_path):
