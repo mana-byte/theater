@@ -143,7 +143,8 @@ def test_optional_installer_failure_rolls_back_replacements_and_credentials(thea
 @pytest.mark.parametrize(
     ("version", "supported"),
     [
-        ("2.1.201 (Claude Code)", False),
+        ("2.1.118 (Claude Code)", False),
+        ("2.1.119 (Claude Code)", True),
         ("2.1.202 (Claude Code)", True),
         ("2.1.220 (Claude Code)", True),
         ("2.2.0 (Claude Code)", True),

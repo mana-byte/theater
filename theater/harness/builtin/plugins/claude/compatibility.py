@@ -8,13 +8,15 @@ import subprocess
 from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
 
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?: \(Claude Code\))?")
-_POLICY = "claude-hooks-2.1.202-compatible"
+_POLICY = "claude-hooks-2.1.119-compatible"
 _MESSAGING_POLICY = "claude-messaging-native-controls-2.1.248"
 
 
 def probe_claude_hooks(context: RuntimeProbeContext) -> RuntimeCompatibility:
     """Check the stable CLI range; hook payload decoding is the schema gate."""
-    return _probe_claude(context, floor=(2, 1, 202), policy=_POLICY, upper=(3, 0, 0))
+    # 2.1.119 is where PostToolUse/PostToolUseFailure gained duration_ms; the older
+    # floor (2.1.202) was set before that evidence was checked against real binaries.
+    return _probe_claude(context, floor=(2, 1, 119), policy=_POLICY, upper=(3, 0, 0))
 
 
 def probe_claude_native_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
