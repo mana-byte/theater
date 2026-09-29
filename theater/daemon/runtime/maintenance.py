@@ -80,16 +80,21 @@ async def gc_loop(daemon) -> None:
                 or result.participants
                 or result.running_marked
                 or result.scratchpad
+                or result.control_operations
+                or result.native_evidence
             ):
                 logger.info(
                     "gc sweep: %d bus, %d jobs, %d touch, "
-                    "%d participants, %d running marked, %d scratchpad",
+                    "%d participants, %d running marked, %d scratchpad, "
+                    "%d control operations, %d native evidence",
                     result.bus,
                     result.jobs,
                     result.touch,
                     result.participants,
                     result.running_marked,
                     result.scratchpad,
+                    result.control_operations,
+                    result.native_evidence,
                 )
         except Exception:
             logger.exception("gc sweep failed")

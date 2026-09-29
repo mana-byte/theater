@@ -1,4 +1,4 @@
-"""GC engine and loop: seven batched phases bounding otherwise unbounded SQLite growth.
+"""GC engine and loop: nine batched phases bounding otherwise unbounded SQLite growth.
 MF1: jobs are swept on ``finished_at < cutoff`` only (NULL while running), never ``created_at``.
 MF3: never delete a mid-lineage participant; the depth rail would silently fail open.
 """
@@ -10,7 +10,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import and_, delete, exists, or_, select, text, update
 
 from theater import timing
 from theater.config import RetentionSection
@@ -33,12 +33,17 @@ from theater.daemon.persistence.checkpoint import passive_checkpoint
 from theater.daemon.persistence.repositories.journal import MAX_EVENTS_PER_TRANSACTION
 from theater.daemon.schema import (
     bus,
+    control_operations,
     jobs,
+    native_terminal_evidence,
+    participant_runtime_bindings,
     participants,
+    terminal_bindings,
     touch,
     workspace_usages,
 )
 from theater.daemon.store import Store
+from theater.harness.contracts.runtime import ControlDeliveryPhase, ControlKind
 from theater.models import Job, now
 from theater.observability.catalog import GC_PHASE
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
@@ -56,6 +61,8 @@ class SweepResult:
     participants: int = 0
     running_marked: int = 0
     scratchpad: int = 0
+    control_operations: int = 0
+    native_evidence: int = 0
 
 
 async def sweep(
@@ -64,7 +71,7 @@ async def sweep(
     *,
     live_handles: frozenset[str] = frozenset(),
 ) -> SweepResult:
-    """Run all seven GC phases in order, returning legacy per-phase row counts.
+    """Run all nine GC phases in order, returning legacy per-phase row counts.
     Yields between batches so status polling and await wakes are not starved. ``live_handles`` (the
     JobManager's events) must never be marked crashed behind a live await.
     """
@@ -75,6 +82,8 @@ async def sweep(
         participants=0,
         running_marked=0,
         scratchpad=0,
+        control_operations=0,
+        native_evidence=0,
     )
 
     cutoff_jobs = now() - retention.jobs_days * SECONDS_PER_DAY
@@ -93,6 +102,8 @@ async def sweep(
         participants=result.participants,
         running_marked=marked,
         scratchpad=result.scratchpad,
+        control_operations=result.control_operations,
+        native_evidence=result.native_evidence,
     )
     await asyncio.sleep(0)
 
@@ -109,6 +120,8 @@ async def sweep(
         participants=result.participants,
         running_marked=result.running_marked,
         scratchpad=result.scratchpad,
+        control_operations=result.control_operations,
+        native_evidence=result.native_evidence,
     )
 
     # Phase 3: participants — after jobs so newly-eligible ones are deleted in the same sweep.
@@ -124,6 +137,8 @@ async def sweep(
         participants=part_deleted,
         running_marked=result.running_marked,
         scratchpad=result.scratchpad,
+        control_operations=result.control_operations,
+        native_evidence=result.native_evidence,
     )
     await asyncio.sleep(0)
 
@@ -142,6 +157,8 @@ async def sweep(
         participants=result.participants,
         running_marked=result.running_marked,
         scratchpad=result.scratchpad,
+        control_operations=result.control_operations,
+        native_evidence=result.native_evidence,
     )
 
     # Phase 5: scratchpad — physical expiry follows the stored global TTL.
@@ -155,6 +172,8 @@ async def sweep(
         participants=result.participants,
         running_marked=result.running_marked,
         scratchpad=kv_deleted,
+        control_operations=result.control_operations,
+        native_evidence=result.native_evidence,
     )
 
     # Phase 6: bus.
@@ -168,6 +187,38 @@ async def sweep(
         participants=result.participants,
         running_marked=result.running_marked,
         scratchpad=result.scratchpad,
+        control_operations=result.control_operations,
+        native_evidence=result.native_evidence,
+    )
+
+    # Phase 7: settled control operations (job retention window).
+    with timing.span(GC_PHASE, phase="control_operations") as fields:
+        ops_deleted = await _sweep_control_operations(store, cutoff_jobs, retention.batch)
+        fields["deleted_rows"] = ops_deleted
+    result = SweepResult(
+        bus=result.bus,
+        jobs=result.jobs,
+        touch=result.touch,
+        participants=result.participants,
+        running_marked=result.running_marked,
+        scratchpad=result.scratchpad,
+        control_operations=ops_deleted,
+        native_evidence=result.native_evidence,
+    )
+
+    # Phase 8: native terminal evidence older than the same window.
+    with timing.span(GC_PHASE, phase="native_evidence") as fields:
+        evidence_deleted = await _sweep_native_evidence(store, cutoff_jobs, retention.batch)
+        fields["deleted_rows"] = evidence_deleted
+    result = SweepResult(
+        bus=result.bus,
+        jobs=result.jobs,
+        touch=result.touch,
+        participants=result.participants,
+        running_marked=result.running_marked,
+        scratchpad=result.scratchpad,
+        control_operations=result.control_operations,
+        native_evidence=evidence_deleted,
     )
 
     await _sweep_journal(store, cutoff_events, retention.batch)
@@ -379,6 +430,7 @@ def _delete_participant_row(store: Store, participant_id: str, restart_cutoff: f
             .where(*_eligible_participant_filters(restart_cutoff))
         ).rowcount
         if deleted:
+            _delete_participant_dependents(unit.connection, participant_id)
             store.journal.append_group(
                 unit,
                 [
@@ -391,6 +443,17 @@ def _delete_participant_row(store: Store, participant_id: str, restart_cutoff: f
                 ],
             )
     return int(deleted or 0)
+
+
+def _delete_participant_dependents(connection, participant_id: str) -> None:
+    """Drop rows only the deleted participant can own; eligibility already fenced unsafe ones."""
+    for table in (
+        terminal_bindings,
+        participant_runtime_bindings,
+        control_operations,
+        native_terminal_evidence,
+    ):
+        connection.execute(delete(table).where(table.c.participant_id == participant_id))
 
 
 async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:
@@ -412,7 +475,7 @@ async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:
 
 
 def _eligible_participant_filters(restart_cutoff: float):
-    """Return the four reference guards for participant retention."""
+    """Reference guards for participant retention; a broken one leaks rows or deletes live state."""
     return (
         participants.c.status == "dead",
         or_(
@@ -421,7 +484,7 @@ def _eligible_participant_filters(restart_cutoff: float):
             participants.c.terminated_at <= restart_cutoff,
         ),
         participants.c.id.not_in(select(jobs.c.target_id).where(jobs.c.target_id.is_not(None))),
-        participants.c.id.not_in(select(jobs.c.caller_id)),
+        participants.c.id.not_in(select(jobs.c.caller_id).where(jobs.c.caller_id.is_not(None))),
         participants.c.id.not_in(
             select(participants.c.resumed_from_id).where(
                 participants.c.resumed_from_id.is_not(None)
@@ -434,6 +497,29 @@ def _eligible_participant_filters(restart_cutoff: float):
             select(workspace_usages.c.holder_id).where(
                 workspace_usages.c.holder_kind == "participant",
                 workspace_usages.c.released_at.is_(None),
+            )
+        ),
+        # An operation recovery or a live await can still reference must fence the owner.
+        participants.c.id.not_in(
+            select(control_operations.c.participant_id).where(
+                or_(
+                    control_operations.c.delivery_phase != str(ControlDeliveryPhase.SETTLED),
+                    control_operations.c.execution_barrier != 0,
+                    and_(
+                        control_operations.c.kind.in_(
+                            [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
+                        ),
+                        exists(jobs.c.handle)
+                        .where(jobs.c.handle == control_operations.c.job_handle)
+                        .where(jobs.c.state == "running"),
+                    ),
+                )
+            )
+        ),
+        # Fail-closed: only stopped/failed backends are dead; any other phase is still recoverable.
+        participants.c.id.not_in(
+            select(participant_runtime_bindings.c.participant_id).where(
+                participant_runtime_bindings.c.lifecycle_phase.not_in(("stopped", "failed"))
             )
         ),
     )
@@ -635,6 +721,36 @@ async def _sweep_scratchpad(store: Store, batch: int) -> int:
     cutoff = now()
     while True:
         deleted = store.scratchpad_delete_expired(timestamp=cutoff, limit=batch)
+        total += deleted
+        await asyncio.sleep(0)
+        if deleted < batch:
+            break
+    return total
+
+
+async def _sweep_control_operations(store: Store, cutoff: float, batch: int) -> int:
+    """Delete settled operations older than the cutoff in bounded writes.
+
+    The repository prune never touches unsettled, barriered, or running-job rows.
+    """
+    total = 0
+    while True:
+        deleted = store.prune_control_operations(older_than=cutoff, limit=batch)
+        total += deleted
+        await asyncio.sleep(0)
+        if deleted < batch:
+            break
+    return total
+
+
+async def _sweep_native_evidence(store: Store, cutoff: float, batch: int) -> int:
+    """Delete terminal evidence older than the cutoff in bounded writes.
+
+    The repository prune keeps evidence whose operation still has a running job.
+    """
+    total = 0
+    while True:
+        deleted = store.prune_native_terminal_evidence(older_than=cutoff, limit=batch)
         total += deleted
         await asyncio.sleep(0)
         if deleted < batch:

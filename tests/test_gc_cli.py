@@ -172,6 +172,8 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, term
         "participants",
         "running_marked",
         "scratchpad",
+        "control_operations",
+        "native_evidence",
         "coverage",
         "db_bytes_before",
         "db_bytes_after",

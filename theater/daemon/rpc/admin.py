@@ -43,6 +43,8 @@ async def _gc(daemon, params: dict) -> dict:
         "participants": result.participants,
         "running_marked": result.running_marked,
         "scratchpad": result.scratchpad,
+        "control_operations": result.control_operations,
+        "native_evidence": result.native_evidence,
         "coverage": _retention_floor(daemon),
         "db_bytes_before": db_bytes_before,
         "db_bytes_after": db_bytes_after,
