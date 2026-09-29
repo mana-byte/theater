@@ -42,6 +42,7 @@ from .runtime_plan import (
     CODEX_RUNTIME_VERIFIED_VERSIONS,
     codex_thread_config_overrides,
     plan_codex_frontend,
+    verified_versions_text,
 )
 
 
@@ -283,7 +284,7 @@ class CodexRuntimeConnection(CodexRuntimeHost):
                 "codex app-server handshake reported unverified native version "
                 f"{native_version!r}; compatibility policy "
                 f"{CODEX_RUNTIME_COMPATIBILITY_POLICY} verifies only "
-                f"{', '.join(sorted(CODEX_RUNTIME_VERIFIED_VERSIONS))}"
+                f"{verified_versions_text()}"
             )
         try:
             # The dialect requires the initialized notification exactly once after initialize; no

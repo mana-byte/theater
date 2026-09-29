@@ -114,7 +114,7 @@ MANIFEST = HarnessManifest(
     controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
     native_compatibility=NativeCompatibilityManifest(
-        qualified_range="==0.154.0",
+        qualified_range=">=0.153.0,<=0.159.1",
         probe=probe_codex_compatibility,
     ),
     runtime=RuntimeManifest(

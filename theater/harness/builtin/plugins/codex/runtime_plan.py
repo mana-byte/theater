@@ -20,11 +20,29 @@ from theater.harness.contracts.runtime import (
 
 from .constants import CODEX_BINARY
 
-#: Name of the tested compatibility policy (Wave 0 proof, codex-cli 0.154.0).
-CODEX_RUNTIME_COMPATIBILITY_POLICY = "codex-appserver-0.154-verified"
+#: Name of the tested compatibility policy: one evidence bundle per exact release.
+CODEX_RUNTIME_COMPATIBILITY_POLICY = "codex-appserver-verified"
 
-#: Exact codex-cli releases the Wave 0 native proof verified end to end.
-CODEX_RUNTIME_VERIFIED_VERSIONS = frozenset({"0.154.0"})
+#: Exact codex-cli releases with a qualified bundle (tests/fixtures/codex_native_runtime).
+CODEX_RUNTIME_VERIFIED_VERSIONS = frozenset(
+    {
+        "0.153.0",
+        "0.153.1",
+        "0.153.2",
+        "0.153.3",
+        "0.153.4",
+        "0.154.0",
+        "0.155.0",
+        "0.155.1",
+        "0.156.0",
+        "0.156.1",
+        "0.157.0",
+        "0.157.1",
+        "0.158.0",
+        "0.159.0",
+        "0.159.1",
+    }
+)
 
 #: ``codex --version`` prints ``codex-cli <version>`` on the verified release.
 CODEX_RUNTIME_VERSION_PREFIX = "codex-cli"
@@ -53,6 +71,12 @@ _CODEX_APPROVAL_OVERRIDES: dict[str, tuple[tuple[str, str], ...]] = {
         ("sandbox_mode", "read-only"),
     ),
 }
+
+
+def verified_versions_text() -> str:
+    """The verified releases in release order, for refusal messages."""
+    ordered = sorted(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
+    return ", ".join(ordered)
 
 
 def codex_endpoint_url(endpoint: str) -> str:
@@ -122,7 +146,7 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
             reason=(
                 f"codex-cli {version} is not Theater-verified by compatibility policy "
                 f"{CODEX_RUNTIME_COMPATIBILITY_POLICY} (verified: "
-                f"{', '.join(sorted(CODEX_RUNTIME_VERIFIED_VERSIONS))}); wiring=auto selects "
+                f"{verified_versions_text()}); wiring=auto selects "
                 "legacy, and explicit native preference selects legacy with this reason"
             ),
         )

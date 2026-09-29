@@ -265,8 +265,9 @@ class TestCollectEvidence:
 class TestDefaultBaselineValidation:
     """default_baseline itself must fail closed on malicious index shapes."""
 
-    def test_default_baseline_selects_the_real_qualified_bundle(self) -> None:
-        assert collector.default_baseline() == (collector.FIXTURE_ROOT / "0.154.0")
+    def test_default_baseline_refuses_to_pick_among_many_qualified_bundles(self) -> None:
+        with pytest.raises(collector.QualificationError, match="pass --baseline explicitly"):
+            collector.default_baseline()
 
     @staticmethod
     def _write_mini_bundle(root: Path, directory: str, *, complete: bool = True) -> None:
@@ -413,6 +414,7 @@ class TestBackendVersionCheck:
             codex_home=Path("/run-root/home"),
             roots={},
             binary="/resolved/codex",
+            provider="ambient",
         )
 
     def test_initializes_exactly_once_and_parses_the_backend_release(
@@ -442,7 +444,9 @@ class TestEvidenceThreadingAndExitCodes:
 
         monkeypatch.setattr(collector, "generate_schema", fake_generate_schema)
         out = tmp_path / "out"
-        exit_code = collector.collect_evidence(out, codex_binary=str(binary))
+        exit_code = collector.collect_evidence(
+            out, codex_binary=str(binary), baseline=collector.FIXTURE_ROOT / "0.154.0"
+        )
         assert exit_code == 0
         assert seen["binary"] == str(binary.resolve())
 

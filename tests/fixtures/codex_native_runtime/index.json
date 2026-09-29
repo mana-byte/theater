@@ -7,10 +7,80 @@
     "candidates": "captured-but-unqualified releases live under candidates/ and are never interpreted as supported"
   },
   "bundles": {
+    "0.153.0": {
+      "directory": "0.153.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.153.1": {
+      "directory": "0.153.1",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.153.2": {
+      "directory": "0.153.2",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.153.3": {
+      "directory": "0.153.3",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.153.4": {
+      "directory": "0.153.4",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
     "0.154.0": {
       "directory": "0.154.0",
       "status": "qualified",
-      "compatibility_policy": "codex-appserver-0.154-verified"
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.155.0": {
+      "directory": "0.155.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.155.1": {
+      "directory": "0.155.1",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.156.0": {
+      "directory": "0.156.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.156.1": {
+      "directory": "0.156.1",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.157.0": {
+      "directory": "0.157.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.157.1": {
+      "directory": "0.157.1",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.158.0": {
+      "directory": "0.158.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.159.0": {
+      "directory": "0.159.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.159.1": {
+      "directory": "0.159.1",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
     }
   }
 }

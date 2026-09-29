@@ -1077,9 +1077,10 @@ documented, not solved.
 ### Tested Codex compatibility boundaries
 
 The shipped Codex runtime is verified against exactly what its Wave 0 native
-proof exercised: compatibility policy `codex-appserver-0.154-verified`, pinned
-to `codex-cli 0.154.0`. The probe runs `codex --version` and refuses any
-other release. Within that boundary, the tested facts are: one detached
+proof exercised: compatibility policy `codex-appserver-verified`, an exact
+allowlist of releases that each have a qualified evidence bundle
+(`codex-cli 0.153.0` through `0.159.1`). The probe runs `codex --version` and
+refuses any release outside the list. Within that boundary, the tested facts are: one detached
 `codex app-server --listen unix://<private-socket>` backend per participant
 (the endpoint carries WebSocket frames with an HTTP Upgrade handshake, not
 Theater NDJSON); the stock native CLI UI attached to the same thread; new,
@@ -1089,10 +1090,10 @@ clients subscribed — only the native UI answers; steering, interruption, and
 after abrupt daemon death.
 
 Vendor documentation labels the WebSocket transport experimental. Theater's
-verification covers the pinned release above under the tested policy — it is
+verification covers the qualified releases above under the tested policy — it is
 not a claim of universal transport stability across Codex versions. With the
 Wave 5 release gate passed, `auto` on a new Codex spawn selects native only
-inside that verified boundary — codex-cli 0.154.0. Outside it, `auto` and
+inside that verified boundary — codex-cli 0.153.0 through 0.159.1. Outside it, `auto` and
 `native` retain the ordinary launch with the recorded compatibility reason.
 
 ### Legacy opt-out and recovery

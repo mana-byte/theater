@@ -15,14 +15,16 @@ native events.
 - [`codex/manifest.py`](../../theater/harness/builtin/plugins/codex/manifest.py#L115)
   declares the detached runtime and native live channel.
 - [`codex/runtime_plan.py`](../../theater/harness/builtin/plugins/codex/runtime_plan.py#L28)
-  allows exactly `codex-cli 0.154.0`; the planner starts the app-server at line 211.
+  allows exactly the releases with a qualified evidence bundle (`0.153.0`–`0.159.1`);
+  the planner starts the app-server at line 211.
 - [`codex/runtime.py`](../../theater/harness/builtin/plugins/codex/runtime.py#L385)
   implements send with `clientUserMessageId`, steer at line 424, interrupt at line
   466, and settings update at line 494.
 - [`tests/test_codex_native_runtime_proof.py`](../../tests/test_codex_native_runtime_proof.py)
   contains offline fixture assertions plus opt-in stock-binary tests.
 - [`tests/fixtures/codex_native_runtime/`](../../tests/fixtures/codex_native_runtime)
-  contains the generated schemas and sanitized behavior captured for `0.154.0`.
+  contains the generated schemas and sanitized behavior captured per qualified release.
+  `0.154.0` is the real-provider baseline; every other bundle records `"provider": "mock"`.
 
 No phase-two production change is justified until a newly qualified release exhibits
 a real dialect difference or fixes a known limitation.
@@ -77,7 +79,7 @@ comparison baseline:
 
 ```text
 tests/fixtures/codex_native_runtime/
-  0.154.0/
+  <release>/
     installed_release.json
     protocol_schema/
     handshake.json
@@ -97,7 +99,7 @@ version; they must not select “latest” by lexical or semantic comparison.
 Migration requirements:
 
 - move the existing files byte-for-byte except deterministic formatting;
-- keep the current offline assertions passing against `0.154.0`;
+- keep the current offline assertions passing against every qualified release;
 - validate that every allowed version has a complete bundle and every passing bundle
   appears in the allowlist;
 - a captured-but-failing candidate may remain in a clearly named `candidates/`
@@ -230,9 +232,13 @@ history.
 
 What it cannot prove: anything the real model does that the script does not
 reproduce — refusal behaviour, multi-tool chains, token/latency realism. A
-mock-captured bundle must record `"provider": "mock"` in `installed_release.json`
-(the collector does this), so mock evidence is never mistaken for real-provider
-evidence. Known mock-environment deltas, each explainable and none of them a
+mock-captured bundle records `"provider": "mock"` in `installed_release.json`
+(the collector does this), so mock evidence stays distinguishable from
+real-provider evidence. Theater's native Codex runtime consumes the app-server wire
+protocol and the stock TUI's `--remote` attach, and the mock leaves both binaries
+unmodified (only the model behind them is scripted), so a release that passes
+the full mock suite is compatible and belongs in the allowlist: the allowlist exists
+to prevent breakage, not to withhold releases that are known to work. Known mock-environment deltas, each explainable and none of them a
 behaviour gap: the release tarball's binary has no model-metadata table, so the
 app-server emits one advisory `warning` notification a metadata-installed
 binary does not; mock turns carry synthetic assistant text.
@@ -245,6 +251,7 @@ SCRATCH=$(mktemp -d /tmp/codex-qualify.XXXXXX)
 uv run python tests/native/codex_fetch_release.py --version X.Y.Z --dest "$SCRATCH/bin"
 uv run python tests/native/codex_qualify_runtime.py \
   --out "$SCRATCH/bundle-X.Y.Z-mock" --capture-behavior --provider mock \
+  --baseline tests/fixtures/codex_native_runtime/0.154.0 \
   --codex "$SCRATCH/bin/codex"
 THEATER_CODEX_NATIVE_PROOF=1 THEATER_CODEX_NATIVE_PROVIDER=mock \
   THEATER_CODEX_NATIVE_BIN="$SCRATCH/bin/codex" \
@@ -262,10 +269,12 @@ admits exactly that one version for the test process (the allowlist itself is
 untouched, so a candidate is exercised before any allowlist edit);
 `THEATER_CODEX_NATIVE_PROVIDER=mock` wires the smoke suite's isolated CODEX_HOME
 at the mock provider instead of copying the ambient config. Real-provider runs
-remain the default everywhere (`--provider ambient`, env unset); a
-mock-captured bundle never qualifies a release by itself — review the diff
-against the last qualified bundle, then capture/commit real evidence or accept
-the mock bundle only after a human has reviewed the deltas.
+remain the default everywhere (`--provider ambient`, env unset). Review the
+printed diff against the baseline: additive schema changes are benign; a removed
+or reshaped required method, notification, or error text is a real dialect break.
+Then commit the bundle, add its `index.json` entry, and edit
+`CODEX_RUNTIME_VERIFIED_VERSIONS` last. A release that passes everything except one
+capability (for example settings readback) is a dialect decision, not a silent pass.
 
 ## Files to change
 

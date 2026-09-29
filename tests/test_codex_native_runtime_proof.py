@@ -378,7 +378,9 @@ class TestOfflineConformanceBundle:
         def capability_gating_facts() -> None:
             fixture = bundle("capabilities.json")
             settings = fixture["thread_settings_update"]
-            assert settings["without_experimental_api"]["error"] == {
+            gate = settings["without_experimental_api"]
+            # The curated 0.154.0 bundle nests the error; collector-captured bundles do not.
+            assert gate.get("error", gate) == {
                 "code": -32600,
                 "message": "thread/settings/update requires experimentalApi capability",
             }
@@ -510,6 +512,7 @@ class TestIndexValidation:
         root = tmp_path / "fixtures"
         root.mkdir()
         monkeypatch.setattr(proof, "FIXTURES", root)
+        monkeypatch.setattr(proof, "CODEX_RUNTIME_VERIFIED_VERSIONS", frozenset({"0.154.0"}))
         return root
 
     def _write_index(self, root: Path, bundles: dict) -> None:
