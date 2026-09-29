@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from theater.constants.harness import HARNESS_MCP_TOOL_TIMEOUT_SECONDS
 from theater.harness.contracts.launch import McpRenderContext, McpRenderOverlay
 
 
@@ -18,6 +19,9 @@ def render_mcp_servers(context: McpRenderContext) -> McpRenderOverlay:
             "-c",
             f"{prefix}.args={json.dumps(list(server.args))}",
         ]
+        # Codex's 300s default equals the daemon's await ceiling, so the
+        # client would give up before Theater's own timeout response arrives.
+        argv += ["-c", f"{prefix}.tool_timeout_sec={HARNESS_MCP_TOOL_TIMEOUT_SECONDS}"]
         for key, value in server.env.items():
             argv += ["-c", f"{prefix}.env.{key}={json.dumps(value)}"]
     insert_at = 3 if context.plan.argv[1:2] == ["fork"] else 1

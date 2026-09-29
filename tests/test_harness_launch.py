@@ -177,6 +177,25 @@ def test_codex_carries_the_id_in_a_config_override(monkeypatch, tmp_path):
     assert all(command.endswith('"') and '="' in command for command in commands)
 
 
+def test_codex_mcp_servers_outlast_a_full_length_await(monkeypatch, tmp_path):
+    """Codex's 300s default tool timeout can fire before Theater's own await reply."""
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    plan = plan_launch(
+        "codex",
+        participant_id="abc123",
+        prompt="say hello",
+        config_path=tmp_path / "unused.json",
+        approval="manual",
+    )
+
+    # `-c` values are TOML; Codex deserializes tool_timeout_sec as f64 seconds.
+    from theater.constants.harness import HARNESS_MCP_TOOL_TIMEOUT_SECONDS
+
+    for name in ("theater", "theater_wait"):
+        assert f"mcp_servers.{name}.tool_timeout_sec=340.0" in plan.argv
+    assert HARNESS_MCP_TOOL_TIMEOUT_SECONDS == 340.0
+
+
 @pytest.mark.parametrize(
     ("harness", "approval"),
     (
