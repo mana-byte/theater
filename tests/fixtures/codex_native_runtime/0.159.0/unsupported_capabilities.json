@@ -1,0 +1,35 @@
+{
+  "entries": [
+    {
+      "capability": "thread/settings/update without the experimentalApi capability",
+      "reason": "server rejects with the recorded error; Theater must treat settings updates as a separately-gated optional capability",
+      "status": "unavailable"
+    },
+    {
+      "capability": "thread/queue/* for Theater's followup queue",
+      "reason": "experimental, capability-gated, and server-side persistent: the queue would outlive a turn and is not Theater-owned",
+      "status": "not used by design"
+    },
+    {
+      "capability": "native UI attach to a zero-turn thread via resume",
+      "reason": "the rollout file is only written when the first turn is accepted; the recorded resume error shows UI attachment must wait until after the first turn/start",
+      "status": "unavailable"
+    },
+    {
+      "capability": "legacy execCommandApproval / applyPatchApproval server requests",
+      "reason": "present in the generated schema but the observed approval request was item/commandExecution/requestApproval; Theater's observer must still tolerate either shape",
+      "status": "not exercised"
+    },
+    {
+      "capability": "atomic idle-only submission",
+      "reason": "turn/start internally steers an already-active turn: a simultaneous native-UI submission absorbs the Theater message; Theater can only reject known-busy state and serialize its own controls",
+      "status": "unavailable"
+    },
+    {
+      "capability": "clarification answered by Theater",
+      "reason": "blocking clarifications arrive as item/tool/requestUserInput server requests; Theater observes them without answering because the native UI retains response ownership",
+      "status": "not exercised"
+    }
+  ],
+  "source": "explicit record of optional capabilities unavailable or not used"
+}
