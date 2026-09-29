@@ -9,6 +9,7 @@ from theater.harness.contracts.source import Source
 from theater.harness.observation import TranscriptObserver
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 
+from .config_root import claude_projects_root
 from .identity import ClaudeIdentity
 from .parser import ClaudeParser
 from .screen import ClaudeScreen
@@ -42,7 +43,7 @@ class ClaudeCodeObserver(
     )
 
     def __init__(self, root: Path | None = None):
-        self.root = root or Path.home() / ".claude" / "projects"
+        self.root = root or claude_projects_root()
         self._mcp_calls: dict[str, tuple[str, str]] = {}
         self._causal_records: dict[str, _ClaudeCausalRecord] = {}
         self._request_clocks: dict[str, _ClaudeRequestClock] = {}

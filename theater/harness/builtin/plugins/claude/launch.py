@@ -6,7 +6,6 @@ MCP config carries the participant id without excluding user servers.
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import uuid
 from collections.abc import Mapping
@@ -25,6 +24,7 @@ from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, Re
 from theater.harness.contracts.manifest import LaunchManifest
 from theater.harness.transcript.discovery import root_domain_overlay
 
+from .config_root import claude_config_root, claude_projects_root
 from .constants import CLAUDE_RECEIPT_EVENTS, CLAUDE_THINKING_SUMMARIES_KEY
 from .hooks import ClaudeHook, ClaudeHookEntry, ClaudeSettings
 
@@ -73,12 +73,7 @@ def _claude_receipt_settings(participant_id: str, token_path: Path) -> ClaudeSet
 
 
 def _user_configures_thinking_summaries() -> bool:
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    settings_path = (
-        Path(config_dir) / "settings.json"
-        if config_dir
-        else Path.home() / ".claude" / "settings.json"
-    )
+    settings_path = claude_config_root() / "settings.json"
     try:
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -127,7 +122,7 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
 
 
 def resume_launch_overlay(context: ResumeContext) -> ResumeLaunchOverlay:
-    return _resume_launch_overlay(context, Path.home() / ".claude" / "projects")
+    return _resume_launch_overlay(context, claude_projects_root())
 
 
 def _resume_launch_overlay(context: ResumeContext, root: Path) -> ResumeLaunchOverlay:
@@ -147,7 +142,7 @@ def _resume_launch_overlay(context: ResumeContext, root: Path) -> ResumeLaunchOv
 
 
 def resume_preflight(context: ResumePreflightContext) -> None:
-    _resume_preflight(context, Path.home() / ".claude" / "projects")
+    _resume_preflight(context, claude_projects_root())
 
 
 def _resume_preflight(context: ResumePreflightContext, root: Path) -> None:
