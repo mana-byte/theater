@@ -188,6 +188,20 @@ def test_probe_requires_the_serve_flags(monkeypatch: pytest.MonkeyPatch) -> None
     assert "port-0 flags" in (compatibility.reason or "")
 
 
+@pytest.mark.parametrize(
+    ("version", "supported"),
+    [("2.0.5", False), ("2.0.6", True), ("2.0.20", True), ("2.1.0", False)],
+)
+def test_probe_qualifies_exactly_the_2x_window(
+    monkeypatch: pytest.MonkeyPatch, version: str, supported: bool
+) -> None:
+    _patch_probe(monkeypatch, f"opencode v{version}\n", "--port --hostname")
+    compatibility = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
+    assert compatibility.supported is supported
+    if not supported:
+        assert "compatibility range" in (compatibility.reason or "")
+
+
 def test_a_2x_release_serves_its_own_lineage_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_opencode
 ) -> None:

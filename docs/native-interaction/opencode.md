@@ -462,7 +462,12 @@ missing; a failed or ambiguous report refuses immediately). Session and agent pe
 rules stay native; the plugin's `permission.evaluate` hook only tightens allows (saved
 "always" ones included) into asks. Planning resolves `opencode` to the absolute
 executable once and pins that path in every create/serve/TUI argv. `manual`/`edits` are
-refused outside the qualified range `>=2.0.18, <2.1.0`; `yolo` keeps its ordinary
+refused outside the qualified 2.x range `>=2.0.6, <2.1.0` — `/api/info` returns 404 below
+2.0.6, and stock 2.0.6, 2.0.12, 2.0.17, and 2.0.20 passed the model-free live probe
+(banner, Basic auth, `/api/info`, session create/readback with `location.directory`,
+`session_message` list) plus the stock approval probe (native denies preserved, saved
+allows tightened, plugin verified active), with only additive changes to the
+Theater-consumed upstream surfaces between adjacent tags; `yolo` keeps its ordinary
 semantics.
 
 **Legacy route.** `manual`/`edits` launch a generated wrapper that owns one private
@@ -491,7 +496,10 @@ client-minted `msg_` id and `delivery: queue`. Execution state polls `session.ac
 Interrupt stays on the terminal route the manifest pins for every release. A 2.x resume
 probe refuses before any backend starts, and the runtime refuses forks before the server
 is asked, so a resume continues on the legacy route. Both routes, approvals, and receipts
-were verified against the stock 2.0.18 binary. `2.0.19` pins the same `@opentui/core`
+were verified against the stock 2.0.18 binary, and the model-free server surface (banner,
+Basic auth, `/api/info`, session create/readback with `location.directory`,
+`session_message` list) plus the stock approval probe were re-verified on stock 2.0.6,
+2.0.12, 2.0.17, and 2.0.20. `2.0.19` pins the same `@opentui/core`
 `0.5.12` (identical lock hash, unchanged `patch-diff.tsx`), so it inherits 2.0.18's
 clip-unwind defect and the version-scoped TUI recovery wrapper covers it; the wrapper
 stays a no-op on unqualified 2.x releases.

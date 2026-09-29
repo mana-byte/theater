@@ -171,7 +171,7 @@ def _plan_enforced_launch_v2(
     ):
         raise BadRequest(
             f"{binary} is OpenCode {rendered}; Theater enforces manual/edits approval on the "
-            "legacy route only for the qualified 2.x range (2.0.18 and later 2.0.x). Install a "
+            "legacy route only for the qualified 2.x range (2.0.6 and later 2.0.x). Install a "
             "qualified release, or launch with yolo approval."
         )
     participant_id = context.participant_id

@@ -97,10 +97,13 @@ OPENCODE_SERVER_COMPATIBILITY_POLICY = "opencode-server-native-controls-1.18.29-
 OPENCODE_SERVER_MIN_VERSION = (1, 18, 29)
 OPENCODE_SERVER_MAX_VERSION = (1, 18, 34)
 SERVER_SESSION_ORDER = RuntimeSessionOrder.SESSION_FIRST
-#: 2.x server topology, verified end to end on 2.0.18: `/api` routes with `{data}` bodies, the
+#: 2.x server topology, verified end to end on 2.0.18 and model-free on stock
+#: 2.0.6/2.0.12/2.0.17/2.0.20 (banner, Basic auth, /api/info, POST/GET /api/session
+#: with location.directory, session_message list; the consumed-surface diffs between
+#: adjacent tags are additive): `/api` routes with `{data}` bodies, the
 #: `server listening on` banner, `--server <url> -s <id>` attach, and a per-lineage database.
 OPENCODE_SERVER_V2_COMPATIBILITY_POLICY = "opencode-server-native-controls-2.0"
-OPENCODE_SERVER_V2_MIN_VERSION = (2, 0, 18)
+OPENCODE_SERVER_V2_MIN_VERSION = (2, 0, 6)
 OPENCODE_SERVER_V2_MAX_VERSION = (2, 1, 0)
 #: The serve banner the stock binary prints on stdout, parsed by
 #: server_discovery.parse_server_stdout_endpoint.

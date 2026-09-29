@@ -137,7 +137,7 @@ MANIFEST = HarnessManifest(
     models=ModelDiscoveryManifest(discoverer=discover_models),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
     native_compatibility=NativeCompatibilityManifest(
-        qualified_range=">=1.18.29,<1.18.34 || >=2.0.18,<2.1.0",
+        qualified_range=">=1.18.29,<1.18.34 || >=2.0.6,<2.1.0",
         probe=probe_opencode_server_compatibility,
     ),
     runtime=RuntimeManifest(

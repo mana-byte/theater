@@ -223,7 +223,7 @@ def _qualify_v2(
             native_version=rendered,
             reason=(
                 "OpenCode 2.x release is outside the server-topology compatibility range; "
-                "stock-binary evidence exists for 2.0.x from 2.0.18"
+                "stock-binary evidence exists for 2.0.x from 2.0.6"
             ),
         )
     serve_help = f"{help_run.stdout}\n{help_run.stderr}"
