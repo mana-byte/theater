@@ -92,7 +92,7 @@ def test_installed_version_parses_and_fails_closed(monkeypatch, tmp_path):
         return SimpleNamespace(returncode=0, stdout="vibe 2.24.1\n")
 
     monkeypatch.setattr(version_module.subprocess, "run", run)
-    version_module._probe.cache_clear()
+    version_module._CACHE.clear()
     assert installed_vibe_version() == (2, 24, 1)
 
     monkeypatch.setattr(
@@ -100,12 +100,16 @@ def test_installed_version_parses_and_fails_closed(monkeypatch, tmp_path):
         "run",
         lambda argv, **kwargs: SimpleNamespace(returncode=1, stdout="vibe 2.24.1"),
     )
-    version_module._probe.cache_clear()
+    version_module._CACHE.clear()
     assert installed_vibe_version() is None
 
     def unavailable(argv, **kwargs):
         raise OSError("no such file")
 
     monkeypatch.setattr(version_module.subprocess, "run", unavailable)
-    version_module._probe.cache_clear()
+    version_module._CACHE.clear()
     assert installed_vibe_version() is None
+
+    # A failure is never cached: the next spawn re-probes and recovers.
+    monkeypatch.setattr(version_module.subprocess, "run", run)
+    assert installed_vibe_version() == (2, 24, 1)
