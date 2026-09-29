@@ -25,6 +25,7 @@ from theater.harness.contracts.manifest import (
     LineageManifest,
     McpRenderingManifest,
     ModelDiscoveryManifest,
+    NativeCompatibilityManifest,
     ObservationManifest,
     OtelChannelManifest,
     ScreenManifest,
@@ -33,6 +34,7 @@ from theater.harness.contracts.manifest import (
 from theater.harness.contracts.source import StreamPoint
 from theater.harness.transcript import file_stream_floor
 
+from .compatibility import probe_vibe_compatibility
 from .launch import discover_models, plan_launch, resume_launch_overlay
 from .mcp import render_mcp_servers
 from .observer import (
@@ -147,6 +149,10 @@ def manifest_for_roots(
         controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
         models=ModelDiscoveryManifest(discoverer=discover_models),
         mcp=McpRenderingManifest(renderer=render_mcp_servers),
+        native_compatibility=NativeCompatibilityManifest(
+            qualified_range=">=2.25.0,<3",
+            probe=probe_vibe_compatibility,
+        ),
     )
 
 

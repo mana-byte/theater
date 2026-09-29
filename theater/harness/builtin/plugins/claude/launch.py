@@ -104,7 +104,8 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         argv += ["--permission-mode", "acceptEdits"]
     elif context.approval == "manual":
         # Explicit, so the launch cannot inherit a permissive `permissions.defaultMode`.
-        # `default` is Claude's Manual mode and, unlike `manual`, every release accepts it.
+        # `default` parses on every release in the hooks range (still on 2.1.284, though
+        # --help no longer lists it); `manual` is the documented name since Claude 2.1.200.
         argv += ["--permission-mode", "default"]
     if context.prompt:
         # Commander treats any element starting with "-" as an option, so a
