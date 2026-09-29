@@ -1088,6 +1088,25 @@ async def test_settings_are_confirmed_by_the_applied_broadcast_when_readback_car
     receipt = await update_and_broadcast("op-contradicted", "high")
     assert receipt.result is DeliveryResult.UNKNOWN
     assert receipt.error_code == "settings_unconfirmed"
+    # A readback contradicting one field is never rescued by a broadcast, even when a
+    # sibling field is missing from it.
+    server.respond("thread/read", {"thread": {"id": "ui-thread-1", "reasoningEffort": "high"}})
+    task = asyncio.create_task(
+        runtime.update_settings(operation_id="op-mixed", model="m", reasoning_effort="medium")
+    )
+    await asyncio.sleep(0.05)
+    server.push(
+        RuntimeNotification(
+            method="thread/settings/updated",
+            params={
+                "threadId": "ui-thread-1",
+                "threadSettings": {"model": "m", "effort": "medium"},
+            },
+        )
+    )
+    receipt = await task
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "settings_contradicted"
     await runtime.aclose()
 
 

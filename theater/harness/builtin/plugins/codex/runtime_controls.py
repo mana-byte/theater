@@ -280,17 +280,23 @@ class CodexRuntimeControls(CodexRuntimeHost):
         self._adopt_thread_settings(thread)
         model = _bounded_str(thread.get("model"), limit=512)
         effort = _bounded_str(thread.get("reasoningEffort") or thread.get("effort"), limit=512)
+        missing = False
+        # Every requested field is checked: a contradiction outranks a missing sibling.
         if want_model is not None and model != want_model:
             self._diagnostic(
                 f"settings readback did not reflect model {want_model!r} (reported {model!r})"
             )
-            return "contradicted" if model is not None else "missing"
+            if model is not None:
+                return "contradicted"
+            missing = True
         if want_effort is not None and effort != want_effort:
             self._diagnostic(
                 f"settings readback did not reflect effort {want_effort!r} (reported {effort!r})"
             )
-            return "contradicted" if effort is not None else "missing"
-        return None
+            if effort is not None:
+                return "contradicted"
+            missing = True
+        return "missing" if missing else None
 
     def _adopt_thread_settings(self, thread: Mapping[str, object]) -> bool:
         model = _bounded_str(thread.get("model"), limit=512)
