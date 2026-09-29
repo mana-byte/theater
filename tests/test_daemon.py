@@ -92,6 +92,7 @@ async def test_spawn_creates_an_identified_participant(client, terminal_provider
     assert terminal["command"] == [
         "vibe",
         "--agent=ask",
+        "--",
         "say hello",
     ]
     # The id must be reachable from inside the pane, and not only via the
@@ -116,6 +117,7 @@ async def test_spawn_response_format_augments_and_persists_prompt(client, termin
     assert terminal_provider.creations[0]["command"] == [
         "vibe",
         "--agent=ask",
+        "--",
         expected,
     ]
     assert expected.count("Return your final answer as a single bare JSON value") == 1
@@ -140,6 +142,7 @@ async def test_promptless_spawn_with_empty_response_format_stays_running(client,
     assert terminal_provider.creations[0]["command"] == [
         "vibe",
         "--agent=ask",
+        "--",
         expected,
     ]
     job = await client.call("jobs.status", handle=record["handle"])
