@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
 from regie.dashboard.content import (
     animated_text_content,
     dashboard_tip_window_content,
     harness_availability_content,
+    pretty_qualifier_range,
     sentence_parts,
 )
 from regie.dashboard.widgets import WelcomeDashboard
@@ -192,19 +194,48 @@ def test_harness_availability_shows_native_qualification():
                 "installed": True,
                 "error": None,
                 "native_compatibility": {
-                    "status": "native-compatible",
-                    "installed_version": "0.154.0",
+                    "status": "outside-qualified-range",
+                    "installed_version": "0.158.0",
                     "qualified_range": "==0.154.0",
+                    "wiring": "legacy",
+                    "routes": {
+                        "send": "tmux",
+                        "steer": "tmux",
+                        "queue_followup": "tmux",
+                        "interrupt": "tmux",
+                    },
                 },
             },
             {
-                "name": "claude",
+                "name": "opencode",
                 "installed": True,
                 "error": None,
                 "native_compatibility": {
-                    "status": "outside-qualified-range",
-                    "installed_version": "2.1.220",
-                    "qualified_range": ">=2.1.248",
+                    "status": "native-compatible",
+                    "installed_version": "2.0.18",
+                    "qualified_range": None,
+                    "wiring": "native",
+                    "routes": {
+                        "send": "native",
+                        "steer": "native",
+                        "interrupt": "tmux",
+                    },
+                },
+            },
+            {
+                "name": "pi",
+                "installed": True,
+                "error": None,
+                "native_compatibility": {
+                    "status": "native-compatible",
+                    "installed_version": "0.84.4",
+                    "qualified_range": None,
+                    "wiring": "native",
+                    "routes": {
+                        "send": "native",
+                        "steer": "unavailable",
+                        "interrupt": "native",
+                    },
                 },
             },
             {
@@ -213,26 +244,151 @@ def test_harness_availability_shows_native_qualification():
                 "error": None,
                 "native_compatibility": {
                     "status": "legacy-only",
-                    "installed_version": None,
+                    "installed_version": "2.25.8",
                     "qualified_range": None,
+                    "wiring": "legacy",
+                    "routes": {
+                        "send": "tmux",
+                        "steer": "unavailable",
+                        "interrupt": "tmux",
+                    },
                 },
             },
         ]
     )
 
     assert str(content) == (
-        "✓ codex — Native-compatible · 0.154.0 · qualified ==0.154.0\n"
-        "✓ claude — Installed but outside qualified range · 2.1.220 · needs >=2.1.248\n"
-        "✓ vibe — Legacy only"
+        "✓ codex 0.158.0 — legacy · native needs ==0.154.0\n"
+        "    send tmux · steer tmux · interrupt tmux\n"
+        "✓ opencode 2.0.18 — native\n"
+        "    send native · steer native · interrupt tmux\n"
+        "✓ pi β 0.84.4 — native\n"
+        "    send native · steer unavailable · interrupt native\n"
+        "✓ vibe 2.25.8 — legacy\n"
+        "    send tmux · steer unavailable · interrupt tmux"
     )
     assert [span.style for span in content.spans] == [
         "$success",
-        "$success dim",
-        "$success",
+        "$text-muted",
         "$warning",
+        "$warning dim",
+        "$text-muted",
+        "$text-muted",
+        "$text-muted",
+        "$text-muted",
+        "$text-muted",
+        "$text-muted",
         "$success",
         "$text-muted",
+        "$success dim",
+        "$text-muted",
+        "$success dim",
+        "$text-muted",
+        "$success dim",
+        "$text-muted",
+        "$text-muted",
+        "$success",
+        "$warning dim",
+        "$text-muted",
+        "$success dim",
+        "$text-muted",
+        "$success dim",
+        "$text-muted",
+        "$warning dim",
+        "$text-muted",
+        "$success dim",
+        "$success",
+        "$text-muted",
+        "$text-muted",
+        "$text-muted",
+        "$text-muted",
+        "$text-muted",
+        "$warning dim",
+        "$text-muted",
+        "$text-muted",
     ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("==0.154.0", "==0.154.0"),
+        (">=2.1.248", ">=2.1.248"),
+        (">=1.18.29,<1.18.30", "1.18.29"),
+        (">=2.0.18,<2.1.0", "2.0.18–2.0.x"),
+        (">=1.18.29,<1.18.30 || >=2.0.18,<2.1.0", "1.18.29 · 2.0.18–2.0.x"),
+        (">=1.2.3,<1.2.5", ">=1.2.3,<1.2.5"),
+        (">=1.18.29,<1.19", ">=1.18.29,<1.19"),
+        ("nonsense", "nonsense"),
+        (None, ""),
+        ("", ""),
+    ],
+)
+def test_pretty_qualifier_range_compacts_only_recognisable_pairs(raw, expected):
+    assert pretty_qualifier_range(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (
+            {
+                "name": "codex",
+                "installed": True,
+                "error": None,
+                "native_compatibility": {
+                    "status": "native-compatible",
+                    "installed_version": "0.154.0",
+                    "qualified_range": "==0.154.0",
+                    "wiring": "native",
+                },
+            },
+            "✓ codex 0.154.0 — native · qualified ==0.154.0",
+        ),
+        (
+            {
+                "name": "opencode",
+                "installed": True,
+                "error": None,
+                "native_compatibility": {
+                    "status": "native-compatible",
+                    "installed_version": "2.0.18",
+                    "qualified_range": None,
+                    "wiring": None,
+                    "routes": {
+                        "send": "native",
+                        "steer": "unavailable",
+                        "interrupt": "native",
+                        "settings_update": "native",
+                    },
+                },
+            },
+            "✓ opencode 2.0.18 — native\n"
+            "    send native · steer unavailable · interrupt native · settings native",
+        ),
+        (
+            {
+                "name": "old",
+                "installed": True,
+                "error": None,
+                "native_compatibility": {
+                    "status": "unknown",
+                    "installed_version": None,
+                    "reason": "x" * 80,
+                },
+            },
+            "✓ old — legacy · compatibility unknown (" + "x" * 59 + "…)",
+        ),
+        (
+            {"name": "pi", "installed": False, "error": "executable not found"},
+            "✗ pi β — executable not found",
+        ),
+    ],
+)
+def test_harness_availability_degrades_when_daemon_details_are_missing(row, expected):
+    content = harness_availability_content([row])
+
+    assert str(content) == expected
 
 
 def test_cycling_text_types_in_holds_and_types_out():

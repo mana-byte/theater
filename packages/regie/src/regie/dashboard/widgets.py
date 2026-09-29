@@ -24,6 +24,7 @@ from regie.motions.cycling_text import (
 from regie.motions.reveal import StyledPart
 from regie.ui_constants import (
     REGIE_DASHBOARD_CURSOR_STYLE,
+    REGIE_DASHBOARD_HARNESS_MAX_HEIGHT,
     REGIE_DASHBOARD_TIP_WINDOW_SIZE,
     REGIE_DASHBOARD_TIPS,
 )
@@ -213,7 +214,8 @@ class DashboardTipWindow(NonSelectableStatic):
 class WelcomeDashboard(Vertical):
     """Centered animated sentence and clickable tip, hidden while staged."""
 
-    DEFAULT_CSS = """
+    DEFAULT_CSS = (
+        """
     WelcomeDashboard {
         width: 1fr;
         min-width: 0;
@@ -255,6 +257,13 @@ class WelcomeDashboard(Vertical):
         text-align: left;
     }
     """
+        + f"""
+    WelcomeDashboard > #dashboard-harnesses {{
+        max-height: {REGIE_DASHBOARD_HARNESS_MAX_HEIGHT};
+        overflow: hidden;
+    }}
+    """
+    )
 
     def __init__(
         self,

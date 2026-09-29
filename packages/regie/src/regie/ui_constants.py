@@ -142,6 +142,21 @@ REGIE_DASHBOARD_HARNESS_AVAILABLE_GLYPH = "✓"
 REGIE_DASHBOARD_HARNESS_UNAVAILABLE_GLYPH = "✗"
 REGIE_DASHBOARD_HARNESS_AVAILABLE_STYLE = "$success"
 REGIE_DASHBOARD_HARNESS_UNAVAILABLE_STYLE = "$text-muted"
+#: Style for the installed version on a dashboard harness line.
+REGIE_DASHBOARD_HARNESS_VERSION_STYLE = "$text-muted"
+#: Row cap for the docked harness list so extra lines never crowd the dashboard.
+REGIE_DASHBOARD_HARNESS_MAX_HEIGHT = 10
+#: Indent and separator for the indented native-route line under a harness.
+REGIE_DASHBOARD_ROUTES_INDENT = "    "
+REGIE_DASHBOARD_ROUTE_SEPARATOR = " · "
+#: Route word styles on the dashboard harness routes line.
+REGIE_DASHBOARD_ROUTE_NATIVE_STYLE = "$success dim"
+REGIE_DASHBOARD_ROUTE_TMUX_STYLE = "$text-muted"
+REGIE_DASHBOARD_ROUTE_UNAVAILABLE_STYLE = "$warning dim"
+REGIE_DASHBOARD_ROUTE_LABEL_STYLE = "$text-muted"
+#: Clip bounds keeping dashboard compatibility details on one bounded line.
+REGIE_DASHBOARD_COMPAT_REASON_MAX = 60
+REGIE_DASHBOARD_COMPAT_RANGE_MAX = 80
 
 #: Style for highlighted words in the dashboard sentence animation.
 REGIE_DASHBOARD_HIGHLIGHT_STYLE = "$accent bold"
