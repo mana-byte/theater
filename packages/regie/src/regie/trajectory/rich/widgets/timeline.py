@@ -10,6 +10,7 @@ from typing import ClassVar
 from rich.segment import Segment
 from rich.style import Style
 from textual import events
+from textual.color import Color
 from textual.geometry import Size
 from textual.message import Message
 from textual.scroll_view import ScrollView
@@ -107,9 +108,11 @@ class Timeline(ScrollView):
     Timeline > .trajectory-timeline--error {{ color: $error; }}
     Timeline > .trajectory-timeline--running {{ text-style: italic; }}
     Timeline > .trajectory-timeline--muted {{ color: $foreground 20%; }}
-    Timeline > .trajectory-timeline--hovered {{ background: $foreground 10%; }}
+    Timeline > .trajectory-timeline--hovered {{
+        background: $foreground 20%;
+        text-style: underline;
+    }}
     Timeline > .trajectory-timeline--selected {{
-        background: $foreground 22%;
         text-style: bold;
     }}
     """
@@ -206,13 +209,23 @@ class Timeline(ScrollView):
     # ---- rendering -------------------------------------------------------------------
 
     def _component(self, name: str) -> Style:
-        return self.get_component_rich_style(f"trajectory-timeline--{name}", partial=True)
+        component = f"trajectory-timeline--{name}"
+        partial = self.get_component_rich_style(component, partial=True)
+        resolved = self.get_component_rich_style(component)
+        # Partial styles exclude inherited colors but discard CSS alpha blending.
+        return partial + Style(
+            color=resolved.color if partial.color is not None else None,
+            bgcolor=resolved.bgcolor if partial.bgcolor is not None else None,
+        )
 
     def _span_style(self, span: TimelineSpan) -> Style:
         record = self._records_by_id[span.record_id]
         if record.status in {TrajectoryStatus.ERROR, TrajectoryStatus.INTERRUPTED}:
             style = self._component("error")
-        elif record.record_id in self._matched_ids:
+        elif record.record_id in self._matched_ids or record.record_id in (
+            self._selected_id,
+            self._hovered_id,
+        ):
             style = self._component(span.lane.value)
         else:
             style = self._component("muted")
@@ -220,6 +233,12 @@ class Timeline(ScrollView):
             style += self._component("running")
         if record.record_id == self._selected_id:
             style += self._component("selected")
+            if style.color is not None:
+                # Keep the lane/error hue as a solid fill with a contrasting glyph.
+                foreground = (
+                    Color.from_rich_color(style.color).get_contrast_text(alpha=1).rich_color
+                )
+                style += Style(color=foreground, bgcolor=style.color)
         elif record.record_id == self._hovered_id:
             style += self._component("hovered")
         return style
@@ -292,7 +311,9 @@ class Timeline(ScrollView):
         label = text.rjust(label_width - TIMELINE_LABEL_RIGHT_PADDING).ljust(label_width)
         chart = self._lane_strip(lane, int(scroll_x), max(1, width - label_width), row)
         label_style = self._component(f"{lane.value}-label")
-        return Strip.join((Strip([Segment(label, label_style)], label_width), chart))
+        return Strip.join((Strip([Segment(label, label_style)], label_width), chart)).apply_style(
+            self.rich_style
+        )
 
     # ---- layout ---------------------------------------------------------------------
 

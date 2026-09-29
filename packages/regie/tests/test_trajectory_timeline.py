@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from itertools import product
+
+import pytest
 from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.render.timeline import build_timeline_layout
 from regie.trajectory.rich.widgets.timeline import Timeline
@@ -14,9 +18,11 @@ from regie.trajectory.ui_constants import (
     TIMELINE_TARGET_SPAN_CELLS,
     TIMELINE_ZOOM_MIN,
 )
+from rich.color import Color
 from textual.app import App, ComposeResult
 
-from theater.frontend.trajectory import Timing, TimingProvenance, TrajectoryRecord
+from tests.rig.waiting import wait_until
+from theater.frontend.trajectory import Timing, TimingProvenance, TrajectoryRecord, TrajectoryStatus
 
 
 def _record(
@@ -123,6 +129,85 @@ async def test_bars_have_caps_and_clicks_hit_the_span_under_the_pointer() -> Non
 
         bar_row = timeline.track_y(TimelineLane.MODEL)
         assert timeline._record_at(TIMELINE_LABEL_WIDTH + model.x + 1, bar_row) == records[0]
+
+        model_offset = (TIMELINE_LABEL_WIDTH + model.x + 1, bar_row)
+        point_offset = (TIMELINE_LABEL_WIDTH + mcp.x, timeline.track_y(TimelineLane.MCP))
+        await pilot.click(timeline, offset=model_offset)
+        await pilot.hover(timeline, offset=point_offset)
+        await wait_until(
+            pilot, lambda: timeline.selected_id == "model" and timeline.hovered_id == "mcp"
+        )
+        assert timeline._span_style(model).bgcolor == lane_colors[TimelineLane.MODEL]
+        assert timeline._span_style(mcp).underline
+
+        await pilot.click(timeline, offset=point_offset)
+        await pilot.hover(timeline, offset=(0, 0))
+        await wait_until(
+            pilot, lambda: timeline.selected_id == "mcp" and timeline.hovered_id is None
+        )
+        assert timeline._span_style(mcp).bgcolor == lane_colors[TimelineLane.MCP]
+        assert timeline._span_style(model).bgcolor is None
+
+
+def _luminance(color: Color) -> float:
+    rgb = [channel / 255 for channel in color.get_truecolor()]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    return sum(c * weight for c, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True))
+
+
+@pytest.mark.parametrize("theme", ["textual-dark", "textual-light"])
+@pytest.mark.parametrize("lane", list(TimelineLane))
+async def test_span_colors_keep_lane_hues_and_blend_translucent_components(
+    theme: str, lane: TimelineLane
+) -> None:
+    app = _Host()
+    app.theme = theme
+    record = _record(
+        "span",
+        "tools" if lane is TimelineLane.MCP else lane.value,
+        1,
+        start=0,
+        duration=5,
+        mcp=lane is TimelineLane.MCP,
+    )
+    async with app.run_test(size=(80, 20)):
+        timeline = app.query_one(Timeline)
+
+        def resolved(name: str):
+            return timeline.get_component_rich_style(f"trajectory-timeline--{name}")
+
+        for status, state, matched in product(
+            (TrajectoryStatus.COMPLETED, TrajectoryStatus.RUNNING, TrajectoryStatus.ERROR),
+            ("plain", "selected", "hovered"),
+            (True, False),
+        ):
+            timeline.update_records(
+                [replace(record, status=status)],
+                selected_id=record.record_id if state == "selected" else None,
+                matched_ids=None if matched else frozenset(),
+            )
+            timeline.set_hovered(record.record_id if state == "hovered" else None)
+            span = timeline.projection.spans[0]
+            strip = timeline._lane_strip(span.lane, span.x, span.width)
+            style = next(iter(strip)).style
+            assert style is not None and style.color is not None
+            component = lane.value if matched or state != "plain" else "muted"
+            hue = resolved("error" if status is TrajectoryStatus.ERROR else component).color
+            assert bool(style.italic) is (status is TrajectoryStatus.RUNNING)
+            if state == "selected":
+                assert style.bgcolor == hue and style.bgcolor is not None
+                low, high = sorted((_luminance(style.color), _luminance(style.bgcolor)))
+                assert (high + 0.05) / (low + 0.05) >= 4.5
+                assert style.bold
+            else:
+                assert style.color == hue
+            if state == "hovered":
+                assert style.bgcolor == resolved(state).bgcolor
+                assert style.bgcolor != resolved(state).color
+                assert style.underline
+        rail = timeline._lane_strip(TimelineLane.MODEL, 0, 1, row=None)
+        assert next(iter(rail)).style.color == resolved("rail").color
+        assert next(iter(timeline.render_line(0))).style.bgcolor == timeline.rich_style.bgcolor
 
 
 async def test_j_k_pick_a_lane_and_h_l_stay_inside_it() -> None:

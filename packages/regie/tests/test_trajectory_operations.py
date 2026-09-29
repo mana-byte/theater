@@ -94,7 +94,7 @@ async def test_live_operation_updates_one_named_span_and_preserves_its_records(s
         assert not span.point
         assert timeline.records[0].status is TrajectoryStatus.ERROR
         style = timeline._span_style(span)
-        assert style.color == timeline._component("error").color
+        assert style.bgcolor == timeline._component("error").color  # selected: solid fill
         assert not style.italic
         assert panel._sheet is not None
         assert f"{server} › {call.mcp_tool}" in panel._sheet.title.plain
