@@ -49,15 +49,20 @@ const renderer = {
   requestRender() { repaints++ },
 }
 const original = root.render
-assert.equal(plugin.setup({ app: { version: '2.0.19' }, renderer }), undefined)
+assert.equal(plugin.setup({ app: { version: '2.0.20' }, renderer }), undefined)
 assert.equal(root.render, original)
-const dispose = plugin.setup({ app: { version: '2.0.18' }, renderer })
-assert.throws(() => root.render(buffer, 16), error => error === failure)
-assert.equal(repaints, 1)
-assert.equal(root.render(buffer, 16), 'header, chat, sidebar, prompt')
-assert.equal(repaints, 1)
-dispose()
-assert.equal(root.render, original)
+for (const version of ['2.0.18', '2.0.19']) {
+  const dispose = plugin.setup({ app: { version }, renderer })
+  assert.throws(() => root.render(buffer, 16), error => error === failure)
+  assert.equal(repaints, 1)
+  assert.equal(root.render(buffer, 16), 'header, chat, sidebar, prompt')
+  assert.equal(repaints, 1)
+  dispose()
+  assert.equal(root.render, original)
+  failed = false
+  repaints = 0
+  hitClip = false
+}
 """
 
 
