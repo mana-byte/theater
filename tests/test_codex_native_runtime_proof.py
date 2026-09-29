@@ -48,6 +48,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.native.codex_mock_provider import MockSession, standard_rules
 from tests.native.codex_native_client import (
     MAX_FRAME_BYTES,
     AppServerProcess,
@@ -58,6 +59,9 @@ from tests.native.codex_native_client import (
     encode_frame,
     expected_accept,
     launch_remote_ui,
+    mock_provider_requested,
+    qualification_codex_binary,
+    qualification_version_override,
     run_turn,
     start_app_server_thread,
     wait_thread_active,
@@ -132,10 +136,17 @@ def load_schema(version: str, name: str) -> dict:
 
 
 def require_installed_allowed_version() -> str:
-    """The smoke gate: only an exactly-qualified installed release may run."""
+    """The smoke gate: only an exactly-qualified release may run.
+
+    THEATER_CODEX_QUALIFY_VERSION admits exactly one candidate version for
+    this process only, so a release can be exercised BEFORE the allowlist
+    edit (the allowlist change stays a separate human-reviewed commit, last).
+    THEATER_CODEX_NATIVE_BIN targets a specific binary such as a release
+    fetched by tests/native/codex_fetch_release.py.
+    """
     try:
         completed = subprocess.run(
-            ["codex", "--version"],
+            [qualification_codex_binary(), "--version"],
             capture_output=True,
             text=True,
             check=True,
@@ -154,9 +165,12 @@ def require_installed_allowed_version() -> str:
     output = completed.stdout.strip()
     version = parse_codex_version(output)
     assert version is not None, f"no codex-cli version in {output!r}"
-    assert version in CODEX_RUNTIME_VERIFIED_VERSIONS, (
-        f"installed codex-cli {version} is not Theater-verified (verified: "
-        f"{', '.join(sorted(CODEX_RUNTIME_VERIFIED_VERSIONS))})"
+    allowed = set(CODEX_RUNTIME_VERIFIED_VERSIONS)
+    override = qualification_version_override()
+    if override is not None:
+        allowed.add(override)
+    assert version in allowed, (
+        f"codex-cli {version} is not Theater-verified (verified: {', '.join(sorted(allowed))})"
     )
     return version
 
@@ -708,9 +722,18 @@ native_proof_required = pytest.mark.skipif(
     not NATIVE_PROOF_ENABLED,
     reason=f"opt-in real-native proof: run with {NATIVE_PROOF_ENV}=1 and -k native_smoke",
 )
+
+
+def codex_binary_available() -> bool:
+    override = os.environ.get("THEATER_CODEX_NATIVE_BIN")
+    if override:
+        return Path(override).is_file()
+    return shutil.which("codex") is not None
+
+
 needs_codex = pytest.mark.skipif(
-    shutil.which("codex") is None,
-    reason="codex release binary not on PATH",
+    not codex_binary_available(),
+    reason="no codex release binary (PATH or THEATER_CODEX_NATIVE_BIN)",
 )
 needs_tmux = pytest.mark.skipif(
     shutil.which("tmux") is None,
@@ -720,7 +743,13 @@ needs_tmux = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def native_env():
-    """One isolated backend per module; every test owns a fresh thread."""
+    """One isolated backend per module; every test owns a fresh thread.
+
+    THEATER_CODEX_NATIVE_PROVIDER=mock wires the backend at the offline
+    scripted provider instead of the ambient one: the same stock binary and
+    wire protocol, no network and no model quota. THEATER_CODEX_NATIVE_BIN
+    targets a specific release binary.
+    """
     if not NATIVE_PROOF_ENABLED:
         pytest.skip(f"set {NATIVE_PROOF_ENV}=1 to run real-native smoke tests")
     import tempfile
@@ -728,11 +757,17 @@ def native_env():
     root = Path(tempfile.mkdtemp(prefix="codex-proof-", dir="/tmp"))
     repo = root / "repo"
     repo.mkdir()
-    codex_home = write_isolated_codex_home(root, trusted_paths=[repo])
+    mock: MockSession | None = None
+    if mock_provider_requested():
+        mock = MockSession.open(root, trusted_paths=[repo], rules=standard_rules())
+        codex_home = mock.codex_home
+    else:
+        codex_home = write_isolated_codex_home(root, trusted_paths=[repo])
     app_server = AppServerProcess.spawn(
         codex_home=codex_home,
         socket_path=root / "control.sock",
         log_path=root / "app-server.log",
+        codex_binary=qualification_codex_binary(),
     )
     registry: dict[str, TmuxUi | None] = {"tmux": None}
 
@@ -761,13 +796,19 @@ def native_env():
     if ui is not None:
         ui.kill()
     app_server.terminate()
+    if mock is not None:
+        mock.close()
     shutil.rmtree(root, ignore_errors=True)
 
 
 def launch_ui(env, ui: TmuxUi, thread_id: str) -> None:
     """The frozen topology's frontend command: attach the native CLI UI."""
     launch_remote_ui(
-        ui, codex_home=env.root / "home", socket_path=env.socket_path, thread_id=thread_id
+        ui,
+        codex_home=env.root / "home",
+        socket_path=env.socket_path,
+        thread_id=thread_id,
+        codex_binary=qualification_codex_binary(),
     )
 
 
@@ -786,7 +827,7 @@ class TestNativeSmokeHandshakeAndFraming:
         assert "websocket" in client.handshake.headers["upgrade"]
 
         installed = subprocess.run(
-            ["codex", "--version"], capture_output=True, text=True, check=True
+            [qualification_codex_binary(), "--version"], capture_output=True, text=True, check=True
         ).stdout.strip()
         version = require_installed_allowed_version()
         assert installed == f"codex-cli {version}", installed
@@ -1103,7 +1144,8 @@ class TestNativeSmokeRemoteNecessity:
         ui = env.tmux("codex-native-proof-badremote")
         ui.launch(
             f"CODEX_HOME={env.root / 'home'} "
-            f"codex --remote unix://{env.root / 'missing.sock'} resume {thread_id}"
+            f"{qualification_codex_binary()} --remote unix://{env.root / 'missing.sock'} "
+            f"resume {thread_id}"
         )
         # The TUI must exit instead of silently starting an embedded backend.
         wait_until(lambda: not ui.session_alive(), timeout=60, what="bad-remote TUI to exit")

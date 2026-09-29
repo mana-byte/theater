@@ -29,6 +29,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tests.native.codex_mock_provider import MockSession, standard_rules
 from tests.native.codex_native_client import (
     AppServerProcess,
     NativeWebSocketClient,
@@ -260,18 +261,22 @@ def require_fresh_output(out: Path) -> None:
         out.mkdir(parents=True)
 
 
-def release_facts_document(facts: ReleaseFacts) -> dict:
+def release_facts_document(facts: ReleaseFacts, *, provider: str = "ambient") -> dict:
     """The bundle's installed_release.json, in the committed fixture's shape.
 
     The absolute binary path never enters committed evidence: only a stable
     placeholder plus the sha256 digest, so the exact measured binary stays
-    identifiable without leaking any machine's layout.
+    identifiable without leaking any machine's layout. ``provider`` records
+    whether the behaviour documents came from the ambient provider or the
+    offline mock, so mock-captured evidence is never mistaken for
+    real-provider evidence.
     """
     return {
         "source": (
             "captured against the unmodified installed release by "
             "tests/native/codex_qualify_runtime.py"
         ),
+        "provider": provider,
         "installed_version": f"codex-cli {facts.version}",
         "installed_version_command": "codex --version",
         "installed_version_output": facts.version_output,
@@ -433,6 +438,8 @@ class CaptureSession:
     codex_home: Path
     roots: dict[str, str]
     binary: str
+    provider: str
+    mock: MockSession | None = None
     initialize_results: list[dict] = field(default_factory=list)
     tmux_uis: list[TmuxUi] = field(default_factory=list)
 
@@ -449,11 +456,14 @@ class CaptureSession:
         return ui
 
     def close(self) -> None:
-        """Tear down UIs, the backend, and the run root; safe on any failure."""
+        """Tear down UIs, the backend, the mock, and the run root."""
         for ui in self.tmux_uis:
             with contextlib.suppress(Exception):
                 ui.kill()
         self.app_server.terminate()
+        if self.mock is not None:
+            with contextlib.suppress(Exception):
+                self.mock.close()
         shutil.rmtree(self.root, ignore_errors=True)
 
     def launch_zero_turn_ui(self, ui: TmuxUi, thread_id: str) -> Path:
@@ -472,12 +482,22 @@ class CaptureSession:
         return stderr_path
 
 
-def open_capture_session(codex_binary: str) -> CaptureSession:
-    """Spawn the detached backend exactly as the frozen topology plans it."""
+def open_capture_session(codex_binary: str, *, provider: str = "ambient") -> CaptureSession:
+    """Spawn the detached backend exactly as the frozen topology plans it.
+
+    ``provider="mock"`` wires the isolated CODEX_HOME at the offline scripted
+    provider instead of copying the ambient provider config: the same
+    app-server, the same wire protocol, zero network and zero model quota.
+    """
     root = Path(tempfile.mkdtemp(prefix="codex-qualify-"))
     repo = root / "repo"
     repo.mkdir()
-    codex_home = write_isolated_codex_home(root, trusted_paths=[repo])
+    mock: MockSession | None = None
+    if provider == "mock":
+        mock = MockSession.open(root, trusted_paths=[repo], rules=standard_rules())
+        codex_home = mock.codex_home
+    else:
+        codex_home = write_isolated_codex_home(root, trusted_paths=[repo])
     app_server = AppServerProcess.spawn(
         codex_home=codex_home,
         socket_path=root / "control.sock",
@@ -486,7 +506,15 @@ def open_capture_session(codex_binary: str) -> CaptureSession:
     )
     roots = {str(root): "<run-root>", str(Path.home()): "<home>"}
     return CaptureSession(
-        root, repo, root / "control.sock", app_server, codex_home, roots, codex_binary
+        root,
+        repo,
+        root / "control.sock",
+        app_server,
+        codex_home,
+        roots,
+        codex_binary,
+        provider,
+        mock,
     )
 
 
@@ -583,7 +611,12 @@ def capture_thread_lifecycle(session: CaptureSession, *, tmux: bool) -> dict:
 
     forked = control.request("thread/fork", {"threadId": thread_id})
     fork_thread = forked["result"]["thread"]
-    fork_read = control.request("thread/read", {"threadId": fork_thread["id"]})
+    # includeTurns hydrates from the rollout: without it the turns list only
+    # reflects whatever the app-server happens to hold in memory, which is
+    # timing-dependent, not a fact about the fork.
+    fork_read = control.request(
+        "thread/read", {"threadId": fork_thread["id"], "includeTurns": True}
+    )
     facts["thread_fork"] = {
         "forked_thread_id": fork_thread["id"],
         "forked_from_id": fork_thread.get("forkedFromId"),
@@ -739,8 +772,10 @@ def capture_capabilities(session: CaptureSession) -> dict:
     )
     queue_list = experimental.request("thread/queue/list", {"threadId": thread_id})
     # The queued submission starts a turn on an idle thread: settle it so the
-    # backend is left clean for later captures.
-    experimental.wait_notification("turn/completed", timeout=180)
+    # backend is left clean for later captures. Turn notifications are
+    # thread-scoped and reach subscribed connections only; queue/add does not
+    # subscribe its caller, so only the thread-starting client sees them.
+    control.wait_notification("turn/completed", timeout=180)
     control.close()
     experimental.close()
     return {
@@ -1051,6 +1086,7 @@ def collect_evidence(
     codex_binary: str = "codex",
     baseline: Path | None = None,
     capture_behavior: bool = False,
+    provider: str = "ambient",
 ) -> int:
     """Collect one release's evidence bundle; return a process exit code."""
     require_fresh_output(out)
@@ -1060,13 +1096,16 @@ def collect_evidence(
     print(f"digest       : sha256:{facts.digest}")
     print(f"version      : {facts.version_output}")
     print(f"platform     : {facts.platform_os}; {facts.platform_arch}")
+    print(f"provider     : {provider}")
 
-    (out / "installed_release.json").write_text(normalize_json(release_facts_document(facts)))
+    (out / "installed_release.json").write_text(
+        normalize_json(release_facts_document(facts, provider=provider))
+    )
     generate_schema(binary, out / "protocol_schema")
     print(f"schema       : {out / 'protocol_schema'} (normalized, sorted keys)")
 
     if capture_behavior:
-        session = open_capture_session(binary)
+        session = open_capture_session(binary, provider=provider)
         try:
             if facts.version != _capture_version(session):
                 raise QualificationError(
@@ -1137,6 +1176,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run the stock topology/behaviour probe (uses model quota; needs tmux)",
     )
+    parser.add_argument(
+        "--provider",
+        choices=("ambient", "mock"),
+        default="ambient",
+        help=(
+            "model provider behind the behaviour probe: ambient (real, consumes quota) "
+            "or mock (offline scripted Responses provider, zero quota)"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         return collect_evidence(
@@ -1144,6 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
             codex_binary=args.codex,
             baseline=args.baseline,
             capture_behavior=args.capture_behavior,
+            provider=args.provider,
         )
     except (QualificationError, subprocess.TimeoutExpired, OSError) as error:
         print(f"error: {error}", file=sys.stderr)

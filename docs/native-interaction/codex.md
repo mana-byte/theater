@@ -207,6 +207,66 @@ example, removal of `expectedTurnId` disables native steer while native send rem
 eligible. The manifest/report must state the actual route; do not silently emulate the
 missing method with keys after an uncertain native attempt.
 
+## Mock-provider qualification (offline, zero quota)
+
+`tests/native/codex_mock_provider.py` is a scripted OpenAI Responses provider on
+loopback that drives every Phase-3 behaviour case — handshake, thread lifecycle,
+steer, stale steer, concurrent-submission race, interrupt, approvals, settings
+gating, queue gating, UI topology — against the unmodified stock binary with no
+network and no model quota. It exists because the ambient provider is not always
+reachable and real turns are slow and metered; Codex ships weekly, so
+qualification must be cheap and repeatable.
+
+What it proves: the binary's app-server wire behaviour — every response shape,
+error code and message, turn identity, subscription/broadcast split, approval
+ownership, TUI attach topology — under scripted model streams. Held streams
+(deltas, then a bounded keepalive pause) keep a turn provably active so
+`turn/steer`, `turn/start`-during-active and `turn/interrupt` are deterministic.
+Dispatch matches the request's *last user message*, because `turn/steer` does
+not abort the in-flight request: the steer text is queued and a new request
+(whose last user message is the steer text) is issued only after the current
+stream completes — a whole-body matcher would mis-dispatch on accumulated
+history.
+
+What it cannot prove: anything the real model does that the script does not
+reproduce — refusal behaviour, multi-tool chains, token/latency realism. A
+mock-captured bundle must record `"provider": "mock"` in `installed_release.json`
+(the collector does this), so mock evidence is never mistaken for real-provider
+evidence. Known mock-environment deltas, each explainable and none of them a
+behaviour gap: the release tarball's binary has no model-metadata table, so the
+app-server emits one advisory `warning` notification a metadata-installed
+binary does not; mock turns carry synthetic assistant text.
+
+Exact commands to qualify a candidate release X.Y.Z.W (allowlist edit always
+last, never persisted):
+
+```sh
+SCRATCH=$(mktemp -d /tmp/codex-qualify.XXXXXX)
+uv run python tests/native/codex_fetch_release.py --version X.Y.Z --dest "$SCRATCH/bin"
+uv run python tests/native/codex_qualify_runtime.py \
+  --out "$SCRATCH/bundle-X.Y.Z-mock" --capture-behavior --provider mock \
+  --codex "$SCRATCH/bin/codex"
+THEATER_CODEX_NATIVE_PROOF=1 THEATER_CODEX_NATIVE_PROVIDER=mock \
+  THEATER_CODEX_NATIVE_BIN="$SCRATCH/bin/codex" \
+  THEATER_CODEX_QUALIFY_VERSION=X.Y.Z \
+  uv run pytest tests/test_codex_native_runtime_proof.py -k native_smoke -v
+THEATER_CODEX_NATIVE_SMOKE=1 THEATER_CODEX_NATIVE_BIN="$SCRATCH/bin/codex" \
+  THEATER_CODEX_QUALIFY_VERSION=X.Y.Z \
+  uv run pytest tests/test_codex_native_ui_bootstrap_proof.py -k native_ui_bootstrap
+rm -rf "$SCRATCH"
+```
+
+The env switches are qualification-run only and never persisted:
+`THEATER_CODEX_NATIVE_BIN` targets the fetched binary; `THEATER_CODEX_QUALIFY_VERSION`
+admits exactly that one version for the test process (the allowlist itself is
+untouched, so a candidate is exercised before any allowlist edit);
+`THEATER_CODEX_NATIVE_PROVIDER=mock` wires the smoke suite's isolated CODEX_HOME
+at the mock provider instead of copying the ambient config. Real-provider runs
+remain the default everywhere (`--provider ambient`, env unset); a
+mock-captured bundle never qualifies a release by itself — review the diff
+against the last qualified bundle, then capture/commit real evidence or accept
+the mock bundle only after a human has reviewed the deltas.
+
 ## Files to change
 
 - `tests/native/codex_native_client.py`: reusable collection helpers only; preserve

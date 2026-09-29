@@ -603,3 +603,38 @@ def launch_remote_ui(
         f"CODEX_HOME={shlex.quote(str(codex_home))} {shlex.quote(codex_binary)} "
         f"--remote unix://{shlex.quote(str(socket_path))} resume {shlex.quote(thread_id)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Qualification-run switches (env only; never persisted, never a range)
+# ---------------------------------------------------------------------------
+
+#: Opt-in mock provider for the native suites: offline, no model quota.
+PROVIDER_ENV = "THEATER_CODEX_NATIVE_PROVIDER"
+#: Exact binary to qualify; e.g. a release fetched by codex_fetch_release.py.
+BIN_ENV = "THEATER_CODEX_NATIVE_BIN"
+#: Admits exactly this one version for this test process only, so a candidate
+#: release can be exercised BEFORE the allowlist edit (allowlist stays last).
+QUALIFY_VERSION_ENV = "THEATER_CODEX_QUALIFY_VERSION"
+
+
+def qualification_codex_binary() -> str:
+    """THEATER_CODEX_NATIVE_BIN when set (and present), else plain ``codex``."""
+    override = os.environ.get(BIN_ENV)
+    if override:
+        if not Path(override).is_file():
+            raise RuntimeError(
+                f"{BIN_ENV}={override} does not name an existing file; point it at the "
+                "release binary (tests/native/codex_fetch_release.py fetches one)"
+            )
+        return override
+    return "codex"
+
+
+def qualification_version_override() -> str | None:
+    """THEATER_CODEX_QUALIFY_VERSION: one exact version or nothing."""
+    return os.environ.get(QUALIFY_VERSION_ENV) or None
+
+
+def mock_provider_requested() -> bool:
+    return os.environ.get(PROVIDER_ENV) == "mock"

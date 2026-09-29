@@ -10,6 +10,7 @@ not named by the test itself.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -62,6 +63,14 @@ def make_git_repo(path: Path) -> Path:
 
 
 def codex_binary() -> str | None:
+    """THEATER_CODEX_NATIVE_BIN when set, else the codex on PATH.
+
+    The override lets the smoke target an exact release binary (one fetched
+    by tests/native/codex_fetch_release.py) without installing anything.
+    """
+    override = os.environ.get("THEATER_CODEX_NATIVE_BIN")
+    if override:
+        return override if Path(override).is_file() else None
     return shutil.which("codex")
 
 

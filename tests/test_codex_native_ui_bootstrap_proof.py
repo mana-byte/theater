@@ -408,6 +408,11 @@ def _server_frame(payload: bytes) -> bytes:
 SMOKE_ENV_VAR = "THEATER_CODEX_NATIVE_SMOKE"
 
 
+def _expected_bootstrap_version() -> str:
+    """THEATER_CODEX_QUALIFY_VERSION admits exactly one candidate release."""
+    return os.environ.get("THEATER_CODEX_QUALIFY_VERSION") or "0.154.0"
+
+
 def _skip_unless_smoke_enabled() -> None:
     if os.environ.get(SMOKE_ENV_VAR) != "1":
         pytest.skip(
@@ -723,10 +728,9 @@ async def test_codex_native_ui_bootstrap_proof() -> None:
     """One full chain, one live backend, one UI, one prompt — asserted at
     every seam against the unmodified installed codex release."""
     _skip_unless_smoke_enabled()
+    expected = f"codex-cli {_expected_bootstrap_version()}"
     version = codex_env.codex_version()
-    assert version and version.startswith("codex-cli 0.154.0"), (
-        f"expected codex-cli 0.154.0, found {version!r}"
-    )
+    assert version == expected, f"expected {expected}, found {version!r}"
 
     # resolve() up front: the app-server canonicalises paths, and on macOS
     # /tmp is a symlink to /private/tmp — the exact-cwd predicate below must
@@ -767,7 +771,7 @@ async def test_codex_native_ui_bootstrap_proof() -> None:
 
         # 3. the real native TUI, promptless, no resume id, on a private tmux
         #    server that belongs to this test alone.
-        frontend_command = f"codex --remote unix://{socket_path}"
+        frontend_command = f"{codex_env.codex_binary() or 'codex'} --remote unix://{socket_path}"
         assert "resume" not in frontend_command and FIRST_TURN_PROMPT not in frontend_command
         _launch_tui(tmux_socket, codex_home, repo, socket_path, frontend_command)
 
