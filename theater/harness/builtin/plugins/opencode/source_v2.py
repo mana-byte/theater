@@ -6,6 +6,7 @@ import hashlib
 import sqlite3
 from dataclasses import dataclass, field
 
+from theater.harness.base import Event, EventKind, clip
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import Attachment, Batch
 from theater.models import Status
@@ -22,7 +23,15 @@ from .store_v2 import (
     row_info,
     row_parts,
 )
-from .values import _has_tool_calls, _table, _terminal_finish
+from .translate_v2 import _error
+from .values import (
+    _error_detail,
+    _has_tool_calls,
+    _seconds,
+    _table,
+    _terminal_finish,
+    load_json_object,
+)
 
 #: Two updates of one row inside a millisecond share `time_updated`; content decides instead.
 _REREAD_WINDOW_MS = 2_000
@@ -50,6 +59,7 @@ class OpenCodeV2Source(OpenCodeSource):
         super().__init__(*args, **kwargs)
         self._point: tuple[int, int] = (0, -1)
         self._emitted: dict[str, _Fingerprint] = {}
+        self._failed: set[str] = set()
         self._reread: _Sweep | None = None
         self._seeding: _AttachmentSeed | None = None
         self._staged: _AttachmentSeed | None = None
@@ -73,6 +83,7 @@ class OpenCodeV2Source(OpenCodeSource):
 
     def _clear_session_state(self, *, detach: bool) -> None:
         super()._clear_session_state(detach=detach)
+        self._failed.clear()
         if detach:
             self._cancel_seed()
             self._point = (0, -1)
@@ -210,8 +221,38 @@ class OpenCodeV2Source(OpenCodeSource):
                 )
                 events.extend(translated)
                 trajectory.extend(facts)
+            events.extend(self._step_failures(row))
             self._emitted[row[0]] = seen
         return fresh
+
+    def _step_failures(self, row: Row) -> list[Event]:
+        """A stored 2.x step error as a mid-turn ERROR event, never the boundary.
+
+        The runner retries inside the same turn (step.ts Outcome.Continue), so the
+        projection hides the error from the parser and this reports it instead.
+        """
+        message_id, _session_id, kind, _seq, _updated, raw = row
+        if kind != "assistant" or message_id in self._failed:
+            return []
+        data = load_json_object(raw)
+        error = _error(data.get("error"))
+        if error is None:
+            return []
+        self._failed.add(message_id)
+        detail = _error_detail(error)
+        time_data = _table(data.get("time"))
+        ts = _seconds(time_data.get("completed")) or _seconds(time_data.get("created"))
+        return [
+            Event(
+                kind=EventKind.ERROR,
+                text=clip(detail),
+                raw_text=detail,
+                ts=ts,
+                turn_end=False,
+                turn_id=message_id or None,
+                raw_index=self._cursor,
+            )
+        ]
 
     def _row_events(self, conn: sqlite3.Connection, row: Row) -> list[tuple[str, dict]]:
         """A row as the 1.x events it replaces: an assistant's parts land before its finish."""

@@ -437,6 +437,57 @@ def test_an_aborted_step_is_an_interrupt(rec, workdir):
     ]
 
 
+def test_a_retryable_step_failure_waits_for_the_idle_marker(rec, workdir):
+    """2.x persists a retryable step failure and continues the turn; only idle ends it."""
+    src = attached(rec, workdir)
+    rec.user("msg_u1", "go")
+    rec.step(
+        "msg_a1",
+        rec.tick(),
+        [text("partial")],
+        finish="error",
+        error={"type": "api.error", "message": "retryable stream failure"},
+        times={"completed": rec.tick()},
+        **USAGE,
+    )
+    assert asyncio.run(OpenCodeV2Source(rec.path, cwd=str(workdir)).read()).status is (
+        Status.WORKING
+    )
+    rec.step(
+        "msg_a2",
+        rec.tick(),
+        [text("recovered")],
+        finish="stop",
+        times={"completed": rec.tick()},
+        **USAGE,
+    )
+    rec.idle("msg_i1", "succeeded")
+    rec.user("msg_u2", "again")
+    rec.step(
+        "msg_a3",
+        rec.tick(),
+        [text("doomed")],
+        finish="error",
+        error={"type": "api.error", "message": "fatal stream failure"},
+        times={"completed": rec.tick()},
+        **USAGE,
+    )
+    rec.idle("msg_i2", "failed")
+
+    events = drain(src)
+    errors = [e for e in events if e.kind is EventKind.ERROR]
+    assert [e.text for e in errors] == [
+        "api.error: retryable stream failure",
+        "api.error: fatal stream failure",
+        "TurnFailed: OpenCode ended the turn with a failure",
+    ]
+    assert [e.turn_end for e in errors] == [False, False, True]
+    assert [(e.kind, e.turn_terminal) for e in events if e.turn_end] == [
+        (EventKind.ASSISTANT, TurnTerminal.COMPLETED),
+        (EventKind.ERROR, TurnTerminal.FAILED),
+    ]
+
+
 def test_history_and_the_live_path_agree(rec, workdir):
     src = attached(rec, workdir)
     a_turn_with_a_tool(rec, workdir)

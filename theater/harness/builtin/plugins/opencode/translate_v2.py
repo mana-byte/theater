@@ -20,6 +20,8 @@ _IDLE_ERRORS = {
     "interrupted": {"name": "AbortedError", "message": "OpenCode interrupted the turn"},
     "failed": {"name": "TurnFailed", "message": "OpenCode ended the turn with a failure"},
 }
+#: A failed step keeps the native prompt loop running mid-turn, like `unknown`.
+_FAILED_STEP_FINISH = "unknown"
 
 
 def part_id(message_id: str, index: int) -> str:
@@ -91,12 +93,18 @@ def _assistant_info(info: dict, data: dict, time_data: dict) -> dict:
         info["modelID"] = model["id"]
     if isinstance(data.get("agent"), str):
         info["agent"] = data["agent"]
-    for key in ("finish", "tokens", "cost"):
+    for key in ("tokens", "cost"):
         if key in data:
             info[key] = data[key]
     error = _error(data.get("error"))
     if error is not None:
-        info["error"] = error
+        # 2.x persists a retryable step failure and continues the turn in a new
+        # assistant message (runner step.ts Outcome.Continue); only the idle
+        # marker ends the turn, so a failed step projects as a continuing one.
+        info["finish"] = _FAILED_STEP_FINISH
+        return info
+    if "finish" in data:
+        info["finish"] = data["finish"]
     return info
 
 
