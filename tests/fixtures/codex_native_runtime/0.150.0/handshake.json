@@ -1,0 +1,35 @@
+{
+  "accept_verification": "sec-websocket-accept matched base64(sha1(key + <uuid>))",
+  "client_request_line": "GET / HTTP/1.1",
+  "initialize": {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "clientInfo": {
+          "name": "<client name>",
+          "title": "<client title>",
+          "version": "<client version>"
+        }
+      }
+    },
+    "required_notification": {
+      "method": "initialized"
+    },
+    "response_result_keys": [
+      "codexHome",
+      "platformFamily",
+      "platformOs",
+      "userAgent"
+    ]
+  },
+  "jsonrpc_version_field": "absent by design: requests and responses carry no jsonrpc member",
+  "server_response_headers": {
+    "connection": "Upgrade",
+    "sec-websocket-accept": "DU5BHqRJCPesDOWdExRAzDhvNDY=",
+    "upgrade": "websocket"
+  },
+  "server_response_status_line": "HTTP/1.1 101 Switching Protocols",
+  "source": "captured against the installed app-server over a Unix socket",
+  "transport": "WebSocket over AF_UNIX with an HTTP Upgrade handshake; not Theater NDJSON"
+}

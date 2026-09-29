@@ -1,0 +1,41 @@
+{
+  "approval_request": {
+    "method_fired": "item/commandExecution/requestApproval",
+    "server_request_shape": {
+      "method": "item/commandExecution/requestApproval",
+      "params_keys": [
+        "availableDecisions",
+        "command",
+        "commandActions",
+        "cwd",
+        "environmentId",
+        "itemId",
+        "kind",
+        "proposedExecpolicyAmendment",
+        "reason",
+        "startedAtMs",
+        "threadId",
+        "turnId"
+      ]
+    },
+    "valid_decisions": [
+      "accept",
+      "acceptForSession",
+      "acceptWithExecpolicyAmendment",
+      "applyNetworkPolicyAmendment",
+      "cancel",
+      "decline"
+    ]
+  },
+  "broadcast_behavior": {
+    "delivered_to_every_subscribed_connection": true
+  },
+  "native_ui_retains_ownership": {
+    "evidence": "the approval request rendered in the TUI; a single 'y' keypress approved it; the observer never sent a response"
+  },
+  "observer_rule": "a Theater observing/control client must never send a response for an approval server request; it records the request and relies on serverRequest/resolved to learn the outcome",
+  "resolution": {
+    "notification": "serverRequest/resolved"
+  },
+  "source": "captured with two clients subscribed to the same thread"
+}
