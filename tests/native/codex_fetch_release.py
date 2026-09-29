@@ -110,6 +110,16 @@ def sigstore_assets(tag: str) -> list[str]:
     return sorted(name for name in completed.stdout.splitlines() if name.endswith(".sigstore"))
 
 
+def published_digest(tag: str, asset: str) -> str | None:
+    """The sha256 GitHub records for the asset, or None when it cannot be read."""
+    if shutil.which("gh") is None:
+        return None
+    query = f'.assets[] | select(.name == "{asset}") | .digest'
+    completed = _run(["gh", "api", f"repos/{REPO}/releases/tags/{tag}", "-q", query], timeout=60.0)
+    digest = completed.stdout.strip() if completed.returncode == 0 else ""
+    return digest.removeprefix("sha256:") if digest.startswith("sha256:") else None
+
+
 def unpack(archive: Path, dest: Path) -> Path:
     """Unpack and normalize to exactly ``<dest>/codex``, executable."""
     extracted = (
@@ -185,6 +195,16 @@ def fetch_release(version: str, dest: Path, *, force: bool = False, tag: str | N
     archive_sha = sha256_of(archive)
     print(f"archive      : {archive}")
     print(f"archive sha256: {archive_sha}")
+    published = published_digest(resolved_tag, asset)
+    if published is None:
+        print("digest       : none published or gh unavailable; archive integrity unverified")
+    elif published != archive_sha:
+        raise FetchError(
+            f"{asset} sha256 {archive_sha} does not match the digest GitHub publishes for "
+            f"{resolved_tag} ({published}); refusing to run an unverified binary"
+        )
+    else:
+        print("digest       : matches the release asset digest")
     binary = unpack(archive, dest)
     print(f"binary       : {binary}")
     print(f"binary sha256: {sha256_of(binary)}")

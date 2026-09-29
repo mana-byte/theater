@@ -14,7 +14,10 @@ from __future__ import annotations
 import json
 import socket
 import time
+from pathlib import Path
 from urllib.parse import urlparse
+
+import pytest
 
 from tests.native.codex_mock_provider import (
     DEFAULT_HOLD_SECONDS,
@@ -200,3 +203,21 @@ def test_fifo_script_ordering_is_deterministic():
     assert factory("") is one
     assert factory("") is two
     assert factory("") is not one
+
+
+def test_fetch_refuses_an_archive_that_does_not_match_the_published_digest(
+    tmp_path, monkeypatch
+) -> None:
+    from tests.native import codex_fetch_release as fetch
+
+    archive = tmp_path / "codex.tar.gz"
+    archive.write_bytes(b"not the published bytes")
+    monkeypatch.setattr(fetch, "asset_name", lambda version: "codex.tar.gz")
+    monkeypatch.setattr(fetch, "sigstore_assets", lambda tag: [])
+    monkeypatch.setattr(fetch, "download_asset", lambda tag, asset, dest: archive)
+    monkeypatch.setattr(fetch, "published_digest", lambda tag, asset: "0" * 64)
+    unpacked: list[Path] = []
+    monkeypatch.setattr(fetch, "unpack", lambda archive, dest: unpacked.append(archive))
+    with pytest.raises(fetch.FetchError, match="does not match the digest"):
+        fetch.fetch_release("0.0.0", tmp_path / "bin")
+    assert unpacked == []
