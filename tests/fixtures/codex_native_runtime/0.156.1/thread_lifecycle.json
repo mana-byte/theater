@@ -1,0 +1,62 @@
+{
+  "source": "captured against the installed app-server; ids, timestamps and paths are placeholders",
+  "thread_fork": {
+    "forked_from_id": "<uuid>",
+    "forked_thread_id": "<uuid>",
+    "history_preserved": true
+  },
+  "thread_resume": {
+    "error_before_rollout_exists": {
+      "code": -32600,
+      "message": "no rollout found for thread id <uuid>"
+    },
+    "live_notification_methods_seen_by_second_client": [
+      "account/rateLimits/updated",
+      "item/agentMessage/delta",
+      "item/completed",
+      "item/started",
+      "thread/goal/cleared",
+      "thread/status/changed",
+      "thread/tokenUsage/updated",
+      "turn/completed",
+      "turn/started",
+      "warning"
+    ],
+    "native_ui_resume_before_first_turn_error": "Error: Failed to resume session from /private<run-root>/home/sessions/2026/09/30/rollout-2026-09-30T00-07-43-<uuid>.jsonl: thread/resume failed during TUI bootstrap: thread/resume failed: no rollout found for thread id <uuid> (code -32600)",
+    "request": {
+      "method": "thread/resume",
+      "params": {
+        "threadId": "<thread-id>"
+      }
+    },
+    "startup_order_consequence": "the native UI can only attach after the rollout exists, i.e. after the first turn/start has been accepted; promptless zero-turn threads cannot be attached via resume",
+    "subscribes_second_connection": true
+  },
+  "thread_start": {
+    "response_result_keys": [
+      "activePermissionProfile",
+      "approvalPolicy",
+      "approvalsReviewer",
+      "cwd",
+      "disabledPluginIds",
+      "instructionSources",
+      "model",
+      "modelProvider",
+      "multiAgentMode",
+      "reasoningEffort",
+      "runtimeWorkspaceRoots",
+      "sandbox",
+      "serviceTier",
+      "thread"
+    ],
+    "thread_facts": {
+      "cliVersion": "0.156.1",
+      "id_equals_session_id": true,
+      "rollout_exists_after_first_turn": true,
+      "rollout_exists_before_first_turn": false,
+      "rollout_path": "/private<run-root>/home/sessions/2026/09/30/rollout-2026-09-30T00-07-43-<uuid>.jsonl",
+      "status_type_initially": "idle"
+    },
+    "thread_id": "<uuid>"
+  }
+}
