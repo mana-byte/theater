@@ -11,12 +11,15 @@ import json
 import sqlite3
 from collections.abc import Sequence
 
-from . import translate_v2
+from . import compaction_v2, translate_v2
 from .values import load_json_object
 
 #: The message types with a 1.x counterpart; the rest (instructions, switches, shell) are not
-#: conversation, and an `idle` marker is kept so it can close its turn.
-_VIEW = "type IN ('user', 'assistant', 'idle')"
+#: conversation, and an `idle` marker is kept so it can close its turn. A `compaction` row is
+#: paid usage, not talk, so it rides the same cursor the observer drains.
+_VIEW = "type IN ('user', 'assistant', 'idle', 'compaction')"
+#: Status answers "is a turn in flight"; a compaction never is one, so it stays out.
+_TURN_VIEW = "type IN ('user', 'assistant', 'idle')"
 _COLUMNS = "id, session_id, type, seq, time_updated, data"
 
 type Row = tuple[str, str, str, int, int, str]
@@ -32,6 +35,8 @@ def is_v2(conn: sqlite3.Connection) -> bool:
 
 def row_info(conn: sqlite3.Connection, row: Row) -> dict:
     message_id, session_id, kind, seq, _updated, raw = row
+    if kind == "compaction":
+        return compaction_v2.message_info(message_id, session_id, load_json_object(raw))
     closes = kind == "idle" and _idle_closes_turn(conn, session_id, seq)
     return translate_v2.message_info(
         message_id, kind, session_id, load_json_object(raw), closes_turn=closes
@@ -50,7 +55,7 @@ def latest_message(conn: sqlite3.Connection, sid: str) -> tuple[object, ...] | N
 
 def latest_row(conn: sqlite3.Connection, sid: str) -> Row | None:
     return conn.execute(
-        f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} "
+        f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_TURN_VIEW} "
         "ORDER BY seq DESC LIMIT 1",
         (sid,),
     ).fetchone()
