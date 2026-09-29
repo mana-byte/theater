@@ -12,27 +12,37 @@ daemon transport or database schema.
 
 ## Qualified Pi range
 
-`>=0.84.4,<0.85.0 || >=0.85.1,<=0.99.1` — declared in
+`>=0.80.8,<0.85.0 || >=0.85.1,<=0.99.1` — declared in
 [`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py) and enforced
 numerically by the probe. Every release inside the range was proven by running the
 three stock-Pi proofs (core correlation, active-run interrupt, steer admission)
 against a scratch install of the published npm tarball with a mock assistant
 stream — no paid model calls:
 
-- 0.84.4, 0.85.1, 0.86.0, 0.86.1, 0.87.0, 0.87.1, 0.99.0, 0.99.1: all three proofs
+- 0.80.8, 0.80.9, 0.80.10, 0.81.0, 0.81.1, 0.82.0, 0.82.1, 0.83.0, 0.84.0,
+  0.84.1, 0.84.2, 0.84.3, 0.84.4, 0.85.1, 0.86.0, 0.86.1, 0.87.0, 0.87.1,
+  0.99.0, 0.99.1: all three proofs
   green. From 0.86.0 on Pi persists a transcript-backed
   `{type:"message", role:"system"}` entry (the session prompt, plus later prompt
   patches) between the prior leaf and the run's trigger entry, so
   `establishRunIdentity` skips that chain and keeps the tree-child condition
-  relative to the first non-system entry; 0.84.4/0.85.1 sessions have no system
+  relative to the first non-system entry; 0.80.8-0.85.1 sessions have no system
   entry and behave exactly as before.
+- The 0.80.8 floor is structural: the proofs need the `ModelRuntime` export and
+  the bridge subscribes to the `agent_settled` event, both first published in
+  0.80.8. `pi-coding-agent` <= 0.80.7 pins `@earendil-works/pi-ai ^0.80.x`, which
+  now resolves to 0.80.10, whose oauth entry dropped `getOAuthApiKey` — fresh
+  installs crash at import. So 0.80.3-0.80.7 never qualify; releases <= 0.80.2
+  and the pre-fork `@mariozechner/pi-coding-agent` line also lack
+  `agent_settled`.
 - 0.85.0 is refused as a broken published artifact: its `dist/index.js` import
   fails with `ERR_MODULE_NOT_FOUND` for `@earendil-works/pi-server` (fixed
   upstream in 0.85.1), so the proofs cannot even load its SDK.
 - Per-release spot checks: Theater's planned argv shapes through each release's
   real `parseArgs` (hostile prompts stay literal), `pi --version` output parseable
-  by the probe, and the startup-filter warning string byte-identical across all
-  nine published releases.
+  by the probe, and the startup-filter warning string and every bridge-used
+  extension/session-manager signature byte-identical across all in-range
+  releases.
 - Still manual (not proven here): a live TUI session against a real model —
   footer rendering, focus-derived presence, and an end-to-end native turn with
   real model output.
@@ -60,7 +70,7 @@ stream — no paid model calls:
 Evidence was inspected at Pi commit
 [`853a80d26c90a14c1886f0ebb8ffaae133ca2185`](https://github.com/earendil-works/pi/tree/853a80d26c90a14c1886f0ebb8ffaae133ca2185),
 package version `0.84.4` (the same surfaces hold unchanged through every
-qualified release; see Qualified Pi range):
+qualified release from the 0.80.8 floor; see Qualified Pi range):
 
 - `before_agent_start`, `agent_start`, `agent_end`, `agent_settled`, and turn events
   are documented in
@@ -254,7 +264,8 @@ optional phase-two stretch work, not part of interrupt acceptance.
 
 ### Phase 4 result — proof run, steer stays unavailable
 
-The executable stock-Pi proof (qualified releases 0.84.4 and 0.85.1-0.99.1) is
+The executable stock-Pi proof (qualified releases 0.80.8-0.84.x and
+0.85.1-0.99.1) is
 [`tests/fixtures/pi_native_control/pi_steer_admission_proof.mts`](../../tests/fixtures/pi_native_control/pi_steer_admission_proof.mts)
 (runner: `tests/test_pi_native_control.py`). It drives the public
 `sendUserMessage(..., {deliverAs: "steer"})` route against the real installed SDK

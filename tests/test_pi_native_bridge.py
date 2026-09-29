@@ -740,6 +740,11 @@ class _Completed:
 
 
 _QUALIFIED_PI_VERSIONS = (
+    "0.80.8",
+    "0.80.10",
+    "0.83.9",
+    "0.84.2",
+    "0.84.3",
     "0.84.4",
     "0.85.1",
     "0.86.0",
@@ -772,7 +777,7 @@ def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> N
     assert calls == [("pi", "--version")]
 
 
-@pytest.mark.parametrize("version", ["0.83.9", "0.84.3", "0.85.0", "0.99.2", "1.0.0"])
+@pytest.mark.parametrize("version", ["0.80.3", "0.80.7", "0.85.0", "0.99.2", "1.0.0"])
 def test_pi_frontend_probe_refuses_unqualified_versions(version, monkeypatch) -> None:
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: _Completed(f"{version}\n"))
     refused = pi_runtime_module.probe_pi_frontend_compatibility(RuntimeProbeContext(binary="pi"))

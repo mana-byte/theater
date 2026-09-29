@@ -1,7 +1,7 @@
 # Pi native control proof
 
 `pi_core_correlation_proof.mts` runs the real installed stock Pi SDK (qualified
-releases 0.84.4 and 0.85.1-0.99.1)
+releases 0.80.8-0.84.x and 0.85.1-0.99.1)
 (`AgentSession`, file-backed `SessionManager`, mock assistant stream after
 Pi's own agent-session test methodology) and loads the real shipped
 `theater_mcp_bridge.ts` through the genuine loader (`DefaultResourceLoader`
@@ -10,7 +10,9 @@ Pi's own agent-session test methodology) and loads the real shipped
 to a loopback NDJSON host over a real socket.
 
 Exit codes: `0` ok, `1` failed, `77` skipped (stock Pi outside the qualified
-range). 0.85.0 is a broken published artifact and never qualifies.
+range). 0.85.0 is a broken published artifact and never qualifies; neither do
+0.80.3-0.80.7, whose SDK crashes at import and lacks `ModelRuntime` and the
+`agent_settled` event.
 
 ## Proven matrix (Phase A — all green)
 

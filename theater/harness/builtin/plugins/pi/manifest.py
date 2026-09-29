@@ -117,7 +117,7 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
         controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
         mcp=McpRenderingManifest(renderer=render_mcp_servers_file),
         native_compatibility=NativeCompatibilityManifest(
-            qualified_range=">=0.84.4,<0.85.0 || >=0.85.1,<=0.99.1",
+            qualified_range=">=0.80.8,<0.85.0 || >=0.85.1,<=0.99.1",
             probe=probe_pi_frontend_compatibility,
         ),
         runtime=RuntimeManifest(
@@ -138,7 +138,7 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
             ),
             host=RuntimeHost.FRONTEND,
             frontend_installer=install_pi_frontend,
-            # Stock Pi proofs (0.84.4 through 0.99.1, 0.85.0 refused as a
+            # Stock Pi proofs (0.80.8 through 0.99.1, 0.85.0 refused as a
             # broken artifact) establish exact active-run identity and
             # once-only abort evidence for native interrupt.
             legacy_fallback=frozenset(),
