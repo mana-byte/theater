@@ -35,7 +35,12 @@ function resolveStockPi(): StockPi | undefined {
 	if (!binPath) return undefined;
 	const resolved = realpathSync(binPath);
 	if (!resolved.includes("pi-coding-agent")) return undefined;
-	const root = dirname(dirname(dirname(resolved)));
+	// dist/cli.js (<= 0.84.2) and dist/bundle/cli.js (>= 0.84.3) differ in
+	// depth, so root at the nearest package.json ancestor of the bin.
+	let root = dirname(resolved);
+	while (!existsSync(join(root, "package.json")) && root !== dirname(root)) {
+		root = dirname(root);
+	}
 	const manifestPath = join(root, "package.json");
 	if (!existsSync(manifestPath)) return undefined;
 	let version = "";
@@ -53,19 +58,16 @@ function resolveStockPi(): StockPi | undefined {
 	}
 	const distIndex = join(root, "dist", "index.js");
 	if (!existsSync(distIndex)) return undefined;
-	// Exactly the releases whose three proofs passed hermetically; 0.85.0 is
-	// a broken published artifact and stays refused.
-	const QUALIFIED_VERSIONS = new Set([
-		"0.84.4",
-		"0.85.1",
-		"0.86.0",
-		"0.86.1",
-		"0.87.0",
-		"0.87.1",
-		"0.99.0",
-		"0.99.1",
-	]);
-	if (!QUALIFIED_VERSIONS.has(version)) return undefined;
+	// Mirrors the probe: admit iff (0,80,8) <= v < (0,85,0) or
+	// (0,85,1) <= v <= (0,99,1). 0.85.0 is a broken published artifact;
+	// <= 0.80.7 lack ModelRuntime and agent_settled, so never qualify.
+	const versionMatch = /^0\.(\d+)\.(\d+)$/.exec(version);
+	if (versionMatch === null) return undefined;
+	const minor = Number(versionMatch[1]);
+	const patch = Number(versionMatch[2]);
+	if (minor < 80 || (minor === 80 && patch < 8)) return undefined;
+	if (minor === 85 && patch === 0) return undefined;
+	if (minor > 99 || (minor === 99 && patch > 1)) return undefined;
 	return { root, distIndex, version };
 }
 
