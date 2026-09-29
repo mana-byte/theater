@@ -1,0 +1,57 @@
+{
+  "native_queue": {
+    "experimental": true,
+    "methods": [
+      "thread/queue/add",
+      "thread/queue/list",
+      "thread/queue/update",
+      "thread/queue/delete",
+      "thread/queue/reorder",
+      "thread/queue/start"
+    ],
+    "theater_position": "do not use the native queue for Theater's followup queue; keep Theater's queue entirely in Theater",
+    "with_experimental_api": {
+      "add_response": {
+        "queuedSubmission": {
+          "clientUserMessageId": "qualify-2",
+          "id": "<uuid>",
+          "input": [
+            {
+              "text": "queued and run",
+              "text_elements": [],
+              "type": "text"
+            }
+          ]
+        }
+      },
+      "list_response": {
+        "data": [],
+        "nextCursor": null
+      }
+    },
+    "without_experimental_api": {
+      "add_error": {
+        "code": -32600,
+        "message": "thread/queue/add requires experimentalApi capability"
+      }
+    }
+  },
+  "source": "captured against the installed app-server",
+  "thread_settings_update": {
+    "experimental": true,
+    "method": "thread/settings/update",
+    "with_experimental_api": {
+      "readback_reasoning_effort": null,
+      "request": {
+        "effort": "<reasoning effort>",
+        "threadId": "<thread-id>"
+      },
+      "response": {},
+      "settings_notification_effort": "medium"
+    },
+    "without_experimental_api": {
+      "code": -32600,
+      "message": "thread/settings/update requires experimentalApi capability"
+    }
+  }
+}
