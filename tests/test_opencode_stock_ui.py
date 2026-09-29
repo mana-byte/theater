@@ -28,6 +28,11 @@ from theater.harness.builtin.plugins.opencode.launch import plan_launch
 from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
 from theater.harness.builtin.plugins.opencode.runtime import OpenCodeFrontendRuntime
+from theater.harness.builtin.plugins.opencode.runtime_plan import (
+    OPENCODE_TUI_MAX_VERSION,
+    OPENCODE_TUI_MIN_VERSION,
+    parse_opencode_version,
+)
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.launch import LaunchPlan
@@ -311,6 +316,11 @@ def _stock_version(binary: str) -> str:
     return subprocess.run(
         [binary, "--version"], capture_output=True, text=True, timeout=15, check=True
     ).stdout
+
+
+def _qualified_1x_release(version: str) -> bool:
+    parsed = parse_opencode_version(version)
+    return parsed is not None and OPENCODE_TUI_MIN_VERSION <= parsed < OPENCODE_TUI_MAX_VERSION
 
 
 async def _until(predicate, *, timeout: float, detail) -> None:
@@ -629,8 +639,8 @@ async def test_stock_tui_loads_passive_extension_and_reconnects(monkeypatch) -> 
         pytest.skip("opencode and tmux are required")
     assert binary is not None
     version = await asyncio.to_thread(_stock_version, binary)
-    if "1.18.29" not in version:
-        pytest.skip(f"expected stock OpenCode 1.18.29, found {version.strip()!r}")
+    if not _qualified_1x_release(version):
+        pytest.skip(f"expected stock OpenCode 1.18.29-1.18.33, found {version.strip()!r}")
 
     root = Path(tempfile.mkdtemp(prefix="oc-stock-", dir="/tmp")).resolve()
     socket = root / "tmux.sock"
@@ -759,8 +769,8 @@ async def test_stock_tui_accepts_native_send_with_exact_lineage(monkeypatch) -> 
         pytest.skip("opencode and tmux are required")
     assert binary is not None
     version = await asyncio.to_thread(_stock_version, binary)
-    if "1.18.29" not in version:
-        pytest.skip(f"expected stock OpenCode 1.18.29, found {version.strip()!r}")
+    if not _qualified_1x_release(version):
+        pytest.skip(f"expected stock OpenCode 1.18.29-1.18.33, found {version.strip()!r}")
 
     root = Path(tempfile.mkdtemp(prefix="oc-stock-native-", dir="/tmp")).resolve()
     socket = root / "tmux.sock"

@@ -548,7 +548,7 @@ async def test_new_session_readback_mismatch_fails_closed(
 
 
 async def test_server_handshake_rejects_version_drift(server: ServerFake, token_file: Path) -> None:
-    server.behaviors["health-version"] = "1.18.30"
+    server.behaviors["health-version"] = "1.18.34"
     runtime = OpenCodeServerRuntime(_context(server, token_file))
     with pytest.raises(RuntimeError, match="outside the qualified range"):
         await runtime.open_session(mode=SessionOpenMode.NEW)

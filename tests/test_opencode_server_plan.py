@@ -167,11 +167,18 @@ def test_probe_requires_both_successful_checks(
         assert compatibility.native_version == "1.18.29"
 
 
-def test_probe_rejects_releases_outside_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_probe(monkeypatch, "1.18.28", "--port --hostname")
+@pytest.mark.parametrize(
+    ("version", "supported"),
+    [("1.18.28", False), ("1.18.29", True), ("1.18.33", True), ("1.18.34", False)],
+)
+def test_probe_qualifies_exactly_the_1x_window(
+    monkeypatch: pytest.MonkeyPatch, version: str, supported: bool
+) -> None:
+    _patch_probe(monkeypatch, version, "--port --hostname")
     compatibility = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
-    assert compatibility.supported is False
-    assert "compatibility range" in (compatibility.reason or "")
+    assert compatibility.supported is supported
+    if not supported:
+        assert "compatibility range" in (compatibility.reason or "")
 
 
 def test_probe_requires_the_serve_flags(monkeypatch: pytest.MonkeyPatch) -> None:

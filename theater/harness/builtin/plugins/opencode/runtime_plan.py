@@ -13,11 +13,12 @@ from theater.harness.contracts.runtime import (
 
 from .constants import MODELS_TIMEOUT
 
-# Evidence pinned to 1.18.29 (upstream c470c79513f78aabb2ff88a8c8f7a3a22c4e97af)
-# only: the conformance fixture and the opt-in stock gate prove send and lineage.
-OPENCODE_TUI_COMPATIBILITY_POLICY = "opencode-tui-native-controls-1.18.29"
+# 1.18.30-1.18.33 qualified by byte-stable Theater-consumed surfaces plus
+# model-free live probes on stock 1.18.33; the paid model-backed conformance
+# suite still pins 1.18.29 (upstream c470c79513f78aabb2ff88a8c8f7a3a22c4e97af).
+OPENCODE_TUI_COMPATIBILITY_POLICY = "opencode-tui-native-controls-1.18.29-1.18.33"
 OPENCODE_TUI_MIN_VERSION = (1, 18, 29)
-OPENCODE_TUI_MAX_VERSION = (1, 18, 30)
+OPENCODE_TUI_MAX_VERSION = (1, 18, 34)
 
 # 1.x prints a bare release; 2.x prints `opencode v2.0.18`, so a leading `v` is allowed.
 _VERSION = re.compile(
@@ -64,8 +65,8 @@ def probe_opencode_compatibility(context: RuntimeProbeContext) -> RuntimeCompati
             supported=False,
             policy=OPENCODE_TUI_COMPATIBILITY_POLICY,
             native_version=rendered,
-            reason="OpenCode release is outside the native control compatibility range; "
-            "conformance evidence exists for 1.18.29 only",
+            reason="OpenCode release is outside the native control compatibility range "
+            "(qualified releases are 1.18.29-1.18.33)",
         )
     help_text = f"{help_run.stdout}\n{help_run.stderr}"
     if help_run.returncode != 0 or not {"--model", "--auto", "--fork"}.issubset(help_text.split()):
@@ -92,9 +93,9 @@ def _unsupported(reason: str) -> RuntimeCompatibility:
 
 # Detached-server topology policy, deliberately NOT yet in MANIFEST: cutover needs
 # send/abort/lineage parity with the TUI host. Pins the release and session-first ordering.
-OPENCODE_SERVER_COMPATIBILITY_POLICY = "opencode-server-native-controls-1.18.29"
+OPENCODE_SERVER_COMPATIBILITY_POLICY = "opencode-server-native-controls-1.18.29-1.18.33"
 OPENCODE_SERVER_MIN_VERSION = (1, 18, 29)
-OPENCODE_SERVER_MAX_VERSION = (1, 18, 30)
+OPENCODE_SERVER_MAX_VERSION = (1, 18, 34)
 SERVER_SESSION_ORDER = RuntimeSessionOrder.SESSION_FIRST
 #: 2.x server topology, verified end to end on 2.0.18: `/api` routes with `{data}` bodies, the
 #: `server listening on` banner, `--server <url> -s <id>` attach, and a per-lineage database.

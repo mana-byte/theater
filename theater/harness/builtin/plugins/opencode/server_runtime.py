@@ -355,7 +355,9 @@ class OpenCodeServerRuntime(HarnessRuntime):
             or not OPENCODE_SERVER_MIN_VERSION <= parsed < OPENCODE_SERVER_MAX_VERSION
         ):
             raise RuntimeError(
-                f"OpenCode server {version!r} is outside the qualified range >=1.18.29,<1.18.30"
+                f"OpenCode server {version!r} is outside the qualified range "
+                f">={'.'.join(map(str, OPENCODE_SERVER_MIN_VERSION))},"
+                f"<{'.'.join(map(str, OPENCODE_SERVER_MAX_VERSION))}"
             )
         return version
 
