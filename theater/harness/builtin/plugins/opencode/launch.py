@@ -16,6 +16,7 @@ from theater.harness.contracts.callbacks import (
     ResumeContext,
 )
 from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
+from theater.harness.normalization import literal_prompt_argument
 from theater.harness.transcript.discovery import root_domain_overlay
 from theater.models import BadRequest
 
@@ -84,7 +85,9 @@ def plan_launch(
     if context.resume is not None:
         argv += ["-s", context.resume, "--fork"]
     elif context.prompt:
-        argv += ["--prompt", context.prompt]
+        # yargs (1.x) and effect's CLI (2.x) both refuse a "-"-leading value
+        # after `--prompt`, so the prompt stays one literal element.
+        argv += ["--prompt", literal_prompt_argument(context.prompt)]
     files = {
         config_path: json.dumps(config, indent=2),
         native_plugin_path: render_native_plugin(participant_id, token_path, session_rules),
@@ -139,7 +142,9 @@ def _plan_launch_v2(context: LaunchContext, *, binary: str) -> LaunchPlan:
     if context.resume is not None:
         argv += ["-s", context.resume]
     elif context.prompt:
-        argv = _open_new_session_v2(binary, [*argv, "--prompt", context.prompt])
+        argv = _open_new_session_v2(
+            binary, [*argv, "--prompt", literal_prompt_argument(context.prompt)]
+        )
     env.update(tui_env_v2(context.approval))
     return LaunchPlan(
         argv=argv,
@@ -175,6 +180,11 @@ def _plan_enforced_launch_v2(
     observation = paths.participant_observation_dir(participant_id, "opencode")
     token_path = observation / "receipt-token"
     session_id = context.resume or ids_v2.session_id()
+    # The bootstrap appends ["--prompt", settings["prompt"]] to the TUI argv,
+    # so the stored prompt must already be the literal-safe form.
+    prompt = (
+        None if context.resume or not context.prompt else literal_prompt_argument(context.prompt)
+    )
     settings = {
         "binary": binary,
         "approval": context.approval,
@@ -184,7 +194,7 @@ def _plan_enforced_launch_v2(
         "plugin_source": str((plugin_dir(config_path) / "server.js").resolve()),
         "session_id": None if context.resume else session_id,
         "resume": context.resume,
-        "prompt": None if context.resume else context.prompt or None,
+        "prompt": prompt,
         "model": context.model,
         "tui_env": tui_env_v2(context.approval),
     }

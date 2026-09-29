@@ -9,6 +9,7 @@ from theater.harness.base import (
     ResumeLaunchOverlay,
 )
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
+from theater.harness.normalization import literal_prompt_argument
 from theater.harness.transcript.discovery import root_domain_overlay
 from theater.models import BadRequest
 
@@ -34,7 +35,9 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         # release, so it is the backward-compatible value here.
         argv += ["-a", "on-request", "-s", "read-only"]
     if context.prompt:
-        argv.append(context.prompt)
+        # Clap treats any element starting with "-" as a flag, so a prompt
+        # like "--dangerously-bypass-approvals-and-sandbox" must not sit bare.
+        argv.append(literal_prompt_argument(context.prompt))
     # Pin CODEX_HOME so the child's rollout root is exactly the one observation
     # derives; unset/empty pins "" (Codex's default home), never a path the
     # child would then require to exist.

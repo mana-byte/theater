@@ -22,6 +22,7 @@ from theater.harness.base import (
 )
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, ResumePreflightContext
 from theater.harness.contracts.manifest import LaunchManifest
+from theater.harness.normalization import literal_prompt_argument
 from theater.harness.transcript.discovery import root_domain_overlay
 
 from .config_root import claude_config_root, claude_projects_root
@@ -106,7 +107,9 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         # `default` is Claude's Manual mode and, unlike `manual`, every release accepts it.
         argv += ["--permission-mode", "default"]
     if context.prompt:
-        argv.append(context.prompt)
+        # Commander treats any element starting with "-" as an option, so a
+        # prompt like "--dangerously-skip-permissions" must not sit bare.
+        argv.append(literal_prompt_argument(context.prompt))
     return LaunchPlan(
         argv=argv,
         files={

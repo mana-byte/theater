@@ -1,6 +1,7 @@
 """Cross-harness trajectory normalization helpers."""
 
 from .facts import fact_builder, lane_for_kind, path_details, tool_failure
+from .prompt import literal_prompt_argument
 from .timing import assemble_timing, epoch_or_number, iso_epoch
 from .usage import qualified_model, reported_cost, trajectory_usage_from_token_usage
 from .values import (
@@ -33,6 +34,7 @@ __all__ = [
     "iso_epoch",
     "json_container_format",
     "lane_for_kind",
+    "literal_prompt_argument",
     "loose_trajectory_text",
     "nonnegative_int",
     "optional_trajectory_detail",
