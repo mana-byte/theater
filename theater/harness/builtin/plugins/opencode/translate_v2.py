@@ -6,7 +6,9 @@ positional id; an `idle` marker that closes a turn no step closed becomes its te
 
 from __future__ import annotations
 
-from .values import _has_tool_calls, _table, _turn_terminal
+from theater.harness.base import TurnTerminal
+
+from .values import _error_terminal, _has_tool_calls, _table, _turn_terminal
 
 _PART_WIDTH = 6
 _PATH_TOOLS = frozenset({"read", "write", "edit"})
@@ -123,12 +125,11 @@ def _closing_info(info: dict, data: dict, cause: dict | None = None) -> dict:
     error = _IDLE_ERRORS.get(outcome)
     if error is None:
         return {**closing, "finish": "stop"}
-    # The turn's last failed step names the real cause; the generic text is only a fallback.
-    return {
-        **closing,
-        "finish": "error",
-        "error": dict(cause if cause and outcome == "failed" else error),
-    }
+    # The last failed step names the real cause of a failed turn; an abort cause must not
+    # turn the authoritative `failed` outcome into an interrupt, so it keeps the generic text.
+    named = cause is not None and _error_terminal(cause) is TurnTerminal.FAILED
+    chosen = cause if named and outcome == "failed" and cause is not None else error
+    return {**closing, "finish": "error", "error": dict(chosen)}
 
 
 def _error(value: object) -> dict | None:

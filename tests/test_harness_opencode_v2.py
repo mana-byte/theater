@@ -519,6 +519,21 @@ def test_a_failed_turn_without_a_step_error_keeps_the_generic_boundary(rec, work
     (boundary,) = [e for e in drain(src) if e.turn_end]
     assert boundary.text == "TurnFailed: OpenCode ended the turn with a failure"
 
+    # An abort-typed step failure must not turn an authoritative `failed` outcome into an interrupt.
+    rec.user("msg_u2", "again")
+    rec.step(
+        "msg_a2",
+        rec.tick(),
+        [text("cut")],
+        finish="error",
+        error={"type": "aborted", "message": "Step interrupted"},
+        **USAGE,
+    )
+    rec.idle("msg_i2", "failed")
+
+    (boundary,) = [e for e in drain(src) if e.turn_end]
+    assert boundary.turn_terminal is TurnTerminal.FAILED
+
 
 def test_history_and_the_live_path_agree(rec, workdir):
     src = attached(rec, workdir)
