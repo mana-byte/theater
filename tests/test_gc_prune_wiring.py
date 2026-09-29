@@ -178,26 +178,29 @@ async def test_null_caller_job_does_not_block_dead_participant_sweep(store):
         assert store.get_participant(pid) is not None
 
 
-async def test_participant_deletion_drops_dependents_and_fences_unsettled_owners(store):
+async def test_participant_deletion_drops_dependents_and_fences_live_owners(store):
     """A deleted participant leaves no dangling bindings/ops/evidence; unsafe owners are kept."""
     _participant(store, pid="deps")
     _binding(store, participant_id="deps", lifecycle="stopped")
     _op(store, operation_id="op-settled", participant_id="deps", age_days=1)
     _evidence(store, session_id="s-deps", participant_id="deps", age_days=1)
-    _participant(store, pid="unsettled")
-    _op(store, operation_id="op-queued", participant_id="unsettled", phase="queued", age_days=30)
+    _participant(store, pid="barriered")
+    _op(store, operation_id="op-barrier", participant_id="barriered", barrier=1, age_days=30)
+    _participant(store, pid="orphan-queued")
+    _op(store, operation_id="op-orphan", participant_id="orphan-queued", phase="queued")
     _participant(store, pid="live-backend")
     _binding(store, participant_id="live-backend", lifecycle="active")
 
     result = await sweep(store, _retention())
 
-    assert result.participants == 1
+    assert result.participants == 2  # deps, and the owner of a queued op that can never settle
     assert store.get_participant("deps") is None
-    assert store.get_participant("unsettled") is not None
+    assert store.get_participant("orphan-queued") is None
+    assert store.get_participant("barriered") is not None
     assert store.get_participant("live-backend") is not None
     assert _count(store, terminal_bindings) == 1  # live-backend's
     assert _count(store, participant_runtime_bindings) == 1  # live-backend's
-    assert _op_ids(store) == {"op-queued"}
+    assert _op_ids(store) == {"op-barrier"}
     assert _count(store, native_terminal_evidence) == 0
 
 

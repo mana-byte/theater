@@ -43,7 +43,7 @@ from theater.daemon.schema import (
     workspace_usages,
 )
 from theater.daemon.store import Store
-from theater.harness.contracts.runtime import ControlDeliveryPhase, ControlKind
+from theater.harness.contracts.runtime import ControlKind
 from theater.models import Job, now
 from theater.observability.catalog import GC_PHASE
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
@@ -499,28 +499,27 @@ def _eligible_participant_filters(restart_cutoff: float):
                 workspace_usages.c.released_at.is_(None),
             )
         ),
-        # An operation recovery or a live await can still reference must fence the owner.
-        participants.c.id.not_in(
-            select(control_operations.c.participant_id).where(
-                or_(
-                    control_operations.c.delivery_phase != str(ControlDeliveryPhase.SETTLED),
-                    control_operations.c.execution_barrier != 0,
-                    and_(
-                        control_operations.c.kind.in_(
-                            [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
-                        ),
-                        exists(jobs.c.handle)
-                        .where(jobs.c.handle == control_operations.c.job_handle)
-                        .where(jobs.c.state == "running"),
+        # Fence only what a live await or recovery can still reference: an unresolved execution
+        # barrier or a running job. A queued op whose job is gone can never settle, so it must not
+        # retain its dead owner forever (its row goes with the participant).
+        ~exists(control_operations.c.operation_id).where(
+            control_operations.c.participant_id == participants.c.id,
+            or_(
+                control_operations.c.execution_barrier != 0,
+                and_(
+                    control_operations.c.kind.in_(
+                        [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
                     ),
-                )
-            )
+                    exists(jobs.c.handle)
+                    .where(jobs.c.handle == control_operations.c.job_handle)
+                    .where(jobs.c.state == "running"),
+                ),
+            ),
         ),
         # Fail-closed: only stopped/failed backends are dead; any other phase is still recoverable.
-        participants.c.id.not_in(
-            select(participant_runtime_bindings.c.participant_id).where(
-                participant_runtime_bindings.c.lifecycle_phase.not_in(("stopped", "failed"))
-            )
+        ~exists(participant_runtime_bindings.c.participant_id).where(
+            participant_runtime_bindings.c.participant_id == participants.c.id,
+            participant_runtime_bindings.c.lifecycle_phase.not_in(("stopped", "failed")),
         ),
     )
 
