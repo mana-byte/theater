@@ -22,6 +22,7 @@ from .constants import (
     RECEIPT_RETRY_DELAYS_MS,
 )
 from .mcp import catalog_path
+from .tui_recovery_v2 import render_tui_recovery_v2
 
 PLUGIN_ID = "theater.opencode-session"
 _PACKAGE = {"name": "theater-opencode-session", "private": True, "type": "module"}
@@ -292,6 +293,7 @@ def render_native_plugin_v2(
     return {
         directory / "package.json": json.dumps(_PACKAGE, indent=2),
         directory / "server.js": _TEMPLATE.replace(_SETTINGS_SENTINEL, json.dumps(settings)),
+        directory / "tui.js": render_tui_recovery_v2(PLUGIN_ID),
     }
 
 
