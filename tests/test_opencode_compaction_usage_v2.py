@@ -7,6 +7,8 @@ import asyncio
 import pytest
 from test_harness_opencode_v2 import USAGE, RecorderV2, attached, text
 
+from theater.harness import EventKind
+
 
 @pytest.fixture
 def workdir(tmp_path):
@@ -22,7 +24,7 @@ def rec(tmp_path, workdir):
     r.conn.close()
 
 
-def _compaction(created: int, *, status: str = "completed") -> dict:
+def _compaction(created: int, *, status: str = "completed", billed: bool = True) -> dict:
     data: dict = {
         "time": {"created": created},
         "status": status,
@@ -31,7 +33,12 @@ def _compaction(created: int, *, status: str = "completed") -> dict:
         "recent": "",
         "model": {"id": "claude", "providerID": "anthropic"},
     }
-    if status == "completed":
+    if status == "failed":
+        data["error"] = {
+            "type": "compaction.failed",
+            "message": "Compaction summary did not match the required template",
+        }
+    if status in ("completed", "failed") and billed:
         data["tokens"] = {
             "input": 2000,
             "output": 300,
@@ -81,3 +88,34 @@ def test_a_completed_compaction_accounts_its_usage_once(rec, workdir):
     assert third.events == [] and not third.trajectory
     all_events = [*first.events, *second.events, *third.events]
     assert sum(e.turn_end for e in all_events) == 1
+
+
+def test_a_failed_compaction_accounts_its_usage_once(rec, workdir):
+    src = attached(rec, workdir)
+    rec.write("msg_c1", "compaction", _compaction(rec.tick(), status="running"))
+    assert asyncio.run(src.read()).events == []
+
+    failed = _compaction(rec.tick(), status="failed")
+    rec.write("msg_c1", "compaction", failed)
+    batch = asyncio.run(src.read())
+    (usage_event,) = [e for e in batch.events if e.usage_only]
+    assert usage_event.turn_end is False and usage_event.turn_terminal is None
+    assert usage_event.usage.input_tokens == 2000
+    assert usage_event.usage.output_tokens == 300
+    assert usage_event.usage.cost_usd == 0.125
+    assert usage_event.usage.idempotency_key == "opencode:msg_c1"
+    assert [e for e in batch.events if e.kind is EventKind.ERROR] == []
+    (fact,) = [f for f in batch.trajectory if f.native_id == "msg_c1"]
+    assert fact.usage is not None
+    assert (fact.usage.input_tokens, fact.usage.output_tokens) == (2000, 300)
+    assert fact.usage.cost_usd == 0.125
+
+    rec.write("msg_c1", "compaction", failed)
+    rewrite = asyncio.run(src.read())
+    assert rewrite.events == [] and not rewrite.trajectory
+
+    rec.write("msg_c2", "compaction", _compaction(rec.tick(), status="failed", billed=False))
+    unbilled = asyncio.run(src.read())
+    assert unbilled.events == [] and not unbilled.trajectory
+    seen = [*batch.events, *rewrite.events, *unbilled.events]
+    assert sum(e.turn_end for e in seen) == 0
