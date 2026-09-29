@@ -746,15 +746,23 @@ def capture_turn_control(session: CaptureSession) -> dict:
 
 def capture_capabilities(session: CaptureSession) -> dict:
     """Experimental-API gating facts; the queued add runs one turn of quota."""
-    control = session.connect()
-    thread_id = start_app_server_thread(control, session.repo)
-    denied = control.request("thread/settings/update", {"threadId": thread_id, "effort": "medium"})
+    plain = session.connect()
+    # The updater must be the thread's subscribed connection: the app-server
+    # delivers thread/settings/updated only to a subscribed updater, so the
+    # experimental connection starts the thread, exactly like Theater's runtime.
     experimental = session.connect(experimental=True)
+    thread_id = start_app_server_thread(experimental, session.repo)
+    denied = plain.request("thread/settings/update", {"threadId": thread_id, "effort": "medium"})
     allowed = experimental.request(
         "thread/settings/update", {"threadId": thread_id, "effort": "medium"}
     )
     readback = experimental.request("thread/read", {"threadId": thread_id})
-    queue_denied = control.request(
+    try:
+        updated = experimental.wait_notification("thread/settings/updated", timeout=60)
+        settings_notification_effort = updated["params"].get("threadSettings", {}).get("effort")
+    except TimeoutError:
+        settings_notification_effort = None
+    queue_denied = plain.request(
         "thread/queue/add",
         {
             "threadId": thread_id,
@@ -775,8 +783,8 @@ def capture_capabilities(session: CaptureSession) -> dict:
     # backend is left clean for later captures. Turn notifications are
     # thread-scoped and reach subscribed connections only; queue/add does not
     # subscribe its caller, so only the thread-starting client sees them.
-    control.wait_notification("turn/completed", timeout=180)
-    control.close()
+    experimental.wait_notification("turn/completed", timeout=180)
+    plain.close()
     experimental.close()
     return {
         "source": "captured against the installed app-server",
@@ -788,6 +796,7 @@ def capture_capabilities(session: CaptureSession) -> dict:
                 "request": {"threadId": "<thread-id>", "effort": "<reasoning effort>"},
                 "response": allowed.get("result", allowed),
                 "readback_reasoning_effort": readback["result"]["thread"].get("reasoningEffort"),
+                "settings_notification_effort": settings_notification_effort,
             },
         },
         "native_queue": {

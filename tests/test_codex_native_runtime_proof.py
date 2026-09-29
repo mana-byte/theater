@@ -1046,9 +1046,14 @@ class TestNativeSmokeTurnControls:
         control.close()
 
     def test_native_smoke_settings_capability_gating(self, native_env) -> None:
-        control, thread_id = start_thread(native_env)
+        # The updater must be the thread's subscribed connection: the app-server
+        # delivers thread/settings/updated only to a subscribed updater, which
+        # is the production topology the broadcast confirmation relies on.
+        experimental = native_env.connect(experimental=True)
+        thread_id = start_app_server_thread(experimental, native_env.repo)
 
-        denied = control.request(
+        plain = native_env.connect()
+        denied = plain.request(
             "thread/settings/update", {"threadId": thread_id, "effort": "medium"}
         )
         assert denied["error"]["code"] == -32600
@@ -1056,15 +1061,22 @@ class TestNativeSmokeTurnControls:
             "thread/settings/update requires experimentalApi capability"
         )
 
-        experimental = native_env.connect(experimental=True)
         allowed = experimental.request(
             "thread/settings/update", {"threadId": thread_id, "effort": "medium"}
         )
         assert allowed.get("result") == {}
         readback = experimental.request("thread/read", {"threadId": thread_id})
-        assert readback["result"]["thread"]["reasoningEffort"] == "medium"
+        thread = readback["result"]["thread"]
+        if "reasoningEffort" in thread:
+            # 0.153.0+ dialect: the readback itself reflects the applied effort.
+            assert thread["reasoningEffort"] == "medium"
+        else:
+            # Pre-0.153 dialect: thread/read never carries effort; the applied-
+            # settings broadcast is the confirmation, exactly as production does.
+            updated = experimental.wait_notification("thread/settings/updated", timeout=60)
+            assert updated["params"]["threadSettings"]["effort"] == "medium"
 
-        queue_denied = control.request(
+        queue_denied = plain.request(
             "thread/queue/add",
             {
                 "threadId": thread_id,
@@ -1074,7 +1086,7 @@ class TestNativeSmokeTurnControls:
         )
         assert queue_denied["error"]["code"] == -32600
         assert "requires experimentalApi capability" in queue_denied["error"]["message"]
-        control.close()
+        plain.close()
         experimental.close()
 
 

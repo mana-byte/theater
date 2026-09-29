@@ -334,10 +334,18 @@ class AppServerClient:
         await self._writer.drain()
 
     async def initialize(self, client_name: str = "theater_probe", version: str = "0.0.0") -> Any:
-        """Complete the initialize/initialized handshake, like the native TUI."""
+        """Complete the initialize/initialized handshake, like the native TUI.
+
+        The experimentalApi capability matches Theater's runtime connection:
+        thread/resume.excludeTurns is experimental-gated before 0.153.0, so a
+        plain observer connection is rejected where Theater itself is not.
+        """
         result = await self.request(
             "initialize",
-            {"clientInfo": {"name": client_name, "title": client_name, "version": version}},
+            {
+                "clientInfo": {"name": client_name, "title": client_name, "version": version},
+                "capabilities": {"experimentalApi": True},
+            },
         )
         await self.notification("initialized")
         return result

@@ -713,14 +713,16 @@ def _assert_sentinels(
     assert not observer.sent.responses_to_server_requests
     assert not observer2.sent.responses_to_server_requests
     # The mock's dispatch record proves the turn's two scripted model calls
-    # happened and the title-generation request got filler.
+    # were the only ones that matched the script.
     matched_requests = [request for request in mock.requests if request.matched]
     assert len(matched_requests) == 2, (
         f"expected exactly two turn model calls, got {len(matched_requests)}"
     )
-    assert any(request.structured for request in mock.requests), (
-        "expected the TUI's structured title-generation request to hit the mock"
-    )
+    # TUI/app-server-internal model traffic varies by release (none on 0.148;
+    # a structured title turn plus a turn_ids summary request on 0.150; a
+    # structured title turn on 0.154+). The mock never lets it consume the
+    # scripted streams — only a matching request pops one — so the exactly-two
+    # matches above prove the turn's model calls were the scripted ones.
 
 
 @pytest.mark.tmux
