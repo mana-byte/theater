@@ -1,0 +1,40 @@
+{
+  "remote_flag": {
+    "bad_endpoint": {
+      "action": "codex --remote unix://<private-socket> resume <zero-turn thread-id>",
+      "backend_still_responsive": true,
+      "error_text": "Error: Failed to resume session from /private<run-root>/home/sessions/2026/09/30/rollout-2026-09-30T00-31-46-<uuid>.jsonl: thread/resume failed during TUI bootstrap: thread/resume failed: no rollout found for thread id <uuid> (code -32600)",
+      "no_silent_fallback": "no embedded backend was started and our app-server stayed responsive",
+      "outcome": "the TUI process exits; the tmux session dies; the error goes to stderr"
+    }
+  },
+  "shared_session": {
+    "observer_saw_ui_initiated": [
+      "turn/started for the TUI-submitted message",
+      "turn/completed for the same turn id"
+    ],
+    "same_thread_ids": true,
+    "ui_turn_completed_matches_started": true
+  },
+  "source": "captured with a real codex TUI attached through tmux",
+  "survival": {
+    "abrupt_control_client_death": {
+      "backend_alive": true,
+      "reconnect": "a fresh control client called thread/resume on the exact same thread id and succeeded",
+      "ui_alive": true
+    }
+  },
+  "topology": {
+    "backend": "codex app-server --listen unix://<private-socket>",
+    "detached_backend": "started with its own session id; its lifetime does not depend on any test/daemon pipe",
+    "ui": "codex --remote unix://<private-socket> resume <thread-id>"
+  },
+  "ui_readiness": {
+    "conditions": [
+      "resumed history text is rendered",
+      "the composer placeholder is visible"
+    ],
+    "method": "deadline-bounded state polling of the tmux pane content",
+    "no_blind_sleep": "every wait is a predicate with a deadline"
+  }
+}
