@@ -169,7 +169,7 @@ def test_probe_requires_both_successful_checks(
 
 @pytest.mark.parametrize(
     ("version", "supported"),
-    [("1.18.28", False), ("1.18.29", True), ("1.18.33", True), ("1.18.34", False)],
+    [("1.17.14", False), ("1.17.15", True), ("1.18.33", True), ("1.18.34", False)],
 )
 def test_probe_qualifies_exactly_the_1x_window(
     monkeypatch: pytest.MonkeyPatch, version: str, supported: bool

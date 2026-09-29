@@ -1050,7 +1050,7 @@ def test_probe_rejects_releases_outside_the_tested_window(monkeypatch) -> None:
     compatibility = probe_opencode_compatibility(RuntimeProbeContext(binary="opencode"))
     assert compatibility.supported is False
     assert compatibility.policy == OPENCODE_TUI_COMPATIBILITY_POLICY
-    assert "1.18.29" in (compatibility.reason or "")
+    assert "1.17.15" in (compatibility.reason or "")
 
 
 def test_opencode_extension_executable_conformance(monkeypatch, tmp_path) -> None:

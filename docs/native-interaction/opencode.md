@@ -43,7 +43,7 @@ client instead of relaying mutations through the editor process.
 - [`opencode/live.py`](../../theater/harness/builtin/plugins/opencode/live.py#L119)
   validates exact message lineage and reconciles the submitted turn at lines 207–247.
 - [`opencode/runtime_plan.py`](../../theater/harness/builtin/plugins/opencode/runtime_plan.py#L12)
-  qualifies OpenCode `1.18.29`–`1.18.33` for the TUI bridge.
+  qualifies OpenCode `1.17.15`–`1.18.33` for the TUI bridge.
 - [`opencode/launch.py`](../../theater/harness/builtin/plugins/opencode/launch.py#L25)
   still builds the ordinary standalone TUI launch.
 
@@ -428,12 +428,15 @@ suite for OpenCode `1.18.29` passes its seven topology and control checks, inclu
 authenticated routes, shared attach/session identity, reconnect, and parent-exit
 survival.
 
-The 1.x qualification arm spans `1.18.29`–`1.18.33`: every Theater-consumed upstream
-surface is byte-stable across those releases, and stock `1.18.33` passed the model-free
-live probes (health, session create/readback/fork, status, messages, permission,
-question, SSE `server.connected`). The model-backed conformance suite has not been
-re-run against `1.18.30`–`1.18.33`; that remains a paid maintainer step, and the
-conformance pin still requires stock `1.18.29+c470c79`.
+The 1.x qualification arm spans `1.17.15`–`1.18.33`: every Theater-consumed upstream
+surface is byte-stable across those releases, and stock `1.17.15`, `1.17.20`, `1.18.0`,
+`1.18.10`, and `1.18.28` passed the model-free live probes (health, session
+create/readback/fork, status, messages, SSE `server.connected`) — `POST /session` answers
+HTTP 500 on 1.17.14 and below. The model-backed conformance suite has **not** been run
+below `1.18.29` (nor for `1.18.30`–`1.18.33`): that remains a paid maintainer step, the
+conformance pin still requires stock `1.18.29+c470c79`, and 1.x approval enforcement —
+the generated plugin's `chat.message` hook — is not model-free verifiable and is
+unverified on the newly widened releases.
 
 The production manifest selects the qualified detached runtime. The server receives
 the launch approval policy, model choice, Theater MCP endpoints, and configured MCP
