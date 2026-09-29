@@ -2510,6 +2510,33 @@ async def test_oversized_native_turn_error_is_bounded_not_fatal() -> None:
     await runtime.aclose()
 
 
+async def test_interrupted_turn_error_text_is_kept_without_a_failure_code() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(
+        RuntimeNotification(
+            method="turn/completed",
+            params={
+                "threadId": "ui-thread-1",
+                "turn": {
+                    "id": "turn-int",
+                    "status": "interrupted",
+                    "error": {"message": "stopped by the user"},
+                    "itemsView": "full",
+                    "items": [],
+                },
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    outcome = (await source.read()).terminal_evidence[0]
+    assert outcome.terminal.value == "interrupted"
+    assert outcome.error == "stopped by the user"
+    assert outcome.error_code is None
+    await runtime.aclose()
+
+
 def summary_turn_completed(
     *,
     thread_id: str = "ui-thread-1",
