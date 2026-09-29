@@ -114,7 +114,7 @@ def test_a_probe_without_a_version_is_unknown_not_outside_range():
     )
     assert record["status"] == "unknown"
     assert record["reason"] == "version command failed"
-    assert record["qualified_range"] == ">=0.153.0,<=0.159.1"
+    assert record["qualified_range"] == ">=0.148.0,<=0.159.1"
 
 
 def test_a_probe_exception_reason_is_bounded():

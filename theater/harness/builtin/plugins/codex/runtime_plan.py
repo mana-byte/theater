@@ -26,6 +26,14 @@ CODEX_RUNTIME_COMPATIBILITY_POLICY = "codex-appserver-verified"
 #: Exact codex-cli releases with a qualified bundle (tests/fixtures/codex_native_runtime).
 CODEX_RUNTIME_VERIFIED_VERSIONS = frozenset(
     {
+        "0.148.0",
+        "0.149.0",
+        "0.149.1",
+        "0.150.0",
+        "0.150.1",
+        "0.151.0",
+        "0.152.0",
+        "0.152.1",
         "0.153.0",
         "0.153.1",
         "0.153.2",

@@ -7,6 +7,46 @@
     "candidates": "captured-but-unqualified releases live under candidates/ and are never interpreted as supported"
   },
   "bundles": {
+    "0.148.0": {
+      "directory": "0.148.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.149.0": {
+      "directory": "0.149.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.149.1": {
+      "directory": "0.149.1",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.150.0": {
+      "directory": "0.150.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.150.1": {
+      "directory": "0.150.1",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.151.0": {
+      "directory": "0.151.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.152.0": {
+      "directory": "0.152.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.152.1": {
+      "directory": "0.152.1",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
+    },
     "0.153.0": {
       "directory": "0.153.0",
       "status": "qualified",

@@ -15,7 +15,7 @@ native events.
 - [`codex/manifest.py`](../../theater/harness/builtin/plugins/codex/manifest.py#L115)
   declares the detached runtime and native live channel.
 - [`codex/runtime_plan.py`](../../theater/harness/builtin/plugins/codex/runtime_plan.py#L28)
-  allows exactly the releases with a qualified evidence bundle (`0.153.0`–`0.159.1`);
+  allows exactly the releases with a qualified evidence bundle (`0.148.0`–`0.159.1`);
   the planner starts the app-server at line 211.
 - [`codex/runtime.py`](../../theater/harness/builtin/plugins/codex/runtime.py#L385)
   implements send with `clientUserMessageId`, steer at line 424, interrupt at line
@@ -275,6 +275,19 @@ or reshaped required method, notification, or error text is a real dialect break
 Then commit the bundle, add its `index.json` entry, and edit
 `CODEX_RUNTIME_VERIFIED_VERSIONS` last. A release that passes everything except one
 capability (for example settings readback) is a dialect decision, not a silent pass.
+
+## Release dialects
+
+Differences the qualified releases exercise, each handled without a version switch:
+
+- 0.148.0–0.152.1: `thread/read`, `thread/resume` and `thread/fork` never carry
+  `model` or `reasoningEffort`, so a settings update is confirmed from the
+  `thread/settings/updated` broadcast (delivered only to subscribed connections); a
+  broadcast naming another value confirms nothing. 0.152.x also answers
+  `includeTurns: true` with `-32601 list_turns is not supported yet`.
+- 0.153.0 and later: the readback carries both fields and confirms directly.
+- 0.156.0 removes `thread/rollback` (Theater never calls it). 0.159.0 documents
+  `Turn.error` for interrupted turns too, so only a failed turn carries `turn_failed`.
 
 ## Files to change
 
