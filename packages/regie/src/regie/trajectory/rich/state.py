@@ -130,7 +130,11 @@ class ParticipantTrajectoryState:
     def record_for_id(self, record_id: str | None) -> TrajectoryRecord | None:
         if record_id is None:
             return None
-        return self.records.get(record_id) or self.search_records.get(record_id)
+        local = self.records.get(record_id)
+        remote = self.search_records.get(record_id) if self.search_result_active else None
+        if remote is not None and (local is None or remote.revision > local.revision):
+            return remote
+        return local
 
     def _set_panel(self, panel: PanelStateInfo) -> None:
         self.panel = panel
@@ -150,8 +154,16 @@ class ParticipantTrajectoryState:
 
     def _rebuild_groups(self) -> None:
         self.groups = group_records(self.record_list)
-        self.request_index = build_request_index(self.records.values())
-        self.tool_index = build_tool_index(self.records.values())
+        self._rebuild_indexes()
+
+    def _rebuild_indexes(self) -> None:
+        records = dict(self.records)
+        for record in self.remote_search_records:
+            current = records.get(record.record_id)
+            if current is None or record.revision > current.revision:
+                records[record.record_id] = record
+        self.request_index = build_request_index(records.values())
+        self.tool_index = build_tool_index(records.values())
 
     def _repair_unchanged_records(self) -> None:
         """Keep no-op upserts consistent with snapshot and tail invariants."""
@@ -164,7 +176,7 @@ class ParticipantTrajectoryState:
                 self.selected_id = display_records[-1].record_id
 
     def row_anchor(self, record_id: str | None) -> str | None:
-        """Resolve a tool member to the record that anchors its operation."""
+        """Resolve a call/result member to the record that anchors its operation."""
         if record_id is None:
             return None
         operation_id = self.tool_index.by_record_id.get(record_id)
@@ -182,6 +194,7 @@ class ParticipantTrajectoryState:
         self.search_scanned_records = 0
         self.search_matched_records = 0
         self.search_truncated = False
+        self._rebuild_indexes()
 
     def apply_search(self, result: TrajectorySearchResult) -> None:
         if result.query != self.query:
@@ -197,6 +210,7 @@ class ParticipantTrajectoryState:
         self.search_scanned_records = result.scanned_records
         self.search_matched_records = result.matched_records
         self.search_truncated = result.truncated
+        self._rebuild_indexes()
 
     def fail_search(self, query: str, message: str) -> None:
         if query != self.query:
@@ -207,6 +221,7 @@ class ParticipantTrajectoryState:
         self.searching_full_history = False
         self.search_complete = False
         self.search_error = message
+        self._rebuild_indexes()
 
     def _trim(self, *, evict_newest: bool) -> None:
         while (

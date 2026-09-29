@@ -200,8 +200,10 @@ class TrajectoryView(Vertical):
         records = self.projection.refresh(self.state)
         if self._retiring or not self.is_attached:
             return
-        if self.state.selected_id not in self.projection.indices:
-            self.state.select(self.projection.nearest(self.state.selected_id))
+        anchor = self.state.row_anchor(self.state.selected_id)
+        self.state.select(
+            anchor if anchor in self.projection.indices else self.projection.nearest(anchor)
+        )
         timeline = self.query_one("#trajectory-timeline", Timeline)
         timeline.set_zoom(self.state.timeline_zoom)
         timeline.update_records(
@@ -254,7 +256,7 @@ class TrajectoryView(Vertical):
         self._detail_settling = False
         panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
         record_id = self.state.row_anchor(self.state.selected_id)
-        record = self.state.record_for_id(record_id)
+        record = self.projection.record_for_id(record_id)
         if record is None or record_id is None:
             panel.hide_pending()
             return

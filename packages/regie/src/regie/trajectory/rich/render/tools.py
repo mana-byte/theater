@@ -1,4 +1,4 @@
-"""Immutable tool-operation rows for the Régie ledger."""
+"""Immutable tool and Theater operation rows for the Régie ledger."""
 
 from __future__ import annotations
 
@@ -6,17 +6,17 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from regie.trajectory.rich.render.operations import display_operations_for_records
 from theater.frontend.trajectory import (
     TrajectoryRecord,
     TrajectoryToolOperation,
     deterministic_record_order,
-    tool_operations_for_records,
 )
 
 
 @dataclass(frozen=True, slots=True)
 class ToolIndex:
-    """A canonical operation projection and its stable display anchors."""
+    """A presentation operation projection and its stable display anchors."""
 
     ordered: tuple[TrajectoryToolOperation, ...] = ()
     by_id: Mapping[str, TrajectoryToolOperation] = MappingProxyType({})
@@ -33,7 +33,15 @@ def build_tool_index(records: Iterable[TrajectoryRecord]) -> ToolIndex:
     """Project tool operations once and map every member to one display row."""
     ordered_records = deterministic_record_order(records)
     positions = {record.record_id: index for index, record in enumerate(ordered_records)}
-    operations = tool_operations_for_records(ordered_records)
+    operations = tuple(
+        sorted(
+            display_operations_for_records(ordered_records),
+            key=lambda operation: min(
+                positions[record_id]
+                for record_id in (*operation.call_record_ids, *operation.result_record_ids)
+            ),
+        )
+    )
     by_id: dict[str, TrajectoryToolOperation] = {}
     by_record_id: dict[str, str] = {}
     anchors: dict[str, str] = {}

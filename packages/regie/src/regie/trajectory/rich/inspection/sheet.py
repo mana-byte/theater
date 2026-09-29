@@ -118,7 +118,7 @@ def build_sheet(
 ) -> SpanSheet:
     """Header facts and sections for one span, ordered for reading at a glance."""
     if tool is not None:
-        return _tool_sheet(tool, palette)
+        return _tool_sheet(tool, palette, record)
     lookup = lookup or (lambda _record_id: None)
     model = record.lane is TrajectoryLane.MODEL
     sections = [*_record_sections(record, request, lookup, palette)]
@@ -132,7 +132,11 @@ def build_sheet(
     return SpanSheet(
         _title(
             KIND_GLYPHS_BY_VALUE.get(record.kind.value, "?"),
-            record.kind.value.replace("_", " ").capitalize(),
+            (
+                f"{record.mcp_server} › {record.mcp_tool}"
+                if record.mcp_tool is not None
+                else record.kind.value.replace("_", " ").capitalize()
+            ),
             None,
             record.status,
             (_request_timing(request) if model else None) or record.timing,
@@ -151,7 +155,9 @@ def _request_timing(request: TrajectoryRequest | None) -> Timing | None:
 # ---- tools ----------------------------------------------------------------------------
 
 
-def _tool_sheet(tool: TrajectoryToolOperation, palette: Palette) -> SpanSheet:
+def _tool_sheet(
+    tool: TrajectoryToolOperation, palette: Palette, record: TrajectoryRecord
+) -> SpanSheet:
     inputs = _matching(tool.call_details, _INPUT)
     results = _matching(tool.result_details, _RESULT)
     path = _input_value(inputs, _PATH_KEYS)
@@ -160,6 +166,7 @@ def _tool_sheet(tool: TrajectoryToolOperation, palette: Palette) -> SpanSheet:
         *_failure_sections(tool.failure, palette),
         *_field_sections("result", "Result", results, palette, lexer=lexer_for_path(path)),
         *_other_sections((*tool.call_details, *tool.result_details), {*inputs, *results}, palette),
+        *_link_sections(record.links, palette),
     ]
     debug = {
         "Call ID": tool.call_id,
@@ -174,7 +181,9 @@ def _tool_sheet(tool: TrajectoryToolOperation, palette: Palette) -> SpanSheet:
     name = f"{tool.mcp_server} › {tool.mcp_tool}" if tool.mcp_server else tool.tool_name
     return SpanSheet(
         _title(
-            "⚙",
+            KIND_GLYPHS_BY_VALUE.get(record.kind.value, "◇")
+            if record.lane is TrajectoryLane.THEATER
+            else "⚙",
             name or "unknown tool",
             _input_value(inputs, TOOL_ROW_INPUT_KEY_PRIORITY),
             tool.status,

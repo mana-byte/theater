@@ -206,7 +206,7 @@ class Timeline(ScrollView):
     # ---- rendering -------------------------------------------------------------------
 
     def _component(self, name: str) -> Style:
-        return self.get_component_rich_style(f"trajectory-timeline--{name}")
+        return self.get_component_rich_style(f"trajectory-timeline--{name}", partial=True)
 
     def _span_style(self, span: TimelineSpan) -> Style:
         record = self._records_by_id[span.record_id]
@@ -370,7 +370,15 @@ class Timeline(ScrollView):
             self._hovered_id = None
         self._timing_for = timing_for or self._timing_for
         key = (
-            tuple((record.record_id, record.revision) for record in self._records),
+            tuple(
+                (
+                    record.record_id,
+                    record.revision,
+                    record.timing,
+                    self._timing_for(record.record_id) if self._timing_for is not None else None,
+                )
+                for record in self._records
+            ),
             self._available_cells(),
             self._zoom,
         )
