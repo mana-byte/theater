@@ -260,6 +260,40 @@ def _pane() -> PaneSnapshot:
     )
 
 
+@pytest.mark.parametrize("dispatched", [False, True])
+async def test_create_failure_records_diagnostics_and_keeps_uncertain_launch(
+    tmp_path, monkeypatch, dispatched
+):
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    callbacks = TmuxProviderCallbacks(state, generation_usable=lambda generation: generation == 3)
+    calls = 0
+
+    async def create(*, before_create, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if dispatched:
+            await before_create()
+        raise TmuxError("tmux creation failed")
+
+    monkeypatch.setattr("regie.bridge.callbacks.create_terminal", create)
+    try:
+        request = _request("terminal.create")
+        result = await callbacks.create(request)
+        assert result["outcome"] == ("unknown" if dispatched else "rejected")
+        assert result["error"]["message"] == "tmux creation failed"
+        assert state.receipt("terminal.create", "operation-a") == result
+        assert bool(state.launch_intents()) is dispatched
+        assert await callbacks.create(request) == result
+        assert calls == 1
+        validate_callback_response(
+            "terminal.create", {"type": "response", "id": request.callback_id, "result": result}
+        )
+    finally:
+        state.release()
+
+
 async def test_create_receipt_is_durable_and_same_generation_is_not_replayed(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -551,7 +585,9 @@ async def test_create_recovers_the_unmarked_launch_without_executing_twice(  # n
             return ""
         if args[0] == "list-sessions":
             return "theater"
-        if args[0] == "new-window":
+        if args[0] == "source-file":
+            assert args == ("source-file", "-")
+            assert _kwargs["input_bytes"].startswith(b'"new-window" ')
             workload_starts += 1
             pane = PaneSnapshot(
                 server_identity="server-a",

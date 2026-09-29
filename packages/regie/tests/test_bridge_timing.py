@@ -31,6 +31,16 @@ def test_mutation_logs_phases_and_result(monkeypatch, caplog):
     ]
 
 
+def test_create_logs_unknown_outcome(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="regie.bridge.latency")
+
+    async def handler(_request):
+        return {"outcome": "unknown"}
+
+    _call(monkeypatch, "terminal.create", handler, 1.0, 1.001)
+    assert caplog.messages[0].endswith("result=unknown")
+
+
 def test_fast_successful_reads_are_not_logged(monkeypatch, caplog):
     caplog.set_level("INFO", logger="regie.bridge.latency")
 

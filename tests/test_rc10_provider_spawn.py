@@ -257,8 +257,50 @@ async def test_private_spawn_uses_configured_default_provider(
     await _settle(daemon)
 
     assert dispatched == [("provider-configured", 1)]
+    assert accepted["operation_state"] == "succeeded"
+    assert "operation_timed_out" not in accepted
     operation = daemon.operation_service.get(str(accepted["operation_id"]))
     assert operation.dispatch_provider_id == "provider-configured"
+
+
+async def test_private_spawn_reports_unconfirmed_launch_without_replaying(
+    daemon, monkeypatch, tmp_path
+) -> None:
+    _install_provider(daemon)
+    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
+    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    _make_launch_preparation(monkeypatch, daemon)
+    error = {"code": "terminal_create_failed", "message": "tmux creation failed"}
+    calls = 0
+
+    async def dispatch(*_args):
+        nonlocal calls
+        calls += 1
+        return OperationOutcome.uncertain(phase="provider_outcome_unknown", error=error)
+
+    wait = daemon.operation_service.wait
+
+    async def wait_after_dispatch(operation_id):
+        await _settle(daemon)
+        return await wait(operation_id, wait_seconds=0)
+
+    monkeypatch.setattr(daemon.terminal_service, "dispatch_operation", dispatch)
+    monkeypatch.setattr(daemon.operation_service, "wait", wait_after_dispatch)
+    request = {
+        "harness": "codex",
+        "prompt": "large handoff",
+        "approval": "manual",
+        "cwd": str(tmp_path),
+        "idempotency_key": "private-uncertain",
+    }
+    result = await _spawn(daemon, request)
+    assert result["operation_state"] == "uncertain"
+    assert result["operation_timed_out"] is True
+    assert result["operation_error"] == error
+    assert "Do not spawn a replacement" in result["operation_warning"]
+    assert result["addressable"] is False
+    assert await _spawn(daemon, request) == result
+    assert calls == 1
 
 
 async def test_selected_provider_absence_and_no_failover(daemon, monkeypatch, tmp_path) -> None:

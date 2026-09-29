@@ -17,7 +17,7 @@ from pathlib import Path
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
 from theater.mcp.session import Session
 from theater.mcp.toolsets.participants import _summarise
-from theater.mcp.toolsets.projection import job_entry
+from theater.mcp.toolsets.projection import compact, job_entry
 
 
 async def harnesses(session: Session) -> list[dict]:
@@ -165,7 +165,22 @@ async def spawn_session(
         wiring=wiring,
     )
     assert isinstance(record, dict)
-    return _summarise(record)
+    return {
+        **_summarise(record),
+        **compact(
+            {
+                key: record.get(key)
+                for key in (
+                    "handle",
+                    "operation_id",
+                    "operation_state",
+                    "operation_timed_out",
+                    "operation_error",
+                    "operation_warning",
+                )
+            }
+        ),
+    }
 
 
 async def await_sessions(

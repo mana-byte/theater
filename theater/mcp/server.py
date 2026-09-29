@@ -232,6 +232,9 @@ wiring:   "auto" | "native" | "legacy" — how the child's controls are wired.
 The returned participant record includes `session_id`, the harness's opaque
 resume identifier. It is normally null at spawn time because the observer
 discovers it asynchronously; call list_participants later to retrieve it.
+Check `operation_state`: only `succeeded` confirms terminal creation. If the
+operation is still running or uncertain, its ID and diagnostic fields are
+returned; do not spawn a replacement while that launch remains unresolved.
 """
 
 

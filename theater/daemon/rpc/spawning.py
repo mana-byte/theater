@@ -137,11 +137,16 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
         {
             "handle": accepted.get("job_handle", participant_id),
             "operation_id": accepted.get("operation_id"),
-            "operation_state": operation.state if timed_out else accepted.get("state"),
+            "operation_state": operation.state,
         }
     )
     if timed_out:
         result["operation_timed_out"] = True
+        result["operation_error"] = operation.error
+        result["operation_warning"] = (
+            "Terminal launch has not been confirmed. Do not spawn a replacement while this "
+            "operation is unresolved; inspect the operation and provider before retrying."
+        )
     return result
 
 

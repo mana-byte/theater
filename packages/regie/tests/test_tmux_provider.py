@@ -305,7 +305,24 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
         "json.dump({'argv':sys.argv[1:],'environment':os.environ['EXACT_ENV'],'input':value},"
         "open(os.environ['RESULT_PATH'],'w',encoding='utf-8')); time.sleep(30)"
     )
-    exact_arguments = ["space value", f"$(touch {shell_marker})", "semi;colon", "'quoted'"]
+    exact_arguments = [
+        "é" * 10_000,
+        "",
+        "space value",
+        f"$(touch {shell_marker})",
+        "semi;colon",
+        ";",
+        "trailing;",
+        "'quoted'",
+        '"double quoted"',
+        "two\\\nlines\r\ttab",
+        "$HOME",
+        "~",
+        "%if",
+        "#{pid}",
+        '"; new-window; #',
+    ]
+    exact_environment = "space ; $(literal) " + "é" * 10_000
     identity = await create_terminal(
         provider_id="provider-a",
         generation=2,
@@ -314,7 +331,7 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
         executable=sys.executable,
         argv=[sys.executable, "-c", program, *exact_arguments],
         cwd=str(isolated_tmux),
-        environment={"RESULT_PATH": str(result_path), "EXACT_ENV": "space ; $(literal)"},
+        environment={"RESULT_PATH": str(result_path), "EXACT_ENV": exact_environment},
         presentation={"name": "provider-test", "background": True},
         expected_server_identity=server,
         terminal_incarnation="tmux-test-incarnation",
@@ -359,7 +376,7 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
     result = json.loads(result_path.read_text())
     assert result == {
         "argv": exact_arguments,
-        "environment": "space ; $(literal)",
+        "environment": exact_environment,
         "input": "literal! ~input",
     }
     assert not shell_marker.exists()
@@ -372,7 +389,7 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
         executable=sys.executable,
         argv=[sys.executable, "-c", program, *exact_arguments],
         cwd=str(isolated_tmux),
-        environment={"RESULT_PATH": str(result_path), "EXACT_ENV": "space ; $(literal)"},
+        environment={"RESULT_PATH": str(result_path), "EXACT_ENV": exact_environment},
         presentation={"name": "provider-test", "background": True},
         expected_server_identity=server,
         terminal_incarnation="ignored-on-reclaim",

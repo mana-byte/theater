@@ -74,7 +74,7 @@ def _emit(method: str, request: CallbackRequest, elapsed: float, result: str, ph
 def _outcome(response: Mapping[str, object] | CallbackResponse) -> str:
     if isinstance(response, CallbackResponse):
         return "success" if response.error is None else str(response.error.get("code", "error"))
-    delivery = response.get("delivery", "accepted")
+    delivery = response.get("delivery", response.get("outcome", "accepted"))
     return "success" if delivery == "accepted" else str(delivery)
 
 

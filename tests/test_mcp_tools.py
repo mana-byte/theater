@@ -192,6 +192,26 @@ async def test_spawn_names_the_caller_as_the_parent():
     assert child["session_id"] == "ses-me"
 
 
+async def test_spawn_preserves_unconfirmed_operation_and_diagnostics():
+    operation = {
+        "handle": "child-job",
+        "operation_id": "launch-operation",
+        "operation_state": "uncertain",
+        "operation_timed_out": True,
+        "operation_error": {"code": "terminal_create_failed", "message": "tmux creation failed"},
+        "operation_warning": "Terminal launch has not been confirmed. Do not spawn a replacement.",
+    }
+    child = await tools.spawn_session(
+        resolved(spawn={**RECORD, **operation, "addressable": False}),
+        harness="vibe",
+        prompt="handoff",
+        approval="manual",
+    )
+
+    assert operation.items() <= child.items()
+    assert child["addressable"] is False
+
+
 async def test_spawn_forwards_an_explicit_provider_override():
     s = resolved()
 

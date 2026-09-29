@@ -26,6 +26,7 @@ from regie.tmux.identity import (
 from regie.tmux.interrupt import interrupt_terminal
 from regie.tmux.presence import PresenceEvidence, PresenceObserver, observe_presence
 from regie.tmux.session import REGIE_LAUNCH_SESSION_OPTION
+from regie.tmux.source import command_source
 
 _BUFFER_PREFIX = "regie-provider-"
 _MAX_TERMINALS = 500
@@ -208,9 +209,11 @@ async def _recover_or_create_pane(
         environment=environment,
         presentation=presentation,
     )
+    source = command_source(args)
     if before_create is not None:
         await before_create()
-    pane_id = await run(*args)
+    # stdin avoids tmux's command-message limit for large prompts and environments.
+    pane_id = await run("source-file", "-", input_bytes=source)
     created = await pane_snapshot(pane_id)
     if created is None or created.server_identity != expected_server_identity:
         raise TmuxOutcomeUnknown("created pane could not be verified on the pinned tmux server")

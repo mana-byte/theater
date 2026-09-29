@@ -115,38 +115,50 @@ class TmuxProviderCallbacks:
             def ensure_usable() -> None:
                 self._require_usable(request)
 
-            identity = await create_terminal(
-                provider_id=self._provider_id,
-                generation=request.provider_generation,
-                participant_id=str(params["participant_id"]),
-                launch_id=launch_id,
-                executable=str(launch["executable"]),
-                argv=argv,
-                cwd=str(launch["cwd"]),
-                environment={str(key): str(value) for key, value in environment.items()},
-                presentation=(
-                    launch.get("presentation")
-                    if isinstance(launch.get("presentation"), Mapping)
-                    else None
-                ),
-                expected_server_identity=self._server_identity,
-                terminal_incarnation=intent.terminal_incarnation,
-                provisional_window_name=intent.provisional_window_name,
-                dispatch_previously_started=intent.dispatched,
-                before_create=before_create,
-                ensure_usable=ensure_usable,
-            )
-            result: dict[str, object] = {
-                "operation_id": operation_id,
-                "provider_generation": request.provider_generation,
-                "outcome": "accepted",
-                "terminal": identity,
-                "launch_id": launch_id,
-            }
-            await self._persistence.run(self._state.complete_launch, intent)
+            try:
+                identity = await create_terminal(
+                    provider_id=self._provider_id,
+                    generation=request.provider_generation,
+                    participant_id=str(params["participant_id"]),
+                    launch_id=launch_id,
+                    executable=str(launch["executable"]),
+                    argv=argv,
+                    cwd=str(launch["cwd"]),
+                    environment={str(key): str(value) for key, value in environment.items()},
+                    presentation=(
+                        launch.get("presentation")
+                        if isinstance(launch.get("presentation"), Mapping)
+                        else None
+                    ),
+                    expected_server_identity=self._server_identity,
+                    terminal_incarnation=intent.terminal_incarnation,
+                    provisional_window_name=intent.provisional_window_name,
+                    dispatch_previously_started=intent.dispatched,
+                    before_create=before_create,
+                    ensure_usable=ensure_usable,
+                )
+            except TmuxError as exc:
+                uncertain = intent.dispatched or isinstance(exc, TmuxOutcomeUnknown)
+                result: dict[str, object] = {
+                    "operation_id": operation_id,
+                    "provider_generation": request.provider_generation,
+                    "outcome": "unknown" if uncertain else "rejected",
+                    "launch_id": launch_id,
+                    "error": {"code": "terminal_create_failed", "message": str(exc)[:4096]},
+                }
+            else:
+                result = {
+                    "operation_id": operation_id,
+                    "provider_generation": request.provider_generation,
+                    "outcome": "accepted",
+                    "terminal": identity,
+                    "launch_id": launch_id,
+                }
             await self._persistence.run(
                 self._state.write_receipt, request.method, operation_id, result
             )
+            if result["outcome"] != "unknown":
+                await self._persistence.run(self._state.complete_launch, intent)
             return result
 
     async def inventory(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:

@@ -70,7 +70,7 @@ async def run(
             raise
         raise TmuxError(f"tmux {args[0] if args else ''} timed out") from None
     if check and process.returncode != 0:
-        detail = error.decode("utf-8", "backslashreplace").strip()
+        detail = (error or output).decode("utf-8", "backslashreplace").strip()
         raise TmuxError(f"tmux {args[0] if args else ''} failed: {detail}")
     return output.decode("utf-8", "backslashreplace").rstrip("\n")
 
