@@ -145,7 +145,7 @@ REGIE_DASHBOARD_HARNESS_UNAVAILABLE_STYLE = "$text-muted"
 #: Style for the installed version on a dashboard harness line.
 REGIE_DASHBOARD_HARNESS_VERSION_STYLE = "$text-muted"
 #: Row cap for the docked harness list so extra lines never crowd the dashboard.
-REGIE_DASHBOARD_HARNESS_MAX_HEIGHT = 10
+REGIE_DASHBOARD_HARNESS_MAX_HEIGHT = 16
 #: Indent and separator for the indented native-route line under a harness.
 REGIE_DASHBOARD_ROUTES_INDENT = "    "
 REGIE_DASHBOARD_ROUTE_SEPARATOR = " · "

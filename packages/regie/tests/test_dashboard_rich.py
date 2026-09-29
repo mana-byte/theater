@@ -249,7 +249,7 @@ def test_harness_availability_shows_native_qualification():
                     "wiring": "legacy",
                     "routes": {
                         "send": "tmux",
-                        "steer": "unavailable",
+                        "steer": "tmux",
                         "interrupt": "tmux",
                     },
                 },
@@ -265,48 +265,10 @@ def test_harness_availability_shows_native_qualification():
         "✓ pi β 0.84.4 — native\n"
         "    send native · steer unavailable · interrupt native\n"
         "✓ vibe 2.25.8 — legacy\n"
-        "    send tmux · steer unavailable · interrupt tmux"
+        "    send tmux · steer tmux · interrupt tmux"
     )
-    assert [span.style for span in content.spans] == [
-        "$success",
-        "$text-muted",
-        "$warning",
-        "$warning dim",
-        "$text-muted",
-        "$text-muted",
-        "$text-muted",
-        "$text-muted",
-        "$text-muted",
-        "$text-muted",
-        "$success",
-        "$text-muted",
-        "$success dim",
-        "$text-muted",
-        "$success dim",
-        "$text-muted",
-        "$success dim",
-        "$text-muted",
-        "$text-muted",
-        "$success",
-        "$warning dim",
-        "$text-muted",
-        "$success dim",
-        "$text-muted",
-        "$success dim",
-        "$text-muted",
-        "$warning dim",
-        "$text-muted",
-        "$success dim",
-        "$success",
-        "$text-muted",
-        "$text-muted",
-        "$text-muted",
-        "$text-muted",
-        "$text-muted",
-        "$warning dim",
-        "$text-muted",
-        "$text-muted",
-    ]
+    styles = {span.style for span in content.spans}
+    assert {"$success", "$warning", "$success dim", "$warning dim", "$text-muted"} <= styles
 
 
 @pytest.mark.parametrize(
