@@ -60,7 +60,13 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
     if context.reasoning_effort:
         argv += ["--thinking", context.reasoning_effort]
     if context.prompt:
-        argv.append(context.prompt)
+        # Pi's parser routes argv by prefix: "-" is an unknown option, "--" a
+        # flag, "@" a file arg (even after a "--" separator). A leading newline
+        # keeps any prompt one literal initial message.
+        prompt = context.prompt
+        if prompt.startswith(("-", "@")):
+            prompt = f"\n{prompt}"
+        argv.append(prompt)
     return LaunchPlan(
         argv=argv,
         env=env,
