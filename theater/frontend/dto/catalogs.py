@@ -69,11 +69,26 @@ class NativeCompatibility:
     qualified_range: str | None = None
     policy: str | None = None
     reason: str | None = None
+    wiring: str | None = None
+    routes: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     extra: Mapping[str, JSONValue] = field(default_factory=lambda: MappingProxyType({}))
 
     @classmethod
     def from_wire(cls, value: object) -> NativeCompatibility:
         data = object_value(value, "native compatibility")
+        raw_wiring = data.get("wiring")
+        raw_routes = data.get("routes")
+        frozen_routes = (
+            MappingProxyType(
+                {
+                    key: item
+                    for key, item in raw_routes.items()
+                    if isinstance(key, str) and key and isinstance(item, str) and item
+                }
+            )
+            if isinstance(raw_routes, Mapping)
+            else MappingProxyType({})
+        )
         return cls(
             status=string_value(data.get("status"), "native compatibility.status") or "",
             installed_version=string_value(
@@ -88,9 +103,23 @@ class NativeCompatibility:
             ),
             policy=string_value(data.get("policy"), "native compatibility.policy", optional=True),
             reason=string_value(data.get("reason"), "native compatibility.reason", optional=True),
+            wiring=(
+                string_value(raw_wiring, "native compatibility.wiring", optional=True)
+                if isinstance(raw_wiring, str) and raw_wiring
+                else None
+            ),
+            routes=frozen_routes,
             extra=extras(
                 data,
-                {"status", "installed_version", "qualified_range", "policy", "reason"},
+                {
+                    "status",
+                    "installed_version",
+                    "qualified_range",
+                    "policy",
+                    "reason",
+                    "wiring",
+                    "routes",
+                },
             ),
         )
 
@@ -102,6 +131,8 @@ class NativeCompatibility:
                 "qualified_range": self.qualified_range,
                 "policy": self.policy,
                 "reason": self.reason,
+                "wiring": self.wiring,
+                "routes": dict(self.routes),
             },
             self.extra,
         )

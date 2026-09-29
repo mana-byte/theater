@@ -425,11 +425,19 @@ def test_native_compatibility_records_separate_version_and_route_support(local_d
     assert harness_registry.native_compatibility_record(
         harness_registry.HARNESSES["claude"], installed=True, result=unsupported
     ) == {
-        "status": "outside-qualified-range",
+        "status": "legacy-only",
         "installed_version": "2.1.220",
-        "qualified_range": ">=2.1.248",
+        "qualified_range": None,
         "policy": "test-policy",
-        "reason": "below floor",
+        "reason": "no native runtime; controls use the provider terminal",
+        "wiring": "legacy",
+        "routes": {
+            "send": "tmux",
+            "steer": "unavailable",
+            "queue_followup": "tmux",
+            "settings_update": "unavailable",
+            "interrupt": "tmux",
+        },
     }
     assert (
         harness_registry.native_compatibility_record(

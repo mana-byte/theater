@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from theater.daemon.rails import (
     check_budget,
@@ -36,9 +37,12 @@ from theater.harness.contracts.runtime import (
     RuntimeProbeContext,
     RuntimeWiring,
 )
+from theater.harness.registry.lookup import ProbeOutcome
 from theater.models import BadRequest, Status, new_id
 
 _WIRING_CHOICES = "auto, native, or legacy"
+
+logger = logging.getLogger(__name__)
 
 
 def _wiring_param(params: dict) -> RuntimeWiring:
@@ -175,7 +179,8 @@ async def _harnesses(daemon, params: dict) -> list[dict]:
             runtime.setdefault(normalize(participant.harness), {})[participant.id] = health
     rows = describe(runtime=runtime)
 
-    async def probe(row: dict) -> RuntimeCompatibility | None:
+    async def probe(row: dict) -> ProbeOutcome:
+        """One probe attempt; an Exception means the probe failed, not None."""
         harness = HARNESSES.get(row["name"])
         if harness is None or not row["installed"] or row["error"]:
             return None
@@ -189,18 +194,22 @@ async def _harnesses(daemon, params: dict) -> list[dict]:
                 RuntimeProbeContext(binary=row["path"]),
                 configuration=daemon.config,
             )
-        except Exception:
-            return None
+        except Exception as error:
+            logger.warning(
+                "compatibility probe for harness %s failed: %s", row["name"], error, exc_info=error
+            )
+            return error
         return result if isinstance(result, RuntimeCompatibility) else None
 
     results = await asyncio.gather(*(probe(row) for row in rows))
-    for row, result in zip(rows, results, strict=True):
+    for row, outcome in zip(rows, results, strict=True):
         harness = HARNESSES.get(row["name"])
         if harness is not None:
             row["native_compatibility"] = native_compatibility_record(
                 harness,
                 installed=bool(row["installed"]),
-                result=result,
+                result=outcome if isinstance(outcome, RuntimeCompatibility) else None,
+                error=outcome if isinstance(outcome, Exception) else None,
             )
     return rows
 

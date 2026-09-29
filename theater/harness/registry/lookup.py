@@ -6,7 +6,12 @@ import shutil
 from typing import Literal
 
 from theater.harness.contracts.harness import Harness
-from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeCompatibilityProbe
+from theater.harness.contracts.runtime import (
+    RuntimeCapability,
+    RuntimeCompatibility,
+    RuntimeCompatibilityProbe,
+    RuntimeManifest,
+)
 from theater.harness.registry import (
     _ALIASES,
     _BROKEN,
@@ -74,34 +79,97 @@ def native_compatibility_probe(harness: Harness) -> RuntimeCompatibilityProbe | 
     return None if harness.runtime is None else harness.runtime.probe
 
 
+#: Shown instead of a range that qualifies nothing: no runtime means no native route.
+_RUNTIMELESS_REASON = "no native runtime; controls use the provider terminal"
+_PROBE_FAILURE_LIMIT = 200
+
+#: One probe attempt through the daemon's ``harnesses`` flow: the answer, the
+#: error that prevented one, or nothing when the harness declares no probe.
+type ProbeOutcome = RuntimeCompatibility | Exception | None
+
+
+def _probe_failure_reason(error: Exception) -> str:
+    """Bounded one-line cause for a probe that could not run."""
+    return f"compatibility probe failed: {type(error).__name__}: {error}"[:_PROBE_FAILURE_LIMIT]
+
+
+def _native_routes(manifest: RuntimeManifest) -> dict[str, str]:
+    """Manifest-derived routes; mirrors ``manifest_control_routes`` (daemon/controls)."""
+    return {
+        capability.value: (
+            "tmux"
+            if capability in manifest.legacy_fallback
+            else "unavailable"
+            if capability in manifest.unavailable_capabilities
+            else "native"
+        )
+        for capability in RuntimeCapability
+    }
+
+
+def _legacy_routes(harness: Harness) -> dict[str, str]:
+    """Pane-wired routes; mirrors ``_legacy_capabilities`` (daemon/rpc/controls)."""
+    controls = getattr(harness, "controls", None)
+    interrupt_plan = None if controls is None else getattr(controls, "interrupt", None)
+    return {
+        RuntimeCapability.SEND.value: "tmux",
+        RuntimeCapability.STEER.value: "unavailable",
+        RuntimeCapability.QUEUE_FOLLOWUP.value: "tmux",
+        RuntimeCapability.SETTINGS_UPDATE.value: "unavailable",
+        RuntimeCapability.INTERRUPT.value: "tmux" if interrupt_plan is not None else "unavailable",
+    }
+
+
 def native_compatibility_record(
     harness: Harness,
     *,
     installed: bool,
     result: RuntimeCompatibility | None = None,
+    error: Exception | None = None,
 ) -> dict[str, object]:
     """Build the stable daemon/UI view of one harness's native qualification."""
     declared = harness.native_compatibility
     qualified_range = None if declared is None else declared.qualified_range
     probe = native_compatibility_probe(harness)
+    runtimeless = harness.runtime is None
     if not installed:
         status: NativeCompatibilityStatus = "not-installed"
+    elif runtimeless:
+        status = "legacy-only"
+    elif error is not None:
+        status = "unknown"
     elif probe is None:
         status = "legacy-only"
-    elif result is None:
+    elif result is None or (not result.supported and result.native_version is None):
         status = "unknown"
     elif not result.supported:
         status = "outside-qualified-range"
-    elif harness.runtime is None:
-        status = "legacy-only"
     else:
         status = "native-compatible"
+    reason = None if result is None else result.reason
+    if runtimeless and installed:
+        qualified_range = None
+        reason = _RUNTIMELESS_REASON
+    if error is not None:
+        reason = _probe_failure_reason(error)
+    wiring = (
+        None
+        if status == "not-installed"
+        else ("native" if status == "native-compatible" else "legacy")
+    )
+    routes: dict[str, str] | None = None
+    if wiring == "native" and harness.runtime is not None:
+        routes = _native_routes(harness.runtime)
+    elif wiring == "legacy":
+        routes = _legacy_routes(harness)
     return {
         "status": status,
         "installed_version": None if result is None else result.native_version,
         "qualified_range": qualified_range,
         "policy": None if result is None else result.policy,
-        "reason": None if result is None else result.reason,
+        "reason": reason,
+        "wiring": wiring,
+        "routes": routes,
     }
 
 

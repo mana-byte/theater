@@ -991,9 +991,13 @@ async def test_harnesses_reports_daemon_native_compatibility(client, daemon, mon
     monkeypatch.setattr(daemon.compatibility_probes, "probe", probe)
     rows = {row["name"]: row for row in await client.call("harnesses")}
 
-    assert rows["claude"]["native_compatibility"]["status"] == "outside-qualified-range"
-    assert rows["claude"]["native_compatibility"]["qualified_range"] == ">=2.1.248"
+    assert rows["claude"]["native_compatibility"]["status"] == "legacy-only"
+    assert rows["claude"]["native_compatibility"]["qualified_range"] is None
+    assert rows["claude"]["native_compatibility"]["reason"] == (
+        "no native runtime; controls use the provider terminal"
+    )
     assert rows["codex"]["native_compatibility"]["status"] == "native-compatible"
+    assert rows["codex"]["native_compatibility"]["wiring"] == "native"
     assert rows["opencode"]["native_compatibility"]["status"] == "native-compatible"
     assert rows["pi"]["native_compatibility"]["status"] == "native-compatible"
     assert rows["vibe"]["native_compatibility"]["status"] == "legacy-only"

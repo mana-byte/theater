@@ -18,6 +18,7 @@ from theater.frontend.capabilities import (
     PUBLIC_API_MINOR,
     TERMINAL_PROVIDER_CAPABILITY,
 )
+from theater.frontend.dto.catalogs import NativeCompatibility
 from theater.frontend.schemas import validator_for
 from theater.models import ProviderRecord, now
 
@@ -180,3 +181,35 @@ async def test_model_and_skill_catalogs_reuse_daemon_owned_discovery(daemon, cat
     _validate("frontend.skills.load", loaded)
     assert loaded["result"]["name"] == skill_name
     assert isinstance(loaded["result"]["content"], str)
+
+
+def test_native_compatibility_dto_round_trips_wiring_and_routes():
+    record = {
+        "status": "outside-qualified-range",
+        "installed_version": "0.158.0",
+        "qualified_range": "==0.154.0",
+        "policy": "codex-qualified",
+        "reason": "wiring=auto selects legacy below the qualified range",
+        "wiring": "legacy",
+        "routes": {
+            "send": "tmux",
+            "steer": "unavailable",
+            "queue_followup": "tmux",
+            "settings_update": "unavailable",
+            "interrupt": "tmux",
+        },
+        "future_key": 1,
+    }
+    dto = NativeCompatibility.from_wire(record)
+    assert dto.wiring == "legacy"
+    assert dict(dto.routes) == record["routes"]
+    assert dto.extra == {"future_key": 1}
+    wire = dto.to_wire()
+    assert wire["wiring"] == "legacy"
+    assert wire["routes"] == record["routes"]
+    assert wire["future_key"] == 1
+
+    malformed = NativeCompatibility.from_wire({"status": "unknown", "wiring": 3, "routes": "nope"})
+    assert malformed.wiring is None
+    assert dict(malformed.routes) == {}
+    assert dict(NativeCompatibility.from_wire({"status": "legacy-only"}).routes) == {}
