@@ -10,6 +10,33 @@ admission and queue ownership cannot meet Theater's once-only contract.
 The work is mostly inside Pi's existing rendered extension. It does not require a new
 daemon transport or database schema.
 
+## Qualified Pi range
+
+`>=0.84.4,<0.85.0 || >=0.85.1,<=0.99.1` — declared in
+[`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py) and enforced
+numerically by the probe. Every release inside the range was proven by running the
+three stock-Pi proofs (core correlation, active-run interrupt, steer admission)
+against a scratch install of the published npm tarball with a mock assistant
+stream — no paid model calls:
+
+- 0.84.4, 0.85.1, 0.86.0, 0.86.1, 0.87.0, 0.87.1, 0.99.0, 0.99.1: all three proofs
+  green. From 0.86.0 on Pi persists a transcript-backed
+  `{type:"message", role:"system"}` entry (the session prompt, plus later prompt
+  patches) between the prior leaf and the run's trigger entry, so
+  `establishRunIdentity` skips that chain and keeps the tree-child condition
+  relative to the first non-system entry; 0.84.4/0.85.1 sessions have no system
+  entry and behave exactly as before.
+- 0.85.0 is refused as a broken published artifact: its `dist/index.js` import
+  fails with `ERR_MODULE_NOT_FOUND` for `@earendil-works/pi-server` (fixed
+  upstream in 0.85.1), so the proofs cannot even load its SDK.
+- Per-release spot checks: Theater's planned argv shapes through each release's
+  real `parseArgs` (hostile prompts stay literal), `pi --version` output parseable
+  by the probe, and the startup-filter warning string byte-identical across all
+  nine published releases.
+- Still manual (not proven here): a live TUI session against a real model —
+  footer rendering, focus-derived presence, and an end-to-end native turn with
+  real model output.
+
 ## Previous baseline
 
 - [`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py#L118)
@@ -32,7 +59,8 @@ daemon transport or database schema.
 
 Evidence was inspected at Pi commit
 [`853a80d26c90a14c1886f0ebb8ffaae133ca2185`](https://github.com/earendil-works/pi/tree/853a80d26c90a14c1886f0ebb8ffaae133ca2185),
-package version `0.84.4`:
+package version `0.84.4` (the same surfaces hold unchanged through every
+qualified release; see Qualified Pi range):
 
 - `before_agent_start`, `agent_start`, `agent_end`, `agent_settled`, and turn events
   are documented in
@@ -226,7 +254,7 @@ optional phase-two stretch work, not part of interrupt acceptance.
 
 ### Phase 4 result — proof run, steer stays unavailable
 
-The executable stock-Pi 0.84.4 proof is
+The executable stock-Pi proof (qualified releases 0.84.4 and 0.85.1-0.99.1) is
 [`tests/fixtures/pi_native_control/pi_steer_admission_proof.mts`](../../tests/fixtures/pi_native_control/pi_steer_admission_proof.mts)
 (runner: `tests/test_pi_native_control.py`). It drives the public
 `sendUserMessage(..., {deliverAs: "steer"})` route against the real installed SDK
@@ -241,8 +269,11 @@ and disproves four of the five invariants:
   (the bound abortHandler, exercised through the shipped bridge's
   `pi.control.interrupt`) silently discards a queued steer with no durable
   trace and no observable outcome, while the public `session.abort()` leaves
-  the queue and `_handlePostAgentRun` immediately converts the leftover
-  steer into an automatic replacement run's own prompt.
+  the queue: through 0.85.x `_handlePostAgentRun` immediately converts the
+  leftover steer into an automatic replacement run's own prompt; from 0.86.0
+  the abort stops the whole run loop and the steer strands in the queue,
+  undelivered and unowned. Either way no synchronous check can promise
+  delivery into the target run.
 - A steer while idle silently starts a new run instead of rejecting, and
   duplicate steers enqueue and deliver twice — no active-run validation and
   no once-only semantics exist at the primitive layer.

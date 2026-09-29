@@ -1,6 +1,6 @@
 """Runs the Pi native-control correlation proof against the installed stock Pi.
 
-Exit 77 means the installed release is outside the supported range, so the
+Exit 77 means the installed release is outside the qualified range, so the
 proof skips rather than fails; any other non-zero exit is a regression of a
 proven correlation property that gates native send and queue delivery.
 """
@@ -31,7 +31,7 @@ def test_pi_core_correlation_proof_holds_on_stock_pi() -> None:
         check=False,
     )
     if result.returncode == 77:
-        pytest.skip("installed Pi is outside the supported 0.84.x range")
+        pytest.skip("installed Pi is outside the qualified range (0.84.4, 0.85.1-0.99.1)")
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "pi core correlation proof: ok" in result.stdout
 
@@ -52,7 +52,7 @@ def test_pi_active_run_interrupt_proof_holds_on_stock_pi() -> None:
         check=False,
     )
     if result.returncode == 77:
-        pytest.skip("installed Pi is outside the supported 0.84.x range")
+        pytest.skip("installed Pi is outside the qualified range (0.84.4, 0.85.1-0.99.1)")
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "pi active-run interrupt proof: ok" in result.stdout
 
@@ -73,6 +73,6 @@ def test_pi_steer_admission_proof_holds_on_stock_pi() -> None:
         check=False,
     )
     if result.returncode == 77:
-        pytest.skip("installed Pi is outside the supported 0.84.x range")
+        pytest.skip("installed Pi is outside the qualified range (0.84.4, 0.85.1-0.99.1)")
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "pi steer admission proof: ok" in result.stdout

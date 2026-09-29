@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from theater.harness.builtin.plugins.pi import runtime as pi_runtime_module
 from theater.harness.builtin.plugins.pi.frontend import (
     PI_FRONTEND_PROTOCOL,
@@ -737,14 +739,27 @@ class _Completed:
     returncode: int = 0
 
 
-def test_pi_frontend_probe_accepts_supported_range_without_mutating_help_probe(monkeypatch) -> None:
+_QUALIFIED_PI_VERSIONS = (
+    "0.84.4",
+    "0.85.1",
+    "0.86.0",
+    "0.86.1",
+    "0.87.0",
+    "0.87.1",
+    "0.99.0",
+    "0.99.1",
+)
+
+
+@pytest.mark.parametrize("version", _QUALIFIED_PI_VERSIONS)
+def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
 
     def run(argv, **kwargs):
         del kwargs
         calls.append(tuple(argv))
         assert argv[1] == "--version"
-        return _Completed("0.84.9\n")
+        return _Completed(f"{version}\n")
 
     monkeypatch.setattr(subprocess, "run", run)
 
@@ -753,17 +768,20 @@ def test_pi_frontend_probe_accepts_supported_range_without_mutating_help_probe(m
     )
 
     assert compatibility.supported is True
-    assert compatibility.native_version == "0.84.9"
+    assert compatibility.native_version == version
     assert calls == [("pi", "--version")]
 
-    def outside_range(argv, **kwargs):
-        del argv, kwargs
-        return _Completed("0.85.0\n")
 
-    monkeypatch.setattr(subprocess, "run", outside_range)
+@pytest.mark.parametrize("version", ["0.83.9", "0.84.3", "0.85.0", "0.99.2", "1.0.0"])
+def test_pi_frontend_probe_refuses_unqualified_versions(version, monkeypatch) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: _Completed(f"{version}\n"))
     refused = pi_runtime_module.probe_pi_frontend_compatibility(RuntimeProbeContext(binary="pi"))
     assert refused.supported is False
-    assert refused.native_version == "0.85.0"
+    assert refused.reason is not None
+    # 1.0.0 is not a stable 0.x.y release at all, so no version is reported.
+    if version != "1.0.0":
+        assert refused.native_version == version
+        assert "outside the qualified range" in refused.reason
 
 
 def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None:

@@ -56,7 +56,19 @@ function resolveStockPi(): StockPi | undefined {
 	}
 	const distIndex = join(root, "dist", "index.js");
 	if (!existsSync(distIndex)) return undefined;
-	if (!/^0\.84\./.test(version)) return undefined;
+	// Exactly the releases whose three proofs passed hermetically; 0.85.0 is
+	// a broken published artifact and stays refused.
+	const QUALIFIED_VERSIONS = new Set([
+		"0.84.4",
+		"0.85.1",
+		"0.86.0",
+		"0.86.1",
+		"0.87.0",
+		"0.87.1",
+		"0.99.0",
+		"0.99.1",
+	]);
+	if (!QUALIFIED_VERSIONS.has(version)) return undefined;
 	return { root, distIndex, version };
 }
 
@@ -262,11 +274,42 @@ function errorCode(reply: JsonRecord): string {
 	return reply.error.code as string;
 }
 
+// Pi 0.86.0+ persists transcript-backed system messages between the prior
+// leaf and the run's trigger; the trigger stays a tree-child of that chain.
+function triggerRootedAtLeaf(
+	parentId: string | null,
+	leaf: string | null,
+	entries: ProofEntry[],
+): boolean {
+	let current: string | null = parentId;
+	for (let guard = 0; guard <= entries.length; guard += 1) {
+		if (current === leaf) return true;
+		const parent = entries.find((candidate) => candidate.id === current);
+		if (
+			parent === undefined ||
+			parent.type !== "message" ||
+			parent.message?.role !== "system"
+		) {
+			return false;
+		}
+		current = parent.parentId;
+	}
+	return false;
+}
+
+function versionAtLeast(version: string, minor: number, patch: number): boolean {
+	const match = /^0\.(\d+)\.(\d+)$/.exec(version);
+	if (match === null) return false;
+	const actualMinor = Number(match[1]);
+	const actualPatch = Number(match[2]);
+	return actualMinor > minor || (actualMinor === minor && actualPatch >= patch);
+}
+
 async function main(): Promise<number> {
 	const stock = resolveStockPi();
 	if (stock === undefined) {
 		console.log(
-			"pi active-run interrupt proof: skipped (stock pi 0.84.x not resolvable)",
+			"pi active-run interrupt proof: skipped (stock pi outside the qualified range)",
 		);
 		return 77;
 	}
@@ -324,6 +367,33 @@ async function main(): Promise<number> {
 			"../../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts",
 			import.meta.url,
 		),
+	);
+	// Helper extension fabricating Pi 0.86.0+'s leading system entry on
+	// releases that do not persist one; armed per-run through a global flag.
+	const SYSTEM_ENTRY_ARM = Symbol.for("theater.pi.proof.system-entry-arm");
+	(globalThis as Record<symbol, unknown>)[SYSTEM_ENTRY_ARM] = false;
+	const armSystemEntryHelper = () => {
+		(globalThis as Record<symbol, unknown>)[SYSTEM_ENTRY_ARM] = true;
+	};
+	const helperPath = join(tempRoot, "system-entry-helper.ts");
+	await writeFile(
+		helperPath,
+		[
+			'const ARM = Symbol.for("theater.pi.proof.system-entry-arm");',
+			"export default function systemEntryHelper(pi: {",
+			'\ton(event: "agent_start", handler: (event: unknown, ctx: unknown) => void): void;',
+			"}) {",
+			'\tpi.on("agent_start", (_event, ctx) => {',
+			"\t\tconst flags = globalThis as Record<symbol, unknown>;",
+			"\t\tif (flags[ARM] !== true) return;",
+			"\t\tflags[ARM] = false;",
+			"\t\tconst manager = (ctx as {",
+			"\t\t\tsessionManager?: { appendMessage?: (message: unknown) => string };",
+			"\t\t}).sessionManager;",
+			'\t\tmanager?.appendMessage?.({ role: "system", content: "", timestamp: Date.now() });',
+			"\t});",
+			"}",
+		].join("\n"),
 	);
 	const socketPath = join(tempRoot, "host.sock");
 	const token = "proof-token-0123456789abcdef";
@@ -474,7 +544,7 @@ async function main(): Promise<number> {
 		agentDir,
 		settingsManager,
 		eventBus: sdk.createEventBus(),
-		additionalExtensionPaths: [shippedBridge],
+		additionalExtensionPaths: [shippedBridge, helperPath],
 		noSkills: true,
 		noThemes: true,
 		noPromptTemplates: true,
@@ -536,6 +606,53 @@ async function main(): Promise<number> {
 		});
 	};
 
+	// ===== S0: Pi 0.86.0+ persists a transcript-backed system entry between
+	// the prior leaf and the run's trigger; identity must still establish as
+	// the trigger entry.  Older releases get the tree fabricated by the
+	// helper so the skip path runs on every qualified release.
+	if (!versionAtLeast(stock.version, 86, 0)) armSystemEntryHelper();
+	const leafS0 = sessionManager.getLeafId();
+	plans.push({ kind: "hold" });
+	const promptS0 = session.prompt("Human turn zero");
+	let snapshotS0: JsonRecord | undefined;
+	await waitUntil(async () => {
+		snapshotS0 = await pollSnapshot(host);
+		return (
+			snapshotS0.execution_state === "active" &&
+			snapshotS0.native_turn_id !== null
+		);
+	}, "the leading-system-entry run to establish identity");
+	const entriesS0 = sessionManager.getEntries();
+	const systemEntryS0 = entriesS0.find(
+		(candidate) =>
+			candidate.type === "message" && candidate.message?.role === "system",
+	);
+	const userEntryS0 = entriesS0.find(
+		(candidate) =>
+			candidate.type === "message" &&
+			candidate.message?.role === "user" &&
+			triggerRootedAtLeaf(candidate.parentId, leafS0, entriesS0),
+	);
+	assert.ok(systemEntryS0, "the fabricated session tree must lead with a system entry");
+	assert.equal(
+		systemEntryS0.parentId,
+		leafS0,
+		"the leading system entry must root at the prior leaf",
+	);
+	assert.ok(userEntryS0, "the system-led run must persist its user trigger entry");
+	assert.equal(
+		userEntryS0.parentId,
+		systemEntryS0.id,
+		"the trigger entry must follow the leading system entry in the tree",
+	);
+	assert.equal(
+		snapshotS0!.native_turn_id,
+		userEntryS0.id,
+		"the system-led run must identify as its own trigger entry",
+	);
+	releaseHeld();
+	await promptS0;
+
 	// ===== S1: a human turn identifies as its own durable user entry, and an
 	// interrupt on that exact id aborts exactly once with settled evidence.
 	const leafBefore = sessionManager.getLeafId();
@@ -549,14 +666,13 @@ async function main(): Promise<number> {
 			humanSnapshot.native_turn_id !== null
 		);
 	}, "the human run to establish identity");
-	const userEntry = sessionManager
-		.getEntries()
-		.find(
-			(candidate) =>
-				candidate.type === "message" &&
-				candidate.message?.role === "user" &&
-				candidate.parentId === leafBefore,
-		);
+	const entriesBefore = sessionManager.getEntries();
+	const userEntry = entriesBefore.find(
+		(candidate) =>
+			candidate.type === "message" &&
+			candidate.message?.role === "user" &&
+			triggerRootedAtLeaf(candidate.parentId, leafBefore, entriesBefore),
+	);
 	assert.ok(userEntry, "the human turn must persist a user entry");
 	assert.equal(
 		humanSnapshot!.native_turn_id,

@@ -1284,20 +1284,40 @@ class FrontendBridge {
 		let source: FrontendRunSource = "unknown";
 		try {
 			const entries = current.ctx.sessionManager.getEntries();
-			const entry = entries[run.baseline] as
-				| {
-						id?: unknown;
-						parentId?: unknown;
-						type?: unknown;
-						customType?: unknown;
-						message?: unknown;
-				  }
-				| undefined;
+			// Pi 0.86.0+ persists transcript-backed system messages (the
+			// session's prompt and later prompt patches) before the trigger
+			// entry; skip them while the chain stays rooted at the prior leaf.
+			type Entry = {
+				id?: unknown;
+				parentId?: unknown;
+				type?: unknown;
+				customType?: unknown;
+				message?: unknown;
+			};
+			let index = run.baseline;
+			let triggerParent: string | null | undefined = run.priorLeaf;
+			for (;;) {
+				const skip = entries[index] as Entry | undefined;
+				if (
+					!record(skip) ||
+					typeof skip.id !== "string" ||
+					!skip.id ||
+					(run.priorLeaf !== undefined && skip.parentId !== triggerParent) ||
+					skip.type !== "message" ||
+					!record(skip.message) ||
+					skip.message.role !== "system"
+				) {
+					break;
+				}
+				triggerParent = skip.id;
+				index += 1;
+			}
+			const entry = entries[index] as Entry | undefined;
 			if (
 				record(entry) &&
 				typeof entry.id === "string" &&
 				entry.id &&
-				(run.priorLeaf === undefined || entry.parentId === run.priorLeaf)
+				(run.priorLeaf === undefined || entry.parentId === triggerParent)
 			) {
 				if (
 					entry.type === "custom_message" &&

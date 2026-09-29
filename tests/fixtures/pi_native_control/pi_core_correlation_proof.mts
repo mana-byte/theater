@@ -53,7 +53,19 @@ function resolveStockPi(): StockPi | undefined {
 	}
 	const distIndex = join(root, "dist", "index.js");
 	if (!existsSync(distIndex)) return undefined;
-	if (!/^0\.84\./.test(version)) return undefined;
+	// Exactly the releases whose three proofs passed hermetically; 0.85.0 is
+	// a broken published artifact and stays refused.
+	const QUALIFIED_VERSIONS = new Set([
+		"0.84.4",
+		"0.85.1",
+		"0.86.0",
+		"0.86.1",
+		"0.87.0",
+		"0.87.1",
+		"0.99.0",
+		"0.99.1",
+	]);
+	if (!QUALIFIED_VERSIONS.has(version)) return undefined;
 	return { root, distIndex, version };
 }
 
@@ -237,11 +249,40 @@ async function findSendEntry(
 	}
 }
 
+// Pi 0.86.0+ persists transcript-backed system messages between the prior
+// leaf and the run's trigger; the trigger stays a tree-child of that chain.
+function triggerRootedAtLeaf(
+	parentId: string | null,
+	leaf: string | null,
+	entries: Array<{
+		id: string;
+		parentId: string | null;
+		type?: string;
+		message?: unknown;
+	}>,
+): boolean {
+	let current: string | null = parentId;
+	for (let guard = 0; guard <= entries.length; guard += 1) {
+		if (current === leaf) return true;
+		const parent = entries.find((candidate) => candidate.id === current);
+		if (
+			parent === undefined ||
+			parent.type !== "message" ||
+			!isRecord(parent.message) ||
+			parent.message.role !== "system"
+		) {
+			return false;
+		}
+		current = parent.parentId;
+	}
+	return false;
+}
+
 async function main(): Promise<number> {
 	const stock = resolveStockPi();
 	if (stock === undefined) {
 		console.log(
-			"pi core correlation proof: skipped (stock pi 0.84.x not resolvable)",
+			"pi core correlation proof: skipped (stock pi outside the qualified range)",
 		);
 		return 77;
 	}
@@ -483,10 +524,9 @@ async function main(): Promise<number> {
 		entry,
 		"the custom message entry must persist within the admission window",
 	);
-	assert.equal(
-		entry.parentId,
-		leafBefore,
-		"the send entry must be a tree-child of the prior leaf",
+	assert.ok(
+		triggerRootedAtLeaf(entry.parentId, leafBefore, sessionManager.getEntries()),
+		"the send entry must root at the prior leaf through system entries only",
 	);
 	const sendEntryId = entry.id;
 

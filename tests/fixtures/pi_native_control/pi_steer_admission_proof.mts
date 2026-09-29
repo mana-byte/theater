@@ -21,6 +21,14 @@ interface StockPi {
 	version: string;
 }
 
+function versionAtLeast(version: string, minor: number, patch: number): boolean {
+	const match = /^0\.(\d+)\.(\d+)$/.exec(version);
+	if (match === null) return false;
+	const actualMinor = Number(match[1]);
+	const actualPatch = Number(match[2]);
+	return actualMinor > minor || (actualMinor === minor && actualPatch >= patch);
+}
+
 function resolveStockPi(): StockPi | undefined {
 	let binPath: string;
 	try {
@@ -49,7 +57,19 @@ function resolveStockPi(): StockPi | undefined {
 	}
 	const distIndex = join(root, "dist", "index.js");
 	if (!existsSync(distIndex)) return undefined;
-	if (!/^0\.84\./.test(version)) return undefined;
+	// Exactly the releases whose three proofs passed hermetically; 0.85.0 is
+	// a broken published artifact and stays refused.
+	const QUALIFIED_VERSIONS = new Set([
+		"0.84.4",
+		"0.85.1",
+		"0.86.0",
+		"0.86.1",
+		"0.87.0",
+		"0.87.1",
+		"0.99.0",
+		"0.99.1",
+	]);
+	if (!QUALIFIED_VERSIONS.has(version)) return undefined;
 	return { root, distIndex, version };
 }
 
@@ -249,7 +269,7 @@ async function main(): Promise<number> {
 	const stock = resolveStockPi();
 	if (stock === undefined) {
 		console.log(
-			"pi steer admission proof: skipped (stock pi 0.84.x not resolvable)",
+			"pi steer admission proof: skipped (stock pi outside the qualified range)",
 		);
 		return 77;
 	}
@@ -549,9 +569,10 @@ async function main(): Promise<number> {
 		"the discarded steer leaves no durable trace and no observable outcome",
 	);
 
-	// ===== S4: the public abort route converts a queued steer into an
-	// automatic replacement run: the aborted run's post-run hook sees the
-	// queued message and continue() delivers it as the new run's own prompt.
+	// ===== S4: the public abort route never hands the queued steer to the
+	// aborted run.  Through 0.85.x it spills into an automatic replacement
+	// run; from 0.86.0 the abort strands it in the queue — either way the
+	// queue has no run ownership.
 	plans.push({ kind: "hold" });
 	const runThree = session.prompt("Human turn three");
 	await waitForActiveRun();
@@ -560,17 +581,6 @@ async function main(): Promise<number> {
 	const callsBeforeAbort = streamCallCount;
 	await session.abort();
 	await runThree;
-	assert.ok(
-		streamCallCount > callsBeforeAbort,
-		"the automatic continuation must run without any new prompt",
-	);
-	const spilled = userEntriesWithText(sessionManager, "Steer text three");
-	assert.equal(
-		spilled.length,
-		1,
-		"the queued steer must spill into an automatic replacement run",
-	);
-	assert.equal(session.pendingMessageCount, 0);
 	const abortedAssistant = sessionManager
 		.getEntries()
 		.filter(
@@ -584,11 +594,38 @@ async function main(): Promise<number> {
 		abortedAssistant,
 		"the aborted turn must persist its assistant entry",
 	);
-	assert.equal(
-		spilled[0]!.parentId,
-		abortedAssistant.id,
-		"the spilled entry is parented after the aborted run, not inside it",
-	);
+	const spilled = userEntriesWithText(sessionManager, "Steer text three");
+	if (versionAtLeast(stock.version, 86, 0)) {
+		// The stranded steer stays queued and undelivered — the same
+		// fail-closed finding: no admission receipt can promise delivery.
+		assert.equal(
+			streamCallCount,
+			callsBeforeAbort,
+			"the aborted run loop must not deliver the queued steer",
+		);
+		assert.equal(
+			spilled.length,
+			0,
+			"the stranded steer must not persist a durable entry",
+		);
+		assert.equal(session.pendingMessageCount, 1);
+	} else {
+		assert.ok(
+			streamCallCount > callsBeforeAbort,
+			"the automatic continuation must run without any new prompt",
+		);
+		assert.equal(
+			spilled.length,
+			1,
+			"the queued steer must spill into an automatic replacement run",
+		);
+		assert.equal(session.pendingMessageCount, 0);
+		assert.equal(
+			spilled[0]!.parentId,
+			abortedAssistant.id,
+			"the spilled entry is parented after the aborted run, not inside it",
+		);
+	}
 
 	// ===== S5: a steer while idle silently becomes a new run's own prompt.
 	const callsBeforeIdleSteer = streamCallCount;

@@ -28,7 +28,11 @@ def _version_in_supported_range(version: str) -> bool:
         parsed = (0, int(match.group("minor")), int(match.group("patch")))
     except ValueError:
         return False
-    return (0, 84, 4) <= parsed < (0, 85, 0)
+    # 0.85.0 is excluded: its published dist/index.js cannot import
+    # @earendil-works/pi-server, so the SDK-driven proofs cannot even load.
+    in_084 = (0, 84, 4) <= parsed < (0, 85, 0)
+    in_qualified = (0, 85, 1) <= parsed <= (0, 99, 1)
+    return in_084 or in_qualified
 
 
 def _unsupported_probe(reason: str, *, version: str | None = None) -> RuntimeCompatibility:
@@ -68,7 +72,10 @@ def probe_pi_frontend_compatibility(context: RuntimeProbeContext) -> RuntimeComp
         return _unsupported_probe("Pi --version did not report a stable 0.x.y release")
     if not _version_in_supported_range(version):
         return _unsupported_probe(
-            f"Pi {version} is outside supported range >=0.84.4,<0.85.0", version=version
+            f"Pi {version} is outside the qualified range "
+            ">=0.84.4,<0.85.0 || >=0.85.1,<=0.99.1 "
+            "(0.85.0 is a broken published artifact)",
+            version=version,
         )
     return RuntimeCompatibility(
         supported=True,
