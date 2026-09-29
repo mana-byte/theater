@@ -28,12 +28,29 @@ from .values import (
 )
 
 
+def _step_error_event(
+    error: dict, mid: str, seq: int, ts: float | None, *, clip_text: bool
+) -> Event:
+    """A stored 2.x step failure as one mid-turn ERROR: visible, never a boundary."""
+    detail = _error_detail(error)
+    return Event(
+        kind=EventKind.ERROR,
+        text=clip(detail) if clip_text else detail,
+        raw_text=detail,
+        ts=ts,
+        turn_end=False,
+        turn_id=mid or None,
+        raw_index=seq,
+    )
+
+
 class OpenCodeParser:
     _cursor: int
     _cwd: str | None
     _finished: set[str]
     _roles: dict[str, str]
     _snapshotted: set[str]
+    _step_failed: set[str]
     _said: set[str]
     _session: str | None
     _stamp: dict[str, float]
@@ -117,6 +134,12 @@ class OpenCodeParser:
                         turn_id=info.get("id") or None,
                         usage=usage,
                     )
+                )
+            step_error = info.get("stepError")
+            if isinstance(step_error, dict):
+                # The step content first, then its failure — the order the live path emits.
+                out.append(
+                    _step_error_event(step_error, info.get("id") or "", 0, ts, clip_text=False)
                 )
             return out
         # A halted turn: the partial content is a step, the failure is the
@@ -313,7 +336,7 @@ class OpenCodeParser:
             # One snapshot per continuation step. A later terminal update for
             # the same message must still end the turn: a stored error can
             # land after a `tool-calls` finish when a tool call is aborted.
-            return []
+            return self._live_step_error(info, mid, seq)
         else:
             self._snapshotted.add(mid)
             reported = False
@@ -330,8 +353,9 @@ class OpenCodeParser:
         usage = None if reported else _opencode_usage(info)
         if not terminal:
             # A continuation step: the content so far, never a turn end.
+            step_error = self._live_step_error(info, mid, seq)
             if not text and usage is None:
-                return []
+                return step_error
             return [
                 Event(
                     kind=EventKind.ASSISTANT,
@@ -342,9 +366,20 @@ class OpenCodeParser:
                     turn_id=mid or None,
                     raw_index=seq,
                     usage=usage,
-                )
+                ),
+                *step_error,
             ]
         return self._terminal_events(mid, seq, ts, text, usage, reported, error=error)
+
+    def _live_step_error(self, info: dict, mid: str, seq: int) -> list[Event]:
+        """A stored 2.x step failure, once per message: a rewrite must not repeat it."""
+        error = info.get("stepError")
+        if not isinstance(error, dict) or mid in self._step_failed:
+            return []
+        self._step_failed.add(mid)
+        time = _table(info.get("time"))
+        ts = _seconds(time.get("completed")) or _seconds(time.get("created"))
+        return [_step_error_event(error, mid, seq, ts, clip_text=True)]
 
     def _terminal_events(
         self,

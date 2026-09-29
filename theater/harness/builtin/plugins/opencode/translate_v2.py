@@ -100,8 +100,10 @@ def _assistant_info(info: dict, data: dict, time_data: dict) -> dict:
     if error is not None:
         # 2.x persists a retryable step failure and continues the turn in a new
         # assistant message (runner step.ts Outcome.Continue); only the idle
-        # marker ends the turn, so a failed step projects as a continuing one.
+        # marker ends the turn, so a failed step projects as a continuing one
+        # and carries its failure on `stepError`, which never ends anything.
         info["finish"] = _FAILED_STEP_FINISH
+        info["stepError"] = error
         return info
     if "finish" in data:
         info["finish"] = data["finish"]

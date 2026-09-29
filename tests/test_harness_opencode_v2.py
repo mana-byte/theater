@@ -441,9 +441,10 @@ def test_a_retryable_step_failure_waits_for_the_idle_marker(rec, workdir):
     """2.x persists a retryable step failure and continues the turn; only idle ends it."""
     src = attached(rec, workdir)
     rec.user("msg_u1", "go")
+    failed = rec.tick()
     rec.step(
         "msg_a1",
-        rec.tick(),
+        failed,
         [text("partial")],
         finish="error",
         error={"type": "api.error", "message": "retryable stream failure"},
@@ -457,7 +458,7 @@ def test_a_retryable_step_failure_waits_for_the_idle_marker(rec, workdir):
         "msg_a2",
         rec.tick(),
         [text("recovered")],
-        finish="stop",
+        finish="tool-calls",
         times={"completed": rec.tick()},
         **USAGE,
     )
@@ -485,6 +486,27 @@ def test_a_retryable_step_failure_waits_for_the_idle_marker(rec, workdir):
     assert [(e.kind, e.turn_terminal) for e in events if e.turn_end] == [
         (EventKind.ASSISTANT, TurnTerminal.COMPLETED),
         (EventKind.ERROR, TurnTerminal.FAILED),
+    ]
+
+    # A rewritten failed row (same id, moving time_updated) must not repeat its ERROR.
+    rec.step(
+        "msg_a1",
+        failed,
+        [text("partial")],
+        at=rec.tick(),
+        finish="error",
+        error={"type": "api.error", "message": "retryable stream failure"},
+        times={"completed": rec.tick()},
+        **USAGE,
+    )
+    assert drain(src) == []
+
+    cold = OpenCodeV2Source(rec.path, cwd=str(workdir))
+    asyncio.run(cold.read())
+    cold.commit_attachment()
+    history = asyncio.run(cold.history(last_n=0)).events
+    assert [(e.kind, e.text, e.turn_end, e.turn_terminal) for e in history] == [
+        (e.kind, e.text, e.turn_end, e.turn_terminal) for e in events
     ]
 
 

@@ -69,6 +69,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._stamp: dict[str, float] = {}
         self._finished: set[str] = set()
         self._snapshotted: set[str] = set()
+        self._step_failed: set[str] = set()
         self._said: set[str] = set()
         self._trajectory_state: OrderedDict[str, tuple[int, TrajectoryFact]] = OrderedDict()
         self._mcp_catalog = OpenCodeMcpCatalog(mcp_catalog_path)
@@ -145,6 +146,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._stamp.clear()
         self._finished.clear()
         self._snapshotted.clear()
+        self._step_failed.clear()
         self._said.clear()
         self._trajectory_state.clear()
 
