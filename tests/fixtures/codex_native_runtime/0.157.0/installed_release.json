@@ -1,0 +1,26 @@
+{
+  "binary_path": "<binary on PATH; resolved per run>",
+  "binary_sha256": "ad0be20d04e2ba6146ecdb51d7f8b7b0fe15420a15dc9b0057518d858f1f3714",
+  "installed_version": "codex-cli 0.157.0",
+  "installed_version_command": "codex --version",
+  "installed_version_output": "codex-cli 0.157.0",
+  "platform_facts": {
+    "platform_arch": "arm64",
+    "platform_family": "unix",
+    "platform_os": "darwin"
+  },
+  "provider": "mock",
+  "schema_generation": {
+    "command": "codex app-server generate-json-schema --out <dir> --experimental",
+    "files": [
+      "ClientRequest.json",
+      "ClientNotification.json",
+      "ServerRequest.json",
+      "ServerNotification.json",
+      "JSONRPCRequest.json",
+      "JSONRPCMessage.json"
+    ],
+    "note": "schema files under protocol_schema/ were emitted by the installed 0.157.0 binary itself"
+  },
+  "source": "captured against the unmodified installed release by tests/native/codex_qualify_runtime.py"
+}
