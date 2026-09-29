@@ -1,0 +1,55 @@
+{
+  "concurrent_submission_race": {
+    "completion_turn_id_equals_active_turn_id": true,
+    "response_turn_id_equals_active_turn_id": true,
+    "scenario": "turn/start issued while a turn was already in progress on the same thread"
+  },
+  "source": "captured against the installed app-server; ids and timestamps are placeholders",
+  "turn_interrupt": {
+    "completed_turn_error": null,
+    "completed_turn_status": "interrupted",
+    "interrupted_turn_id_matches_requested": true,
+    "response": {}
+  },
+  "turn_notification_sequence_observed": [
+    "thread/started",
+    "warning",
+    "warning",
+    "thread/status/changed",
+    "turn/started",
+    "item/started",
+    "item/completed",
+    "item/started",
+    "item/agentMessage/delta",
+    "item/completed",
+    "thread/tokenUsage/updated",
+    "account/rateLimits/updated",
+    "item/started",
+    "item/completed",
+    "item/started",
+    "item/agentMessage/delta",
+    "item/completed",
+    "thread/tokenUsage/updated",
+    "account/rateLimits/updated",
+    "thread/status/changed"
+  ],
+  "turn_start": {
+    "start_or_steer": "turn/start internally steers an already-active turn: it returns the SAME active turn id instead of creating a new turn"
+  },
+  "turn_steer": {
+    "completion_turn_id_matches_expected": true,
+    "expectedTurnId_required": true,
+    "response": {
+      "result": {
+        "turnId": "<same active turn-id>"
+      }
+    },
+    "stale_turn_refusal": {
+      "error": {
+        "code": -32600,
+        "message": "no active turn to steer"
+      },
+      "request_context": "turn/steer with an expectedTurnId whose turn already completed"
+    }
+  }
+}
