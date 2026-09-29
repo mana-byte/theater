@@ -53,7 +53,10 @@ def tilde(path: str | None) -> str:
     if not path:
         return "-"
     home = str(Path.home())
-    return "~" + path[len(home) :] if path.startswith(home) else path
+    # Component boundary: /Users/bob2 must not read as ~2 when home is /Users/bob.
+    if home != "/" and (path == home or path.startswith(home.rstrip("/") + "/")):
+        return "~" + path[len(home) :]
+    return path
 
 
 def harness_icon(name: str | None) -> str:
