@@ -6,6 +6,8 @@ from theater.harness.contracts.source import BATCH_TERMINAL_EVIDENCE_MAX
 #: Default deadlines from the approved plan (§3.5): 30 s startup, 10 s control.
 CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 30.0
 CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS = 10.0
+#: Codex <=0.152 has no settings readback; the applied-settings broadcast follows within this.
+CODEX_RUNTIME_SETTINGS_NOTICE_SECONDS = 2.0
 
 #: Bounded normalization state.
 CODEX_RUNTIME_EVENTS_BUFFER = 256

@@ -1060,6 +1060,37 @@ async def test_settings_update_with_unconfirmed_readback_exposes_uncertainty() -
     await runtime.aclose()
 
 
+async def test_settings_are_confirmed_by_the_applied_broadcast_when_readback_carries_none() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+
+    async def update_and_broadcast(operation_id: str, applied_effort: str):
+        # Codex <=0.152: thread/read never carries effort; only this broadcast names it.
+        task = asyncio.create_task(
+            runtime.update_settings(operation_id=operation_id, reasoning_effort="medium")
+        )
+        await asyncio.sleep(0.05)
+        server.push(
+            RuntimeNotification(
+                method="thread/settings/updated",
+                params={
+                    "threadId": "ui-thread-1",
+                    "threadSettings": {"model": "m", "effort": applied_effort},
+                },
+            )
+        )
+        return await task
+
+    receipt = await update_and_broadcast("op-notice", "medium")
+    assert receipt.result is DeliveryResult.ACCEPTED
+    assert (await runtime.snapshot()).settings.reasoning_effort == "medium"
+    # A broadcast that names another value never confirms the requested one.
+    receipt = await update_and_broadcast("op-contradicted", "high")
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "settings_unconfirmed"
+    await runtime.aclose()
+
+
 async def test_settings_readback_confirms_exactly_the_requested_fields() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)

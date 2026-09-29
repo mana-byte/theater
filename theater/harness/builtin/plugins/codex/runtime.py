@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.runtime import (
@@ -74,6 +74,8 @@ class CodexRuntime(
             supported_fields=runtime_constants._CODEX_SETTING_FIELDS,
         )
         self._settings_available: bool | None = None
+        self._settings_notice: Mapping[str, object] | None = None
+        self._settings_notice_event = asyncio.Event()
         self._settings_gate_reason: CapabilityUnavailableReason | None = None
         self._subscribed = False
         self._health = ConnectionHealth.UNOPENED

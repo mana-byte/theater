@@ -49,6 +49,8 @@ class CodexRuntimeEvents(CodexRuntimeHost):
     _thread_status: str | None
     _active_turn_id: str | None
     _status_hint: Status | None
+    _settings_notice: Mapping[str, object] | None
+    _settings_notice_event: asyncio.Event
 
     async def _handle_notification(self, notification: RuntimeNotification) -> None:
         method = notification.method
@@ -280,6 +282,9 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         if not self._thread_filter(params):
             return
         settings = params.get("threadSettings")
+        if isinstance(settings, Mapping):
+            self._settings_notice = settings
+            self._settings_notice_event.set()
         if isinstance(settings, Mapping) and self._adopt_thread_settings(settings):
             # Adopted settings are readable state with no event or fact.
             self._notify_activity()

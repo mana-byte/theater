@@ -50,6 +50,8 @@ if TYPE_CHECKING:
         _overflow_kinds: frozenset[NativeInteractionKind]
         _settings: RuntimeSettings
         _settings_available: bool | None
+        _settings_notice: Mapping[str, object] | None
+        _settings_notice_event: asyncio.Event
         _settings_gate_reason: CapabilityUnavailableReason | None
         _subscribed: bool
         _health: ConnectionHealth

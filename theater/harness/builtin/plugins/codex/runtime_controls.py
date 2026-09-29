@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Mapping
 
 from theater.harness.contracts.events import clip
@@ -25,6 +26,7 @@ from ._runtime_host import CodexRuntimeHost
 from .runtime_constants import (
     _CODEX_SETTING_FIELDS,
     CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS,
+    CODEX_RUNTIME_SETTINGS_NOTICE_SECONDS,
 )
 from .runtime_messages import (
     _bounded_str,
@@ -36,6 +38,8 @@ class CodexRuntimeControls(CodexRuntimeHost):
     _thread_status: str | None
     _settings_available: bool | None
     _settings_gate_reason: CapabilityUnavailableReason | None
+    _settings_notice: Mapping[str, object] | None
+    _settings_notice_event: asyncio.Event
     _status_hint: Status | None
 
     async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
@@ -174,6 +178,9 @@ class CodexRuntimeControls(CodexRuntimeHost):
             params["model"] = model
         if reasoning_effort is not None:
             params["effort"] = reasoning_effort
+        # Cleared before the request: the applied-settings broadcast may beat the response.
+        self._settings_notice = None
+        self._settings_notice_event.clear()
         try:
             await self._request("thread/settings/update", params)
             self._settings_available = True
@@ -192,6 +199,8 @@ class CodexRuntimeControls(CodexRuntimeHost):
         unconfirmed = await self._readback_settings(
             session, want_model=model, want_effort=reasoning_effort
         )
+        if unconfirmed == "missing" and await self._notice_confirms(model, reasoning_effort):
+            unconfirmed = None
         if unconfirmed is not None:
             # A readback that omits or contradicts a requested field is never accepted;
             # delivery stays UNKNOWN and a readable readback's values are adopted.
@@ -206,6 +215,22 @@ class CodexRuntimeControls(CodexRuntimeHost):
                 f"confirm the requested settings ({unconfirmed})",
             )
         return ControlReceipt(operation_id=operation_id, result=DeliveryResult.ACCEPTED)
+
+    async def _notice_confirms(self, want_model: str | None, want_effort: str | None) -> bool:
+        """Confirm from the backend's applied-settings broadcast when readback carries none."""
+        if self._settings_notice is None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._settings_notice_event.wait(), CODEX_RUNTIME_SETTINGS_NOTICE_SECONDS
+                )
+        notice = self._settings_notice
+        if notice is None:
+            return False
+        model = _bounded_str(notice.get("model"), limit=512)
+        effort = _bounded_str(notice.get("effort") or notice.get("reasoningEffort"), limit=512)
+        return (want_model is None or model == want_model) and (
+            want_effort is None or effort == want_effort
+        )
 
     async def _probe_settings_gate(self) -> None:
         """Honestly determine the experimental settings gate, idle-only."""
