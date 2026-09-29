@@ -36,7 +36,13 @@ def split_part_id(value: str) -> tuple[str, int] | None:
 
 
 def message_info(
-    message_id: str, kind: str, session_id: str, data: dict, *, closes_turn: bool = False
+    message_id: str,
+    kind: str,
+    session_id: str,
+    data: dict,
+    *,
+    closes_turn: bool = False,
+    cause: dict | None = None,
 ) -> dict:
     """The 1.x `message.data` a 2.x row stands for; non-conversation rows get role `idle`."""
     time_data = _table(data.get("time"))
@@ -50,7 +56,7 @@ def message_info(
     if kind == "assistant":
         return _assistant_info(info, data, time_data)
     if kind == "idle" and closes_turn:
-        return _closing_info(info, data)
+        return _closing_info(info, data, cause)
     return {**info, "role": "idle"}
 
 
@@ -110,13 +116,19 @@ def _assistant_info(info: dict, data: dict, time_data: dict) -> dict:
     return info
 
 
-def _closing_info(info: dict, data: dict) -> dict:
+def _closing_info(info: dict, data: dict, cause: dict | None = None) -> dict:
     created = info["time"]["created"]
     closing = {**info, "role": "assistant", "time": {"created": created, "completed": created}}
-    error = _IDLE_ERRORS.get(_string(data.get("outcome")))
+    outcome = _string(data.get("outcome"))
+    error = _IDLE_ERRORS.get(outcome)
     if error is None:
         return {**closing, "finish": "stop"}
-    return {**closing, "finish": "error", "error": dict(error)}
+    # The turn's last failed step names the real cause; the generic text is only a fallback.
+    return {
+        **closing,
+        "finish": "error",
+        "error": dict(cause if cause and outcome == "failed" else error),
+    }
 
 
 def _error(value: object) -> dict | None:

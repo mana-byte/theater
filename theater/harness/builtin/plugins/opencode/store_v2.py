@@ -37,9 +37,9 @@ def row_info(conn: sqlite3.Connection, row: Row) -> dict:
     message_id, session_id, kind, seq, _updated, raw = row
     if kind == "compaction":
         return compaction_v2.message_info(message_id, session_id, load_json_object(raw))
-    closes = kind == "idle" and _idle_closes_turn(conn, session_id, seq)
+    closes, cause = _idle_close(conn, session_id, seq) if kind == "idle" else (False, None)
     return translate_v2.message_info(
-        message_id, kind, session_id, load_json_object(raw), closes_turn=closes
+        message_id, kind, session_id, load_json_object(raw), closes_turn=closes, cause=cause
     )
 
 
@@ -245,7 +245,8 @@ def _session_rows(conn: sqlite3.Connection, sid: str) -> list[Row]:
     ).fetchall()
 
 
-def _idle_closes_turn(conn: sqlite3.Connection, sid: str, seq: int) -> bool:
+def _idle_close(conn: sqlite3.Connection, sid: str, seq: int) -> tuple[bool, dict | None]:
+    """Whether an idle marker closes its turn, and the last step failure that names why."""
     previous = conn.execute(
         "SELECT COALESCE(MAX(seq), -1) FROM session_message "
         "WHERE session_id = ? AND type = 'idle' AND seq < ?",
@@ -262,8 +263,8 @@ def _idle_closes_turn(conn: sqlite3.Connection, sid: str, seq: int) -> bool:
             "AND seq > ? AND seq < ? LIMIT 1",
             (sid, previous, seq),
         ).fetchone()
-        return translate_v2.idle_closes_turn(None, prompted is not None)
+        return translate_v2.idle_closes_turn(None, prompted is not None), None
     data = load_json_object(assistant[1])
     info = translate_v2.message_info(assistant[0], "assistant", sid, data)
     parts = translate_v2.message_parts(assistant[0], "assistant", sid, data)
-    return translate_v2.idle_closes_turn((info, parts), True)
+    return translate_v2.idle_closes_turn((info, parts), True), info.get("stepError")

@@ -480,7 +480,7 @@ def test_a_retryable_step_failure_waits_for_the_idle_marker(rec, workdir):
     assert [e.text for e in errors] == [
         "api.error: retryable stream failure",
         "api.error: fatal stream failure",
-        "TurnFailed: OpenCode ended the turn with a failure",
+        "api.error: fatal stream failure",  # the boundary names the cause, not a generic text
     ]
     assert [e.turn_end for e in errors] == [False, False, True]
     assert [(e.kind, e.turn_terminal) for e in events if e.turn_end] == [
@@ -508,6 +508,16 @@ def test_a_retryable_step_failure_waits_for_the_idle_marker(rec, workdir):
     assert [(e.kind, e.text, e.turn_end, e.turn_terminal) for e in history] == [
         (e.kind, e.text, e.turn_end, e.turn_terminal) for e in events
     ]
+
+
+def test_a_failed_turn_without_a_step_error_keeps_the_generic_boundary(rec, workdir):
+    src = attached(rec, workdir)
+    rec.user("msg_u1", "go")
+    rec.step("msg_a1", rec.tick(), [text("ok")], finish="tool-calls", **USAGE)
+    rec.idle("msg_i1", "failed")
+
+    (boundary,) = [e for e in drain(src) if e.turn_end]
+    assert boundary.text == "TurnFailed: OpenCode ended the turn with a failure"
 
 
 def test_history_and_the_live_path_agree(rec, workdir):

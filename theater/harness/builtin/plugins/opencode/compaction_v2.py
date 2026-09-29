@@ -1,9 +1,6 @@
-"""Billed OpenCode 2.x compaction rows — completed or failed — as the usage the path accounts.
+"""Billed OpenCode 2.x compaction rows (completed or failed) as assistant-shaped usage.
 
-A compaction is a paid summarization request, not a conversation step: its row carries the
-call's own `tokens`/`cost` and a summary no turn ever sees (session/compaction.ts). It
-projects onto the assistant usage shape the observer already accounts — never a turn
-boundary, and never a row still running.
+A compaction is a paid summarization call, not a turn: never a boundary, never while running.
 """
 
 from __future__ import annotations
