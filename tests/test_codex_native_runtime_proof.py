@@ -1067,12 +1067,15 @@ class TestNativeSmokeTurnControls:
         assert allowed.get("result") == {}
         readback = experimental.request("thread/read", {"threadId": thread_id})
         thread = readback["result"]["thread"]
-        if "reasoningEffort" in thread:
-            # 0.153.0+ dialect: the readback itself reflects the applied effort.
-            assert thread["reasoningEffort"] == "medium"
+        release = tuple(int(part) for part in require_installed_allowed_version().split("."))
+        if release >= (0, 153, 0):
+            # 0.153.0+ dialect: the readback must reflect the applied effort, so a
+            # release that drops it cannot qualify through the broadcast branch.
+            assert thread.get("reasoningEffort") == "medium"
         else:
             # Pre-0.153 dialect: thread/read never carries effort; the applied-
             # settings broadcast is the confirmation, exactly as production does.
+            assert "reasoningEffort" not in thread
             updated = experimental.wait_notification("thread/settings/updated", timeout=60)
             assert updated["params"]["threadSettings"]["effort"] == "medium"
 
