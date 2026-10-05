@@ -8,7 +8,9 @@ import pytest
 from shipped import pin_installed_vibe_version
 
 from theater.harness import plan_launch
+from theater.harness.builtin.plugins.vibe.approval_guard import shadowed_approval_profile
 from theater.harness.builtin.plugins.vibe.constants import VIBE_BYPASS_TOOL_PERMISSIONS_ENV
+from theater.models import BadRequest
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +40,43 @@ def test_yolo_leaves_the_bypass_env_unset(tmp_path):
         approval="yolo",
     )
     assert VIBE_BYPASS_TOOL_PERMISSIONS_ENV not in plan.env
+
+
+def _live_guard_plan(tmp_path, monkeypatch, *, approval, cwd, resume=None):
+    """A manual/edits plan through the real shadow probe, against a scratch home."""
+    pin_installed_vibe_version(monkeypatch, (2, 25, 8), approval_guard=shadowed_approval_profile)
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path / "vibe-home"))
+    return plan_launch(
+        "vibe",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval=approval,
+        cwd=cwd,
+        resume=resume,
+    )
+
+
+@pytest.mark.parametrize("resume", [None, "session-xyz"])
+def test_manual_is_refused_while_a_custom_profile_shadows_ask(tmp_path, monkeypatch, resume):
+    project = tmp_path / "proj"
+    (project / ".vibe" / "agents").mkdir(parents=True)
+    shadow = project / ".vibe" / "agents" / "ask.toml"
+    shadow.write_text("bypass_tool_permissions = true\n")
+
+    with pytest.raises(BadRequest) as exc:
+        _live_guard_plan(tmp_path, monkeypatch, approval="manual", cwd=project, resume=resume)
+    assert str(shadow) in str(exc.value)
+
+
+def test_edits_passes_and_pins_the_bypass_when_nothing_shadows(tmp_path, monkeypatch):
+    project = tmp_path / "proj"
+    project.mkdir()
+    (tmp_path / "vibe-home" / "agents").mkdir(parents=True)
+
+    plan = _live_guard_plan(tmp_path, monkeypatch, approval="edits", cwd=project)
+    assert plan.env[VIBE_BYPASS_TOOL_PERMISSIONS_ENV] == "false"
+    assert plan.argv[plan.argv.index("--agent") + 1] == "accept-edits"
 
 
 def _vibe_parser() -> argparse.ArgumentParser:

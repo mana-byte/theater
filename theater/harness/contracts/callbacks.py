@@ -38,6 +38,8 @@ class LaunchContext:
     resume: str | None = None
     #: The harness's selected binary name; planners resolve and pin it themselves.
     binary: str | None = None
+    #: The child's working directory; None when the caller did not state it.
+    cwd: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

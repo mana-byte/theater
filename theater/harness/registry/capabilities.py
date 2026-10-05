@@ -66,6 +66,7 @@ def plan_launch(
     model: str | None = None,
     reasoning_effort: str | None = None,
     resume: str | None = None,
+    cwd: Path | None = None,
     mcp_servers: tuple[McpServerSpec, ...] | None = None,
 ) -> LaunchPlan:
     """The one funnel every spawn goes through, and so the one compat seam.
@@ -84,6 +85,8 @@ def plan_launch(
         extra["reasoning_effort"] = reasoning_effort
     if resume is not None:
         extra["resume"] = resume
+    if cwd is not None and _accepts_keyword(found.plan_launch, "cwd"):
+        extra["cwd"] = cwd
     if mcp_servers is None:
         mcp_servers = theater_mcp_servers(participant_id, found.name)
     if not isinstance(mcp_servers, tuple) or any(

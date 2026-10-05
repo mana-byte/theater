@@ -15,6 +15,7 @@ from theater.harness.contracts.callbacks import (
 )
 from theater.models import BadRequest
 
+from .approval_guard import shadowed_approval_profile
 from .constants import (
     ISOLATION_MARKER,
     VIBE_ACTIVE_MODEL_ENV,
@@ -50,18 +51,20 @@ def plan_launch(
     # Launch the binary the probe resolved: the pane's PATH may find another
     # install whose version lacks the argv chosen for the probed one.
     argv = [resolve_vibe_binary(context.binary) or "vibe"]
+    profile: str | None = None
     if approval == "yolo":
         if version is None or version >= _YOLO_FLOOR:
             argv.append("--yolo")
         else:
             argv += ["--agent", "auto-approve"]
     elif approval == "edits":
-        argv += ["--agent", "accept-edits"]
+        profile = "accept-edits"
+        argv += ["--agent", profile]
     elif approval == "manual":
         # Explicit, since without --agent vibe falls back to `default_agent` (may
         # auto-approve). `ask`/`default` are the same approval-per-tool profile.
-        agent = "ask" if version is None or version >= _ASK_FLOOR else "default"
-        argv.append(f"--agent={agent}")
+        profile = "ask" if version is None or version >= _ASK_FLOOR else "default"
+        argv.append(f"--agent={profile}")
     # --resume appends to the same messages.jsonl, keeps the session id; prompt still honoured.
     if resume is not None:
         argv += ["--resume", resume]
@@ -70,10 +73,22 @@ def plan_launch(
         # positional; vibe's parser would otherwise treat it as auto-approval.
         argv += ["--", prompt]
     env = {}
-    if approval in ("manual", "edits"):
-        # Env outranks user/project TOML bypass_tool_permissions=true, and the builtin
-        # ask/accept-edits profiles never re-enable it (a custom profile file of the
-        # same name could). `yolo` is already the bypass and stays untouched.
+    if profile is not None:
+        # A custom profile file of the same name shadows the builtin and merges
+        # its overrides ABOVE the env layer, so it could beat the pin below.
+        shadow = shadowed_approval_profile(profile, context.cwd)
+        if shadow is not None:
+            raise BadRequest(
+                f"refusing to launch Vibe with approval {approval!r}: the custom agent "
+                f"profile {shadow} shadows the builtin {profile!r} profile, and a "
+                "profile file's overrides outrank the VIBE_BYPASS_TOOL_PERMISSIONS "
+                "pin, so it can widen tool approval that Theater promised to hold; "
+                "rename or remove that file, or spawn with approval 'yolo' if you "
+                "want the bypass."
+            )
+        # Env outranks user/project TOML bypass_tool_permissions=true, and the
+        # builtin ask/accept-edits profiles never re-enable it. `yolo` is
+        # already the bypass and stays untouched.
         env[VIBE_BYPASS_TOOL_PERMISSIONS_ENV] = "false"
     # No `--model` flag: the same VIBE_* override carries the model. Empty = configured default.
     env[VIBE_ACTIVE_MODEL_ENV] = model or ""

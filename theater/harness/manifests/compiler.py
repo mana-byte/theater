@@ -264,6 +264,7 @@ class _CompiledHarness(Harness):
         reasoning_effort: str | None = None,
         resume: str | None = None,
         mcp_servers: tuple[McpServerSpec, ...] = (),
+        cwd: Path | None = None,
     ) -> LaunchPlan:
         if approval not in self._launch.approvals:
             choices = ", ".join(self._launch.approvals)
@@ -285,6 +286,7 @@ class _CompiledHarness(Harness):
                 reasoning_effort=reasoning_effort,
                 resume=resume,
                 binary=self.binary,
+                cwd=cwd,
             )
         )
         if not isinstance(plan, LaunchPlan):

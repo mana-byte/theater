@@ -195,7 +195,7 @@ async def _harness_plan(
     plan = await workers.to_thread(
         _plan_via_funnel,
         req,
-        participant.id,
+        participant,
         config_path,
         resume_reference,
         mcp_servers,
@@ -206,7 +206,7 @@ async def _harness_plan(
 
 def _plan_via_funnel(
     req: SpawnRequest,
-    participant_id: str,
+    participant: Participant,
     config_path: Path,
     resume_reference: str | None,
     mcp_servers: tuple[McpServerSpec, ...],
@@ -214,13 +214,16 @@ def _plan_via_funnel(
     """The funnel call, isolated so only it — never sidecar/store work — leaves the loop."""
     return plan_launch(
         req.harness,
-        participant_id=participant_id,
+        participant_id=participant.id,
         prompt=req.prompt,
         config_path=config_path,
         approval=req.approval,
         model=req.model,
         reasoning_effort=req.reasoning_effort,
         resume=resume_reference,
+        # participant.cwd is the post-worktree child dir; req.cwd is the parent's
+        # when a worktree was prepared, so it is only the fallback here.
+        cwd=Path(getattr(participant, "cwd", None) or req.cwd),
         mcp_servers=mcp_servers,
     )
 

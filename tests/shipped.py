@@ -72,12 +72,14 @@ VibeHarness.resume_strategy = "continue"  # type: ignore[attr-defined]
 VibeObserver = _VibeObserver
 
 
-def pin_installed_vibe_version(monkeypatch, version, *, binary=None) -> None:
-    """Pin the vibe version and resolved binary in both import worlds.
+def pin_installed_vibe_version(monkeypatch, version, *, binary=None, approval_guard=None) -> None:
+    """Pin the vibe version, resolved binary, and shadow probe in both import worlds.
 
     The registry loads shipped plugins through an isolated package import, so
     the canonical module and the live planner see different module objects.
-    ``binary=None`` keeps the bare ``vibe`` argv[0] regardless of the host PATH.
+    ``binary=None`` keeps the bare ``vibe`` argv[0] regardless of the host PATH;
+    ``approval_guard=None`` sees no shadowing profile file regardless of the
+    host filesystem, so pass the real guard to exercise the shadow check.
     """
     from theater.harness import HARNESSES
     from theater.harness.builtin.plugins.vibe import launch
@@ -85,10 +87,15 @@ def pin_installed_vibe_version(monkeypatch, version, *, binary=None) -> None:
     def _resolve(name=None):
         return binary
 
+    def _guard(agent, cwd=None):
+        return approval_guard(agent, cwd) if approval_guard else None
+
     monkeypatch.setattr(launch, "installed_vibe_version", lambda binary=None: version)
     monkeypatch.setattr(launch, "resolve_vibe_binary", _resolve)
+    monkeypatch.setattr(launch, "shadowed_approval_profile", _guard)
     planner = HARNESSES["vibe"]._launch.planner
     while hasattr(planner, "func"):
         planner = planner.func
     monkeypatch.setitem(planner.__globals__, "installed_vibe_version", lambda binary=None: version)
     monkeypatch.setitem(planner.__globals__, "resolve_vibe_binary", _resolve)
+    monkeypatch.setitem(planner.__globals__, "shadowed_approval_profile", _guard)

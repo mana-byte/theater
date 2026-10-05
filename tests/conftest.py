@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from shipped import pin_installed_vibe_version
 from tmux_guard import reap_private_server
 
 from theater import paths
@@ -247,6 +248,9 @@ def available_harness_binaries(monkeypatch, shipped_harnesses) -> None:
         return real_which(command, *args, **kwargs)
 
     monkeypatch.setattr(shutil, "which", which)
+    # Hermetic vibe plans: no probe of the host CLI, and no shadow-profile scan
+    # of the host filesystem; argv[0] stays the interpreter the which stub returns.
+    pin_installed_vibe_version(monkeypatch, None, binary=sys.executable)
 
 
 @pytest.fixture
