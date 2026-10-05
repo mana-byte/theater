@@ -1064,6 +1064,33 @@ async def test_manual_binds_once_the_plugin_proves_it_loaded(
     await runtime.aclose()
 
 
+async def test_reconnecting_a_pre_receipt_participant_is_not_stranded(
+    server: ServerFake, token_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plugin rendered before load receipts existed cannot prove anything on a
+    daemon restart; refusing would strand its jobs, so only a NEW session needs it."""
+    monkeypatch.setattr(plugin_receipt, "PLUGIN_RECEIPT_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(plugin_receipt, "PLUGIN_RECEIPT_POLL_SECONDS", 0.02)
+    participant = _enforced_launch_files(tmp_path, monkeypatch)
+    plugin = plugin_path(paths.mcp_config_path(participant))
+    plugin.write_text(
+        plugin.read_text(encoding="utf-8").replace(
+            f'const loadProof = "{_rendered_proof(participant)}"', "const loadProof = null"
+        )
+    )
+    server.add_session("ses_parent")
+    runtime = OpenCodeServerRuntime(_context(server, token_file, approval="manual"))
+    binding = await runtime.open_session(
+        mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent"
+    )
+    assert binding.native_session_id == "ses_parent"
+    await runtime.aclose()
+    runtime = OpenCodeServerRuntime(_context(server, token_file, approval="manual"))
+    with pytest.raises(PluginNotLoaded, match="no load proof"):
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.aclose()
+
+
 async def test_a_stale_receipt_from_an_earlier_backend_never_releases_the_gate(
     server: ServerFake, token_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -125,7 +125,9 @@ class OpenCodeServerRuntime(HarnessRuntime):
         # Fail closed: 1.x keeps serving with a broken approval plugin, so
         # manual/edits need the launch's load receipt before any prompt runs.
         if approval_requires_plugin(self.context.approval):
-            await require_plugin_loaded(self.context.participant_id)
+            await require_plugin_loaded(
+                self.context.participant_id, reconnect=mode is SessionOpenMode.RECONNECT
+            )
         self._session_id = session_id
         if self._source.connection_health is ConnectionHealth.CONNECTED:
             self._request_input_refresh()

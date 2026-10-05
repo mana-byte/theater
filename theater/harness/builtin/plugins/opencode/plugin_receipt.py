@@ -45,16 +45,13 @@ def approval_requires_plugin(approval: str | None) -> bool:
     return approval in ENFORCED_APPROVALS
 
 
-def _expected_proof(participant_id: str) -> str | None:
-    """The nonce baked into the plugin this launch rendered, or ``None``."""
+def _plugin_build(participant_id: str) -> bytes | None:
+    """The plugin file this launch rendered, or ``None`` when unreadable."""
     try:
         raw = plugin_path(paths.mcp_config_path(participant_id)).read_bytes()
     except OSError:
         return None
-    if len(raw) > _PLUGIN_MAX_BYTES:
-        return None
-    match = _PROOF_RE.search(raw)
-    return match.group(1).decode("ascii") if match else None
+    return raw if len(raw) <= _PLUGIN_MAX_BYTES else None
 
 
 def _receipt_matches(participant_id: str, proof: str) -> bool:
@@ -81,16 +78,24 @@ def _refusal(participant_id: str, detail: str) -> str:
     )
 
 
-async def require_plugin_loaded(participant_id: str) -> None:
+async def require_plugin_loaded(participant_id: str, *, reconnect: bool = False) -> None:
     """Wait for this launch's load receipt; refuse when it never lands.
 
     The backend loads its config (and so the plugin) lazily — the session
     create that precedes this call triggers it — so a missing or stale receipt
-    is polled, but an unreadable plugin build is refused immediately.
+    is polled, but an unreadable plugin build is refused immediately. A
+    reconnect to a build rendered before receipts existed has nothing to
+    prove with: refusing would only strand its running jobs.
     """
-    proof = _expected_proof(participant_id)
-    if proof is None:
+    raw = _plugin_build(participant_id)
+    if raw is None:
         raise PluginNotLoaded(_refusal(participant_id, "the generated plugin build is unreadable"))
+    match = _PROOF_RE.search(raw)
+    if match is None:
+        if reconnect:
+            return
+        raise PluginNotLoaded(_refusal(participant_id, "the plugin build carries no load proof"))
+    proof = match.group(1).decode("ascii")
     loop = asyncio.get_running_loop()
     deadline = loop.time() + PLUGIN_RECEIPT_TIMEOUT_SECONDS
     while not _receipt_matches(participant_id, proof):
