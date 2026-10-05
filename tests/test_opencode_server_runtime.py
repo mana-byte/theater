@@ -15,10 +15,18 @@ from typing import Any, ClassVar
 
 import pytest
 
-from theater.harness.builtin.plugins.opencode import server_runtime
+from theater import paths
+from theater.harness.builtin.plugins.opencode import plugin_receipt, server_runtime
+from theater.harness.builtin.plugins.opencode.constants import _APPROVAL_SESSION_RULES
 from theater.harness.builtin.plugins.opencode.http import (
     BASIC_USERNAME,
     OpenCodeHttpError,
+)
+from theater.harness.builtin.plugins.opencode.mcp import plugin_path
+from theater.harness.builtin.plugins.opencode.native_plugin import render_native_plugin
+from theater.harness.builtin.plugins.opencode.plugin_receipt import (
+    PluginNotLoaded,
+    load_receipt_path,
 )
 from theater.harness.builtin.plugins.opencode.server_live import OpenCodeServerLiveSource
 from theater.harness.builtin.plugins.opencode.server_plan import (
@@ -390,7 +398,9 @@ class _IO(RuntimeIO):
         raise AssertionError("the server runtime never opens a frontend connection")
 
 
-def _context(server: ServerFake, token_file: Path) -> RuntimeContext:
+def _context(
+    server: ServerFake, token_file: Path, *, approval: str | None = None
+) -> RuntimeContext:
     return RuntimeContext(
         participant_id="h00000000001",
         cwd="/tmp",
@@ -398,6 +408,7 @@ def _context(server: ServerFake, token_file: Path) -> RuntimeContext:
         backend_generation=3,
         endpoint=server.endpoint,
         token_file=token_file,
+        approval=approval,
     )
 
 
@@ -987,4 +998,96 @@ async def test_frontend_plan_builds_the_attach_command(
         "ses_attach",
     ]
     assert plan.secret_env == {SERVER_SECRET_ENV: token_file}
+    await runtime.aclose()
+
+
+# ---- fail-closed approval proof ------------------------------------------
+
+
+def _enforced_launch_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, approval: str = "manual"
+) -> str:
+    """Materialize the launch files the runtime reads, as the daemon would."""
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    participant = "h00000000001"
+    config_path = paths.mcp_config_path(participant)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}")
+    plugin = plugin_path(config_path)
+    plugin.write_text(
+        render_native_plugin(
+            participant, config_path.parent / "receipt-token", _APPROVAL_SESSION_RULES[approval]
+        )
+    )
+    return participant
+
+
+def _write_load_receipt(participant: str, proof: str) -> None:
+    receipt = load_receipt_path(participant)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"proof": proof}))
+
+
+def _rendered_proof(participant: str) -> str:
+    source = plugin_path(paths.mcp_config_path(participant)).read_text(encoding="utf-8")
+    return source.split('const loadProof = "', 1)[1].split('"', 1)[0]
+
+
+async def test_manual_refuses_a_session_when_the_plugin_never_proved_it_loaded(
+    server: ServerFake, token_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken plugin leaves no receipt, so the session — and with it the
+    first prompt — is refused instead of running on the agent's permissions."""
+    monkeypatch.setattr(plugin_receipt, "PLUGIN_RECEIPT_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(plugin_receipt, "PLUGIN_RECEIPT_POLL_SECONDS", 0.02)
+    _enforced_launch_files(tmp_path, monkeypatch)
+    runtime = OpenCodeServerRuntime(_context(server, token_file, approval="manual"))
+    with pytest.raises(PluginNotLoaded, match="refuses to open one"):
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    # No session was adopted, so no prompt_async can ever be submitted.
+    assert not _prompts(server)
+    receipt = await runtime.send(operation_id="op-proof", prompt="hello")
+    assert receipt.result is DeliveryResult.REJECTED
+    await runtime.aclose()
+
+
+async def test_manual_binds_once_the_plugin_proves_it_loaded(
+    server: ServerFake, token_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt naming this launch's plugin build is proof enough: the
+    session binds (no model call involved in the proof)."""
+    participant = _enforced_launch_files(tmp_path, monkeypatch)
+    _write_load_receipt(participant, _rendered_proof(participant))
+    runtime = OpenCodeServerRuntime(_context(server, token_file, approval="manual"))
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert binding.native_session_id
+    await runtime.aclose()
+
+
+async def test_a_stale_receipt_from_an_earlier_backend_never_releases_the_gate(
+    server: ServerFake, token_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt must name this launch's plugin build; the previous
+    backend generation's receipt is not proof that this one loaded."""
+    monkeypatch.setattr(plugin_receipt, "PLUGIN_RECEIPT_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(plugin_receipt, "PLUGIN_RECEIPT_POLL_SECONDS", 0.02)
+    participant = _enforced_launch_files(tmp_path, monkeypatch)
+    _write_load_receipt(participant, "0" * 32)
+    runtime = OpenCodeServerRuntime(_context(server, token_file, approval="edits"))
+    with pytest.raises(PluginNotLoaded):
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert not _prompts(server)
+    await runtime.aclose()
+
+
+async def test_yolo_never_waits_for_a_plugin_proof(
+    server: ServerFake, token_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Yolo enforces nothing, so no plugin file or receipt is required."""
+    monkeypatch.setattr(plugin_receipt, "PLUGIN_RECEIPT_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(plugin_receipt, "PLUGIN_RECEIPT_POLL_SECONDS", 0.02)
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    runtime = OpenCodeServerRuntime(_context(server, token_file, approval="yolo"))
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert binding.native_session_id
     await runtime.aclose()

@@ -31,6 +31,7 @@ from theater.harness.contracts.source import Source
 
 from .http import OpenCodeClient, OpenCodeHttpError
 from .inputs import is_input_event
+from .plugin_receipt import approval_requires_plugin, require_plugin_loaded
 from .runtime_plan import (
     OPENCODE_SERVER_COMPATIBILITY_POLICY,
     OPENCODE_SERVER_MAX_VERSION,
@@ -121,6 +122,10 @@ class OpenCodeServerRuntime(HarnessRuntime):
             raise ValueError(f"unsupported OpenCode session open mode: {mode}")
         if mode is not SessionOpenMode.RECONNECT:
             self._start_events()
+        # Fail closed: 1.x keeps serving with a broken approval plugin, so
+        # manual/edits need the launch's load receipt before any prompt runs.
+        if approval_requires_plugin(self.context.approval):
+            await require_plugin_loaded(self.context.participant_id)
         self._session_id = session_id
         if self._source.connection_health is ConnectionHealth.CONNECTED:
             self._request_input_refresh()

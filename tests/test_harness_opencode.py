@@ -216,11 +216,11 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path, opencode_binary):
         participant_id="abc123",
         prompt="say hello",
         config_path=config,
-        approval="manual",
+        approval="yolo",
         mcp_servers=theater_mcp_servers("abc123", "opencode"),
     )
 
-    assert plan.argv == [opencode_binary, "--prompt", "say hello"]
+    assert plan.argv == [opencode_binary, "--auto", "--prompt", "say hello"]
     assert plan.env == {
         "OPENCODE_CONFIG": str(config),
         "OPENCODE_DB": str(database.resolve()),
@@ -251,12 +251,11 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path, opencode_binary):
 def test_every_approval_enforces_its_own_native_policy(tmp_path, opencode_binary):
     """OpenCode's permission layers merge in order: permissive agent
     defaults, then every config file (with OPENCODE_PERMISSION inside that
-    same layer), then the selected agent's own config-file rules. The only
-    layer merged after all of them is the session's permission, so the
-    rendered plugin appends each choice's ruleset there, once per session,
-    before the first LLM call. The `edit` permission covers edit/write/
-    apply_patch tool calls, which is the whole of an "accept edits" policy;
-    everything else asks the human at the pane.
+    same layer), then the selected agent's own config-file rules. On the TUI
+    route no Theater-side proof can come between a broken plugin and the
+    first model call, so manual/edits are refused here and enforced only on
+    the server topology, where the session is refused unless the plugin
+    proves it loaded; `--auto` is yolo's own auto-approve channel.
     """
 
     def plan(approval):
@@ -267,56 +266,39 @@ def test_every_approval_enforces_its_own_native_policy(tmp_path, opencode_binary
             approval=approval,
         )
 
-    def plugin_rules(plan):
-        source = plan.files[plugin_path(tmp_path / "x.json")]
-        start = source.index("const permissionRules = ")
-        end = source.index("\n", start)
-        return json.loads(source[start + len("const permissionRules = ") : end])
-
     yolo = plan("yolo")
     assert yolo.argv == [opencode_binary, "--auto"]
     # `--auto` approves everything; an enforced ruleset would only fight it.
-    assert plugin_rules(yolo) == []
+    source = yolo.files[plugin_path(tmp_path / "x.json")]
+    start = source.index("const permissionRules = ")
+    end = source.index("\n", start)
+    assert json.loads(source[start + len("const permissionRules = ") : end]) == []
 
-    manual = plan("manual")
-    assert manual.argv == [opencode_binary]
-    # No env layer can enforce this: it would deep-merge into the global
-    # config permission, which a permissive per-agent config merges over.
-    assert "OPENCODE_PERMISSION" not in manual.env
-    assert plugin_rules(manual) == [
-        {"permission": "*", "pattern": "*", "action": "ask"},
-        {"permission": "read", "pattern": "*", "action": "allow"},
-        {"permission": "read", "pattern": "*.env", "action": "ask"},
-        {"permission": "read", "pattern": "*.env.*", "action": "ask"},
-        {"permission": "read", "pattern": "*.env.example", "action": "allow"},
-    ]
-    assert "client.session.update" in manual.files[plugin_path(tmp_path / "x.json")]
-
-    edits = plan("edits")
-    assert edits.argv == [opencode_binary]
-    assert plugin_rules(edits) == [
-        {"permission": "*", "pattern": "*", "action": "ask"},
-        {"permission": "read", "pattern": "*", "action": "allow"},
-        {"permission": "read", "pattern": "*.env", "action": "ask"},
-        {"permission": "read", "pattern": "*.env.*", "action": "ask"},
-        {"permission": "read", "pattern": "*.env.example", "action": "allow"},
-        {"permission": "edit", "pattern": "*", "action": "allow"},
-    ]
+    for approval in ("manual", "edits"):
+        with pytest.raises(BadRequest, match="cannot prove its approval plugin loaded"):
+            plan(approval)
 
 
-def test_approval_enforcement_survives_a_resume_launch(tmp_path, opencode_binary):
-    """A forked resume runs with the same argv shape, so its permission
-    enforcement comes from the same plugin hook, not from the prompt path."""
+def test_approval_enforcement_refuses_a_resume_launch_too(tmp_path, opencode_binary):
+    """A resume is the same TUI process shape, so a manual/edits resume has the
+    same fail-open hole through a broken plugin — it is refused like a fresh
+    launch, while a yolo resume still plans."""
+    with pytest.raises(BadRequest, match="cannot prove its approval plugin loaded"):
+        OpenCodeHarness().plan_launch(
+            participant_id="abc123",
+            prompt="",
+            config_path=tmp_path / "x.json",
+            approval="edits",
+            resume="ses_1",
+        )
     plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="",
         config_path=tmp_path / "x.json",
-        approval="edits",
+        approval="yolo",
         resume="ses_1",
     )
-    assert plan.argv == [opencode_binary, "-s", "ses_1", "--fork"]
-    source = plan.files[plugin_path(tmp_path / "x.json")]
-    assert '"edit", "pattern": "*", "action": "allow"' in source
+    assert plan.argv == [opencode_binary, "--auto", "-s", "ses_1", "--fork"]
 
 
 def test_an_unknown_approval_is_refused(tmp_path):
@@ -949,7 +931,7 @@ def test_configured_manifest_reads_the_injected_database_and_correlation(
         participant_id="participant",
         prompt="",
         config_path=tmp_path / "config.json",
-        approval="manual",
+        approval="yolo",
     )
     assert launch.env["OPENCODE_DB"] == str(rec.path.resolve())
     candidates = harness.observer.transcript_candidates(cwd=str(workdir))

@@ -44,6 +44,7 @@ from .mcp import plugin_path
 from .native_plugin import render_native_plugin
 from .native_plugin_v2 import plugin_dir, render_native_plugin_v2
 from .observer import database_path
+from .plugin_receipt import approval_requires_plugin
 from .runtime_plan import (
     OPENCODE_SERVER_V2_MAX_VERSION,
     OPENCODE_SERVER_V2_MIN_VERSION,
@@ -65,6 +66,16 @@ def plan_launch(
     binary = resolve_binary(context.binary or "opencode")
     if (dialect or installed_dialect(binary)) is OpenCodeDialect.V2:
         return _plan_launch_v2(context, binary=binary)
+    if approval_requires_plugin(context.approval):
+        # The TUI submits the prompt inside the opencode process, so no
+        # Theater-side proof can come between a broken plugin and the first
+        # model call — the fail-closed behavior is to refuse the launch.
+        raise BadRequest(
+            "the OpenCode 1.x TUI route cannot prove its approval plugin loaded: OpenCode "
+            "silently keeps a broken plugin running, and the prompt would run with the "
+            "agent's own permissions. Launch with yolo approval, or use the native server "
+            "topology, which refuses the session unless the plugin proves it loaded."
+        )
     participant_id = context.participant_id
     config_path = context.config_path
     database = database_path(db)

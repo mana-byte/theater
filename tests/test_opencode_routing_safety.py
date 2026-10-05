@@ -302,7 +302,7 @@ async def test_the_event_loop_stays_live_during_a_blocked_version_probe(
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.delenv(dialect.VERSION_ENV, raising=False)
 
-    req = SpawnRequest(harness="opencode", prompt="", cwd="/tmp", approval="manual")
+    req = SpawnRequest(harness="opencode", prompt="", cwd="/tmp", approval="yolo")
     participant = SimpleNamespace(id="h00000000001", harness="opencode")
     plan_task = asyncio.create_task(planning.build_plan(req, participant, None, registry=None))
     await _await_condition(started.exists)
@@ -311,7 +311,7 @@ async def test_the_event_loop_stays_live_during_a_blocked_version_probe(
     assert not plan_task.done()
     release.write_text("go")
     plan = await asyncio.wait_for(plan_task, timeout=10)
-    assert plan.argv == [str(binary.resolve())]
+    assert plan.argv == [str(binary.resolve()), "--auto"]
 
 
 class _MinimalHarness(Harness):

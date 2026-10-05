@@ -750,6 +750,6 @@ def test_the_launch_plan_still_carries_the_configured_database(
         participant_id="abc123",
         prompt="",
         config_path=tmp_path / "x.json",
-        approval="manual",
+        approval="yolo",
     )
     assert plan.env["OPENCODE_DB"] == str(rec.path.resolve())

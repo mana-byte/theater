@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 
 from theater.harness.base import theater_binary
@@ -17,6 +18,7 @@ from .constants import (
     RECEIPT_RETRY_DELAYS_MS,
 )
 from .mcp import catalog_path
+from .plugin_receipt import load_receipt_path
 
 
 def render_native_plugin(participant_id: str, token_path: Path, permission_rules=()) -> str:
@@ -30,6 +32,8 @@ def render_native_plugin(participant_id: str, token_path: Path, permission_rules
     command = json.dumps(theater_binary())
     retry_delays = json.dumps(RECEIPT_RETRY_DELAYS_MS)
     mcp_catalog = json.dumps(str(catalog_path(participant_id)))
+    load_proof = json.dumps(secrets.token_hex(16))
+    load_receipt = json.dumps(str(load_receipt_path(participant_id)))
     rules = json.dumps([dict(rule) for rule in permission_rules])
     return f"""import {{ spawn }} from "node:child_process"
 import {{ mkdir, rename, unlink, writeFile }} from "node:fs/promises"
@@ -46,6 +50,8 @@ const catalogMaxServers = {MCP_CATALOG_MAX_SERVERS}
 const catalogMaxTools = {MCP_CATALOG_MAX_TOOLS}
 const catalogMaxDefinitions = {MCP_CATALOG_MAX_NON_MCP_TOOLS}
 const catalogNameMaxBytes = {MCP_CATALOG_NAME_MAX_BYTES}
+const loadProof = {load_proof}
+const loadReceiptPath = {load_receipt}
 const permissionRules = {rules}
 let currentSessionID = null
 let deliveredSessionID = null
@@ -122,6 +128,20 @@ async function writeCatalog() {{
     await mkdir(dirname(catalogPath), {{ recursive: true, mode: 0o700 }})
     await writeFile(temporary, encoded, {{ mode: 0o600 }})
     await rename(temporary, catalogPath)
+  }} catch {{
+    try {{ await unlink(temporary) }} catch {{}}
+  }}
+}}
+
+async function writeLoadReceipt() {{
+  // OpenCode keeps serving with a broken plugin, so manual/edits cannot be
+  // assumed: this receipt names the exact build that rendered it, and the
+  // runtime refuses the session until it appears.
+  const temporary = `${{loadReceiptPath}}.${{process.pid}}.tmp`
+  try {{
+    await mkdir(dirname(loadReceiptPath), {{ recursive: true, mode: 0o700 }})
+    await writeFile(temporary, JSON.stringify({{ proof: loadProof }}), {{ mode: 0o600 }})
+    await rename(temporary, loadReceiptPath)
   }} catch {{
     try {{ await unlink(temporary) }} catch {{}}
   }}
@@ -330,6 +350,7 @@ export const TheaterSessionReceipt = async ({{ client }}) => {{
       await catalogWrite
     }},
     config: async (config) => {{
+      await writeLoadReceipt()
       const mcp = config?.mcp
       setServers(mcp && typeof mcp === "object" && !Array.isArray(mcp) ? Object.keys(mcp) : [])
       await persistCatalog()

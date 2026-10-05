@@ -26,6 +26,7 @@ from shipped import OpenCodeHarness, OpenCodeObserver
 from theater.harness import EventKind
 from theater.harness.base import EventPath
 from theater.harness.builtin.plugins.opencode import _paths_from_tool, _relativise
+from theater.models import BadRequest
 
 SCHEMA = """
 CREATE TABLE session (
@@ -353,15 +354,26 @@ def test_history_also_carries_paths(rec, workdir):
 
 
 def test_resume_forks_the_session_and_waits_for_its_receipt(tmp_path, available_harness_binaries):
+    """Manual/edits cannot be proven on the TUI route, so the resume keeps
+    working for yolo — the enforced choices are covered by the refusal test."""
+    with pytest.raises(BadRequest, match="cannot prove its approval plugin loaded"):
+        OpenCodeHarness().plan_launch(
+            participant_id="abc123",
+            prompt="do something",
+            config_path=tmp_path / "x.json",
+            approval="manual",
+            resume="ses_ffb42302cffeaasiFBDGgLmkRf",
+        )
     plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="do something",
         config_path=tmp_path / "x.json",
-        approval="manual",
+        approval="yolo",
         resume="ses_ffb42302cffeaasiFBDGgLmkRf",
     )
     assert plan.argv == [
         str(Path(sys.executable).resolve()),
+        "--auto",
         "-s",
         "ses_ffb42302cffeaasiFBDGgLmkRf",
         "--fork",

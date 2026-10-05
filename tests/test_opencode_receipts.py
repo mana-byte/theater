@@ -87,7 +87,7 @@ def test_launch_uses_a_core_owned_generic_receipt_token(
         participant_id="participant",
         prompt="",
         config_path=config,
-        approval="manual",
+        approval="yolo",
     )
 
     token_path = paths.participant_observation_dir("participant", "opencode") / "receipt-token"

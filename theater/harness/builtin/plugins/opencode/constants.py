@@ -93,3 +93,15 @@ PLUGIN_ACTIVE_TIMEOUT_SECONDS = 15.0
 PLUGIN_ACTIVE_POLL_SECONDS = 0.1
 #: The legacy bootstrap's own serve credential file, minted 0600 and never in argv.
 BOOTSTRAP_CREDENTIAL_NAME = "server-credential"
+
+#: Approval choices whose 1.x enforcement rides on the generated plugin; yolo
+#: enforces nothing and never needs the plugin proven loaded.
+ENFORCED_APPROVALS = frozenset(("manual", "edits"))
+#: The 1.x plugin writes this receipt from its `config` hook, naming the exact
+#: build that rendered it; the server runtime refuses a manual/edits session
+#: until it appears — OpenCode 1.x keeps serving with a broken plugin.
+PLUGIN_LOAD_RECEIPT_FILENAME = "plugin-load-receipt.json"
+#: The backend loads its config (and the plugin) lazily on first session work,
+#: so the gate polls within this bound before refusing.
+PLUGIN_RECEIPT_TIMEOUT_SECONDS = 15.0
+PLUGIN_RECEIPT_POLL_SECONDS = 0.1

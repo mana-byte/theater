@@ -19,8 +19,11 @@ that silently wins when the plan says nothing:
   config file. No env layer can beat that tail, so manual/edits are enforced
   at the one layer merged after everything the agent carries: the session's
   permission, appended once per session by the rendered native plugin before
-  the first LLM call. Yolo carries no ruleset at all — `--auto` approves on
-  its own and an ask ruleset would fight it.
+  the first LLM call. OpenCode keeps serving with a broken plugin, so that
+  enforcement is only trusted where Theater can prove the plugin loaded: the
+  native server route refuses the session without a load receipt, and the
+  1.x TUI route refuses manual/edits outright. Yolo carries no ruleset at all
+  — `--auto` approves on its own and an ask ruleset would fight it.
 
 No CLI is launched here: these are launch-plan regressions only.
 """
@@ -30,7 +33,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import sys
 from functools import partial
 from pathlib import Path
 
@@ -175,14 +177,35 @@ def test_vibe_manual_survives_a_resume(tmp_path):
 #      handlers/session.ts:194-198).
 #
 # So the rendered native plugin appends the approval's ruleset to each
-# session's permission once, before its first LLM call — layer 4. The tests
-# below model those layers faithfully to prove a permissive layer 2 or 3
-# cannot survive manual/edits, and that an env var alone (layer 2) could not.
+# session's permission once, before its first LLM call — layer 4. OpenCode
+# silently keeps a broken plugin running, so that enforcement is only
+# trusted where it is proven: the native server route refuses the session
+# unless the plugin wrote its load receipt, and the 1.x TUI route refuses
+# manual/edits outright (no proof can precede its in-process prompt). The
+# tests below model those layers faithfully to prove a permissive layer 2 or
+# 3 cannot survive manual/edits, and that an env var alone (layer 2) could not.
 
 
-def opencode_plugin_rules(plan, tmp_path):
-    """The ruleset baked into the rendered plugin for this launch plan."""
-    source = plan.files[plugin_path(tmp_path / "x.json")]
+def opencode_server_plugin_source(approval):
+    """The plugin rendered by the native server plan for this approval."""
+    from theater.harness.builtin.plugins.opencode.server_plan import plan_opencode_server
+    from theater.harness.contracts.runtime import RuntimePlanningContext
+    from theater.paths import mcp_config_path
+
+    plan = plan_opencode_server(
+        RuntimePlanningContext(
+            participant_id="p-audit",
+            cwd="/tmp",
+            token_file=Path("/tmp/credential"),
+            approval=approval,
+        )
+    )
+    return plan.backend.files[plugin_path(mcp_config_path("p-audit"))]
+
+
+def opencode_server_plugin_rules(approval):
+    """The ruleset baked into the server plan's rendered plugin."""
+    source = opencode_server_plugin_source(approval)
     start = source.index("const permissionRules = ")
     end = source.index("\n", start)
     return json.loads(source[start + len("const permissionRules = ") : end])
@@ -194,10 +217,7 @@ def test_opencode_manual_asks_for_everything_but_plain_reads(tmp_path):
     allowlist verbatim — plain `read` tool calls auto-allowed (the same
     reads-auto-allowed contract as claude and codex manual), `.env`-style
     secret files still asking."""
-    plan = opencode_launch(tmp_path, "manual")
-    assert "--auto" not in plan.argv
-    assert "OPENCODE_PERMISSION" not in plan.env
-    assert opencode_plugin_rules(plan, tmp_path) == [
+    assert opencode_server_plugin_rules("manual") == [
         {"permission": "*", "pattern": "*", "action": "ask"},
         {"permission": "read", "pattern": "*", "action": "allow"},
         {"permission": "read", "pattern": "*.env", "action": "ask"},
@@ -206,7 +226,7 @@ def test_opencode_manual_asks_for_everything_but_plain_reads(tmp_path):
     ]
     # The plugin enforces through the session update route, one append per
     # session, before the first LLM call.
-    source = plan.files[plugin_path(tmp_path / "x.json")]
+    source = opencode_server_plugin_source("manual")
     assert "client.session.update" in source
     assert '"chat.message"' in source
 
@@ -216,9 +236,7 @@ def test_opencode_edits_allows_only_the_edit_permission(tmp_path):
     with (permission/index.ts `disabled`), so one trailing `edit: allow`
     rule — after the manual rules, so findLast picks it — is the native
     shape of an accept-edits policy; everything else still asks."""
-    plan = opencode_launch(tmp_path, "edits")
-    assert "--auto" not in plan.argv
-    assert opencode_plugin_rules(plan, tmp_path)[-1] == {
+    assert opencode_server_plugin_rules("edits")[-1] == {
         "permission": "edit",
         "pattern": "*",
         "action": "allow",
@@ -231,19 +249,21 @@ def test_opencode_yolo_auto_approves_without_fighting_a_ruleset(tmp_path):
     nothing."""
     plan = opencode_launch(tmp_path, "yolo")
     assert "--auto" in plan.argv
-    assert opencode_plugin_rules(plan, tmp_path) == []
+    source = plan.files[plugin_path(tmp_path / "x.json")]
+    start = source.index("const permissionRules = ")
+    end = source.index("\n", start)
+    assert json.loads(source[start + len("const permissionRules = ") : end]) == []
 
 
-def test_opencode_approval_enforcement_survives_a_resume(tmp_path):
-    """A forked resume opens a fresh session; the hook fires on its first
-    message, so the same ruleset enforces without the prompt path."""
-    plan = opencode_launch(tmp_path, "edits", resume="ses_1")
-    assert plan.argv == [str(Path(sys.executable).resolve()), "-s", "ses_1", "--fork"]
-    assert opencode_plugin_rules(plan, tmp_path)[-1] == {
-        "permission": "edit",
-        "pattern": "*",
-        "action": "allow",
-    }
+def test_opencode_tui_refuses_what_it_cannot_prove(tmp_path):
+    """The 1.x TUI submits the prompt inside the opencode process, so no
+    Theater-side proof can come between a broken plugin and the first model
+    call — manual/edits are refused there, fresh or resumed, with guidance
+    to the routes that prove the plugin."""
+    for kwargs in ({}, {"resume": "ses_1"}):
+        for approval in ("manual", "edits"):
+            with pytest.raises(BadRequest, match="cannot prove its approval plugin loaded"):
+                opencode_launch(tmp_path, approval, **kwargs)
 
 
 # Native's own evaluation semantics, mirrored from the read-only tree so the
