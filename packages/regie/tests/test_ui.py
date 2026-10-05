@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -481,6 +481,9 @@ class _Presentation:
 
     def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]:
         return True, None
+
+    def retain(self, terminals: Iterable[str]) -> None:
+        del terminals
 
     async def target_window(self) -> str:
         self.target_window_calls += 1

@@ -657,3 +657,80 @@ async def test_create_recovers_the_unmarked_launch_without_executing_twice(  # n
         assert tuple(bridge._state.launch_dir.iterdir()) == ()
     finally:
         bridge._state.release()
+
+
+async def test_churned_locks_are_evicted_and_a_held_lock_survives(tmp_path, monkeypatch) -> None:
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    callbacks = TmuxProviderCallbacks(state, generation_usable=lambda requested: requested == 3)
+
+    async def snapshot(pane_id: str):
+        return replace(_pane(), pane_id=pane_id)
+
+    async def absent(**_kwargs):
+        return _identity(), PresenceEvidence("absent", "no_viewer", None), None, True
+
+    async def terminate(_snapshot, *, before_effect):
+        return True
+
+    async def create(**_kwargs):
+        return _identity()
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", absent)
+    monkeypatch.setattr("regie.bridge.callbacks.terminate_terminal", terminate)
+    monkeypatch.setattr("regie.bridge.callbacks.create_terminal", create)
+
+    held = asyncio.Lock()
+    await held.acquire()
+    callbacks._terminal_locks["%held"] = held
+    try:
+        for index in range(5):
+            terminated = await callbacks.terminate(
+                CallbackRequest(
+                    callback_id=f"terminate-{index}",
+                    method="terminal.terminate",
+                    params={
+                        "operation_id": f"terminate-{index}",
+                        "provider_generation": 3,
+                        "participant_id": "participant-a",
+                        "terminal_id": f"%{index}",
+                        "terminal_incarnation": "incarnation-a",
+                        "expected_occupant": "participant-a",
+                        "require_absent": True,
+                    },
+                    provider_generation=3,
+                )
+            )
+            assert not isinstance(terminated, CallbackResponse)
+            assert terminated["exit_confirmed"] is True
+            await callbacks.create(
+                CallbackRequest(
+                    callback_id=f"create-{index}",
+                    method="terminal.create",
+                    params={
+                        "operation_id": f"create-{index}",
+                        "provider_generation": 3,
+                        "participant_id": "participant-a",
+                        "launch_id": f"launch-{index}",
+                        "launch": {
+                            "executable": "/bin/agent",
+                            "argv": ["/bin/agent", "--safe"],
+                            "cwd": "/tmp",
+                            "environment": {},
+                        },
+                    },
+                    provider_generation=3,
+                )
+            )
+        await asyncio.sleep(0)
+        assert set(callbacks._terminal_locks) == {"%held"}
+        assert callbacks._launch_locks == {}
+
+        held.release()
+        callbacks.evict_idle_locks()
+        await asyncio.sleep(0)
+        assert callbacks._terminal_locks == {}
+    finally:
+        state.release()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from regie.contracts import LocalPresentationTarget, StageTarget, UnmanagedPane
@@ -86,6 +86,18 @@ class TmuxPresentation:
             pane_pid=pane_pid,
         )
         return True, None
+
+    def retain(self, terminals: Iterable[str]) -> None:
+        """Drop fences for terminal ids absent from the latest projection.
+
+        Can_stage re-verifies and re-adds a fence before any use, so a dropped
+        fence only costs one re-acceptance, never identity safety.
+        """
+        self._targets = {
+            terminal_id: fence
+            for terminal_id, fence in self._targets.items()
+            if terminal_id in terminals
+        }
 
     async def target_window(self) -> str:
         """Return the local Régie window only under the pinned server identity."""

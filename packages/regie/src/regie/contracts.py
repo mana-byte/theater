@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -111,6 +111,8 @@ class PresentationOperations(Protocol):
     async def close(self) -> None: ...
 
     def can_stage(self, target: StageTarget) -> tuple[bool, str | None]: ...
+
+    def retain(self, terminals: Iterable[str]) -> None: ...
 
     async def target_window(self) -> str: ...
 

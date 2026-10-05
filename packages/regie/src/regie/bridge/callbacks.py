@@ -57,6 +57,31 @@ class TmuxProviderCallbacks:
             }
         )
 
+    def _evict_lock(self, locks: dict[str, asyncio.Lock], key: str) -> None:
+        """Drop one idle per-id lock; a woken waiter re-locks before evict runs.
+
+        call_soon orders eviction after any waiter the release just woke, so a
+        concurrent setdefault can never split mutual exclusion.
+        """
+
+        def evict() -> None:
+            lock = locks.get(key)
+            if lock is not None and not lock.locked() and not _lock_has_waiters(lock):
+                del locks[key]
+
+        asyncio.get_running_loop().call_soon(evict)
+
+    def evict_idle_locks(self) -> None:
+        """Drop every per-id lock that is neither held nor awaited (generation retire)."""
+
+        def evict() -> None:
+            for locks in (self._terminal_locks, self._launch_locks):
+                for key, lock in list(locks.items()):
+                    if not lock.locked() and not _lock_has_waiters(lock):
+                        del locks[key]
+
+        asyncio.get_running_loop().call_soon(evict)
+
     async def create(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
         stale = self._stale(request)
         if stale is not None:
@@ -84,7 +109,10 @@ class TmuxProviderCallbacks:
             launch=launch,
         )
         lock = self._launch_locks.setdefault(launch_id, asyncio.Lock())
-        async with lock:
+        with phase("lock_wait"):
+            await lock.acquire()
+        launch_retired = False
+        try:
             stale = self._stale(request)
             if stale is not None:
                 return stale
@@ -159,7 +187,12 @@ class TmuxProviderCallbacks:
             )
             if result["outcome"] != "unknown":
                 await self._persistence.run(self._state.complete_launch, intent)
+                launch_retired = True
             return result
+        finally:
+            lock.release()
+            if launch_retired:
+                self._evict_lock(self._launch_locks, launch_id)
 
     async def inventory(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
         stale = self._stale(request)
@@ -293,9 +326,11 @@ class TmuxProviderCallbacks:
         cached = await self._cached_mutation(request)
         if cached is not None:
             return cached
-        lock = self._terminal_locks.setdefault(str(request.params["terminal_id"]), asyncio.Lock())
+        terminal_id = str(request.params["terminal_id"])
+        lock = self._terminal_locks.setdefault(terminal_id, asyncio.Lock())
         with phase("lock_wait"):
             await lock.acquire()
+        terminated = False
         try:
             cached = await self._cached_mutation(request)
             if cached is not None:
@@ -324,9 +359,12 @@ class TmuxProviderCallbacks:
                 await self._persistence.run(
                     self._state.write_receipt, request.method, operation_id, result
                 )
+            terminated = True
             return result
         finally:
             lock.release()
+            if terminated:
+                self._evict_lock(self._terminal_locks, terminal_id)
 
     async def _mutation(
         self,
@@ -494,6 +532,11 @@ class TmuxProviderCallbacks:
     def _require_usable(self, request: CallbackRequest) -> None:
         if not self._generation_usable(request.provider_generation):
             raise TmuxError("the callback generation became inactive before terminal mutation")
+
+
+def _lock_has_waiters(lock: asyncio.Lock) -> bool:
+    """True when a task is parked on the lock; waiters only exist while it is held."""
+    return bool(lock._waiters)
 
 
 def _error(

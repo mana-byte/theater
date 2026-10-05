@@ -482,3 +482,13 @@ async def test_session_teardown_does_not_restore_into_a_replaced_server(monkeypa
 
 async def _current_server(identity: str) -> str:
     return identity
+
+
+def test_retain_drops_fences_for_gone_terminals() -> None:
+    presentation = TmuxPresentation()
+    live = replace(_target(), terminal_id="%live")
+    for index in range(3):
+        assert presentation.can_stage(replace(_target(), terminal_id=f"%{index}")) == (True, None)
+    assert presentation.can_stage(live) == (True, None)
+    presentation.retain({"%live"})
+    assert set(presentation._targets) == {"%live"}

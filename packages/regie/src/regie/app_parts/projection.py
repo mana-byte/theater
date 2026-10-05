@@ -7,7 +7,7 @@ from time import monotonic
 from textual.containers import Vertical
 
 from regie.app_parts._shared import _AppBase, logger
-from regie.contracts import LocalPresentationTarget
+from regie.contracts import LocalPresentationTarget, PresentationTarget
 from regie.controllers.surface import SurfaceMode
 from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_milestone
@@ -158,6 +158,9 @@ class ProjectionSync(_AppBase):
             for participant in projection.participants.values()
             if (route := participant.terminal_route) is not None
         }
+        if isinstance(staged, PresentationTarget):
+            managed.add(staged.terminal_id)
+        self.presentation.retain(managed)
         selected = tree.show_projection(
             projection,
             participant_detail=self.settings.participant_detail,

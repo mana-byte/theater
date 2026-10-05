@@ -90,6 +90,7 @@ class TmuxBridge:
                 finally:
                     await self._close_connections()
                     self._generation = None
+                    self._callbacks.evict_idle_locks()
                 if self._close_event.is_set():
                     break
                 with contextlib.suppress(TimeoutError):
