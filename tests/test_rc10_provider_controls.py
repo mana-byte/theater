@@ -54,6 +54,7 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
 )
 from theater.models import (
+    BadRequest,
     JobState,
     PublicOperationRecord,
     PublicOperationState,
@@ -82,7 +83,7 @@ def _context() -> ConnectionContext:
     )
 
 
-def _bind(daemon, participant_id: str, *, generation: int = 1) -> None:
+def _bind(daemon, participant_id: str, *, generation: int = 1, harness: str = "codex") -> None:
     timestamp = now()
     with daemon.store.write_unit() as unit:
         daemon.store.terminal_bindings.bind(
@@ -92,7 +93,7 @@ def _bind(daemon, participant_id: str, *, generation: int = 1) -> None:
                 provider_generation=generation,
                 terminal_id="terminal-a",
                 terminal_incarnation="incarnation-a",
-                occupant_evidence={"occupant_id": "occupant-a", "harness": "codex"},
+                occupant_evidence={"occupant_id": "occupant-a", "harness": harness},
                 process_facts={"pid": 42, "started_at": 1.0, "executable": "/bin/agent"},
                 health="healthy",
                 report_revision=1,
@@ -105,7 +106,7 @@ def _bind(daemon, participant_id: str, *, generation: int = 1) -> None:
 
 def _target(daemon, *, harness="codex") -> str:
     participant = daemon.registry.register(harness=harness, pane=None, cwd=None)
-    _bind(daemon, participant.id)
+    _bind(daemon, participant.id, harness=harness)
     return participant.id
 
 
@@ -644,6 +645,50 @@ def test_historical_pane_without_binding_is_not_a_control_route(daemon) -> None:
     assert not route.route_available
     assert not route.is_provider
     assert not route.is_legacy
+
+
+@pytest.mark.parametrize(("harness", "steers"), [("codex", True), ("claude", False)])
+async def test_provider_steer_submits_with_enter_only_where_the_harness_declares_it(
+    daemon, monkeypatch: pytest.MonkeyPatch, harness: str, steers: bool
+) -> None:
+    _online(monkeypatch, daemon)
+    actions: list[str] = []
+
+    async def accepted(_provider, generation, method, params):
+        if method == "terminal.deliver":
+            actions.append(params["action"]["kind"])
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
+    participant_id = _target(daemon, harness=harness)
+    await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "start"},
+        idempotency_key="steer-enter-send",
+    )
+    await _settle(daemon)
+    actions.clear()
+    steer = controls_steer(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "adjust"},
+        idempotency_key="steer-enter",
+    )
+    if not steers:
+        with pytest.raises(BadRequest, match="does not offer a transport for steer"):
+            await steer
+        assert actions == []
+        return
+    _accepted("frontend.controls.steer", await steer)
+    await _settle(daemon)
+    assert actions == ["submit_text"]  # Enter, never a bare paste
 
 
 async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(

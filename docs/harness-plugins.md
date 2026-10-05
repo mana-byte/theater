@@ -184,7 +184,10 @@ Optional interactive controls belong in `HarnessManifest.controls`. An
 `InterruptPlan` is immutable data: a short validated tmux-key sequence and an
 optional bounded delay between keys. The daemon applies the same lineage,
 status, pane-identity, and human-presence gates for every harness; plugins only
-declare the native keys their own TUI uses.
+declare the native keys their own TUI uses. `SteerPlan()` declares that plain
+Enter during a running turn steers it in that TUI (Codex and Pi); Theater then
+submits the steer text with Enter. Leave it unset where Enter only queues the text
+until the turn ends: steer over the pane is refused rather than guessed.
 
 The example puts the Theater MCP server in the harness's native configuration.
 `theater_binary()` is the public helper for the executable path; the identity

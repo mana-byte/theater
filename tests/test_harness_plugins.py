@@ -433,7 +433,7 @@ def test_native_compatibility_records_separate_version_and_route_support(local_d
         "wiring": "legacy",
         "routes": {
             "send": "tmux",
-            "steer": "tmux",
+            "steer": "unavailable",  # claude has not declared that Enter steers
             "queue_followup": "tmux",
             "settings_update": "unavailable",
             "interrupt": "tmux",

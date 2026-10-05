@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from theater.harness.contracts import InterruptPlan
+from theater.harness.contracts import InterruptPlan, SteerPlan
 from theater.models import Participant
 
 __all__ = ["ControlGates"]
@@ -83,3 +83,4 @@ class ControlGates:
 
     #: Only the harness manifest chooses terminal interruption keys.
     terminal_interrupt_plan: Callable[[str], InterruptPlan | None] = lambda _participant_id: None
+    terminal_steer_plan: Callable[[str], SteerPlan | None] = lambda _participant_id: None

@@ -275,10 +275,12 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         job_handle: optional handle you believe is running; the daemon
                 refuses a mismatch instead of amending the wrong job.
 
-        Steering needs native runtime wiring and an active turn; the daemon
-        refuses with `stale_target` and its reason when either is missing
-        (wait for status="idle" and use send, or call queue_followup) or when
-        the harness has no runtime at all. A refusal is final: a steer is
+        Steering needs an active turn and either native runtime wiring or a
+        harness that declares Enter steers a running turn in its terminal (the
+        text is submitted with Enter; codex and pi declare it). The daemon
+        refuses with `stale_target` and its reason when the turn is missing
+        (wait for status="idle" and use send, or call queue_followup) and with
+        `bad_request` when neither route exists. A refusal is final: a steer is
         never retried and never reinterpreted as a send, so after a
         refusal queue a followup instead of retrying. Only the
         direct parent or a local operator may steer; the daemon decides from

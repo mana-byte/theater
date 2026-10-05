@@ -64,6 +64,7 @@ def build_control_gates(daemon) -> ControlGates:
             tuple(daemon.config.reasoning_for(harness)),
         ),
         terminal_interrupt_plan=_terminal_interrupt_plan(daemon),
+        terminal_steer_plan=_terminal_steer_plan(daemon),
     )
 
 
@@ -74,6 +75,17 @@ def _terminal_interrupt_plan(daemon):
         participant = daemon.registry.get(participant_id)
         harness = HARNESSES.get(normalize(participant.harness))
         return None if harness is None else harness.controls.interrupt
+
+    return plan
+
+
+def _terminal_steer_plan(daemon):
+    def plan(participant_id):
+        from theater.harness import HARNESSES, normalize
+
+        participant = daemon.registry.get(participant_id)
+        harness = HARNESSES.get(normalize(participant.harness))
+        return None if harness is None else harness.controls.steer
 
     return plan
 

@@ -84,10 +84,20 @@ class InterruptPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class SteerPlan:
+    """Declares that plain Enter in this harness's TUI steers a running turn.
+
+    Presence is the whole claim: only declare it where Enter during a turn is
+    consumed by that turn, not merely queued until it ends.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class ControlManifest:
     """Explicit native controls supported by one harness."""
 
     interrupt: InterruptPlan | None = None
+    steer: SteerPlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,5 +282,6 @@ __all__ = [
     "RuntimeManifest",
     "ScreenManifest",
     "SourceManifest",
+    "SteerPlan",
     "UnavailableChannelManifest",
 ]

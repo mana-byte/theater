@@ -26,6 +26,7 @@ from theater.harness.contracts.manifest import (
     OtelChannelManifest,
     ScreenManifest,
     SourceManifest,
+    SteerPlan,
 )
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
@@ -111,7 +112,7 @@ MANIFEST = HarnessManifest(
         trajectory_capabilities=CodexObserver.trajectory_capabilities,
         enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
     ),
-    controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
+    controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",)), steer=SteerPlan()),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
     native_compatibility=NativeCompatibilityManifest(
         qualified_range=">=0.148.0,<=0.159.1",

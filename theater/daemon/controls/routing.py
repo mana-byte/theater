@@ -143,6 +143,14 @@ class ControlRouteResolver:
                 ControlRoute(capability, ControlTransport.PROVIDER_TERMINAL, native_wiring=False),
                 connection=connection,
             )
+        if capability is RuntimeCapability.STEER and not self._declares_steer(harness_name):
+            # Enter may only queue the text in that TUI; never offer a steer on a guess.
+            return ControlRoute(
+                capability,
+                None,
+                native_wiring=False,
+                unavailable_reason=CapabilityUnavailableReason.WIRING_MODE,
+            )
         return self._with_provider_fallback(
             participant_id,
             ControlRoute(capability, None, native_wiring=False),
@@ -225,6 +233,14 @@ class ControlRouteResolver:
     def _harness_name(self, participant_id: str, *, connection=None) -> str:
         participant = self._store.get_participant(participant_id, connection=connection)
         return participant.harness if participant is not None else ""
+
+    @staticmethod
+    def _declares_steer(harness_name: str) -> bool:
+        try:
+            controls = get_harness(harness_name).controls
+        except Exception:
+            return False
+        return controls is not None and controls.steer is not None
 
     @staticmethod
     def _manifest(harness_name: str):

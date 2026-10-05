@@ -53,6 +53,7 @@ from theater.harness.contracts.manifest import (
     OtelChannelManifest,
     ScreenManifest,
     SourceManifest,
+    SteerPlan,
     UnavailableChannelManifest,
 )
 from theater.harness.contracts.runtime import (
@@ -188,6 +189,12 @@ def _validate_launch(name: str, launch: object) -> None:
 def _validate_controls(name: str, controls: object) -> None:
     if not isinstance(controls, ControlManifest):
         _fail(name, "controls", f"expected ControlManifest, got {type(controls).__name__}")
+    if controls.steer is not None and not isinstance(controls.steer, SteerPlan):
+        _fail(
+            name,
+            "controls.steer",
+            f"expected SteerPlan or null, got {type(controls.steer).__name__}",
+        )
     plan = controls.interrupt
     if plan is None:
         return

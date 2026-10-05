@@ -35,8 +35,9 @@ from theater.harness.contracts.runtime import (
 #: control. The detail string says the same thing the service's refusal does.
 _WIRING_REASON = str(CapabilityUnavailableReason.WIRING_MODE)
 _STEER_LEGACY_DETAIL = (
-    "steering requires native runtime wiring; this participant's harness has "
-    "no runtime — send when it is idle or queue a followup"
+    "steering over a pane needs the harness to declare that Enter steers a running "
+    "turn, or native runtime wiring; this participant has neither — send when it is "
+    "idle or queue a followup"
 )
 _SETTINGS_LEGACY_DETAIL = (
     "settings updates require native runtime wiring; this participant's model is fixed at launch"

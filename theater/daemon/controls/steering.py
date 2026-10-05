@@ -35,6 +35,15 @@ from theater.models import BadRequest, Job, JobState, StaleTarget
 logger = logging.getLogger("theater.daemon.controls")
 
 
+def _provider_steer_refusal(participant_id: str) -> str:
+    return (
+        f"steering participant {participant_id!r} over its terminal is not offered: its "
+        "harness has not declared that Enter steers a running turn (it may only queue the "
+        "text until the turn ends), so Theater will not guess; queue a followup, or "
+        "interrupt it and send once it is idle"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _SteerRequest:
     participant_id: str
@@ -255,6 +264,8 @@ class SteerControls(ControlHost):
         on_reserved: Callable[[str, str | None], None] | None,
         pre_reserved: bool,
     ) -> tuple[Job, str]:
+        if self._gates.terminal_steer_plan(participant_id) is None:
+            raise BadRequest(_provider_steer_refusal(participant_id))
         jobs = self._store.active_running_jobs_for_target(participant_id)
         if len(jobs) != 1:
             raise StaleTarget(
@@ -301,7 +312,8 @@ class SteerControls(ControlHost):
             participant_id=participant_id,
             control_operation_id=control_id,
             callback_operation_id=callback_operation_id or control_id,
-            action={"kind": "paste_text", "text": prompt},
+            # Enter, not a bare paste: the declared harness consumes it as a steer.
+            action={"kind": "submit_text", "text": prompt},
             job_handle=None,
         )
         return job, _delivery_label(result)
@@ -310,9 +322,10 @@ class SteerControls(ControlHost):
     def _steer_route_refusal(participant_id: str, route: ControlRoute) -> BadRequest:
         if not route.native_wiring:
             return BadRequest(
-                f"steering participant {participant_id!r} requires native runtime wiring; "
-                "its harness has no runtime, so the prompt can only be sent with the "
-                "ordinary idle-guarded send or queued as a followup"
+                f"steering participant {participant_id!r} is not offered: it has no native "
+                "runtime and its harness has not declared that Enter steers a running turn "
+                "in its terminal, so the prompt can only be sent with the ordinary "
+                "idle-guarded send or queued as a followup"
             )
         return BadRequest(
             f"steering participant {participant_id!r} is unavailable on its selected transport"

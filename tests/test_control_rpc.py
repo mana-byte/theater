@@ -333,7 +333,7 @@ async def test_steer_on_legacy_wiring_names_the_alternatives(client, daemon):
     with pytest.raises(RemoteError) as raised:
         await client.call("participant.steer", target=child.id, prompt="amend", caller_id=parent.id)
     assert raised.value.code == "bad_request"
-    assert "no runtime" in raised.value.message
+    assert "has not declared that Enter steers" in raised.value.message
     assert "queued as a followup" in raised.value.message
 
 

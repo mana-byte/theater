@@ -20,6 +20,8 @@ _LEGACY_ROUTES = {
     "settings_update": "unavailable",
     "interrupt": "tmux",
 }
+# Only harnesses declaring that Enter steers a running turn (codex, pi) steer over a pane.
+_LEGACY_ROUTES_NO_STEER = {**_LEGACY_ROUTES, "steer": "unavailable"}
 _PI_ROUTES = {
     "send": "native",
     "steer": "unavailable",
@@ -74,7 +76,7 @@ _OUT_OF_RANGE = RuntimeCompatibility(
             {
                 "status": "legacy-only",
                 "wiring": "legacy",
-                "routes": _LEGACY_ROUTES,
+                "routes": _LEGACY_ROUTES_NO_STEER,
                 "qualified_range": None,
                 "reason": "no native runtime; controls use the provider terminal",
             },
@@ -83,7 +85,7 @@ _OUT_OF_RANGE = RuntimeCompatibility(
         pytest.param(
             "vibe",
             None,
-            {"status": "legacy-only", "wiring": "legacy", "routes": _LEGACY_ROUTES},
+            {"status": "legacy-only", "wiring": "legacy", "routes": _LEGACY_ROUTES_NO_STEER},
             id="vibe-no-probe-legacy-routes",
         ),
     ],
@@ -155,3 +157,13 @@ async def test_harnesses_surfaces_a_probe_exception_as_unknown(client, daemon, m
     assert codex["wiring"] == "legacy"
     assert codex["routes"]["interrupt"] == "tmux"
     assert any("codex" in message for message in caplog.messages)
+
+
+def test_only_harnesses_that_declare_it_steer_over_a_terminal():
+    declared = {
+        name
+        for name, harness in harness_registry.HARNESSES.items()
+        if harness.controls is not None and harness.controls.steer is not None
+    }
+    # Enter steers a running turn in the Codex and Pi TUIs; the rest are unverified.
+    assert declared == {"codex", "pi"}

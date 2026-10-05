@@ -27,6 +27,7 @@ from theater.harness.contracts.manifest import (
     OtelChannelManifest,
     ScreenManifest,
     SourceManifest,
+    SteerPlan,
 )
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
@@ -114,7 +115,7 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
             trajectory_capabilities=PiObserver.trajectory_capabilities,
             enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
         ),
-        controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
+        controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",)), steer=SteerPlan()),
         mcp=McpRenderingManifest(renderer=render_mcp_servers_file),
         native_compatibility=NativeCompatibilityManifest(
             qualified_range=">=0.80.8,<0.85.0 || >=0.85.1,<=0.99.1",

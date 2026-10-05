@@ -101,6 +101,7 @@ from theater.harness.contracts.manifest import (
     OtelChannelManifest,
     ScreenManifest,
     SourceManifest,
+    SteerPlan,
     UnavailableChannelManifest,
 )
 from theater.harness.contracts.observation import (
@@ -308,6 +309,7 @@ __all__ = [
     "SourceContractError",
     "SourceFactory",
     "SourceManifest",
+    "SteerPlan",
     "StreamFloorContext",
     "StreamFloorReader",
     "TokenUsage",
