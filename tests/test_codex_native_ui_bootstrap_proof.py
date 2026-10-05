@@ -814,3 +814,98 @@ async def test_codex_native_ui_bootstrap_proof() -> None:
         _assert_sentinels(observer, observer2, mock)
     finally:
         await _teardown(observers, mock, backend, backend_log, str(tmux_socket), root)
+
+
+_UPDATE_AVAILABLE = '{"latest_version": "99.0.0", "last_checked_at": "2026-10-05T00:00:00Z"}'
+_PRODUCTION_STARTUP_DEADLINE = 30.0
+
+
+async def _ui_thread_within_deadline(observer, cwd: Path) -> bool:
+    try:
+        await observer.wait_for(
+            "notification",
+            method="thread/started",
+            predicate=lambda event: event.payload.get("thread", {}).get("cwd") == str(cwd),
+            timeout=_PRODUCTION_STARTUP_DEADLINE,
+        )
+    except TimeoutError:
+        return False
+    return True
+
+
+@pytest.mark.tmux
+@pytest.mark.parametrize(
+    ("scenario", "keep_update_override"),
+    [
+        ("update-available", True),
+        ("update-available-control", False),
+        ("worktree-of-trusted-repo", True),
+    ],
+)
+async def test_codex_native_ui_starts_a_thread_unattended(
+    scenario: str, keep_update_override: bool
+) -> None:
+    """Theater's own UI plan must reach `thread/started` with nobody to answer a
+    startup dialog: an available update, a worktree of a trusted repo. The control
+    drops the update override and must block, proving the scenario can bite."""
+    import shlex
+
+    from theater.harness.builtin.plugins.codex.runtime_plan import plan_codex_frontend
+
+    _skip_unless_smoke_enabled()
+    root = Path(tempfile.mkdtemp(prefix="cxu-", dir="/tmp")).resolve()
+    codex_home = root / "codex-home"
+    repo = codex_env.make_git_repo(root / "repo")
+    cwd = repo
+    if scenario == "worktree-of-trusted-repo":
+        # Theater's own layout: the worktree lives inside the repo it was cut from.
+        cwd = repo / ".theater" / "worktrees" / "child"
+        await asyncio.to_thread(
+            subprocess.run, ["git", "worktree", "add", "-q", str(cwd)], cwd=repo, check=True
+        )
+    socket_path = root / "app.sock"
+    tmux_socket = root / "tmux-socket"
+    backend_log = (root / "backend.log").open("w")
+    backend_env = dict(os.environ, CODEX_HOME=str(codex_home), TERM="xterm-256color")
+    backend_env.pop("TMUX", None)
+    backend_env.pop("TMUX_PANE", None)
+    backend: subprocess.Popen | None = None
+    mock = _make_mock(repo / MARKER_FILENAME)
+    observers: list = []
+    try:
+        mock.start()
+        config = codex_env.write_mock_config(codex_home, mock.base_url)
+        # Only the repo root is trusted: a worktree must rely on Codex's own inheritance.
+        config.write_text(
+            config.read_text(encoding="utf-8")
+            + f'\n[projects."{repo}"]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        (codex_home / "version.json").write_text(_UPDATE_AVAILABLE, encoding="utf-8")
+        backend = _spawn_backend(cwd, socket_path, backend_log, backend_env)
+        await client.wait_until(socket_path.exists, timeout=30.0)
+        await client.wait_until(lambda: client.socket_connectable(str(socket_path)), timeout=30.0)
+        observer = client.AppServerClient(str(socket_path), name="theater-observer")
+        observers.append(observer)
+        await observer.connect()
+        await observer.initialize()
+
+        argv = plan_codex_frontend(str(socket_path), native_session_id=None, approval="yolo").argv
+        if not keep_update_override:
+            at = argv.index("check_for_update_on_startup=false")
+            del argv[at - 1 : at + 1]  # the `-c` flag and its value
+        command = shlex.join([codex_env.codex_binary() or "codex", *argv[1:]])
+        _launch_tui(tmux_socket, codex_home, cwd, socket_path, command)
+
+        started = await _ui_thread_within_deadline(observer, cwd)
+        screen = _capture_pane(str(tmux_socket))
+        if keep_update_override:
+            assert started, f"the UI never created a thread unattended; screen:\n{screen}"
+        elif started:
+            pytest.skip(
+                "this codex install cannot show the update dialog, so it cannot be provoked"
+            )
+        else:
+            assert "update" in screen.lower(), f"blocked, but not on the update dialog:\n{screen}"
+    finally:
+        await _teardown(observers, mock, backend, backend_log, str(tmux_socket), root)

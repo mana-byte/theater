@@ -251,7 +251,9 @@ def plan_codex_frontend(
     reasoning_effort: str | None = None,
 ) -> LaunchPlan:
     """Plan a promptless native CLI UI attachment."""
-    argv = [CODEX_BINARY]
+    # A promptless TUI shows a blocking update dialog before it creates its thread, and
+    # nobody is there to answer it; only a CLI prompt skips it.
+    argv = [CODEX_BINARY, "-c", "check_for_update_on_startup=false"]
     for key, value in codex_launch_config_overrides(
         approval=approval,
         model=model,

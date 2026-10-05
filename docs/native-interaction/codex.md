@@ -289,6 +289,15 @@ Differences the qualified releases exercise, each handled without a version swit
 - 0.156.0 removes `thread/rollback` (Theater never calls it). 0.159.0 documents
   `Turn.error` for interrupted turns too, so only a failed turn carries `turn_failed`.
 
+## Startup dialogs
+
+A promptless `codex --remote` TUI creates no thread until it clears its startup dialogs, and
+nobody answers them for an agent-spawned child. Codex skips its update prompt only when a CLI
+prompt is given, so the native UI plan passes `-c check_for_update_on_startup=false`.
+`test_codex_native_ui_starts_a_thread_unattended` (opt-in, stock binary) launches that exact
+plan with an update available, plus a control without the override that must block. The
+workspace-trust dialog is not suppressed: a worktree inside a trusted repo did not show it.
+
 ## Files to change
 
 - `tests/native/codex_native_client.py`: reusable collection helpers only; preserve

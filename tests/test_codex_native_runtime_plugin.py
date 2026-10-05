@@ -440,6 +440,8 @@ def test_frontend_plan_promptless_for_fresh_ui() -> None:
     assert plan.argv == [
         "codex",
         "-c",
+        "check_for_update_on_startup=false",
+        "-c",
         "approval_policy=never",
         "-c",
         "sandbox_mode=danger-full-access",
@@ -457,6 +459,8 @@ def test_frontend_plan_resumes_exact_thread() -> None:
     plan = plan_codex_frontend(ENDPOINT, native_session_id="th-42", approval="manual")
     assert plan.argv == [
         "codex",
+        "-c",
+        "check_for_update_on_startup=false",
         "-c",
         "approval_policy=on-request",
         "-c",
