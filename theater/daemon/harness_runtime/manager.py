@@ -508,8 +508,8 @@ class HarnessRuntimeManager:
             raise
         except Exception:
             recovered = False
-        if gone:
-            return True
+        if gone and recovered:
+            return True  # a failed settlement must stay retryable, never be abandoned
         if not recovered and self.recovery_callback_is_current(callback):
             await asyncio.sleep(RUNTIME_RECOVERY_RETRY_SECONDS)
         return False

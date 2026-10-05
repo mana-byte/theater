@@ -787,3 +787,27 @@ async def test_blocked_recovery_for_one_participant_does_not_block_another(
     gate.set()
     await _wait_until(lambda: "p1" in calls, message="p1's recovery after the gate")
     await manager.aclose()
+
+
+async def test_a_dead_backend_stays_retryable_until_its_jobs_are_settled() -> None:
+    class _DeadBackend:
+        def alive(self) -> bool:
+            return False
+
+    manager = HarnessRuntimeManager()
+    attempts: list[bool] = []
+
+    async def callback(participant_id: str, backend_generation: int) -> bool:
+        del participant_id, backend_generation
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("settlement failed")
+        return True
+
+    manager.set_recovery_callback(callback)
+    dead = _DeadBackend()
+    first = await manager._recover_disconnected("p1", 1, callback, backend=dead)  # type: ignore[arg-type]
+    assert first is False  # the failed settlement is retried, not abandoned
+    second = await manager._recover_disconnected("p1", 1, callback, backend=dead)  # type: ignore[arg-type]
+    assert second is True
+    await manager.aclose()
