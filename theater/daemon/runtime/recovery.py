@@ -847,6 +847,28 @@ def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
     """
 
     async def recover(participant_id: str, backend_generation: int) -> bool:
+        backend = daemon.runtime_manager.backend(participant_id)
+        if backend is not None and not backend.alive():
+            # The verified backend process exited mid-flight, so its open turns
+            # can never produce native evidence (no idle marker, no terminal
+            # event): settle affected jobs as crashed — never as success — via
+            # the backend_gone path startup reconciliation uses, instead of
+            # retrying a reconnect that can never land.
+            binding = daemon.store.get_runtime_binding(participant_id)
+            if binding is not None and binding.backend_generation == backend_generation:
+                logger.warning(
+                    "the native backend of %s (generation %s) exited while its "
+                    "work was in flight; failing its running jobs as crashed",
+                    participant_id,
+                    backend_generation,
+                )
+                _backend_gone(daemon, binding)
+            runtime = daemon.runtime_manager.get(participant_id)
+            if runtime is not None:
+                await _discard_recovered_candidate(
+                    daemon, participant_id, runtime, recovery_owner=recover
+                )
+            return True
         return await recover_live_runtime(
             daemon,
             participant_id,
@@ -893,7 +915,9 @@ def _backend_gone(daemon, binding) -> None:
     """A persisted backend whose pid no longer verifies: fail affected work.
 
     The process exited (pid possibly reused), so nothing is signalled; jobs fail
-    ``backend_gone`` and the participant follows its ordinary lifecycle.
+    ``backend_gone`` and the participant follows its ordinary lifecycle. Used
+    both at startup reconciliation and by the running health monitor, whose
+    recovery callback hits this when the verified process died mid-flight.
     """
     participant_id = binding.participant_id
     hub = getattr(daemon.observer, "live", None)

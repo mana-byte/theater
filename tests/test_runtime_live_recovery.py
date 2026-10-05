@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
 import sys
 from dataclasses import replace
 
@@ -45,6 +46,7 @@ from theater.harness.contracts.runtime import (
     RuntimeContext,
     RuntimeExecutionState,
     RuntimeIO,
+    RuntimeLifecyclePhase,
     RuntimeManifest,
     RuntimeNotification,
     RuntimePlan,
@@ -1531,4 +1533,48 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(  
         retry_connect_gate.set()
         if pid is not None:
             await _teardown(d, pid)
+        await d.aclose()
+
+
+async def test_a_backend_that_exits_mid_turn_settles_its_open_job_as_crashed(
+    theater_home, terminal_provider, monkeypatch
+) -> None:
+    """A turn in flight when the backend process dies can never write its
+    terminal marker: the job must surface as crashed (backend_gone), never
+    as success, and the monitor must not retry a dead process forever."""
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
+    pid = None
+    try:
+        pid = await _spawn(d)
+        binding = d.store.get_runtime_binding(pid)
+        assert binding is not None and binding.backend_pid is not None
+        server = _server(io, pid)
+        # The turn is genuinely in flight: the prompt was accepted and no
+        # terminal evidence has arrived.
+        assert server.requested("turn/start")
+        assert d.store.get_job(pid).state == JobState.RUNNING
+
+        # The backend process exits mid-turn, and its stream dies with it.
+        os.kill(binding.backend_pid, signal.SIGKILL)
+        await _await_reaped(binding.backend_pid)
+        _disconnect(io, 0)
+
+        await _wait_until(
+            lambda: d.store.get_job(pid).state == JobState.CRASHED,
+            what="the mid-flight job settling as crashed",
+        )
+        job = d.store.get_job(pid)
+        assert job.error_code == "backend_gone"
+        assert job.result, "the crash names what happened and what to do"
+        failed = d.store.get_runtime_binding(pid)
+        assert failed is not None
+        assert failed.lifecycle is RuntimeLifecyclePhase.FAILED
+        # Recovery settled the death instead of churning reconnects at a
+        # process that can never answer: only the spawn handshake connected.
+        assert server.connect_count == 1, "no reconnect may be attempted"
+    finally:
+        if pid is not None:
+            backend = d.runtime_manager.backend(pid)
+            if backend is not None and backend.alive():
+                await _teardown(d, pid)
         await d.aclose()

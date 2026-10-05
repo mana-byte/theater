@@ -481,15 +481,38 @@ class HarnessRuntimeManager:
                 self.record_snapshot(participant_id, runtime, snapshot)
             if snapshot is None or snapshot.health is not ConnectionHealth.DISCONNECTED:
                 continue
+            if await self._recover_disconnected(
+                participant_id, backend_generation, callback, backend=entry.backend
+            ):
+                return  # the verified backend exited: no reconnect can ever land
+
+    async def _recover_disconnected(
+        self,
+        participant_id: str,
+        backend_generation: int,
+        callback: RecoveryCallback,
+        *,
+        backend: DetachedBackendProcess | None,
+    ) -> bool:
+        """Run one bounded recovery attempt; True ends the watch for good.
+
+        The verified backend exiting mid-flight is terminal: the attempt's
+        callback settles affected work, and retrying a dead process forever
+        would only leave its jobs running.
+        """
+        gone = backend is not None and not backend.alive()
+        recovered = False
+        try:
+            recovered = await callback(participant_id, backend_generation)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
             recovered = False
-            try:
-                recovered = await callback(participant_id, backend_generation)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                recovered = False
-            if not recovered and self.recovery_callback_is_current(callback):
-                await asyncio.sleep(RUNTIME_RECOVERY_RETRY_SECONDS)
+        if gone:
+            return True
+        if not recovered and self.recovery_callback_is_current(callback):
+            await asyncio.sleep(RUNTIME_RECOVERY_RETRY_SECONDS)
+        return False
 
     # ---- lookups (create nothing) ------------------------------------------
 
