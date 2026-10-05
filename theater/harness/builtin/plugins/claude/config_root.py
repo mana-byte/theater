@@ -14,7 +14,9 @@ def claude_config_root() -> Path:
     """Claude's config root: $CLAUDE_CONFIG_DIR when set and non-empty, else ~/.claude."""
     configured = os.environ.get("CLAUDE_CONFIG_DIR")
     if configured:
-        return Path(configured).expanduser()
+        # Absolute so the daemon's reads and the child's writes name one folder
+        # even when the child's cwd (a worktree) differs from the daemon's.
+        return Path(configured).expanduser().absolute()
     return Path.home() / ".claude"
 
 

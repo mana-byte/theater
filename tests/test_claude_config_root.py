@@ -96,6 +96,12 @@ def test_plan_env_pins_config_dir_only_when_configured(tmp_path, monkeypatch) ->
     plan = plan_launch(context())
     assert plan.env["CLAUDE_CONFIG_DIR"] == str(config)
 
+    # A relative value is pinned absolute: the child's cwd is not the daemon's.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "claude-work")
+    plan = plan_launch(context())
+    assert plan.env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-work")
+
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     plan = plan_launch(context())
     assert "CLAUDE_CONFIG_DIR" not in plan.env
