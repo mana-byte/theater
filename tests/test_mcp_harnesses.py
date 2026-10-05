@@ -140,7 +140,7 @@ async def test_spawning_a_listed_harness_is_accepted(daemon, terminal_provider, 
                 {
                     "harness": name,
                     "prompt": "",
-                    "approval": "yolo" if name == "pi" else "manual",
+                    "approval": "yolo" if name in ("pi", "opencode") else "manual",
                     # Catalog acceptance only: prove the name is spawnable on
                     # this fake pane path. Codex selects the real native
                     # wiring under the default auto, which would launch a

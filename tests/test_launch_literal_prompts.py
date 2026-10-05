@@ -117,9 +117,9 @@ def test_opencode_1x_keeps_the_prompt_the_value_of_its_flag(
         participant_id="p",
         prompt=prompt,
         config_path=tmp_path / "x.json",
-        approval="manual",
+        approval="yolo",
     )
-    assert plan.argv == [opencode_binary, "--prompt", f"\n{prompt}"]
+    assert plan.argv == [opencode_binary, "--auto", "--prompt", f"\n{prompt}"]
 
 
 @pytest.mark.parametrize("prompt", HOSTILE_PROMPTS)

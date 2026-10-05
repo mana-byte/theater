@@ -256,7 +256,7 @@ async def test_private_sidecar_launch_executes_with_its_environment(
     (
         ("claude", "manual"),
         ("codex", "manual"),
-        ("opencode", "manual"),
+        ("opencode", "yolo"),
         ("pi", "yolo"),
         ("vibe", "manual"),
     ),

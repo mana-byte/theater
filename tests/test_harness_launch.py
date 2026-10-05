@@ -207,7 +207,7 @@ def test_codex_mcp_servers_outlast_a_full_length_await(monkeypatch, tmp_path):
     (
         ("claude", "manual"),
         ("codex", "manual"),
-        ("opencode", "manual"),
+        ("opencode", "yolo"),
         ("vibe", "manual"),
         ("pi", "yolo"),
     ),
@@ -393,7 +393,7 @@ def test_model_reaches_every_harness_by_its_own_lever(tmp_path, available_harnes
         participant_id="a",
         prompt="",
         config_path=tmp_path / "x.json",
-        approval="manual",
+        approval="yolo",
         model="anthropic/claude-sonnet-4",
     )
     assert plan.argv[plan.argv.index("--model") :][:2] == [
@@ -449,7 +449,7 @@ def test_no_model_asked_means_no_model_flag(tmp_path, available_harness_binaries
             participant_id="a",
             prompt="",
             config_path=tmp_path / "x.json",
-            approval="manual",
+            approval="yolo" if harness == "opencode" else "manual",
         )
         assert not any(a.startswith("--model") for a in plan.argv), harness
 
@@ -556,7 +556,7 @@ def test_no_reasoning_effort_asked_means_no_lever(tmp_path, available_harness_bi
             participant_id="a",
             prompt="",
             config_path=tmp_path / "x.json",
-            approval="manual",
+            approval="yolo" if harness == "opencode" else "manual",
         )
         assert not any(a.startswith("--effort") for a in plan.argv), harness
         assert not any("model_reasoning_effort=" in a for a in plan.argv), harness
