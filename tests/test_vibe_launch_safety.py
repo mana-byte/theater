@@ -76,6 +76,8 @@ def test_edits_passes_and_pins_the_bypass_when_nothing_shadows(tmp_path, monkeyp
 
     plan = _live_guard_plan(tmp_path, monkeypatch, approval="edits", cwd=project)
     assert plan.env[VIBE_BYPASS_TOOL_PERMISSIONS_ENV] == "false"
+    # The child loads profiles from the home the guard checked, not its pane's.
+    assert plan.env["VIBE_HOME"] == str(tmp_path / "vibe-home")
     assert plan.argv[plan.argv.index("--agent") + 1] == "accept-edits"
 
 

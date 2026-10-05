@@ -16,7 +16,7 @@ from .constants import VIBE_HOME_ENV
 _PROJECT_AGENTS_SUBDIR = Path(".vibe") / "agents"
 
 
-def _vibe_home() -> Path:
+def vibe_home() -> Path:
     """Where vibe resolves its home: ``$VIBE_HOME`` wins, else ``~/.vibe``."""
     home = os.environ.get(VIBE_HOME_ENV)
     return Path(home).expanduser() if home else Path.home() / ".vibe"
@@ -29,11 +29,11 @@ def shadowed_approval_profile(agent: str, cwd: Path | None) -> Path | None:
     hit is refused even when vibe's own trust gate would have skipped the file.
     """
     candidates = [Path(cwd) / _PROJECT_AGENTS_SUBDIR / f"{agent}.toml"] if cwd is not None else []
-    candidates.append(_vibe_home() / "agents" / f"{agent}.toml")
+    candidates.append(vibe_home() / "agents" / f"{agent}.toml")
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     return None
 
 
-__all__ = ["shadowed_approval_profile"]
+__all__ = ["shadowed_approval_profile", "vibe_home"]

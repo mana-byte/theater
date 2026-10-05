@@ -15,7 +15,7 @@ from theater.harness.contracts.callbacks import (
 )
 from theater.models import BadRequest
 
-from .approval_guard import shadowed_approval_profile
+from .approval_guard import shadowed_approval_profile, vibe_home
 from .constants import (
     ISOLATION_MARKER,
     VIBE_ACTIVE_MODEL_ENV,
@@ -90,6 +90,8 @@ def plan_launch(
         # builtin ask/accept-edits profiles never re-enable it. `yolo` is
         # already the bypass and stays untouched.
         env[VIBE_BYPASS_TOOL_PERMISSIONS_ENV] = "false"
+        # The guard checked this home; the pane's own environment must not pick another.
+        env[VIBE_HOME_ENV] = str(vibe_home())
     # No `--model` flag: the same VIBE_* override carries the model. Empty = configured default.
     env[VIBE_ACTIVE_MODEL_ENV] = model or ""
     files: dict[Path, str] = {}
