@@ -83,6 +83,16 @@ def test_probe_failure_keeps_todays_argv(tmp_path, monkeypatch):
     assert "--yolo" in _plan(tmp_path, "yolo").argv
 
 
+@pytest.mark.parametrize(
+    ("resolved", "argv0"),
+    [("/opt/other-install/bin/vibe", "/opt/other-install/bin/vibe"), (None, "vibe")],
+)
+def test_launch_runs_the_binary_the_probe_resolved(tmp_path, monkeypatch, resolved, argv0):
+    """The pane's PATH may differ from the daemon's, so argv[0] must be the probed path."""
+    pin_installed_vibe_version(monkeypatch, (2, 25, 8), binary=resolved)
+    assert _plan(tmp_path, "manual").argv[0] == argv0
+
+
 def test_installed_version_parses_and_fails_closed(monkeypatch, tmp_path):
     binary = tmp_path / "vibe"
     binary.write_text("#!/bin/sh\n")

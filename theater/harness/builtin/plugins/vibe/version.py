@@ -40,6 +40,15 @@ def _probe(target: str) -> tuple[int, int, int] | None:
     return parse_vibe_version(result.stdout)
 
 
+def resolve_vibe_binary(binary: str | None = None) -> str | None:
+    """The absolute path the daemon's PATH finds, or ``None`` when it does not.
+
+    Launch argv[0] uses this so the pane runs the exact binary the version probe
+    resolved; the pane's PATH may point at a different install.
+    """
+    return shutil.which(binary or "vibe")
+
+
 def installed_vibe_version(binary: str | None = None) -> tuple[int, int, int] | None:
     """The installed CLI's version, or ``None`` when it cannot be determined.
 
@@ -63,4 +72,4 @@ def installed_vibe_version(binary: str | None = None) -> tuple[int, int, int] | 
     return _CACHE[key]
 
 
-__all__ = ["installed_vibe_version", "parse_vibe_version"]
+__all__ = ["installed_vibe_version", "parse_vibe_version", "resolve_vibe_binary"]

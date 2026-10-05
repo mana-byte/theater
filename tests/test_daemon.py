@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 
 import pytest
@@ -89,8 +90,10 @@ async def test_spawn_creates_an_identified_participant(client, terminal_provider
 
     terminal = terminal_provider.creations[0]
     assert terminal["background"] is True
+    # argv[0] is the resolved binary (the fixture maps harness CLIs to sys.executable),
+    # not a bare name the pane would re-resolve on its own PATH.
     assert terminal["command"] == [
-        "vibe",
+        sys.executable,
         "--agent=ask",
         "--",
         "say hello",
@@ -115,7 +118,7 @@ async def test_spawn_response_format_augments_and_persists_prompt(client, termin
     )
 
     assert terminal_provider.creations[0]["command"] == [
-        "vibe",
+        sys.executable,
         "--agent=ask",
         "--",
         expected,
@@ -140,7 +143,7 @@ async def test_promptless_spawn_with_empty_response_format_stays_running(client,
     )
 
     assert terminal_provider.creations[0]["command"] == [
-        "vibe",
+        sys.executable,
         "--agent=ask",
         "--",
         expected,

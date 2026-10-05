@@ -25,7 +25,7 @@ from .constants import (
 )
 from .identity import participant_root
 from .isolation import _canonical, isolation_marker_text, validate_isolated_domain
-from .version import installed_vibe_version
+from .version import installed_vibe_version, resolve_vibe_binary
 
 # Verified against real wheels: `ask` replaces `default` as the builtin
 # approval-per-tool profile in 2.24.1; `--yolo` exists from 2.17.0.
@@ -47,7 +47,9 @@ def plan_launch(
     version = installed_vibe_version(context.binary)
     # No --experimental-harness: the observer reads both the classic session log
     # and the Unified Session Store that flag opts into, so neither is required.
-    argv = ["vibe"]
+    # Launch the binary the probe resolved: the pane's PATH may find another
+    # install whose version lacks the argv chosen for the probed one.
+    argv = [resolve_vibe_binary(context.binary) or "vibe"]
     if approval == "yolo":
         if version is None or version >= _YOLO_FLOOR:
             argv.append("--yolo")
