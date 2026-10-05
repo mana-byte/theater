@@ -25,7 +25,7 @@ from theater.harness.contracts.manifest import LaunchManifest
 from theater.harness.normalization import literal_prompt_argument
 from theater.harness.transcript.discovery import root_domain_overlay
 
-from .config_root import claude_config_root, claude_projects_root
+from .config_root import claude_config_env, claude_config_root, claude_projects_root
 from .constants import CLAUDE_RECEIPT_EVENTS, CLAUDE_THINKING_SUMMARIES_KEY
 from .hooks import ClaudeHook, ClaudeHookEntry, ClaudeSettings
 
@@ -113,6 +113,9 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         argv.append(literal_prompt_argument(context.prompt))
     return LaunchPlan(
         argv=argv,
+        # The child's env comes from the terminal provider, not the daemon, so
+        # pin the root only when configured — else observer and child diverge.
+        env=claude_config_env(),
         files={
             settings_path: json.dumps(
                 _claude_receipt_settings(context.participant_id, token_path), indent=2

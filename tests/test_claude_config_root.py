@@ -12,11 +12,12 @@ from pathlib import Path
 import pytest
 
 from theater.harness.builtin.plugins.claude.launch import (
+    plan_launch,
     resume_launch_overlay,
     resume_preflight,
 )
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
-from theater.harness.contracts.callbacks import ResumeContext, ResumePreflightContext
+from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, ResumePreflightContext
 from theater.models import BadRequest, Participant
 
 SESSION = "11111111-1111-4111-8111-111111111111"
@@ -79,6 +80,25 @@ def test_custom_config_root_still_rejects_transcripts_outside_it(tmp_path, monke
     predecessor = _predecessor(default_root, stray)
     with pytest.raises(BadRequest, match="does not match"):
         resume_preflight(ResumePreflightContext(predecessor=predecessor))
+
+
+def test_plan_env_pins_config_dir_only_when_configured(tmp_path, monkeypatch) -> None:
+    def context() -> LaunchContext:
+        return LaunchContext(
+            participant_id="abc123",
+            prompt="hi",
+            config_path=tmp_path / "mcp.json",
+            approval="manual",
+        )
+
+    config = tmp_path / "claude-config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    plan = plan_launch(context())
+    assert plan.env["CLAUDE_CONFIG_DIR"] == str(config)
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    plan = plan_launch(context())
+    assert "CLAUDE_CONFIG_DIR" not in plan.env
 
 
 def test_default_root_when_env_unset_is_unchanged(tmp_path, monkeypatch) -> None:
