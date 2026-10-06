@@ -9,7 +9,10 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from theater.constants.observation import LAST_ACTIVITY_REFRESH_SECONDS
+from theater.constants.observation import (
+    LAST_ACTIVITY_REFRESH_SECONDS,
+    SCREEN_CHECK_BACKOFF_CAP_SECONDS,
+)
 from theater.daemon import lineage
 from theater.daemon.observation.screen import end_turn_from_screen_text
 from theater.daemon.observation.turns import Turn, TurnAccumulator
@@ -58,12 +61,16 @@ class QuietClock:
     screen_quiet_since: float | None = None
     rescue_since: float | None = None
     last_text: str = ""
+    screen_backoff: int = 0
+    last_screen_kind: ScreenKind | None = None
 
     def stir(self) -> None:
         """Semantic output arrived: every timer starts again from zero."""
         self.quiet_since = None
         self.screen_quiet_since = None
         self.rescue_since = None
+        self.screen_backoff = 0
+        self.last_screen_kind = None
 
     def stir_raw(self) -> None:
         """Input was consumed but produced no event or authoritative status."""
@@ -78,6 +85,23 @@ class QuietClock:
             self.screen_quiet_since = now
         if self.rescue_since is None:
             self.rescue_since = now
+
+    def screen_interval(self, base: float) -> float:
+        """The period: doubles while an idle prompt holds, then caps.
+
+        Only PROMPT backs off: a WORKING or approval reading gates sends and awaits, so its exit
+        is looked for at the base period.
+        """
+        if self.last_screen_kind is not ScreenKind.PROMPT:
+            return base
+        return max(base, min(base * 2**self.screen_backoff, SCREEN_CHECK_BACKOFF_CAP_SECONDS))
+
+    def note_screen(self, kind: ScreenKind | None) -> None:
+        """A changed reading restarts the period; an unchanged one stretches it."""
+        self.screen_backoff = (
+            min(self.screen_backoff + 1, 8) if kind == self.last_screen_kind else 0
+        )
+        self.last_screen_kind = kind
 
     def quiet_for(self, now: float) -> float:
         return now - (self.quiet_since if self.quiet_since is not None else now)
@@ -310,7 +334,7 @@ class Reducer:
         elif reading.kind is ScreenKind.PROMPT:
             self.settle(pid, Status.IDLE)
 
-    async def check_idle_screen(self, pid: str, observer: HarnessObserver) -> None:
+    async def check_idle_screen(self, pid: str, observer: HarnessObserver):
         """Map the rendered screen to a status, for any non-DEAD participant.
 
         The mapping is applied regardless of confidence. Being wrong here costs
@@ -318,12 +342,13 @@ class Reducer:
         """
         p = self.store.get_participant(pid)
         if p is None or p.status is Status.DEAD:
-            return
+            return None
         capture = await self._capture_fn(pid)
         if capture is None:
-            return
+            return None
         reading = observer.screen_reading(capture)
         self.apply_screen_reading(pid, reading)
+        return reading
 
     async def screen_is_positively_working(self, pid: str, observer: HarnessObserver) -> bool:
         from theater.harness import ScreenConfidence
@@ -400,7 +425,7 @@ class Reducer:
             reset_identity_loss_fn(pid)
             clock.quiet_since = now
 
-        if clock.screen_quiet_for(now) > self.awaiting:
+        if clock.screen_quiet_for(now) > clock.screen_interval(self.awaiting):
             await self._screen_status_due(
                 pid,
                 observer,
@@ -449,10 +474,11 @@ class Reducer:
         now = self._monotonic_fn()
         if clock.screen_quiet_since is None:
             clock.screen_quiet_since = now
-        if clock.screen_quiet_for(now) > self.awaiting:
+        if clock.screen_quiet_for(now) > clock.screen_interval(self.awaiting):
             if source_status is Status.AWAITING_INPUT:
                 return
-            await self.check_idle_screen(pid, observer)
+            reading = await self.check_idle_screen(pid, observer)
+            clock.note_screen(reading.kind if reading is not None else None)
             clock.screen_quiet_since = now
 
     def _unblock(self, pid: str) -> None:

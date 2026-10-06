@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +18,10 @@ import pytest
 from shipped import VibeHarness
 from sqlalchemy import delete, update
 
-from theater.constants.observation import LAST_ACTIVITY_REFRESH_SECONDS
+from theater.constants.observation import (
+    LAST_ACTIVITY_REFRESH_SECONDS,
+    SCREEN_CHECK_BACKOFF_CAP_SECONDS,
+)
 from theater.daemon import methods as methods_mod
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
@@ -2314,3 +2318,68 @@ def test_restating_a_status_refreshes_last_activity_only_every_few_seconds(regis
     )
     observer._settle(p.id, Status.WORKING)
     assert touches == [p.id]
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_screen_is_inspected_at_growing_intervals_until_something_moves(
+    registry,
+):
+    """A quiet participant's screen arm backs off, and any progress restores the base period."""
+    now = [0.0]
+    reading = ScreenReading(ScreenKind.PROMPT, ScreenConfidence.LOW)
+    observer, screen, p = screen_checked(
+        registry,
+        reading=reading,
+        awaiting=1.0,
+        monotonic_clock=lambda: now[0],
+    )
+    inspects: list[float] = []
+
+    async def capture_pane(_pane):
+        inspects.append(now[0])
+        return "$ "
+
+    observer._capture = capture_pane
+    clock = QuietClock()
+    for tick in range(0, 40):
+        now[0] = float(tick)
+        await observer._screen_status_due(p.id, screen, clock)
+
+    gaps = [b - a for a, b in pairwise(inspects)]
+    assert gaps[0] < gaps[-1] <= SCREEN_CHECK_BACKOFF_CAP_SECONDS + 1
+    assert len(inspects) < 15
+
+    now[0] += 1.5
+    before = len(inspects)
+    await observer._screen_status_due(p.id, screen, clock)
+    assert len(inspects) == before  # still inside the stretched period
+
+    clock.stir()
+    await observer._screen_status_due(p.id, screen, clock)
+    now[0] += 1.5
+    await observer._screen_status_due(p.id, screen, clock)
+    assert len(inspects) == before + 1  # progress restored the base period
+
+
+@pytest.mark.asyncio
+async def test_a_working_screen_is_never_backed_off_because_it_gates_sends(registry):
+    now = [0.0]
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.WORKING, ScreenConfidence.LOW),
+        awaiting=1.0,
+        monotonic_clock=lambda: now[0],
+    )
+    inspects: list[float] = []
+
+    async def capture_pane(_pane):
+        inspects.append(now[0])
+        return "working"
+
+    observer._capture = capture_pane
+    clock = QuietClock()
+    for tick in range(0, 21):
+        now[0] = float(tick)
+        await observer._screen_status_due(p.id, screen, clock)
+
+    assert {b - a for a, b in pairwise(inspects)} == {2.0}  # the base period, forever

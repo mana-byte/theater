@@ -56,3 +56,7 @@ SKIPPED_RECORD_ERROR_CODES = frozenset({"pi_transcript_oversized_record"})
 #: a quiet transcript is re-probed at most this often, doubling while nothing changes.
 ROTATION_PROBE_MIN_SECONDS = 5.0
 ROTATION_PROBE_MAX_SECONDS = 60.0
+
+#: An idle prompt's unchanged screen is re-inspected at doubling intervals up to this cap; each
+#: inspect is a terminal round-trip. Working and approval screens keep the base period.
+SCREEN_CHECK_BACKOFF_CAP_SECONDS = 10.0
