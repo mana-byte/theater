@@ -119,6 +119,9 @@ def unwrap(value: object, depth: int = 0) -> object:
             return {**rest, "content": body} if rest else body
         return {key: unwrap(item, depth + 1) for key, item in value.items()}
     if isinstance(value, list):
+        text = _flatten_text_parts(value)
+        if text is not None:
+            return unwrap(text, depth + 1)
         return [unwrap(item, depth + 1) for item in value]
     return value
 
@@ -190,8 +193,54 @@ def _last_member_end(value: str) -> tuple[int, tuple[str, ...]] | None:
     return cut
 
 
+_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
+# What `lenient_json` appends when a preview was cut: a trailing string, or a key with value "".
+_CUT_NOTE = re.compile(r"… (?:\d+ bytes omitted|truncated)")
+
+
 def _is_text_part(part: object) -> bool:
-    return isinstance(part, dict) and part.get("type", "text") == "text" and "text" in part
+    if not isinstance(part, dict) or "text" not in part:
+        return False
+    kind = part.get("type", "text")
+    return isinstance(kind, str) and kind in _TEXT_PART_TYPES
+
+
+def _flatten_text_parts(items: list) -> str | None:
+    """One string for a list that is only text parts (Codex's `input_text` output), else None.
+
+    Needs one explicitly typed part, so a generic `[{"text": …}]` stays data; a part that lost
+    its type to truncation is still accepted, as is the cut note `lenient_json` leaves.
+    """
+    note = None
+    if items and isinstance(items[-1], str) and _CUT_NOTE.fullmatch(items[-1]):
+        items, note = items[:-1], items[-1]
+    texts: list[str] = []
+    typed = False
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            return None
+        for key in item.keys() - {"type", "text"}:
+            if (
+                index != len(items) - 1
+                or item[key] != ""
+                or not isinstance(key, str)
+                or not _CUT_NOTE.fullmatch(key)
+            ):
+                return None
+            note = key
+        kind = item.get("type")
+        if kind is not None:
+            if not isinstance(kind, str) or kind not in _TEXT_PART_TYPES:
+                return None
+            typed = True
+        if item["text"]:
+            texts.append(item["text"])
+    if not typed or not texts:
+        return None
+    joined = ""
+    for text in (*texts, *([note] if note else [])):
+        joined += text if not joined or joined.endswith("\n") else f"\n{text}"
+    return joined
 
 
 def lexer_for_path(path: str | None) -> str | None:
@@ -210,6 +259,7 @@ def lexer_for_path(path: str | None) -> str | None:
 
 
 NODE_META = "trajectory_detail_node"
+_VERBATIM = frozenset({ContentFormat.CODE, ContentFormat.DIFF, ContentFormat.PATH})
 
 
 def render_content(
@@ -229,10 +279,18 @@ def render_content(
     if format is ContentFormat.MARKDOWN:
         return _ThemedMarkdown(value, palette)
     data = _structured(value, format, lexer)
+    if isinstance(data, str):  # JSON-looking text that unwrapped to plain text
+        return _plain(data, ContentFormat.TEXT, None, palette)
     if data is not None:
         return DataView(data, palette, scope, toggled)
     if format is ContentFormat.JSON:
         return _text(value, palette.text)
+    return _plain(value, format, lexer, palette)
+
+
+def _plain(
+    value: str, format: ContentFormat, lexer: str | None, palette: Palette
+) -> RenderableType:
     if _ANSI.search(value):
         raw = value.replace("\\x1b[", "\x1b[")
         return _strip_backgrounds(Text.from_ansi(raw, no_wrap=False))
@@ -248,12 +306,16 @@ def render_content(
 
 
 def _structured(value: str, format: ContentFormat, lexer: str | None) -> object | None:
-    """Decode JSON, YAML, or TOML into data, or None when the text is not structured."""
+    """Decode JSON, YAML, or TOML into data (or plain text), or None when not structured."""
+    if lexer is None and format in _VERBATIM:
+        return None  # code, diffs and paths are shown as written, whatever their first character
     stripped = value.lstrip()
     if format is ContentFormat.JSON or stripped[:1] in {"{", "["}:
         decoded = unwrap(value)
-        if isinstance(decoded, (dict, list)) or format is ContentFormat.JSON:
-            return decoded if isinstance(decoded, (dict, list)) else None
+        if isinstance(decoded, (dict, list)) or (isinstance(decoded, str) and decoded != value):
+            return decoded
+        if format is ContentFormat.JSON:
+            return None
     toml_like = _TOML_TABLE.search(value) and _TOML_KEY.search(value)
     if lexer == "toml" or (lexer is None and toml_like):
         return _parse_toml(value)

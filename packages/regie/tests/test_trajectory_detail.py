@@ -13,7 +13,12 @@ from rich.console import Console
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog
 
-from theater.frontend.trajectory import ParticipantLink, TrajectoryRecord, requests_for_records
+from theater.frontend.trajectory import (
+    ContentFormat,
+    ParticipantLink,
+    TrajectoryRecord,
+    requests_for_records,
+)
 
 
 def _record(record_id: str, kind: str, lane: str, **fields: object) -> TrajectoryRecord:
@@ -56,6 +61,76 @@ def test_mcp_results_unwrap_nested_json_even_when_cut_in_the_middle() -> None:
     assert "… 900 bytes omitted" in rendered  # the cut is labelled, not hidden
     assert "_meta" not in rendered  # protocol envelope noise is dropped
     assert lenient_json('[1, 2, {"k"') == [1, 2, "… truncated"]
+
+
+_CODEX_RESULT = json.dumps(
+    [
+        {"text": "Script completed\nWall time 0.3 seconds\nOutput:\n", "type": "input_text"},
+        {"text": "FINAL1 exit=0\nXML OK\n", "type": "input_text"},
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    ("value", "format", "shown", "hidden"),
+    [
+        (
+            _CODEX_RESULT,
+            ContentFormat.JSON,
+            ["Wall time 0.3 seconds\nOutput:\nFINAL1"],
+            ["input_text"],
+        ),
+        (
+            '[{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]',
+            ContentFormat.JSON,
+            ["first\nsecond"],
+            ["type:"],
+        ),
+        (  # cut between members: the typeless last part and the note survive
+            '[{"text": "a\\n", "type": "input_text"}, {"text": "b… 99 bytes omitted …c"',
+            ContentFormat.JSON,
+            ["a\n", "… 99 bytes omitted"],
+            ["input_text"],
+        ),
+        (
+            '[{"text": "{\\"ok\\": true, \\"n\\": 3}", "type": "output_text"}]',
+            ContentFormat.JSON,
+            ["ok: true", "n: 3"],  # JSON inside a part becomes a tree
+            ["output_text"],
+        ),
+        (  # not all text parts, no typed part, or nothing to show: stays data
+            '[{"type": "input_text", "text": "hi"}, {"type": "input_image", "image_url": "x"}]',
+            ContentFormat.JSON,
+            ["type: input_image"],
+            [],
+        ),
+        ('[{"text": "hi"}, {"text": "yo"}]', ContentFormat.JSON, ["text: hi", "text: yo"], []),
+        ('[{"text": "", "type": "input_text"}]', ContentFormat.JSON, ["type: input_text"], []),
+        (  # code is shown as written even when it opens like JSON
+            '[1, 2].map((x) => x * 2);\ntext("ok");',
+            ContentFormat.CODE,
+            ["[1, 2].map((x) => x * 2);"],
+            ["•"],
+        ),
+    ],
+    ids=["codex", "claude-blocks", "cut", "json-in-part", "mixed", "untyped", "empty", "code"],
+)
+def test_lists_of_text_parts_render_as_their_text(value, format, shown, hidden) -> None:
+    rendered = _plain(render_content(value, Palette(), format=format))
+
+    for expected in shown:
+        assert expected in rendered
+    for unexpected in hidden:
+        assert unexpected not in rendered
+
+
+def test_odd_part_shapes_stay_data_instead_of_breaking_the_render() -> None:
+    unhashable_type = '{"content": [{"type": ["x"], "text": "a"}]}'
+    yaml_int_key = "- type: text\n  text: a\n- type: text\n  text: b\n  1: ''\n"
+
+    data = render_content(unhashable_type, Palette(), format=ContentFormat.JSON)
+    assert "text: a" in _plain(data)
+    assert "text: b" in _plain(render_content(yaml_int_key, Palette(), lexer="yaml"))
 
 
 def test_a_list_result_joined_as_several_json_texts_renders_as_data() -> None:
