@@ -197,8 +197,9 @@ worktree: if True, create a git worktree for the child with its own
           --delete-branch` once no participant uses them. Dirty worktrees
           and unmerged branches are retained unless separately forced.
           Cannot be combined with resume.
-name:      optional live-only alias. It is case-insensitively unique while the
-           child lives, is never persisted, and is not inherited on resume.
+name:      optional alias. It is case-insensitively unique while the child lives,
+           survives daemon restarts, is released at death, and is not inherited
+           on resume.
 description: highly recommended for user clarity: a short, plain, specific,
            non-verbose summary of the child's purpose (maximum 160 Unicode
            codepoints). It is durable and is inherited by resume unless an
@@ -536,10 +537,11 @@ def build(
         to deliver into.
 
         Names are unique among live participants and every tool's `target`
-        accepts one, so prefer names for live agents. They are live-only: a
-        dead participant has no name (the field is omitted) and a name may be
-        recycled after a death, so use the id for dead rows, resume, and any
-        reference you keep across a death. Ids stay valid until retention GC.
+        accepts one, so prefer names for live agents. They last while the
+        participant lives, daemon restarts included: a dead participant has no
+        name (the field is omitted) and a name may be recycled after a death,
+        so use the id for dead rows, resume, and any reference you keep across a
+        death. Ids stay valid until retention GC.
         Empty fields are omitted from every row.
 
         Historical rows may retain `tmux_server_identity`, but it is not a live
@@ -689,7 +691,8 @@ def build(
         `target` defaults to yourself and accepts a stable participant id or a
         current live name. You may update only yourself or a direct child;
         dead targets are refused. Supply at least one field. `name` is a
-        live-only, case-insensitively unique alias and cannot be cleared.
+        case-insensitively unique alias, kept while the target lives, and cannot
+        be cleared.
         `description` is durable; use an empty string to clear it, or a short,
         plain, specific, non-verbose single-line summary up to 160 Unicode
         codepoints. Keeping your own description aligned with the task at hand

@@ -68,9 +68,10 @@ def _add_identity_commands(sub) -> None:
     kill.add_argument(
         "id",
         help=(
-            "Participant id or name. Names are live-only and recyclable; a "
-            "dead participant has no name. Use the id for destructive "
-            "targeting — a recycled name can point at a successor."
+            "Participant id or name. Names last while a participant lives "
+            "(daemon restarts included) and are recyclable; a dead participant has "
+            "no name. Use the id for destructive targeting — a recycled name can "
+            "point at a successor."
         ),
     )
 
