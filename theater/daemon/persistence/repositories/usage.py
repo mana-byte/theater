@@ -63,8 +63,19 @@ class UsageRepository:
                 index_elements=[usage.c.participant_id, usage.c.usage_key]
             )
         result = self._db.conn.execute(statement)
-        if result.rowcount > 0:
-            self._summary_cache = None
+        if result.rowcount > 0 and self._summary_cache is not None:
+            # None (a ts SQLite cannot date) drops the cache: the next read rescans.
+            self._summary_cache = self._summary_cache.with_row(
+                ts,
+                {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_creation_input_tokens": cache_creation_input_tokens,
+                    "cache_read_input_tokens": cache_read_input_tokens,
+                    "reasoning_output_tokens": reasoning_output_tokens,
+                    "cost_microcents": cost_microcents,
+                },
+            )
         return result.rowcount > 0
 
     def totals(self, *, since: float | None = None) -> dict:
@@ -182,8 +193,8 @@ class UsageRepository:
             )
         local_date = func.date(usage.c.ts, "unixepoch", "localtime")
         selected.append(
-            func.count(distinct(case((usage.c.ts >= average_since, local_date)))).label(
-                "average_active_days"
+            func.group_concat(distinct(case((usage.c.ts >= average_since, local_date)))).label(
+                "average_dates"
             )
         )
         row = self._db.conn.execute(select(*selected)).fetchone()
@@ -193,13 +204,19 @@ class UsageRepository:
             group: {name: values[f"{group}_{name}"] for name in columns}
             for group in ("all_time", "windowed", "average")
         }
-        result["average"]["active_days"] = values["average_active_days"]
+        active_dates = frozenset(
+            values["average_dates"].split(",") if values["average_dates"] else ()
+        )
+        result["average"]["active_days"] = len(active_dates)
         if math.isfinite(since) and math.isfinite(average_since):
             self._summary_cache = SummaryCache(
                 window=CutoffRange(values["window_excluded"], values["window_included"]),
                 average=CutoffRange(values["average_excluded"], values["average_included"]),
                 timezone=timezone_key(),
                 values={key: dict(value) for key, value in result.items()},
+                since=since,
+                average_since=average_since,
+                active_dates=active_dates,
             )
         return result
 
