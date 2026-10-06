@@ -108,6 +108,21 @@ class ProviderPresenceSource:
         """Return cached audit timestamps without exposing mutable observations."""
         return tuple(observation.observed_at for observation in self._observations.values())
 
+    def is_recent(self, participant_id: str, max_age: float) -> bool:
+        """Whether a settled observation of the current binding is younger than ``max_age``."""
+        observation = self._observations.get(participant_id)
+        if observation is None or observation.state is PresenceState.UNKNOWN:
+            return False
+        try:
+            binding = self.binding(participant_id)
+        except Exception:
+            return False
+        return (
+            binding is not None
+            and observation.binding_key == self._binding_key(binding)
+            and self._clock() - observation.observed_mono <= max_age
+        )
+
     def binding(self, participant_id: str) -> TerminalBindingRecord | None:
         store = getattr(self._registry, "store", None)
         repository = getattr(store, "terminal_bindings", None)

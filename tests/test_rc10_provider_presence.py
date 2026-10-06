@@ -159,6 +159,31 @@ def provider_monitor():
     return monitor, service, registry, clock
 
 
+async def test_periodic_refresh_skips_fresh_evidence_but_always_retries_unknown(
+    provider_monitor,
+) -> None:
+    monitor, service, _registry, clock = provider_monitor
+    service.responses.extend(
+        [result("absent", 1), result("absent", 2), result("unknown", 3), result("absent", 4)]
+    )
+    await monitor.refresh()
+    assert service.inspect_calls == 1
+
+    clock.value += 0.5
+    await monitor.refresh(reuse_within=1.0)
+    assert service.inspect_calls == 1  # fresh enough: no round trip
+
+    clock.value += 1.0
+    await monitor.refresh(reuse_within=1.0)
+    assert service.inspect_calls == 2  # aged past the reuse window
+
+    await monitor.refresh()
+    assert service.inspect_calls == 3  # an explicit refresh always inspects
+
+    await monitor.refresh(reuse_within=1.0)
+    assert service.inspect_calls == 4  # unknown evidence is retried at once, however young
+
+
 @pytest.mark.parametrize("state", ["present", "absent", "unknown"])
 async def test_provider_inspect_projects_public_presence_states(
     provider_monitor, state: str

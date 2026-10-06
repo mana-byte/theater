@@ -53,6 +53,7 @@ class PresenceMonitor:
         self._wake = asyncio.Event()
         self._published_states: dict[str, PresenceState] = {}
         self._refresh_task: asyncio.Task[None] | None = None
+        self._refresh_reuse = 0.0
         self._target_tasks: dict[str, _TargetRefresh] = {}
         self._loop_task: asyncio.Task[None] | None = None
         self._provider = ProviderPresenceSource(
@@ -120,13 +121,18 @@ class PresenceMonitor:
             None,
         )
 
-    async def refresh(self) -> None:
+    async def refresh(self, *, reuse_within: float = 0.0) -> None:
+        """Refresh every participant, except those observed within ``reuse_within`` seconds."""
         if self._stopping:
             return
-        task = self._refresh_task
-        if task is None or task.done():
-            task = asyncio.create_task(self._refresh_owned(), name="presence-refresh-once")
-            self._refresh_task = task
+        while (task := self._refresh_task) is not None and not task.done():
+            reuse = self._refresh_reuse
+            await asyncio.shield(task)
+            if reuse <= reuse_within:
+                return  # the run we joined was at least as fresh as asked
+        self._refresh_reuse = reuse_within
+        task = asyncio.create_task(self._refresh_owned(reuse_within), name="presence-refresh-once")
+        self._refresh_task = task
         await asyncio.shield(task)
 
     async def require_absent(self, participant_id: str) -> None:
@@ -213,9 +219,14 @@ class PresenceMonitor:
         self._loop_task = self._refresh_task = None
         self._target_tasks.clear()
 
-    async def _refresh_owned(self) -> None:
+    async def _refresh_owned(self, reuse_within: float = 0.0) -> None:
         participants = tuple(self._registry.list())
-        await asyncio.gather(*(self._refresh_target(item.id) for item in participants))
+        due = [
+            item
+            for item in participants
+            if reuse_within <= 0 or not self._provider.is_recent(item.id, reuse_within)
+        ]
+        await asyncio.gather(*(self._refresh_target(item.id) for item in due))
         if not self._stopping:
             if not participants:
                 self._bump_revision()
@@ -298,7 +309,8 @@ class PresenceMonitor:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), self._refresh_interval)
             self._wake.clear()
-            await self.refresh()
+            # Evidence gathered by another path counts; a quarter interval leaves staleness slack.
+            await self.refresh(reuse_within=self._refresh_interval / 4)
 
 
 __all__ = ["PresenceMonitor"]
