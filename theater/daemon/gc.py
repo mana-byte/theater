@@ -36,6 +36,7 @@ from theater.daemon.schema import (
     control_operations,
     jobs,
     native_terminal_evidence,
+    participant_names,
     participant_runtime_bindings,
     participants,
     terminal_bindings,
@@ -452,6 +453,7 @@ def _delete_participant_dependents(connection, participant_id: str) -> None:
         participant_runtime_bindings,
         control_operations,
         native_terminal_evidence,
+        participant_names,
     ):
         connection.execute(delete(table).where(table.c.participant_id == participant_id))
 

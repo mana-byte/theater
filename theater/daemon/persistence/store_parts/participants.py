@@ -31,6 +31,7 @@ class ParticipantStore(StoreHost):
     def upsert_participant(self, p: Participant, *, connection=None) -> None:
         if connection is not None:
             self._participants.upsert(p, connection=connection)
+            self._release_dead_name(p, connection)
             return
         with self.write_unit() as unit:
             before = self._participants.get(p.id, connection=unit.connection)
@@ -46,6 +47,10 @@ class ParticipantStore(StoreHost):
                 ).payload
             )
             self._participants.upsert(p, connection=unit.connection)
+            # Only a NEW row stores its name here: a stale object must never undo a rename.
+            if before is None and p.name is not None and p.status is not Status.DEAD:
+                self._participant_names.set(p.id, p.name, connection=unit.connection)
+            self._release_dead_name(p, unit.connection)
             persisted = self._participants.get(p.id, connection=unit.connection)
             assert persisted is not None
             persisted.name = p.name
@@ -58,6 +63,23 @@ class ParticipantStore(StoreHost):
             )
             if before_payload != event.payload:
                 self.journal.append_group(unit, [event])
+
+    def _release_dead_name(self, p: Participant, connection) -> None:
+        if p.status is Status.DEAD:
+            self._participant_names.delete(p.id, connection=connection)
+
+    def live_participant_names(self) -> list[tuple[str, str]]:
+        """Stored (id, name) of non-dead participants, oldest first."""
+        return self._participant_names.live()
+
+    def set_participant_name(self, pid: str, name: str, *, connection=None) -> None:
+        self._participant_names.set(pid, name, connection=connection)
+
+    def delete_participant_name(self, pid: str, *, connection=None) -> None:
+        self._participant_names.delete(pid, connection=connection)
+
+    def purge_stale_participant_names(self) -> None:
+        self._participant_names.purge_stale()
 
     def get_participant(self, pid: str, *, connection=None) -> Participant | None:
         return self._participants.get(pid, connection=connection)

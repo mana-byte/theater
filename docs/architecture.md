@@ -111,8 +111,13 @@ has completed. Like the rest of the machine-wide participant list, session ids
 follow Theater's single-user trust model; they are routing metadata, not
 authorization tokens.
 
-Participant names are deliberately live-only, recyclable aliases: they make
-current interaction readable without becoming historical identifiers.
+Participant names are recyclable aliases of live participants: they make
+current interaction readable without becoming historical identifiers. A name is
+stored in `participant_names` and survives a daemon restart; death releases it
+(the row is dropped, or ignored and purged at the next start) and the mask can
+go to another participant. Uniqueness among live participants is enforced by the
+registry, not by an index. Names persisted nowhere before this table existed, so
+the first start after upgrading assigns fresh ones once.
 Descriptions are different metadata. They are bounded, persisted with the
 participant row, retained after death for résumé discovery, and inherited by a
 resumed successor unless the caller explicitly replaces or clears them.
@@ -1006,7 +1011,7 @@ theater/
 ├── paths.py            $THEATER_HOME layout
 ├── formatting.py       shared CLI/régie rendering, no rich/textual
 ├── proc.py             process facts from ps / proc / lsof
-├── names.py            live-only participant name aliases (recyclable masks)
+├── names.py            live participant names, kept across restarts (recyclable masks)
 ├── provenance.py       transcript-provenance predicates (trusted vs untrusted)
 ├── transcript_identity.py  shared transcript identity and location canonicalisation
 ├── resume_floor.py     persisted pre-launch stream-position fact for resume

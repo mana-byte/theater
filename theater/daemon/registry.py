@@ -13,6 +13,7 @@ from theater import names
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_METADATA_CHANGED
 from theater.daemon import lineage
 from theater.daemon.events.publication import next_revision, participant_event
+from theater.daemon.persistence.repositories.journal import MAX_EVENTS_PER_TRANSACTION
 from theater.daemon.schema import participants
 from theater.daemon.store import Store
 from theater.harness import normalize
@@ -34,10 +35,11 @@ from theater.models import (
 class Registry:
     def __init__(self, store: Store):
         self.store = store
-        # participant id -> runtime name; never persisted, only live participants.
+        # participant id -> name of a live participant; persist_names() stores the new ones.
         self._names: dict[str, str] = {}
         self._participant_cleanup: list[Callable[[str], None]] = []
         self._addressable: Callable[[str], bool] | None = None
+        self._load_names()
         for participant in self.store.list_participants():
             self._named(participant)
 
@@ -54,6 +56,45 @@ class Registry:
             callback(participant_id)
 
     # ---- naming --------------------------------------------------------
+
+    def _load_names(self) -> None:
+        """Adopt the stored names of live participants; the oldest wins a case-insensitive tie."""
+        taken: set[str] = set()
+        for participant_id, name in self.store.live_participant_names():
+            if names.is_valid_name(name) and name.casefold() not in taken:
+                self._names[participant_id] = name
+                taken.add(name.casefold())
+
+    def persist_names(self) -> None:
+        """Daemon start: drop stale rows, then store and journal each name not yet stored.
+
+        Only legacy rows, duplicate losers and invalid stored names get here; a restart that
+        restores every name journals nothing.
+        """
+        self.store.purge_stale_participant_names()
+        stored = dict(self.store.live_participant_names())
+        pending = [
+            self._named(p)
+            for p in self.store.list_participants()
+            if self._names.get(p.id) not in {None, stored.get(p.id)}
+        ]
+        for start in range(0, len(pending), MAX_EVENTS_PER_TRANSACTION):
+            with self.store.write_unit() as unit:
+                events = []
+                for offset, p in enumerate(pending[start : start + MAX_EVENTS_PER_TRANSACTION]):
+                    assert p.name is not None
+                    self.store.set_participant_name(p.id, p.name, connection=unit.connection)
+                    revision = next_revision(self.store, unit.connection, offset=offset)
+                    events.append(
+                        participant_event(
+                            self.store,
+                            p,
+                            unit.connection,
+                            revision=revision,
+                            recorded_at=now(),
+                        )
+                    )
+                self.store.journal.append_group(unit, events)
 
     def _named(self, p: Participant) -> Participant:
         """Ensure *p* has a runtime name, assigning one lazily if needed.
@@ -200,6 +241,8 @@ class Registry:
             self._remember_name(p)
         else:
             self._upsert_in_connection(p, connection)
+            if p.name is not None:  # rolls back with the reservation; memory follows the commit
+                self.store.set_participant_name(p.id, p.name, connection=connection)
         if connection is None:
             self.store.bus_append(
                 "participant.created",
@@ -367,6 +410,7 @@ class Registry:
 
         updated = replace(p, name=new_name)
         with self.store.write_unit() as unit:
+            self.store.set_participant_name(p.id, new_name, connection=unit.connection)
             self.store.journal.append_group(
                 unit,
                 [
@@ -418,6 +462,8 @@ class Registry:
             with self.store.write_unit() as unit:
                 if "description" in changed:
                     self._upsert_in_connection(p, unit.connection)
+                if "name" in changed:
+                    self.store.set_participant_name(p.id, p.name or "", connection=unit.connection)
                 self.store.journal.append_group(
                     unit,
                     [
@@ -480,6 +526,7 @@ class Registry:
         if p is None or p.status is Status.DEAD:
             # Already dead or gone: still purge stale name entry so the mask can be reused.
             self._names.pop(pid, None)
+            self.store.delete_participant_name(pid)
             self.store.delete_receipt_token(pid)
             self.store.delete_channel_credentials(pid)
             self.store.delete_mcp_plugin_credentials(pid)
@@ -500,6 +547,7 @@ class Registry:
             self.store.delete_mcp_plugin_credentials(p.id)
             self._cleanup_participant(p.id)
             self._names.pop(p.id, None)
+            self.store.delete_participant_name(p.id)
 
     def touch(self, pid: str) -> None:
         self.store.touch(pid)

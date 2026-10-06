@@ -21,6 +21,7 @@ from theater.daemon.persistence.repositories.native_evidence import (
     NativeTerminalEvidenceRepository,
 )
 from theater.daemon.persistence.repositories.operations import OperationRepository
+from theater.daemon.persistence.repositories.participant_names import ParticipantNameRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.persistence.repositories.providers import ProviderRepository
 from theater.daemon.persistence.repositories.receipts import ReceiptRepository
@@ -68,6 +69,7 @@ class Store(
         self.conn = self._db.conn
 
         self._participants = ParticipantRepository(self._db)
+        self._participant_names = ParticipantNameRepository(self._db)
         self._artifacts = ArtifactRepository(self._db)
         self._jobs = JobRepository(self._db)
         self._bus = BusRepository(self._db)

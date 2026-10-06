@@ -126,7 +126,7 @@ def test_spawned_metadata_is_normalized_and_name_is_reserved_before_a_pane(regis
         for row in registry.store.bus_tail(limit=20)
         if row["kind"] == "participant.renamed" and row["to_id"] == participant.id
     ]
-    assert Registry(registry.store).get(participant.id).name != "Metadata-Child"
+    assert Registry(registry.store).get(participant.id).name == "Metadata-Child"  # survives restart
 
 
 @pytest.mark.parametrize("description", ["two\nlines", "bad\x00control", "x" * 161])

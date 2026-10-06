@@ -96,6 +96,12 @@ class Daemon:
     #: One shared monitor serves controls, awaits, and read-only projections.
     presence: PresenceMonitor
 
+    def _open_registry(self) -> Registry:
+        registry = Registry(self.store)
+        self.store.set_participant_name_resolver(registry.projection_name)
+        registry.persist_names()  # before anything serves, so restarts keep live names
+        return registry
+
     def __init__(
         self,
         *,
@@ -122,8 +128,7 @@ class Daemon:
             else:
                 _owned_store = Store(paths.db_path())
                 self.store = _owned_store
-            self.registry = Registry(self.store)
-            self.store.set_participant_name_resolver(self.registry.projection_name)
+            self.registry = self._open_registry()
             # Missing provider evidence yields UNKNOWN; protection never depends on a UI client.
             self.presence = PresenceMonitor(self.registry, on_change=self._presence_changed)
             self.hook_runtime = HookRuntime(

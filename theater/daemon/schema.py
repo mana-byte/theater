@@ -168,6 +168,15 @@ participant_artifacts = Table(
 
 Index("idx_participant_artifacts_participant", participant_artifacts.c.participant_id)
 
+# The name of a live participant, kept across daemon restarts. Uniqueness is the registry's job,
+# not an index's: rows of participants that died unobserved are ignored on load and purged.
+participant_names = Table(
+    "participant_names",
+    metadata,
+    Column("participant_id", Text, primary_key=True),
+    Column("name", Text, nullable=False),
+)
+
 # The daemon stores a verifier, never a plugin credential.  One row is one
 # participant-scoped stdio sidecar and remains authoritative after a restart.
 participant_mcp_plugins = Table(

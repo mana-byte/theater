@@ -1,6 +1,7 @@
-"""Live-only participant names: speakable commedia dell'arte masks for 12-hex ids.
-Names are recycled after death and never persisted; the id is stable while the row is retained
-(GC-bounded), so use the id for anything spanning time or destructive.
+"""Live participant names: speakable commedia dell'arte masks for 12-hex ids.
+A name is kept while its participant lives, daemon restarts included, and recycled after death; the
+id is stable while the row is retained (GC-bounded), so use it for anything spanning time or
+destructive.
 """
 
 from __future__ import annotations

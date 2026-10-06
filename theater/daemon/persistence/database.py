@@ -27,7 +27,7 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 BASELINE = "0001"
 
 #: The latest revision. A legacy DB is stamped at BASELINE then upgraded here.
-HEAD = "0034"
+HEAD = "0035"
 
 #: Crossing this revision permanently ends the one-time RC9 drain requirement.
 RC10_BOUNDARY = "0032"

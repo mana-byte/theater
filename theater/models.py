@@ -109,7 +109,8 @@ class Participant:
     control_owner_id: str | None = None
     control_revision: int = 0
     workspace_id: str | None = None
-    # Live-only alias; never persisted. Use the id for cross-time targeting — names recycle.
+    # Alias of a live participant: kept across daemon restarts, released at death, recycled after.
+    # Use the id for cross-time targeting.
     name: str | None = None
 
     @property

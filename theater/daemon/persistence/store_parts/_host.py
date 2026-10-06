@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from theater.daemon.persistence.repositories.native_evidence import (
         NativeTerminalEvidenceRepository,
     )
+    from theater.daemon.persistence.repositories.participant_names import (
+        ParticipantNameRepository,
+    )
     from theater.daemon.persistence.repositories.participants import ParticipantRepository
     from theater.daemon.persistence.repositories.receipts import ReceiptRepository
     from theater.daemon.persistence.repositories.runtime_bindings import (
@@ -44,6 +47,7 @@ class StoreHost:
         engine: Engine
         journal: JournalRepository
         _participants: ParticipantRepository
+        _participant_names: ParticipantNameRepository
         _artifacts: ArtifactRepository
         _jobs: JobRepository
         _bus: BusRepository

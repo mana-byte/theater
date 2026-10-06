@@ -90,7 +90,7 @@ theater/
 ├── frontend/           public SDK, DTOs, wire client, schemas, state-follow controller
 │   └── trajectory.py   trajectory values frontends decode responses with (re-exports)
 ├── proc.py             process facts from `ps` / `/proc` / `lsof`: descendants, open files
-├── names.py            live-only participant name aliases (recyclable masks)
+├── names.py            live participant names, kept across restarts (recyclable masks)
 ├── provenance.py       transcript-provenance predicates (trusted vs untrusted)
 ├── transcript_identity.py  shared transcript identity and location canonicalisation
 ├── resume_floor.py     persisted pre-launch stream-position fact for resume
