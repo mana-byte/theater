@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 
 import pytest
@@ -246,6 +247,113 @@ async def test_fresh_read_does_not_queue_behind_an_older_read(monkeypatch):
     finally:
         release_old.set()
         await monitor.aclose()
+
+
+async def test_inspections_share_one_read_begun_after_their_requests_arrived(monkeypatch):
+    class Hooks:
+        def __init__(self, identity):
+            self.identity = ServerIdentity.parse(identity)
+
+        async def arm(self):
+            return True
+
+        async def wait(self):
+            await asyncio.Event().wait()
+
+        async def close(self):
+            pass
+
+    reads = 0
+
+    async def read(_identity):
+        nonlocal reads
+        reads += 1
+        return _facts(_client(flags=frozenset()) if reads > 1 else _client())
+
+    monkeypatch.setattr("regie.tmux.focus_monitor.FocusHooks", Hooks)
+    monkeypatch.setattr("regie.tmux.focus_monitor.read_inventory", read)
+    monitor = FocusMonitor()
+    await monitor.start(_SERVER)
+    try:
+        arrived = time.monotonic()
+        before = reads
+        await asyncio.sleep(0.01)
+        states = [(await monitor.observe(_pane(), requested_at=arrived)).state for _ in range(5)]
+        assert states == ["absent"] * 5
+        assert reads == before + 1  # one read answered every request that predates it
+
+        await monitor.observe(_pane(), requested_at=time.monotonic())
+        await monitor.observe(_pane())
+        assert reads == before + 3  # a newer request, or none, always reads afresh
+
+        monitor._invalidate("focus_refresh_pending")
+        assert (await monitor.observe(_pane(), requested_at=arrived)).state == "absent"
+        assert reads == before + 4  # an invalidated read is never shared
+    finally:
+        await monitor.aclose()
+
+
+async def test_a_shared_read_discarded_behind_an_older_one_is_replaced_not_served_stale(
+    monkeypatch,
+):
+    class Hooks:
+        def __init__(self, identity):
+            self.identity = ServerIdentity.parse(identity)
+
+        async def arm(self):
+            return True
+
+        async def wait(self):
+            await asyncio.Event().wait()
+
+        async def close(self):
+            pass
+
+    older_started, release_older = asyncio.Event(), asyncio.Event()
+    newer_started, release_newer = asyncio.Event(), asyncio.Event()
+    last_started, release_last = asyncio.Event(), asyncio.Event()
+    reads = 0
+
+    async def read(_identity):
+        nonlocal reads
+        reads += 1
+        number = reads
+        if number == 2:  # begun before the request, finishes first with changed facts
+            older_started.set()
+            await release_older.wait()
+            return _facts(_client())
+        if number == 3:  # begun after the request, discarded once the older one installs
+            newer_started.set()
+            await release_newer.wait()
+        if number == 4:  # the replacement read
+            last_started.set()
+            await release_last.wait()
+        return _facts(_client(flags=frozenset()))
+
+    monkeypatch.setattr("regie.tmux.focus_monitor.FocusHooks", Hooks)
+    monkeypatch.setattr("regie.tmux.focus_monitor.read_inventory", read)
+    monitor = FocusMonitor()
+    await monitor.start(_SERVER)
+    older = asyncio.create_task(monitor.refresh())
+    await asyncio.wait_for(older_started.wait(), 1)
+    requested_at = time.monotonic()
+    pending = asyncio.create_task(monitor.observe(_pane(), requested_at=requested_at))
+    try:
+        await asyncio.wait_for(newer_started.wait(), 1)
+        release_older.set()
+        await older
+        release_newer.set()
+        await asyncio.wait_for(last_started.wait(), 1)
+        assert not pending.done()  # it will not answer from the older read's facts
+        release_last.set()
+        await asyncio.wait_for(pending, 1)
+        assert monitor._facts_started_at >= requested_at
+    finally:
+        release_older.set()
+        release_newer.set()
+        release_last.set()
+        await monitor.aclose()
+        await asyncio.gather(older, pending, return_exceptions=True)
 
 
 @pytest.mark.parametrize("query_fails", [False, True])

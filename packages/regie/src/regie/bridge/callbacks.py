@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from collections.abc import Awaitable, Callable, Mapping
 
 from regie.bridge.persistence import BridgePersistence
@@ -234,6 +235,7 @@ class TmuxProviderCallbacks:
         }
 
     async def inspect(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
+        requested_at = time.monotonic()
         stale = self._stale(request)
         if stale is not None:
             return stale
@@ -253,6 +255,7 @@ class TmuxProviderCallbacks:
                     screen_max_bytes=screen_max_bytes,
                     expected_terminal=expected_terminal,
                     presence_observer=self._presence_observer,
+                    requested_at=requested_at,
                 )
         except TmuxError:
             return _error("stale_terminal", "The tmux terminal identity is absent or stale.")

@@ -288,6 +288,7 @@ async def inspect_terminal(
     expected_terminal: Mapping[str, object] | None = None,
     presence_observer: PresenceObserver | None = None,
     snapshot: PaneSnapshot | None = None,
+    requested_at: float | None = None,
 ) -> tuple[dict[str, object], PresenceEvidence, str | None, bool]:
     """Inspect one terminal; callers holding a just-read ``snapshot`` may pass it."""
     snapshot = snapshot or await pane_snapshot(terminal_id)
@@ -322,7 +323,9 @@ async def inspect_terminal(
             occupant_id=snapshot.occupant_id,
         ):
             raise TmuxError("terminal identity is absent or stale")
-        presence = await (presence_observer or observe_presence)(snapshot)
+        presence = await (presence_observer or observe_presence)(
+            snapshot, requested_at=requested_at
+        )
     screen: str | None = None
     if screen_max_bytes:
         captured = await run("capture-pane", "-p", "-t", terminal_id, check=False)

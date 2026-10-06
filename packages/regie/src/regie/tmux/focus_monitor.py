@@ -34,6 +34,7 @@ class FocusMonitor:
         self._refresh_task: asyncio.Task | None = None
         self._reading: set[asyncio.Task] = set()
         self._reads = self._task_read = self._started_read = self._installed_read = 0
+        self._read_started_at = self._facts_started_at = 0.0
         self._loop_task: asyncio.Task | None = None
         self._waiter_task: asyncio.Task | None = None
 
@@ -73,13 +74,34 @@ class FocusMonitor:
             logger.warning("could not arm focus reporting; blur remains untrusted", exc_info=True)
         self._armed_at = time.monotonic()
 
-    async def refresh(self, *, fresh: bool = False) -> None:
+    async def refresh(self, *, fresh: bool = False, requested_at: float | None = None) -> None:
+        await self._refresh_once(fresh, requested_at)
+        if (
+            requested_at is not None
+            and self._facts is not None
+            and self._facts_started_at < requested_at
+        ):
+            # An older read installed first and discarded the one we joined: read once more.
+            await self._refresh_once(fresh, requested_at)
+
+    async def _refresh_once(self, fresh: bool, requested_at: float | None) -> None:
         if self._stopping:
             return
+        if (
+            requested_at is not None
+            and self._facts is not None
+            and self._facts_started_at >= requested_at
+        ):
+            return  # a read begun after the request arrived is as fresh as one begun now
         task = self._refresh_task
-        # A fresh caller may join only a read that has not begun querying tmux;
-        # otherwise it starts one now instead of queueing behind the older read.
-        if task is None or task.done() or (fresh and self._started_read >= self._task_read):
+        # A fresh caller may join only a read that has not begun querying tmux, or one that began
+        # after its request arrived; otherwise it starts one now instead of queueing behind it.
+        began_after = requested_at is not None and self._read_started_at >= requested_at
+        if (
+            task is None
+            or task.done()
+            or (fresh and self._started_read >= self._task_read and not began_after)
+        ):
             self._reads += 1
             self._task_read = self._reads
             task = asyncio.create_task(self._read(self._reads), name="regie-focus-read")
@@ -94,6 +116,7 @@ class FocusMonitor:
             return
         epoch = self._epoch
         self._started_read = sequence
+        started_at = self._read_started_at = time.monotonic()
         try:
             async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
                 facts = await read_inventory(hooks.identity.value)
@@ -120,9 +143,12 @@ class FocusMonitor:
             self._epoch += 1
             self.changed.set()
         self._facts = facts
+        self._facts_started_at = started_at
 
-    async def observe(self, expected: PaneSnapshot) -> PresenceEvidence:
-        await self.refresh(fresh=True)
+    async def observe(
+        self, expected: PaneSnapshot, *, requested_at: float | None = None
+    ) -> PresenceEvidence:
+        await self.refresh(fresh=True, requested_at=requested_at)
         if self._facts is None:
             return PresenceEvidence("unknown", self._reason, None)
         return replace(classify(expected, self._facts, self._trust), epoch=self._epoch)
