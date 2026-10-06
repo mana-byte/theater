@@ -662,6 +662,13 @@ SEARCH_INTERVAL        = 2.0
 SYNC_INTERVAL          = 1.0
 ```
 
+Quiet participants cost less. The screen check's period doubles (cap 10 s) while an idle
+prompt is unchanged; working and approval screens keep the base period. A watcher with no
+progress for 10 s polls up to 4× slower (cap 1 s). New output or a changed reading restores
+the base periods. The periodic presence refresh skips terminals whose evidence is under a
+quarter interval old; admissions and unknown evidence always inspect afresh. None of this
+changes the three quiet timers above.
+
 The first two were one timer in v1. Sharing them made `AWAITING_INPUT`
 unreachable: relocation fired first, every time. They measure different things
 and must stay separate — this is a scar, not a preference.
