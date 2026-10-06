@@ -13,7 +13,13 @@ from functools import partial
 
 from theater import timing
 from theater.config import ObserverSection
-from theater.constants.observation import OBSERVATION_FAILURE_GRACE, SOURCE_CONTRACT_FAILED
+from theater.constants.observation import (
+    OBSERVATION_FAILURE_GRACE,
+    QUIET_POLL_AFTER_SECONDS,
+    QUIET_POLL_FACTOR,
+    QUIET_POLL_MAX_SECONDS,
+    SOURCE_CONTRACT_FAILED,
+)
 from theater.daemon.observation.attachment import AttachmentManager
 from theater.daemon.observation.batches import BatchApplication
 from theater.daemon.observation.binding import TranscriptBinding
@@ -83,6 +89,7 @@ class _WatchContext:
     clock: QuietClock = field(default_factory=QuietClock)
     turns: TurnAccumulator = field(default_factory=TurnAccumulator)
     last_live_observation_at: float | None = None
+    active_at: float = 0.0
 
 
 @dataclass(slots=True)
@@ -286,6 +293,7 @@ class Observer(
             opened_durable=opened_durable,
             finish_fn=finish_fn,
             wake=self.live.wake_signal(pid),
+            active_at=self._monotonic(),
         )
 
     def _register_watch_source(self, context: _WatchContext) -> bool:
@@ -401,8 +409,10 @@ class Observer(
         if context.opened_durable:
             return False
         self._capture_trajectory(context.pid, batch)
-        if batch.status is not None and (batch.progressed or batch.events):
-            self._settle(context.pid, batch.status)
+        if batch.progressed or batch.events:
+            context.active_at = self._monotonic()
+            if batch.status is not None:
+                self._settle(context.pid, batch.status)
         if await self._route_terminal_evidence(
             context.pid, context.source, batch, context.registration
         ):
@@ -411,8 +421,17 @@ class Observer(
         await self._screen_only(
             context.pid, context.observer, context.clock, source_status=batch.status
         )
-        await self._sleep(self.poll, context.wake)
+        await self._sleep(self._quiet_poll(context, self.poll), context.wake)
         return True
+
+    def _quiet_poll(self, context: _WatchContext, interval: float) -> float:
+        """Stretch the poll of a watcher that has seen nothing for a while."""
+        if (
+            interval != self.poll
+            or self._monotonic() - context.active_at < QUIET_POLL_AFTER_SECONDS
+        ):
+            return interval
+        return min(interval * QUIET_POLL_FACTOR, max(interval, QUIET_POLL_MAX_SECONDS))
 
     async def _handle_rejected_attachment(self, context: _WatchContext, batch: Batch) -> bool:
         if self._accept_attachment(
@@ -443,6 +462,7 @@ class Observer(
             registration=context.registration,
         ):
             iteration.applied = True
+            context.active_at = self._monotonic()
             self._reducer.unblock_on_semantic_progress(context.pid, batch)
             await self._reducer.on_progress(context.pid, context.observer, batch, context.clock)
             return
@@ -460,9 +480,7 @@ class Observer(
             accept_attachment_fn=partial(
                 self._accept_attachment, registration=context.registration
             ),
-            apply_fn=lambda p, b, c, t: self._apply_and_collect(
-                p, context.source, b, c, t, iteration.inner, context.registration
-            ),
+            apply_fn=lambda p, b, c, t: self._apply_inner(context, iteration, p, b, c, t),
             on_progress_fn=self._reducer.on_progress,
             evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
             confirm_identity_loss_fn=self._confirm_identity_loss,
@@ -474,6 +492,23 @@ class Observer(
             rescue_jobs_fn=partial(self._rescue_jobs, registration=context.registration),
         )
         iteration.applied = True
+
+    def _apply_inner(
+        self,
+        context: _WatchContext,
+        iteration: _WatchIteration,
+        pid: str,
+        batch: Batch,
+        clock: QuietClock,
+        turns: TurnAccumulator,
+    ) -> bool:
+        """A quiet-time (relocation) batch that makes progress is activity like any other."""
+        progressed = self._apply_and_collect(
+            pid, context.source, batch, clock, turns, iteration.inner, context.registration
+        )
+        if progressed:
+            context.active_at = self._monotonic()
+        return progressed
 
     def _retain_cancelled_evidence(
         self, context: _WatchContext, iteration: _WatchIteration
@@ -513,7 +548,7 @@ class Observer(
             self._ack_terminal_evidence(context.source)
             if iteration.applied:
                 self._persist_pending_source_checkpoint(context.pid, context.source)
-        await self._sleep(iteration.next_poll, context.wake)
+        await self._sleep(self._quiet_poll(context, iteration.next_poll), context.wake)
 
     async def _close_watch(self, context: _WatchContext) -> None:
         pid = context.pid

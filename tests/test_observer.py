@@ -20,6 +20,7 @@ from sqlalchemy import delete, update
 
 from theater.constants.observation import (
     LAST_ACTIVITY_REFRESH_SECONDS,
+    QUIET_POLL_AFTER_SECONDS,
     SCREEN_CHECK_BACKOFF_CAP_SECONDS,
 )
 from theater.daemon import methods as methods_mod
@@ -2383,3 +2384,16 @@ async def test_a_working_screen_is_never_backed_off_because_it_gates_sends(regis
         await observer._screen_status_due(p.id, screen, clock)
 
     assert {b - a for a, b in pairwise(inspects)} == {2.0}  # the base period, forever
+
+
+def test_a_watcher_with_no_progress_for_a_while_polls_slower_and_progress_restores_it(registry):
+    now = [100.0]
+    observer = Observer(registry, harnesses={}, poll=0.25, monotonic_clock=lambda: now[0])
+    context = SimpleNamespace(active_at=100.0)
+
+    assert observer._quiet_poll(context, 0.25) == 0.25  # recently active
+    now[0] += QUIET_POLL_AFTER_SECONDS + 1
+    assert observer._quiet_poll(context, 0.25) == 1.0  # quiet: stretched, capped
+    assert observer._quiet_poll(context, 0) == 0  # a batch with more to read is never delayed
+    context.active_at = now[0]
+    assert observer._quiet_poll(context, 0.25) == 0.25  # new output restores the fast poll

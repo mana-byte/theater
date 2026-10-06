@@ -60,3 +60,9 @@ ROTATION_PROBE_MAX_SECONDS = 60.0
 #: An idle prompt's unchanged screen is re-inspected at doubling intervals up to this cap; each
 #: inspect is a terminal round-trip. Working and approval screens keep the base period.
 SCREEN_CHECK_BACKOFF_CAP_SECONDS = 10.0
+
+#: A watcher that has seen no progress for this long polls at up to `QUIET_POLL_FACTOR` times its
+#: period (capped at `QUIET_POLL_MAX_SECONDS`); the first byte of new output restores the fast poll.
+QUIET_POLL_AFTER_SECONDS = 10.0
+QUIET_POLL_FACTOR = 4
+QUIET_POLL_MAX_SECONDS = 1.0
