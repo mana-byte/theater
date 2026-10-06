@@ -9,6 +9,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from theater.constants.observation import LAST_ACTIVITY_REFRESH_SECONDS
 from theater.daemon import lineage
 from theater.daemon.observation.screen import end_turn_from_screen_text
 from theater.daemon.observation.turns import Turn, TurnAccumulator
@@ -294,7 +295,8 @@ class Reducer:
         if p is None or p.status is Status.DEAD:
             return
         if p.status is desired:
-            self.registry.touch(pid)
+            if self._wall_now_fn() - p.last_activity >= LAST_ACTIVITY_REFRESH_SECONDS:
+                self.registry.touch(pid)
         else:
             self.registry.set_status(pid, desired)
 

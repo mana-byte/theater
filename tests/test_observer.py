@@ -17,6 +17,7 @@ import pytest
 from shipped import VibeHarness
 from sqlalchemy import delete, update
 
+from theater.constants.observation import LAST_ACTIVITY_REFRESH_SECONDS
 from theater.daemon import methods as methods_mod
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
@@ -2292,3 +2293,24 @@ async def test_suppressed_floor_survives_daemon_restart(theater_home, terminal_p
         p = d2.registry.store.get_participant(rows[0]["id"])
         assert floor_is_present(p.resume_floor)
     await d2.aclose()
+
+
+def test_restating_a_status_refreshes_last_activity_only_every_few_seconds(registry, monkeypatch):
+    """Every refresh is a commit, so an unchanged status must not stamp on every call."""
+    p = registry.register(harness="vibe", pane=None, cwd="/tmp")
+    observer = Observer(registry, harnesses={})
+    registry.set_status(p.id, Status.WORKING)
+    touches: list[str] = []
+    monkeypatch.setattr(registry, "touch", touches.append)
+
+    observer._settle(p.id, Status.WORKING)
+    assert touches == []  # stamped by set_status moments ago
+
+    stale = registry.store.get_participant(p.id)
+    registry.store.conn.execute(
+        update(participants_table)
+        .where(participants_table.c.id == p.id)
+        .values(last_activity=stale.last_activity - LAST_ACTIVITY_REFRESH_SECONDS - 1)
+    )
+    observer._settle(p.id, Status.WORKING)
+    assert touches == [p.id]

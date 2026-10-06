@@ -14,6 +14,10 @@ IDLE_CONFIRMATIONS = 2
 #: Bound provider screen evidence while retaining the current prompt/footer.
 SCREEN_CAPTURE_MAX_BYTES = 64 * 1024
 
+#: Re-stating an unchanged status refreshes `last_activity` at most this often: every refresh is
+#: a database commit, and the readers (resume and list ordering) only need second-level freshness.
+LAST_ACTIVITY_REFRESH_SECONDS = 5.0
+
 #: Duplicates are adjacent, so a small window suffices.
 ANSWERED_TURNS = 32
 
