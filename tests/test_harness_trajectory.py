@@ -19,6 +19,7 @@ from theater.harness.contracts.trajectory import ParsedRecord
 from theater.pricing import usage_cost_microcents
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.enums import (
+    ContentFormat,
     CostProvenance,
     TimingProvenance,
     TrajectoryFailureCategory,
@@ -381,6 +382,25 @@ def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_
     assert complete.summary == "turn completed"
     assert complete.timing is not None
     assert complete.timing.duration_ms == 9000
+
+
+def test_codex_call_inputs_are_json_only_when_structured() -> None:
+    """Code mode's `exec` input is JavaScript: labelling it JSON left it unparsed plain text."""
+    calls = [
+        {"type": "custom_tool_call", "call_id": "js", "name": "exec", "input": "text(1 + 1);"},
+        {"type": "function_call", "call_id": "fn", "name": "exec_command", "arguments": '{"a": 1}'},
+    ]
+    lines = [
+        json.dumps({"timestamp": "2026-08-23T11:00:03.000Z", "type": "response_item", "payload": c})
+        for c in calls
+    ]
+    formats = {
+        fact.call_id: fact.details[0].format
+        for fact in _facts(CodexObserver(), lines)
+        if fact.kind is TrajectoryKind.TOOL_CALL
+    }
+
+    assert formats == {"js": ContentFormat.CODE, "fn": ContentFormat.JSON}
 
 
 def test_codex_thread_settings_seed_usage_without_adding_trajectory_noise() -> None:

@@ -48,6 +48,7 @@ from .paths import _patch_change_paths
 from .values import (
     _codex_block_id,
     _codex_flag,
+    _codex_input_format,
     _codex_item_timing,
     _codex_mcp_identity,
     _codex_response_usage_key,
@@ -241,7 +242,7 @@ class CodexTrajectoryMixin:
         if event_type == "mcp_tool_call_begin":
             args = invocation.get("arguments") or invocation.get("input")
             mcp_details = (
-                (_trajectory_detail("input", args, format=ContentFormat.JSON),)
+                (_trajectory_detail("input", args, format=_codex_input_format(args)),)
                 if args is not None
                 else ()
             )
@@ -325,7 +326,7 @@ class CodexTrajectoryMixin:
             fact_timing=item_timing,
             revision=call_revision,
             details=(
-                (_trajectory_detail("input", arguments, format=ContentFormat.JSON),)
+                (_trajectory_detail("input", arguments, format=_codex_input_format(arguments)),)
                 if arguments is not None
                 else ()
             ),
@@ -700,7 +701,7 @@ class CodexTrajectoryMixin:
                 request_id=item_turn,
             ),
             details=(
-                (_trajectory_detail("input", input_value, format=ContentFormat.JSON),)
+                (_trajectory_detail("input", input_value, format=_codex_input_format(input_value)),)
                 if input_value is not None
                 else ()
             ),

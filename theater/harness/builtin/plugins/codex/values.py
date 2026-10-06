@@ -8,12 +8,12 @@ import math
 from theater.harness.normalization.timing import epoch_or_number as _trajectory_time
 from theater.harness.normalization.usage import reported_cost
 from theater.harness.normalization.values import finite_float as _trajectory_float
+from theater.harness.normalization.values import json_container_format, revision_from
 from theater.harness.normalization.values import nonnegative_int as _trajectory_int
-from theater.harness.normalization.values import revision_from
 from theater.harness.normalization.values import (
     trajectory_identifier as _trajectory_id,
 )
-from theater.trajectory.enums import TimingProvenance
+from theater.trajectory.enums import ContentFormat, TimingProvenance
 from theater.trajectory.records import Timing, TrajectoryUsage
 
 from .constants import CODEX_MODEL_PROVIDER_ID_KEY, CODEX_MODEL_PROVIDER_KEY
@@ -131,6 +131,13 @@ def _codex_block_id(item_id: str | None, block: dict, ordinal: int) -> str | Non
     if item_id is None:
         return None
     return item_id if ordinal == 0 else f"{item_id}:content:{ordinal}"
+
+
+def _codex_input_format(value: object) -> ContentFormat:
+    """JSON for structured arguments; raw strings (code-mode JavaScript, patches) are CODE."""
+    if isinstance(value, str) and json_container_format(value) is not ContentFormat.JSON:
+        return ContentFormat.CODE
+    return ContentFormat.JSON
 
 
 def _codex_flag(value: object) -> bool:
