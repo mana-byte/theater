@@ -144,7 +144,7 @@ def _item_summary(item: Mapping[str, object]) -> str | None:
     label = f"codex item: {item_type}"
     command = item.get("command")
     if isinstance(command, str) and command:
-        return f"{label} {command[:160]}"
+        return f"{label} {' '.join(command.split())[:160]}"  # one line: it names the tool
     return label
 
 

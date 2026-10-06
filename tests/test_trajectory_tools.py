@@ -468,3 +468,37 @@ def test_input_is_not_mutated_and_supported_fixtures_pair_exact_ids() -> None:
         TrajectoryKind.THEATER_CALL,
         TrajectoryKind.THEATER_RESULT,
     }
+
+
+def test_a_multiline_summary_names_the_tool_on_one_line() -> None:
+    """Codex native items carry the raw command as the summary; \n and \t broke the projection."""
+    call = _record(
+        "c",
+        0,
+        kind=TrajectoryKind.TOOL_CALL,
+        call_id="x",
+        summary="codex item: commandExecution cat <<EOF\n\tbody\r\nEOF",
+    )
+
+    (operation,) = tool_operations_for_records([call])
+
+    assert operation.tool_name == "codex item: commandExecution cat <<EOF body EOF"
+
+
+def test_one_unprojectable_group_does_not_drop_the_others(monkeypatch) -> None:
+    from theater.trajectory import tools
+
+    real = tools._operation_for_group
+
+    def flaky(records, links):
+        if records[0].call_id == "bad":
+            raise TrajectoryValidationError("tool.attribute is invalid")
+        return real(records, links)
+
+    monkeypatch.setattr(tools, "_operation_for_group", flaky)
+    records = [
+        _record("a", 0, kind=TrajectoryKind.TOOL_CALL, call_id="bad"),
+        _record("b", 1, kind=TrajectoryKind.TOOL_CALL, call_id="good"),
+    ]
+
+    assert [operation.call_id for operation in tool_operations_for_records(records)] == ["good"]

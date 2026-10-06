@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -37,6 +39,10 @@ from theater.trajectory.validation import (
     string,
     string_or_none,
 )
+
+logger = logging.getLogger("theater.trajectory")
+_SKIPPED: OrderedDict[str, None] = OrderedDict()  # reported records: repeated projections log once
+_SKIPPED_LIMIT = 256
 
 
 class TrajectoryToolIdentity(StrEnum):
@@ -273,7 +279,23 @@ def tool_operations_for_records(
         else:
             groups[position].append(record)
     child_links = {key: tuple(value) for key, value in child_ids.items()}
-    return tuple(_operation_for_group(group, child_links) for group in groups)
+    operations = []
+    for group in groups:
+        try:
+            operations.append(_operation_for_group(group, child_links))
+        except TrajectoryValidationError:
+            # One malformed group must not take down a participant's snapshot or telemetry.
+            _report_skipped(group[-1].record_id)
+    return tuple(operations)
+
+
+def _report_skipped(record_id: str) -> None:
+    if record_id in _SKIPPED:
+        return
+    _SKIPPED[record_id] = None
+    if len(_SKIPPED) > _SKIPPED_LIMIT:
+        _SKIPPED.popitem(last=False)  # forget the oldest, so a later regression still logs
+    logger.warning("tool operation for record %s is not projectable; skipped", record_id)
 
 
 def _operation_for_group(
@@ -371,10 +393,11 @@ def _tool_name(record: TrajectoryRecord | None) -> str | None:
         ),
         None,
     )
-    value = detail or record.summary or None
+    # One line: ContentPreview keeps \n, \t and \r, which the identifier check rejects.
+    value = " ".join((detail or record.summary or "").split())
     return (
         ContentPreview.from_text(value, max_bytes=TRAJECTORY_SOURCE_MAX_BYTES).text
-        if value is not None
+        if value
         else None
     )
 

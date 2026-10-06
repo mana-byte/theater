@@ -17,7 +17,7 @@ from theater.harness.builtin.plugins.codex.launch import plan_launch
 from theater.harness.builtin.plugins.codex.manifest import MANIFEST, manifest_for_root
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.codex.runtime import CodexRuntime, codex_runtime_factory
-from theater.harness.builtin.plugins.codex.runtime_messages import _native_revision
+from theater.harness.builtin.plugins.codex.runtime_messages import _item_summary, _native_revision
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
     CODEX_RUNTIME_VERIFIED_VERSIONS,
@@ -303,6 +303,12 @@ def _patch_version(monkeypatch, output: str | None, *, error: Exception | None =
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.codex.runtime_plan.subprocess.run", fake_run
     )
+
+
+def test_a_tool_item_summary_is_one_line_whatever_the_command() -> None:
+    item = {"type": "commandExecution", "command": "/bin/zsh -lc 'cat <<EOF\n\thi\nEOF'"}
+
+    assert _item_summary(item) == "codex item: commandExecution /bin/zsh -lc 'cat <<EOF hi EOF'"
 
 
 def test_installed_release_fixture_version_is_verified_policy() -> None:
