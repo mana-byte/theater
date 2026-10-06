@@ -26,6 +26,7 @@ from theater.daemon.artifacts import (
     ArtifactKind,
     OwnedArtifact,
     artifacts_for_plan,
+    cleanup_orphan_paths,
     remove_secret_file,
 )
 from theater.daemon.gc import SweepResult, sweep
@@ -232,6 +233,32 @@ def _materialize_participant_artifacts(store, participant: Participant) -> tuple
         token_path=str(observation / "hook.token"),
     )
     return (root, *files)
+
+
+def test_read_only_artifact_trees_are_removed_without_leaving_the_owner_root(
+    theater_home, tmp_path
+):
+    """Vibe's plugin packages are r-x directories; rmtree alone failed on them forever."""
+    owner = "a" * 12
+    root = paths.participant_dir(owner)
+    package = root / "observations" / "vibe" / "plugins" / "packages" / "82" / "hash"
+    package.mkdir(parents=True)
+    (package / "module.py").write_text("x")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    (package / "link").symlink_to(outside)
+    for directory in (package, package.parent, package.parent.parent):
+        directory.chmod(0o555)
+    outside.chmod(0o500)  # a followed symlink would try to delete from here
+
+    try:
+        failures = cleanup_orphan_paths(((OwnedArtifact(root, ArtifactKind.DIRECTORY), owner),))
+        assert failures == () and not root.exists()
+        assert (outside / "keep.txt").read_text() == "keep"
+        assert outside.stat().st_mode & 0o777 == 0o500  # never chmodded through the link
+    finally:
+        outside.chmod(0o700)
 
 
 # ---- MF1: running job survives, and finish() still works -------------------

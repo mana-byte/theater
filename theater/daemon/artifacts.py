@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import stat
@@ -211,7 +212,34 @@ def _remove_one(artifact: OwnedArtifact) -> None:
         return
     if not stat.S_ISDIR(mode):
         raise OSError("expected a directory")
-    shutil.rmtree(artifact.path)
+    try:
+        shutil.rmtree(artifact.path)
+    except PermissionError:
+        # Vibe's package trees are read-only; a retry would fail forever without write access.
+        _make_tree_writable(artifact.path)
+        shutil.rmtree(artifact.path)
+
+
+def _make_tree_writable(root: Path) -> None:
+    """Give the owner rwx on every real directory below ``root``; symlinks are never followed."""
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            mode = directory.lstat().st_mode
+            if not stat.S_ISDIR(mode):
+                continue
+            if mode & 0o700 != 0o700:
+                _chmod_without_following(directory, mode | 0o700)
+            with os.scandir(directory) as entries:
+                pending.extend(Path(e.path) for e in entries if e.is_dir(follow_symlinks=False))
+        except FileNotFoundError:
+            continue
+
+
+def _chmod_without_following(path: Path, mode: int) -> None:
+    """chmod that cannot be redirected by a symlink swapped in after the lstat, where supported."""
+    path.chmod(mode, follow_symlinks=os.chmod not in os.supports_follow_symlinks)
 
 
 def _children(root: Path) -> tuple[Path, ...]:
