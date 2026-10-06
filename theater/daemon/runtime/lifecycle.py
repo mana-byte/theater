@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+from collections.abc import Callable
 
 from theater import paths, protocol, timing
 from theater.constants.observability import (
@@ -148,7 +149,7 @@ async def reconcile(daemon) -> None:
     )
 
 
-async def serve(daemon) -> None:
+async def serve(daemon, *, on_started: Callable[[], None] | None = None) -> None:
     """Run until stop() is called. Teardown is aclose()'s job, not ours.
 
     Not ``async with self._server``: since 3.12 its exit waits for every connection handler,
@@ -156,6 +157,8 @@ async def serve(daemon) -> None:
     """
     await daemon.start()
     assert daemon._server is not None
+    if on_started is not None:
+        on_started()
     await daemon._stopping.wait()
 
 

@@ -44,6 +44,22 @@ async def test_serve_returns_after_stop_with_a_client_attached(theater_home, ter
         await daemon.aclose()
 
 
+async def test_serve_reports_once_started_so_the_process_can_freeze_its_heap(
+    theater_home, terminal_provider
+):
+    daemon = Daemon(harnesses={})
+    started = []
+    serving = asyncio.create_task(daemon.serve(on_started=lambda: started.append(daemon._server)))
+    while not started:
+        await asyncio.sleep(0.01)
+    assert started[0] is not None  # reported only after the listener exists
+    daemon.stop()
+    try:
+        await asyncio.wait_for(serving, timeout=BUDGET)
+    finally:
+        await daemon.aclose()
+
+
 async def test_aclose_finishes_with_a_client_attached(theater_home, terminal_provider):
     daemon = Daemon(harnesses={})
     await daemon.start()

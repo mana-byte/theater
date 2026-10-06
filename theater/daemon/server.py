@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import logging
 import signal
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -389,8 +390,8 @@ class Daemon:
     async def _reconcile(self) -> None:
         await lifecycle.reconcile(self)
 
-    async def serve(self) -> None:
-        await lifecycle.serve(self)
+    async def serve(self, *, on_started: Callable[[], None] | None = None) -> None:
+        await lifecycle.serve(self, on_started=on_started)
 
     def stop(self) -> None:
         lifecycle.stop(self)
@@ -435,6 +436,12 @@ class Daemon:
 
 
 # ---- entrypoint --------------------------------------------------------
+
+
+def _freeze_startup_heap() -> None:
+    """Exempt the startup heap from full collections; it lives as long as the process."""
+    gc.collect()
+    gc.freeze()
 
 
 async def run(options: DaemonRunOptions | None = None) -> None:
@@ -487,7 +494,7 @@ async def run(options: DaemonRunOptions | None = None) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, daemon.stop)
-        await daemon.serve()
+        await daemon.serve(on_started=_freeze_startup_heap)
     finally:
         try:
             if daemon is not None:

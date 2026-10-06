@@ -374,7 +374,7 @@ def test_run_accepts_none_options(theater_home, terminal_provider, monkeypatch):
 
     started = asyncio.Event()
 
-    async def fake_serve(self):
+    async def fake_serve(self, **_kwargs):
         started.set()
         self.stop()
 
@@ -413,7 +413,7 @@ async def test_run_passes_agent_metric_specs_from_config(
         def shutdown(self):
             pass
 
-    async def serve(self):
+    async def serve(self, **_kwargs):
         self.stop()
 
     async def aclose(self):
@@ -460,7 +460,7 @@ async def test_run_passes_runtime_signal_bridge_to_daemon(
         def stop(self):
             pass
 
-        async def serve(self):
+        async def serve(self, **_kwargs):
             pass
 
         async def aclose(self):
@@ -504,7 +504,7 @@ async def test_run_shuts_runtime_when_daemon_aclose_fails(
 
     handle = Handle()
 
-    async def serve(self):
+    async def serve(self, **_kwargs):
         return None
 
     async def fail_close(self):
