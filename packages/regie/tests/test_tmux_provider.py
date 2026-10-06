@@ -199,6 +199,26 @@ async def test_real_inspection_requests_bounded_screen_and_preserves_approval_fo
         state.release()
 
 
+async def test_focus_inventory_is_one_tmux_process_with_every_pane_and_the_option(
+    isolated_tmux, monkeypatch
+):
+    from regie.tmux import focus_facts
+
+    server = await ensure_server(cwd=str(isolated_tmux))
+    spawned: list[tuple[str, ...]] = []
+    real_run = focus_facts.run
+
+    async def counting(*args, **kwargs):
+        spawned.append(args)
+        return await real_run(*args, **kwargs)
+
+    monkeypatch.setattr(focus_facts, "run", counting)
+    inventory = await focus_facts.read_inventory(server)
+    assert len(spawned) == 1
+    assert inventory.panes and inventory.server_identity == server
+    assert inventory.clients == ()  # a detached test server has no clients
+
+
 async def test_focus_hooks_preserve_user_hooks_wake_and_close_on_isolated_server(isolated_tmux):
     from regie.tmux.focus_facts import read_inventory
     from regie.tmux.focus_hooks import FocusHooks

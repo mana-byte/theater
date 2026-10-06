@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 
-from regie.tmux.command import TmuxError, run
+from regie.tmux.command import TmuxError, run, sequence_argv
 from regie.tmux.identity import ServerIdentity
 
 _PANES = "\t".join(
@@ -106,15 +105,39 @@ def _panes(output: str, server_identity: str) -> dict[str, FocusPane]:
     return panes
 
 
+_SECTION = "@regie-focus-section@"
+
+
 async def read_inventory(server_identity: str) -> FocusInventory:
+    """Read panes, clients and the focus option in one tmux process, bracketed by two pane reads."""
     socket = ServerIdentity.parse(server_identity).socket_path
-    before = _panes(await run("-S", socket, "list-panes", "-a", "-F", _PANES), server_identity)
-    clients_output, enabled = await asyncio.gather(
-        run("-S", socket, "list-clients", "-F", _CLIENTS),
-        run("-S", socket, "show-options", "-g", "-v", "focus-events"),
+    output = await run(
+        "-S",
+        socket,
+        *sequence_argv(
+            (
+                ("list-panes", "-a", "-F", _PANES),
+                ("display-message", "-p", _SECTION),
+                ("list-clients", "-F", _CLIENTS),
+                ("display-message", "-p", _SECTION),
+                ("show-options", "-g", "-v", "focus-events"),
+                ("display-message", "-p", _SECTION),
+                ("list-panes", "-a", "-F", _PANES),
+            )
+        ),
     )
-    clients = parse_clients(clients_output)
-    after = _panes(await run("-S", socket, "list-panes", "-a", "-F", _PANES), server_identity)
+    sections: list[list[str]] = [[]]
+    for line in output.split("\n"):
+        if line == _SECTION:
+            sections.append([])
+        else:
+            sections[-1].append(line)
+    if len(sections) != 4:
+        raise TmuxError("tmux returned an invalid focus inventory")
+    before_text, clients_text, enabled, after_text = ("\n".join(lines) for lines in sections)
+    before = _panes(before_text, server_identity)
+    clients = parse_clients(clients_text)
+    after = _panes(after_text, server_identity)
     if before != after:
         raise TmuxError("tmux focus topology changed during observation")
     return FocusInventory(server_identity, before, clients, enabled.strip() == "on")
