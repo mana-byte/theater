@@ -42,6 +42,32 @@ def test_yolo_leaves_the_bypass_env_unset(tmp_path):
     assert VIBE_BYPASS_TOOL_PERMISSIONS_ENV not in plan.env
 
 
+def test_launch_admits_the_newest_qualified_writer(tmp_path, monkeypatch):
+    pin_installed_vibe_version(monkeypatch, (2, 26, 0))
+    plan = plan_launch(
+        "vibe",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="yolo",
+    )
+    assert plan.argv[0] == "vibe"
+
+
+@pytest.mark.parametrize("version", [(2, 27, 0), (3, 0, 0)])
+def test_launch_refuses_a_writer_newer_than_the_store_reader(tmp_path, monkeypatch, version):
+    """A writer whose unified store no reader understands must fail at spawn."""
+    pin_installed_vibe_version(monkeypatch, version)
+    with pytest.raises(BadRequest, match="upgrade Theater"):
+        plan_launch(
+            "vibe",
+            participant_id="a",
+            prompt="",
+            config_path=tmp_path / "x.json",
+            approval="yolo",
+        )
+
+
 def _live_guard_plan(tmp_path, monkeypatch, *, approval, cwd, resume=None):
     """A manual/edits plan through the real shadow probe, against a scratch home."""
     pin_installed_vibe_version(monkeypatch, (2, 25, 8), approval_guard=shadowed_approval_profile)

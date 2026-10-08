@@ -1,0 +1,26 @@
+{
+  "session_id": "8dea2672-fc18-0660-e8f0-9414dd3670e9",
+  "parent_session_id": null,
+  "start_time": "2026-10-08T17:54:07.018000+00:00",
+  "end_time": "2026-10-08T17:54:09.752000+00:00",
+  "git_commit": null,
+  "git_branch": null,
+  "environment": {
+    "working_directory": "/tmp"
+  },
+  "origin_directory": "/tmp",
+  "username": "mana",
+  "child_sessions": [],
+  "loops": [],
+  "title": null,
+  "title_source": "auto",
+  "bumped_at": "2026-10-08T17:54:08.593233+00:00",
+  "pinned_at": null,
+  "archived_at": null,
+  "unseen_at": "2026-10-08T17:54:09.762332+00:00",
+  "seen_at": null,
+  "experiments": null,
+  "config": null,
+  "import_provenance": null,
+  "created_worktree": null
+}

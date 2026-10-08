@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .unified_store_io import (
+    _attach_pooled_value,
     _attach_transcript,
     _canonical_json,
     _ChunkCache,
@@ -20,6 +21,7 @@ from .unified_store_io import (
     _sha256_json,
 )
 from .unified_store_types import (
+    _CAPABILITY_CATALOG_KEY,
     _CHECKPOINT_MESSAGES_PATH,
     _CHUNKS_DIRNAME,
     _GENERATION_PATTERN,
@@ -332,6 +334,15 @@ def _load_generation_documents(
             _read_chunked_transcript(chunk_root, manifest.checkpoint.chunks, chunk_cache),
         )
     runtime_value = _read_referenced_document(generation_dir, manifest.runtime_state)
+    if manifest.runtime_state.chunks is not None:
+        # Store minor 8 pools the capability catalog: the envelope holds null
+        # and the single chunk carries the catalog as a one-item run.
+        _reject_symlink_components(session_root, chunk_root)
+        _attach_pooled_value(
+            runtime_value,
+            _CAPABILITY_CATALOG_KEY,
+            _read_chunked_transcript(chunk_root, manifest.runtime_state.chunks, chunk_cache),
+        )
     projection_value = _read_referenced_document(generation_dir, manifest.projection_state)
     if manifest.projection_state.chunks is not None:
         _reject_symlink_components(session_root, chunk_root)

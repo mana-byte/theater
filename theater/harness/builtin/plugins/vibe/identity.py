@@ -134,6 +134,44 @@ class VibeIdentityMixin:
         except (OSError, ValueError, UnifiedStoreError):
             return None
 
+    def unified_store_load_error(
+        self, *, session_id: str | None = None
+    ) -> UnifiedStoreError | None:
+        """Why discovery found no readable store, when an unreadable one explains it.
+
+        Discovery skips stores it cannot read; without this, a store written by a
+        newer Vibe reads as "no transcript yet" and spawned jobs wait forever. Only
+        structural errors surface — a transient OSError keeps the retry semantics.
+        """
+        if not self._root_searchable():
+            return None
+        unified = self.root / "unified"
+        if not unified.is_dir() or unified.is_symlink():
+            return None
+        if session_id is not None:
+            exact = unified / session_id / "CURRENT"
+            candidates = [exact] if exact.is_file() else []
+        else:
+            try:
+                candidates = sorted(
+                    unified.glob("*/CURRENT"), key=lambda path: path.stat().st_mtime, reverse=True
+                )
+            except OSError:
+                return None
+        for current in candidates[:_SCAN_LIMIT]:
+            try:
+                load_unified_store(current)
+            except UnifiedStoreError as exc:
+                return exc
+            except (OSError, ValueError):
+                continue
+        return None
+
+    async def unified_store_load_error_async(
+        self, *, session_id: str | None = None
+    ) -> UnifiedStoreError | None:
+        return await asyncio.to_thread(self.unified_store_load_error, session_id=session_id)
+
     @staticmethod
     def _unified_metadata(view: UnifiedStoreView) -> tuple[str | None, str | None, float, float]:
         metadata = view.runtime_state.get("session_metadata")

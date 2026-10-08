@@ -16,6 +16,7 @@ from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.vibe import unified_store
 from theater.harness.builtin.plugins.vibe.manifest import _vibe_stream_floor
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
+from theater.harness.builtin.plugins.vibe.unified_source import UnifiedVibeSource
 from theater.harness.builtin.plugins.vibe.unified_store import (
     STORE_FORMAT_MINOR,
     UnifiedStoreError,
@@ -124,6 +125,8 @@ class Store:
         pooled: bool = False,
         store_minor: int | None = 4,
         parent_session_id: str | None = None,
+        runtime_catalog: Any = None,
+        runtime_actions: list[dict[str, Any]] | None = None,
     ) -> None:
         first_sequence = snapshot_sequence + 1
         checkpoint = {"checkpoint_version": 1, "context": {"messages": state["history"]["entries"]}}
@@ -132,6 +135,12 @@ class Store:
             session_id=self.session_id,
             parent_session_id=parent_session_id,
         )
+        if runtime_actions is not None:
+            runtime["actions"] = runtime_actions
+        runtime_chunks = None
+        if runtime_catalog is not None:
+            runtime["core_capabilities"] = runtime_catalog
+            runtime_chunks = self._pool_value(runtime, "core_capabilities")
         projection = {
             "projection_state_version": 1,
             "session_id": self.session_id,
@@ -170,7 +179,7 @@ class Store:
             "runtime_state": {
                 "path": "runtime-state.json",
                 "sha256": sha256_json(runtime),
-                "chunks": None,
+                "chunks": runtime_chunks,
             },
             "projection_state": {
                 "path": "projection-state.json",
@@ -226,6 +235,16 @@ class Store:
         node[path[-1]] = []
         return [digest]
 
+    def _pool_value(self, document: dict[str, Any], key: str) -> list[str]:
+        """Pool one whole field as a single-item chunk, leaving null behind."""
+        body = canonical([document[key]])
+        digest = sha256_hex(body)
+        chunk = self.session_root / "chunks" / f"{digest}.json"
+        chunk.parent.mkdir(parents=True, exist_ok=True)
+        chunk.write_bytes(body + b"\n")
+        document[key] = None
+        return [digest]
+
     @staticmethod
     def _write(path: Path, value: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,6 +280,165 @@ def test_reader_supports_every_known_store_minor(tmp_path: Path, minor: int | No
     view = load_unified_store(store.current)
     assert view is not None
     assert view.store_minor == (1 if minor is None else minor)
+
+
+def test_minor8_pooled_capability_catalog_round_trips(store: Store) -> None:
+    """Store minor 8 pools the capability catalog into one chunk; the reader reattaches it."""
+    catalog = {
+        "agent_types": ["build", "plan"],
+        "skills": ["skill-creator"],
+        "tool_groups": {"file": ["read", "write"]},
+    }
+    publish_default(store, store_minor=8, runtime_catalog=catalog)
+    envelope = read_object(store.generation_dir(GEN1) / "runtime-state.json")
+    assert envelope["core_capabilities"] is None
+    view = load_unified_store(store.current)
+    assert view is not None and view.store_minor == 8
+    assert view.runtime_state["core_capabilities"] == catalog
+
+
+def test_manifest_rejects_a_multi_chunk_runtime_state(store: Store) -> None:
+    """The runtime state pools exactly one catalog chunk; anything else fails closed."""
+    publish_default(store, store_minor=8, runtime_catalog={"skills": []})
+    manifest_path = store.generation_dir(GEN1) / "manifest.json"
+    manifest = read_object(manifest_path)
+    digest = manifest["runtime_state"]["chunks"][0]
+    manifest["runtime_state"]["chunks"] = [digest, digest]
+    body = canonical(manifest)
+    manifest_path.write_bytes(body + b"\n")
+    pointer = read_object(store.current)
+    pointer["manifest_sha256"] = sha256_hex(body)
+    store._write(store.current, pointer)
+    with pytest.raises(UnifiedStoreError, match="pooled capability catalog must be one chunk"):
+        load_unified_store(store.current)
+
+
+def pruned_settled_action() -> dict[str, Any]:
+    """A minor-8 settled tool action: bodies pruned, digests and flags retained."""
+    return {
+        "action_id": "act-pruned-1",
+        "kind": "tool",
+        "state": "succeeded",
+        "request_sha256": "0" * 64,
+        "request": None,
+        "lease_id": None,
+        "recovery_mode": "idempotent_retry",
+        "process_manager_instance_id": None,
+        "process_request_sha256": None,
+        "prepared_process_start": None,
+        "result": None,
+        "request_pruned": True,
+        "result_pruned": True,
+    }
+
+
+def test_minor8_pruned_action_bodies_are_never_fabricated(store: Store) -> None:
+    """Pruned settled-action bodies stay absent, and projection reads only public entries.
+
+    A future consumer that derives tool I/O from runtime-state action bodies would
+    silently report absent detail on every minor-8 store; this test fails loudly
+    instead of letting the reader fabricate bodies that were pruned.
+    """
+    user = public_message("user-1", "user", "question")
+    partial = public_message("assistant-1", "assistant", "draft", status="in_progress")
+    store.publish(
+        generation=GEN1,
+        snapshot_sequence=0,
+        state=source_state([user, partial], turn_status="in_progress"),
+        watermark=1,
+        store_minor=8,
+        runtime_actions=[pruned_settled_action()],
+    )
+    observer = VibeObserver(root=store.session_root.parent.parent)
+    source = observer.open_source(cwd="/tmp/work")
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+
+    completed = public_message("assistant-1", "assistant", "answer", updated_at=3_000)
+    store.publish(
+        generation=GEN2,
+        snapshot_sequence=1,
+        state=source_state([user, completed, public_effect()], turn_status="completed"),
+        watermark=2,
+        store_minor=8,
+        runtime_actions=[pruned_settled_action()],
+    )
+    view = load_unified_store(store.current)
+    assert view is not None and view.store_minor == 8
+    (action,) = view.runtime_state["actions"]
+    assert action["request"] is None and action["result"] is None
+    assert action["request_pruned"] is True and action["result_pruned"] is True
+
+    update = asyncio.run(source.read())
+    turn_ends = [event for event in update.events if event.turn_end]
+    assert [(event.kind, event.text, event.turn_terminal) for event in turn_ends] == [
+        (EventKind.ASSISTANT, "answer", TurnTerminal.COMPLETED)
+    ]
+    assert [fact.kind for fact in update.trajectory] == [
+        TrajectoryKind.ASSISTANT,
+        TrajectoryKind.TOOL_CALL,
+        TrajectoryKind.TOOL_RESULT,
+    ]
+    assert all(fact.native_id != "act-pruned-1" for fact in update.trajectory)
+
+
+def test_unreadable_store_surfaces_as_a_source_error(store: Store) -> None:
+    """A store no reader understands fails loudly instead of waiting forever."""
+    publish_default(store, store_minor=STORE_FORMAT_MINOR + 1)
+    observer = VibeObserver(root=store.session_root.parent.parent)
+    error = observer.unified_store_load_error()
+    assert isinstance(error, UnifiedStoreRequiresNewer)
+    source = observer.open_source(cwd="/tmp/work")
+    batch = asyncio.run(source.read())
+    assert batch.waiting is True
+    assert batch.error_code == "vibe_unified_store_newer"
+    assert "upgrade Theater" in (batch.error or "")
+
+
+def test_transient_store_errors_keep_waiting(store: Store, monkeypatch) -> None:
+    """A torn read retries next poll; only structural errors fail the channel."""
+    publish_default(store, store_minor=STORE_FORMAT_MINOR + 1)
+
+    def _torn(_path):
+        raise OSError("torn read")
+
+    monkeypatch.setattr("theater.harness.builtin.plugins.vibe.identity.load_unified_store", _torn)
+    observer = VibeObserver(root=store.session_root.parent.parent)
+    assert observer.unified_store_load_error() is None
+    source = observer.open_source(cwd="/tmp/work")
+    batch = asyncio.run(source.read())
+    assert batch.waiting is True
+    assert batch.error_code is None
+
+
+GOLDEN_STORE_ROOT = Path(__file__).parent / "fixtures" / "vibe_unified_store_v2.26.0"
+
+
+def test_golden_store_written_by_vibe_2260_reads_back_with_turn_boundary() -> None:
+    """A store written by the real 2.26.0 binary (store_format_minor 8).
+
+    Guards the reader upgrade end to end: transcript readback, the pooled
+    capability catalog, and turn-boundary extraction must all work on a genuine
+    minor-8 store — the exact shape that once left spawned jobs waiting forever.
+    """
+    session_dirs = sorted(path for path in GOLDEN_STORE_ROOT.iterdir() if path.is_dir())
+    assert len(session_dirs) == 1
+    view = load_unified_store(session_dirs[0] / "CURRENT")
+    assert view is not None
+    assert view.store_minor == 8
+    catalog = view.runtime_state.get("core_capabilities")
+    assert isinstance(catalog, dict) and catalog, "the pooled capability catalog reattaches"
+    entries = view.snapshot["history"]["entries"]
+    roles = [entry.get("role") for entry in entries if entry.get("type") == "message"]
+    assert "user" in roles and "assistant" in roles
+    latest = view.snapshot.get("latestTurn")
+    assert isinstance(latest, dict) and latest.get("status") == "completed"
+    event = UnifiedVibeSource._turn_boundary(view, previous=None)
+    assert event is not None
+    assert event.turn_end is True
+    assert event.turn_terminal is TurnTerminal.COMPLETED
+    assert event.text.strip()
 
 
 def test_reader_reassembles_chunks_and_replays_projection_records(store: Store) -> None:

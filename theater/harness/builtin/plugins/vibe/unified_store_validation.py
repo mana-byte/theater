@@ -302,8 +302,11 @@ def _validate_manifest(value: Any) -> _Manifest:
         value["checkpoint"].get("checkpoint_version", 1), 1, "checkpoint record version"
     )
     runtime_state = _validate_stored_file(value["runtime_state"], "runtime state record")
-    if runtime_state.chunks is not None:
-        raise UnifiedStoreError("the runtime state carries no transcript to pool")
+    if runtime_state.chunks is not None and len(runtime_state.chunks) != 1:
+        # The runtime state has no transcript; its one poolable field is the
+        # capability catalog (store minor 8), which travels as a single item
+        # and so always seals into exactly one chunk.
+        raise UnifiedStoreError("a pooled capability catalog must be one chunk")
     projection_state = _validate_stored_file(value["projection_state"], "projection state record")
     interop_export = None
     if value.get("interop_export") is not None:

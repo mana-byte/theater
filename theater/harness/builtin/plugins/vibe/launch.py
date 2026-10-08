@@ -16,6 +16,7 @@ from theater.harness.contracts.callbacks import (
 from theater.models import BadRequest
 
 from .approval_guard import shadowed_approval_profile, vibe_home
+from .compatibility import vibe_qualified_range_text, vibe_store_format_ceiling
 from .constants import (
     ISOLATION_MARKER,
     VIBE_ACTIVE_MODEL_ENV,
@@ -46,6 +47,14 @@ def plan_launch(
     resume = context.resume
     # Undeterminable version keeps today's argv; never guess from a probe failure.
     version = installed_vibe_version(context.binary)
+    if version is not None and version >= vibe_store_format_ceiling():
+        # Refuse a writer whose unified store this reader cannot open: the job
+        # would wait forever on a transcript that never becomes readable.
+        raise BadRequest(
+            f"refusing to launch Vibe {'.'.join(str(part) for part in version)}: it writes "
+            "a unified session store newer than this Theater can read (qualified Vibe "
+            f"releases are {vibe_qualified_range_text()}); upgrade Theater"
+        )
     # No --experimental-harness: the observer reads both the classic session log
     # and the Unified Session Store that flag opts into, so neither is required.
     # Launch the binary the probe resolved: the pane's PATH may find another

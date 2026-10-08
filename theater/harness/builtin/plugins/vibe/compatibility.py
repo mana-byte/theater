@@ -14,7 +14,30 @@ _POLICY = "vibe-harness-2.24.0-compatible"
 # load the legacy VibeConfig and write outside the isolated domain); manual's
 # ask profile replaces default in 2.24.1; --yolo exists since 2.17.0.
 _FLOOR = (2, 24, 0)
-_CEILING = (3, 0, 0)
+#: The newest Vibe release line whose unified session store this reader
+#: understands: 2.26.x writes store_format_minor 8 (vibe 376f6a33). The probe is
+#: display-only, so launch planning enforces the same ceiling (launch.plan_launch);
+#: bump the ceiling in the same commit as unified_store_types.STORE_FORMAT_MINOR —
+#: the qualified range once outran the reader, and finished jobs waited forever on
+#: stores no reader could open.
+_CEILING = (2, 27, 0)
+
+
+def vibe_qualified_range_text() -> str:
+    """The human-readable qualified Vibe range, shared by the probe and launch."""
+    floor = ".".join(str(part) for part in _FLOOR)
+    ceiling = ".".join(str(part) for part in _CEILING)
+    return f">={floor},<{ceiling}"
+
+
+def vibe_store_format_ceiling() -> tuple[int, int, int]:
+    """The newest Vibe version whose unified session store this reader can read.
+
+    The probe is display-only; launch planning enforces this ceiling so a too-new
+    writer is refused before the child runs instead of writing a store that no
+    reader understands.
+    """
+    return _CEILING
 
 
 def probe_vibe_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
@@ -37,13 +60,18 @@ def probe_vibe_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibili
             supported=False, policy=_POLICY, reason="Vibe did not report a stable CLI version"
         )
     supported = _FLOOR <= version < _CEILING
-    range_text = f">={'.'.join(str(part) for part in _FLOOR)},<3"
     return RuntimeCompatibility(
         supported=supported,
         policy=_POLICY,
         native_version=".".join(str(part) for part in version),
-        reason=None if supported else f"Vibe harness support requires {range_text}",
+        reason=(
+            None if supported else f"Vibe harness support requires {vibe_qualified_range_text()}"
+        ),
     )
 
 
-__all__ = ["probe_vibe_compatibility"]
+__all__ = [
+    "probe_vibe_compatibility",
+    "vibe_qualified_range_text",
+    "vibe_store_format_ceiling",
+]

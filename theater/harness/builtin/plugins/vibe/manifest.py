@@ -34,7 +34,7 @@ from theater.harness.contracts.manifest import (
 from theater.harness.contracts.source import StreamPoint
 from theater.harness.transcript import file_stream_floor
 
-from .compatibility import probe_vibe_compatibility
+from .compatibility import probe_vibe_compatibility, vibe_qualified_range_text
 from .launch import discover_models, plan_launch, resume_launch_overlay
 from .mcp import render_mcp_servers
 from .observer import (
@@ -150,7 +150,9 @@ def manifest_for_roots(
         models=ModelDiscoveryManifest(discoverer=discover_models),
         mcp=McpRenderingManifest(renderer=render_mcp_servers),
         native_compatibility=NativeCompatibilityManifest(
-            qualified_range=">=2.24.0,<3",
+            # Derived from the enforced ceiling so the declared range can never
+            # outrun the store reader again (the drift behind the stuck jobs).
+            qualified_range=vibe_qualified_range_text(),
             probe=probe_vibe_compatibility,
         ),
     )

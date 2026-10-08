@@ -7,8 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from theater import harness as harness_registry
-from theater.harness.builtin.plugins.vibe.compatibility import probe_vibe_compatibility
+from theater.harness.builtin.plugins.vibe.compatibility import (
+    probe_vibe_compatibility,
+    vibe_qualified_range_text,
+    vibe_store_format_ceiling,
+)
 from theater.harness.builtin.plugins.vibe.manifest import manifest_for_roots
+from theater.harness.builtin.plugins.vibe.unified_store import STORE_FORMAT_MINOR
 from theater.harness.contracts.runtime import RuntimeProbeContext
 from theater.harness.manifests.validation import validate_manifest
 
@@ -16,11 +21,13 @@ from theater.harness.manifests.validation import validate_manifest
 @pytest.mark.parametrize(
     ("stdout", "supported", "version", "reason"),
     [
+        ("vibe 2.26.0", True, "2.26.0", None),
         ("vibe 2.25.8", True, "2.25.8", None),
         ("vibe 2.24.0", True, "2.24.0", None),
-        ("vibe 2.20.0", False, "2.20.0", "Vibe harness support requires >=2.24.0,<3"),
+        ("vibe 2.20.0", False, "2.20.0", "Vibe harness support requires >=2.24.0,<2.27.0"),
         ("2.24.0", False, None, "Vibe did not report a stable CLI version"),
-        ("vibe 3.0.0", False, "3.0.0", "Vibe harness support requires >=2.24.0,<3"),
+        ("vibe 2.27.0", False, "2.27.0", "Vibe harness support requires >=2.24.0,<2.27.0"),
+        ("vibe 3.0.0", False, "3.0.0", "Vibe harness support requires >=2.24.0,<2.27.0"),
     ],
 )
 def test_vibe_version_parse_table(stdout, supported, version, reason, monkeypatch):
@@ -33,6 +40,21 @@ def test_vibe_version_parse_table(stdout, supported, version, reason, monkeypatc
     assert result.native_version == version
     assert result.reason == reason
     assert result.policy == "vibe-harness-2.24.0-compatible"
+
+
+def test_ceiling_tracks_the_reader_store_minor():
+    """The qualified ceiling must not outrun the unified-store reader again.
+
+    2.26.x writes store_format_minor 8 (vibe 376f6a33); the ceiling is the next
+    release line, and the reader understands exactly that minor. The observed
+    incident was this pair drifting apart: the probe admitted a writer whose
+    stores the reader refused, and finished jobs waited forever.
+    """
+    assert vibe_store_format_ceiling() == (2, 27, 0)
+    assert STORE_FORMAT_MINOR == 8
+    declared = manifest_for_roots().native_compatibility
+    assert declared is not None
+    assert declared.qualified_range == vibe_qualified_range_text()
 
 
 def test_nonzero_exit_is_not_a_stable_version(monkeypatch):

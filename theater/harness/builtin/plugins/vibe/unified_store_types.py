@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
-# Highest store minor understood (2: projection_delta; 4: chunk-pool transcripts; 5-7 opaque).
+# Highest store minor understood (2: projection_delta; 4: chunk-pool transcripts;
+# 5-7 opaque; 8: pruned settled-action bodies, pooled capability catalogs).
 # The field defaults to 1, so a pre-minor pointer restores as minor 1.
-STORE_FORMAT_MINOR = 7
+STORE_FORMAT_MINOR = 8
 
 _CHUNKS_DIRNAME = "chunks"
 _GENERATION_PATTERN = re.compile(r"^[0-9]{16}$")
@@ -22,6 +23,9 @@ _TIMESTAMP_PATTERN = re.compile(
 _JOURNAL_PATH_PATTERN = re.compile(r"^journal/[0-9]{16}\.jsonl$")
 _CHECKPOINT_MESSAGES_PATH = ("context", "messages")
 _PROJECTION_HISTORY_PATH = ("snapshot", "history", "entries")
+#: The runtime state's one poolable field (store minor 8): the capability catalog
+#: travels as a single-item chunk and the envelope holds null until reattached.
+_CAPABILITY_CATALOG_KEY = "core_capabilities"
 _MAX_DOCUMENT_BYTES = 64 * 1024 * 1024
 _MAX_SAFE_JSON_INTEGER = 2**53 - 1
 _CANONICAL_INTEGER_RANGE = range(-_MAX_SAFE_JSON_INTEGER, _MAX_SAFE_JSON_INTEGER + 1)

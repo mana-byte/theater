@@ -12,6 +12,7 @@ from theater.harness.base import Event
 from theater.harness.source import Batch, Source, TranscriptSource
 from theater.harness.transcript.discovery import stateful_history_reader
 from theater.provenance import TranscriptProvenance
+from theater.transcript_identity import TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
 
 from .trajectory import usage_fact
 from .unified_source import UnifiedVibeSource
@@ -306,6 +307,20 @@ class _VibeSource(VibeUsageMixin, Source):
         if batch.attached is not None:
             return batch
         if self.path is None:
+            if batch.error_code is None and self._observer is not None:
+                # Discovery found nothing readable. A unified store it skipped
+                # because no reader understands it must surface as a source error,
+                # not as an eternal wait on a transcript that exists.
+                load_error = await self._observer.unified_store_load_error_async(
+                    session_id=self._session_id
+                )
+                if load_error is not None:
+                    return replace(
+                        batch,
+                        error_code=getattr(load_error, "code", None)
+                        or TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                        error=str(load_error),
+                    )
             return batch
         if isinstance(self._inner, UnifiedVibeSource):
             return batch

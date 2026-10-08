@@ -206,3 +206,12 @@ def _attach_transcript(document: dict[str, Any], path: tuple[str, ...], items: l
     if not isinstance(node, dict) or node.get(path[-1]) != []:
         raise UnifiedStoreError("chunked document envelope must hold an empty transcript")
     node[path[-1]] = items
+
+
+def _attach_pooled_value(document: Any, key: str, items: list[Any]) -> None:
+    """Restore one whole detached field (the minor-8 capability catalog)."""
+    if not isinstance(document, dict) or document.get(key) is not None:
+        raise UnifiedStoreError("pooled document envelope must hold an empty field")
+    if len(items) != 1:
+        raise UnifiedStoreError("a pooled value restores from exactly one item")
+    document[key] = items[0]
