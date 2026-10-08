@@ -640,7 +640,7 @@ async def test_stock_tui_loads_passive_extension_and_reconnects(monkeypatch) -> 
     assert binary is not None
     version = await asyncio.to_thread(_stock_version, binary)
     if not _qualified_1x_release(version):
-        pytest.skip(f"expected stock OpenCode 1.17.15-1.18.33, found {version.strip()!r}")
+        pytest.skip(f"expected stock OpenCode 1.17.15-1.18.34, found {version.strip()!r}")
 
     root = Path(tempfile.mkdtemp(prefix="oc-stock-", dir="/tmp")).resolve()
     socket = root / "tmux.sock"
@@ -770,7 +770,7 @@ async def test_stock_tui_accepts_native_send_with_exact_lineage(monkeypatch) -> 
     assert binary is not None
     version = await asyncio.to_thread(_stock_version, binary)
     if not _qualified_1x_release(version):
-        pytest.skip(f"expected stock OpenCode 1.17.15-1.18.33, found {version.strip()!r}")
+        pytest.skip(f"expected stock OpenCode 1.17.15-1.18.34, found {version.strip()!r}")
 
     root = Path(tempfile.mkdtemp(prefix="oc-stock-native-", dir="/tmp")).resolve()
     socket = root / "tmux.sock"

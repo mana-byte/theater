@@ -13,14 +13,14 @@ from theater.harness.contracts.runtime import (
 
 from .constants import MODELS_TIMEOUT
 
-# 1.17.15-1.18.33 qualified by byte-stable Theater-consumed surfaces plus
-# model-free live probes on stock 1.17.15/1.17.20/1.18.0/1.18.10/1.18.28; the paid
-# model-backed conformance suite still pins 1.18.29 (upstream
-# c470c79513f78aabb2ff88a8c8f7a3a22c4e97af), and 1.x approval enforcement
-# (the plugin's chat.message hook) is not model-free verifiable.
-OPENCODE_TUI_COMPATIBILITY_POLICY = "opencode-tui-native-controls-1.17.15-1.18.33"
+# 1.17.15-1.18.34 qualified by byte-stable Theater-consumed surfaces plus
+# model-free live probes on stock 1.17.15/1.17.20/1.18.0/1.18.10/1.18.28/1.18.34;
+# the paid model-backed conformance suite is pinned to stock 1.18.34 (previously
+# 1.18.29, upstream c470c79513f78aabb2ff88a8c8f7a3a22c4e97af), and 1.x approval
+# enforcement (the plugin's chat.message hook) is not model-free verifiable.
+OPENCODE_TUI_COMPATIBILITY_POLICY = "opencode-tui-native-controls-1.17.15-1.18.34"
 OPENCODE_TUI_MIN_VERSION = (1, 17, 15)
-OPENCODE_TUI_MAX_VERSION = (1, 18, 34)
+OPENCODE_TUI_MAX_VERSION = (1, 18, 35)
 
 # 1.x prints a bare release; 2.x prints `opencode v2.0.18`, so a leading `v` is allowed.
 _VERSION = re.compile(
@@ -68,7 +68,7 @@ def probe_opencode_compatibility(context: RuntimeProbeContext) -> RuntimeCompati
             policy=OPENCODE_TUI_COMPATIBILITY_POLICY,
             native_version=rendered,
             reason="OpenCode release is outside the native control compatibility range "
-            "(qualified releases are 1.17.15-1.18.33)",
+            "(qualified releases are 1.17.15-1.18.34)",
         )
     help_text = f"{help_run.stdout}\n{help_run.stderr}"
     if help_run.returncode != 0 or not {"--model", "--auto", "--fork"}.issubset(help_text.split()):
@@ -95,9 +95,9 @@ def _unsupported(reason: str) -> RuntimeCompatibility:
 
 # Detached-server topology policy, deliberately NOT yet in MANIFEST: cutover needs
 # send/abort/lineage parity with the TUI host. Pins the release and session-first ordering.
-OPENCODE_SERVER_COMPATIBILITY_POLICY = "opencode-server-native-controls-1.17.15-1.18.33"
+OPENCODE_SERVER_COMPATIBILITY_POLICY = "opencode-server-native-controls-1.17.15-1.18.34"
 OPENCODE_SERVER_MIN_VERSION = (1, 17, 15)
-OPENCODE_SERVER_MAX_VERSION = (1, 18, 34)
+OPENCODE_SERVER_MAX_VERSION = (1, 18, 35)
 SERVER_SESSION_ORDER = RuntimeSessionOrder.SESSION_FIRST
 #: 2.x server topology, verified end to end on 2.0.18 and model-free on stock
 #: 2.0.6/2.0.12/2.0.17/2.0.20 (banner, Basic auth, /api/info, POST/GET /api/session

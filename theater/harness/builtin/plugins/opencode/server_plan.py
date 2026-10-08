@@ -42,7 +42,7 @@ from .runtime_plan import (
 )
 from .server_discovery import parse_server_stdout_endpoint
 
-#: Evidence-pinned route facts for 1.17.15-1.18.33 (stock-binary model-free probes;
+#: Evidence-pinned route facts for 1.17.15-1.18.34 (stock-binary model-free probes;
 #: the Theater-consumed upstream surfaces are byte-stable across those releases):
 #: banner on stdout, Basic auth, /global/health, POST /session, GET /session/:id,
 #: POST /session/:id/fork, GET /session/:id/message, /session/:id/prompt_async
@@ -195,7 +195,7 @@ def probe_opencode_server_compatibility(context: RuntimeProbeContext) -> Runtime
             native_version=rendered,
             reason=(
                 "OpenCode release is outside the server-topology compatibility "
-                "range; qualified releases are 1.17.15-1.18.33"
+                "range; qualified releases are 1.17.15-1.18.34"
             ),
         )
     serve_help = f"{help_run.stdout}\n{help_run.stderr}"

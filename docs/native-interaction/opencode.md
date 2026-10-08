@@ -43,7 +43,7 @@ client instead of relaying mutations through the editor process.
 - [`opencode/live.py`](../../theater/harness/builtin/plugins/opencode/live.py#L119)
   validates exact message lineage and reconciles the submitted turn at lines 207–247.
 - [`opencode/runtime_plan.py`](../../theater/harness/builtin/plugins/opencode/runtime_plan.py#L12)
-  qualifies OpenCode `1.17.15`–`1.18.33` for the TUI bridge.
+  qualifies OpenCode `1.17.15`–`1.18.34` for the TUI bridge.
 - [`opencode/launch.py`](../../theater/harness/builtin/plugins/opencode/launch.py#L25)
   still builds the ordinary standalone TUI launch.
 
@@ -424,19 +424,30 @@ official API cannot prove.
 The detached-server foundation landed: bounded loopback endpoint discovery,
 participant-scoped Basic authentication, HTTP/SSE transport, server planning, live
 observation, exact message lineage, and the detached runtime. The opt-in stock-binary
-suite for OpenCode `1.18.29` passes its seven topology and control checks, including
-authenticated routes, shared attach/session identity, reconnect, and parent-exit
-survival.
+suite — pinned to stock `1.18.34`, the installed binary's exact `opencode --version`
+string — passes its seven topology and control checks, including authenticated
+routes, shared attach/session identity, reconnect, and parent-exit survival
+(last run 2026-10-08 with `THEATER_OPENCODE_SERVER_CONFORMANCE=1`: 7/7 passed).
 
-The 1.x qualification arm spans `1.17.15`–`1.18.33`: every Theater-consumed upstream
+The 1.x qualification arm spans `1.17.15`–`1.18.34`: every Theater-consumed upstream
 surface is byte-stable across those releases, and stock `1.17.15`, `1.17.20`, `1.18.0`,
-`1.18.10`, and `1.18.28` passed the model-free live probes (health, session
+`1.18.10`, `1.18.28`, and `1.18.34` passed the model-free live probes (health, session
 create/readback/fork, status, messages, SSE `server.connected`) — `POST /session` answers
-HTTP 500 on 1.17.14 and below. The model-backed conformance suite has **not** been run
-below `1.18.29` (nor for `1.18.30`–`1.18.33`): that remains a paid maintainer step, the
-conformance pin still requires stock `1.18.29+c470c79`, and 1.x approval enforcement —
-the generated plugin's `chat.message` hook — is not model-free verifiable and is
-unverified on the newly widened releases.
+HTTP 500 on 1.17.14 and below. The 1.18.33→1.18.34 upstream delta touched only LLM
+request headers, darwin build re-signing, and the TUI `/status` dialog; the blob SHAs of
+every Theater-consumed file (attach/serve CLI, network, session/event handlers, auth,
+the JS SDK server, and the plugin hook API including `chat.message`/`permission.ask`)
+are byte-identical across both tags, and the stock 1.18.34 binary passed the model-free
+probe checks (`--version` in range, `serve --help` exposing `--port`/`--hostname`,
+`--help` exposing `--model`/`--auto`/`--fork`) plus a launch-time `server listening on`
+banner parse. The model-backed conformance suite is pinned to stock `1.18.34` — the
+installed binary's exact `opencode --version` string (previously `1.18.29+c470c79`) —
+and 1.x approval enforcement — the generated plugin's `chat.message` hook — is not
+model-free verifiable; it was proven for stock `1.18.34` by running that suite with
+`THEATER_OPENCODE_SERVER_CONFORMANCE=1` (2026-10-08, all seven checks passed), and any
+future version pin re-proves it the same opt-in way. Widening the range constants also
+widens the opt-in TUI stock-binary gate (`test_opencode_stock_ui.py` gates on them);
+the TUI route remains the legacy fallback and still refuses manual/edits launches.
 
 The production manifest selects the qualified detached runtime. The server receives
 the launch approval policy, model choice, Theater MCP endpoints, and configured MCP
