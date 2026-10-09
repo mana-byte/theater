@@ -13,6 +13,7 @@ from regie.ambience.pixels import HALF_BLOCKS
 from regie.ambience.registry import load_catalog
 from regie.ambience.render import render_band
 from regie.ambience.scene import MAX_TRANSITION_SECONDS, Cell, Phase, Scene
+from regie.widgets import ParticipantTree
 from regie.widgets.ambience_band import AmbienceBand
 from textual import events
 
@@ -185,6 +186,64 @@ async def test_a_tree_without_free_rows_plays_nothing(monkeypatch: pytest.Monkey
         await _set_app_focus(pilot, False)  # away: the band would play if it fit
         await pilot.pause(0.3)
         assert not app.query_one(AmbienceBand).display
+
+
+async def test_a_tick_serves_the_band_from_cache_and_never_queries_the_dom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tick reads cached refs and free band; a sync, a resize, or a row leaving re-measures."""
+    monkeypatch.setattr("regie.app_parts.ambience.scene_for", lambda _name: _Sticky)
+    app, _client, _presentation = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        await wait_until(pilot, lambda: app._ambience is not None)
+        await _set_app_focus(pilot, False)  # away: the band plays
+        await wait_until(pilot, lambda: bool(app.query_one(AmbienceBand).display))
+        tree = app.query_one(ParticipantTree)
+
+        queries: list[str] = []
+        measures: list[tuple[int, int]] = []
+        query, query_one, measure = app.query, app.query_one, app._measure_free_band
+
+        def spy_query(*args, **kwargs):
+            queries.append("query")
+            return query(*args, **kwargs)
+
+        def spy_query_one(*args, **kwargs):
+            queries.append("query_one")
+            return query_one(*args, **kwargs)
+
+        def spy_measure():
+            result = measure()
+            measures.append(result)
+            return result
+
+        monkeypatch.setattr(app, "query", spy_query)
+        monkeypatch.setattr(app, "query_one", spy_query_one)
+        monkeypatch.setattr(app, "_measure_free_band", spy_measure)
+        for _ in range(5):
+            app._tick_ambience()
+        assert queries == [] and measures == []  # the per-frame tick is DOM-free
+
+        app._sync_ambience()
+        assert len(measures) == 1  # a sync re-measures the free band
+
+        timer = app._ambience_timer
+        assert timer is not None
+        timer.stop()  # from here on, ticks happen only where the test calls them
+        row = next(child for child in tree.children if child.display)
+        rows, row_height = len(tree.children), row.outer_size.height
+        before = measures[-1]
+        await row.remove()  # a finished retirement removes a row without any sync
+        await wait_until(pilot, lambda: len(tree.children) == rows - 1)
+        assert measures == [before]  # the departure alone re-measured nothing
+        queries.clear()  # removal machinery may query; the tick may not
+        app._tick_ambience()
+        assert queries == []  # the tick caught the departed row with no DOM query
+        assert measures[-1] == (before[0], before[1] + row_height)
+
+        await pilot.resize_terminal(80, 20)
+        await wait_until(pilot, lambda: len(measures) >= 3)  # so does a resize
+        assert measures[-1][1] < before[1]  # the tree lost rows of free space
 
 
 def test_tree_ambience_is_validated_and_defaults_to_the_footer_while_away(tmp_path) -> None:

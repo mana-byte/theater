@@ -6,6 +6,8 @@ import math
 from time import monotonic
 
 from textual import events
+from textual.css.query import NoMatches
+from textual.geometry import Size
 from textual.timer import Timer
 
 from regie.ambience.driver import AmbienceDriver
@@ -24,14 +26,33 @@ class TreeAmbience(_AppBase):
     _ambience_on = False
     _ambience_rest_until = 0.0
     _ambience_wake: Timer | None = None
+    _ambience_tree: ParticipantTree | None = None
+    _ambience_band: AmbienceBand | None = None
+    _ambience_bands: tuple[AmbienceBand, ...] = ()
+    _free_band_cache: tuple[int, int] | None = None
+    _free_band_key: tuple[Size, int] | None = None
 
     def _initialize_ambience(self) -> None:
         scene = scene_for(self.settings.tree_ambience)
         self._ambience = None if scene is None else AmbienceDriver(scene)
         self._sync_ambience()
 
+    def _cache_ambience_widgets(self) -> None:
+        """Resolve the tree and every band once; missing widgets stay None until they mount."""
+        try:
+            self._ambience_tree = self.query_one(ParticipantTree)
+        except NoMatches:
+            self._ambience_tree = None
+        self._ambience_bands = tuple(self.query(AmbienceBand))
+        self._ambience_band = self._ambience_bands[0] if self._ambience_bands else None
+
     def _ambience_mounted(self) -> bool:
-        return bool(self.query(AmbienceBand)) and bool(self.query(ParticipantTree))
+        """Cached refs answer in the steady state; the DOM is queried only when they go stale."""
+        tree, band = self._ambience_tree, self._ambience_band
+        if tree is None or band is None or not tree.is_mounted or not band.is_mounted:
+            self._cache_ambience_widgets()
+            tree, band = self._ambience_tree, self._ambience_band
+        return tree is not None and band is not None and tree.is_mounted and band.is_mounted
 
     def _ambience_wanted(self) -> bool:
         if self.settings.tree_ambience_when == "tree":
@@ -53,9 +74,22 @@ class TreeAmbience(_AppBase):
         return focused is None or any(node.id == "sidebar" for node in focused.ancestors)
 
     def _free_band(self) -> tuple[int, int]:
-        """The empty rows under the tree's last row; none once the tree scrolls."""
-        tree = self.query_one(ParticipantTree)
-        band = self.query_one(AmbienceBand)
+        """The empty rows under the tree's last row; cached against the tree's size and rows.
+
+        Rows leave without a sync when a retirement finishes, so the key re-measures on change.
+        """
+        tree = self._ambience_tree
+        key = None if tree is None else (tree.size, len(tree.children))
+        if self._free_band_cache is None or key != self._free_band_key:
+            self._free_band_cache = self._measure_free_band()
+            self._free_band_key = key
+        return self._free_band_cache
+
+    def _measure_free_band(self) -> tuple[int, int]:
+        """Read the cached refs; the viewport never reports less than its own height."""
+        tree, band = self._ambience_tree, self._ambience_band
+        if tree is None or band is None:
+            return 0, 0
         width = tree.size.width - band.styles.padding.left - band.styles.padding.right
         # The viewport never reports less than its own height, so sum the rows themselves.
         rows = sum(child.outer_size.height for child in tree.children if child.display)
@@ -63,6 +97,7 @@ class TreeAmbience(_AppBase):
 
     def _sync_ambience(self) -> None:
         """Feed focus and free space to the driver; tick only while something plays."""
+        self._free_band_cache = None  # rows or size may have changed since the last sync
         driver = self._ambience
         # Deferred syncs can land while the app is tearing its widgets down.
         if driver is None or not self.is_running or not self._ambience_mounted():
@@ -111,7 +146,7 @@ class TreeAmbience(_AppBase):
             return
         now = monotonic()
         dt, self._ambience_at = now - self._ambience_at, now
-        width, height = self._free_band()
+        width, height = self._free_band()  # cached: a tick never measures or queries
         driver.set_band(width, height)
         cells = driver.tick(dt)
         if not driver.running:
@@ -119,14 +154,20 @@ class TreeAmbience(_AppBase):
             if self._begin_cooldown():  # the outro is over; wanted again already? wait for it
                 self._sync_ambience()
             return
-        self.query_one(AmbienceBand).show_cells(cells, width, height)
+        band = self._ambience_band
+        if band is not None:
+            band.show_cells(cells, width, height)
 
     def _stop_ambience(self) -> None:
         if self._ambience_timer is not None:
             self._ambience_timer.stop()
             self._ambience_timer = None
-        for band in self.query(AmbienceBand):
-            band.clear()
+        for band in self._ambience_bands:
+            if band.is_mounted:
+                band.clear()
+
+    def on_resize(self, _event: events.Resize) -> None:
+        self._free_band_cache = None  # the tree's free rows follow the terminal size
 
     def watch_app_focus(self, _focused: bool) -> None:
         self._sync_ambience()
