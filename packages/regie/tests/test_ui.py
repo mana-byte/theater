@@ -670,6 +670,64 @@ async def test_late_projection_work_renders_the_latest_installed_state(monkeypat
         assert shown[-1] is fresh
 
 
+async def test_unchanged_projection_skips_redundant_tree_render(monkeypatch):
+    app, _client, _presentation = _app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._startup_task is not None
+        await app._startup_task
+        await pilot.pause()
+        tree = app.query_one(ParticipantTree)
+        calls = []
+        real_show = tree.show_projection
+
+        def counted_show(*args, **kwargs):
+            calls.append(args)
+            return real_show(*args, **kwargs)
+
+        monkeypatch.setattr(tree, "show_projection", counted_show)
+        state = cast(_State, app._state)
+        assert state.projection is not None
+        installed = state.projection
+
+        # A follow update with identical inputs must not re-render the tree.
+        await app._synchronize_projection()
+        await pilot.pause()
+        assert len(calls) == 0
+
+        # The tree reads neither the cursor nor providers: neither alone re-renders.
+        advanced = replace(installed, cursor=EventCursor("stream-a", 2))
+        provider = next(iter(advanced.providers.values()))
+        state.projection = replace(
+            advanced,
+            providers=MappingProxyType({provider.provider_id: replace(provider, generation=2)}),
+        )
+        await app._synchronize_projection()
+        await pilot.pause()
+        assert len(calls) == 0
+
+        busier = replace(
+            advanced,
+            participants=MappingProxyType(
+                {
+                    **advanced.participants,
+                    "participant-1": replace(
+                        advanced.participants["participant-1"], status="working"
+                    ),
+                }
+            ),
+        )
+        state.projection = busier
+        await app._synchronize_projection()
+        await pilot.pause()
+        assert len(calls) == 1
+
+        state.projection = replace(busier, cursor=EventCursor("stream-a", 3))
+        await app._synchronize_projection()
+        await pilot.pause()
+        assert len(calls) == 1
+
+
 @pytest.mark.parametrize("reader", ["state", "usage", "bus"])
 async def test_late_reader_does_not_paint_after_shutdown(monkeypatch, reader):
     app, _client, _presentation = _app()

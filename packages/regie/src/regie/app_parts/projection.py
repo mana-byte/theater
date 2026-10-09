@@ -12,6 +12,7 @@ from regie.controllers.surface import SurfaceMode
 from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_milestone
 from regie.presentation import stageability
+from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_UNMANAGED_POLL_INTERVAL_SECONDS
 from regie.widgets import ParticipantTree
 from theater.frontend import (
@@ -23,7 +24,22 @@ from theater.frontend import (
 )
 
 
+def _tree_layout_fingerprint(layout: TreeLayout) -> tuple[object, ...]:
+    """Content snapshot of the mutable layout; edits re-render without a state change."""
+    orders = tuple((parent, tuple(entries)) for parent, entries in sorted(layout.orders.items()))
+    separators = tuple(
+        sorted(
+            (separator_id, record.get("name"), record.get("collapsed") is True)
+            for separator_id, record in layout.separators.items()
+        )
+    )
+    return orders, separators, layout.pending
+
+
 class ProjectionSync(_AppBase):
+    #: Inputs of the last completed tree render; an equal fingerprint means it is current.
+    _projection_fingerprint: tuple[object, ...] | None = None
+
     async def _tick_synchronize(self) -> None:
         if not self._view_active:
             return
@@ -149,7 +165,6 @@ class ProjectionSync(_AppBase):
         staged_unmanaged_id = (
             staged.terminal_id if isinstance(staged, LocalPresentationTarget) else None
         )
-        tree = self.query_one(ParticipantTree)
         harness_icons = {
             harness.name: harness.icon for harness in self._harnesses if harness.icon is not None
         }
@@ -160,28 +175,59 @@ class ProjectionSync(_AppBase):
         }
         if isinstance(staged, PresentationTarget):
             managed.add(staged.terminal_id)
-        self.presentation.retain(managed)
-        selected = tree.show_projection(
-            projection,
-            participant_detail=self.settings.participant_detail,
-            cwd_segments=self.settings.cwd_segments,
-            stage_reasons=stage_reasons,
-            harness_icons=harness_icons,
-            selected_id=selected,
-            staged_id=staged_id,
-            staged_unmanaged_id=staged_unmanaged_id,
-            trajectory_id=self._surface.trajectory_participant_id,
-            layout=self._tree_layout,
-            pending_spawn=self._pending_spawn,
-            unmanaged=[
-                {**pane.to_tree_row(), "icon": harness_icons.get(pane.harness or "")}
-                for pane in self._unmanaged or ()
-                if pane.pane_id not in managed
-            ],
+        unmanaged = [
+            {**pane.to_tree_row(), "icon": harness_icons.get(pane.harness or "")}
+            for pane in self._unmanaged or ()
+            if pane.pane_id not in managed
+        ]
+        # Every input tree.show_projection reads: an equal fingerprint is a redundant render.
+        # Providers and cursor are absent: the tree reads them only through stage_reasons.
+        fingerprint = (
+            projection.stale,
+            projection.participants,
+            tuple(sorted(stage_reasons.items())),
+            tuple(sorted(harness_icons.items())),
+            selected,
+            staged_id,
+            staged_unmanaged_id,
+            (
+                (staged.provider_id, staged.terminal_id, staged.terminal_incarnation)
+                if isinstance(staged, PresentationTarget)
+                else None
+            ),
+            self._surface.trajectory_participant_id,
+            self.settings.participant_detail,
+            self.settings.cwd_segments,
+            _tree_layout_fingerprint(self._tree_layout),
+            (
+                tuple(sorted(self._pending_spawn.items()))
+                if self._pending_spawn is not None
+                else None
+            ),
+            tuple(tuple(sorted(row.items())) for row in unmanaged),
         )
-        self._navigation.select(selected)
+        rows_unchanged = fingerprint == self._projection_fingerprint
+        self._projection_fingerprint = fingerprint
+        self.presentation.retain(managed)
+        if not rows_unchanged:
+            tree = self.query_one(ParticipantTree)
+            selected = tree.show_projection(
+                projection,
+                participant_detail=self.settings.participant_detail,
+                cwd_segments=self.settings.cwd_segments,
+                stage_reasons=stage_reasons,
+                harness_icons=harness_icons,
+                selected_id=selected,
+                staged_id=staged_id,
+                staged_unmanaged_id=staged_unmanaged_id,
+                trajectory_id=self._surface.trajectory_participant_id,
+                layout=self._tree_layout,
+                pending_spawn=self._pending_spawn,
+                unmanaged=unmanaged,
+            )
+            self._navigation.select(selected)
+            self.call_after_refresh(self._sync_ambience)  # rows changed: so did the free band
         self._sync_surface()
-        self.call_after_refresh(self._sync_ambience)  # rows changed: so did the free band
         if self._initial_projection_pending:
             self._finish_initial_projection()
             self.call_after_refresh(
