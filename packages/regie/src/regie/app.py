@@ -44,6 +44,7 @@ from regie.contracts import (
 )
 from regie.controllers.action_presentation import ActionPresentation
 from regie.controllers.actions import OperationController
+from regie.controllers.long_poll import LongPollLoop
 from regie.controllers.navigation import NavigationState
 from regie.controllers.polling import RefreshGate
 from regie.controllers.presentation_queue import PresentationQueue
@@ -77,6 +78,7 @@ from regie.trajectory.rich import (
 from regie.trajectory.ui_constants import TOOLTIP_DELAY
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import (
+    REGIE_BUS_LONG_POLL_SECONDS,
     REGIE_COST_WINDOW_LABELS,
     REGIE_PALETTE_KEYS_COMMAND_TITLE,
     REGIE_RETURN_SIGNAL_TEXTUAL,
@@ -208,6 +210,14 @@ class RegieApp(
             self._clients.animation_bus, batch=settings.bus_batch
         )
         self._animation_primed = False
+        self._bus_loop = LongPollLoop(
+            self._refresh_bus, wait_seconds=REGIE_BUS_LONG_POLL_SECONDS, name="regie-bus"
+        )
+        self._animation_loop = LongPollLoop(
+            self._refresh_animations,
+            wait_seconds=REGIE_BUS_LONG_POLL_SECONDS,
+            name="regie-animations",
+        )
         self._animation = RouteAnimationController()
         self._animation_timer: Timer | None = None
         self._trajectory_states = TrajectoryStateStore(page_size=settings.trajectory_page_size)
@@ -382,6 +392,8 @@ class RegieApp(
         await self._presentation_queue.close()
         await self._cancel_startup()
         await self._state_follow.close()
+        await self._bus_loop.close()
+        await self._animation_loop.close()
         self._lag_stopping.set()
         self._stop_animation_timer()
         await self._actions.close()

@@ -58,20 +58,6 @@ class StartupLoading(_AppBase):
                     REGIE_USAGE_POLL_INTERVAL_SECONDS,
                     True,
                 ),
-                (
-                    "animations",
-                    self._refresh_animations,
-                    self._refresh_animations,
-                    self.settings.bus_interval,
-                    True,
-                ),
-                (
-                    "bus",
-                    self._refresh_bus,
-                    self._refresh_bus,
-                    self.settings.bus_interval,
-                    self._bus_visible,
-                ),
             ):
                 group.create_task(
                     start_reader(
@@ -81,6 +67,10 @@ class StartupLoading(_AppBase):
                         start_timer=self.set_interval,
                     )
                 )
+        # Daemon-side long polls: no timers, so an idle Régie makes no bus wakeups.
+        self._animation_loop.start()
+        if self._bus_visible:
+            self._bus_loop.start()
         self.call_after_refresh(startup_milestone, "ready", self._startup_started_at)
 
     async def _initialize_state_follow(self) -> None:

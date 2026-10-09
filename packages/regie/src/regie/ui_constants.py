@@ -349,6 +349,9 @@ REGIE_USAGE_METRIC_UP = {"cost": "input", "average": "cache"}
 #: How often the régie polls the daemon for usage data (seconds).
 REGIE_USAGE_POLL_INTERVAL_SECONDS = 10.0
 
+#: How long one diagnostic-bus read blocks in the daemon (below the 35s request timeout).
+REGIE_BUS_LONG_POLL_SECONDS = 25.0
+
 # Public usage values keep Theater's wire units; Régie owns their presentation.
 REGIE_MICROCENTS_PER_DOLLAR = 100_000_000
 REGIE_USAGE_AVERAGE_WINDOW_DAYS = 30

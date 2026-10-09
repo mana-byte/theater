@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from regie.contracts import PresentationOperations, RegieSettings, UnmanagedPane
     from regie.controllers.action_presentation import ActionPresentation
     from regie.controllers.actions import ActionRecord, OperationController
+    from regie.controllers.long_poll import LongPollLoop
     from regie.controllers.navigation import NavigationState
     from regie.controllers.polling import RefreshGate
     from regie.controllers.presentation_queue import PresentationQueue
@@ -53,6 +54,8 @@ if TYPE_CHECKING:
         _bus: DiagnosticBusController
         _animation_bus: DiagnosticBusController
         _animation_primed: bool
+        _bus_loop: LongPollLoop
+        _animation_loop: LongPollLoop
         _animation: RouteAnimationController
         _animation_timer: Timer | None
         _trajectory: TrajectoryController

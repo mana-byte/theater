@@ -26,12 +26,13 @@ class DiagnosticBusController:
     def last_gap(self) -> int:
         return self._last_gap
 
-    async def poll(self) -> tuple[Mapping[str, object], ...]:
+    async def poll(self, wait_seconds: float = 0.0) -> tuple[Mapping[str, object], ...]:
+        """Read new rows; a positive ``wait_seconds`` blocks in the daemon until one lands."""
         async with self._lock:
-            response = await self._client.diagnostics.bus_tail(
-                after_id=self._after_id,
-                limit=self._batch,
-            )
+            params: dict[str, object] = {"after_id": self._after_id, "limit": self._batch}
+            if wait_seconds > 0:
+                params["wait_seconds"] = wait_seconds
+            response = await self._client.diagnostics.bus_tail(**params)
             items = getattr(getattr(response, "value", None), "items", None)
             if not isinstance(items, tuple | list):
                 raise TypeError("diagnostic bus response must contain an item sequence")

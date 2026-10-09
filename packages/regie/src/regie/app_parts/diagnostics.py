@@ -20,11 +20,12 @@ from theater.frontend import (
 
 
 class DiagnosticsDisplay(_AppBase):
-    async def _refresh_bus(self) -> None:
+    async def _refresh_bus(self, wait_seconds: float = 0.0) -> bool:
+        """One bus read; returns False when the daemon was unreachable."""
         if not self._bus_visible:
-            return
+            return True
         try:
-            rows = await self._bus.poll()
+            rows = await self._bus.poll(wait_seconds)
         except (
             AttributeError,
             FrontendClientError,
@@ -33,20 +34,21 @@ class DiagnosticsDisplay(_AppBase):
             TypeError,
         ) as exc:
             logger.debug("diagnostic bus unavailable: %s", exc)
-            return
+            return False
         if not self._view_active:
-            return
+            return True
         view = self.query_one("#bus", RichLog)
         if self._bus.last_gap:
             view.write(Text(f"... {self._bus.last_gap} events dropped", style="dim italic"))
         for row in rows:
             variables = self.theme_variables if self.is_running else None
             view.write(format_bus_line(row, variables=variables))
+        return True
 
-    async def _refresh_animations(self) -> None:
+    async def _refresh_animations(self, wait_seconds: float = 0.0) -> bool:
         """Follow coordination events on a cursor independent of the bus panel."""
         try:
-            rows = await self._animation_bus.poll()
+            rows = await self._animation_bus.poll(wait_seconds)
         except (
             AttributeError,
             FrontendClientError,
@@ -54,16 +56,17 @@ class DiagnosticsDisplay(_AppBase):
             FrontendTransportError,
             TypeError,
         ):
-            return
+            return False
         if not self._animation_primed:
             self._animation_primed = True
-            return
+            return True
         if any(self._animation_needs_fresh_tree(row) for row in rows):
             await self._tick_synchronize()
         if not self._view_active:
-            return
+            return True
         for row in rows:
             self._animate_bus_row(row)
+        return True
 
     @staticmethod
     def _animation_needs_fresh_tree(row: object) -> bool:
@@ -153,3 +156,7 @@ class DiagnosticsDisplay(_AppBase):
     def action_toggle_bus(self) -> None:
         self._bus_visible = not self._bus_visible
         self._show_bus_visibility()
+        if self._bus_visible:
+            self._bus_loop.start()
+        else:
+            self._bus_loop.stop()

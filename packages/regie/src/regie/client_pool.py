@@ -8,6 +8,9 @@ from itertools import count
 from theater.frontend import FrontendClient
 
 _LONG_POLL_REQUEST_TIMEOUT_SECONDS = 35.0
+_LONG_POLL_PURPOSES = frozenset(
+    {"state", "trajectory_follow", "transcripts", "bus", "animation_bus"}
+)
 
 
 class FrontendClientPool:
@@ -37,7 +40,7 @@ class FrontendClientPool:
                     purpose,
                     minimum_timeout=(
                         _LONG_POLL_REQUEST_TIMEOUT_SECONDS
-                        if purpose in {"state", "trajectory_follow", "transcripts"}
+                        if purpose in _LONG_POLL_PURPOSES
                         else None
                     ),
                 )

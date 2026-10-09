@@ -257,9 +257,11 @@ class _Diagnostics:
         self.rows: list[dict[str, object]] = []
         self.calls: list[dict[str, int]] = []
 
-    async def bus_tail(self, *, after_id: int, limit: int) -> object:
+    async def bus_tail(self, *, after_id: int, limit: int, wait_seconds: float = 0) -> object:
         self.calls.append({"after_id": after_id, "limit": limit})
         items = tuple(row for row in self.rows if int(row["id"]) > after_id)[:limit]
+        if wait_seconds and not items:
+            await asyncio.sleep(0.01)  # stands in for the daemon-side block
         return SimpleNamespace(value=SimpleNamespace(items=items))
 
 
@@ -636,12 +638,7 @@ async def test_startup_reveals_state_before_catalog_discovery_and_usage(  # noqa
         assert app._startup_task is not None
         await app._startup_task
         await pilot.pause()
-        assert sorted(timers) == [
-            "_refresh_animations",
-            "_refresh_bus",
-            "_refresh_local_projection",
-            "usage",
-        ]
+        assert sorted(timers) == ["_refresh_local_projection", "usage"]  # bus reads long-poll
         assert any(message.startswith("startup.ready ") for message in caplog.messages)
         assert app.selected_participant_id == "participant-2"
 
@@ -2164,7 +2161,7 @@ async def test_malformed_bus_pages_are_contained_by_both_pollers(
         app._bus_visible = True
         monkeypatch.setattr(app, "notify", lambda message, **_kwargs: messages.append(str(message)))
 
-        async def malformed() -> object:
+        async def malformed(*_args: object, **_kwargs: object) -> object:
             raise TypeError("malformed diagnostic page")
 
         monkeypatch.setattr(app._bus, "poll", malformed)
@@ -2454,3 +2451,14 @@ def test_partially_revealed_name_has_no_span_until_clipped_in() -> None:
     }
     assert visible_name_span(node, reveal=9) is None
     assert visible_name_span(node, reveal=10) == (8, 9)
+
+
+async def test_bus_loop_follows_panel_visibility() -> None:
+    app, _client, _presentation = _app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._animation_loop.running and not app._bus_loop.running
+        await pilot.press("v")
+        assert app._bus_loop.running
+        await pilot.press("v")
+        assert not app._bus_loop.running

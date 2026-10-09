@@ -11,9 +11,8 @@
 # Defaults to "ansi-dark", which follows your terminal's own colours.
 # theme = "catppuccin-mocha"
 
-# State-follow and diagnostic-bus refresh intervals, in seconds.
+# State-follow refresh interval in seconds; the diagnostic bus long-polls (no interval).
 tree_interval = 1.0
-bus_interval = 0.4
 bus_batch = 50
 
 # Tree and layout presentation.

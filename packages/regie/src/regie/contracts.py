@@ -15,7 +15,7 @@ class RegieSettings:
     theme: str | None = "ansi-dark"
     favourite: str | None = None
     tree_interval: float = 1.0
-    bus_interval: float = 0.4
+    bus_interval: float = 0.4  # Obsolete (bus reads long-poll); kept so old configs still load.
     bus_batch: int = 50
     cwd_segments: int = 2
     participant_detail: str = "cwd"
