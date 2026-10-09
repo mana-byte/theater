@@ -110,7 +110,7 @@ class DirectoryInput(Input):
 
     def action_complete_directory(self) -> None:
         suggestion = directory_suggestion(
-            self.value,
+            self.value,  # type: ignore[has-type]
             base_dir=self._directory_suggester.base_dir,
         )
         if suggestion is not None:

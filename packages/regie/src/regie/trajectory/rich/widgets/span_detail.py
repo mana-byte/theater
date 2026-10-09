@@ -93,7 +93,7 @@ class _DetailLoadingIndicator(LoadingIndicator):
 
     def set_active(self, active: bool) -> None:
         self.display = active
-        self.auto_refresh = 1 / 16 if active else None
+        self.auto_refresh = 1 / 16 if active else None  # type: ignore[assignment]
 
 
 @dataclass(frozen=True, slots=True)
