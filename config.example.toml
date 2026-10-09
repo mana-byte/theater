@@ -118,6 +118,12 @@ sync_interval = 1.0
 ttl_days = 7
 
 
+# SQLite pragmas are fixed in code. WAL + synchronous=NORMAL may lose recent
+# commits after power loss (not a process crash) in exchange for faster commits.
+# A 64 MiB page cache, 256 MiB mmap, and in-memory temp tables trade memory
+# for fewer disk reads.
+
+
 [retention]
 
 # The database grows without bound unless old rows are swept. The daemon runs

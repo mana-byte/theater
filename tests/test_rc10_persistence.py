@@ -188,6 +188,21 @@ def test_fresh_and_drained_rc9_databases_migrate(tmp_path: Path) -> None:
         migrated.close()
 
 
+def test_database_pragmas_are_tuned(tmp_path: Path) -> None:
+    """Performance pragmas apply to long-lived and fresh connections."""
+    db = Database(tmp_path / "pragmas.db")
+    try:
+        assert db.conn.exec_driver_sql("PRAGMA synchronous").scalar() == 1
+        assert db.conn.exec_driver_sql("PRAGMA cache_size").scalar() == -65536
+        assert db.conn.exec_driver_sql("PRAGMA mmap_size").scalar() == 268435456
+        assert db.conn.exec_driver_sql("PRAGMA temp_store").scalar() == 2
+        with db.engine.connect() as fresh:
+            assert fresh.exec_driver_sql("PRAGMA synchronous").scalar() == 1
+            assert fresh.exec_driver_sql("PRAGMA cache_size").scalar() == -65536
+    finally:
+        db.close()
+
+
 def test_database_startup_refuses_live_rc9_without_touching_file(tmp_path: Path) -> None:
     path = tmp_path / "live.db"
     _rc9_database(path, live_participant=True)

@@ -274,11 +274,15 @@ def ensure_rc9_upgrade_allowed(connection: Connection) -> None:
 
 
 def _set_pragmas(dbapi_connection, _record) -> None:
-    """WAL, foreign keys, and busy_timeout for every connection."""
+    """WAL, foreign keys, busy_timeout, and tuned performance pragmas, per connection."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA cache_size=-65536")
+    cursor.execute("PRAGMA mmap_size=268435456")
+    cursor.execute("PRAGMA temp_store=MEMORY")
     cursor.close()
 
 
