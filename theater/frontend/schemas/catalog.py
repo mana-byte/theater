@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from functools import lru_cache
 from importlib import resources
@@ -61,13 +63,27 @@ def schema_registry() -> Registry:
     return registry
 
 
+# The catalog holds ~160 schema ids; the cap only bounds crafted ids.
+_VALIDATOR_CACHE_MAX = 512
+_validators: OrderedDict[str, Draft202012Validator] = OrderedDict()
+_validators_lock = threading.Lock()
+
+
 def validator_for(schema_id: str) -> Draft202012Validator:
-    """Resolve a stable schema ID solely through the bundled registry."""
+    """Resolve a stable schema ID solely through the bundled registry, built once per ID."""
     if not isinstance(schema_id, str) or not schema_id.startswith(SCHEMA_BASE_URI):
         raise KeyError(f"schema is not in the bundled RC10 catalog: {schema_id!r}")
-    validator = Draft202012Validator({"$ref": schema_id}, registry=schema_registry())
-    validator.check_schema(validator.schema)
-    return validator
+    with _validators_lock:
+        validator = _validators.get(schema_id)
+        if validator is not None:
+            _validators.move_to_end(schema_id)
+            return validator
+        validator = Draft202012Validator({"$ref": schema_id}, registry=schema_registry())
+        validator.check_schema(validator.schema)
+        _validators[schema_id] = validator
+        if len(_validators) > _VALIDATOR_CACHE_MAX:
+            _validators.popitem(last=False)
+        return validator
 
 
 def _reject_nonfinite(value: object) -> None:
