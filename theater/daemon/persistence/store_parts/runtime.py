@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from theater.daemon.events.publication import next_revision, participant_event
 from theater.daemon.persistence.store_parts._host import StoreHost
+from theater.daemon.persistence.transactions import active_write_unit
 from theater.models import now
 
 
@@ -131,34 +132,78 @@ class RuntimeBindingStore(StoreHost):
         native_version: str | None = None,
         compatibility_policy: str | None = None,
         updated_at: float,
+        connection=None,
     ) -> bool:
         """Atomically bind one native identity and its trusted participant identity.
 
         One fact in one write unit: a crash must never expose a new native route beside an
         older trusted transcript identity.
         """
-        with self.write_unit() as unit:
-            participant = self._participants.get(participant_id, connection=unit.connection)
-            if participant is None:
-                return False
-            changed = self._runtime_bindings.bind_identity(
+        if connection is not None:
+            unit = active_write_unit(connection)
+            if unit is None:
+                raise RuntimeError("runtime identity bind requires an active write unit")
+            return self._bind_runtime_and_participant_identity(
+                unit,
                 participant_id,
                 backend_generation=backend_generation,
                 native_session_id=native_session_id,
+                session_correlation=session_correlation,
                 protocol=protocol,
                 protocol_version=protocol_version,
                 native_version=native_version,
                 compatibility_policy=compatibility_policy,
                 updated_at=updated_at,
-                connection=unit.connection,
             )
-            if not changed:
-                return False
-            participant.session_id = native_session_id
-            participant.session_correlation = session_correlation
-            self._participants.upsert(participant, connection=unit.connection)
-            self._append_participant_controls_event(unit, participant_id, recorded_at=updated_at)
-            return True
+        with self.write_unit() as unit:
+            return self._bind_runtime_and_participant_identity(
+                unit,
+                participant_id,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                session_correlation=session_correlation,
+                protocol=protocol,
+                protocol_version=protocol_version,
+                native_version=native_version,
+                compatibility_policy=compatibility_policy,
+                updated_at=updated_at,
+            )
+
+    def _bind_runtime_and_participant_identity(
+        self,
+        unit,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str,
+        session_correlation: str,
+        protocol: str | None,
+        protocol_version: str | None,
+        native_version: str | None,
+        compatibility_policy: str | None,
+        updated_at: float,
+    ) -> bool:
+        participant = self._participants.get(participant_id, connection=unit.connection)
+        if participant is None:
+            return False
+        changed = self._runtime_bindings.bind_identity(
+            participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+            protocol=protocol,
+            protocol_version=protocol_version,
+            native_version=native_version,
+            compatibility_policy=compatibility_policy,
+            updated_at=updated_at,
+            connection=unit.connection,
+        )
+        if not changed:
+            return False
+        participant.session_id = native_session_id
+        participant.session_correlation = session_correlation
+        self._participants.upsert(participant, connection=unit.connection)
+        self._append_participant_controls_event(unit, participant_id, recorded_at=updated_at)
+        return True
 
     def set_runtime_lifecycle(
         self,
@@ -208,7 +253,13 @@ class RuntimeBindingStore(StoreHost):
             ],
         )
 
-    def publish_participant_controls_changed(self, participant_id: str) -> None:
+    def publish_participant_controls_changed(self, participant_id: str, *, connection=None) -> None:
         """Journal one cached physical-control projection change."""
+        if connection is not None:
+            unit = active_write_unit(connection)
+            if unit is None:
+                raise RuntimeError("controls publication requires an active write unit")
+            self._append_participant_controls_event(unit, participant_id, recorded_at=now())
+            return
         with self.write_unit() as unit:
             self._append_participant_controls_event(unit, participant_id, recorded_at=now())

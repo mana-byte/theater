@@ -114,7 +114,7 @@ class SQLiteWriteUnit:
             raise
         return self
 
-    def __exit__(
+    def __exit__(  # noqa: PLR0912
         self,
         exception_type: type[BaseException] | None,
         exception: BaseException | None,
@@ -134,6 +134,10 @@ class SQLiteWriteUnit:
                 connection.rollback()
             else:
                 transaction.rollback()
+        except BaseException:
+            if exception_type is None:
+                connection.rollback()
+            raise
         finally:
             if connection.info.get(_UNIT_KEY) is self:
                 connection.info.pop(_UNIT_KEY, None)

@@ -374,7 +374,7 @@ class Reducer:
         elif connection is None:
             self.registry.set_status(pid, desired)
         else:
-            self.store.set_status(pid, desired, connection=connection)
+            self.store.set_status(pid, desired, connection=connection, publish=True)
             self.store.bus_append(
                 "participant.status",
                 to_id=pid,

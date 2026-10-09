@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from functools import partial
 
 from sqlalchemy import Connection, delete, select
 
@@ -12,6 +13,7 @@ from theater.daemon.artifacts import remove_secret_file
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
+from theater.daemon.persistence.transactions import after_commit
 from theater.daemon.schema import meta
 from theater.harness.contracts.channels import ChannelKind
 from theater.models import Status
@@ -113,8 +115,8 @@ class ChannelCredentialRepository:
         for key, raw in rows:
             if not key.startswith(prefix):
                 continue
-            self._unlink_token(raw, participant_id)
             conn.execute(delete(meta).where(meta.c.key == key))
+            after_commit(connection, partial(self._unlink_token, raw, participant_id))
 
     def cleanup(self, *, connection: Connection | None = None) -> int:
         conn = self._db.conn if connection is None else connection

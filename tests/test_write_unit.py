@@ -74,6 +74,48 @@ def test_write_unit_rolls_back_and_rejects_nesting(tmp_path) -> None:
         store.close()
 
 
+def test_explicit_participant_connection_does_not_publish_a_journal_event(tmp_path) -> None:
+    store = Store(tmp_path / "participant-raw.db")
+    registry = Registry(store)
+    participant = registry.register(harness="codex", pane=None, cwd="/tmp")
+    participant = store.get_participant(participant.id)
+    assert participant is not None
+    before = store.journal.current_sequence()
+    participant.description = "stored by an external transaction"
+    try:
+        with store.write_unit() as unit:
+            store.upsert_participant(participant, connection=unit.connection)
+
+        assert store.journal.current_sequence() == before
+    finally:
+        store.close()
+
+
+def test_commit_failure_rolls_back_a_supplied_connection(tmp_path, monkeypatch) -> None:
+    store = Store(tmp_path / "commit-failure.db")
+    notifications: list[str] = []
+    commit = store.conn.commit
+
+    def fail_commit() -> None:
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(store.conn, "commit", fail_commit)
+    try:
+        with pytest.raises(RuntimeError, match="commit failed"):  # noqa: SIM117
+            with store.write_unit(connection=store.conn) as unit:
+                store.bus_append(
+                    "agent.assistant", from_id="participant-a", connection=unit.connection
+                )
+                unit.after_commit(lambda: notifications.append("committed"))
+
+        assert not store.conn.in_transaction()
+        assert store.bus_tail() == []
+        assert notifications == []
+    finally:
+        monkeypatch.setattr(store.conn, "commit", commit)
+        store.close()
+
+
 class _CheckpointSource:
     def __init__(self, checkpoint: str) -> None:
         self.checkpoint = checkpoint

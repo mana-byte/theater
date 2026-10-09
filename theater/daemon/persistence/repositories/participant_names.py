@@ -42,9 +42,10 @@ class ParticipantNameRepository:
             delete(participant_names).where(participant_names.c.participant_id == participant_id)
         )
 
-    def purge_stale(self) -> None:
+    def purge_stale(self, *, connection: Connection | None = None) -> None:
         """Drop rows whose participant is dead or gone."""
         live = select(participants.c.id).where(participants.c.status != str(Status.DEAD))
-        self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             delete(participant_names).where(participant_names.c.participant_id.not_in(live))
         )

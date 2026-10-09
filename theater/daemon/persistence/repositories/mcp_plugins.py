@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from sqlalchemy import Connection, delete, select
@@ -14,6 +15,7 @@ from theater.constants.core import HARNESS_NAME
 from theater.daemon.artifacts import ArtifactKind, remove_secret_file, validate_persisted_path
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
+from theater.daemon.persistence.transactions import after_commit
 from theater.daemon.schema import participant_mcp_plugins
 from theater.mcp_plugins.contracts import PluginCapability
 from theater.models import Status
@@ -128,7 +130,7 @@ class McpPluginCredentialRepository:
             )
         ).first()
         if row is not None:
-            remove_secret_file(row[0], owner_id=participant_id)
+            after_commit(connection, partial(remove_secret_file, row[0], owner_id=participant_id))
         conn.execute(
             delete(participant_mcp_plugins).where(
                 participant_mcp_plugins.c.participant_id == participant_id,
@@ -146,7 +148,10 @@ class McpPluginCredentialRepository:
             )
         ).fetchall()
         for (credential_path,) in rows:
-            remove_secret_file(credential_path, owner_id=participant_id)
+            after_commit(
+                connection,
+                partial(remove_secret_file, credential_path, owner_id=participant_id),
+            )
         conn.execute(
             delete(participant_mcp_plugins).where(
                 participant_mcp_plugins.c.participant_id == participant_id

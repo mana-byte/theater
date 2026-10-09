@@ -30,15 +30,18 @@ class ParticipantStore(StoreHost):
 
     def upsert_participant(self, p: Participant, *, connection=None) -> None:
         if connection is not None:
-            unit = active_write_unit(connection)
-            if unit is None:
-                self._participants.upsert(p, connection=connection)
-                self._release_dead_name(p, connection)
-            else:
-                self._upsert_participant(p, unit)
+            self._participants.upsert(p, connection=connection)
+            self._release_dead_name(p, connection)
             return
         with self.write_unit() as unit:
             self._upsert_participant(p, unit)
+
+    def upsert_participant_published(self, p: Participant, *, connection) -> None:
+        """Upsert and journal inside an active caller-owned write unit."""
+        unit = active_write_unit(connection)
+        if unit is None:
+            raise RuntimeError("published participant upsert requires an active write unit")
+        self._upsert_participant(p, unit)
 
     def _upsert_participant(self, p: Participant, unit: WriteUnit) -> None:
         before = self._participants.get(p.id, connection=unit.connection)
@@ -85,8 +88,8 @@ class ParticipantStore(StoreHost):
     def delete_participant_name(self, pid: str, *, connection=None) -> None:
         self._participant_names.delete(pid, connection=connection)
 
-    def purge_stale_participant_names(self) -> None:
-        self._participant_names.purge_stale()
+    def purge_stale_participant_names(self, *, connection=None) -> None:
+        self._participant_names.purge_stale(connection=connection)
 
     def get_participant(self, pid: str, *, connection=None) -> Participant | None:
         return self._participants.get(pid, connection=connection)
@@ -137,13 +140,18 @@ class ParticipantStore(StoreHost):
     def children_of(self, pid: str) -> list[Participant]:
         return self._participants.children_of(pid)
 
-    def set_status(self, pid: str, status: Status, *, connection=None) -> None:
+    def set_status(
+        self, pid: str, status: Status, *, connection=None, publish: bool = False
+    ) -> None:
         participant = self._participants.get(pid, connection=connection)
         if participant is None:
             return
         participant.status = status
         participant.last_activity = now()
-        self.upsert_participant(participant, connection=connection)
+        if publish:
+            self.upsert_participant_published(participant, connection=connection)
+        else:
+            self.upsert_participant(participant, connection=connection)
 
     def stamp_live_tmux_server_identity(
         self,
@@ -262,8 +270,11 @@ class ParticipantStore(StoreHost):
     def set_source_checkpoint(self, pid: str, checkpoint: str, *, connection=None) -> None:
         self._participants.set_source_checkpoint(pid, checkpoint, connection=connection)
 
-    def reparent_participant(self, pid: str, *, new_parent_id: str) -> None:
+    def reparent_participant(self, pid: str, *, new_parent_id: str, connection=None) -> None:
         """Set the parent_id of a participant."""
+        if connection is not None:
+            self.reparent_in_connection(pid, new_parent_id=new_parent_id, connection=connection)
+            return
         with self.write_unit() as unit:
             participant = self._participants.get(pid, connection=unit.connection)
             if participant is None or participant.parent_id == new_parent_id:
