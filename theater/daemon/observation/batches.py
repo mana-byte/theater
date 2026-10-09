@@ -99,6 +99,18 @@ class BatchApplication:
         )
         answer_turn_fn = partial(self._answer_turn, registration=registration)
         try:
+            if self._reducer.is_write_free(batch) and source.pending_source_checkpoint() is None:
+                # Nothing to write or acknowledge: skip the unit; apply fast-paths itself.
+                return self._reducer.apply(
+                    pid,
+                    batch,
+                    clock,
+                    turns,
+                    answer_turn_fn=answer_turn_fn,
+                    settle_fn=self._settle,
+                    turn_result_fn=self._turn_result,
+                    path_target_fn=path_target_fn,
+                )
             with (
                 rollback_observation_state(clock, turns),
                 self._reducer.staged_hashes(pid, batch),
