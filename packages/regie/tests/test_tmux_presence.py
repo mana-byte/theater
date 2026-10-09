@@ -391,3 +391,195 @@ async def test_reporting_failure_cannot_create_a_refresh_or_notification_loop(
         assert monitor._armed_at > 0
     finally:
         await monitor.aclose()
+
+
+async def _scoped_monitor(monkeypatch, reads):
+    class Hooks:
+        def __init__(self, identity):
+            self.identity = ServerIdentity.parse(identity)
+
+        async def arm(self):
+            return True
+
+        async def wait(self):
+            await asyncio.Event().wait()
+
+        async def close(self):
+            pass
+
+    async def read(_identity):
+        return reads.pop(0)
+
+    monkeypatch.setattr("regie.tmux.focus_monitor.FocusHooks", Hooks)
+    monkeypatch.setattr("regie.tmux.focus_monitor.read_inventory", read)
+    monitor = FocusMonitor()
+    await monitor.start(_SERVER)
+    monitor.take_changed_panes()
+    return monitor
+
+
+async def test_install_scopes_changes_to_the_pane_whose_focus_state_differs(monkeypatch):
+    other = FocusClient(
+        ("tty2", "pid", "created", "session", "session-created"),
+        frozenset({"focused"}),
+        False,
+        False,
+        "@2",
+        "%8",
+        frozenset({"focus"}),
+    )
+    first = replace(
+        _facts(_client(), other), panes={**_facts().panes, "%8": FocusPane("@2", 99, None)}
+    )
+    second = replace(first, clients=(_client(flags=frozenset()), other))
+    monitor = await _scoped_monitor(monkeypatch, [first, first, second, second])
+    try:
+        await monitor.refresh()
+        assert monitor.take_changed_panes() == frozenset()  # same facts: nothing moved
+        monitor.changed.clear()
+        await monitor.refresh(fresh=True)
+        assert monitor.changed.is_set()
+        assert monitor.take_changed_panes() == frozenset({"%7"})
+        await monitor.refresh(fresh=True)
+        assert monitor.take_changed_panes() == frozenset()  # a taken scope is never reused
+    finally:
+        await monitor.aclose()
+
+
+async def test_unattributable_changes_are_wholesale_and_unrelated_ones_empty(monkeypatch):
+    facts = _facts(_client())
+    unrelated = replace(facts, clients=(*facts.clients, _client(readonly=True)))
+    monitor = await _scoped_monitor(monkeypatch, [facts, unrelated, unrelated, unrelated])
+    try:
+        await monitor.refresh()
+        assert monitor.take_changed_panes() == frozenset()  # only a read-only client appeared
+        assert monitor.changed.is_set()
+        monitor._invalidate("focus_refresh_pending", wake=True)  # wake: reported wholesale
+        assert monitor.take_changed_panes() is None
+        assert monitor.take_changed_panes() == frozenset()
+        await monitor.refresh(fresh=True)  # the wake kept its baseline: unrelated, so empty
+        assert monitor.take_changed_panes() == frozenset()
+    finally:
+        await monitor.aclose()
+        assert monitor.take_changed_panes() is None  # monitor close is wholesale too
+
+
+def _two_windows(*, first_focused=True, second_focused=True) -> FocusInventory:
+    def client(tty, window, pane, focused):
+        return FocusClient(
+            (tty, "pid", "created", "session", "session-created"),
+            frozenset({"focused"}) if focused else frozenset(),
+            False,
+            False,
+            window,
+            pane,
+            frozenset({"focus"}),
+        )
+
+    panes = {"%7": FocusPane("@1", 42, None), "%8": FocusPane("@2", 99, None)}
+    clients = (client("a", "@1", "%7", first_focused), client("b", "@2", "%8", second_focused))
+    return FocusInventory(_SERVER, panes, clients, True)
+
+
+async def test_wake_is_wholesale_then_the_post_wake_install_is_scoped(monkeypatch):
+    monitor = await _scoped_monitor(
+        monkeypatch, [_two_windows(), _two_windows(first_focused=False)]
+    )
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        assert monitor.take_changed_panes() is None  # consumed before the install
+        await monitor.refresh(fresh=True)
+        assert monitor.take_changed_panes() == frozenset({"%7"})
+    finally:
+        await monitor.aclose()
+
+
+async def test_install_before_the_wake_scope_is_consumed_keeps_both_reports(monkeypatch):
+    monitor = await _scoped_monitor(
+        monkeypatch, [_two_windows(), _two_windows(first_focused=False)]
+    )
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        await monitor.refresh(fresh=True)
+        monitor.changed.clear()
+        assert monitor.take_changed_panes() is None
+        assert monitor.changed.is_set()  # the queued scope wakes the bridge again
+        assert monitor.take_changed_panes() == frozenset({"%7"})
+    finally:
+        await monitor.aclose()
+
+
+async def test_post_wake_installs_union_their_scopes(monkeypatch):
+    second = _two_windows(first_focused=False)
+    third = _two_windows(first_focused=False, second_focused=False)
+    monitor = await _scoped_monitor(monkeypatch, [_two_windows(), second, third])
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        await monitor.refresh(fresh=True)
+        await monitor.refresh(fresh=True)
+        assert monitor.take_changed_panes() is None
+        assert monitor.take_changed_panes() == frozenset({"%7", "%8"})
+    finally:
+        await monitor.aclose()
+
+
+@pytest.mark.parametrize(
+    "reason", ["focus_query_failed", "focus_arming_failed", "focus_wake_unavailable"]
+)
+async def test_failures_stay_wholesale_even_after_recovery(monkeypatch, reason):
+    unchanged = _two_windows()
+    monitor = await _scoped_monitor(monkeypatch, [unchanged, unchanged, unchanged])
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)  # a baseline exists...
+        monitor._invalidate(reason)  # ...until a failure discards it
+        assert monitor.take_changed_panes() is None
+        await monitor.refresh(fresh=True)  # recovery has nothing to attribute against
+        assert monitor.take_changed_panes() is None
+    finally:
+        await monitor.aclose()
+    assert monitor.take_changed_panes() is None  # close is wholesale too
+
+
+@pytest.mark.parametrize(
+    "lose", ["focus_query_failed", "focus_arming_failed", "focus_wake_unavailable", "closed"]
+)
+async def test_trust_loss_discards_a_queued_scope(monkeypatch, lose):
+    reads = [_two_windows(), _two_windows(first_focused=False)]
+    monitor = await _scoped_monitor(monkeypatch, reads)
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        await monitor.refresh(fresh=True)  # queues {"%7"} behind the wake's wholesale
+        if lose == "closed":
+            await monitor.aclose()
+        else:
+            monitor._invalidate(lose)
+        assert monitor.take_changed_panes() is None
+        assert monitor.take_changed_panes() == frozenset()  # nothing stale survives
+    finally:
+        await monitor.aclose()
+
+
+async def test_disabled_reporting_discards_baseline_and_queued_scope(monkeypatch):
+    disabled = replace(_two_windows(first_focused=False), enabled=False)
+    monitor = await _scoped_monitor(monkeypatch, [_two_windows(), disabled, disabled])
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)  # baseline kept
+        await monitor.refresh(fresh=True)  # disabled read: no scoped attribution
+        assert monitor.take_changed_panes() is None
+        assert monitor.take_changed_panes() == frozenset()
+    finally:
+        await monitor.aclose()
+
+
+async def test_server_change_restart_is_wholesale(monkeypatch):
+    monitor = await _scoped_monitor(
+        monkeypatch, [_two_windows(), _two_windows(first_focused=False), _two_windows()]
+    )
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        await monitor.refresh(fresh=True)  # queued scope {"%7"}
+        await monitor.start(ServerIdentity("/other/tmux", "33", "44").value)
+        assert monitor.take_changed_panes() is None
+        assert monitor.take_changed_panes() == frozenset()
+    finally:
+        await monitor.aclose()

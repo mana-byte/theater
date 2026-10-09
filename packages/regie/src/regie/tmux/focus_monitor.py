@@ -8,7 +8,7 @@ import logging
 import time
 from dataclasses import replace
 
-from regie.tmux.focus_facts import FocusInventory, read_inventory
+from regie.tmux.focus_facts import FocusInventory, changed_panes, read_inventory
 from regie.tmux.focus_hooks import FocusHooks
 from regie.tmux.focus_policy import FocusTrust, PresenceEvidence, classify
 from regie.tmux.identity import PaneSnapshot
@@ -27,6 +27,11 @@ class FocusMonitor:
         self._trust = FocusTrust()
         self._hooks: FocusHooks | None = None
         self._facts: FocusInventory | None = None
+        self._blurred: frozenset[tuple[str, ...]] = frozenset()
+        self._wholesale = True  # a wholesale (invalidate-all) report is owed
+        self._scope: frozenset[str] = frozenset()  # diffs queued behind it
+        # Pre-wake facts, kept only across plain hook wakes, to attribute the post-wake read.
+        self._baseline: tuple[FocusInventory, frozenset[tuple[str, ...]]] | None = None
         self._stopping = True
         self._reason = "focus_not_observed"
         self._epoch = 0
@@ -49,8 +54,14 @@ class FocusMonitor:
         await self.refresh()
         self._loop_task = asyncio.create_task(self._loop(), name="regie-focus-refresh")
 
-    def _invalidate(self, reason: str) -> None:
+    def _invalidate(self, reason: str, *, wake: bool = False) -> None:
         changed = self._facts is not None or self._reason != reason
+        if not wake:
+            self._baseline = None
+            self._scope = frozenset()  # trust lost: nothing queued may outlive the wholesale
+        elif self._facts is not None:
+            self._baseline = (self._facts, self._blurred)
+        self._wholesale = True
         self._epoch += 1
         self._facts = None
         self._reason = reason
@@ -138,12 +149,40 @@ class FocusMonitor:
                 self._wake.set()
             self._trust.armed = False
             self._trust.invalidate()
+            # Trust history was reset: inventory alone cannot attribute, so stay wholesale.
+            self._wholesale = True
+            self._baseline = None
+            self._scope = frozenset()
         self._trust.observe(facts.clients)
+        blurred = frozenset(c.identity for c in facts.clients if self._trust.blurred(c))
+        if facts.enabled:
+            self._note_scope(facts, blurred)
         if self._facts != facts:
             self._epoch += 1
             self.changed.set()
         self._facts = facts
+        self._blurred = blurred
         self._facts_started_at = started_at
+
+    def _note_scope(self, facts: FocusInventory, blurred: frozenset[tuple[str, ...]]) -> None:
+        """Queue panes changed against the last known state; none known means wholesale."""
+        base = (self._facts, self._blurred) if self._facts is not None else self._baseline
+        self._baseline = None
+        scope = None if base is None else changed_panes(base[0], base[1], facts, blurred)
+        if scope is None:
+            self._wholesale = True
+        else:
+            self._scope |= scope
+
+    def take_changed_panes(self) -> frozenset[str] | None:
+        """Next scope to report: None is wholesale (unknown), queued diffs follow it."""
+        if self._wholesale:
+            self._wholesale = False
+            if self._scope:
+                self.changed.set()  # wake the bridge again for the queued scope
+            return None
+        scope, self._scope = self._scope, frozenset()
+        return scope
 
     async def observe(
         self, expected: PaneSnapshot, *, requested_at: float | None = None
@@ -179,7 +218,7 @@ class FocusMonitor:
                 self._wake.set()
                 await asyncio.sleep(1.0)
             else:
-                self._invalidate("focus_refresh_pending")
+                self._invalidate("focus_refresh_pending", wake=True)
                 self._wake.set()
 
     async def aclose(self) -> None:
