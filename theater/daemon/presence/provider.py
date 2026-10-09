@@ -83,13 +83,13 @@ class ProviderPresenceSource:
         self,
         provider_id: str,
         generation: int,
-        terminal_ids: Sequence[str] | None = None,
+        invalidated_terminals: Sequence[str] | None = None,
     ) -> tuple[str, ...] | None:
-        """Forget cached evidence; ``terminal_ids`` limits the epoch fence."""
+        """Forget cached evidence; ``invalidated_terminals`` limits the epoch fence."""
         service = self._terminal_service
         if service is None or not service.connections.is_current(provider_id, generation):
             return None
-        scoped = None if terminal_ids is None else frozenset(terminal_ids)
+        scoped = None if invalidated_terminals is None else frozenset(invalidated_terminals)
         if scoped is not None:
             if not scoped:
                 return ()

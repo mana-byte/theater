@@ -168,23 +168,25 @@ class PresenceMonitor:
         self,
         provider_id: str,
         generation: int,
-        terminal_ids: Sequence[str] | None = None,
+        invalidated_terminals: Sequence[str] | None = None,
     ) -> None:
-        """Forget provider evidence; explicit ``terminal_ids`` scope the re-check."""
+        """Forget provider evidence; explicit ``invalidated_terminals`` scope the re-check."""
         if self._stopping:
             return
-        invalidated = self._provider.invalidate(provider_id, generation, terminal_ids=terminal_ids)
+        invalidated = self._provider.invalidate(
+            provider_id, generation, invalidated_terminals=invalidated_terminals
+        )
         if invalidated is None:
             return
-        if terminal_ids is not None and not invalidated:
+        if invalidated_terminals is not None and not invalidated:
             return  # named terminals hold no cached evidence: nothing to re-check
         self._bump_revision()
         for participant_id in invalidated:
             before = self._published_states.get(participant_id)
             self._published_states[participant_id] = PresenceState.UNKNOWN
             if before is not PresenceState.UNKNOWN:
-                self._publish_change(participant_id, PresenceState.UNKNOWN)
-        if terminal_ids is None:
+                self._publish_change(participant_id)
+        if invalidated_terminals is None:
             self._wake.set()
         else:
             self._schedule_scoped_refresh(invalidated)
@@ -192,7 +194,8 @@ class PresenceMonitor:
     def _schedule_scoped_refresh(self, participant_ids: Sequence[str]) -> None:
         for participant_id in participant_ids:
             task = asyncio.create_task(
-                self._refresh_target(participant_id), name=f"presence-scoped-{participant_id}"
+                self._refresh_target(participant_id, fresh=True),
+                name=f"presence-scoped-{participant_id}",
             )
             self._scoped_tasks.add(task)
             task.add_done_callback(self._scoped_tasks.discard)
@@ -311,7 +314,7 @@ class PresenceMonitor:
         if published is not observed and not self._stopping:
             self._bump_revision()
             self._published_states[participant_id] = observed
-            self._publish_change(participant_id, observed)
+            self._publish_change(participant_id)
         await self._provider.refresh((participant,), screen_max_bytes=screen_max_bytes)
         if not self._stopping:
             after = self.snapshot(participant_id).state
@@ -319,10 +322,10 @@ class PresenceMonitor:
             self._published_states[participant_id] = after
             if before is not after:
                 self._bump_revision()
-                self._publish_change(participant_id, after)
+                self._publish_change(participant_id)
 
-    def _publish_change(self, participant_id: str, state: PresenceState) -> None:
-        self._publisher.publish(participant_id, state)
+    def _publish_change(self, participant_id: str) -> None:
+        self._publisher.publish(participant_id)
 
     def _emit_change(self, participant_id: str) -> None:
         try:

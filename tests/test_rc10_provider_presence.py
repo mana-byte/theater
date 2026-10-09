@@ -345,7 +345,9 @@ async def test_expired_provider_evidence_publishes_unknown_once(provider_monitor
     assert changes == ["participant-a", "participant-a"]
 
 
-async def test_successful_refresh_publishes_expiry_before_recovery(provider_monitor) -> None:
+async def test_successful_refresh_batches_expiry_and_recovery_into_one_publication(
+    provider_monitor,
+) -> None:
     monitor, service, _registry, clock = provider_monitor
     states: list[PresenceState] = []
     monitor._on_change = lambda participant_id: states.append(
@@ -355,10 +357,15 @@ async def test_successful_refresh_publishes_expiry_before_recovery(provider_moni
     await monitor.refresh()
 
     clock.value += 6
+    revisions = monitor.revision
     service.responses.append(result("absent", 2))
     await monitor.refresh()
 
-    assert states == [PresenceState.ABSENT, PresenceState.UNKNOWN, PresenceState.ABSENT]
+    # Expiry protects through the snapshot and revisions at once; the journal
+    # sees one coalesced publication per refresh, carrying the settled state.
+    assert monitor.revision > revisions
+    assert monitor.snapshot("participant-a").state is PresenceState.ABSENT
+    assert states == [PresenceState.ABSENT, PresenceState.ABSENT]
 
 
 async def test_refresh_rechecks_focus_immediately_before_each_delivery(provider_monitor) -> None:

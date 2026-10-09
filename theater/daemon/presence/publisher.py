@@ -1,4 +1,4 @@
-"""Coalesced presence change publication with immediate UNKNOWN delivery."""
+"""Coalesced presence change publication; safety stays in snapshots and revisions."""
 
 from __future__ import annotations
 
@@ -6,14 +6,13 @@ import asyncio
 import logging
 from collections.abc import Callable, Sequence
 
-from theater.daemon.presence.contracts import PresenceState
+logger = logging.getLogger("theater.daemon.presence")
 
 PRESENCE_PUBLISH_COALESCE_SECONDS = 0.25
-logger = logging.getLogger("theater.daemon.presence")
 
 
 class PresenceChangePublisher:
-    """Batch non-protective change notifications; UNKNOWN is never delayed."""
+    """Batch change notifications within a short window, one per participant."""
 
     def __init__(
         self,
@@ -23,26 +22,20 @@ class PresenceChangePublisher:
     ) -> None:
         self._emit = emit
         self._window = window
-        self._pending: dict[str, PresenceState] = {}
+        self._pending: dict[str, None] = {}
         self._timer: asyncio.TimerHandle | None = None
         self._closed = False
 
-    def publish(self, participant_id: str, state: PresenceState) -> None:
+    def publish(self, participant_id: str) -> None:
         if self._closed:
             return
-        if state is PresenceState.UNKNOWN:
-            # Safety-relevant: a protective state must reach watchers at once,
-            # superseding any quieter state still waiting in the window.
-            self._pending.pop(participant_id, None)
-            self._deliver((participant_id,))
-            return
-        self._pending[participant_id] = state
+        self._pending[participant_id] = None
         self._arm()
 
     def flush(self) -> None:
+        self._disarm()  # a fired timer must never block the next window
         if self._closed or not self._pending:
             return
-        self._disarm()
         pending, self._pending = tuple(self._pending), {}
         self._deliver(pending)
 
@@ -71,7 +64,7 @@ class PresenceChangePublisher:
 
     def _disarm(self) -> None:
         if self._timer is not None:
-            self._timer.cancel()
+            self._timer.cancel()  # a no-op once the handle has already fired
             self._timer = None
 
 

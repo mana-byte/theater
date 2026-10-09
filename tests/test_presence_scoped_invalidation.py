@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from theater.daemon.presence import PresenceMonitor, PresenceState
-from theater.models import Participant, TerminalBindingRecord
+from theater.models import HumanPresent, Participant, TerminalBindingRecord
 
 P1, T1 = "participant-a", "terminal-a"
 P2, T2 = "participant-b", "terminal-b"
@@ -162,7 +163,7 @@ async def test_scoped_invalidation_rechecks_only_the_named_terminal(scoped_monit
     settled = monitor.revision
 
     service.responses[T1].append(result("absent", 2, T1))
-    monitor.invalidate_provider("provider-a", 7, terminal_ids=[T1])
+    monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[T1])
     assert monitor.revision > settled
     assert monitor.snapshot(P1).state is PresenceState.UNKNOWN
     assert monitor.snapshot(P2).state is PresenceState.ABSENT  # untouched terminal keeps evidence
@@ -196,7 +197,7 @@ async def test_scoped_invalidation_fences_only_the_named_terminal(
     try:
         await asyncio.wait_for(inspecting.wait(), 1)
         service.responses[T1].append(result("absent", 3, T1))
-        monitor.invalidate_provider("provider-a", 7, terminal_ids=[T1])
+        monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[T1])
         assert monitor.snapshot(P1).state is PresenceState.UNKNOWN
         assert monitor.snapshot(P2).state is PresenceState.ABSENT
         release.set()
@@ -216,7 +217,7 @@ async def test_empty_scope_rechecks_nothing(scoped_monitor) -> None:
     await _both_absent(scoped_monitor)
     settled = monitor.revision
 
-    monitor.invalidate_provider("provider-a", 7, terminal_ids=[])
+    monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[])
     assert monitor.revision == settled
     assert not monitor._wake.is_set()
     assert monitor.snapshot(P1).state is PresenceState.ABSENT
@@ -242,13 +243,15 @@ async def test_stale_generation_scoped_invalidation_is_noop(scoped_monitor) -> N
     await _both_absent(scoped_monitor)
     settled = monitor.revision
 
-    monitor.invalidate_provider("provider-a", 6, terminal_ids=[T1])
+    monitor.invalidate_provider("provider-a", 6, invalidated_terminals=[T1])
     assert monitor.revision == settled
     assert monitor.snapshot(P1).state is PresenceState.ABSENT
     assert not monitor._wake.is_set()
 
 
-async def test_unknown_publishes_immediately_and_recovery_coalesces(scoped_monitor) -> None:
+async def test_invalidation_safety_is_immediate_and_journal_coalesces_per_wave(
+    scoped_monitor,
+) -> None:
     monitor, service = scoped_monitor.monitor, scoped_monitor.service
     changes: list[str] = []
     monitor._on_change = changes.append
@@ -256,15 +259,17 @@ async def test_unknown_publishes_immediately_and_recovery_coalesces(scoped_monit
     assert sorted(changes) == [P1, P2]  # refresh batches its publications before returning
 
     for revision in (2, 3):
+        settled = monitor.revision
         service.responses[T1].append(result("absent", revision, T1))
-        monitor.invalidate_provider("provider-a", 7, terminal_ids=[T1])
-        assert changes.count(P1) == revision  # UNKNOWN reached watchers at once
+        monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[T1])
+        # Safety is immediate in memory; only the journal callback waits in the window.
+        assert monitor.revision > settled
         assert monitor.snapshot(P1).state is PresenceState.UNKNOWN
         await _settle(monitor)
-    assert changes.count(P1) == 3  # two ABSENT recoveries are still waiting in the window
-
-    await asyncio.sleep(0.08)
-    assert changes.count(P1) == 4  # both recoveries collapse into one batched publication
+        assert changes.count(P1) == revision - 1  # the wave is still coalesced
+        await asyncio.sleep(0.08)
+        assert changes.count(P1) == revision  # one batched publication per wave
+        assert changes[-1] == P1  # the fired timer re-arms for the next wave
 
 
 async def test_shutdown_drops_pending_publications_and_cancels_timers(scoped_monitor) -> None:
@@ -274,16 +279,57 @@ async def test_shutdown_drops_pending_publications_and_cancels_timers(scoped_mon
     await _both_absent(scoped_monitor)
 
     service.responses[T1].append(result("present", 2, T1))
-    monitor.invalidate_provider("provider-a", 7, terminal_ids=[T1])
+    monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[T1])
     await _settle(monitor)
-    assert changes == [P1, P2, P1]  # UNKNOWN immediate; PRESENT recovery still pending
+    assert changes == [P1, P2]  # the whole wave still sits coalesced in the window
 
     await monitor.aclose()
     await asyncio.sleep(0.08)
-    assert changes == [P1, P2, P1]  # nothing is published after shutdown
+    assert changes == [P1, P2]  # nothing is published after shutdown
     assert monitor._scoped_tasks == set()
     assert monitor._target_tasks == {}
     assert monitor._publisher._timer is None
 
-    monitor.invalidate_provider("provider-a", 7, terminal_ids=[T1])
-    assert changes == [P1, P2, P1]
+    monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[T1])
+    assert changes == [P1, P2]
+
+
+async def test_scoped_recheck_starts_fresh_when_named_inspection_is_in_flight(
+    scoped_monitor, monkeypatch
+) -> None:
+    monitor, service = scoped_monitor.monitor, scoped_monitor.service
+    await _both_absent(scoped_monitor)
+    service.responses[T1].append(result("absent", 2, T1))
+    inspecting, release = asyncio.Event(), asyncio.Event()
+    original = service.inspect
+
+    async def inspect(provider_id, generation, terminal_id, incarnation, *, screen_max_bytes=0):
+        if terminal_id == T1:
+            inspecting.set()
+            await release.wait()
+        return await original(
+            provider_id, generation, terminal_id, incarnation, screen_max_bytes=screen_max_bytes
+        )
+
+    monkeypatch.setattr(service, "inspect", inspect)
+    blocked = asyncio.create_task(monitor.require_absent(P1))
+    try:
+        await asyncio.wait_for(inspecting.wait(), 1)
+        service.responses[T1].append(result("absent", 3, T1))
+        monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[T1])
+        assert monitor.snapshot(P1).state is PresenceState.UNKNOWN
+
+        release.set()
+        # The pre-invalidation inspection is fenced, so admission stays protected.
+        with pytest.raises(HumanPresent):
+            await blocked
+
+        await _settle(monitor)  # the scoped re-check must start a fresh inspection
+        assert monitor.snapshot(P1).state is PresenceState.ABSENT
+        assert monitor.snapshot(P1).reason == "focus-absent"
+        assert monitor.snapshot(P2).state is PresenceState.ABSENT
+        assert service.inspect_calls == {T1: 3, T2: 1}
+    finally:
+        release.set()
+        with contextlib.suppress(BaseException):
+            await blocked
