@@ -8,6 +8,8 @@ transactional write that binds touches to the job result.
 
 from __future__ import annotations
 
+import pytest
+
 import theater.daemon.jobs as jobs_mod
 from theater.constants.daemon import TOUCH_HASH_MAX_FILE_BYTES
 from theater.daemon.blob import BlobHash, BlobHashState, blob_sha
@@ -270,3 +272,14 @@ def test_busy_timeout_is_set_on_all_connections(store):
     assert store.conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
     with store.engine.connect() as fresh:
         assert fresh.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+
+
+def test_incomplete_staging_fails_loudly_before_mutating(tmp_path):
+    from theater.daemon.jobs import StagedHashes, StagingIncomplete
+
+    acc = TouchAccumulator(cwd=str(tmp_path))
+
+    with pytest.raises(StagingIncomplete):
+        acc.observe((EventPath(path="x.txt", mode="write"),), staged=StagedHashes())
+
+    assert acc.known_paths() == []

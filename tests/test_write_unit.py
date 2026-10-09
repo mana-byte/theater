@@ -385,3 +385,59 @@ def test_second_turn_touches_go_to_the_next_job_without_file_io_in_the_unit(
         assert sorted(tuple(r) for r in rows) == [("job-a", "a.txt"), ("job-b", "b.txt")]
     finally:
         store.close()
+
+
+def test_each_job_spends_only_its_own_touch_hash_budget(tmp_path, monkeypatch) -> None:
+    from sqlalchemy import select
+
+    from theater.daemon import jobs as jobs_module
+    from theater.daemon.schema import touch
+    from theater.harness import EventPath
+
+    monkeypatch.setattr(jobs_module, "TOUCH_HASH_MAX_JOB_BYTES", 3)
+    store = Store(tmp_path / "budget.db")
+    registry = Registry(store)
+    jobs = JobManager(store)
+    participant = _two_delivered_jobs(registry, jobs, cwd=str(tmp_path))
+    (tmp_path / "a.txt").write_text("aa")
+    (tmp_path / "b.txt").write_text("bb")
+    observer = Observer(registry, harnesses={}, jobs=jobs)
+    batch = Batch(
+        events=[
+            Event(kind=EventKind.USER, text="job-a prompt"),
+            Event(
+                kind=EventKind.ASSISTANT,
+                text="answer a",
+                turn_end=True,
+                turn_id="turn-a",
+                paths=(EventPath("a.txt", "write"),),
+            ),
+            Event(kind=EventKind.USER, text="job-b prompt"),
+            Event(
+                kind=EventKind.ASSISTANT,
+                text="answer b",
+                turn_end=True,
+                turn_id="turn-b",
+                paths=(EventPath("b.txt", "write"),),
+            ),
+        ]
+    )
+    try:
+        observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+
+        rows = store.conn.execute(
+            select(
+                touch.c.job_handle,
+                touch.c.sha_before,
+                touch.c.sha_after,
+                touch.c.sha_before_error,
+                touch.c.sha_after_error,
+            )
+        ).fetchall()
+        assert len(rows) == 2
+        for row in rows:
+            assert row.sha_before and row.sha_after
+            assert row.sha_before_error is None
+            assert row.sha_after_error is None
+    finally:
+        store.close()
