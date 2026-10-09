@@ -8,7 +8,11 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Mapping
-from typing import Any, Final, NotRequired, Protocol, TypedDict
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, Final, NotRequired, Protocol, Self, TypedDict
+
+if TYPE_CHECKING:
+    from sqlalchemy import Connection
 
 #: Bumped when the request/response shape changes incompatibly; daemon refuses different majors.
 PROTOCOL_VERSION = 1
@@ -119,10 +123,10 @@ class BusTailParams(TypedDict, total=False):
 
 
 class BusEvent(TypedDict):
-    """One diagnostic-bus row as returned on the wire (``ts`` is the event timestamp)."""
+    """One diagnostic-bus row as returned on the wire (``ts`` is epoch seconds)."""
 
     id: int
-    ts: str
+    ts: float
     kind: str
     from_id: str | None
     to_id: str | None
@@ -135,8 +139,8 @@ class BusTailResult(TypedDict):
     next_after_id: int
 
 
-class ProviderReportResult(TypedDict, total=False):
-    """Additions to the ``providers.report`` response.
+class ProviderReportFacts(TypedDict, total=False):
+    """Presence-invalidation additions to the ``providers.report`` request facts.
     ``invalidated_terminals`` omitted means every terminal's presence is invalidated.
     """
 
@@ -144,10 +148,37 @@ class ProviderReportResult(TypedDict, total=False):
     invalidated_terminals: NotRequired[list[str]]
 
 
+class ProviderReportResult(TypedDict):
+    """The ``providers.report`` response."""
+
+    provider_id: str
+    provider_generation: int
+    report_revision: int
+    health: str
+    restored_participant_ids: list[str]
+    reconciled_operation_ids: list[str]
+    ignored_operation_ids: list[str]
+    acknowledged_operation_ids: list[str]
+    deferred_operation_ids: list[str]
+
+
 class WriteUnit(Protocol):
-    """Contract for ``write_unit(connection=...)``: one SQLite transaction, never nested.
-    ``after_commit`` hooks run only after a successful commit, in registration order;
-    a rollback discards them. Entering a unit inside another raises RuntimeError.
+    """Import-light mirror of ``theater.daemon.persistence.transactions.WriteUnit``.
+    One SQLite transaction, never nested; ``after_commit`` hooks run after a successful commit in
+    registration order and a rollback discards them. Entering a unit inside another raises
+    RuntimeError.
     """
 
-    def after_commit(self, hook: Callable[[], None]) -> None: ...
+    @property
+    def connection(self) -> Connection: ...
+
+    def after_commit(self, notification: Callable[[], None]) -> None: ...
+
+    def __enter__(self) -> Self: ...
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None: ...

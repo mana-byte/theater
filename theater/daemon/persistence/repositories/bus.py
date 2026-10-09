@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Collection
 
-from sqlalchemy import Connection, insert, or_, select
+from sqlalchemy import Connection, func, insert, or_, select
 
 from theater.constants.daemon import (
     BUS_KIND_AGENT_TRANSCRIPT,
@@ -62,6 +62,22 @@ class BusRepository:
             select(bus).where(bus.c.id > after_id).order_by(bus.c.id.desc()).limit(limit)
         ).fetchall()
         return [self._decode(row) for row in reversed(rows)]
+
+    def scan(
+        self, after_id: int, limit: int, kinds: Collection[str], *, window: int
+    ) -> tuple[list[dict], int]:
+        """Oldest matching rows in ``(after_id, after_id + window]`` plus the id consumed up to."""
+        upper = after_id + window
+        rows = self._db.conn.execute(
+            select(bus)
+            .where(bus.c.id > after_id, bus.c.id <= upper, bus.c.kind.in_(tuple(kinds)))
+            .order_by(bus.c.id)
+            .limit(limit)
+        ).fetchall()
+        if len(rows) >= limit:
+            return [self._decode(row) for row in rows], rows[-1].id
+        head = self._db.conn.execute(select(func.max(bus.c.id))).scalar() or 0
+        return [self._decode(row) for row in rows], max(after_id, min(upper, head))
 
     def page_for_participant(
         self,
