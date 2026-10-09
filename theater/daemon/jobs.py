@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,10 +44,21 @@ __all__ = [
 
 #: How long to wait for a job to finish if the caller does not specify.
 DEFAULT_MAX_WAIT = RPC_DEFAULT_MAX_WAIT_SECONDS
-HashFn = Callable[..., BlobHash]
 STRUCTURED_PARSED = "parsed"
 STRUCTURED_UNAVAILABLE = "unavailable"
 _RAW_UNSET = object()
+
+
+_UNSTAGED = BlobHash(BlobHashState.UNAVAILABLE, reason="unstaged")
+
+
+@dataclass(frozen=True, slots=True)
+class StagedHashes:
+    """Filesystem results gathered before a write unit opens; the unit only reads them."""
+
+    normalized: dict[str, str | None] = field(default_factory=dict)
+    before: dict[str, BlobHash] = field(default_factory=dict)
+    after: dict[str, BlobHash] = field(default_factory=dict)
 
 
 @dataclass
@@ -68,45 +79,86 @@ class TouchAccumulator:
     #: Total regular-file bytes hashed at first observation.
     _before_bytes: int = 0
 
-    def known_paths(self) -> list[str]:
-        return list(self._paths)
+    def stage(self, raw_paths: list[str]) -> StagedHashes:
+        """Do every filesystem read a batch's observe/rows will need, with the same budgets.
 
-    def observe(self, paths: tuple[EventPath, ...], *, hash_fn: HashFn = blob_hash) -> None:
-        """Record paths from one event. Hashes new paths immediately."""
+        Assumes the whole batch lands on this job, so budgets are never looser than reality.
+        """
+        normalized = {raw: normalize_touch_path(self.cwd, raw) for raw in raw_paths}
+        before: dict[str, BlobHash] = {}
+        before_bytes = self._before_bytes
+        for path in normalized.values():
+            if path is None or path in self._before or path in before:
+                continue
+            remaining = max(0, TOUCH_HASH_MAX_JOB_BYTES - before_bytes)
+            outcome = blob_hash(
+                Path(self.cwd) / path, max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining)
+            )
+            before[path] = outcome
+            if outcome.state is BlobHashState.HASHED:
+                before_bytes += outcome.size
+        after: dict[str, BlobHash] = {}
+        after_bytes = 0
+        for path in [*self._paths, *before]:
+            safe_path = normalize_touch_path(self.cwd, path)
+            if safe_path is None:
+                after[path] = BlobHash(BlobHashState.UNAVAILABLE, reason="unsafe_path")
+                continue
+            remaining = max(0, TOUCH_HASH_MAX_JOB_BYTES - after_bytes)
+            after[path] = blob_hash(
+                Path(self.cwd) / safe_path,
+                max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
+            )
+            if after[path].state is BlobHashState.HASHED:
+                after_bytes += after[path].size
+        return StagedHashes(normalized, before, after)
+
+    def observe(self, paths: tuple[EventPath, ...], *, staged: StagedHashes | None = None) -> None:
+        """Record paths from one event. Hashes new paths immediately, or reads ``staged``."""
         for ep in paths:
-            path = normalize_touch_path(self.cwd, ep.path)
+            path = (
+                normalize_touch_path(self.cwd, ep.path)
+                if staged is None
+                else staged.normalized.get(ep.path)
+            )
             if path is None:
                 continue
             if path not in self._before:
                 remaining = max(0, TOUCH_HASH_MAX_JOB_BYTES - self._before_bytes)
                 # Hash first: a failure must leave no partial state, so replay stays idempotent.
-                outcome = hash_fn(
-                    Path(self.cwd) / path,
-                    max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
-                )
+                if staged is None:
+                    outcome = blob_hash(
+                        Path(self.cwd) / path,
+                        max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
+                    )
+                else:
+                    outcome = staged.before.get(path, _UNSTAGED)
                 self._paths.append(path)
                 self._before[path] = outcome
                 if outcome.state is BlobHashState.HASHED:
                     self._before_bytes += outcome.size
             self._mode[path] = ep.mode
 
-    def rows(self, job_handle: str, *, hash_fn: HashFn = blob_hash) -> list[dict]:
+    def rows(self, job_handle: str, *, staged: StagedHashes | None = None) -> list[dict]:
         """The touch rows for this job, with ``sha_after`` computed now (None if deleted)."""
         result = []
         after_bytes = 0
         for path in self._paths:
-            safe_path = normalize_touch_path(self.cwd, path)
-            # A symlink may have escaped since observation; never hash it.
-            if safe_path is None:
-                after = BlobHash(BlobHashState.UNAVAILABLE, reason="unsafe_path")
+            if staged is not None:
+                after = staged.after.get(path, _UNSTAGED)
             else:
-                remaining = max(0, TOUCH_HASH_MAX_JOB_BYTES - after_bytes)
-                after = hash_fn(
-                    Path(self.cwd) / safe_path,
-                    max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
-                )
-                if after.state is BlobHashState.HASHED:
-                    after_bytes += after.size
+                safe_path = normalize_touch_path(self.cwd, path)
+                # A symlink may have escaped since observation; never hash it.
+                if safe_path is None:
+                    after = BlobHash(BlobHashState.UNAVAILABLE, reason="unsafe_path")
+                else:
+                    remaining = max(0, TOUCH_HASH_MAX_JOB_BYTES - after_bytes)
+                    after = blob_hash(
+                        Path(self.cwd) / safe_path,
+                        max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
+                    )
+            if after.state is BlobHashState.HASHED:
+                after_bytes += after.size
             before = self._before[path]
             if BlobHashState.UNAVAILABLE in (before.state, after.state):
                 logger.debug(
@@ -156,7 +208,7 @@ class JobManager:
         #: Per-job path accumulators; a job with no cwd (CLI spawn, no target) gets no accumulator.
         self._accumulators: dict[str, TouchAccumulator] = {}
         #: Hashes staged outside a write unit; set only while a terminal batch is applied.
-        self._staged_hashes: dict[tuple[str, str], BlobHash] | None = None
+        self._staged: dict[str, StagedHashes] | None = None
 
     def create(
         self,
@@ -204,7 +256,7 @@ class JobManager:
         """
         acc = self._accumulators.get(handle)
         if acc is not None and paths:
-            acc.observe(paths, hash_fn=self._hash_fn(acc.cwd))
+            acc.observe(paths, staged=self._staged_for(handle))
 
     @contextmanager
     def stage_hashes(self, target_id: str, paths: tuple[EventPath, ...]) -> Iterator[None]:
@@ -212,38 +264,22 @@ class JobManager:
 
         Inside the unit observe/rows read these results, so the unit does no file I/O.
         """
-        staged: dict[tuple[str, str], BlobHash] = {}
+        staged: dict[str, StagedHashes] = {}
+        raw_paths = [ep.path for ep in paths]
         for job in self.store.running_jobs_for_target(target_id):
             acc = self._accumulators.get(job.handle)
-            if acc is None:
-                continue
-            wanted = set(acc.known_paths())
-            wanted.update(
-                p for ep in paths if (p := normalize_touch_path(acc.cwd, ep.path)) is not None
-            )
-            for path in wanted:
-                if (acc.cwd, path) not in staged:
-                    staged[(acc.cwd, path)] = blob_hash(Path(acc.cwd) / path)
-        self._staged_hashes = staged
+            if acc is not None:
+                staged[job.handle] = acc.stage(raw_paths)
+        self._staged = staged
         try:
             yield
         finally:
-            self._staged_hashes = None
+            self._staged = None
 
-    def _hash_fn(self, cwd: str) -> HashFn:
-        staged = self._staged_hashes
-        if staged is None:
-            return blob_hash
-
-        def lookup(path: Path, *, max_bytes: int) -> BlobHash:
-            outcome = staged.get((cwd, str(path.relative_to(cwd))))
-            if outcome is None:
-                return blob_hash(path, max_bytes=max_bytes)
-            if outcome.state is BlobHashState.HASHED and outcome.size > max_bytes:
-                return BlobHash(BlobHashState.UNAVAILABLE, reason="too_large")
-            return outcome
-
-        return lookup
+    def _staged_for(self, handle: str) -> StagedHashes | None:
+        if self._staged is None:
+            return None
+        return self._staged.get(handle, StagedHashes())
 
     def attach_touch_accumulator(self, handle: str, *, cwd: str) -> bool:
         """Attach a queued job's path accumulator at dispatch time; return whether one is attached.
@@ -386,7 +422,7 @@ class JobManager:
             response_format=job.response_format,
             structured_result=structured_result,
             structured_status=structured_status,
-            touches=acc.rows(handle, hash_fn=self._hash_fn(acc.cwd)) if acc else [],
+            touches=acc.rows(handle, staged=self._staged_for(handle)) if acc else [],
         )
         self.store.bus_append(
             "job.finished",

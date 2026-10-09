@@ -324,9 +324,13 @@ def test_terminal_batch_commits_once_and_replay_never_completes_the_next_job(
         store.close()
 
 
-def test_second_turn_touches_go_to_the_next_job(tmp_path) -> None:
+@pytest.mark.parametrize("entry", ["source_batch", "direct_apply"])
+def test_second_turn_touches_go_to_the_next_job_without_file_io_in_the_unit(
+    tmp_path, monkeypatch, entry
+) -> None:
     from sqlalchemy import select
 
+    from theater.daemon import jobs as jobs_module
     from theater.daemon.schema import touch
     from theater.harness import EventPath
 
@@ -337,6 +341,18 @@ def test_second_turn_touches_go_to_the_next_job(tmp_path) -> None:
     (tmp_path / "a.txt").write_text("a")
     (tmp_path / "b.txt").write_text("b")
     observer = Observer(registry, harnesses={}, jobs=jobs)
+
+    def guarded(real):
+        def call(*args, **kwargs):
+            assert not store._db._write_unit_active, "file I/O inside the write unit"
+            return real(*args, **kwargs)
+
+        return call
+
+    monkeypatch.setattr(jobs_module, "blob_hash", guarded(jobs_module.blob_hash))
+    monkeypatch.setattr(
+        jobs_module, "normalize_touch_path", guarded(jobs_module.normalize_touch_path)
+    )
     batch = Batch(
         events=[
             Event(kind=EventKind.USER, text="job-a prompt"),
@@ -358,9 +374,12 @@ def test_second_turn_touches_go_to_the_next_job(tmp_path) -> None:
         ]
     )
     try:
-        observer._apply_source_batch(
-            participant.id, _CheckpointSource("c"), batch, QuietClock(), TurnAccumulator()
-        )
+        if entry == "source_batch":
+            observer._apply_source_batch(
+                participant.id, _CheckpointSource("c"), batch, QuietClock(), TurnAccumulator()
+            )
+        else:
+            observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
 
         rows = store.conn.execute(select(touch.c.job_handle, touch.c.path)).fetchall()
         assert sorted(tuple(r) for r in rows) == [("job-a", "a.txt"), ("job-b", "b.txt")]

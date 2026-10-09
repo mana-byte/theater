@@ -209,7 +209,11 @@ class Reducer:
         wiring passes nothing and keeps the oldest-running heuristic.
         """
         if connection is None:
-            with rollback_observation_state(clock, turns), self.store.write_unit() as unit:
+            with (
+                rollback_observation_state(clock, turns),
+                self.staged_hashes(pid, batch),
+                self.store.write_unit() as unit,
+            ):
                 return self.apply(
                     pid,
                     batch,
