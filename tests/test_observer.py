@@ -21,7 +21,7 @@ from sqlalchemy import delete, update
 from theater.constants.observation import (
     LAST_ACTIVITY_REFRESH_SECONDS,
     QUIET_POLL_AFTER_SECONDS,
-    SCREEN_CHECK_BACKOFF_CAP_SECONDS,
+    WORKING_SCREEN_BACKOFF_CAP_SECONDS,
 )
 from theater.daemon import methods as methods_mod
 from theater.daemon.jobs import JobManager
@@ -2322,48 +2322,8 @@ def test_restating_a_status_refreshes_last_activity_only_every_few_seconds(regis
 
 
 @pytest.mark.asyncio
-async def test_an_unchanged_screen_is_inspected_at_growing_intervals_until_something_moves(
-    registry,
-):
-    """A quiet participant's screen arm backs off, and any progress restores the base period."""
-    now = [0.0]
-    reading = ScreenReading(ScreenKind.PROMPT, ScreenConfidence.LOW)
-    observer, screen, p = screen_checked(
-        registry,
-        reading=reading,
-        awaiting=1.0,
-        monotonic_clock=lambda: now[0],
-    )
-    inspects: list[float] = []
-
-    async def capture_pane(_pane):
-        inspects.append(now[0])
-        return "$ "
-
-    observer._capture = capture_pane
-    clock = QuietClock()
-    for tick in range(0, 40):
-        now[0] = float(tick)
-        await observer._screen_status_due(p.id, screen, clock)
-
-    gaps = [b - a for a, b in pairwise(inspects)]
-    assert gaps[0] < gaps[-1] <= SCREEN_CHECK_BACKOFF_CAP_SECONDS + 1
-    assert len(inspects) < 15
-
-    now[0] += 1.5
-    before = len(inspects)
-    await observer._screen_status_due(p.id, screen, clock)
-    assert len(inspects) == before  # still inside the stretched period
-
-    clock.stir()
-    await observer._screen_status_due(p.id, screen, clock)
-    now[0] += 1.5
-    await observer._screen_status_due(p.id, screen, clock)
-    assert len(inspects) == before + 1  # progress restored the base period
-
-
-@pytest.mark.asyncio
-async def test_a_working_screen_is_never_backed_off_because_it_gates_sends(registry):
+async def test_a_working_screen_backs_off_to_the_cap_and_other_kinds_stay_at_base(registry):
+    """Only a WORKING reading stretches the screen period; any other reading is base at once."""
     now = [0.0]
     observer, screen, p = screen_checked(
         registry,
@@ -2379,11 +2339,30 @@ async def test_a_working_screen_is_never_backed_off_because_it_gates_sends(regis
 
     observer._capture = capture_pane
     clock = QuietClock()
-    for tick in range(0, 21):
+    for tick in range(0, 20):
         now[0] = float(tick)
         await observer._screen_status_due(p.id, screen, clock)
 
-    assert {b - a for a, b in pairwise(inspects)} == {2.0}  # the base period, forever
+    # Doubling from the 1s base (a check lands one tick past each period), pinned at the cap.
+    cap_gap = WORKING_SCREEN_BACKOFF_CAP_SECONDS + 1
+    assert [b - a for a, b in pairwise(inspects)] == [2.0, 3.0, cap_gap, cap_gap, cap_gap]
+
+    screen._reading = ScreenReading(ScreenKind.PROMPT, ScreenConfidence.LOW)
+    for tick in range(20, 28):
+        now[0] = float(tick)
+        await observer._screen_status_due(p.id, screen, clock)
+
+    # The stretched period runs out, then the PROMPT result checks at the base period again.
+    assert [b - a for a, b in pairwise(inspects)] == [
+        2.0,
+        3.0,
+        cap_gap,
+        cap_gap,
+        cap_gap,
+        cap_gap,
+        2.0,
+        2.0,
+    ]
 
 
 def test_a_watcher_with_no_progress_for_a_while_polls_slower_and_progress_restores_it(registry):

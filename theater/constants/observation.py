@@ -57,9 +57,10 @@ SKIPPED_RECORD_ERROR_CODES = frozenset({"pi_transcript_oversized_record"})
 ROTATION_PROBE_MIN_SECONDS = 5.0
 ROTATION_PROBE_MAX_SECONDS = 60.0
 
-#: An idle prompt's unchanged screen is re-inspected at doubling intervals up to this cap; each
-#: inspect is a terminal round-trip. Working and approval screens keep the base period.
-SCREEN_CHECK_BACKOFF_CAP_SECONDS = 10.0
+#: A working screen's unchanged reading is re-inspected at doubling intervals up to this cap;
+#: each inspect is a terminal round-trip. Prompts, approvals, and every other kind keep the
+#: base period, so awaiting-input detection is never delayed by a backoff.
+WORKING_SCREEN_BACKOFF_CAP_SECONDS = 3.0
 
 #: A watcher that has seen no progress for this long polls at up to `QUIET_POLL_FACTOR` times its
 #: period (capped at `QUIET_POLL_MAX_SECONDS`); the first byte of new output restores the fast poll.

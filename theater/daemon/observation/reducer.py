@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from theater.constants.observation import (
     LAST_ACTIVITY_REFRESH_SECONDS,
-    SCREEN_CHECK_BACKOFF_CAP_SECONDS,
+    WORKING_SCREEN_BACKOFF_CAP_SECONDS,
 )
 from theater.daemon import lineage
 from theater.daemon.observation.screen import end_turn_from_screen_text
@@ -87,14 +87,15 @@ class QuietClock:
             self.rescue_since = now
 
     def screen_interval(self, base: float) -> float:
-        """The period: doubles while an idle prompt holds, then caps.
+        """The period: doubles while the screen keeps reading WORKING, then caps.
 
-        Only PROMPT backs off: a WORKING or approval reading gates sends and awaits, so its exit
-        is looked for at the base period.
+        Only WORKING backs off: a working agent's exit arrives as transcript output,
+        which stirs the clock. Prompts and approvals gate sends and awaits, so their
+        readings are re-checked at the base period.
         """
-        if self.last_screen_kind is not ScreenKind.PROMPT:
+        if self.last_screen_kind is not ScreenKind.WORKING:
             return base
-        return max(base, min(base * 2**self.screen_backoff, SCREEN_CHECK_BACKOFF_CAP_SECONDS))
+        return max(base, min(base * 2**self.screen_backoff, WORKING_SCREEN_BACKOFF_CAP_SECONDS))
 
     def note_screen(self, kind: ScreenKind | None) -> None:
         """A changed reading restarts the period; an unchanged one stretches it."""
