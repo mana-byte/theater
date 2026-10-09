@@ -30,7 +30,7 @@ from theater.daemon import (  # noqa: F401
     workers,
 )
 from theater.daemon.controls.service import ControlService
-from theater.daemon.events import StateService
+from theater.daemon.events import BusTailWaiter, StateService
 from theater.daemon.events.snapshot import (
     CachedParticipantProjection,
     configure_participant_projection,
@@ -240,6 +240,7 @@ class Daemon:
             participant_name=self.registry.projection_name,
             provider_health=self.terminal_service.connections.health,
         )
+        self.bus_tail_waiter = BusTailWaiter(self.store)
 
     def _compose_runtime_services(self) -> None:
         self.runtime_manager = HarnessRuntimeManager()

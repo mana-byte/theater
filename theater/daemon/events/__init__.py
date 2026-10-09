@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
+from theater.daemon.events.bus import BusTailWaiter
 from theater.daemon.events.follow import FollowService
 from theater.daemon.events.snapshot import SnapshotService
 from theater.models import new_id, now
@@ -52,4 +53,4 @@ class StateService:
         await self.follows.aclose()
 
 
-__all__ = ["StateService"]
+__all__ = ["BusTailWaiter", "StateService"]

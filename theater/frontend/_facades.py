@@ -982,10 +982,16 @@ class DiagnosticsClient(_Facade):
         return result_of(await self._call("frontend.stats.get", {}), freeze_object)
 
     async def bus_tail(
-        self, *, after_id: object = _UNSET, limit: object = _UNSET
+        self,
+        *,
+        after_id: object = _UNSET,
+        limit: object = _UNSET,
+        kinds: object = _UNSET,
+        wait_seconds: object = _UNSET,
     ) -> FrontendResult[Page[JSONValue]]:
+        params = _params(after_id=after_id, limit=limit, kinds=kinds, wait_seconds=wait_seconds)
         return result_of(
-            await self._call("frontend.bus.tail", _params(after_id=after_id, limit=limit)),
+            await self._call("frontend.bus.tail", params),
             lambda value: decode_page(value, _json_value),
         )
 

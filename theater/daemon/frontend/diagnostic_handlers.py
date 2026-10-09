@@ -7,11 +7,13 @@ from types import MappingProxyType
 
 from theater.constants import SECONDS_PER_DAY, USAGE_AVERAGE_WINDOW_DAYS
 from theater.daemon.frontend.handshake import ConnectionContext
-from theater.daemon.rpc.usage import _bus_tail, _calendar_period_since, _stats, _usage_by_harness
+from theater.daemon.events.bus import BUS_TAIL_MAX_WAIT_SECONDS
+from theater.daemon.rpc.params import _finite_number_param, _integer_param
+from theater.daemon.rpc.usage import _calendar_period_since, _stats, _usage_by_harness
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
 from theater.harness import describe
-from theater.models import now
+from theater.models import BadRequest, now
 
 _DEFAULT_SUMMARY_HOURS = 24.0
 
@@ -135,15 +137,25 @@ async def stats_get(daemon, _context: ConnectionContext, _params: dict) -> dict:
 
 
 async def bus_tail(daemon, _context: ConnectionContext, params: dict) -> dict:
-    rows = await _bus_tail(daemon, params)
-    after_id = params.get("after_id", 0)
-    next_after_id = rows[-1]["id"] if rows else after_id
+    after_id = _integer_param(params.get("after_id", 0), "after_id", method_name="bus.tail")
+    limit = _integer_param(params.get("limit", 100), "limit", method_name="bus.tail")
+    wait = _finite_number_param(
+        params.get("wait_seconds", 0), "wait_seconds", method_name="bus.tail"
+    )
+    kinds = params.get("kinds")
+    if not 0 <= wait <= BUS_TAIL_MAX_WAIT_SECONDS:
+        raise BadRequest(
+            f"bus.tail wait_seconds must be between 0 and {BUS_TAIL_MAX_WAIT_SECONDS:g}"
+        )
+    if kinds is not None and not (isinstance(kinds, list) and all(type(k) is str for k in kinds)):
+        raise BadRequest("bus.tail parameter 'kinds' must be a list of strings")
+    tail = await daemon.bus_tail_waiter.tail(after_id, limit, kinds, wait)
     return _validated(
         "frontend.bus.tail",
         {
-            "items": rows,
-            "next_cursor": None if not rows else str(next_after_id),
-            "next_after_id": next_after_id,
+            "items": tail.rows,
+            "next_cursor": None if tail.next_after_id == after_id else str(tail.next_after_id),
+            "next_after_id": tail.next_after_id,
         },
     )
 

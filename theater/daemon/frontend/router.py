@@ -116,7 +116,9 @@ class ConnectionRouter:
             slow_ms = None
             if method in {"frontend.participants.spawn", "frontend.participants.terminate"}:
                 slow_ms = 0.0
-            elif method.endswith((".await", ".follow")):
+            elif method.endswith((".await", ".follow")) or (
+                method == "frontend.bus.tail" and request["params"].get("wait_seconds")
+            ):
                 slow_ms = float("inf")  # Waiting is expected, not a slow-handler warning.
             with PublicRequestTiming(
                 method,
