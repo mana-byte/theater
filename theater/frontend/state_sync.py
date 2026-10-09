@@ -286,42 +286,71 @@ def _projection_revision(value: object) -> int:
     return revision if type(revision) is int and revision >= 0 else 0
 
 
+@dataclass(slots=True)
+class _FollowBatch:
+    """Mutable working copies for one follow batch, frozen once at the end."""
+
+    cursor: EventCursor
+    collections: dict[str, dict[str, object]]
+    revisions: dict[tuple[str, str], int]
+    unapplied: list[Event]
+    catalog_dirty: bool
+    catalog_generation: int
+
+
 def _apply_follow(projection: StateProjection, result: StateFollowResult) -> StateProjection:
-    candidate = projection
-    for transaction in result.transactions:
-        candidate = _apply_transaction(candidate, transaction)
-    if result.cursor != candidate.cursor:
-        raise StateResnapshotRequired("follow cursor is not the last complete applied transaction")
-    return replace(candidate, stale=False)
-
-
-def _apply_transaction(
-    projection: StateProjection, transaction: EventTransaction
-) -> StateProjection:
-    cursor = projection.cursor
-    ending = transaction.ending_cursor
-    if ending.stream_id != cursor.stream_id:
-        raise StateResnapshotRequired("transaction belongs to a different orchestration stream")
-    if ending.sequence <= cursor.sequence:
-        return projection
-    if ending.sequence != cursor.sequence + len(transaction.events):
-        raise StateResnapshotRequired("follow transaction leaves a cursor gap")
     participants = dict(projection.participants)
     operations = dict(projection.operations)
     jobs = dict(projection.jobs)
     providers = dict(projection.providers)
     workspaces = dict(projection.workspaces)
-    revisions = dict(projection.entity_revisions)
-    unapplied = list(projection.unapplied_events)
-    catalog_dirty = projection.catalog_dirty
-    catalog_generation = projection.catalog_generation
-    collections: dict[str, dict[str, object]] = {
-        "participants": cast(dict[str, object], participants),
-        "operations": cast(dict[str, object], operations),
-        "jobs": cast(dict[str, object], jobs),
-        "providers": cast(dict[str, object], providers),
-        "workspaces": cast(dict[str, object], workspaces),
-    }
+    batch = _FollowBatch(
+        cursor=projection.cursor,
+        collections={
+            "participants": cast(dict[str, object], participants),
+            "operations": cast(dict[str, object], operations),
+            "jobs": cast(dict[str, object], jobs),
+            "providers": cast(dict[str, object], providers),
+            "workspaces": cast(dict[str, object], workspaces),
+        },
+        revisions=dict(projection.entity_revisions),
+        unapplied=list(projection.unapplied_events),
+        catalog_dirty=projection.catalog_dirty,
+        catalog_generation=projection.catalog_generation,
+    )
+    for transaction in result.transactions:
+        _apply_transaction(batch, transaction)
+    if result.cursor != batch.cursor:
+        raise StateResnapshotRequired("follow cursor is not the last complete applied transaction")
+    return StateProjection(
+        cursor=batch.cursor,
+        participants=MappingProxyType(participants),
+        operations=MappingProxyType(operations),
+        jobs=MappingProxyType(jobs),
+        providers=MappingProxyType(providers),
+        workspaces=MappingProxyType(workspaces),
+        usage=projection.usage,
+        snapshot_extras=projection.snapshot_extras,
+        unapplied_events=tuple(batch.unapplied),
+        catalog_dirty=batch.catalog_dirty,
+        catalog_generation=batch.catalog_generation,
+        entity_revisions=MappingProxyType(batch.revisions),
+    )
+
+
+def _apply_transaction(batch: _FollowBatch, transaction: EventTransaction) -> None:
+    """Extend the batch copies; a raise leaves the committed projection untouched."""
+    cursor = batch.cursor
+    ending = transaction.ending_cursor
+    if ending.stream_id != cursor.stream_id:
+        raise StateResnapshotRequired("transaction belongs to a different orchestration stream")
+    if ending.sequence <= cursor.sequence:
+        return
+    if ending.sequence != cursor.sequence + len(transaction.events):
+        raise StateResnapshotRequired("follow transaction leaves a cursor gap")
+    collections = batch.collections
+    revisions = batch.revisions
+    unapplied = batch.unapplied
     for event in transaction.events:
         domain = _event_domain(event.kind)
         revision_key = (domain or f"event:{event.kind}", event.entity_id)
@@ -333,8 +362,8 @@ def _apply_transaction(
             revisions[revision_key] = event.entity_revision
             continue
         if event.kind == "catalog.invalidated":
-            catalog_dirty = True
-            catalog_generation += 1
+            batch.catalog_dirty = True
+            batch.catalog_generation += 1
             revisions[revision_key] = event.entity_revision
             continue
         if domain is None:
@@ -351,20 +380,7 @@ def _apply_transaction(
         else:
             collections[domain].pop(event.entity_id, None)
         revisions[revision_key] = event.entity_revision
-    return StateProjection(
-        cursor=ending,
-        participants=MappingProxyType(participants),
-        operations=MappingProxyType(operations),
-        jobs=MappingProxyType(jobs),
-        providers=MappingProxyType(providers),
-        workspaces=MappingProxyType(workspaces),
-        usage=projection.usage,
-        snapshot_extras=projection.snapshot_extras,
-        unapplied_events=tuple(unapplied),
-        catalog_dirty=catalog_dirty,
-        catalog_generation=catalog_generation,
-        entity_revisions=MappingProxyType(revisions),
-    )
+    batch.cursor = ending
 
 
 def _event_domain(kind: str) -> str | None:

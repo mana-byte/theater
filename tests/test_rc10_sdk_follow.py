@@ -1007,3 +1007,142 @@ async def test_operation_wait_cancellation_detaches_and_handle_survives_reconnec
 
     assert methods.count("frontend.operations.await") == 3
     assert "frontend.jobs.await" not in methods
+
+
+@pytest.mark.asyncio
+async def test_follow_batch_matches_separate_follows_and_mid_batch_gap() -> None:  # noqa: PLR0915
+    snapshots = 0
+    follows = 0
+
+    def tx_a() -> dict[str, object]:
+        return _transaction(
+            "tx-a",
+            2,
+            _event(
+                "participant.updated",
+                "participant-a",
+                2,
+                _participant("participant-a", "ready", 2),
+            ),
+            _event("catalog.invalidated", "provider-a", 1, {"reason": "provider_online"}),
+        )
+
+    def tx_b() -> dict[str, object]:
+        return _transaction(
+            "tx-b",
+            5,
+            _event(
+                "participant.updated",
+                "participant-a",
+                3,
+                _participant("participant-a", "running", 3),
+            ),
+            _event("participant.removed", "participant-b", 2, {"participant_id": "participant-b"}),
+            _event("job.updated", "job-a", 1, _job("job-a", "done")),
+        )
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal snapshots, follows
+        await _handshake(reader, writer)
+        while request := await _read_request(reader):
+            method = request["method"]
+            request_id = request["id"]
+            assert type(request_id) is int
+            if method == "frontend.state.snapshot":
+                snapshots += 1
+                if snapshots <= 2:
+                    result = _snapshot(
+                        "snapshot-base",
+                        0,
+                        True,
+                        0,
+                        participants=[
+                            _participant("participant-a", "idle", 1),
+                            _participant("participant-b", "idle", 1),
+                        ],
+                        jobs=[_job("job-a", "running")],
+                        providers=[_provider("healthy")],
+                        usage={"input_tokens": 7},
+                    )
+                else:
+                    result = _snapshot(
+                        "snapshot-after-gap",
+                        0,
+                        True,
+                        6,
+                        participants=[_participant("participant-a", "fresh-after-gap", 5)],
+                        usage={"input_tokens": 7},
+                    )
+                await _send(writer, {"id": request_id, "ok": True, "result": result})
+            elif method == "frontend.state.release":
+                await _send(writer, {"id": request_id, "ok": True, "result": {"released": True}})
+            elif method == "frontend.state.follow":
+                follows += 1
+                if follows == 1:
+                    result = _follow(5, tx_a(), tx_b())
+                elif follows == 2:
+                    result = _follow(2, tx_a())
+                elif follows == 3:
+                    result = _follow(5, tx_b())
+                elif follows == 4:
+                    result = _follow(
+                        9,
+                        _transaction(
+                            "tx-c",
+                            6,
+                            _event(
+                                "participant.updated",
+                                "participant-a",
+                                4,
+                                _participant("participant-a", "would-be-partial", 4),
+                            ),
+                        ),
+                        _transaction(
+                            "tx-d",
+                            9,
+                            _event(
+                                "participant.updated",
+                                "participant-a",
+                                5,
+                                _participant("participant-a", "never-applied", 5),
+                            ),
+                        ),
+                    )
+                else:
+                    raise AssertionError("unexpected extra follow")
+                await _send(writer, {"id": request_id, "ok": True, "result": result})
+            else:
+                raise AssertionError(f"unexpected method {method!r}")
+
+    async with _fixture_server(handler) as socket_path:
+        client = FrontendClient(socket_path, client_id="sdk-follow")
+        batched_sync = StateSynchronizer(client)
+        await batched_sync.refresh()
+        batched = await batched_sync.follow_once(wait_seconds=0)
+
+        individual_sync = StateSynchronizer(client)
+        await individual_sync.refresh()
+        await individual_sync.follow_once(wait_seconds=0)
+        individual = await individual_sync.follow_once(wait_seconds=0)
+
+        assert batched.cursor.sequence == 5
+        assert set(batched.participants) == {"participant-a"}
+        assert batched.participants["participant-a"].status == "running"
+        assert batched.jobs == {}
+        assert batched.providers["provider-a"].health == "healthy"
+        assert batched.catalog_dirty is True
+        assert batched.catalog_generation == 1
+        assert individual.cursor == batched.cursor
+        assert _state_wire(individual) == _state_wire(batched)
+        assert individual.entity_revisions == batched.entity_revisions
+        assert individual.unapplied_events == batched.unapplied_events
+        assert individual.catalog_dirty == batched.catalog_dirty
+        assert individual.catalog_generation == batched.catalog_generation
+        assert individual.usage == batched.usage
+
+        resnapshotted = await batched_sync.follow_once(wait_seconds=0)
+        assert snapshots == 3
+        assert resnapshotted.cursor.sequence == 6
+        assert resnapshotted.participants["participant-a"].status == "fresh-after-gap"
+        assert batched_sync.projection is resnapshotted
+        await client.close()
