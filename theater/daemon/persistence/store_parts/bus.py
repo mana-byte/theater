@@ -109,6 +109,11 @@ class BusStore(StoreHost):
     def bus_tail(self, limit: int = 100, *, after_id: int = 0) -> list[dict]:
         return self._bus.tail(limit, after_id=after_id)
 
+    def bus_scan(
+        self, after_id: int, limit: int, kinds: Collection[str], *, window: int
+    ) -> tuple[list[dict], int]:
+        return self._bus.scan(after_id, limit, kinds, window=window)
+
     def observation_error_active(self, participant_id: str, code: str) -> bool:
         """Whether an observation error remains uncleared in the audit stream."""
         return self._bus.observation_error_active(participant_id, code)

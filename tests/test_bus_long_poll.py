@@ -54,6 +54,17 @@ async def test_kinds_keeps_waiting_and_advances_cursor_past_filtered_rows(daemon
     assert only_other.rows == [] and only_other.next_after_id > wanted
 
 
+async def test_kinds_filter_before_truncation_not_after(daemon, waiter):
+    after = daemon.store.bus_append("t.seed")
+    wanted = daemon.store.bus_append("t.want")
+    for _ in range(500):
+        daemon.store.bus_append("t.other")
+    tail = await waiter.tail(after, 10, ["t.want"], 0.0)
+    assert [row["id"] for row in tail.rows] == [wanted]
+    assert tail.next_after_id == wanted + 500  # every scanned row was consumed
+    assert (await waiter.tail(tail.next_after_id, 10, ["t.want"], 0.0)).rows == []
+
+
 async def test_close_wakes_waiters(daemon, waiter):
     after = daemon.store.bus_append("t.seed")
     task = asyncio.create_task(waiter.tail(after, 10, None, 10.0))

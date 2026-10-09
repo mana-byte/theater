@@ -9,7 +9,7 @@ from typing import NamedTuple
 
 from theater.protocol import BUS_TAIL_MAX_WAIT_SECONDS
 
-_BUS_TAIL_MAX_LIMIT = 500
+_BUS_SCAN_WINDOW = 2000  # ids scanned per synchronous read
 
 
 class BusTail(NamedTuple):
@@ -49,9 +49,14 @@ class BusTailWaiter:
             observed = self._revision
             result = self._read(after_id, limit, kinds)
             remaining = deadline - loop.time()
-            if result.rows or self._closed or remaining <= 0:
+            if result.rows or self._closed:
                 return result
-            after_id = max(after_id, result.next_after_id)  # scanned only non-matching rows
+            if result.next_after_id > after_id:  # scanned only non-matching rows
+                after_id = result.next_after_id
+                await asyncio.sleep(0)  # yield between bounded scan windows
+                continue
+            if remaining <= 0:
+                return result
             if self._revision == observed:
                 await self._wait(observed, remaining)
 
@@ -59,9 +64,8 @@ class BusTailWaiter:
         if kinds is None:
             rows = self._store.bus_tail(limit, after_id=after_id)
             return BusTail(rows, rows[-1]["id"] if rows else after_id)
-        scanned = self._store.bus_tail(_BUS_TAIL_MAX_LIMIT, after_id=after_id)
-        matching = [row for row in scanned if row["kind"] in kinds][-limit:]
-        return BusTail(matching, scanned[-1]["id"] if scanned else after_id)
+        rows, next_after_id = self._store.bus_scan(after_id, limit, kinds, window=_BUS_SCAN_WINDOW)
+        return BusTail(rows, next_after_id)
 
     async def _wait(self, observed: int, remaining: float) -> None:
         event = asyncio.Event()

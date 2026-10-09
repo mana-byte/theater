@@ -18,6 +18,16 @@ from theater.frontend import (
     FrontendTransportError,
 )
 
+# The only bus kinds `_animate_bus_row` / `_animation_needs_fresh_tree` react to.
+_ANIMATION_KINDS = (
+    "agent.send",
+    "agent.steer",
+    "agent.queue_followup",
+    "participant.created",
+    "job.await.start",
+    "job.await.end",
+)
+
 
 class DiagnosticsDisplay(_AppBase):
     async def _refresh_bus(self, wait_seconds: float = 0.0) -> bool:
@@ -48,7 +58,7 @@ class DiagnosticsDisplay(_AppBase):
     async def _refresh_animations(self, wait_seconds: float = 0.0) -> bool:
         """Follow coordination events on a cursor independent of the bus panel."""
         try:
-            rows = await self._animation_bus.poll(wait_seconds)
+            rows = await self._animation_bus.poll(wait_seconds, kinds=_ANIMATION_KINDS)
         except (
             AttributeError,
             FrontendClientError,
