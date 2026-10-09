@@ -179,10 +179,10 @@ class FailureTracker:
 
     def transcript_identity_lost(self, pid: str) -> bool:
         """Pure cached predicate; only the watch path may enter quarantine."""
+        if pid not in self._identity_lost:
+            return False  # negative short-circuit: no suspicion, no SELECT
         participant = self.store.get_participant(pid)
-        if participant is None or participant.status is Status.DEAD:
-            return False
-        return pid in self._identity_lost
+        return participant is not None and participant.status is not Status.DEAD
 
     def mark_transcript_identity_lost(self, pid: str, reason: str, *, finish_fn) -> None:
         """Enter quarantine from positive evidence in the observation path."""
