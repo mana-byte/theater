@@ -53,6 +53,7 @@ class _ReportContext:
     generation: int
     revision: int
     presence_invalidated: bool
+    invalidated_terminals: tuple[str, ...] | None
     terminals: Sequence[Mapping[str, object]]
     receipts: Sequence[Mapping[str, object]]
     ignored: tuple[str, ...]
@@ -100,10 +101,10 @@ class TerminalProviderService:
         self._operations = operations
         self._clock = clock
         self._startup_recovering = False
-        self._presence_invalidated: Callable[[str, int], None] | None = None
+        self._presence_invalidated: Callable[..., None] | None = None
         self._tmux_restart_finalizer: Callable[[Sequence[Participant]], None] | None = None
 
-    def configure_presence_invalidation(self, callback: Callable[[str, int], None]) -> None:
+    def configure_presence_invalidation(self, callback: Callable[..., None]) -> None:
         self._presence_invalidated = callback
 
     def configure_tmux_restart_finalizer(
@@ -178,6 +179,7 @@ class TerminalProviderService:
             raise ProviderReportInvalid(
                 "provider report facts.presence_invalidated must be a boolean"
             )
+        invalidated_terminals = self._invalidated_terminals(facts)
         terminals = self._terminal_facts(facts)
         receipts = self._receipt_facts(facts)
         ignored = self._validate_receipts(provider_id, receipts)
@@ -205,6 +207,7 @@ class TerminalProviderService:
             generation=generation,
             revision=report_revision,
             presence_invalidated=presence_invalidated,
+            invalidated_terminals=invalidated_terminals,
             terminals=terminals,
             receipts=receipts,
             ignored=ignored,
@@ -215,6 +218,18 @@ class TerminalProviderService:
             health_changes=health_changes,
             timestamp=self._clock(),
         )
+
+    @staticmethod
+    def _invalidated_terminals(facts: Mapping[str, object] | None) -> tuple[str, ...] | None:
+        # Omitted means every terminal; an empty list means none.
+        scope = None if facts is None else facts.get("invalidated_terminals")
+        if scope is None:
+            return None
+        if not isinstance(scope, list) or not all(type(item) is str for item in scope):
+            raise ProviderReportInvalid(
+                "provider report facts.invalidated_terminals must be a list of terminal ids"
+            )
+        return tuple(scope)
 
     def _apply_report(self, context: _ReportContext) -> _ReportSettlement:
         with self._store.write_unit() as unit:
@@ -279,7 +294,13 @@ class TerminalProviderService:
             )
             if context.presence_invalidated and self._presence_invalidated is not None:
                 callback = self._presence_invalidated
-                unit.after_commit(lambda: callback(context.provider_id, context.generation))
+                unit.after_commit(
+                    lambda: callback(
+                        context.provider_id,
+                        context.generation,
+                        invalidated_terminals=context.invalidated_terminals,
+                    )
+                )
         return _ReportSettlement(restored, reconciled, deferred)
 
     def _report_events(self, unit, context: _ReportContext, changed_bindings) -> tuple[list, int]:

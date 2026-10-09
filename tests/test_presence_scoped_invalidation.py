@@ -333,3 +333,25 @@ async def test_scoped_recheck_starts_fresh_when_named_inspection_is_in_flight(
         release.set()
         with contextlib.suppress(BaseException):
             await blocked
+
+
+async def test_report_scope_reaches_monitor_with_omitted_all_and_empty_none(scoped_monitor) -> None:
+    from theater.daemon.terminals.service import TerminalProviderService
+
+    monitor = scoped_monitor.monitor
+    await _both_absent(scoped_monitor)
+    parse = TerminalProviderService._invalidated_terminals
+
+    monitor.invalidate_provider("provider-a", 7, invalidated_terminals=parse({"x": 1}))
+    assert monitor._wake.is_set()  # omitted scope invalidates every terminal
+    assert monitor.snapshot(P1).state is monitor.snapshot(P2).state is PresenceState.UNKNOWN
+
+
+async def test_report_empty_scope_reaches_monitor_as_none(scoped_monitor) -> None:
+    from theater.daemon.terminals.service import TerminalProviderService
+
+    monitor = scoped_monitor.monitor
+    await _both_absent(scoped_monitor)
+    scope = TerminalProviderService._invalidated_terminals({"invalidated_terminals": []})
+    monitor.invalidate_provider("provider-a", 7, invalidated_terminals=scope)
+    assert monitor.snapshot(P1).state is monitor.snapshot(P2).state is PresenceState.ABSENT

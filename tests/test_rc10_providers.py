@@ -128,7 +128,7 @@ def test_presence_invalidation_requires_committed_current_provider_report(tmp_pa
     service = _service(store, _Clock(10.0))
     notifications = []
 
-    def invalidate(provider_id, generation):
+    def invalidate(provider_id, generation, invalidated_terminals=None):
         notifications.append((provider_id, generation))
         assert store.providers.get(provider_id).last_report_revision == 1
         with store.write_unit():
@@ -152,6 +152,33 @@ def test_presence_invalidation_requires_committed_current_provider_report(tmp_pa
         with pytest.raises(StaleGeneration):
             service.report("provider-a", generation + 1, 2, facts)
         assert notifications == [("provider-a", generation)]
+    finally:
+        store.close()
+
+
+def test_presence_invalidation_forwards_terminal_scope(tmp_path):
+    store = _Store(tmp_path / "scope.db")
+    service = _service(store, _Clock(10.0))
+    scopes = []
+    service.configure_presence_invalidation(
+        lambda _provider, _generation, invalidated_terminals=None: scopes.append(
+            invalidated_terminals
+        )
+    )
+    try:
+        _register(service)
+        generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+        base = {"presence_invalidated": True}
+        with pytest.raises(ProviderReportInvalid):
+            service.report("provider-a", generation, 1, {**base, "invalidated_terminals": "t1"})
+        with pytest.raises(ProviderReportInvalid):
+            service.report("provider-a", generation, 1, {**base, "invalidated_terminals": [1]})
+        assert scopes == []
+        for revision, extra in enumerate(
+            ({}, {"invalidated_terminals": []}, {"invalidated_terminals": ["t1", "t2"]}), 1
+        ):
+            service.report("provider-a", generation, revision, {**base, **extra})
+        assert scopes == [None, (), ("t1", "t2")]
     finally:
         store.close()
 
