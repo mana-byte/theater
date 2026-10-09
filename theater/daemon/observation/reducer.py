@@ -14,7 +14,8 @@ from sqlalchemy import Connection
 
 from theater.constants.observation import (
     LAST_ACTIVITY_REFRESH_SECONDS,
-    WORKING_SCREEN_BACKOFF_CAP_SECONDS,
+    SCREEN_CHECK_BACKOFF_CAP_SECONDS,
+    WORKING_SCREEN_INTERVAL_CAP_SECONDS,
 )
 from theater.daemon import lineage
 from theater.daemon.observation.rollback import rollback_observation_state
@@ -93,15 +94,16 @@ class QuietClock:
             self.rescue_since = now
 
     def screen_interval(self, base: float) -> float:
-        """The period: doubles while the screen keeps reading WORKING, then caps.
+        """The period: doubles while a PROMPT holds, then caps; WORKING never exceeds its budget.
 
-        Only WORKING backs off: a working agent's exit arrives as transcript output,
-        which stirs the clock. Prompts and approvals gate sends and awaits, so their
-        readings are re-checked at the base period.
+        A WORKING reading gates sends, so its approval flip must land inside the target:
+        interval + slowest tick + capture. Both gates in the reducer read this one value.
         """
-        if self.last_screen_kind is not ScreenKind.WORKING:
+        if self.last_screen_kind is ScreenKind.WORKING:
+            return min(base, WORKING_SCREEN_INTERVAL_CAP_SECONDS)
+        if self.last_screen_kind is not ScreenKind.PROMPT:
             return base
-        return max(base, min(base * 2**self.screen_backoff, WORKING_SCREEN_BACKOFF_CAP_SECONDS))
+        return max(base, min(base * 2**self.screen_backoff, SCREEN_CHECK_BACKOFF_CAP_SECONDS))
 
     def note_screen(self, kind: ScreenKind | None) -> None:
         """A changed reading restarts the period; an unchanged one stretches it."""

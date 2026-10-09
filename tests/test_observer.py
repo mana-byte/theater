@@ -19,9 +19,12 @@ from shipped import VibeHarness
 from sqlalchemy import delete, update
 
 from theater.constants.observation import (
+    AWAITING_INPUT_TARGET_SECONDS,
     LAST_ACTIVITY_REFRESH_SECONDS,
     QUIET_POLL_AFTER_SECONDS,
-    WORKING_SCREEN_BACKOFF_CAP_SECONDS,
+    QUIET_POLL_MAX_SECONDS,
+    SCREEN_CHECK_BACKOFF_CAP_SECONDS,
+    WORKING_SCREEN_INTERVAL_CAP_SECONDS,
 )
 from theater.daemon import methods as methods_mod
 from theater.daemon.jobs import JobManager
@@ -2323,12 +2326,12 @@ def test_restating_a_status_refreshes_last_activity_only_every_few_seconds(regis
 
 
 @pytest.mark.asyncio
-async def test_a_working_screen_backs_off_to_the_cap_and_other_kinds_stay_at_base(registry):
-    """Only a WORKING reading stretches the screen period; any other reading is base at once."""
+async def test_an_unchanged_prompt_screen_is_inspected_at_growing_intervals_until_stirred(registry):
+    """A quiet prompt's screen arm backs off to its cap, and any progress restores the base."""
     now = [0.0]
     observer, screen, p = screen_checked(
         registry,
-        reading=ScreenReading(ScreenKind.WORKING, ScreenConfidence.LOW),
+        reading=ScreenReading(ScreenKind.PROMPT, ScreenConfidence.LOW),
         awaiting=1.0,
         monotonic_clock=lambda: now[0],
     )
@@ -2336,34 +2339,59 @@ async def test_a_working_screen_backs_off_to_the_cap_and_other_kinds_stay_at_bas
 
     async def capture_pane(_pane):
         inspects.append(now[0])
+        return "$ "
+
+    observer._capture = capture_pane
+    clock = QuietClock()
+    for tick in range(0, 40):
+        now[0] = float(tick)
+        await observer._screen_status_due(p.id, screen, clock)
+
+    gaps = [b - a for a, b in pairwise(inspects)]
+    assert gaps[0] < gaps[-1] <= SCREEN_CHECK_BACKOFF_CAP_SECONDS + 1
+    assert len(inspects) < 15
+
+    clock.stir()
+    before = len(inspects)
+    await observer._screen_status_due(p.id, screen, clock)
+    now[0] += 1.5
+    await observer._screen_status_due(p.id, screen, clock)
+    assert len(inspects) == before + 1  # progress restored the base period
+
+
+@pytest.mark.asyncio
+async def test_an_approval_after_a_working_screen_is_seen_within_target_including_capture(registry):
+    """Slowest production cadence (1.0s tick), a timed capture, and no transcript event."""
+    now = [0.0]
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.WORKING, ScreenConfidence.LOW),
+        status=Status.WORKING,
+        awaiting=1.5,
+        monotonic_clock=lambda: now[0],
+    )
+    reads: list[float] = []
+
+    async def capture_pane(_pane):
+        reads.append(now[0])
+        now[0] += 0.25  # the capture takes time; the clock keeps running through the await
         return "working"
 
     observer._capture = capture_pane
     clock = QuietClock()
-    for tick in range(0, 20):
-        now[0] = float(tick)
+    tick = QUIET_POLL_MAX_SECONDS
+    for _ in range(20):
+        now[0] += tick
         await observer._screen_status_due(p.id, screen, clock)
+    assert clock.screen_interval(1.5) <= WORKING_SCREEN_INTERVAL_CAP_SECONDS
 
-    # Doubling from the 1s base (a check lands one tick past each period), pinned at the cap.
-    cap_gap = WORKING_SCREEN_BACKOFF_CAP_SECONDS + 1
-    assert [b - a for a, b in pairwise(inspects)] == [2.0, 3.0, cap_gap, cap_gap, cap_gap]
-
-    screen._reading = ScreenReading(ScreenKind.PROMPT, ScreenConfidence.LOW)
-    for tick in range(20, 28):
-        now[0] = float(tick)
+    # Flip at the instant of the last capture read: the worst moment for the next check.
+    screen._reading = ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.LOW)
+    flipped = reads[-1]
+    while registry.get(p.id).status is not Status.AWAITING_INPUT:
+        now[0] += tick
         await observer._screen_status_due(p.id, screen, clock)
-
-    # The stretched period runs out, then the PROMPT result checks at the base period again.
-    assert [b - a for a, b in pairwise(inspects)] == [
-        2.0,
-        3.0,
-        cap_gap,
-        cap_gap,
-        cap_gap,
-        cap_gap,
-        2.0,
-        2.0,
-    ]
+        assert now[0] - flipped <= AWAITING_INPUT_TARGET_SECONDS
 
 
 def test_a_watcher_with_no_progress_for_a_while_polls_slower_and_progress_restores_it(registry):
