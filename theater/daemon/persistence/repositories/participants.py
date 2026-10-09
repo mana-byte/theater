@@ -153,8 +153,11 @@ class ParticipantRepository:
         )
         return [Participant.from_row(r._mapping) for r in self._db.conn.execute(stmt)]
 
-    def set_status(self, pid: str, status: Status) -> None:
-        self._db.conn.execute(
+    def set_status(
+        self, pid: str, status: Status, *, connection: Connection | None = None
+    ) -> None:
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             update(participants)
             .where(participants.c.id == pid)
             .values(status=str(status), last_activity=now())
