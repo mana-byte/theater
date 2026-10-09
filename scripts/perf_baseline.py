@@ -37,9 +37,9 @@ except ImportError:  # pragma: no cover - dev script
 REPO = Path(__file__).resolve().parent.parent
 ROLES = ("daemon", "bridge", "regie", "tmux")
 DEFAULT_WORKING_PROMPT = (
-    "This is a load-generation run. Using your shell tool, run `sleep 3; date` and report the "
-    "output, then repeat that exact step again. Keep repeating until you have done it 200 times. "
-    "Do not edit any files."
+    "This is a load-generation run. Call your shell tool with exactly `sleep 2; date`, read the "
+    "output, then call it again as a NEW, separate tool call. Never batch, loop, or background "
+    "commands. Repeat until you have made 300 separate calls. Do not edit any files."
 )
 SHIM = """#!/bin/sh
 printf '%s\\n' "$*" >> "{log}"
@@ -109,7 +109,8 @@ class Stack:
                 PATH=f"{shim_dir}{os.pathsep}{self.env.get('PATH', '')}",
             )
         self.home = Path(self.env.get("THEATER_HOME", Path.home() / ".theater"))
-        self.workdir = self.tmp / "work" if self.tmp else Path.cwd()
+        # Agents need a directory their CLI already trusts, or they sit at a trust prompt.
+        self.workdir = args.cwd
 
     def theater(self, *argv: str, check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -125,12 +126,6 @@ class Stack:
         if self.attach:
             return
         assert self.real_tmux is not None
-        self.workdir.mkdir()
-        subprocess.run(["git", "init", "-q", str(self.workdir)], check=True)
-        subprocess.run(  # spawn inspects repository identity, which needs a HEAD
-            ["git", "-C", str(self.workdir), "commit", "-q", "--allow-empty", "-m", "perf"],
-            check=True,
-        )
         self.theater("ls")  # autostarts the daemon under the isolated home
         regie = f"{sys.executable} -m regie --socket {self.home / 'var/run/daemon.sock'}"
         subprocess.run(
@@ -208,11 +203,23 @@ class Stack:
             return
         for participant in self.spawned:
             self.theater("kill", participant, check=False)
+        subprocess.run(
+            [sys.executable, "-m", "regie", "bridge", "stop"],
+            env=self.env,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
         self.theater("stop", check=False)
         if self.real_tmux:
             subprocess.run(
                 [self.real_tmux, "kill-server"], env=self.env, capture_output=True, check=False
             )
+        # The bridge and agents are detached; anything still naming our temp dir is ours.
+        for proc in psutil.process_iter(["cmdline"]):
+            with contextlib.suppress(psutil.Error):
+                if any(str(self.tmp) in arg for arg in proc.info["cmdline"] or ()):
+                    proc.kill()
         if not self.args.keep_home:
             shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -483,6 +490,9 @@ def main() -> int:
         type=Path,
         default=Path(os.environ.get("THEATER_HOME", Path.home() / ".theater")) / "config.toml",
         help="config.toml copied into the isolated home",
+    )
+    parser.add_argument(
+        "--cwd", type=Path, default=REPO, help="agent cwd; must be trusted by the harness CLI"
     )
     parser.add_argument("--keep-home", action="store_true", help="keep the temp home")
     parser.add_argument("--out", type=Path, default=REPO / "docs/perf-baseline.md")
