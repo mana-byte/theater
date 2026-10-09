@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig
+from regie.tmux.command import TmuxError
 
 from theater.frontend import CallbackRequest
 
@@ -17,6 +18,7 @@ def focus_lifecycle(monkeypatch):
     class Focus:
         def __init__(self):
             self.changed = asyncio.Event()
+            self.scope = None
             self.starts = []
             self.closed = False
 
@@ -25,6 +27,10 @@ def focus_lifecycle(monkeypatch):
 
         async def aclose(self):
             self.closed = True
+
+        def take_changed_panes(self):
+            scope, self.scope = self.scope, frozenset()
+            return scope
 
         async def observe(self, expected):
             raise AssertionError("this lifecycle test does not inspect terminals")
@@ -352,3 +358,55 @@ async def test_bridge_replaces_server_without_replaying_old_pending_effects(
         assert bridge._state.launch_intents() == (old_intent,)
     finally:
         bridge._state.release()
+
+
+def _scoped_bridge(tmp_path: Path, monkeypatch, panes: list[tuple[str, str | None]]) -> TmuxBridge:
+    bridge = TmuxBridge(
+        BridgeConfig(theater_socket=tmp_path / "frontend.sock", state_dir=tmp_path / "state")
+    )
+    bridge._state.acquire()
+    bridge._state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    snapshots = [
+        SimpleNamespace(pane_id=pane, provider_id=owner, server_identity="server-a")
+        for pane, owner in panes
+    ]
+
+    async def inventory():
+        return snapshots
+
+    monkeypatch.setattr("regie.bridge.presence_scope.pane_inventory", inventory)
+    return bridge
+
+
+async def test_presence_report_scopes_to_changed_panes_and_drops_foreign_ones(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bridge = _scoped_bridge(
+        tmp_path, monkeypatch, [("%1", "provider-a"), ("%2", None), ("%3", "provider-b")]
+    )
+    # %9 vanished: tmux cannot prove it foreign, so it stays in scope.
+    facts = await bridge._presence_facts(frozenset({"%1", "%2", "%3", "%9"}))
+    assert facts == {"presence_invalidated": True, "invalidated_terminals": ["%1", "%9"]}
+
+
+async def test_presence_report_wholesale_scope_omits_terminals(tmp_path: Path, monkeypatch) -> None:
+    bridge = _scoped_bridge(tmp_path, monkeypatch, [("%1", "provider-a")])
+    assert await bridge._presence_facts(None) == {"presence_invalidated": True}
+
+
+async def test_presence_report_empty_scope_reports_empty_list(tmp_path: Path, monkeypatch) -> None:
+    bridge = _scoped_bridge(tmp_path, monkeypatch, [])
+    facts = await bridge._presence_facts(frozenset())
+    assert facts == {"presence_invalidated": True, "invalidated_terminals": []}
+
+
+async def test_presence_report_falls_back_to_invalidate_all_when_tmux_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bridge = _scoped_bridge(tmp_path, monkeypatch, [("%1", "provider-a")])
+
+    async def broken():
+        raise TmuxError("tmux unavailable")
+
+    monkeypatch.setattr("regie.bridge.presence_scope.pane_inventory", broken)
+    assert await bridge._presence_facts(frozenset({"%1"})) == {"presence_invalidated": True}

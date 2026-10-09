@@ -71,6 +71,42 @@ class FocusInventory:
     enabled: bool
 
 
+def _window_views(
+    facts: FocusInventory, blurred: frozenset[tuple[str, ...]]
+) -> dict[str, frozenset[tuple[FocusClient, str | None, bool]]]:
+    """Per window: every input-capable client plus what classification reads about it."""
+    views: dict[str, set[tuple[FocusClient, str | None, bool]]] = {}
+    for client in facts.clients:
+        if not client.input_capable:
+            continue
+        selected = facts.panes.get(client.pane_id)
+        entry = (client, selected.window_id if selected else None, client.identity in blurred)
+        views.setdefault(client.window_id, set()).add(entry)
+    return {window: frozenset(entries) for window, entries in views.items()}
+
+
+def changed_panes(
+    old: FocusInventory,
+    old_blurred: frozenset[tuple[str, ...]],
+    new: FocusInventory,
+    new_blurred: frozenset[tuple[str, ...]],
+) -> frozenset[str] | None:
+    """Panes whose presence inputs differ; None when server or focus reporting changed."""
+    if old.server_identity != new.server_identity or old.enabled != new.enabled:
+        return None
+    old_views, new_views = _window_views(old, old_blurred), _window_views(new, new_blurred)
+    empty: frozenset[tuple[FocusClient, str | None, bool]] = frozenset()
+    changed = set()
+    for pane_id in old.panes.keys() | new.panes.keys():
+        before, after = old.panes.get(pane_id), new.panes.get(pane_id)
+        if before is None or after is None or before != after:
+            changed.add(pane_id)
+            continue
+        if old_views.get(before.window_id, empty) != new_views.get(after.window_id, empty):
+            changed.add(pane_id)
+    return frozenset(changed)
+
+
 def parse_clients(output: str) -> tuple[FocusClient, ...]:
     clients = []
     for line in output.splitlines():

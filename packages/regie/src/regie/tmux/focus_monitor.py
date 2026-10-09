@@ -8,7 +8,7 @@ import logging
 import time
 from dataclasses import replace
 
-from regie.tmux.focus_facts import FocusInventory, read_inventory
+from regie.tmux.focus_facts import FocusInventory, changed_panes, read_inventory
 from regie.tmux.focus_hooks import FocusHooks
 from regie.tmux.focus_policy import FocusTrust, PresenceEvidence, classify
 from regie.tmux.identity import PaneSnapshot
@@ -27,6 +27,8 @@ class FocusMonitor:
         self._trust = FocusTrust()
         self._hooks: FocusHooks | None = None
         self._facts: FocusInventory | None = None
+        self._blurred: frozenset[tuple[str, ...]] = frozenset()
+        self._pending: frozenset[str] | None = None  # None: scope unknown, report wholesale
         self._stopping = True
         self._reason = "focus_not_observed"
         self._epoch = 0
@@ -53,6 +55,7 @@ class FocusMonitor:
         changed = self._facts is not None or self._reason != reason
         self._epoch += 1
         self._facts = None
+        self._pending = None
         self._reason = reason
         if changed:
             self.changed.set()
@@ -139,11 +142,27 @@ class FocusMonitor:
             self._trust.armed = False
             self._trust.invalidate()
         self._trust.observe(facts.clients)
+        blurred = frozenset(c.identity for c in facts.clients if self._trust.blurred(c))
+        self._note_scope(facts, blurred)
         if self._facts != facts:
             self._epoch += 1
             self.changed.set()
         self._facts = facts
+        self._blurred = blurred
         self._facts_started_at = started_at
+
+    def _note_scope(self, facts: FocusInventory, blurred: frozenset[tuple[str, ...]]) -> None:
+        """Accumulate panes changed since the last report; no baseline means unknown."""
+        if self._pending is None:
+            return
+        old = self._facts
+        scope = None if old is None else changed_panes(old, self._blurred, facts, blurred)
+        self._pending = None if scope is None else self._pending | scope
+
+    def take_changed_panes(self) -> frozenset[str] | None:
+        """Consume the panes changed since the last take; None means wholesale (unknown)."""
+        pending, self._pending = self._pending, frozenset()
+        return pending
 
     async def observe(
         self, expected: PaneSnapshot, *, requested_at: float | None = None

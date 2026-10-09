@@ -11,6 +11,7 @@ from collections.abc import Mapping
 
 from regie.bridge.callbacks import TmuxProviderCallbacks
 from regie.bridge.persistence import BridgePersistence
+from regie.bridge.presence_scope import reportable_terminals
 from regie.bridge.state import BridgeStateStore
 from regie.contracts import BridgeConfig, BridgeStatus
 from regie.tmux.command import TmuxError
@@ -196,10 +197,11 @@ class TmuxBridge:
                 break
             if presence_changed in done:
                 self._presence.changed.clear()
+                scope = self._presence.take_changed_panes()  # after clear, so no change is lost
                 await report_client.providers.report(
                     generation,
                     await self._persistence.run(self._state.next_report_revision),
-                    facts={"presence_invalidated": True},
+                    facts=await self._presence_facts(scope),
                 )
                 provider.renew_lease(generation=generation)
             if loop.time() >= heartbeat_at:
@@ -210,6 +212,22 @@ class TmuxBridge:
         if not self._close_event.is_set():
             error = provider.last_error
             raise RuntimeError(str(error) if error is not None else "provider connection closed")
+
+    async def _presence_facts(self, scope: frozenset[str] | None) -> dict[str, object]:
+        """Scope omitted invalidates every terminal; any doubt keeps it omitted."""
+        facts: dict[str, object] = {"presence_invalidated": True}
+        if scope is None:
+            return facts
+        if not scope:
+            facts["invalidated_terminals"] = []
+            return facts
+        with contextlib.suppress(TmuxError):  # unreadable tmux: fall back to invalidate-all
+            facts["invalidated_terminals"] = await reportable_terminals(
+                scope,
+                provider_id=self._provider_id,
+                expected_server_identity=self._server_identity,
+            )
+        return facts
 
     async def _report_inventory(
         self,
