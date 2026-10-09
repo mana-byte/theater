@@ -287,6 +287,9 @@ class JobManager:
                 safe = normalized[(acc.cwd, raw)]
                 if safe is None:
                     continue
+                # rows() re-reads the canonical spelling of paths first seen in this batch.
+                if (acc.cwd, safe) not in normalized:
+                    normalized[(acc.cwd, safe)] = normalize_touch_path(acc.cwd, safe)
                 after_owners, before_owners = owners.setdefault((acc.cwd, safe), ([], []))
                 side = (handle, "after") if safe in known else (handle, "before")
                 target = after_owners if safe in known else before_owners

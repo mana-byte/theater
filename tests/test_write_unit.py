@@ -441,3 +441,37 @@ def test_each_job_spends_only_its_own_touch_hash_budget(tmp_path, monkeypatch) -
             assert row.sha_after_error is None
     finally:
         store.close()
+
+
+def test_dot_slash_touch_path_completes_the_job(tmp_path) -> None:
+    from sqlalchemy import select
+
+    from theater.daemon.schema import touch
+    from theater.harness import EventPath
+
+    store = Store(tmp_path / "dotslash.db")
+    registry = Registry(store)
+    jobs = JobManager(store)
+    participant = _two_delivered_jobs(registry, jobs, cwd=str(tmp_path))
+    (tmp_path / "x.txt").write_text("x")
+    observer = Observer(registry, harnesses={}, jobs=jobs)
+    batch = Batch(
+        events=[
+            Event(kind=EventKind.USER, text="job-a prompt"),
+            Event(
+                kind=EventKind.ASSISTANT,
+                text="answer a",
+                turn_end=True,
+                turn_id="turn-a",
+                paths=(EventPath("./x.txt", "write"),),
+            ),
+        ]
+    )
+    try:
+        observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+
+        assert store.get_job("job-a").state == "done"
+        rows = store.conn.execute(select(touch.c.job_handle, touch.c.path)).fetchall()
+        assert [tuple(r) for r in rows] == [("job-a", "x.txt")]
+    finally:
+        store.close()
