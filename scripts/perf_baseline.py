@@ -41,6 +41,8 @@ DEFAULT_WORKING_PROMPT = (
     "output, then call it again as a NEW, separate tool call. Never batch, loop, or background "
     "commands. Repeat until you have made 300 separate calls. Do not edit any files."
 )
+# Any-frame-in-stack markers for the observer watch loop (inclusive cost).
+WATCH_LOOP_MARKERS = ("theater/daemon/observation", "theater/harness/transcript")
 SHIM = """#!/bin/sh
 printf '%s\\n' "$*" >> "{log}"
 exec "{real}" "$@"
@@ -63,6 +65,13 @@ class RoleSample:
 
 
 @dataclass
+class ProfileSummary:
+    top: list[tuple[str, int]]
+    total: int
+    watch_loop: int
+
+
+@dataclass
 class ScenarioResult:
     scenario: Scenario
     seconds: float
@@ -72,7 +81,7 @@ class ScenarioResult:
     bus_kinds: Counter
     journal_kinds: Counter
     latency_ms: list[float]
-    profiles: dict[str, list[tuple[str, int]]]
+    profiles: dict[str, ProfileSummary]
     profile_errors: dict[str, str]
 
 
@@ -286,7 +295,9 @@ def _events(stack: Stack, bus_after: int, journal_after: int):
     return bus_kinds, journal, latency
 
 
-def _start_profiles(stack: Stack, procs: dict[str, psutil.Process], seconds: float, out: Path):
+def _start_profiles(
+    stack: Stack, procs: dict[str, psutil.Process], seconds: float, out: Path, scenario: str
+):
     if not stack.args.py_spy:
         return {}
     pyspy = shutil.which("py-spy")
@@ -294,7 +305,7 @@ def _start_profiles(stack: Stack, procs: dict[str, psutil.Process], seconds: flo
     for role, proc in procs.items():
         if role == "tmux":
             continue
-        target = out / f"{role}.raw.txt"
+        target = out / f"{scenario}-{role}.raw.txt"
         if pyspy is None:
             started[role] = (None, target, "py-spy not on PATH")
             continue
@@ -310,8 +321,8 @@ def _start_profiles(stack: Stack, procs: dict[str, psutil.Process], seconds: flo
     return started
 
 
-def _finish_profiles(started) -> tuple[dict[str, list[tuple[str, int]]], dict[str, str]]:
-    profiles: dict[str, list[tuple[str, int]]] = {}
+def _finish_profiles(started) -> tuple[dict[str, ProfileSummary], dict[str, str]]:
+    profiles: dict[str, ProfileSummary] = {}
     errors: dict[str, str] = {}
     for role, (popen, target, error) in started.items():
         if popen is not None:
@@ -324,11 +335,15 @@ def _finish_profiles(started) -> tuple[dict[str, list[tuple[str, int]]], dict[st
             errors[role] = error or "no profile written"
             continue
         self_time: Counter = Counter()
+        total = watch_loop = 0
         for line in target.read_text().splitlines():
             stack_text, _, count = line.rpartition(" ")
             if stack_text and count.isdigit():
                 self_time[stack_text.rsplit(";", 1)[-1]] += int(count)
-        profiles[role] = self_time.most_common(12)
+                total += int(count)
+                if any(marker in stack_text for marker in WATCH_LOOP_MARKERS):
+                    watch_loop += int(count)
+        profiles[role] = ProfileSummary(self_time.most_common(12), total, watch_loop)
     return profiles, errors
 
 
@@ -343,7 +358,7 @@ def measure(stack: Stack, scenario: Scenario, out: Path) -> ScenarioResult:
         times = proc.cpu_times()
         start_cpu[role] = times.user + times.system
         proc.cpu_percent(None)
-    profiling = _start_profiles(stack, procs, stack.args.duration, out)
+    profiling = _start_profiles(stack, procs, stack.args.duration, out, scenario.name)
     started = time.monotonic()
     while time.monotonic() - started < stack.args.duration:
         time.sleep(1.0)
@@ -454,12 +469,17 @@ def render(results: list[ScenarioResult], args: argparse.Namespace) -> str:
             lines += ["", f"### {title}", "", "| kind | per hour |", "|---|---:|"]
             for kind, count in counter.most_common():
                 lines.append(f"| `{kind}` | {_per_hour(count, result.seconds):.0f} |")
-        for role, top in result.profiles.items():
-            total = sum(count for _, count in top) or 1
+        for role, profile in result.profiles.items():
+            total = profile.total or 1
             lines += ["", f"### py-spy top self frames — {role}", "", "| frame | share |"]
             lines.append("|---|---:|")
-            for frame, count in top:
+            for frame, count in profile.top:
                 lines.append(f"| `{frame.replace('|', '/')}` | {100 * count / total:.1f}% |")
+            lines.append(
+                f"\nInclusive watch-loop cost (any frame in observation/transcript): "
+                f"{100 * profile.watch_loop / total:.1f}% of {profile.total} samples; "
+                f"self-frame shares above are also of all {profile.total} samples."
+            )
         for role, error in result.profile_errors.items():
             lines.append(f"\npy-spy {role}: unavailable ({error}).")
     lines += [
