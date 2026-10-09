@@ -126,6 +126,6 @@ script on the same quiet host as this report.
 | idle10+working5 | daemon | 15.07 | 16.40* |
 
 *Working-load event volume varies per run (agent activity); compare at equal
-event rates, see docs/perf-baseline-head.md (14.2k events/h: 13.19 vs 13.51).
+event rates, see docs/perf-profile-head.md (14.2k events/h: 13.19 vs 13.51).
 
 Conclusion: no idle regression — HEAD is equal or better in every scenario.
