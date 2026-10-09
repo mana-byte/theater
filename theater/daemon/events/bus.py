@@ -53,6 +53,8 @@ class BusTailWaiter:
                 return result
             if result.next_after_id > after_id:  # scanned only non-matching rows
                 after_id = result.next_after_id
+                if loop.time() >= deadline:  # resume from the cursor on the next call
+                    return BusTail([], after_id)
                 await asyncio.sleep(0)  # yield between bounded scan windows
                 continue
             if remaining <= 0:
