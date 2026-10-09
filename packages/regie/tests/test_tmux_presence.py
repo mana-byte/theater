@@ -454,11 +454,87 @@ async def test_unattributable_changes_are_wholesale_and_unrelated_ones_empty(mon
         await monitor.refresh()
         assert monitor.take_changed_panes() == frozenset()  # only a read-only client appeared
         assert monitor.changed.is_set()
-        monitor._invalidate("focus_refresh_pending")  # wake: facts dropped wholesale
+        monitor._invalidate("focus_refresh_pending", wake=True)  # wake: reported wholesale
         assert monitor.take_changed_panes() is None
         assert monitor.take_changed_panes() == frozenset()
-        await monitor.refresh(fresh=True)  # no baseline survives the drop
-        assert monitor.take_changed_panes() is None
+        await monitor.refresh(fresh=True)  # the wake kept its baseline: unrelated, so empty
+        assert monitor.take_changed_panes() == frozenset()
     finally:
         await monitor.aclose()
         assert monitor.take_changed_panes() is None  # monitor close is wholesale too
+
+
+def _two_windows(*, first_focused=True, second_focused=True) -> FocusInventory:
+    def client(tty, window, pane, focused):
+        return FocusClient(
+            (tty, "pid", "created", "session", "session-created"),
+            frozenset({"focused"}) if focused else frozenset(),
+            False,
+            False,
+            window,
+            pane,
+            frozenset({"focus"}),
+        )
+
+    panes = {"%7": FocusPane("@1", 42, None), "%8": FocusPane("@2", 99, None)}
+    clients = (client("a", "@1", "%7", first_focused), client("b", "@2", "%8", second_focused))
+    return FocusInventory(_SERVER, panes, clients, True)
+
+
+async def test_wake_is_wholesale_then_the_post_wake_install_is_scoped(monkeypatch):
+    monitor = await _scoped_monitor(
+        monkeypatch, [_two_windows(), _two_windows(first_focused=False)]
+    )
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        assert monitor.take_changed_panes() is None  # consumed before the install
+        await monitor.refresh(fresh=True)
+        assert monitor.take_changed_panes() == frozenset({"%7"})
+    finally:
+        await monitor.aclose()
+
+
+async def test_install_before_the_wake_scope_is_consumed_keeps_both_reports(monkeypatch):
+    monitor = await _scoped_monitor(
+        monkeypatch, [_two_windows(), _two_windows(first_focused=False)]
+    )
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        await monitor.refresh(fresh=True)
+        monitor.changed.clear()
+        assert monitor.take_changed_panes() is None
+        assert monitor.changed.is_set()  # the queued scope wakes the bridge again
+        assert monitor.take_changed_panes() == frozenset({"%7"})
+    finally:
+        await monitor.aclose()
+
+
+async def test_post_wake_installs_union_their_scopes(monkeypatch):
+    second = _two_windows(first_focused=False)
+    third = _two_windows(first_focused=False, second_focused=False)
+    monitor = await _scoped_monitor(monkeypatch, [_two_windows(), second, third])
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        await monitor.refresh(fresh=True)
+        await monitor.refresh(fresh=True)
+        assert monitor.take_changed_panes() is None
+        assert monitor.take_changed_panes() == frozenset({"%7", "%8"})
+    finally:
+        await monitor.aclose()
+
+
+@pytest.mark.parametrize(
+    "reason", ["focus_query_failed", "focus_arming_failed", "focus_wake_unavailable"]
+)
+async def test_failures_stay_wholesale_even_after_recovery(monkeypatch, reason):
+    unchanged = _two_windows()
+    monitor = await _scoped_monitor(monkeypatch, [unchanged, unchanged, unchanged])
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)  # a baseline exists...
+        monitor._invalidate(reason)  # ...until a failure discards it
+        assert monitor.take_changed_panes() is None
+        await monitor.refresh(fresh=True)  # recovery has nothing to attribute against
+        assert monitor.take_changed_panes() is None
+    finally:
+        await monitor.aclose()
+    assert monitor.take_changed_panes() is None  # close is wholesale too
