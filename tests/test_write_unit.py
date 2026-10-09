@@ -7,6 +7,7 @@ from sqlalchemy import event as sqlalchemy_event
 
 from theater.daemon.jobs import JobManager
 from theater.daemon.observation.reducer import QuietClock
+from theater.daemon.observation.rollback import rollback_observation_state
 from theater.daemon.observation.service import Observer
 from theater.daemon.observation.turns import TurnAccumulator
 from theater.daemon.persistence.store import Store
@@ -242,3 +243,49 @@ def test_terminal_completion_failure_rolls_back_the_source_checkpoint(tmp_path) 
         assert store.get_job(job.handle).state == "running"
     finally:
         store.close()
+
+
+def test_write_unit_accepts_autocommit_connection_after_reads(tmp_path) -> None:
+    store = Store(tmp_path / "autobegin.db")
+    try:
+        store.bus_tail()
+        assert store.conn.in_transaction()
+        with store.write_unit(connection=store.conn) as unit:
+            store.bus_append("agent.assistant", from_id="participant-a", connection=unit.connection)
+
+        assert len(store.bus_tail()) == 1
+    finally:
+        store.close()
+
+
+def test_rollback_journal_undoes_only_the_failed_units_mutations() -> None:
+    clock, turns = QuietClock(last_text="before"), TurnAccumulator()
+    turns.say("kept")
+    turns.mark_handled("t0")
+    with pytest.raises(RuntimeError, match="boom"), rollback_observation_state(clock, turns):
+        turns.say("lost")
+        turns.hear("lost")
+        turns.mark_handled("t1")
+        clock.last_text = "after"
+        assert turns.take().said == "kept\n\nlost"
+        raise RuntimeError("boom")
+
+    assert clock.last_text == "before"
+    assert not turns.already_handled("t1") and turns.already_handled("t0")
+    assert turns.take().said == "kept"
+    assert "take" not in turns.__dict__
+
+
+class _NoCopyTurns(TurnAccumulator):
+    def __deepcopy__(self, memo):
+        raise AssertionError("turn history was copied")
+
+
+def test_empty_observation_unit_never_copies_turn_history() -> None:
+    turns = _NoCopyTurns()
+    for index in range(1000):
+        turns.say(f"block-{index}")
+    with rollback_observation_state(QuietClock(), turns):
+        pass
+
+    assert len(turns._blocks) == 1000

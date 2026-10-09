@@ -42,13 +42,25 @@ class WriteUnitFactory(Protocol):
     def __call__(self, *, connection: Connection | None = None) -> WriteUnit: ...
 
 
+def _dbapi_in_transaction(connection: Connection) -> bool:
+    """Whether the driver holds an open transaction, ignoring SQLAlchemy autobegin bookkeeping."""
+    state = getattr(connection.connection.driver_connection, "in_transaction", None)
+    return connection.in_transaction() if state is None else bool(state)
+
+
 def after_commit(connection: Connection | None, notification: AfterCommit) -> None:
-    """Run ``notification`` after the active unit commits, or immediately."""
+    """Run ``notification`` after the active unit commits; immediately only on autocommit."""
     unit = None if connection is None else connection.info.get(_UNIT_KEY)
-    if unit is None:
-        notification()
-    else:
+    if unit is not None:
         unit.after_commit(notification)
+    elif connection is not None and _dbapi_in_transaction(connection):
+        raise RuntimeError(
+            "after-commit notification requested inside an external transaction that no write "
+            "unit owns; wrap the writes in store.write_unit(connection=...) so listeners fire "
+            "only after the real commit, or use an autocommit connection"
+        )
+    else:
+        notification()
 
 
 def active_write_unit(connection: Connection | None) -> WriteUnit | None:
@@ -90,7 +102,12 @@ class SQLiteWriteUnit:
 
     @staticmethod
     def _require_idle(connection: Connection) -> None:
-        if connection.in_transaction():
+        if connection.get_execution_options().get("isolation_level") == "AUTOCOMMIT":
+            # Reads autobegin SQLAlchemy bookkeeping; only an open driver transaction is real.
+            busy = _dbapi_in_transaction(connection)
+        else:
+            busy = connection.in_transaction()
+        if busy:
             raise RuntimeError("write unit connection already has an active transaction")
 
     def __enter__(self) -> Self:
