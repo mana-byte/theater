@@ -102,6 +102,9 @@ class TouchAccumulator:
     def known_paths(self) -> list[str]:
         return list(self._paths)
 
+    def before_budget_left(self) -> int:
+        return max(0, TOUCH_HASH_MAX_JOB_BYTES - self._before_bytes)
+
     def observe(self, paths: tuple[EventPath, ...], *, staged: StagedHashes | None = None) -> None:
         """Record paths from one event. Hashes new paths immediately, or reads ``staged``."""
         if staged is not None:
@@ -267,23 +270,40 @@ class JobManager:
             for job in self.store.running_jobs_for_target(target_id)
             if (acc := self._accumulators.get(job.handle)) is not None
         ]
-        # One job hashes at most JOB bytes before-side plus JOB after-side; never stage more.
-        remaining = 2 * TOUCH_HASH_MAX_JOB_BYTES * len(accs)
+        # Each accumulator owns an independent before- and after-side budget. Known paths are
+        # certainly an accumulator's, so they spend its after side. A new path's owner is only
+        # known inside the unit: charge it to the candidate with the most before-side budget left
+        # (never to all), so total staged work stays within one before-side budget per job.
+        pools: dict[tuple[str, str], int] = {}
+        owners: dict[tuple[str, str], tuple[list[tuple[str, str]], list[tuple[str, str]]]] = {}
         normalized: dict[tuple[str, str], str | None] = {}
-        hashes: dict[tuple[str, str], BlobHash] = {}
-        for _handle, acc in accs:
+        for handle, acc in accs:
+            pools[(handle, "after")] = TOUCH_HASH_MAX_JOB_BYTES
+            pools[(handle, "before")] = acc.before_budget_left()
+            known = set(acc.known_paths())
             for raw in (*acc.known_paths(), *raw_paths):
-                if (acc.cwd, raw) in normalized:
+                if (acc.cwd, raw) not in normalized:
+                    normalized[(acc.cwd, raw)] = normalize_touch_path(acc.cwd, raw)
+                safe = normalized[(acc.cwd, raw)]
+                if safe is None:
                     continue
-                safe = normalized[(acc.cwd, raw)] = normalize_touch_path(acc.cwd, raw)
-                if safe is not None and (acc.cwd, safe) not in hashes:
-                    outcome = blob_hash(
-                        Path(acc.cwd) / safe,
-                        max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
-                    )
-                    hashes[(acc.cwd, safe)] = outcome
-                    if outcome.state is BlobHashState.HASHED:
-                        remaining -= outcome.size
+                after_owners, before_owners = owners.setdefault((acc.cwd, safe), ([], []))
+                side = (handle, "after") if safe in known else (handle, "before")
+                target = after_owners if safe in known else before_owners
+                if side not in target:
+                    target.append(side)
+        hashes: dict[tuple[str, str], BlobHash] = {}
+        for (cwd, safe), (after_owners, before_owners) in owners.items():
+            cap = min(
+                TOUCH_HASH_MAX_FILE_BYTES, max(pools[o] for o in (*after_owners, *before_owners))
+            )
+            outcome = hashes[(cwd, safe)] = blob_hash(Path(cwd) / safe, max_bytes=cap)
+            if outcome.state is BlobHashState.HASHED:
+                charged = list(after_owners)
+                if before_owners:
+                    charged.append(max(before_owners, key=lambda o: pools[o]))
+                for owner in charged:
+                    pools[owner] = max(0, pools[owner] - outcome.size)
         handles = {handle for handle, _acc in accs}
         self._staged = StagedHashes(frozenset(handles), normalized, hashes)
         try:

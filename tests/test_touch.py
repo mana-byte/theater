@@ -307,3 +307,44 @@ def test_staging_bounds_synchronous_hash_work_for_one_job(store, tmp_path, monke
         pass
 
     assert 0 < sum(hashed) <= 2 * 10
+
+
+def _stage(jobs, target, cwd_paths):
+    with jobs.stage_hashes(target, cwd_paths):
+        return jobs._staged
+
+
+def test_staging_known_paths_spend_only_the_after_side_budget(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_mod, "TOUCH_HASH_MAX_JOB_BYTES", 10)
+    jobs = JobManager(store)
+    jobs.create(handle="h1", caller_id="cli", target_id="t", kind="send", cwd=str(tmp_path))
+    for name in ("k1.txt", "k2.txt"):
+        (tmp_path / name).write_bytes(b"1")
+        jobs.observe_paths("h1", (EventPath(path=name, mode="write"),))
+        (tmp_path / name).write_bytes(b"123456789")
+    (tmp_path / "new.txt").write_bytes(b"1234")
+
+    staged = _stage(jobs, "t", (EventPath(path="new.txt", mode="write"),))
+
+    assert staged.hashes[(str(tmp_path), "k1.txt")].state is BlobHashState.HASHED
+    assert staged.hashes[(str(tmp_path), "k2.txt")].reason == "too_large"
+    assert staged.hashes[(str(tmp_path), "new.txt")].state is BlobHashState.HASHED
+
+
+def test_staging_budgets_are_never_shared_between_jobs(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_mod, "TOUCH_HASH_MAX_JOB_BYTES", 10)
+    cwd_a, cwd_b = tmp_path / "a", tmp_path / "b"
+    cwd_a.mkdir()
+    cwd_b.mkdir()
+    jobs = JobManager(store)
+    jobs.create(handle="hb", caller_id="cli", target_id="t", kind="send", cwd=str(cwd_b))
+    jobs.create(handle="ha", caller_id="cli", target_id="t", kind="send", cwd=str(cwd_a))
+    heavy = [f"heavy{i}.txt" for i in range(6)]
+    for name in heavy:
+        (cwd_a / name).write_bytes(b"12345678")
+    (cwd_b / "small.txt").write_bytes(b"1234")
+    paths = tuple(EventPath(path=n, mode="write") for n in [*heavy, "small.txt"])
+
+    staged = _stage(jobs, "t", paths)
+
+    assert staged.hashes[(str(cwd_b), "small.txt")].state is BlobHashState.HASHED
