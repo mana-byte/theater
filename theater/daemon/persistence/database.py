@@ -279,7 +279,7 @@ def _set_pragmas(dbapi_connection, _record) -> None:
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA busy_timeout=5000")
-    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA synchronous=FULL")
     cursor.execute("PRAGMA cache_size=-65536")
     cursor.execute("PRAGMA mmap_size=268435456")
     cursor.execute("PRAGMA temp_store=MEMORY")
