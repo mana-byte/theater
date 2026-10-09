@@ -283,3 +283,27 @@ def test_incomplete_staging_fails_loudly_before_mutating(tmp_path):
         acc.observe((EventPath(path="x.txt", mode="write"),), staged=StagedHashes())
 
     assert acc.known_paths() == []
+
+
+def test_staging_bounds_synchronous_hash_work_for_one_job(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_mod, "TOUCH_HASH_MAX_JOB_BYTES", 10)
+    hashed: list[int] = []
+    real = jobs_mod.blob_hash
+
+    def counting(path, *, max_bytes):
+        outcome = real(path, max_bytes=max_bytes)
+        if outcome.state is BlobHashState.HASHED:
+            hashed.append(outcome.size)
+        return outcome
+
+    monkeypatch.setattr(jobs_mod, "blob_hash", counting)
+    names = [f"f{i}.txt" for i in range(50)]
+    for name in names:
+        (tmp_path / name).write_bytes(b"1234")
+    jobs = JobManager(store)
+    jobs.create(handle="h1", caller_id="cli", target_id="t", kind="send", cwd=str(tmp_path))
+
+    with jobs.stage_hashes("t", tuple(EventPath(path=n, mode="write") for n in names)):
+        pass
+
+    assert 0 < sum(hashed) <= 2 * 10

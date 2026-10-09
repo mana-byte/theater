@@ -262,20 +262,29 @@ class JobManager:
         Inside the unit observe/rows read these results, so the unit does no file I/O.
         """
         raw_paths = [ep.path for ep in paths]
-        handles: set[str] = set()
+        accs = [
+            (job.handle, acc)
+            for job in self.store.running_jobs_for_target(target_id)
+            if (acc := self._accumulators.get(job.handle)) is not None
+        ]
+        # One job hashes at most JOB bytes before-side plus JOB after-side; never stage more.
+        remaining = 2 * TOUCH_HASH_MAX_JOB_BYTES * len(accs)
         normalized: dict[tuple[str, str], str | None] = {}
         hashes: dict[tuple[str, str], BlobHash] = {}
-        for job in self.store.running_jobs_for_target(target_id):
-            acc = self._accumulators.get(job.handle)
-            if acc is None:
-                continue
-            handles.add(job.handle)
-            for raw in (*raw_paths, *acc.known_paths()):
+        for _handle, acc in accs:
+            for raw in (*acc.known_paths(), *raw_paths):
                 if (acc.cwd, raw) in normalized:
                     continue
                 safe = normalized[(acc.cwd, raw)] = normalize_touch_path(acc.cwd, raw)
                 if safe is not None and (acc.cwd, safe) not in hashes:
-                    hashes[(acc.cwd, safe)] = blob_hash(Path(acc.cwd) / safe)
+                    outcome = blob_hash(
+                        Path(acc.cwd) / safe,
+                        max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
+                    )
+                    hashes[(acc.cwd, safe)] = outcome
+                    if outcome.state is BlobHashState.HASHED:
+                        remaining -= outcome.size
+        handles = {handle for handle, _acc in accs}
         self._staged = StagedHashes(frozenset(handles), normalized, hashes)
         try:
             yield
