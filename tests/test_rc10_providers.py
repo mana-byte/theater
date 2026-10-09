@@ -454,6 +454,63 @@ def test_dead_binding_does_not_claim_reused_terminal_id(tmp_path: Path) -> None:
     store.close()
 
 
+def test_reconnect_skips_dead_participant_bindings(tmp_path: Path) -> None:
+    store = _Store(tmp_path / "dead-reconnect.db")
+    clock = _Clock(10.0)
+    service = _service(store, clock)
+    try:
+        _register(service)
+        with store.write_unit() as unit:
+            ids = [f"dead-{index:03d}" for index in range(400)] + ["participant-live"]
+            for participant_id in ids:
+                store._participants.upsert(
+                    Participant(
+                        id=participant_id,
+                        harness="codex",
+                        tier=Tier.EXTERNAL,
+                        cwd=None,
+                        status=Status.DEAD if participant_id != "participant-live" else Status.IDLE,
+                    ),
+                    connection=unit.connection,
+                )
+                store.terminal_bindings.bind(
+                    TerminalBindingRecord(
+                        participant_id=participant_id,
+                        provider_id="provider-a",
+                        provider_generation=0,
+                        terminal_id=f"terminal-{participant_id}",
+                        terminal_incarnation="incarnation-a",
+                        occupant_evidence={"occupant_id": participant_id},
+                        process_facts=None,
+                        health="healthy",
+                        report_revision=0,
+                        created_at=1.0,
+                        updated_at=1.0,
+                    ),
+                    connection=unit.connection,
+                )
+        generation, _token = service.authenticate_handshake(
+            "provider-a", "credential-a", callback=True
+        )
+        assert generation == 1
+        binding_events = (
+            store.db.conn.execute(
+                select(orchestration_events.c.entity_id).where(
+                    orchestration_events.c.kind == "terminal.binding_changed"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert binding_events == ["participant-live"]
+        live_binding = store.terminal_bindings.get("participant-live")
+        assert live_binding is not None and live_binding.health == "reconciling"
+        dead_binding = store.terminal_bindings.get("dead-000")
+        assert dead_binding is not None and dead_binding.health == "healthy"
+    finally:
+        store.close()
+
+
 def test_expired_provider_configuration_update_avoids_nested_write_unit(tmp_path: Path) -> None:
     store = _Store(tmp_path / "expired-update.db")
     clock = _Clock(10.0)
