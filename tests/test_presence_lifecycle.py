@@ -56,6 +56,19 @@ async def test_reconcile_refreshes_provider_evidence(daemon, terminal_provider):
     assert daemon.presence.revision > revisions_before
 
 
+async def test_identical_reports_do_not_bump_revision(daemon, terminal_provider):
+    participant = daemon.registry.register(harness="pi", pane=None, cwd="/tmp")
+    terminal_id = terminal_provider.bind(daemon, participant.id, command="pi")
+    terminal_provider.presence[terminal_id] = "absent"
+    await daemon.presence.refresh()
+    settled = daemon.presence.revision
+    await daemon.presence.refresh()
+    assert daemon.presence.revision == settled
+    terminal_provider.presence[terminal_id] = "present"
+    await daemon.presence.refresh()
+    assert daemon.presence.revision > settled
+
+
 async def test_shutdown_stops_monitor(theater_home, terminal_provider):
     daemon = Daemon(harnesses={})
     await daemon.start()

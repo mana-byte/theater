@@ -284,11 +284,11 @@ class PresenceMonitor:
             self._publish_change(participant_id)
         await self._provider.refresh((participant,), screen_max_bytes=screen_max_bytes)
         if not self._stopping:
-            self._bump_revision()
             after = self.snapshot(participant_id).state
             before = self._published_states.get(participant_id, observed)
             self._published_states[participant_id] = after
             if before is not after:
+                self._bump_revision()
                 self._publish_change(participant_id)
 
     def _publish_change(self, participant_id: str) -> None:
