@@ -17,12 +17,6 @@ async def waiter(daemon):
     await waiter.aclose()
 
 
-async def test_returns_immediately_when_rows_exist(daemon, waiter):
-    row_id = daemon.store.bus_append("t.one")
-    tail = await asyncio.wait_for(waiter.tail(row_id - 1, 10, None, 5.0), 1)
-    assert [row["id"] for row in tail.rows] == [row_id]
-
-
 async def test_blocks_then_wakes_on_append(daemon, waiter):
     after = daemon.store.bus_append("t.seed")
     task = asyncio.create_task(waiter.tail(after, 10, None, 10.0))

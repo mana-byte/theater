@@ -6,7 +6,6 @@ import sys
 from types import MappingProxyType
 
 from theater.constants import SECONDS_PER_DAY, USAGE_AVERAGE_WINDOW_DAYS
-from theater.daemon.events.bus import BUS_TAIL_MAX_WAIT_SECONDS
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.rpc.params import _finite_number_param, _integer_param
 from theater.daemon.rpc.usage import _calendar_period_since, _stats, _usage_by_harness
@@ -14,6 +13,7 @@ from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
 from theater.harness import describe
 from theater.models import BadRequest, now
+from theater.protocol import BUS_TAIL_MAX_WAIT_SECONDS, BUS_TAIL_METHOD
 
 _DEFAULT_SUMMARY_HOURS = 24.0
 
@@ -151,7 +151,7 @@ async def bus_tail(daemon, _context: ConnectionContext, params: dict) -> dict:
         raise BadRequest("bus.tail parameter 'kinds' must be a list of strings")
     tail = await daemon.bus_tail_waiter.tail(after_id, limit, kinds, wait)
     return _validated(
-        "frontend.bus.tail",
+        BUS_TAIL_METHOD,
         {
             "items": tail.rows,
             "next_cursor": None if tail.next_after_id == after_id else str(tail.next_after_id),
@@ -167,7 +167,7 @@ DIAGNOSTIC_HANDLERS = MappingProxyType(
         "frontend.usage.by_harness": usage_by_harness,
         "frontend.usage.by_participant": usage_by_participant,
         "frontend.stats.get": stats_get,
-        "frontend.bus.tail": bus_tail,
+        BUS_TAIL_METHOD: bus_tail,
     }
 )
 

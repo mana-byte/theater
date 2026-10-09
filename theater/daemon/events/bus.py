@@ -7,7 +7,8 @@ import contextlib
 from collections.abc import Collection
 from typing import NamedTuple
 
-BUS_TAIL_MAX_WAIT_SECONDS = 30.0
+from theater.protocol import BUS_TAIL_MAX_WAIT_SECONDS
+
 _BUS_TAIL_MAX_LIMIT = 500
 
 
@@ -77,7 +78,10 @@ class BusTailWaiter:
         loop = self._loop
         if self._closed or loop is None or loop.is_closed():
             return
-        loop.call_soon_threadsafe(self._notify)
+        if _running_loop() is loop:
+            self._notify()  # Store is loop-thread-only: skip the self-pipe wakeup.
+        else:
+            loop.call_soon_threadsafe(self._notify)
 
     def _notify(self) -> None:
         self._revision += 1
@@ -92,6 +96,13 @@ class BusTailWaiter:
         for waiter in tuple(self._waiters):
             waiter.set()
         await asyncio.sleep(0)
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 __all__ = ["BUS_TAIL_MAX_WAIT_SECONDS", "BusTail", "BusTailWaiter"]
