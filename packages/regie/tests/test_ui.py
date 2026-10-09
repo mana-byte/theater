@@ -1882,8 +1882,8 @@ async def test_rich_leaves_reconcile_animations_and_pointer_actions() -> None:
         first_leaf = tree._key_widgets[("p", first.participant_id)]
         assert isinstance(first_leaf, AgentLeaf)
         assert len(str(first_leaf.render()).splitlines()) == 3
-        assert first_leaf._timer is not None
-        assert first_leaf._marquee_timer is not None
+        assert first_leaf._spinner_sub is not None
+        assert first_leaf._marquee_sub is not None
 
         previous_frame = str(first_leaf.render())
         first_leaf._tick()
@@ -1905,7 +1905,7 @@ async def test_rich_leaves_reconcile_animations_and_pointer_actions() -> None:
         app._show_projection(state.projection)
         await pilot.pause()
         assert tree._key_widgets[("p", first.participant_id)] is first_leaf
-        assert first_leaf._timer is None
+        assert first_leaf._spinner_sub is None
         assert "renamed" in str(first_leaf.render())
 
         second_leaf = tree._key_widgets[("p", second.participant_id)]

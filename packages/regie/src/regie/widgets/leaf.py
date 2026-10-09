@@ -7,7 +7,6 @@ from typing import ClassVar, Literal
 from rich.cells import cell_len
 from textual import events
 from textual.content import Content
-from textual.timer import Timer
 
 from regie.formatting import format_cost, tilde
 from regie.motions.footer import CountingValue
@@ -22,6 +21,7 @@ from regie.ui_constants import (
     REGIE_LEAF_SPINNER_INTERVAL,
     REGIE_TREE_USAGE_COST_STYLE,
 )
+from regie.widgets.animation_clock import AnimationSubscription, animation_clock
 from regie.widgets.renameable import RenameableRow
 
 type StageMarker = Literal["tmux", "trajectory"]
@@ -87,8 +87,8 @@ class AgentLeaf(RenameableRow):
         self._is_first_root = is_first_root
         self._reveal = reveal
         self._frame = 0
-        self._timer: Timer | None = None
-        self._marquee_timer: Timer | None = None
+        self._spinner_sub: AnimationSubscription | None = None
+        self._marquee_sub: AnimationSubscription | None = None
         self._marquee_offset = 0
         self._hovered = False
         self._highlight: LeafOverlay | None = None
@@ -97,7 +97,7 @@ class AgentLeaf(RenameableRow):
         self._overlay: LeafOverlay | None = None
         self._cost = CountingValue(_format_leaf_cost)
         self._cost.set_target(_microcents(node), animate=False)
-        self._cost_timer: Timer | None = None
+        self._cost_sub: AnimationSubscription | None = None
         # A row's cost counts up from zero the first time it becomes visible, as at startup.
         self._cost_shown = False
         # Textual's is_mounted is still False inside on_mount, where timers already work.
@@ -273,8 +273,10 @@ class AgentLeaf(RenameableRow):
     def _sync_cost_timer(self, counting: bool) -> None:
         if not counting:
             self._stop_cost_count()
-        elif self._cost_timer is None:
-            self._cost_timer = self.set_interval(REGIE_FOOTER_ANIM_INTERVAL, self._tick_cost)
+        elif self._cost_sub is None:
+            self._cost_sub = animation_clock(self.app).subscribe(
+                REGIE_FOOTER_ANIM_INTERVAL, self._tick_cost
+            )
 
     def _tick_cost(self) -> None:
         if not self._cost.tick():
@@ -282,9 +284,9 @@ class AgentLeaf(RenameableRow):
         self.update(self._render_label(), layout=False)
 
     def _stop_cost_count(self) -> None:
-        if self._cost_timer is not None:
-            self._cost_timer.stop()
-            self._cost_timer = None
+        if self._cost_sub is not None:
+            self._cost_sub.stop()
+            self._cost_sub = None
 
     def retire(self) -> None:
         self.close_rename()
@@ -303,13 +305,15 @@ class AgentLeaf(RenameableRow):
         self.update(self._render_label(), layout=False)
 
     def _start_timer(self) -> None:
-        if self._timer is None:
-            self._timer = self.set_interval(REGIE_LEAF_SPINNER_INTERVAL, self._tick)
+        if self._spinner_sub is None:
+            self._spinner_sub = animation_clock(self.app).subscribe(
+                REGIE_LEAF_SPINNER_INTERVAL, self._tick
+            )
 
     def _stop_timer(self) -> None:
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer = None
+        if self._spinner_sub is not None:
+            self._spinner_sub.stop()
+            self._spinner_sub = None
 
     def _tick_marquee(self) -> None:
         if not self._should_marquee():
@@ -320,13 +324,15 @@ class AgentLeaf(RenameableRow):
         self.update(self._render_label(), layout=False)
 
     def _start_marquee(self) -> None:
-        if self._marquee_timer is None:
-            self._marquee_timer = self.set_interval(REGIE_LEAF_MARQUEE_INTERVAL, self._tick_marquee)
+        if self._marquee_sub is None:
+            self._marquee_sub = animation_clock(self.app).subscribe(
+                REGIE_LEAF_MARQUEE_INTERVAL, self._tick_marquee
+            )
 
     def _stop_marquee(self) -> None:
-        if self._marquee_timer is not None:
-            self._marquee_timer.stop()
-            self._marquee_timer = None
+        if self._marquee_sub is not None:
+            self._marquee_sub.stop()
+            self._marquee_sub = None
         self._marquee_offset = 0
 
     def _sync_marquee(self) -> None:

@@ -6,13 +6,13 @@ from rich.cells import cell_len
 from textual import events
 from textual.content import Content
 from textual.message import Message
-from textual.timer import Timer
 
 from regie.motions.routes import LeafOverlay
 from regie.motions.spinner import advance_spinner_frame
 from regie.render.glyphs import separator_label, separator_name_span, with_stage_marker
 from regie.render.layout import Key
 from regie.ui_constants import REGIE_LEAF_SPINNER_INTERVAL
+from regie.widgets.animation_clock import AnimationSubscription, animation_clock
 from regie.widgets.leaf import StageMarker
 from regie.widgets.renameable import RenameableRow
 
@@ -42,7 +42,7 @@ class SeparatorRow(RenameableRow):
         self._highlight: LeafOverlay | None = None
         self._stage_marker: StageMarker | None = None
         self._frame = 0
-        self._spinner: Timer | None = None
+        self._spinner_sub: AnimationSubscription | None = None
         super().__init__()
         self.key = key
         self.update(self._render_label(), layout=False)
@@ -70,11 +70,18 @@ class SeparatorRow(RenameableRow):
     def _sync_spinner(self) -> None:
         """Spin only while a hidden agent is working, as that agent's own row would."""
         if self.fold_status == "working":
-            if self._spinner is None and self.is_attached:
-                self._spinner = self.set_interval(REGIE_LEAF_SPINNER_INTERVAL, self._tick)
-        elif self._spinner is not None:
-            self._spinner.stop()
-            self._spinner = None
+            if self._spinner_sub is None and self.is_attached:
+                self._spinner_sub = animation_clock(self.app).subscribe(
+                    REGIE_LEAF_SPINNER_INTERVAL, self._tick
+                )
+        elif self._spinner_sub is not None:
+            self._spinner_sub.stop()
+            self._spinner_sub = None
+
+    def on_unmount(self) -> None:
+        if self._spinner_sub is not None:
+            self._spinner_sub.stop()
+            self._spinner_sub = None
 
     def _tick(self) -> None:
         self._frame = advance_spinner_frame(self._frame)
