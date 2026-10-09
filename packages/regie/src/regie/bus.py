@@ -64,6 +64,10 @@ class DiagnosticBusController:
                     raise
                 self._extended = False  # previous daemon: unknown parameters are refused
                 value = await self._tail(params)
+            except TypeError:
+                # client does not accept extended parameters: legacy fallback
+                self._extended = False
+                value = await self._tail(params)
             else:
                 if "next_after_id" not in _extra(value):
                     self._extended = False  # parameters were ignored, not honoured
