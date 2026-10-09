@@ -102,7 +102,7 @@ REGIE_LEAF_SPINNER_INTERVAL = 0.1
 #: Hovered overflowing participant-description marquee interval in seconds.
 REGIE_LEAF_MARQUEE_INTERVAL = 0.12
 
-#: Shared animation-clock tick; the marquee rides it ~20% faster than its 0.12 s period.
+#: Shared animation-clock tick; subscribers fire on deadlines, keeping their own periods.
 REGIE_ANIMATION_CLOCK_INTERVAL = REGIE_LEAF_SPINNER_INTERVAL
 
 #: Cadence for discovering unmanaged tmux panes. Managed participants remain on the tree cadence.

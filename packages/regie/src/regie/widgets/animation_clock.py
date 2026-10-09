@@ -2,10 +2,12 @@
 
 Per-widget set_interval meant N spinning leaves woke the loop N times per
 frame; the clock wakes it once, and subscribers advance on their own period.
+Each keeps its requested period via a deadline, not a rounded tick divisor.
 """
 
 from __future__ import annotations
 
+import time
 import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -31,11 +33,14 @@ class AnimationSubscription:
     even if it never unsubscribed.
     """
 
-    __slots__ = ("_callback", "_clock", "divisor")
+    __slots__ = ("_callback", "_clock", "due", "period")
 
-    def __init__(self, clock: AnimationClock, divisor: int, callback: Callable[[], None]) -> None:
+    def __init__(
+        self, clock: AnimationClock, period: float, due: float, callback: Callable[[], None]
+    ) -> None:
         self._clock = clock
-        self.divisor = divisor
+        self.period = period
+        self.due = due
         self._callback = weakref.WeakMethod(callback)
 
     def stop(self) -> None:
@@ -44,13 +49,13 @@ class AnimationSubscription:
 
 
 class AnimationClock:
-    """One timer, many cadences: each subscriber fires every divisor ticks."""
+    """One timer, many cadences: each subscriber fires once its deadline passes."""
 
-    def __init__(self, app: App) -> None:
+    def __init__(self, app: App, now: Callable[[], float] = time.monotonic) -> None:
+        self._now = now
         # Weak, or the registry below would keep the app alive forever.
         self._app = weakref.ref(app)
         self._timer: Timer | None = None
-        self._tick_count = 0
         self._subscriptions: list[AnimationSubscription] = []
 
     @property
@@ -62,8 +67,7 @@ class AnimationClock:
         return self._timer is not None
 
     def subscribe(self, period: float, callback: Callable[[], None]) -> AnimationSubscription:
-        divisor = max(1, round(period / REGIE_ANIMATION_CLOCK_INTERVAL))
-        subscription = AnimationSubscription(self, divisor, callback)
+        subscription = AnimationSubscription(self, period, self._now() + period, callback)
         self._subscriptions.append(subscription)
         if self._timer is None:
             app = self._require_app()
@@ -88,8 +92,7 @@ class AnimationClock:
             self._timer = None
 
     def _on_tick(self) -> None:
-        self._tick_count += 1
-        tick = self._tick_count
+        now = self._now()
         alive: list[AnimationSubscription] = []
         due: list[Callable[[], None]] = []
         for subscription in self._subscriptions:
@@ -97,7 +100,12 @@ class AnimationClock:
             if callback is None:
                 continue
             alive.append(subscription)
-            if tick % subscription.divisor == 0 and _displayed(callback):
+            if subscription.due > now:
+                continue
+            # Re-arm from the last deadline, not now, so the cadence never drifts.
+            while subscription.due <= now:
+                subscription.due += subscription.period
+            if _displayed(callback):
                 due.append(callback)
         self._subscriptions = alive
         if not due:
