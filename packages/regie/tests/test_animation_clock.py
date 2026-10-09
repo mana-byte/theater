@@ -82,6 +82,16 @@ def test_clock_preserves_each_cadence_and_sleeps_when_idle() -> None:
     assert spinner.fires == 120
     assert abs(marquee.fires - 12 / REGIE_LEAF_MARQUEE_INTERVAL) <= 1
 
+    # Never early: just before the next marquee deadline nothing advances.
+    fires = marquee.fires
+    due = marquee_sub.due
+    now[0] = due - 0.001
+    clock._on_tick()
+    assert marquee.fires == fires
+    now[0] = due
+    clock._on_tick()
+    assert marquee.fires == fires + 1
+
     del spinner
     gc.collect()
     tick()  # a dead owner is dropped, never ticked

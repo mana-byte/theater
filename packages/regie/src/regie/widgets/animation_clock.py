@@ -93,8 +93,6 @@ class AnimationClock:
 
     def _on_tick(self) -> None:
         now = self._now()
-        # Timer jitter: a tick a hair early still serves a deadline.
-        horizon = now + REGIE_ANIMATION_CLOCK_INTERVAL / 10
         alive: list[AnimationSubscription] = []
         due: list[Callable[[], None]] = []
         for subscription in self._subscriptions:
@@ -102,10 +100,10 @@ class AnimationClock:
             if callback is None:
                 continue
             alive.append(subscription)
-            if subscription.due > horizon:
+            if subscription.due > now:
                 continue
             # Re-arm from the last deadline, not now, so the cadence never drifts.
-            while subscription.due <= horizon:
+            while subscription.due <= now:
                 subscription.due += subscription.period
             if _displayed(callback):
                 due.append(callback)
