@@ -62,7 +62,13 @@ class _Ticker:
 def test_clock_preserves_each_cadence_and_sleeps_when_idle() -> None:
     assert REGIE_ANIMATION_CLOCK_INTERVAL == REGIE_LEAF_SPINNER_INTERVAL
     app = _StubApp()
-    clock = AnimationClock(app)
+    now = [0.0]
+    clock = AnimationClock(app, now=lambda: now[0])
+
+    def tick() -> None:
+        now[0] += REGIE_ANIMATION_CLOCK_INTERVAL
+        clock._on_tick()
+
     assert not clock.is_running
     spinner = _Ticker()
     marquee = _Ticker()
@@ -70,15 +76,15 @@ def test_clock_preserves_each_cadence_and_sleeps_when_idle() -> None:
     assert clock.is_running and app.intervals == [REGIE_ANIMATION_CLOCK_INTERVAL]
     marquee_sub = clock.subscribe(REGIE_LEAF_MARQUEE_INTERVAL, marquee.tick)
 
-    # The marquee rides the shared 0.1 s tick, ~20% faster than its 0.12 s period.
-    for _ in range(6):
-        clock._on_tick()
-    assert spinner.fires == 6
-    assert marquee.fires == 6
+    # 120 ticks = 12 s: the marquee keeps its 0.12 s period, not the 0.1 s tick.
+    for _ in range(120):
+        tick()
+    assert spinner.fires == 120
+    assert abs(marquee.fires - 12 / REGIE_LEAF_MARQUEE_INTERVAL) <= 1
 
     del spinner
     gc.collect()
-    clock._on_tick()  # a dead owner is dropped, never ticked
+    tick()  # a dead owner is dropped, never ticked
     assert clock.subscriber_count == 1
     marquee_sub.stop()
     assert not clock.is_running and app.timers[0].stopped
@@ -91,7 +97,7 @@ def test_clock_preserves_each_cadence_and_sleeps_when_idle() -> None:
 
     hidden = _Ticker(display=False)
     clock.subscribe(REGIE_LEAF_SPINNER_INTERVAL, hidden.tick)
-    clock._on_tick()
+    tick()
     assert hidden.fires == 0  # a hidden owner is skipped; frames resume once shown
     assert clock.subscriber_count == 1
 
