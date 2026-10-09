@@ -274,3 +274,18 @@ def test_rollback_journal_undoes_only_the_failed_units_mutations() -> None:
     assert not turns.already_handled("t1") and turns.already_handled("t0")
     assert turns.take().said == "kept"
     assert "take" not in turns.__dict__
+
+
+class _NoCopyTurns(TurnAccumulator):
+    def __deepcopy__(self, memo):
+        raise AssertionError("turn history was copied")
+
+
+def test_empty_observation_unit_never_copies_turn_history() -> None:
+    turns = _NoCopyTurns()
+    for index in range(1000):
+        turns.say(f"block-{index}")
+    with rollback_observation_state(QuietClock(), turns):
+        pass
+
+    assert len(turns._blocks) == 1000
