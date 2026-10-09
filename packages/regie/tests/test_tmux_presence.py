@@ -538,3 +538,48 @@ async def test_failures_stay_wholesale_even_after_recovery(monkeypatch, reason):
     finally:
         await monitor.aclose()
     assert monitor.take_changed_panes() is None  # close is wholesale too
+
+
+@pytest.mark.parametrize(
+    "lose", ["focus_query_failed", "focus_arming_failed", "focus_wake_unavailable", "closed"]
+)
+async def test_trust_loss_discards_a_queued_scope(monkeypatch, lose):
+    reads = [_two_windows(), _two_windows(first_focused=False)]
+    monitor = await _scoped_monitor(monkeypatch, reads)
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        await monitor.refresh(fresh=True)  # queues {"%7"} behind the wake's wholesale
+        if lose == "closed":
+            await monitor.aclose()
+        else:
+            monitor._invalidate(lose)
+        assert monitor.take_changed_panes() is None
+        assert monitor.take_changed_panes() == frozenset()  # nothing stale survives
+    finally:
+        await monitor.aclose()
+
+
+async def test_disabled_reporting_discards_baseline_and_queued_scope(monkeypatch):
+    disabled = replace(_two_windows(first_focused=False), enabled=False)
+    monitor = await _scoped_monitor(monkeypatch, [_two_windows(), disabled, disabled])
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)  # baseline kept
+        await monitor.refresh(fresh=True)  # disabled read: no scoped attribution
+        assert monitor.take_changed_panes() is None
+        assert monitor.take_changed_panes() == frozenset()
+    finally:
+        await monitor.aclose()
+
+
+async def test_server_change_restart_is_wholesale(monkeypatch):
+    monitor = await _scoped_monitor(
+        monkeypatch, [_two_windows(), _two_windows(first_focused=False), _two_windows()]
+    )
+    try:
+        monitor._invalidate("focus_refresh_pending", wake=True)
+        await monitor.refresh(fresh=True)  # queued scope {"%7"}
+        await monitor.start(ServerIdentity("/other/tmux", "33", "44").value)
+        assert monitor.take_changed_panes() is None
+        assert monitor.take_changed_panes() == frozenset()
+    finally:
+        await monitor.aclose()

@@ -58,6 +58,7 @@ class FocusMonitor:
         changed = self._facts is not None or self._reason != reason
         if not wake:
             self._baseline = None
+            self._scope = frozenset()  # trust lost: nothing queued may outlive the wholesale
         elif self._facts is not None:
             self._baseline = (self._facts, self._blurred)
         self._wholesale = True
@@ -148,10 +149,14 @@ class FocusMonitor:
                 self._wake.set()
             self._trust.armed = False
             self._trust.invalidate()
-            self._wholesale = True  # trust history was reset: inventory alone cannot attribute
+            # Trust history was reset: inventory alone cannot attribute, so stay wholesale.
+            self._wholesale = True
+            self._baseline = None
+            self._scope = frozenset()
         self._trust.observe(facts.clients)
         blurred = frozenset(c.identity for c in facts.clients if self._trust.blurred(c))
-        self._note_scope(facts, blurred)
+        if facts.enabled:
+            self._note_scope(facts, blurred)
         if self._facts != facts:
             self._epoch += 1
             self.changed.set()
