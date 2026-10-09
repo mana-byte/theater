@@ -52,7 +52,7 @@ class _ApplyContext:
     turns: TurnAccumulator
     callbacks: _ApplyCallbacks
     state: _ApplyState
-    connection: Connection
+    connection: Connection | None
 
 
 @dataclass
@@ -200,13 +200,18 @@ class Reducer:
         turn_result_fn,
         path_target_fn=None,
         connection=None,
+        transactional: bool = True,
     ) -> bool:
         """Put a batch on the bus and move the participant's status; return whether anything did.
 
         ``path_target_fn`` maps an event to its exact owning job (native live wiring); legacy
         wiring passes nothing and keeps the oldest-running heuristic.
         """
-        if connection is None:
+        if (
+            connection is None
+            and transactional
+            and not any(event.turn_end for event in batch.events)
+        ):
             with rollback_observation_state(clock, turns), self.store.write_unit() as unit:
                 return self.apply(
                     pid,
@@ -224,12 +229,17 @@ class Reducer:
         context = _ApplyContext(pid, clock, turns, callbacks, state, connection)
         for event in batch.events:
             self._apply_event(event, context)
-        self._settle_batch(
-            pid,
-            batch,
-            state.last,
-            lambda participant_id, status: settle_fn(participant_id, status, connection=connection),
-        )
+        if connection is None:
+            self._settle_batch(pid, batch, state.last, settle_fn)
+        else:
+            self._settle_batch(
+                pid,
+                batch,
+                state.last,
+                lambda participant_id, status: settle_fn(
+                    participant_id, status, connection=connection
+                ),
+            )
         self._clear_resolved_resume_floor(pid, batch, connection=connection)
         result = batch.progressed or bool(batch.events) or batch.attached is not None
         if self._telemetry_fn is not None:
@@ -281,6 +291,8 @@ class Reducer:
         if event.kind is EventKind.USER and event.text:
             context.turns.hear(event.text)
         if event.turn_end:
+            if active_write_unit(context.connection) is not None:
+                raise RuntimeError("terminal observation events cannot run inside a write unit")
             turn = context.turns.take()
             if not context.turns.already_handled(event.turn_id):
                 result_text, raw_result = context.callbacks.turn_result(event, turn)
@@ -292,11 +304,7 @@ class Reducer:
                     raw_result=raw_result,
                     terminal=event.turn_terminal,
                 )
-                unit = active_write_unit(context.connection)
-                if unit is None:
-                    answer()
-                else:
-                    unit.after_commit(answer)
+                answer()
                 context.turns.mark_handled(event.turn_id)
             context.clock.last_text = ""
 

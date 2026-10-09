@@ -73,6 +73,7 @@ class BatchApplication:
             answer_turn_fn=self._answer_turn,
             settle_fn=self._settle,
             turn_result_fn=self._turn_result,
+            transactional=not any(event.turn_end for event in batch.events),
         )
 
     def _apply_source_batch(
@@ -98,21 +99,40 @@ class BatchApplication:
             else None
         )
         answer_turn_fn = partial(self._answer_turn, registration=registration)
+        terminal_batch = any(event.turn_end for event in batch.events)
         try:
-            with rollback_observation_state(clock, turns), self.store.write_unit() as unit:
-                result = self._reducer.apply(
-                    pid,
-                    batch,
-                    clock,
-                    turns,
-                    answer_turn_fn=answer_turn_fn,
-                    settle_fn=self._settle,
-                    turn_result_fn=self._turn_result,
-                    path_target_fn=path_target_fn,
-                    connection=unit.connection,
-                )
-                if not batch.terminal_evidence:
-                    self._persist_pending_source_checkpoint(pid, source, connection=unit.connection)
+            with rollback_observation_state(clock, turns):
+                if terminal_batch:
+                    result = self._reducer.apply(
+                        pid,
+                        batch,
+                        clock,
+                        turns,
+                        answer_turn_fn=answer_turn_fn,
+                        settle_fn=self._settle,
+                        turn_result_fn=self._turn_result,
+                        path_target_fn=path_target_fn,
+                        transactional=False,
+                    )
+                    if not batch.terminal_evidence:
+                        self._persist_pending_source_checkpoint(pid, source)
+                    return result
+                with self.store.write_unit() as unit:
+                    result = self._reducer.apply(
+                        pid,
+                        batch,
+                        clock,
+                        turns,
+                        answer_turn_fn=answer_turn_fn,
+                        settle_fn=self._settle,
+                        turn_result_fn=self._turn_result,
+                        path_target_fn=path_target_fn,
+                        connection=unit.connection,
+                    )
+                    if not batch.terminal_evidence:
+                        self._persist_pending_source_checkpoint(
+                            pid, source, connection=unit.connection
+                        )
         except Exception:
             source.rollback_source_checkpoint()
             raise

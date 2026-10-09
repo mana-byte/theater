@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import event as sqlalchemy_event
 
+from theater.daemon.jobs import JobManager
 from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.observation.service import Observer
 from theater.daemon.observation.turns import TurnAccumulator
@@ -207,3 +208,37 @@ def test_checkpoint_failure_rolls_back_the_observation_batch(tmp_path, monkeypat
     assert source.rolled_back
     assert not source.acknowledged
     assert store.bus_tail() == bus_before
+
+
+def test_terminal_completion_failure_rolls_back_the_source_checkpoint(tmp_path) -> None:
+    store = Store(tmp_path / "terminal-failure.db")
+    registry = Registry(store)
+    participant = registry.register(harness="codex", pane=None, cwd="/tmp")
+    jobs = JobManager(store)
+    job = jobs.create(
+        handle="job-a",
+        caller_id="cli",
+        target_id=participant.id,
+        kind="send",
+    )
+    observer = Observer(registry, harnesses={}, jobs=jobs)
+    source = _CheckpointSource("cursor-a")
+    store.conn.exec_driver_sql(
+        "CREATE TRIGGER fail_job_finish BEFORE UPDATE OF state ON jobs "
+        "WHEN NEW.state != OLD.state BEGIN SELECT RAISE(ABORT, 'finish blocked'); END"
+    )
+    try:
+        with pytest.raises(Exception, match="finish blocked"):
+            observer._apply_source_batch(
+                participant.id,
+                source,
+                Batch(events=[Event(kind=EventKind.ASSISTANT, text="done", turn_end=True)]),
+                QuietClock(),
+                TurnAccumulator(),
+            )
+
+        assert source.rolled_back
+        assert not source.acknowledged
+        assert store.get_job(job.handle).state == "running"
+    finally:
+        store.close()
