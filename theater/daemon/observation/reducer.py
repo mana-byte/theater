@@ -243,17 +243,19 @@ class Reducer:
         self._clear_resolved_resume_floor(pid, batch, connection=connection)
         result = batch.progressed or bool(batch.events) or batch.attached is not None
         if self._telemetry_fn is not None:
-            try:
-                unit = active_write_unit(connection)
-                if unit is None:
-                    self._telemetry_fn(pid, batch, tuple(state.usage_events or ()))
-                else:
-                    unit.after_commit(
-                        lambda: self._telemetry_fn(pid, batch, tuple(state.usage_events or ()))
-                    )
-            except Exception:
-                logger.exception("agent telemetry failed for %s", pid)
+            events = tuple(state.usage_events or ())
+            unit = active_write_unit(connection)
+            if unit is None:
+                self._safe_telemetry(pid, batch, events)
+            else:
+                unit.after_commit(lambda: self._safe_telemetry(pid, batch, events))
         return result
+
+    def _safe_telemetry(self, pid: str, batch: Batch, events: tuple) -> None:
+        try:
+            self._telemetry_fn(pid, batch, events)
+        except Exception:
+            logger.exception("agent telemetry failed for %s", pid)
 
     def _apply_event(self, event: Event, context: _ApplyContext) -> None:
         pid = context.pid
