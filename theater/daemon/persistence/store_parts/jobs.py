@@ -115,5 +115,5 @@ class JobStore(StoreHost):
     def get_send_seq(self) -> int:
         return self._meta.get_send_seq()
 
-    def set_send_seq(self, value: int) -> None:
-        self._meta.set_send_seq(value)
+    def set_send_seq(self, value: int, *, connection=None) -> None:
+        self._meta.set_send_seq(value, connection=connection)

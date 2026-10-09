@@ -8,14 +8,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
+
+from sqlalchemy import Connection
 
 from theater.constants.observation import (
     LAST_ACTIVITY_REFRESH_SECONDS,
     WORKING_SCREEN_BACKOFF_CAP_SECONDS,
 )
 from theater.daemon import lineage
+from theater.daemon.observation.rollback import rollback_observation_state
 from theater.daemon.observation.screen import end_turn_from_screen_text
 from theater.daemon.observation.turns import Turn, TurnAccumulator
+from theater.daemon.persistence.transactions import active_write_unit
 from theater.harness import Event, EventKind, HarnessObserver, ScreenKind, status_after
 from theater.harness.source import Batch, Source
 from theater.models import Status
@@ -47,6 +52,7 @@ class _ApplyContext:
     turns: TurnAccumulator
     callbacks: _ApplyCallbacks
     state: _ApplyState
+    connection: Connection
 
 
 @dataclass
@@ -156,7 +162,7 @@ class Reducer:
     def rescue(self) -> float:
         return self._config_fn().rescue
 
-    def record_usage(self, pid: str, event) -> bool:
+    def record_usage(self, pid: str, event, *, connection=None) -> bool:
         """Persist a usage report, returning whether it was new."""
         assert event.usage is not None
         u = event.usage
@@ -179,6 +185,7 @@ class Reducer:
             cache_read_input_tokens=u.cache_read_input_tokens,
             reasoning_output_tokens=u.reasoning_output_tokens,
             cost_microcents=usage_cost_microcents(u),
+            connection=connection,
         )
 
     def apply(
@@ -192,23 +199,48 @@ class Reducer:
         settle_fn,
         turn_result_fn,
         path_target_fn=None,
+        connection=None,
     ) -> bool:
         """Put a batch on the bus and move the participant's status; return whether anything did.
 
         ``path_target_fn`` maps an event to its exact owning job (native live wiring); legacy
         wiring passes nothing and keeps the oldest-running heuristic.
         """
+        if connection is None:
+            with rollback_observation_state(clock, turns), self.store.write_unit() as unit:
+                return self.apply(
+                    pid,
+                    batch,
+                    clock,
+                    turns,
+                    answer_turn_fn=answer_turn_fn,
+                    settle_fn=settle_fn,
+                    turn_result_fn=turn_result_fn,
+                    path_target_fn=path_target_fn,
+                    connection=unit.connection,
+                )
         state = _ApplyState(usage_events=[] if self._telemetry_fn is not None else None)
         callbacks = _ApplyCallbacks(answer_turn_fn, turn_result_fn, path_target_fn)
-        context = _ApplyContext(pid, clock, turns, callbacks, state)
+        context = _ApplyContext(pid, clock, turns, callbacks, state, connection)
         for event in batch.events:
             self._apply_event(event, context)
-        self._settle_batch(pid, batch, state.last, settle_fn)
-        self._clear_resolved_resume_floor(pid, batch)
+        self._settle_batch(
+            pid,
+            batch,
+            state.last,
+            lambda participant_id, status: settle_fn(participant_id, status, connection=connection),
+        )
+        self._clear_resolved_resume_floor(pid, batch, connection=connection)
         result = batch.progressed or bool(batch.events) or batch.attached is not None
         if self._telemetry_fn is not None:
             try:
-                self._telemetry_fn(pid, batch, tuple(state.usage_events or ()))
+                unit = active_write_unit(connection)
+                if unit is None:
+                    self._telemetry_fn(pid, batch, tuple(state.usage_events or ()))
+                else:
+                    unit.after_commit(
+                        lambda: self._telemetry_fn(pid, batch, tuple(state.usage_events or ()))
+                    )
             except Exception:
                 logger.exception("agent telemetry failed for %s", pid)
         return result
@@ -218,7 +250,7 @@ class Reducer:
         state = context.state
         if (
             event.usage is not None
-            and self.record_usage(pid, event)
+            and self.record_usage(pid, event, connection=context.connection)
             and state.usage_events is not None
         ):
             state.usage_events.append(event)
@@ -239,6 +271,7 @@ class Reducer:
                 "index": event.raw_index,
                 "observed_at": state.observed_at,
             },
+            connection=context.connection,
         )
         state.last = event
         self._observe_event_paths(event, context)
@@ -251,13 +284,19 @@ class Reducer:
             turn = context.turns.take()
             if not context.turns.already_handled(event.turn_id):
                 result_text, raw_result = context.callbacks.turn_result(event, turn)
-                context.callbacks.answer_turn(
+                answer = partial(
+                    context.callbacks.answer_turn,
                     pid,
                     result_text,
                     turn.heard,
                     raw_result=raw_result,
                     terminal=event.turn_terminal,
                 )
+                unit = active_write_unit(context.connection)
+                if unit is None:
+                    answer()
+                else:
+                    unit.after_commit(answer)
                 context.turns.mark_handled(event.turn_id)
             context.clock.last_text = ""
 
@@ -269,13 +308,20 @@ class Reducer:
         if context.callbacks.path_target is not None:
             target = context.callbacks.path_target(pid, event)
             if target:
-                self.jobs.observe_paths(target, event.paths)
+                self._observe_paths_after_commit(context.connection, target, event.paths)
             return
         if state.job_handle is None:
             job = self.store.oldest_running_job_for_target(pid)
             state.job_handle = job.handle if job is not None else ""
         if state.job_handle:
-            self.jobs.observe_paths(state.job_handle, event.paths)
+            self._observe_paths_after_commit(context.connection, state.job_handle, event.paths)
+
+    def _observe_paths_after_commit(self, connection, handle: str, paths) -> None:
+        unit = active_write_unit(connection)
+        if unit is None:
+            self.jobs.observe_paths(handle, paths)
+        else:
+            unit.after_commit(lambda: self.jobs.observe_paths(handle, paths))
 
     @staticmethod
     def _settle_batch(pid: str, batch: Batch, last: Event | None, settle_fn: Callable) -> None:
@@ -285,12 +331,12 @@ class Reducer:
         elif last is not None:
             settle_fn(pid, status_after(last))
 
-    def _clear_resolved_resume_floor(self, pid: str, batch: Batch) -> None:
+    def _clear_resolved_resume_floor(self, pid: str, batch: Batch, *, connection=None) -> None:
         if batch.attached is not None or not (batch.progressed or batch.events):
             return
-        participant = self.store.get_participant(pid)
+        participant = self.store.get_participant(pid, connection=connection)
         if participant is not None and floor_is_present(participant.resume_floor):
-            self.store.clear_resume_floor(pid)
+            self.store.clear_resume_floor(pid, connection=connection)
 
     @staticmethod
     def has_semantic_progress(batch: Batch) -> bool:
@@ -315,15 +361,26 @@ class Reducer:
         clock.stir_raw()
         await self._screen_status_due(pid, observer, clock)
 
-    def settle(self, pid: str, desired: Status) -> None:
-        p = self.store.get_participant(pid)
+    def settle(self, pid: str, desired: Status, *, connection=None) -> None:
+        p = self.store.get_participant(pid, connection=connection)
         if p is None or p.status is Status.DEAD:
             return
         if p.status is desired:
             if self._wall_now_fn() - p.last_activity >= LAST_ACTIVITY_REFRESH_SECONDS:
-                self.registry.touch(pid)
-        else:
+                if connection is None:
+                    self.registry.touch(pid)
+                else:
+                    self.store.touch(pid, connection=connection)
+        elif connection is None:
             self.registry.set_status(pid, desired)
+        else:
+            self.store.set_status(pid, desired, connection=connection)
+            self.store.bus_append(
+                "participant.status",
+                to_id=pid,
+                payload={"status": str(desired)},
+                connection=connection,
+            )
 
     def apply_screen_reading(self, pid: str, reading) -> None:
         # PROMPT -> IDLE cannot defer to rescue.

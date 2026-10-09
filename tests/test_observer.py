@@ -196,24 +196,25 @@ def test_source_checkpoint_is_persisted_only_after_apply_succeeds(registry, monk
     persistence_batch = Batch(
         events=(Event(kind=EventKind.ASSISTANT, text="apply exactly once"),), progressed=True
     )
-    assert observer._apply_source_batch(
-        participant.id,
-        persistence_failure,
-        persistence_batch,
-        QuietClock(),
-        TurnAccumulator(),
-    )
+    with pytest.raises(RuntimeError, match="checkpoint persistence failed"):
+        observer._apply_source_batch(
+            participant.id,
+            persistence_failure,
+            persistence_batch,
+            QuietClock(),
+            TurnAccumulator(),
+        )
     assert persistence_failure.acknowledged is False
-    assert persistence_failure.rolled_back is False
+    assert persistence_failure.rolled_back is True
     assert persistence_failure.pending is True
     assert registry.get(participant.id).source_checkpoint == source.checkpoint
-    assert kinds(registry.store).count("agent.assistant") == 1
+    assert kinds(registry.store).count("agent.assistant") == 0
 
     monkeypatch.setattr(observer.store, "set_source_checkpoint", persist_checkpoint)
     assert observer._persist_pending_source_checkpoint(participant.id, persistence_failure)
     assert persistence_failure.acknowledged is True
     assert persistence_failure.pending is False
-    assert kinds(registry.store).count("agent.assistant") == 1
+    assert kinds(registry.store).count("agent.assistant") == 0
 
 
 async def test_new_records_reach_the_bus_as_normalized_events(registry, vibe_tree, observing):

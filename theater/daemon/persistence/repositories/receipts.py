@@ -11,6 +11,7 @@ from theater.daemon.artifacts import remove_secret_file
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
+from theater.daemon.persistence.transactions import after_commit
 from theater.daemon.schema import meta, participants
 from theater.models import Participant, Status
 from theater.provenance import TranscriptProvenance
@@ -38,12 +39,15 @@ class ReceiptRepository:
         token: str,
         *,
         token_path: str | None = None,
+        connection: Connection | None = None,
     ) -> None:
         payload: dict[str, object] = {
             "token": token,
             "token_path": token_path,
         }
-        self._meta.set(f"{_RECEIPT_TOKEN_PREFIX}{participant_id}", json.dumps(payload))
+        self._meta.set(
+            f"{_RECEIPT_TOKEN_PREFIX}{participant_id}", json.dumps(payload), connection=connection
+        )
 
     def get_token(self, participant_id: str) -> str | None:
         participant = self._participants.get(participant_id)
@@ -56,8 +60,8 @@ class ReceiptRepository:
         token = payload.get("token")
         return token if isinstance(token, str) else None
 
-    def renew_token(self, participant_id: str) -> None:
-        payload = self._token_payload(participant_id)
+    def renew_token(self, participant_id: str, *, connection: Connection | None = None) -> None:
+        payload = self._token_payload(participant_id, connection=connection)
         if payload is None:
             return
         token = payload.get("token")
@@ -68,33 +72,41 @@ class ReceiptRepository:
             participant_id,
             token,
             token_path=token_path if isinstance(token_path, str) else None,
+            connection=connection,
         )
 
-    def delete_token(self, participant_id: str) -> None:
-        payload = self._token_payload(participant_id)
+    def delete_token(self, participant_id: str, *, connection: Connection | None = None) -> None:
+        payload = self._token_payload(participant_id, connection=connection)
         token_path = payload.get("token_path") if payload is not None else None
+        conn = self._db.conn if connection is None else connection
+        conn.execute(delete(meta).where(meta.c.key == f"{_RECEIPT_TOKEN_PREFIX}{participant_id}"))
         if isinstance(token_path, str) and token_path:
-            remove_secret_file(token_path, owner_id=participant_id)
-        self._db.conn.execute(
-            delete(meta).where(meta.c.key == f"{_RECEIPT_TOKEN_PREFIX}{participant_id}")
-        )
+            after_commit(
+                connection,
+                lambda: remove_secret_file(token_path, owner_id=participant_id),
+            )
 
-    def cleanup_tokens(self) -> int:
-        rows = self._db.conn.execute(
+    def cleanup_tokens(self, *, connection: Connection | None = None) -> int:
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
             select(meta.c.key, meta.c.value).where(meta.c.key.like(f"{_RECEIPT_TOKEN_PREFIX}%"))
         ).fetchall()
         deleted = 0
         for key, _raw in rows:
             participant_id = key.removeprefix(_RECEIPT_TOKEN_PREFIX)
-            participant = self._participants.get(participant_id)
+            participant = self._participants.get(participant_id, connection=connection)
             if participant is not None and participant.status is not Status.DEAD:
                 continue
-            self.delete_token(participant_id)
+            self.delete_token(participant_id, connection=connection)
             deleted += 1
         return deleted
 
-    def _token_payload(self, participant_id: str) -> dict | None:
-        return self._decode_token(self._meta.get(f"{_RECEIPT_TOKEN_PREFIX}{participant_id}"))
+    def _token_payload(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> dict | None:
+        return self._decode_token(
+            self._meta.get(f"{_RECEIPT_TOKEN_PREFIX}{participant_id}", connection=connection)
+        )
 
     @staticmethod
     def _decode_token(raw: str | None) -> dict | None:

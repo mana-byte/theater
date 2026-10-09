@@ -329,12 +329,13 @@ class Database:
     def _leave_write_unit(self) -> None:
         self._write_unit_active = False
 
-    def write_unit(self) -> SQLiteWriteUnit:
+    def write_unit(self, *, connection: Connection | None = None) -> SQLiteWriteUnit:
         """Return one short synchronous transaction for cooperating repositories."""
         return SQLiteWriteUnit(
             self.engine,
             enter=self._enter_write_unit,
             leave=self._leave_write_unit,
+            connection=connection,
         )
 
     # ---- migrations ----------------------------------------------------

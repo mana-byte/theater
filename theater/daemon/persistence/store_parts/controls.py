@@ -260,11 +260,14 @@ class ControlOperationStore(StoreHost):
         """Current persisted send-sequence allocator value."""
         return self._meta.get_send_seq(connection=connection)
 
-    def prune_control_operations(self, *, older_than: float, limit: int | None = None) -> int:
+    def prune_control_operations(
+        self, *, older_than: float, limit: int | None = None, connection=None
+    ) -> int:
         """Bounded prune of settled operations."""
         kwargs: dict = {"older_than": older_than}
         if limit is not None:
             kwargs["limit"] = limit
+        kwargs["connection"] = connection
         return self._control_operations.prune(**kwargs)
 
     def record_native_terminal_evidence(self, evidence, *, connection=None) -> bool:
@@ -289,9 +292,12 @@ class ControlOperationStore(StoreHost):
     def native_terminal_evidence_for_participant(self, participant_id: str) -> list:
         return self._native_evidence.for_participant(participant_id)
 
-    def prune_native_terminal_evidence(self, *, older_than: float, limit: int | None = None) -> int:
+    def prune_native_terminal_evidence(
+        self, *, older_than: float, limit: int | None = None, connection=None
+    ) -> int:
         """Bounded prune of terminal evidence."""
         kwargs: dict = {"older_than": older_than}
         if limit is not None:
             kwargs["limit"] = limit
+        kwargs["connection"] = connection
         return self._native_evidence.prune(**kwargs)

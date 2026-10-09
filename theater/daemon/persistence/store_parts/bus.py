@@ -10,6 +10,7 @@ from copy import deepcopy
 
 from theater.constants.daemon import BUS_PARTICIPANT_PAGE_MAX_LIMIT
 from theater.daemon.persistence.store_parts._host import BusListener, StoreHost
+from theater.daemon.persistence.transactions import after_commit
 from theater.models import now
 
 logger = logging.getLogger("theater.store")
@@ -62,6 +63,7 @@ class BusStore(StoreHost):
         from_id: str | None = None,
         to_id: str | None = None,
         payload: dict | None = None,
+        connection=None,
     ) -> int:
         listeners = tuple(self._bus_listeners)
         timestamp = now() if listeners else None
@@ -71,12 +73,13 @@ class BusStore(StoreHost):
             to_id=to_id,
             payload=payload,
             timestamp=timestamp,
+            connection=connection,
         )
         if listeners:
             assert timestamp is not None
             payload_text = json.dumps(payload) if payload else None
             row = self._bus_row(row_id, timestamp, from_id, to_id, kind, payload_text)
-            self._notify_bus_listeners([row], listeners)
+            after_commit(connection, lambda: self._notify_bus_listeners([row], listeners))
         return row_id
 
     def bus_page_for_participant(

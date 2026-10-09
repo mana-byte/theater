@@ -33,6 +33,7 @@ class UsageStore(StoreHost):
         cache_read_input_tokens: int,
         reasoning_output_tokens: int,
         cost_microcents: int,
+        connection=None,
     ) -> bool:
         """Insert one usage row, returning whether its native key was new."""
         return self._usage.record(
@@ -48,6 +49,7 @@ class UsageStore(StoreHost):
             cache_read_input_tokens=cache_read_input_tokens,
             reasoning_output_tokens=reasoning_output_tokens,
             cost_microcents=cost_microcents,
+            connection=connection,
         )
 
     def usage_totals(self, *, since: float | None = None) -> dict:

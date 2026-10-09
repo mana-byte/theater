@@ -6,7 +6,7 @@ import json
 import math
 from collections.abc import Mapping
 
-from sqlalchemy import ColumnElement, case, distinct, func, select
+from sqlalchemy import ColumnElement, Connection, case, distinct, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.persistence.database import Database
@@ -15,6 +15,7 @@ from theater.daemon.persistence.repositories.usage_cache import (
     SummaryCache,
     timezone_key,
 )
+from theater.daemon.persistence.transactions import after_commit
 from theater.daemon.schema import usage
 from theater.observability.catalog import USAGE_SUMMARY
 from theater.observability.engine import span
@@ -42,6 +43,7 @@ class UsageRepository:
         cache_read_input_tokens: int,
         reasoning_output_tokens: int,
         cost_microcents: int,
+        connection: Connection | None = None,
     ) -> bool:
         """Insert one usage row, returning whether its native key was new."""
         statement = sqlite_insert(usage).values(
@@ -62,21 +64,27 @@ class UsageRepository:
             statement = statement.on_conflict_do_nothing(
                 index_elements=[usage.c.participant_id, usage.c.usage_key]
             )
-        result = self._db.conn.execute(statement)
+        conn = self._db.conn if connection is None else connection
+        result = conn.execute(statement)
         if result.rowcount > 0 and self._summary_cache is not None:
             # None (a ts SQLite cannot date) drops the cache: the next read rescans.
-            self._summary_cache = self._summary_cache.with_row(
-                ts,
-                {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_creation_input_tokens": cache_creation_input_tokens,
-                    "cache_read_input_tokens": cache_read_input_tokens,
-                    "reasoning_output_tokens": reasoning_output_tokens,
-                    "cost_microcents": cost_microcents,
-                },
+            values = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": cache_creation_input_tokens,
+                "cache_read_input_tokens": cache_read_input_tokens,
+                "reasoning_output_tokens": reasoning_output_tokens,
+                "cost_microcents": cost_microcents,
+            }
+            after_commit(
+                connection,
+                lambda: self._update_summary_cache(ts, values),
             )
         return result.rowcount > 0
+
+    def _update_summary_cache(self, ts: float, values: dict[str, int]) -> None:
+        if self._summary_cache is not None:
+            self._summary_cache = self._summary_cache.with_row(ts, values)
 
     def totals(self, *, since: float | None = None) -> dict:
         """Sum of all token and cost columns across the usage table."""

@@ -40,8 +40,8 @@ class MetadataRepository:
         except ValueError:
             return 0
 
-    def set_send_seq(self, value: int) -> None:
-        self.set(SEND_SEQ_META_KEY, str(value))
+    def set_send_seq(self, value: int, *, connection: Connection | None = None) -> None:
+        self.set(SEND_SEQ_META_KEY, str(value), connection=connection)
 
     def allocate_send_seq(self, *, connection: Connection | None = None) -> int:
         """Atomically increment and persist the durable sequence counter.

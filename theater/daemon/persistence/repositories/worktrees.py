@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import Connection, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.persistence.database import Database
@@ -32,6 +32,7 @@ class WorktreeRepository:
         branch: str,
         path: str,
         base_branch: str | None,
+        connection: Connection | None = None,
     ) -> None:
         stmt = sqlite_insert(named_worktrees).values(
             repo_root=repo_root,
@@ -41,7 +42,8 @@ class WorktreeRepository:
             base_branch=base_branch,
             created_at=now(),
         )
-        self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             stmt.on_conflict_do_update(
                 index_elements=[named_worktrees.c.repo_root, named_worktrees.c.name],
                 set_={
@@ -52,8 +54,11 @@ class WorktreeRepository:
             )
         )
 
-    def delete(self, *, repo_root: str, name: str) -> None:
-        self._db.conn.execute(
+    def delete(
+        self, *, repo_root: str, name: str, connection: Connection | None = None
+    ) -> None:
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             named_worktrees.delete()
             .where(named_worktrees.c.repo_root == repo_root)
             .where(named_worktrees.c.name == name)

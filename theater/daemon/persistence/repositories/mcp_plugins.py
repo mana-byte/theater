@@ -117,8 +117,11 @@ class McpPluginCredentialRepository:
         ).fetchall()
         return tuple(record for row in rows if (record := self._record(row._mapping)) is not None)
 
-    def delete_plugin(self, participant_id: str, plugin_name: str) -> None:
-        row = self._db.conn.execute(
+    def delete_plugin(
+        self, participant_id: str, plugin_name: str, *, connection: Connection | None = None
+    ) -> None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
             select(participant_mcp_plugins.c.credential_path).where(
                 participant_mcp_plugins.c.participant_id == participant_id,
                 participant_mcp_plugins.c.plugin_name == plugin_name,
@@ -126,37 +129,39 @@ class McpPluginCredentialRepository:
         ).first()
         if row is not None:
             remove_secret_file(row[0], owner_id=participant_id)
-        self._db.conn.execute(
+        conn.execute(
             delete(participant_mcp_plugins).where(
                 participant_mcp_plugins.c.participant_id == participant_id,
                 participant_mcp_plugins.c.plugin_name == plugin_name,
             )
         )
 
-    def delete_participant(self, participant_id: str) -> None:
-        rows = self._db.conn.execute(
+    def delete_participant(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> None:
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
             select(participant_mcp_plugins.c.credential_path).where(
                 participant_mcp_plugins.c.participant_id == participant_id
             )
         ).fetchall()
         for (credential_path,) in rows:
             remove_secret_file(credential_path, owner_id=participant_id)
-        self._db.conn.execute(
+        conn.execute(
             delete(participant_mcp_plugins).where(
                 participant_mcp_plugins.c.participant_id == participant_id
             )
         )
 
-    def cleanup(self) -> int:
-        rows = self._db.conn.execute(
-            select(participant_mcp_plugins.c.participant_id).distinct()
-        ).fetchall()
+    def cleanup(self, *, connection: Connection | None = None) -> int:
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(select(participant_mcp_plugins.c.participant_id).distinct()).fetchall()
         deleted = 0
         for (participant_id,) in rows:
-            participant = self._participants.get(participant_id)
+            participant = self._participants.get(participant_id, connection=connection)
             if participant is not None and participant.status is not Status.DEAD:
                 continue
-            self.delete_participant(participant_id)
+            self.delete_participant(participant_id, connection=connection)
             deleted += 1
         return deleted
 

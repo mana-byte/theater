@@ -207,19 +207,24 @@ class ParticipantRepository:
         )
         return result.rowcount
 
-    def touch(self, pid: str) -> None:
-        self._db.conn.execute(
+    def touch(self, pid: str, *, connection: Connection | None = None) -> None:
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             update(participants).where(participants.c.id == pid).values(last_activity=now())
         )
 
-    def clear_resume_floor(self, pid: str) -> None:
+    def clear_resume_floor(self, pid: str, *, connection: Connection | None = None) -> None:
         """Clear the resume floor column without touching any other field."""
-        self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             update(participants).where(participants.c.id == pid).values(resume_floor=None)
         )
 
-    def set_source_checkpoint(self, pid: str, checkpoint: str) -> None:
-        self._db.conn.execute(
+    def set_source_checkpoint(
+        self, pid: str, checkpoint: str, *, connection: Connection | None = None
+    ) -> None:
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             update(participants)
             .where(participants.c.id == pid)
             .where(participants.c.source_checkpoint.is_not(checkpoint))

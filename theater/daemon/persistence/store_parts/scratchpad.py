@@ -18,6 +18,7 @@ class ScratchpadStore(StoreHost):
         value: str,
         updated_by: str,
         key: str | None = None,
+        connection=None,
     ) -> str:
         return self._scratchpad.write(
             tree_root_id=tree_root_id,
@@ -26,6 +27,7 @@ class ScratchpadStore(StoreHost):
             value=value,
             updated_by=updated_by,
             key=key,
+            connection=connection,
         )
 
     def scratchpad_get(
@@ -53,6 +55,7 @@ class ScratchpadStore(StoreHost):
         namespace: str,
         keys: list[str],
         digests: list[str] | None = None,
+        connection=None,
     ) -> list[str]:
         return self._scratchpad.delete(
             tree_root_id=tree_root_id,
@@ -60,10 +63,13 @@ class ScratchpadStore(StoreHost):
             namespace=namespace,
             keys=keys,
             digests=digests,
+            connection=connection,
         )
 
-    def scratchpad_delete_expired(self, *, timestamp: float, limit: int) -> int:
-        return self._scratchpad.delete_expired(timestamp=timestamp, limit=limit)
+    def scratchpad_delete_expired(self, *, timestamp: float, limit: int, connection=None) -> int:
+        return self._scratchpad.delete_expired(
+            timestamp=timestamp, limit=limit, connection=connection
+        )
 
     # ---- named worktrees ------------------------------------------------
 
@@ -78,6 +84,7 @@ class ScratchpadStore(StoreHost):
         branch: str,
         path: str,
         base_branch: str | None,
+        connection=None,
     ) -> None:
         self._worktrees.upsert(
             repo_root=repo_root,
@@ -85,4 +92,5 @@ class ScratchpadStore(StoreHost):
             branch=branch,
             path=path,
             base_branch=base_branch,
+            connection=connection,
         )

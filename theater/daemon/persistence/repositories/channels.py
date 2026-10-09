@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from sqlalchemy import delete, select
+from sqlalchemy import Connection, delete, select
 
 from theater.constants.daemon import CHANNEL_CREDENTIAL_PREFIX
 from theater.daemon.artifacts import remove_secret_file
@@ -50,6 +50,7 @@ class ChannelCredentialRepository:
         channel_id: str,
         token: str,
         token_path: str,
+        connection: Connection | None = None,
     ) -> None:
         self._meta.set(
             self._key(participant_id, kind, channel_id),
@@ -62,6 +63,7 @@ class ChannelCredentialRepository:
                     "token_path": token_path,
                 }
             ),
+            connection=connection,
         )
 
     def get(
@@ -100,19 +102,23 @@ class ChannelCredentialRepository:
             token_path=payload["token_path"],
         )
 
-    def delete_participant(self, participant_id: str) -> None:
+    def delete_participant(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> None:
         prefix = f"{CHANNEL_CREDENTIAL_PREFIX}{participant_id}:"
-        rows = self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
             select(meta.c.key, meta.c.value).where(meta.c.key.like(f"{CHANNEL_CREDENTIAL_PREFIX}%"))
         ).fetchall()
         for key, raw in rows:
             if not key.startswith(prefix):
                 continue
             self._unlink_token(raw, participant_id)
-            self._db.conn.execute(delete(meta).where(meta.c.key == key))
+            conn.execute(delete(meta).where(meta.c.key == key))
 
-    def cleanup(self) -> int:
-        rows = self._db.conn.execute(
+    def cleanup(self, *, connection: Connection | None = None) -> int:
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
             select(meta.c.key).where(meta.c.key.like(f"{CHANNEL_CREDENTIAL_PREFIX}%"))
         ).fetchall()
         participant_ids = {
@@ -120,10 +126,10 @@ class ChannelCredentialRepository:
         }
         deleted = 0
         for participant_id in participant_ids:
-            participant = self._participants.get(participant_id)
+            participant = self._participants.get(participant_id, connection=connection)
             if participant is not None and participant.status is not Status.DEAD:
                 continue
-            self.delete_participant(participant_id)
+            self.delete_participant(participant_id, connection=connection)
             deleted += 1
         return deleted
 

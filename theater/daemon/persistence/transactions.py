@@ -11,6 +11,7 @@ from sqlalchemy import Connection, Engine
 from sqlalchemy.engine import Transaction
 
 AfterCommit = Callable[[], None]
+_UNIT_KEY = "theater.persistence.write_unit"
 
 
 class WriteUnit(Protocol):
@@ -38,7 +39,21 @@ class WriteUnit(Protocol):
 class WriteUnitFactory(Protocol):
     """Factory boundary supplied by Wave 02's daemon persistence implementation."""
 
-    def __call__(self) -> WriteUnit: ...
+    def __call__(self, *, connection: Connection | None = None) -> WriteUnit: ...
+
+
+def after_commit(connection: Connection | None, notification: AfterCommit) -> None:
+    """Run ``notification`` after the active unit commits, or immediately."""
+    unit = None if connection is None else connection.info.get(_UNIT_KEY)
+    if unit is None:
+        notification()
+    else:
+        unit.after_commit(notification)
+
+
+def active_write_unit(connection: Connection | None) -> WriteUnit | None:
+    """Return the write unit currently owning ``connection``, if any."""
+    return None if connection is None else connection.info.get(_UNIT_KEY)
 
 
 class SQLiteWriteUnit:
@@ -50,10 +65,13 @@ class SQLiteWriteUnit:
         *,
         enter: Callable[[], None],
         leave: Callable[[], None],
+        connection: Connection | None = None,
     ) -> None:
         self._engine = engine
         self._enter = enter
         self._leave = leave
+        self._provided_connection = connection
+        self._owns_connection = connection is None
         self._connection: Connection | None = None
         self._transaction: Transaction | None = None
         self._notifications: list[AfterCommit] = []
@@ -70,18 +88,28 @@ class SQLiteWriteUnit:
             raise RuntimeError("after-commit notifications require an active write unit")
         self._notifications.append(notification)
 
+    @staticmethod
+    def _require_idle(connection: Connection) -> None:
+        if connection.in_transaction():
+            raise RuntimeError("write unit connection already has an active transaction")
+
     def __enter__(self) -> Self:
         if self._used:
             raise RuntimeError("write unit cannot be reused")
         self._enter()
         self._used = True
         try:
-            self._connection = self._engine.connect()
-            self._transaction = self._connection.begin()
+            self._connection = self._provided_connection or self._engine.connect()
+            self._require_idle(self._connection)
+            if self._connection.get_execution_options().get("isolation_level") == "AUTOCOMMIT":
+                self._connection.exec_driver_sql("BEGIN")
+            else:
+                self._transaction = self._connection.begin()
+            self._connection.info[_UNIT_KEY] = self
         except BaseException:
-            if self._connection is not None:
+            if self._connection is not None and self._owns_connection:
                 self._connection.close()
-                self._connection = None
+            self._connection = None
             self._leave()
             raise
         return self
@@ -92,17 +120,25 @@ class SQLiteWriteUnit:
         exception: BaseException | None,
         traceback: TracebackType | None,
     ) -> Literal[False]:
-        transaction = cast(Transaction, self._transaction)
+        transaction = self._transaction
         connection = cast(Connection, self._connection)
         committed = False
         try:
             if exception_type is None:
-                transaction.commit()
+                if transaction is None:
+                    connection.commit()
+                else:
+                    transaction.commit()
                 committed = True
+            elif transaction is None:
+                connection.rollback()
             else:
                 transaction.rollback()
         finally:
-            connection.close()
+            if connection.info.get(_UNIT_KEY) is self:
+                connection.info.pop(_UNIT_KEY, None)
+            if self._owns_connection:
+                connection.close()
             self._connection = None
             self._transaction = None
             self._leave()
@@ -117,4 +153,11 @@ class SQLiteWriteUnit:
         return False
 
 
-__all__ = ["AfterCommit", "SQLiteWriteUnit", "WriteUnit", "WriteUnitFactory"]
+__all__ = [
+    "AfterCommit",
+    "SQLiteWriteUnit",
+    "WriteUnit",
+    "WriteUnitFactory",
+    "active_write_unit",
+    "after_commit",
+]

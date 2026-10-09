@@ -20,7 +20,7 @@ from theater.daemon.artifacts import OwnedArtifact
 from theater.daemon.events.publication import next_revision, participant_event
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.persistence.store_parts._host import StoreHost
-from theater.daemon.persistence.transactions import SQLiteWriteUnit
+from theater.daemon.persistence.transactions import SQLiteWriteUnit, WriteUnit, active_write_unit
 from theater.daemon.schema import bus, participants
 from theater.models import Participant, Status, now
 
@@ -30,39 +30,46 @@ class ParticipantStore(StoreHost):
 
     def upsert_participant(self, p: Participant, *, connection=None) -> None:
         if connection is not None:
-            self._participants.upsert(p, connection=connection)
-            self._release_dead_name(p, connection)
+            unit = active_write_unit(connection)
+            if unit is None:
+                self._participants.upsert(p, connection=connection)
+                self._release_dead_name(p, connection)
+            else:
+                self._upsert_participant(p, unit)
             return
         with self.write_unit() as unit:
-            before = self._participants.get(p.id, connection=unit.connection)
-            before_payload = (
-                None
-                if before is None
-                else participant_event(
-                    self,
-                    before,
-                    unit.connection,
-                    revision=0,
-                    recorded_at=0,
-                ).payload
-            )
-            self._participants.upsert(p, connection=unit.connection)
-            # Only a NEW row stores its name here: a stale object must never undo a rename.
-            if before is None and p.name is not None and p.status is not Status.DEAD:
-                self._participant_names.set(p.id, p.name, connection=unit.connection)
-            self._release_dead_name(p, unit.connection)
-            persisted = self._participants.get(p.id, connection=unit.connection)
-            assert persisted is not None
-            persisted.name = p.name
-            event = participant_event(
+            self._upsert_participant(p, unit)
+
+    def _upsert_participant(self, p: Participant, unit: WriteUnit) -> None:
+        before = self._participants.get(p.id, connection=unit.connection)
+        before_payload = (
+            None
+            if before is None
+            else participant_event(
                 self,
-                persisted,
+                before,
                 unit.connection,
-                revision=next_revision(self, unit.connection),
-                recorded_at=now(),
-            )
-            if before_payload != event.payload:
-                self.journal.append_group(unit, [event])
+                revision=0,
+                recorded_at=0,
+            ).payload
+        )
+        self._participants.upsert(p, connection=unit.connection)
+        # Only a NEW row stores its name here: a stale object must never undo a rename.
+        if before is None and p.name is not None and p.status is not Status.DEAD:
+            self._participant_names.set(p.id, p.name, connection=unit.connection)
+        self._release_dead_name(p, unit.connection)
+        persisted = self._participants.get(p.id, connection=unit.connection)
+        assert persisted is not None
+        persisted.name = p.name
+        event = participant_event(
+            self,
+            persisted,
+            unit.connection,
+            revision=next_revision(self, unit.connection),
+            recorded_at=now(),
+        )
+        if before_payload != event.payload:
+            self.journal.append_group(unit, [event])
 
     def _release_dead_name(self, p: Participant, connection) -> None:
         if p.status is Status.DEAD:
@@ -107,9 +114,9 @@ class ParticipantStore(StoreHost):
         )
 
     def add_participant_artifacts(
-        self, participant_id: str, artifacts: Sequence[OwnedArtifact]
+        self, participant_id: str, artifacts: Sequence[OwnedArtifact], *, connection=None
     ) -> None:
-        self._artifacts.add_many(participant_id, artifacts)
+        self._artifacts.add_many(participant_id, artifacts, connection=connection)
 
     def participant_artifacts(self, participant_id: str) -> tuple[OwnedArtifact, ...]:
         return self._artifacts.list_for(participant_id)
@@ -130,23 +137,25 @@ class ParticipantStore(StoreHost):
     def children_of(self, pid: str) -> list[Participant]:
         return self._participants.children_of(pid)
 
-    def set_status(self, pid: str, status: Status) -> None:
-        participant = self._participants.get(pid)
+    def set_status(self, pid: str, status: Status, *, connection=None) -> None:
+        participant = self._participants.get(pid, connection=connection)
         if participant is None:
             return
         participant.status = status
         participant.last_activity = now()
-        self.upsert_participant(participant)
+        self.upsert_participant(participant, connection=connection)
 
     def stamp_live_tmux_server_identity(
         self,
         identity: str,
         *,
         participant_ids: Sequence[str] | None = None,
+        connection=None,
     ) -> int:
         return self._participants.stamp_live_tmux_server_identity(
             identity,
             participant_ids=participant_ids,
+            connection=connection,
         )
 
     def record_tmux_server_restart(
@@ -243,15 +252,15 @@ class ParticipantStore(StoreHost):
         with self.write_unit() as owned_unit:
             return record(owned_unit)
 
-    def touch(self, pid: str) -> None:
-        self._participants.touch(pid)
+    def touch(self, pid: str, *, connection=None) -> None:
+        self._participants.touch(pid, connection=connection)
 
-    def clear_resume_floor(self, pid: str) -> None:
+    def clear_resume_floor(self, pid: str, *, connection=None) -> None:
         """Clear the resume floor column without touching any other field."""
-        self._participants.clear_resume_floor(pid)
+        self._participants.clear_resume_floor(pid, connection=connection)
 
-    def set_source_checkpoint(self, pid: str, checkpoint: str) -> None:
-        self._participants.set_source_checkpoint(pid, checkpoint)
+    def set_source_checkpoint(self, pid: str, checkpoint: str, *, connection=None) -> None:
+        self._participants.set_source_checkpoint(pid, checkpoint, connection=connection)
 
     def reparent_participant(self, pid: str, *, new_parent_id: str) -> None:
         """Set the parent_id of a participant."""

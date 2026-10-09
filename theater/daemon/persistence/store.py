@@ -6,6 +6,8 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
+from sqlalchemy import Connection
+
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.artifacts import ArtifactRepository
 from theater.daemon.persistence.repositories.bus import BusRepository
@@ -96,9 +98,9 @@ class Store(
         self._bus_listeners.clear()
         self._db.close()
 
-    def write_unit(self) -> SQLiteWriteUnit:
+    def write_unit(self, *, connection: Connection | None = None) -> SQLiteWriteUnit:
         """Create one short transaction shared by cooperating repositories."""
-        return self._db.write_unit()
+        return self._db.write_unit(connection=connection)
 
     def set_participant_name_resolver(self, resolver: Callable[[str], str | None]) -> None:
         """Install the daemon's in-memory public-name lookup."""

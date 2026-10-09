@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Any
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.observation.reducer import QuietClock, Reducer
+from theater.daemon.observation.rollback import rollback_observation_state
 from theater.daemon.observation.turns import Turn, TurnAccumulator
+from theater.daemon.persistence.transactions import active_write_unit
 from theater.harness import Event, HarnessObserver
 from theater.harness.source import Batch, Source
 from theater.models import Status
@@ -97,21 +99,23 @@ class BatchApplication:
         )
         answer_turn_fn = partial(self._answer_turn, registration=registration)
         try:
-            result = self._reducer.apply(
-                pid,
-                batch,
-                clock,
-                turns,
-                answer_turn_fn=answer_turn_fn,
-                settle_fn=self._settle,
-                turn_result_fn=self._turn_result,
-                path_target_fn=path_target_fn,
-            )
+            with rollback_observation_state(clock, turns), self.store.write_unit() as unit:
+                result = self._reducer.apply(
+                    pid,
+                    batch,
+                    clock,
+                    turns,
+                    answer_turn_fn=answer_turn_fn,
+                    settle_fn=self._settle,
+                    turn_result_fn=self._turn_result,
+                    path_target_fn=path_target_fn,
+                    connection=unit.connection,
+                )
+                if not batch.terminal_evidence:
+                    self._persist_pending_source_checkpoint(pid, source, connection=unit.connection)
         except Exception:
             source.rollback_source_checkpoint()
             raise
-        if not batch.terminal_evidence:
-            self._persist_pending_source_checkpoint(pid, source)
         return result
 
     def _apply_and_collect(
@@ -128,7 +132,9 @@ class BatchApplication:
         routed_batches.append(batch)
         return self._apply_source_batch(pid, source, batch, clock, turns, registration=registration)
 
-    def _persist_pending_source_checkpoint(self, pid: str, source: Source) -> bool:
+    def _persist_pending_source_checkpoint(
+        self, pid: str, source: Source, *, connection=None
+    ) -> bool:
         pending_evidence = getattr(source, "pending_terminal_evidence", None)
         if callable(pending_evidence) and pending_evidence():
             # Exact terminal evidence owns this checkpoint's acknowledgement:
@@ -140,11 +146,17 @@ class BatchApplication:
         if checkpoint is None:
             return True
         try:
-            self.store.set_source_checkpoint(pid, checkpoint)
+            self.store.set_source_checkpoint(pid, checkpoint, connection=connection)
         except Exception:
             logger.exception("persisting source checkpoint for %s failed", pid)
+            if active_write_unit(connection) is not None:
+                raise
             return False
-        source.acknowledge_source_checkpoint()
+        unit = active_write_unit(connection)
+        if unit is None:
+            source.acknowledge_source_checkpoint()
+        else:
+            unit.after_commit(source.acknowledge_source_checkpoint)
         return True
 
     def _unblock_on_semantic_progress(self, pid: str, batch: Batch) -> None:
@@ -207,5 +219,5 @@ class BatchApplication:
             turn_result_fn=self._turn_result,
         )
 
-    def _settle(self, pid: str, desired: Status) -> None:
-        self._reducer.settle(pid, desired)
+    def _settle(self, pid: str, desired: Status, *, connection=None) -> None:
+        self._reducer.settle(pid, desired, connection=connection)
