@@ -192,6 +192,16 @@ class Reducer:
             connection=connection,
         )
 
+    @staticmethod
+    def is_write_free(batch: Batch) -> bool:
+        """True when applying the batch can write nothing (terminal evidence needs the unit)."""
+        return not (
+            batch.progressed
+            or batch.events
+            or batch.attached is not None
+            or batch.terminal_evidence
+        )
+
     def apply(
         self,
         pid: str,
@@ -210,6 +220,11 @@ class Reducer:
         ``path_target_fn`` maps an event to its exact owning job (native live wiring); legacy
         wiring passes nothing and keeps the oldest-running heuristic.
         """
+        if connection is None and self.is_write_free(batch):
+            # Empty quiet poll: settle/floor/usage all no-op, so only telemetry remains.
+            if self._telemetry_fn is not None:
+                self._safe_telemetry(pid, batch, ())
+            return False
         if connection is None:
             with (
                 rollback_observation_state(clock, turns),
