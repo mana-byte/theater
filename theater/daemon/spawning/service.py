@@ -490,6 +490,10 @@ class Spawner:
         command = resolve_launch_command(plan)
         if not command:
             raise BadRequest("terminal launch plan has no executable")
+        executable = shutil.which(command[0])
+        if executable is None:
+            raise BadRequest(f"{command[0]!r} is not on PATH")
+        command[0] = executable
         params = {
             "operation_id": provider.operation_id,
             "provider_generation": provider.provider_generation,

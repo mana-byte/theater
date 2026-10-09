@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 import threading
 from dataclasses import replace
@@ -111,7 +112,7 @@ def _make_launch_preparation(monkeypatch, daemon) -> None:
     ):
         return Reservation(
             participant=participant,
-            plan=LaunchPlan(argv=["/bin/agent", "--fixture"]),
+            plan=LaunchPlan(argv=["/bin/sh", "--fixture"]),
             child_cwd=child_cwd,
             session="",
             name="fixture",
@@ -128,6 +129,71 @@ async def _settle(daemon) -> None:
     tasks = daemon.operation_service.owned_tasks
     if tasks:
         await asyncio.gather(*tasks)
+
+
+async def test_provider_launch_pins_daemon_resolved_executable(
+    daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_provider(daemon)
+    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
+    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    fixture_which = shutil.which
+    resolved = "/opt/homebrew/bin/codex"
+
+    def which(command, *args, **kwargs):
+        return resolved if command == "codex" else fixture_which(command, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", which)
+
+    async def prepare(
+        req,
+        participant,
+        *,
+        child_cwd,
+        provider,
+        workspace_usage_id,
+        **_kwargs,
+    ):
+        return Reservation(
+            participant=participant,
+            plan=LaunchPlan(argv=["codex", "--fixture"]),
+            child_cwd=child_cwd,
+            session="",
+            name="fixture",
+            req=req,
+            provider=provider,
+            workspace_usage_id=workspace_usage_id,
+        )
+
+    monkeypatch.setattr(daemon.spawner, "prepare_provider_launch", prepare)
+    dispatched: list[dict[str, object]] = []
+
+    async def dispatch(provider_id, generation, _method, params):
+        dispatched.append(dict(params))
+        return OperationOutcome.succeeded(
+            phase="provider_acknowledged",
+            result={
+                "operation_id": params["operation_id"],
+                "provider_generation": generation,
+                "outcome": "accepted",
+                "terminal": _identity(provider_id, str(params["participant_id"])),
+            },
+        )
+
+    monkeypatch.setattr(daemon.terminal_service, "dispatch_operation", dispatch)
+    accepted = await ParticipantLaunchService(daemon).spawn(
+        client_id="operator-a",
+        idempotency_key="resolved-executable",
+        params={"harness": "codex", "approval": "manual", "cwd": str(tmp_path)},
+    )
+    await _settle(daemon)
+
+    operation = daemon.operation_service.get(str(accepted["operation_id"]))
+    launch = dispatched[0]["launch"]
+    assert operation.state == "succeeded"
+    assert isinstance(launch, dict)
+    assert launch["executable"] == resolved
+    assert launch["argv"] == [resolved, "--fixture"]
 
 
 def test_public_spawn_request_defaults_an_omitted_prompt_to_empty() -> None:
