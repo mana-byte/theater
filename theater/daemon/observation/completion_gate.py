@@ -6,6 +6,8 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import Connection
+
 from theater.constants.observation import RAW_RESULT_UNSET
 from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observation.live import LiveObservationHub, LiveRegistration
@@ -78,6 +80,7 @@ class CompletionGate:
         raw_result: str | object | None = RAW_RESULT_UNSET,
         registration: LiveRegistration | None = None,
         terminal: TurnTerminal | None = None,
+        connection: Connection | None = None,
     ) -> None:
         if self._live_completion_owned(pid, registration):
             # Live-wired turns complete through exact terminal evidence via
@@ -89,7 +92,12 @@ class CompletionGate:
             )
             return
         self._completion.answer_turn(
-            pid, result_text, heard, raw_result=raw_result, terminal=terminal
+            pid,
+            result_text,
+            heard,
+            raw_result=raw_result,
+            terminal=terminal,
+            connection=connection,
         )
 
     def _release_jobs(

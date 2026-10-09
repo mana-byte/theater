@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from typing import Any
+
+from sqlalchemy import Connection
 
 from theater.constants.observability import AGENT_RESULT_INTERRUPTED
 from theater.constants.observation import (
@@ -17,6 +20,7 @@ from theater.constants.observation import (
     UNMATCHED_LIMIT,
 )
 from theater.daemon.observation.turns import answers_prompt
+from theater.daemon.persistence.transactions import active_write_unit, after_commit
 from theater.harness import TurnTerminal
 from theater.models import JobState
 
@@ -40,6 +44,8 @@ class CompletionTracker:
         self.registry = registry
         self._jobs_fn = jobs_fn
         self._unmatched: dict[str, int] = {}
+        #: Misses counted inside one open write unit, committed to _unmatched after it lands.
+        self._unit_misses: tuple[object, dict[str, int]] | None = None
 
     @property
     def jobs(self):
@@ -53,6 +59,7 @@ class CompletionTracker:
         *,
         raw_result: str | object | None = RAW_RESULT_UNSET,
         terminal: TurnTerminal | None = None,
+        connection: Connection | None = None,
     ) -> None:
         """One turn ended: hand its text to the oldest delivered job, and only that one.
 
@@ -62,15 +69,12 @@ class CompletionTracker:
         """
         if self.jobs is None:
             return
-        delivered = self.store.active_running_jobs_for_target(pid)
+        delivered = self.store.active_running_jobs_for_target(pid, connection=connection)
         job = delivered[0] if delivered else None
         if job is None:
             return
         if not answers_prompt(heard, job.prompt):
-            missed = self._unmatched.get(job.handle, 0) + 1
-            self._unmatched[job.handle] = missed
-            while len(self._unmatched) > UNMATCHED_CAP:
-                self._unmatched.pop(next(iter(self._unmatched)))
+            missed = self._count_miss(job.handle, connection)
             if missed < UNMATCHED_LIMIT:
                 logger.info(
                     "turn at %s replies to something else; %s keeps waiting",
@@ -90,13 +94,39 @@ class CompletionTracker:
                 error_code=UNDELIVERED_CODE,
                 state=JobState.CRASHED,
                 raw_result=None,
+                connection=connection,
             )
             return
-        self._unmatched.pop(job.handle, None)
         state, error_code = _FINISHED_FOR_TERMINAL[terminal]
         self._finish(
-            job.handle, result_text, error_code=error_code, state=state, raw_result=raw_result
+            job.handle,
+            result_text,
+            error_code=error_code,
+            state=state,
+            raw_result=raw_result,
+            connection=connection,
         )
+
+    def _count_miss(self, handle: str, connection: Connection | None) -> int:
+        unit = active_write_unit(connection)
+        if unit is None:
+            self._remember_miss(handle, self._unmatched.get(handle, 0) + 1)
+            return self._unmatched[handle]
+        if self._unit_misses is None or self._unit_misses[0] is not unit:
+            self._unit_misses = (unit, {})
+        pending = self._unit_misses[1]
+        missed = pending.get(handle, self._unmatched.get(handle, 0)) + 1
+        pending[handle] = missed
+        unit.after_commit(lambda: self._remember_miss(handle, missed))
+        return missed
+
+    def _forget_misses(self, handle: str) -> None:
+        self._unmatched.pop(handle, None)
+
+    def _remember_miss(self, handle: str, missed: int) -> None:
+        self._unmatched[handle] = missed
+        while len(self._unmatched) > UNMATCHED_CAP:
+            self._unmatched.pop(next(iter(self._unmatched)))
 
     def release_jobs(
         self,
@@ -179,22 +209,14 @@ class CompletionTracker:
         error_code: str | None = None,
         state: JobState = JobState.DONE,
         raw_result: str | object | None = RAW_RESULT_UNSET,
+        connection: Connection | None = None,
     ) -> None:
         """Resolve one job. The result is already clipped by the parser."""
         assert self.jobs is not None
-        self._unmatched.pop(handle, None)
-        if raw_result is RAW_RESULT_UNSET:
-            self.jobs.finish(
-                handle,
-                state=state,
-                result=result_text or "",
-                error_code=error_code,
-            )
-        else:
-            self.jobs.finish(
-                handle,
-                state=state,
-                result=result_text or "",
-                error_code=error_code,
-                raw_result=raw_result,
-            )
+        after_commit(connection, lambda: self._forget_misses(handle))
+        extra: dict[str, Any] = {} if raw_result is RAW_RESULT_UNSET else {"raw_result": raw_result}
+        if connection is not None:
+            extra["connection"] = connection
+        self.jobs.finish(
+            handle, state=state, result=result_text or "", error_code=error_code, **extra
+        )

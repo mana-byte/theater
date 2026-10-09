@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sqlalchemy import insert, update
+from sqlalchemy import Connection, insert, update
 
 from theater.constants.daemon import (
     RPC_DEFAULT_MAX_WAIT_SECONDS,
@@ -22,6 +22,7 @@ from theater.constants.daemon import (
 )
 from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
 from theater.daemon.events.publication import job_event, next_revision
+from theater.daemon.persistence.transactions import active_write_unit, after_commit
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
 from theater.daemon.store import Store
@@ -233,7 +234,17 @@ class JobManager:
         result: str | None = None,
         error_code: str | None = None,
         raw_result: str | object | None = _RAW_UNSET,
+        connection: Connection | None = None,
     ) -> Job | None:
+        if connection is not None:
+            return self._finish_in_unit(
+                handle,
+                state=state,
+                result=result,
+                error_code=error_code,
+                raw_result=raw_result,
+                connection=connection,
+            )
         job = self.store.get_job(handle)
         if job is None:
             return None
@@ -298,6 +309,56 @@ class JobManager:
         logger.info("job %s finished: %s", handle, state)
         return self.store.get_job(handle)
 
+    def _finish_in_unit(
+        self,
+        handle: str,
+        *,
+        state: JobState,
+        result: str | None,
+        error_code: str | None,
+        raw_result: str | object | None,
+        connection: Connection,
+    ) -> Job | None:
+        """Finish inside the caller's write unit; memory wakeups wait for the commit."""
+        job = self.store.get_job(handle, connection=connection)
+        if job is None:
+            return None
+        if job.state != JobState.RUNNING:
+            after_commit(connection, lambda: self._wake(handle))
+            return job
+        acc = self._accumulators.get(handle)
+        structured_result, structured_status = self._structured_values(
+            job, state=state, result=result, error_code=error_code, raw_result=raw_result
+        )
+        self._write_finish(
+            connection,
+            handle,
+            state=str(state),
+            result=result,
+            error_code=error_code,
+            finished_at=now(),
+            response_format=job.response_format,
+            structured_result=structured_result,
+            structured_status=structured_status,
+            touches=acc.rows(handle) if acc else [],
+        )
+        self.store.bus_append(
+            "job.finished",
+            from_id=job.target_id,
+            to_id=job.caller_id,
+            payload={"handle": handle, "state": str(state), "error_code": error_code},
+            connection=connection,
+        )
+        after_commit(connection, lambda: self._wake(handle))
+        after_commit(connection, lambda: logger.info("job %s finished: %s", handle, state))
+        return self.store.get_job(handle, connection=connection)
+
+    def _wake(self, handle: str) -> None:
+        self._accumulators.pop(handle, None)
+        event = self._events.pop(handle, None)
+        if event:
+            event.set()
+
     def notify_committed_finish(self, job: Job) -> None:
         """Wake local consumers after another domain writer commits job completion."""
         self._accumulators.pop(job.handle, None)
@@ -361,33 +422,63 @@ class JobManager:
         The write unit keeps the result, touch rows, and public event atomic.
         """
         with self.store.write_unit() as unit:
-            unit.connection.execute(
-                update(jobs_table)
-                .where(jobs_table.c.handle == handle)
-                .values(
-                    state=state,
-                    result=result,
-                    error_code=error_code,
-                    finished_at=finished_at,
-                    response_format=response_format,
-                    structured_result=structured_result,
-                    structured_status=structured_status,
+            self._write_finish(
+                unit.connection,
+                handle,
+                state=state,
+                result=result,
+                error_code=error_code,
+                finished_at=finished_at,
+                response_format=response_format,
+                structured_result=structured_result,
+                structured_status=structured_status,
+                touches=touches,
+            )
+
+    def _write_finish(
+        self,
+        connection: Connection,
+        handle: str,
+        *,
+        state: str,
+        result: str | None,
+        error_code: str | None,
+        finished_at: float | None,
+        response_format: str | None,
+        structured_result: str | None,
+        structured_status: str | None,
+        touches: list[dict],
+    ) -> None:
+        """Job row, touch rows and public event, all on the caller's unit connection."""
+        unit = active_write_unit(connection)
+        assert unit is not None
+        connection.execute(
+            update(jobs_table)
+            .where(jobs_table.c.handle == handle)
+            .values(
+                state=state,
+                result=result,
+                error_code=error_code,
+                finished_at=finished_at,
+                response_format=response_format,
+                structured_result=structured_result,
+                structured_status=structured_status,
+            )
+        )
+        if touches:
+            connection.execute(insert(touch_table), touches)
+        current = self.store.get_job(handle, connection=connection)
+        assert current is not None
+        self.store.journal.append_group(
+            unit,
+            [
+                job_event(
+                    current,
+                    revision=next_revision(self.store, connection),
+                    recorded_at=current.finished_at or now(),
                 )
-            )
-            if touches:
-                unit.connection.execute(insert(touch_table), touches)
-            current = self.store.get_job(handle, connection=unit.connection)
-            assert current is not None
-            self.store.journal.append_group(
-                unit,
-                [
-                    job_event(
-                        current,
-                        revision=next_revision(self.store, unit.connection),
-                        recorded_at=current.finished_at or now(),
-                    )
-                ],
-            )
+            ],
+        )
 
     @property
     def wait_graph(self) -> dict[str, set[str]]:

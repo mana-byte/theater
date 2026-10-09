@@ -12,6 +12,7 @@ from theater.daemon.observation.turns import TurnAccumulator
 from theater.daemon.persistence.store import Store
 from theater.daemon.registry import Registry
 from theater.harness import Event, EventKind
+from theater.harness.contracts.runtime import ControlDeliveryPhase, ControlKind, DeliveryResult
 from theater.harness.source import Batch
 from theater.models import Status
 
@@ -240,5 +241,81 @@ def test_terminal_completion_failure_rolls_back_the_source_checkpoint(tmp_path) 
         assert source.rolled_back
         assert not source.acknowledged
         assert store.get_job(job.handle).state == "running"
+    finally:
+        store.close()
+
+
+def _two_delivered_jobs(registry, jobs):
+    from tests.test_completion_queued_followups import _op
+
+    participant = registry.register(harness="codex", pane=None, cwd="/tmp")
+    for handle in ("job-a", "job-b"):
+        jobs.create(
+            handle=handle,
+            caller_id="cli",
+            target_id=participant.id,
+            kind="send",
+            prompt=f"{handle} prompt",
+        )
+    with registry.store.write_unit() as unit:
+        for handle in ("job-a", "job-b"):
+            registry.store.reserve_control_operation(
+                _op(
+                    f"op-{handle}",
+                    participant.id,
+                    kind=ControlKind.SEND,
+                    phase=ControlDeliveryPhase.SETTLED,
+                    job_handle=handle,
+                    result=DeliveryResult.ACCEPTED,
+                ),
+                connection=unit.connection,
+            )
+    return participant
+
+
+def _terminal_batch(prompt: str, answer: str, turn_id: str) -> Batch:
+    return Batch(
+        events=[
+            Event(kind=EventKind.USER, text=prompt),
+            Event(kind=EventKind.ASSISTANT, text=answer, turn_end=True, turn_id=turn_id),
+        ]
+    )
+
+
+def test_terminal_batch_commits_once_and_replay_never_completes_the_next_job(
+    tmp_path, monkeypatch
+) -> None:
+    store = Store(tmp_path / "replay.db")
+    registry = Registry(store)
+    jobs = JobManager(store)
+    participant = _two_delivered_jobs(registry, jobs)
+    store.set_status(participant.id, Status.WORKING)
+    observer = Observer(registry, harnesses={}, jobs=jobs)
+    clock, turns = QuietClock(), TurnAccumulator()
+    batch = _terminal_batch("job-a prompt", "answer a", "turn-a")
+    commits: list[None] = []
+    sqlalchemy_event.listen(store.engine, "commit", lambda _connection: commits.append(None))
+    set_status = store.set_status
+
+    def fail(*_args, **_kwargs) -> None:
+        raise RuntimeError("cannot persist status")
+
+    try:
+        monkeypatch.setattr(store, "set_status", fail)
+        with pytest.raises(RuntimeError, match="cannot persist status"):
+            observer._apply_source_batch(
+                participant.id, _CheckpointSource("c"), batch, clock, turns
+            )
+        assert store.get_job("job-a").state == "running"
+        assert not turns.already_handled("turn-a")
+
+        monkeypatch.setattr(store, "set_status", set_status)
+        commits.clear()
+        observer._apply_source_batch(participant.id, _CheckpointSource("c"), batch, clock, turns)
+
+        assert len(commits) == 1
+        assert (store.get_job("job-a").state, store.get_job("job-a").result) == ("done", "answer a")
+        assert store.get_job("job-b").state == "running"
+        assert store.get_job("job-b").result is None
     finally:
         store.close()
