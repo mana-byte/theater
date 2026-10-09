@@ -6,8 +6,8 @@ import sys
 from types import MappingProxyType
 
 from theater.constants import SECONDS_PER_DAY, USAGE_AVERAGE_WINDOW_DAYS
-from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.events.bus import BUS_TAIL_MAX_WAIT_SECONDS
+from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.rpc.params import _finite_number_param, _integer_param
 from theater.daemon.rpc.usage import _calendar_period_since, _stats, _usage_by_harness
 from theater.frontend.capabilities import METHOD_CATALOG

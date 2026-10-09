@@ -50,8 +50,7 @@ class BusTailWaiter:
             remaining = deadline - loop.time()
             if result.rows or self._closed or remaining <= 0:
                 return result
-            if result.next_after_id > after_id:
-                after_id = result.next_after_id  # scanned only non-matching rows
+            after_id = max(after_id, result.next_after_id)  # scanned only non-matching rows
             if self._revision == observed:
                 await self._wait(observed, remaining)
 
