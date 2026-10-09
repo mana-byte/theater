@@ -6,8 +6,10 @@ import asyncio
 import time
 
 import pytest
+from sqlalchemy import insert
 
-from theater.daemon.events.bus import BusTailWaiter
+from theater.daemon.events.bus import _BUS_SCAN_WINDOW, BusTailWaiter
+from theater.daemon.schema import bus
 
 
 @pytest.fixture
@@ -63,6 +65,16 @@ async def test_kinds_filter_before_truncation_not_after(daemon, waiter):
     assert [row["id"] for row in tail.rows] == [wanted]
     assert tail.next_after_id == wanted + 500  # every scanned row was consumed
     assert (await waiter.tail(tail.next_after_id, 10, ["t.want"], 0.0)).rows == []
+
+
+async def test_expired_deadline_stops_between_windows_on_sparse_history(daemon, waiter):
+    after = daemon.store.bus_append("t.seed")
+    far = 10_000_000
+    daemon.store._db.conn.execute(insert(bus).values(id=far, ts=0.0, kind="t.want"))
+    tail = await waiter.tail(after, 10, ["t.want"], 0.0)
+    assert tail.rows == [] and tail.next_after_id == after + _BUS_SCAN_WINDOW
+    resumed = await waiter.tail(tail.next_after_id, 10, ["t.want"], 30.0)
+    assert [row["id"] for row in resumed.rows] == [far]
 
 
 async def test_close_wakes_waiters(daemon, waiter):
