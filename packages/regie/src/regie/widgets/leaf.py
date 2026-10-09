@@ -271,12 +271,20 @@ class AgentLeaf(RenameableRow):
         self._sync_cost_timer(self._cost.count_from_zero())
 
     def _sync_cost_timer(self, counting: bool) -> None:
-        if not counting:
+        if counting and not self.display:
+            self._settle_hidden_cost()
+        elif not counting:
             self._stop_cost_count()
         elif self._cost_sub is None:
             self._cost_sub = animation_clock(self.app).subscribe(
                 REGIE_FOOTER_ANIM_INTERVAL, self._tick_cost
             )
+
+    def _settle_hidden_cost(self) -> None:
+        """Hidden leaves finish the count silently: same end value, no clock wake-ups."""
+        self._stop_cost_count()
+        self._cost.snap()
+        self.update(self._render_label(), layout=False)
 
     def _tick_cost(self) -> None:
         if not self._cost.tick():
@@ -446,6 +454,10 @@ class AgentLeaf(RenameableRow):
         self._stop_timer()
         self._stop_marquee()
         self._stop_cost_count()
+
+    def on_hide(self, _event: events.Hide) -> None:
+        if self._cost_sub is not None and not self.display:
+            self._settle_hidden_cost()
 
     def on_enter(self, _event: events.Enter) -> None:
         self._hovered = True

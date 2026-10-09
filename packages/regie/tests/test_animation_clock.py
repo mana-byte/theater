@@ -137,3 +137,51 @@ async def test_working_leaves_share_one_timer_and_unmount_drains_it(tmp_path: Pa
             await leaf.remove()
         await wait_until(pilot, lambda: clock.subscriber_count == 0)
         assert not clock.is_running
+
+
+async def _counting_leaf(app, pilot, tree):
+    await wait_until(pilot, lambda: len(tree.participant_ids) == 1)
+    leaf = next(iter(app.query(AgentLeaf)))
+    leaf.set_cursor(True)  # only the focused agent shows (and counts) its cost
+    await wait_until(pilot, lambda: leaf._mounted)
+    return leaf
+
+
+async def test_visible_cost_count_up_completes_and_releases_the_clock(tmp_path: Path) -> None:
+    projection = replace(
+        _projection(), participants=MappingProxyType({"a": _participant("a", name="a")})
+    )
+    app, _client, _presentation = _app(
+        tree_layout_path=tmp_path / "tree-layout.json", projection=projection
+    )
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        leaf = await _counting_leaf(app, pilot, tree)
+        clock = animation_clock(app)
+        leaf.set_usage_cost(5_000_000)
+        assert leaf._cost_sub is not None and clock.is_running
+        await wait_until(pilot, lambda: not clock.is_running, timeout=6)
+        assert leaf._cost.display == 5_000_000
+
+
+async def test_hidden_cost_count_up_settles_without_waking_the_clock(tmp_path: Path) -> None:
+    projection = replace(
+        _projection(), participants=MappingProxyType({"a": _participant("a", name="a")})
+    )
+    app, _client, _presentation = _app(
+        tree_layout_path=tmp_path / "tree-layout.json", projection=projection
+    )
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        leaf = await _counting_leaf(app, pilot, tree)
+        clock = animation_clock(app)
+        leaf.set_usage_cost(5_000_000)
+        assert clock.is_running
+        leaf.display = False
+        await wait_until(pilot, lambda: not clock.is_running, timeout=1)
+        assert leaf._cost_sub is None and leaf._cost.display == 5_000_000
+
+        # A count started while already hidden never subscribes either.
+        leaf.set_usage_cost(9_000_000)
+        assert leaf._cost_sub is None and not clock.is_running
+        assert leaf._cost.display == 9_000_000
