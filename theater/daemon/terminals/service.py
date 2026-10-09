@@ -550,6 +550,11 @@ class TerminalProviderService:
             raise StaleGeneration(provider_id, generation)
         timestamp = self._clock()
         with self._store.write_unit() as unit:
+            record = self._store.providers.get(provider_id, connection=unit.connection)
+            assert record is not None
+            # A heartbeat changes nothing durable except the report revision; only
+            # first contact for the generation is material, as in the report path.
+            first_contact = record.last_report_revision is None
             if not self._store.providers.accept_report_revision(
                 provider_id,
                 generation=generation,
@@ -563,20 +568,23 @@ class TerminalProviderService:
                     report_revision,
                     connection=unit.connection,
                 )
-            record = self._store.providers.get(provider_id, connection=unit.connection)
-            assert record is not None
-            self._store.journal.append_group(
-                unit,
-                [
-                    provider_event(
-                        record,
-                        health,
-                        timestamp,
-                        revision=self._store.journal.current_sequence(connection=unit.connection)
-                        + 1,
-                    )
-                ],
-            )
+            if first_contact:
+                record = self._store.providers.get(provider_id, connection=unit.connection)
+                assert record is not None
+                self._store.journal.append_group(
+                    unit,
+                    [
+                        provider_event(
+                            record,
+                            health,
+                            timestamp,
+                            revision=self._store.journal.current_sequence(
+                                connection=unit.connection
+                            )
+                            + 1,
+                        )
+                    ],
+                )
             unit.after_commit(lambda: self.connections.renew(provider_id, generation))
 
     def _raise_stale_report(

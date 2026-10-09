@@ -234,6 +234,30 @@ def test_callback_generation_report_and_restart_health_are_fenced(tmp_path: Path
         store.close()
 
 
+def test_stable_heartbeats_journal_no_provider_events(tmp_path: Path) -> None:
+    store = _Store(tmp_path / "stable-heartbeat.db")
+    clock = _Clock(10.0)
+    service = _service(store, clock)
+    try:
+        _register(service)
+        generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+        service.report("provider-a", generation, 1, {"terminals": [], "complete": True})
+        assert service.connections.health("provider-a") == "online"
+        before = store.journal.current_sequence()
+
+        # One hour at the negotiated 10-second heartbeat interval; the fake clock
+        # advances instead of sleeping.
+        for revision in range(2, 2 + 3600 // 10):
+            clock.value += 10
+            service.heartbeat("provider-a", generation, revision)
+
+        assert store.journal.current_sequence() == before
+        assert store.providers.get("provider-a").last_report_revision == 361
+        assert service.connections.health("provider-a") == "online"
+    finally:
+        store.close()
+
+
 def test_report_restores_only_an_exact_terminal_identity(tmp_path: Path) -> None:
     store = _Store(tmp_path / "bindings.db")
     clock = _Clock(10.0)
