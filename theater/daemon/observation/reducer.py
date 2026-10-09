@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from functools import partial
 
 from sqlalchemy import Connection
 
@@ -54,6 +54,8 @@ class _ApplyContext:
     callbacks: _ApplyCallbacks
     state: _ApplyState
     connection: Connection | None
+    #: A terminal batch finishes its job in the same unit, so touches must be seen first.
+    paths_now: bool = False
 
 
 @dataclass
@@ -202,19 +204,18 @@ class Reducer:
         turn_result_fn,
         path_target_fn=None,
         connection=None,
-        transactional: bool = True,
     ) -> bool:
         """Put a batch on the bus and move the participant's status; return whether anything did.
 
         ``path_target_fn`` maps an event to its exact owning job (native live wiring); legacy
         wiring passes nothing and keeps the oldest-running heuristic.
         """
-        if (
-            connection is None
-            and transactional
-            and not any(event.turn_end for event in batch.events)
-        ):
-            with rollback_observation_state(clock, turns), self.store.write_unit() as unit:
+        if connection is None:
+            with (
+                rollback_observation_state(clock, turns),
+                self.staged_hashes(pid, batch),
+                self.store.write_unit() as unit,
+            ):
                 return self.apply(
                     pid,
                     batch,
@@ -228,20 +229,16 @@ class Reducer:
                 )
         state = _ApplyState(usage_events=[] if self._telemetry_fn is not None else None)
         callbacks = _ApplyCallbacks(answer_turn_fn, turn_result_fn, path_target_fn)
-        context = _ApplyContext(pid, clock, turns, callbacks, state, connection)
+        paths_now = any(event.turn_end for event in batch.events)
+        context = _ApplyContext(pid, clock, turns, callbacks, state, connection, paths_now)
         for event in batch.events:
             self._apply_event(event, context)
-        if connection is None:
-            self._settle_batch(pid, batch, state.last, settle_fn)
-        else:
-            self._settle_batch(
-                pid,
-                batch,
-                state.last,
-                lambda participant_id, status: settle_fn(
-                    participant_id, status, connection=connection
-                ),
-            )
+        self._settle_batch(
+            pid,
+            batch,
+            state.last,
+            lambda participant_id, status: settle_fn(participant_id, status, connection=connection),
+        )
         self._clear_resolved_resume_floor(pid, batch, connection=connection)
         result = batch.progressed or bool(batch.events) or batch.attached is not None
         if self._telemetry_fn is not None:
@@ -295,22 +292,21 @@ class Reducer:
         if event.kind is EventKind.USER and event.text:
             context.turns.hear(event.text)
         if event.turn_end:
-            if active_write_unit(context.connection) is not None:
-                raise RuntimeError("terminal observation events cannot run inside a write unit")
             turn = context.turns.take()
             if not context.turns.already_handled(event.turn_id):
                 result_text, raw_result = context.callbacks.turn_result(event, turn)
-                answer = partial(
-                    context.callbacks.answer_turn,
+                context.callbacks.answer_turn(
                     pid,
                     result_text,
                     turn.heard,
                     raw_result=raw_result,
                     terminal=event.turn_terminal,
+                    connection=context.connection,
                 )
-                answer()
                 context.turns.mark_handled(event.turn_id)
             context.clock.last_text = ""
+            # The finished job must not own the next turn's paths.
+            state.job_handle = None
 
     def _observe_event_paths(self, event: Event, context: _ApplyContext) -> None:
         pid = context.pid
@@ -320,17 +316,25 @@ class Reducer:
         if context.callbacks.path_target is not None:
             target = context.callbacks.path_target(pid, event)
             if target:
-                self._observe_paths_after_commit(context.connection, target, event.paths)
+                self._observe_paths(context, target, event.paths)
             return
         if state.job_handle is None:
-            job = self.store.oldest_running_job_for_target(pid)
+            job = self.store.oldest_running_job_for_target(pid, connection=context.connection)
             state.job_handle = job.handle if job is not None else ""
         if state.job_handle:
-            self._observe_paths_after_commit(context.connection, state.job_handle, event.paths)
+            self._observe_paths(context, state.job_handle, event.paths)
 
-    def _observe_paths_after_commit(self, connection, handle: str, paths) -> None:
-        unit = active_write_unit(connection)
-        if unit is None:
+    def staged_hashes(self, pid: str, batch: Batch) -> AbstractContextManager[None]:
+        """Pre-hash a terminal batch's paths so its write unit performs no file I/O."""
+        if self.jobs is None or not any(event.turn_end for event in batch.events):
+            return nullcontext()
+        paths = tuple(path for event in batch.events for path in event.paths or ())
+        return self.jobs.stage_hashes(pid, paths)
+
+    def _observe_paths(self, context: _ApplyContext, handle: str, paths) -> None:
+        # Observation is idempotent (first-seen hash kept), so replay after rollback is safe.
+        unit = active_write_unit(context.connection)
+        if unit is None or context.paths_now:
             self.jobs.observe_paths(handle, paths)
         else:
             unit.after_commit(lambda: self.jobs.observe_paths(handle, paths))

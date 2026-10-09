@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sqlalchemy import insert, update
+from sqlalchemy import Connection, insert, update
 
 from theater.constants.daemon import (
     RPC_DEFAULT_MAX_WAIT_SECONDS,
@@ -22,6 +22,7 @@ from theater.constants.daemon import (
 )
 from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
 from theater.daemon.events.publication import job_event, next_revision
+from theater.daemon.persistence.transactions import active_write_unit, after_commit
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
 from theater.daemon.store import Store
@@ -48,6 +49,38 @@ STRUCTURED_UNAVAILABLE = "unavailable"
 _RAW_UNSET = object()
 
 
+class StagingIncomplete(RuntimeError):
+    """A write unit needed a filesystem fact that was not staged before it opened."""
+
+
+@dataclass(frozen=True, slots=True)
+class StagedHashes:
+    """Filesystem facts gathered before a write unit opens; the unit only reads them.
+
+    Hashes are unbudgeted (file cap only); each job applies its own budget at lookup, so
+    attribution decided inside the unit can never contaminate another job's budget.
+    """
+
+    handles: frozenset[str] = frozenset()
+    normalized: dict[tuple[str, str], str | None] = field(default_factory=dict)
+    hashes: dict[tuple[str, str], BlobHash] = field(default_factory=dict)
+
+    def safe_path(self, cwd: str, raw: str) -> str | None:
+        try:
+            return self.normalized[(cwd, raw)]
+        except KeyError:
+            raise StagingIncomplete(f"path {raw!r} under {cwd!r} was not staged") from None
+
+    def hash_for(self, cwd: str, path: str, max_bytes: int) -> BlobHash:
+        try:
+            outcome = self.hashes[(cwd, path)]
+        except KeyError:
+            raise StagingIncomplete(f"hash of {path!r} under {cwd!r} was not staged") from None
+        if outcome.state is BlobHashState.HASHED and outcome.size > max_bytes:
+            return BlobHash(BlobHashState.UNAVAILABLE, reason="too_large")
+        return outcome
+
+
 @dataclass
 class TouchAccumulator:
     """Per-job set of file paths, with ``sha_before`` captured on first sight.
@@ -66,41 +99,66 @@ class TouchAccumulator:
     #: Total regular-file bytes hashed at first observation.
     _before_bytes: int = 0
 
-    def observe(self, paths: tuple[EventPath, ...]) -> None:
-        """Record paths from one event. Hashes new paths immediately."""
+    def known_paths(self) -> list[str]:
+        return list(self._paths)
+
+    def before_budget_left(self) -> int:
+        return max(0, TOUCH_HASH_MAX_JOB_BYTES - self._before_bytes)
+
+    def observe(self, paths: tuple[EventPath, ...], *, staged: StagedHashes | None = None) -> None:
+        """Record paths from one event. Hashes new paths immediately, or reads ``staged``."""
+        if staged is not None:
+            # Validate everything first: an incomplete stage must fail before any mutation.
+            for ep in paths:
+                safe = staged.safe_path(self.cwd, ep.path)
+                if safe is not None and safe not in self._before:
+                    staged.hash_for(self.cwd, safe, 0)
         for ep in paths:
-            path = normalize_touch_path(self.cwd, ep.path)
+            path = (
+                normalize_touch_path(self.cwd, ep.path)
+                if staged is None
+                else staged.safe_path(self.cwd, ep.path)
+            )
             if path is None:
                 continue
             if path not in self._before:
-                self._paths.append(path)
-                remaining = max(0, TOUCH_HASH_MAX_JOB_BYTES - self._before_bytes)
-                outcome = blob_hash(
-                    Path(self.cwd) / path,
-                    max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
+                max_bytes = min(
+                    TOUCH_HASH_MAX_FILE_BYTES, max(0, TOUCH_HASH_MAX_JOB_BYTES - self._before_bytes)
                 )
+                # Hash first: a failure must leave no partial state, so replay stays idempotent.
+                if staged is None:
+                    outcome = blob_hash(Path(self.cwd) / path, max_bytes=max_bytes)
+                else:
+                    outcome = staged.hash_for(self.cwd, path, max_bytes)
+                self._paths.append(path)
                 self._before[path] = outcome
                 if outcome.state is BlobHashState.HASHED:
                     self._before_bytes += outcome.size
             self._mode[path] = ep.mode
 
-    def rows(self, job_handle: str) -> list[dict]:
+    def rows(self, job_handle: str, *, staged: StagedHashes | None = None) -> list[dict]:
         """The touch rows for this job, with ``sha_after`` computed now (None if deleted)."""
         result = []
         after_bytes = 0
         for path in self._paths:
-            safe_path = normalize_touch_path(self.cwd, path)
+            safe_path = (
+                normalize_touch_path(self.cwd, path)
+                if staged is None
+                else staged.safe_path(self.cwd, path)
+            )
             # A symlink may have escaped since observation; never hash it.
             if safe_path is None:
                 after = BlobHash(BlobHashState.UNAVAILABLE, reason="unsafe_path")
             else:
-                remaining = max(0, TOUCH_HASH_MAX_JOB_BYTES - after_bytes)
-                after = blob_hash(
-                    Path(self.cwd) / safe_path,
-                    max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
+                max_bytes = min(
+                    TOUCH_HASH_MAX_FILE_BYTES, max(0, TOUCH_HASH_MAX_JOB_BYTES - after_bytes)
                 )
-                if after.state is BlobHashState.HASHED:
-                    after_bytes += after.size
+                if staged is None:
+                    after = blob_hash(Path(self.cwd) / safe_path, max_bytes=max_bytes)
+                else:
+                    after = staged.hash_for(self.cwd, safe_path, max_bytes)
+            if after.state is BlobHashState.HASHED:
+                after_bytes += after.size
             before = self._before[path]
             if BlobHashState.UNAVAILABLE in (before.state, after.state):
                 logger.debug(
@@ -149,6 +207,8 @@ class JobManager:
         self._waits: dict[object, tuple[str, frozenset[str]]] = {}
         #: Per-job path accumulators; a job with no cwd (CLI spawn, no target) gets no accumulator.
         self._accumulators: dict[str, TouchAccumulator] = {}
+        #: Hashes staged outside a write unit; set only while a terminal batch is applied.
+        self._staged: StagedHashes | None = None
 
     def create(
         self,
@@ -196,7 +256,67 @@ class JobManager:
         """
         acc = self._accumulators.get(handle)
         if acc is not None and paths:
-            acc.observe(paths)
+            acc.observe(paths, staged=self._staged_for(handle))
+
+    @contextmanager
+    def stage_hashes(self, target_id: str, paths: tuple[EventPath, ...]) -> Iterator[None]:
+        """Hash every file a terminal batch can touch BEFORE its write unit opens.
+
+        Inside the unit observe/rows read these results, so the unit does no file I/O.
+        """
+        raw_paths = [ep.path for ep in paths]
+        accs = [
+            (job.handle, acc)
+            for job in self.store.running_jobs_for_target(target_id)
+            if (acc := self._accumulators.get(job.handle)) is not None
+        ]
+        # Each accumulator owns an independent before- and after-side budget. Known paths are
+        # certainly an accumulator's, so they spend its after side. A new path's owner is only
+        # known inside the unit: charge it to the candidate with the most before-side budget left
+        # (never to all), so total staged work stays within one before-side budget per job.
+        pools: dict[tuple[str, str], int] = {}
+        owners: dict[tuple[str, str], tuple[list[tuple[str, str]], list[tuple[str, str]]]] = {}
+        normalized: dict[tuple[str, str], str | None] = {}
+        for handle, acc in accs:
+            pools[(handle, "after")] = TOUCH_HASH_MAX_JOB_BYTES
+            pools[(handle, "before")] = acc.before_budget_left()
+            known = set(acc.known_paths())
+            for raw in (*acc.known_paths(), *raw_paths):
+                if (acc.cwd, raw) not in normalized:
+                    normalized[(acc.cwd, raw)] = normalize_touch_path(acc.cwd, raw)
+                safe = normalized[(acc.cwd, raw)]
+                if safe is None:
+                    continue
+                after_owners, before_owners = owners.setdefault((acc.cwd, safe), ([], []))
+                side = (handle, "after") if safe in known else (handle, "before")
+                target = after_owners if safe in known else before_owners
+                if side not in target:
+                    target.append(side)
+        hashes: dict[tuple[str, str], BlobHash] = {}
+        for (cwd, safe), (after_owners, before_owners) in owners.items():
+            cap = min(
+                TOUCH_HASH_MAX_FILE_BYTES, max(pools[o] for o in (*after_owners, *before_owners))
+            )
+            outcome = hashes[(cwd, safe)] = blob_hash(Path(cwd) / safe, max_bytes=cap)
+            if outcome.state is BlobHashState.HASHED:
+                charged = list(after_owners)
+                if before_owners:
+                    charged.append(max(before_owners, key=lambda o: pools[o]))
+                for owner in charged:
+                    pools[owner] = max(0, pools[owner] - outcome.size)
+        handles = {handle for handle, _acc in accs}
+        self._staged = StagedHashes(frozenset(handles), normalized, hashes)
+        try:
+            yield
+        finally:
+            self._staged = None
+
+    def _staged_for(self, handle: str) -> StagedHashes | None:
+        if self._staged is None:
+            return None
+        if handle not in self._staged.handles:
+            raise StagingIncomplete(f"job {handle} has a touch accumulator but was not staged")
+        return self._staged
 
     def attach_touch_accumulator(self, handle: str, *, cwd: str) -> bool:
         """Attach a queued job's path accumulator at dispatch time; return whether one is attached.
@@ -233,7 +353,17 @@ class JobManager:
         result: str | None = None,
         error_code: str | None = None,
         raw_result: str | object | None = _RAW_UNSET,
+        connection: Connection | None = None,
     ) -> Job | None:
+        if connection is not None:
+            return self._finish_in_unit(
+                handle,
+                state=state,
+                result=result,
+                error_code=error_code,
+                raw_result=raw_result,
+                connection=connection,
+            )
         job = self.store.get_job(handle)
         if job is None:
             return None
@@ -298,6 +428,56 @@ class JobManager:
         logger.info("job %s finished: %s", handle, state)
         return self.store.get_job(handle)
 
+    def _finish_in_unit(
+        self,
+        handle: str,
+        *,
+        state: JobState,
+        result: str | None,
+        error_code: str | None,
+        raw_result: str | object | None,
+        connection: Connection,
+    ) -> Job | None:
+        """Finish inside the caller's write unit; memory wakeups wait for the commit."""
+        job = self.store.get_job(handle, connection=connection)
+        if job is None:
+            return None
+        if job.state != JobState.RUNNING:
+            after_commit(connection, lambda: self._wake(handle))
+            return job
+        acc = self._accumulators.get(handle)
+        structured_result, structured_status = self._structured_values(
+            job, state=state, result=result, error_code=error_code, raw_result=raw_result
+        )
+        self._write_finish(
+            connection,
+            handle,
+            state=str(state),
+            result=result,
+            error_code=error_code,
+            finished_at=now(),
+            response_format=job.response_format,
+            structured_result=structured_result,
+            structured_status=structured_status,
+            touches=acc.rows(handle, staged=self._staged_for(handle)) if acc else [],
+        )
+        self.store.bus_append(
+            "job.finished",
+            from_id=job.target_id,
+            to_id=job.caller_id,
+            payload={"handle": handle, "state": str(state), "error_code": error_code},
+            connection=connection,
+        )
+        after_commit(connection, lambda: self._wake(handle))
+        after_commit(connection, lambda: logger.info("job %s finished: %s", handle, state))
+        return self.store.get_job(handle, connection=connection)
+
+    def _wake(self, handle: str) -> None:
+        self._accumulators.pop(handle, None)
+        event = self._events.pop(handle, None)
+        if event:
+            event.set()
+
     def notify_committed_finish(self, job: Job) -> None:
         """Wake local consumers after another domain writer commits job completion."""
         self._accumulators.pop(job.handle, None)
@@ -361,33 +541,63 @@ class JobManager:
         The write unit keeps the result, touch rows, and public event atomic.
         """
         with self.store.write_unit() as unit:
-            unit.connection.execute(
-                update(jobs_table)
-                .where(jobs_table.c.handle == handle)
-                .values(
-                    state=state,
-                    result=result,
-                    error_code=error_code,
-                    finished_at=finished_at,
-                    response_format=response_format,
-                    structured_result=structured_result,
-                    structured_status=structured_status,
+            self._write_finish(
+                unit.connection,
+                handle,
+                state=state,
+                result=result,
+                error_code=error_code,
+                finished_at=finished_at,
+                response_format=response_format,
+                structured_result=structured_result,
+                structured_status=structured_status,
+                touches=touches,
+            )
+
+    def _write_finish(
+        self,
+        connection: Connection,
+        handle: str,
+        *,
+        state: str,
+        result: str | None,
+        error_code: str | None,
+        finished_at: float | None,
+        response_format: str | None,
+        structured_result: str | None,
+        structured_status: str | None,
+        touches: list[dict],
+    ) -> None:
+        """Job row, touch rows and public event, all on the caller's unit connection."""
+        unit = active_write_unit(connection)
+        assert unit is not None
+        connection.execute(
+            update(jobs_table)
+            .where(jobs_table.c.handle == handle)
+            .values(
+                state=state,
+                result=result,
+                error_code=error_code,
+                finished_at=finished_at,
+                response_format=response_format,
+                structured_result=structured_result,
+                structured_status=structured_status,
+            )
+        )
+        if touches:
+            connection.execute(insert(touch_table), touches)
+        current = self.store.get_job(handle, connection=connection)
+        assert current is not None
+        self.store.journal.append_group(
+            unit,
+            [
+                job_event(
+                    current,
+                    revision=next_revision(self.store, connection),
+                    recorded_at=current.finished_at or now(),
                 )
-            )
-            if touches:
-                unit.connection.execute(insert(touch_table), touches)
-            current = self.store.get_job(handle, connection=unit.connection)
-            assert current is not None
-            self.store.journal.append_group(
-                unit,
-                [
-                    job_event(
-                        current,
-                        revision=next_revision(self.store, unit.connection),
-                        recorded_at=current.finished_at or now(),
-                    )
-                ],
-            )
+            ],
+        )
 
     @property
     def wait_graph(self) -> dict[str, set[str]]:

@@ -89,9 +89,9 @@ class JobStore(StoreHost):
     def running_jobs_for_target(self, target_id: str) -> list[Job]:
         return self._jobs.running_for_target(target_id)
 
-    def oldest_running_job_for_target(self, target_id: str) -> Job | None:
+    def oldest_running_job_for_target(self, target_id: str, *, connection=None) -> Job | None:
         """The longest-running job waiting on this participant, if any."""
-        return self._jobs.oldest_running_for_target(target_id)
+        return self._jobs.oldest_running_for_target(target_id, connection=connection)
 
     def max_send_seq(self) -> int:
         """Highest numeric suffix across every send handle, 0 if none."""

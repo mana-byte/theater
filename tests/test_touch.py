@@ -8,6 +8,8 @@ transactional write that binds touches to the job result.
 
 from __future__ import annotations
 
+import pytest
+
 import theater.daemon.jobs as jobs_mod
 from theater.constants.daemon import TOUCH_HASH_MAX_FILE_BYTES
 from theater.daemon.blob import BlobHash, BlobHashState, blob_sha
@@ -270,3 +272,79 @@ def test_busy_timeout_is_set_on_all_connections(store):
     assert store.conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
     with store.engine.connect() as fresh:
         assert fresh.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+
+
+def test_incomplete_staging_fails_loudly_before_mutating(tmp_path):
+    from theater.daemon.jobs import StagedHashes, StagingIncomplete
+
+    acc = TouchAccumulator(cwd=str(tmp_path))
+
+    with pytest.raises(StagingIncomplete):
+        acc.observe((EventPath(path="x.txt", mode="write"),), staged=StagedHashes())
+
+    assert acc.known_paths() == []
+
+
+def test_staging_bounds_synchronous_hash_work_for_one_job(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_mod, "TOUCH_HASH_MAX_JOB_BYTES", 10)
+    hashed: list[int] = []
+    real = jobs_mod.blob_hash
+
+    def counting(path, *, max_bytes):
+        outcome = real(path, max_bytes=max_bytes)
+        if outcome.state is BlobHashState.HASHED:
+            hashed.append(outcome.size)
+        return outcome
+
+    monkeypatch.setattr(jobs_mod, "blob_hash", counting)
+    names = [f"f{i}.txt" for i in range(50)]
+    for name in names:
+        (tmp_path / name).write_bytes(b"1234")
+    jobs = JobManager(store)
+    jobs.create(handle="h1", caller_id="cli", target_id="t", kind="send", cwd=str(tmp_path))
+
+    with jobs.stage_hashes("t", tuple(EventPath(path=n, mode="write") for n in names)):
+        pass
+
+    assert 0 < sum(hashed) <= 2 * 10
+
+
+def _stage(jobs, target, cwd_paths):
+    with jobs.stage_hashes(target, cwd_paths):
+        return jobs._staged
+
+
+def test_staging_known_paths_spend_only_the_after_side_budget(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_mod, "TOUCH_HASH_MAX_JOB_BYTES", 10)
+    jobs = JobManager(store)
+    jobs.create(handle="h1", caller_id="cli", target_id="t", kind="send", cwd=str(tmp_path))
+    for name in ("k1.txt", "k2.txt"):
+        (tmp_path / name).write_bytes(b"1")
+        jobs.observe_paths("h1", (EventPath(path=name, mode="write"),))
+        (tmp_path / name).write_bytes(b"123456789")
+    (tmp_path / "new.txt").write_bytes(b"1234")
+
+    staged = _stage(jobs, "t", (EventPath(path="new.txt", mode="write"),))
+
+    assert staged.hashes[(str(tmp_path), "k1.txt")].state is BlobHashState.HASHED
+    assert staged.hashes[(str(tmp_path), "k2.txt")].reason == "too_large"
+    assert staged.hashes[(str(tmp_path), "new.txt")].state is BlobHashState.HASHED
+
+
+def test_staging_budgets_are_never_shared_between_jobs(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_mod, "TOUCH_HASH_MAX_JOB_BYTES", 10)
+    cwd_a, cwd_b = tmp_path / "a", tmp_path / "b"
+    cwd_a.mkdir()
+    cwd_b.mkdir()
+    jobs = JobManager(store)
+    jobs.create(handle="hb", caller_id="cli", target_id="t", kind="send", cwd=str(cwd_b))
+    jobs.create(handle="ha", caller_id="cli", target_id="t", kind="send", cwd=str(cwd_a))
+    heavy = [f"heavy{i}.txt" for i in range(6)]
+    for name in heavy:
+        (cwd_a / name).write_bytes(b"12345678")
+    (cwd_b / "small.txt").write_bytes(b"1234")
+    paths = tuple(EventPath(path=n, mode="write") for n in [*heavy, "small.txt"])
+
+    staged = _stage(jobs, "t", paths)
+
+    assert staged.hashes[(str(cwd_b), "small.txt")].state is BlobHashState.HASHED
