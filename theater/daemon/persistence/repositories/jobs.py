@@ -79,9 +79,12 @@ class JobRepository:
         ).fetchall()
         return [Job.from_row(r._mapping) for r in rows]
 
-    def oldest_running_for_target(self, target_id: str) -> Job | None:
+    def oldest_running_for_target(
+        self, target_id: str, *, connection: Connection | None = None
+    ) -> Job | None:
         """The longest-running job waiting on this participant, if any."""
-        row = self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
             select(jobs)
             .where(jobs.c.target_id == target_id)
             .where(jobs.c.state == "running")

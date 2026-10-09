@@ -245,7 +245,7 @@ def test_terminal_completion_failure_rolls_back_the_source_checkpoint(tmp_path) 
         store.close()
 
 
-def _two_delivered_jobs(registry, jobs):
+def _two_delivered_jobs(registry, jobs, *, cwd=None):
     from tests.test_completion_queued_followups import _op
 
     participant = registry.register(harness="codex", pane=None, cwd="/tmp")
@@ -256,6 +256,7 @@ def _two_delivered_jobs(registry, jobs):
             target_id=participant.id,
             kind="send",
             prompt=f"{handle} prompt",
+            cwd=cwd,
         )
     with registry.store.write_unit() as unit:
         for handle in ("job-a", "job-b"):
@@ -306,16 +307,62 @@ def test_terminal_batch_commits_once_and_replay_never_completes_the_next_job(
             observer._apply_source_batch(
                 participant.id, _CheckpointSource("c"), batch, clock, turns
             )
-        assert store.get_job("job-a").state == "running"
-        assert not turns.already_handled("turn-a")
+        a_after_failure = store.get_job("job-a").state
+        marker_after_failure = turns.already_handled("turn-a")
 
         monkeypatch.setattr(store, "set_status", set_status)
         commits.clear()
         observer._apply_source_batch(participant.id, _CheckpointSource("c"), batch, clock, turns)
 
-        assert len(commits) == 1
-        assert (store.get_job("job-a").state, store.get_job("job-a").result) == ("done", "answer a")
         assert store.get_job("job-b").state == "running"
         assert store.get_job("job-b").result is None
+        assert a_after_failure == "running"
+        assert not marker_after_failure
+        assert (store.get_job("job-a").state, store.get_job("job-a").result) == ("done", "answer a")
+        assert len(commits) == 1
+    finally:
+        store.close()
+
+
+def test_second_turn_touches_go_to_the_next_job(tmp_path) -> None:
+    from sqlalchemy import select
+
+    from theater.daemon.schema import touch
+    from theater.harness import EventPath
+
+    store = Store(tmp_path / "touches.db")
+    registry = Registry(store)
+    jobs = JobManager(store)
+    participant = _two_delivered_jobs(registry, jobs, cwd=str(tmp_path))
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "b.txt").write_text("b")
+    observer = Observer(registry, harnesses={}, jobs=jobs)
+    batch = Batch(
+        events=[
+            Event(kind=EventKind.USER, text="job-a prompt"),
+            Event(
+                kind=EventKind.ASSISTANT,
+                text="answer a",
+                turn_end=True,
+                turn_id="turn-a",
+                paths=(EventPath("a.txt", "write"),),
+            ),
+            Event(kind=EventKind.USER, text="job-b prompt"),
+            Event(
+                kind=EventKind.ASSISTANT,
+                text="answer b",
+                turn_end=True,
+                turn_id="turn-b",
+                paths=(EventPath("b.txt", "write"),),
+            ),
+        ]
+    )
+    try:
+        observer._apply_source_batch(
+            participant.id, _CheckpointSource("c"), batch, QuietClock(), TurnAccumulator()
+        )
+
+        rows = store.conn.execute(select(touch.c.job_handle, touch.c.path)).fetchall()
+        assert sorted(tuple(r) for r in rows) == [("job-a", "a.txt"), ("job-b", "b.txt")]
     finally:
         store.close()

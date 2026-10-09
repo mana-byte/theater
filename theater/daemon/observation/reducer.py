@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 
 from sqlalchemy import Connection
@@ -298,6 +299,8 @@ class Reducer:
                 )
                 context.turns.mark_handled(event.turn_id)
             context.clock.last_text = ""
+            # The finished job must not own the next turn's paths.
+            state.job_handle = None
 
     def _observe_event_paths(self, event: Event, context: _ApplyContext) -> None:
         pid = context.pid
@@ -310,10 +313,17 @@ class Reducer:
                 self._observe_paths(context, target, event.paths)
             return
         if state.job_handle is None:
-            job = self.store.oldest_running_job_for_target(pid)
+            job = self.store.oldest_running_job_for_target(pid, connection=context.connection)
             state.job_handle = job.handle if job is not None else ""
         if state.job_handle:
             self._observe_paths(context, state.job_handle, event.paths)
+
+    def staged_hashes(self, pid: str, batch: Batch) -> AbstractContextManager[None]:
+        """Pre-hash a terminal batch's paths so its write unit performs no file I/O."""
+        if self.jobs is None or not any(event.turn_end for event in batch.events):
+            return nullcontext()
+        paths = tuple(path for event in batch.events for path in event.paths or ())
+        return self.jobs.stage_hashes(pid, paths)
 
     def _observe_paths(self, context: _ApplyContext, handle: str, paths) -> None:
         # Observation is idempotent (first-seen hash kept), so replay after rollback is safe.

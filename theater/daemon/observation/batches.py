@@ -99,7 +99,11 @@ class BatchApplication:
         )
         answer_turn_fn = partial(self._answer_turn, registration=registration)
         try:
-            with rollback_observation_state(clock, turns), self.store.write_unit() as unit:
+            with (
+                rollback_observation_state(clock, turns),
+                self._reducer.staged_hashes(pid, batch),
+                self.store.write_unit() as unit,
+            ):
                 result = self._reducer.apply(
                     pid,
                     batch,
