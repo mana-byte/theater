@@ -173,6 +173,8 @@ def test_presence_invalidation_forwards_terminal_scope(tmp_path):
             service.report("provider-a", generation, 1, {**base, "invalidated_terminals": "t1"})
         with pytest.raises(ProviderReportInvalid):
             service.report("provider-a", generation, 1, {**base, "invalidated_terminals": [1]})
+        with pytest.raises(ProviderReportInvalid):
+            service.report("provider-a", generation, 1, {**base, "invalidated_terminals": None})
         assert scopes == []
         for revision, extra in enumerate(
             ({}, {"invalidated_terminals": []}, {"invalidated_terminals": ["t1", "t2"]}), 1

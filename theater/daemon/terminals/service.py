@@ -222,9 +222,9 @@ class TerminalProviderService:
     @staticmethod
     def _invalidated_terminals(facts: Mapping[str, object] | None) -> tuple[str, ...] | None:
         # Omitted means every terminal; an empty list means none.
-        scope = None if facts is None else facts.get("invalidated_terminals")
-        if scope is None:
+        if facts is None or "invalidated_terminals" not in facts:
             return None
+        scope = facts["invalidated_terminals"]
         if not isinstance(scope, list) or not all(type(item) is str for item in scope):
             raise ProviderReportInvalid(
                 "provider report facts.invalidated_terminals must be a list of terminal ids"
