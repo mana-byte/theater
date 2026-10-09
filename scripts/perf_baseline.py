@@ -298,7 +298,9 @@ def _start_profiles(stack: Stack, procs: dict[str, psutil.Process], seconds: flo
         if pyspy is None:
             started[role] = (None, target, "py-spy not on PATH")
             continue
-        argv = [pyspy, "record", "--nonblocking", "--format", "raw", "-r", "50"]
+        argv = [pyspy, "record", "--nonblocking", "--format", "raw", "-r", "50", "--gil"]
+        if stack.args.py_spy_sudo:
+            argv = ["sudo", "-n", *argv]
         argv += ["-d", str(int(seconds)), "-p", str(proc.pid), "-o", str(target)]
         started[role] = (
             subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True),
@@ -485,6 +487,11 @@ def main() -> int:
     parser.add_argument("--warmup", type=float, default=20.0)
     parser.add_argument("--duration", type=float, default=120.0)
     parser.add_argument("--py-spy", action="store_true", help="profile (macOS needs sudo)")
+    parser.add_argument(
+        "--py-spy-sudo",
+        action="store_true",
+        help="launch py-spy via sudo -n (run sudo -v first in this terminal)",
+    )
     parser.add_argument(
         "--config",
         type=Path,
