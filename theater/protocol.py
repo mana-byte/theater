@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, Final, NotRequired, Protocol, TypedDict
 
 #: Bumped when the request/response shape changes incompatibly; daemon refuses different majors.
 PROTOCOL_VERSION = 1
@@ -99,3 +99,55 @@ class RemoteError(Exception):
         self.code = code
         self.message = message
         self.details = dict(details) if details is not None else None
+
+
+# --- Shared Wave-2 contracts: the daemon implements these, frontends consume them. ---
+
+#: Long-poll diagnostic-bus read. Logical name ``diagnostics.bus_tail``; the public wire method.
+BUS_TAIL_METHOD: Final = "frontend.bus.tail"
+#: Upper bound the daemon accepts for ``wait_seconds``; 0 means return immediately.
+BUS_TAIL_MAX_WAIT_SECONDS: Final = 30.0
+
+
+class BusTailParams(TypedDict, total=False):
+    """Return events with id > after_id; when none, block up to wait_seconds for one."""
+
+    after_id: int
+    limit: int
+    kinds: list[str]
+    wait_seconds: float
+
+
+class BusEvent(TypedDict):
+    """One diagnostic-bus row as returned on the wire (``ts`` is the event timestamp)."""
+
+    id: int
+    ts: str
+    kind: str
+    from_id: str | None
+    to_id: str | None
+    payload: Any
+
+
+class BusTailResult(TypedDict):
+    items: list[BusEvent]
+    next_cursor: str | None
+    next_after_id: int
+
+
+class ProviderReportResult(TypedDict, total=False):
+    """Additions to the ``providers.report`` response.
+    ``invalidated_terminals`` omitted means every terminal's presence is invalidated.
+    """
+
+    presence_invalidated: bool
+    invalidated_terminals: NotRequired[list[str]]
+
+
+class WriteUnit(Protocol):
+    """Contract for ``write_unit(connection=...)``: one SQLite transaction, never nested.
+    ``after_commit`` hooks run only after a successful commit, in registration order;
+    a rollback discards them. Entering a unit inside another raises RuntimeError.
+    """
+
+    def after_commit(self, hook: Callable[[], None]) -> None: ...
