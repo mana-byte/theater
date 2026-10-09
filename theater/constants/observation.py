@@ -61,12 +61,16 @@ ROTATION_PROBE_MAX_SECONDS = 60.0
 #: inspect is a terminal round-trip. Approval and other kinds keep the base period.
 SCREEN_CHECK_BACKOFF_CAP_SECONDS = 10.0
 
-#: A working screen backs off to at most this: the 2s awaiting-input target minus the 0.25s poll,
-#: because a WORKING->APPROVAL flip is only noticed at the interval chosen by the old reading.
-WORKING_SCREEN_BACKOFF_CAP_SECONDS = 1.75
-
 #: A watcher that has seen no progress for this long polls at up to `QUIET_POLL_FACTOR` times its
 #: period (capped at `QUIET_POLL_MAX_SECONDS`); the first byte of new output restores the fast poll.
 QUIET_POLL_AFTER_SECONDS = 10.0
 QUIET_POLL_FACTOR = 4
 QUIET_POLL_MAX_SECONDS = 1.0
+
+#: Approval must be noticed within this after a WORKING reading; the budget below is what is left
+#: once the slowest quiet tick and one terminal capture are paid for.
+AWAITING_INPUT_TARGET_SECONDS = 2.0
+SCREEN_CAPTURE_BUDGET_SECONDS = 0.25
+WORKING_SCREEN_INTERVAL_CAP_SECONDS = (
+    AWAITING_INPUT_TARGET_SECONDS - QUIET_POLL_MAX_SECONDS - SCREEN_CAPTURE_BUDGET_SECONDS
+)

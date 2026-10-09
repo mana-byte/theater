@@ -19,10 +19,12 @@ from shipped import VibeHarness
 from sqlalchemy import delete, update
 
 from theater.constants.observation import (
+    AWAITING_INPUT_TARGET_SECONDS,
     LAST_ACTIVITY_REFRESH_SECONDS,
     QUIET_POLL_AFTER_SECONDS,
+    QUIET_POLL_MAX_SECONDS,
     SCREEN_CHECK_BACKOFF_CAP_SECONDS,
-    WORKING_SCREEN_BACKOFF_CAP_SECONDS,
+    WORKING_SCREEN_INTERVAL_CAP_SECONDS,
 )
 from theater.daemon import methods as methods_mod
 from theater.daemon.jobs import JobManager
@@ -2358,8 +2360,8 @@ async def test_an_unchanged_prompt_screen_is_inspected_at_growing_intervals_unti
 
 
 @pytest.mark.asyncio
-async def test_a_working_screen_backs_off_only_within_the_awaiting_input_target(registry):
-    """WORKING stretches the period to a tight cap; an approval reading is seen within 2s."""
+async def test_an_approval_after_a_working_screen_is_seen_within_target_including_capture(registry):
+    """Slowest production cadence (1.0s tick), a timed capture, and no transcript event."""
     now = [0.0]
     observer, screen, p = screen_checked(
         registry,
@@ -2368,21 +2370,28 @@ async def test_a_working_screen_backs_off_only_within_the_awaiting_input_target(
         awaiting=1.5,
         monotonic_clock=lambda: now[0],
     )
+    reads: list[float] = []
+
+    async def capture_pane(_pane):
+        reads.append(now[0])
+        now[0] += 0.25  # the capture takes time; the clock keeps running through the await
+        return "working"
+
+    observer._capture = capture_pane
     clock = QuietClock()
-    tick = 0.25
-    for _ in range(80):  # 20s of an unchanged WORKING screen, polled at the 0.25s default
+    tick = QUIET_POLL_MAX_SECONDS
+    for _ in range(20):
         now[0] += tick
         await observer._screen_status_due(p.id, screen, clock)
-    assert clock.screen_interval(1.5) == WORKING_SCREEN_BACKOFF_CAP_SECONDS
+    assert clock.screen_interval(1.5) <= WORKING_SCREEN_INTERVAL_CAP_SECONDS
 
-    # No transcript event in between: the screen flips to approval right after a check.
+    # Flip at the instant of the last capture read: the worst moment for the next check.
     screen._reading = ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.LOW)
-    flipped = now[0]
+    flipped = reads[-1]
     while registry.get(p.id).status is not Status.AWAITING_INPUT:
         now[0] += tick
         await observer._screen_status_due(p.id, screen, clock)
-        assert now[0] - flipped <= 2.0
-    assert clock.screen_interval(1.5) == 1.5  # approval is back at the base period
+        assert now[0] - flipped <= AWAITING_INPUT_TARGET_SECONDS
 
 
 def test_a_watcher_with_no_progress_for_a_while_polls_slower_and_progress_restores_it(registry):
