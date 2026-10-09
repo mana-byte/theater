@@ -77,21 +77,39 @@ class ProviderPresenceSource:
         self._exit_handler: ExitHandler | None = None
         self._observations: dict[str, _Observation] = {}
         self._epochs: dict[str, int] = {}
+        self._terminal_epochs: dict[tuple[str, str], int] = {}
 
-    def invalidate(self, provider_id: str, generation: int) -> tuple[str, ...] | None:
+    def invalidate(
+        self,
+        provider_id: str,
+        generation: int,
+        invalidated_terminals: Sequence[str] | None = None,
+    ) -> tuple[str, ...] | None:
+        """Forget cached evidence; ``invalidated_terminals`` limits the epoch fence."""
         service = self._terminal_service
         if service is None or not service.connections.is_current(provider_id, generation):
             return None
-        self._epochs[provider_id] = self._epochs.get(provider_id, 0) + 1
+        scoped = None if invalidated_terminals is None else frozenset(invalidated_terminals)
+        if scoped is not None:
+            if not scoped:
+                return ()
+            for terminal_id in scoped:
+                key = (provider_id, terminal_id)
+                self._terminal_epochs[key] = self._terminal_epochs.get(key, 0) + 1
+        else:
+            self._epochs[provider_id] = self._epochs.get(provider_id, 0) + 1
         invalidated = []
         for participant_id, observation in self._observations.items():
-            if observation.binding_key[:2] == (provider_id, generation):
-                self._observations[participant_id] = replace(
-                    observation,
-                    state=PresenceState.UNKNOWN,
-                    reason="provider-presence-invalidated",
-                )
-                invalidated.append(participant_id)
+            if observation.binding_key[:2] != (provider_id, generation):
+                continue
+            if scoped is not None and observation.binding_key[2] not in scoped:
+                continue
+            self._observations[participant_id] = replace(
+                observation,
+                state=PresenceState.UNKNOWN,
+                reason="provider-presence-invalidated",
+            )
+            invalidated.append(participant_id)
         return tuple(invalidated)
 
     def configure(self, terminal_service: Any, *, exit_handler: ExitHandler | None = None) -> None:
@@ -260,7 +278,10 @@ class ProviderPresenceSource:
         *,
         screen_max_bytes: int = 0,
     ) -> None:
-        epoch = self._epochs.get(binding.provider_id, 0)
+        epoch = (
+            self._epochs.get(binding.provider_id, 0),
+            self._terminal_epochs.get((binding.provider_id, binding.terminal_id), 0),
+        )
         service = self._terminal_service
         if service is None:
             self._unknown(participant_id, binding, "provider-not-composed")
@@ -295,7 +316,10 @@ class ProviderPresenceSource:
                 f"provider-inspect-failed:{type(exc).__name__}",
             )
             return
-        if epoch != self._epochs.get(binding.provider_id, 0):
+        if epoch != (
+            self._epochs.get(binding.provider_id, 0),
+            self._terminal_epochs.get((binding.provider_id, binding.terminal_id), 0),
+        ):
             self._unknown(participant_id, binding, "provider-presence-changed-during-inspect")
             return
         if result is None:

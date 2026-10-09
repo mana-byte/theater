@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from theater.constants.presence import (
@@ -17,6 +17,10 @@ from theater.constants.presence import (
 )
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.daemon.presence.provider import ExitHandler, ProviderPresenceSource
+from theater.daemon.presence.publisher import (
+    PRESENCE_PUBLISH_COALESCE_SECONDS,
+    PresenceChangePublisher,
+)
 from theater.models import HumanPresent, NotFound, TerminalBindingRecord
 
 _AWAIT_GUIDANCE = "call await_sessions(handles=[{participant_id!r}]), then retry"
@@ -41,6 +45,7 @@ class PresenceMonitor:
         arm_check_interval: float | None = None,
         clock=time.monotonic,
         on_change: Callable[[str], None] | None = None,
+        publish_window: float = PRESENCE_PUBLISH_COALESCE_SECONDS,
     ) -> None:
         del arm_check_interval
         self._registry = registry
@@ -48,6 +53,7 @@ class PresenceMonitor:
         self._stale_after = stale_after
         self._clock = clock
         self._on_change = on_change
+        self._publisher = PresenceChangePublisher(self._emit_change, window=publish_window)
         self._revision = 0
         self._revision_event = asyncio.Event()
         self._wake = asyncio.Event()
@@ -55,6 +61,7 @@ class PresenceMonitor:
         self._refresh_task: asyncio.Task[None] | None = None
         self._refresh_reuse = 0.0
         self._target_tasks: dict[str, _TargetRefresh] = {}
+        self._scoped_tasks: set[asyncio.Task[None]] = set()
         self._loop_task: asyncio.Task[None] | None = None
         self._provider = ProviderPresenceSource(
             registry,
@@ -157,19 +164,41 @@ class PresenceMonitor:
     ) -> None:
         self._provider.configure(terminal_service, exit_handler=exit_handler)
 
-    def invalidate_provider(self, provider_id: str, generation: int) -> None:
+    def invalidate_provider(
+        self,
+        provider_id: str,
+        generation: int,
+        invalidated_terminals: Sequence[str] | None = None,
+    ) -> None:
+        """Forget provider evidence; explicit ``invalidated_terminals`` scope the re-check."""
         if self._stopping:
             return
-        invalidated = self._provider.invalidate(provider_id, generation)
+        invalidated = self._provider.invalidate(
+            provider_id, generation, invalidated_terminals=invalidated_terminals
+        )
         if invalidated is None:
             return
+        if invalidated_terminals is not None and not invalidated:
+            return  # named terminals hold no cached evidence: nothing to re-check
         self._bump_revision()
         for participant_id in invalidated:
             before = self._published_states.get(participant_id)
             self._published_states[participant_id] = PresenceState.UNKNOWN
             if before is not PresenceState.UNKNOWN:
                 self._publish_change(participant_id)
-        self._wake.set()
+        if invalidated_terminals is None:
+            self._wake.set()
+        else:
+            self._schedule_scoped_refresh(invalidated)
+
+    def _schedule_scoped_refresh(self, participant_ids: Sequence[str]) -> None:
+        for participant_id in participant_ids:
+            task = asyncio.create_task(
+                self._refresh_target(participant_id, fresh=True),
+                name=f"presence-scoped-{participant_id}",
+            )
+            self._scoped_tasks.add(task)
+            task.add_done_callback(self._scoped_tasks.discard)
 
     def terminal_screen(self, participant_id: str) -> str | None:
         return self._provider.screen(participant_id, stale_after=self._stale_after)
@@ -199,12 +228,14 @@ class PresenceMonitor:
 
     async def aclose(self) -> None:
         self._stopping = True
+        self._publisher.close()
         tasks = [
             task
             for task in (
                 self._loop_task,
                 self._refresh_task,
                 *(pending.task for pending in self._target_tasks.values()),
+                *self._scoped_tasks,
             )
             if task is not None
         ]
@@ -218,6 +249,7 @@ class PresenceMonitor:
             pass
         self._loop_task = self._refresh_task = None
         self._target_tasks.clear()
+        self._scoped_tasks.clear()
 
     async def _refresh_owned(self, reuse_within: float = 0.0) -> None:
         participants = tuple(self._registry.list())
@@ -234,6 +266,7 @@ class PresenceMonitor:
             for participant_id in self._published_states.keys() - live_ids:
                 self._published_states.pop(participant_id, None)
             self._provider.retain(live_ids)
+            self._publisher.flush()
 
     async def _refresh_target(
         self, participant_id: str, *, fresh: bool = False, screen_max_bytes: int = 0
@@ -292,6 +325,9 @@ class PresenceMonitor:
                 self._publish_change(participant_id)
 
     def _publish_change(self, participant_id: str) -> None:
+        self._publisher.publish(participant_id)
+
+    def _emit_change(self, participant_id: str) -> None:
         try:
             if self._on_change is not None:
                 self._on_change(participant_id)
