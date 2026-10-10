@@ -88,7 +88,7 @@ job_terminal wins same-evaluation ties.
 An awaiting_input entry also includes pending_interaction when an exact cached native
 snapshot supplies it (kind, optional native_turn_id and details). Inspect the child's
 native UI to answer the request; this result grants no permission to mutate it.
-No-job entries omit state, kind, prompt, and result; no synthetic job is created.
+No-job entries omit state; no synthetic job is created.
 Re-await a pending or timed-out entry only while its job or presence can still change.
 The daemon and other agents keep running.
 
@@ -834,9 +834,10 @@ def build(
         when truncated is true and after_key is non-null, pass that after_key to
         continue after the last returned key. A legacy entry too large to return
         alone instead reports oversized_digest, oversized_bytes, and a nullable
-        oversized_key; it is unread. Skip it with after_key only when
-        oversized_key is non-null, otherwise delete it by digest or clear the
-        namespace. Current bounded writes cannot create such an entry. Entries
+        oversized_key; it is unread. Pass oversized_key as after_key to skip it
+        only when non-null; otherwise stop and report the unread entry. Delete
+        by digest or clear only when cleanup is intended. Current bounded writes
+        cannot create such an entry. Entries
         are shared by namespace across this Theater machine; expired entries
         are omitted and reads never refresh their expiry.
 
@@ -887,12 +888,13 @@ def build(
         cursor: opaque next_cursor returned by Theater, or null for the
         newest page. Never construct or edit a cursor.
 
-        Returns id, path, chronological event chunks, next_cursor, and
-        truncated. Continue with next_cursor only when it is non-null and older
-        content is still needed. truncated means the response budget cut this
-        source page before all eligible events were returned. Event chunks
-        retain index, role, tool_name, and turn_end plus UTF-8 byte offsets;
-        reaches_text_start is true when a suffix-first chunk includes byte zero.
+        Returns id, path, events (chronological; entries may be partial text
+        chunks), next_cursor, and truncated. Continue with next_cursor only when
+        it is non-null and older content is still needed. truncated means the
+        response budget cut this source page before all eligible events were
+        returned. Each event retains index, role, tool_name, and turn_end plus
+        UTF-8 byte offsets; reaches_text_start is true when a suffix-first chunk
+        includes byte zero.
 
         Refuses if the transcript needs binding or its identity is lost.
         """
