@@ -62,6 +62,8 @@ class Harness(ABC):
     controls: ControlManifest | None = None
     #: Whether this harness explicitly renders generic MCP server specs.
     supports_mcp_rendering: bool = False
+    #: How Theater's MCP server delivers refusals to this harness ("is_error" or "result").
+    mcp_error_delivery: str = "is_error"
     #: Optional native runtime wiring compiled from the manifest; ``None``
     #: means legacy behavior everywhere. An annotation, not abstract: existing
     #: harnesses and sources gain no mandatory methods.
