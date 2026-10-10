@@ -329,7 +329,7 @@ async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
 async def test_kill_schema_uses_target_not_target_id(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     kill = schema["put_child_back_in_the_wound"]
-    assert set(kill["properties"]) == {"target"}
+    assert set(kill["properties"]) == {"target", "forget"}
     assert kill["required"] == ["target"]
 
 

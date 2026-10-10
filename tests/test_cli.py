@@ -984,6 +984,13 @@ def test_kill_names_what_it_killed(answers, capsys, killed):
     assert ("killed p-abc123" if killed else "already dead: p-abc123") in capsys.readouterr().out
 
 
+def test_kill_forget_forwards_the_flag(answers, capsys):
+    answers["replies"] = {"participant.kill": {"id": "p-1", "killed": True, "forgotten": True}}
+    assert cli.cmd_kill(parse("kill", "--forget", "p-1")) == 0
+    assert answers["calls"] == [("participant.kill", {"id": "p-1", "forget": True})]
+    assert "forgot p-1" in capsys.readouterr().out
+
+
 def test_name_command_calls_rename_and_prints_the_result(answers, capsys):
     answers["replies"] = {"participant.rename": {**ROW, "name": "Pierrot"}}
     assert cli.cmd_name(parse("name", "Arlequin", "Pierrot")) == 0

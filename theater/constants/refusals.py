@@ -14,6 +14,10 @@ NEXT_FOCUS_EVENTS_OFF: Final = (
     "ask the user to detach or enable tmux focus-events"
 )
 NEXT_RETRY_ONCE: Final = "retry once"
+NEXT_FORGET: Final = "no terminal exists for this participant: kill(forget=true)"
+NEXT_ASK_OPERATOR: Final = (
+    "no terminal exists for this participant: ask the operator to run `theater kill --forget`"
+)
 NEXT_NOT_YOUR_CHILD: Final = (
     "ask its control owner {owner!r} to act, or have the operator run `theater control-transfer`"
 )

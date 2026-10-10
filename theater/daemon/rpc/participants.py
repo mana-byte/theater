@@ -13,8 +13,14 @@ from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     PARTICIPANTS_LIST_MAX_LIMIT,
 )
-from theater.constants.refusals import NEXT_NOT_YOUR_CHILD
+from theater.constants.refusals import (
+    NEXT_ASK_OPERATOR,
+    NEXT_FORGET,
+    NEXT_NOT_YOUR_CHILD,
+    NO_TERMINAL_PRESENCE_REASON,
+)
 from theater.daemon.events.publication import next_revision, participant_event
+from theater.daemon.forgetting import forget_participant, forget_refusal
 from theater.daemon.operations.termination import terminate_with_operation
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _require
@@ -25,6 +31,7 @@ from theater.harness.contracts.runtime import RuntimeCapability
 from theater.models import (
     BadRequest,
     ControlOwnerKind,
+    HumanPresent,
     JobState,
     NoSelfKill,
     NotYourChild,
@@ -467,17 +474,32 @@ def _authorize_termination(target: Participant, caller_id: str) -> None:
         )
 
 
+async def _require_absent_or_forget_hint(daemon, target: Participant, caller_id: str) -> None:
+    """An unbound target never gains presence evidence: point at forget, not at waiting."""
+    try:
+        await presence_access.require_absent(daemon, target.id)
+    except HumanPresent as exc:
+        if NO_TERMINAL_PRESENCE_REASON not in str(exc):
+            raise
+        allowed = forget_refusal(daemon, target, caller_id) is None
+        exc.details = {**(exc.details or {}), "next": NEXT_FORGET if allowed else NEXT_ASK_OPERATOR}
+        raise
+
+
 async def terminate_participant(
     daemon,
     pid: str,
     *,
     caller_id: str,
     operation_id: str | None = None,
+    forget: bool = False,
 ) -> dict:
     """Verify exit, retire participant state, then clean its unique workspace."""
     target = daemon.registry.resolve(pid)
     pid = target.id
 
+    if forget:
+        return await forget_participant(daemon, target, caller_id=caller_id)
     _authorize_termination(target, caller_id)
     if target.status is Status.DEAD:
         return {"id": pid, "killed": False, "reason": "already_dead"}
@@ -506,7 +528,7 @@ async def terminate_participant(
                 id=pid,
                 operation_id=operation_id,
             ):
-                await presence_access.require_absent(daemon, pid)
+                await _require_absent_or_forget_hint(daemon, target, caller_id)
         # Verify every execution surface before committing participant, job, or usage state.
         try:
             with timing.span(
@@ -564,6 +586,7 @@ async def _kill(daemon, params: dict) -> dict:
         daemon,
         _require(params, "id"),
         caller_id=params.get("caller_id") or "cli",
+        forget=bool(params.get("forget")),
     )
 
 
