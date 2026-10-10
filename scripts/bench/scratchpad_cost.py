@@ -58,7 +58,7 @@ async def measure(entries: int, value_bytes: int) -> dict:
     return {
         "full_bytes": len(json.dumps(full).encode()),
         "keys_only_bytes": len(json.dumps(keys_only).encode()),
-        "keys_only_has_values": any(isinstance(v, str) for v in keys_only["entries"].values()),
+        "keys_only_has_values": isinstance(keys_only["entries"], dict),
         "entry_error": entry_error or "",
         "byte_error": byte_error or "",
     }
