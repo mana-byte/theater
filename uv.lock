@@ -1446,7 +1446,7 @@ wheels = [
 
 [[package]]
 name = "regie"
-version = "1.0.0rc10"
+version = "1.0.0rc11"
 source = { editable = "packages/regie" }
 dependencies = [
     { name = "textual" },
@@ -1703,7 +1703,7 @@ wheels = [
 
 [[package]]
 name = "theater"
-version = "1.0.0rc10"
+version = "1.0.0rc11"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

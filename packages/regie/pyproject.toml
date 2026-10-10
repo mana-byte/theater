@@ -1,12 +1,12 @@
 [project]
 name = "regie"
-version = "1.0.0rc10"
+version = "1.0.0rc11"
 authors = [{ name = "Manaiki Laut", email = "manaikilaut@gmail.com" }]
 description = "Independent Theater frontend and tmux terminal provider"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "theater==1.0.0rc10",
+    "theater==1.0.0rc11",
     "textual>=0.40.0",
 ]
 
