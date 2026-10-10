@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from theater.constants.core import HARNESS_NAME
@@ -191,6 +191,12 @@ class CompositeSource(Source):
 
     def channel_health(self) -> tuple[ChannelHealth, ...]:
         return tuple(self._channel_health(binding) for binding in self._enrichments)
+
+    def bind_wakeup(self, wakeup: Callable[[], None] | None) -> None:
+        """Bind the primary only; enrichment queues drain on read by design."""
+        binder = getattr(self._primary, "bind_wakeup", None)
+        if binder is not None:
+            binder(wakeup)
 
     def health_snapshot(self) -> tuple[ChannelHealth, ...]:
         primary = () if self._primary is None else (self.primary_health(),)

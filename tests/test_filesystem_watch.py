@@ -74,7 +74,7 @@ def count_stats(monkeypatch, path: Path) -> list[int]:
 async def test_append_wakes_the_source_without_waiting_for_a_poll(watched):
     s, path = watched
     signal = WakeupSignal()
-    s._bind_wakeup(signal.wake)
+    s.bind_wakeup(signal.wake)
     await attach(s)
     await s.read()  # arms the watch
     signal.consume()
@@ -338,3 +338,27 @@ def test_closed_loops_leave_no_global_leak(tmp_path):
     finally:
         current.close()
         loop.close()
+
+
+async def test_hybrid_forwards_the_wakeup_to_the_durable_gate(watched):
+    from test_hybrid_source import LIVE, ScriptedSource
+
+    from theater.harness.channels.hybrid import HybridSource
+    from theater.harness.contracts.runtime import LiveChannelDeclaration
+
+    s, path = watched
+    hybrid = HybridSource(
+        durable=s,
+        live=ScriptedSource(),
+        live_channel=LiveChannelDeclaration(channel=LIVE),
+    )
+    signal = WakeupSignal()
+    hybrid.bind_wakeup(signal.wake)
+    await attach(s)
+    await s.read()  # arms the watch
+    signal.consume()
+
+    with path.open("a") as fh:
+        fh.write(record("new") + "\n")
+
+    await asyncio.wait_for(signal.wait(), timeout=2)

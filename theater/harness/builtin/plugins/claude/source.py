@@ -56,8 +56,8 @@ class _ClaudeSource(TranscriptSource):
         #: A receipt path is stat-polled only when its directory changed or the safety net is due.
         self._receipt_gate = WatchGate(fallback_seconds=_RECEIPT_FALLBACK_SECONDS)
 
-    def _bind_wakeup(self, wakeup) -> None:
-        super()._bind_wakeup(wakeup)
+    def bind_wakeup(self, wakeup) -> None:
+        super().bind_wakeup(wakeup)
         self._receipt_gate.set_wake(wakeup)
 
     async def aclose(self) -> None:

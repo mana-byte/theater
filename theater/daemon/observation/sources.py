@@ -107,6 +107,10 @@ class SourceChannels:
             self.store.upsert_participant(p)
         if primary_tracker is not None and primary is not None:
             self._primary_channel_health[(pid, primary.id)] = primary_tracker
+        signal = self.live.wake_signal(p.id)
+        binder = getattr(source, "bind_wakeup", None)
+        if signal is not None and binder is not None:
+            binder(signal.wake)
         return source
 
     def _open_durable_source(

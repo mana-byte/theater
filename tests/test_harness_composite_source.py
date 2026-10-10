@@ -1464,3 +1464,24 @@ def test_dedupe_max_is_named_constant() -> None:
 
     cache = _DedupCache()
     assert cache._max == HARNESS_DEDUPE_MAX_FACTS
+
+
+def test_bind_wakeup_reaches_the_primary_and_not_enrichments() -> None:
+    class _Bindable(_RecordingSource):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bound: list[object] = []
+
+        def bind_wakeup(self, wakeup) -> None:
+            self.bound.append(wakeup)
+
+    primary, enrichment = _Bindable(), _Bindable()
+    composite = CompositeSource(
+        primary=primary,
+        enrichments=[EnrichmentBinding(source=enrichment, declaration=_decl("hook"))],
+    )
+    wake = object()
+    composite.bind_wakeup(wake)  # type: ignore[arg-type]
+    assert primary.bound == [wake]
+    assert enrichment.bound == []
+    CompositeSource().bind_wakeup(wake)  # type: ignore[arg-type]  # no primary: a no-op
