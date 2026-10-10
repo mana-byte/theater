@@ -494,12 +494,21 @@ async def test_read_transcript_forwards_a_live_name_without_listing_first():
 
 
 async def test_read_transcript_forwards_only_the_returned_cursor():
-    s = resolved(read_transcript={"id": "p-you", "events": []})
-    await tools.read_transcript(s, target="Arlequin", cursor="trc1.cursor")
+    s = resolved(
+        read_transcript={
+            "id": "p-you",
+            "events": [],
+            "cursor": "trc1.cursor",
+            "next_cursor": None,
+            "has_more": False,
+        }
+    )
+    page = await tools.read_transcript(s, target="Arlequin", cursor="trc1.cursor")
     assert s.client.params("read_transcript") == {
         "id": "Arlequin",
         "cursor": "trc1.cursor",
     }
+    assert page == {"id": "p-you", "events": [], "next_cursor": None}
 
 
 async def test_put_child_back_in_the_wound_names_the_caller_so_the_daemon_can_authorize():

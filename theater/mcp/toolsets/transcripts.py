@@ -24,4 +24,6 @@ async def read_transcript(session: Session, *, target: str, cursor: str | None =
         params["cursor"] = cursor
     record = await session.client.call("read_transcript", **params)
     assert isinstance(record, dict)
+    record.pop("cursor", None)
+    record.pop("has_more", None)
     return record

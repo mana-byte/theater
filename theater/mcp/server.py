@@ -851,9 +851,9 @@ def build(
         cursor: opaque next_cursor returned by Theater, or null for the
         newest page. Never construct or edit a cursor.
 
-        Returns id, path, chronological event chunks, cursor (the supplied
-        cursor), next_cursor, has_more, and truncated. has_more means a
-        next_cursor exists; truncated means the response budget cut this
+        Returns id, path, chronological event chunks, next_cursor, and
+        truncated. Continue with next_cursor only when it is non-null and older
+        content is still needed. truncated means the response budget cut this
         source page before all eligible events were returned. Event chunks
         retain index, role, tool_name, and turn_end plus UTF-8 byte offsets;
         reaches_text_start is true when a suffix-first chunk includes byte zero.
