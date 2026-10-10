@@ -49,6 +49,17 @@ async def cleanup_killed_workspace(daemon, participant: Participant) -> dict[str
                 ),
             },
         }
+    details = (operation.error or {}).get("details") or {}
+    if isinstance(details, dict) and details.get("reason") == "branch_moved":
+        # A switched branch is deliberate child work: keep it and name the one-command fix.
+        return {
+            "workspace_id": workspace_id,
+            "operation_id": operation_id,
+            "state": "retained",
+            "reason": "branch_moved",
+            "next": details.get("next"),
+            "error": operation.error,
+        }
     return {
         "workspace_id": workspace_id,
         "operation_id": operation_id,
