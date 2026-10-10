@@ -13,8 +13,8 @@ async def require_absent(daemon, participant_id: str) -> None:
     if provider is None:
         raise HumanPresent(
             f"human-presence protection for {participant_id!r} cannot be verified: "
-            "the daemon has no composed presence provider, so no mutation may proceed; "
-            f"await_sessions(handles=[{participant_id!r}]) and report this configuration"
+            "the daemon has no composed presence provider, so no mutation may proceed",
+            details={"next": "report this daemon configuration to the operator"},
         )
     await provider.require_absent(participant_id)
 
@@ -25,8 +25,7 @@ def check_absent(daemon, participant_id: str) -> None:
     if snapshot.protected:
         raise HumanPresent(
             f"human presence for {participant_id!r} is {snapshot.state.value} "
-            f"({snapshot.reason}); not mutating; "
-            f"call await_sessions(handles=[{participant_id!r}]), then retry",
+            f"({snapshot.reason}); not mutating",
             details={"next": human_present_next(snapshot.reason)},
         )
 
