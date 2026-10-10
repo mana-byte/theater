@@ -52,6 +52,7 @@ class _ReportContext:
     provider_id: str
     generation: int
     revision: int
+    snapshot: bool
     presence_invalidated: bool
     invalidated_terminals: tuple[str, ...] | None
     terminals: Sequence[Mapping[str, object]]
@@ -160,8 +161,12 @@ class TerminalProviderService:
         generation: int,
         report_revision: int,
         facts: Mapping[str, object] | None,
+        *,
+        snapshot: bool = False,
     ) -> dict:
-        context = self._prepare_report(provider_id, generation, report_revision, facts)
+        context = self._prepare_report(
+            provider_id, generation, report_revision, facts, snapshot=snapshot
+        )
         settlement = self._apply_report(context)
         return self._report_response(context, settlement)
 
@@ -171,6 +176,8 @@ class TerminalProviderService:
         generation: int,
         report_revision: int,
         facts: Mapping[str, object] | None,
+        *,
+        snapshot: bool,
     ) -> _ReportContext:
         if not self.connections.is_current(provider_id, generation):
             raise StaleGeneration(provider_id, generation)
@@ -201,11 +208,12 @@ class TerminalProviderService:
         # Participant projections derive route availability from provider health.
         health_changes = (
             "online" if inventory_verified else health_snapshot
-        ) != health_snapshot or provider.last_report_revision is None
+        ) != health_snapshot or (not snapshot and provider.last_report_revision is None)
         return _ReportContext(
             provider_id=provider_id,
             generation=generation,
             revision=report_revision,
+            snapshot=snapshot,
             presence_invalidated=presence_invalidated,
             invalidated_terminals=invalidated_terminals,
             terminals=terminals,
@@ -233,7 +241,21 @@ class TerminalProviderService:
 
     def _apply_report(self, context: _ReportContext) -> _ReportSettlement:
         with self._store.write_unit() as unit:
-            if not self._store.providers.accept_report_revision(
+            if context.snapshot:
+                record = self._store.providers.get(context.provider_id, connection=unit.connection)
+                if record is None or record.generation != context.generation:
+                    raise StaleGeneration(context.provider_id, context.generation)
+                if (
+                    record.last_report_revision is not None
+                    and context.revision <= record.last_report_revision
+                ):
+                    raise StaleReportRevision(
+                        context.provider_id,
+                        context.generation,
+                        context.revision,
+                        record.last_report_revision,
+                    )
+            elif not self._store.providers.accept_report_revision(
                 context.provider_id,
                 generation=context.generation,
                 report_revision=context.revision,
@@ -385,6 +407,7 @@ class TerminalProviderService:
             generation,
             revision,
             report_facts,
+            snapshot=True,
         )
         return result
 
@@ -434,6 +457,7 @@ class TerminalProviderService:
             generation,
             revision,
             {"terminals": [terminal], "complete": False},
+            snapshot=True,
         )
         return result
 

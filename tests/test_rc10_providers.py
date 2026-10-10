@@ -287,6 +287,67 @@ def test_stable_heartbeats_journal_no_provider_events(tmp_path: Path) -> None:
         store.close()
 
 
+async def test_inspect_snapshot_does_not_stale_a_delayed_heartbeat(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = _Store(tmp_path / "snapshot-order.db")
+    service = _service(store, _Clock(10.0))
+    try:
+        _register(service)
+        generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+        with store.write_unit() as unit:
+            store._participants.upsert(
+                Participant(id="participant-a", harness="codex", tier=Tier.EXTERNAL, cwd=None),
+                connection=unit.connection,
+            )
+            store.terminal_bindings.bind(
+                TerminalBindingRecord(
+                    participant_id="participant-a",
+                    provider_id="provider-a",
+                    provider_generation=generation,
+                    terminal_id="terminal-a",
+                    terminal_incarnation="incarnation-a",
+                    occupant_evidence={"occupant_id": "occupant-a"},
+                    process_facts={"pid": 42, "started_at": 2.0, "executable": "/bin/agent"},
+                    health="healthy",
+                    report_revision=0,
+                    created_at=1.0,
+                    updated_at=1.0,
+                ),
+                connection=unit.connection,
+            )
+
+        revisions = iter((3, 5))
+
+        async def request(_provider_id, current_generation, _method, _params):
+            revision = next(revisions)
+            return {
+                "provider_generation": current_generation,
+                "report_revision": revision,
+                "terminal": _identity(current_generation),
+                "presence": {"state": "absent", "revision": revision},
+            }
+
+        monkeypatch.setattr(service.connections, "request", request)
+        before = store.journal.current_sequence()
+        await service.inspect("provider-a", generation, "terminal-a", "incarnation-a")
+        assert store.providers.get("provider-a").last_report_revision is None
+        assert store.journal.current_sequence() == before
+
+        service.heartbeat("provider-a", generation, 2)
+        assert store.providers.get("provider-a").last_report_revision == 2
+        assert store.terminal_bindings.get("participant-a").report_revision == 3
+
+        service.heartbeat("provider-a", generation, 6)
+        with pytest.raises(StaleReportRevision):
+            await service.inspect("provider-a", generation, "terminal-a", "incarnation-a")
+        assert store.terminal_bindings.get("participant-a").report_revision == 3
+        with pytest.raises(StaleReportRevision):
+            service.heartbeat("provider-a", generation, 6)
+    finally:
+        store.close()
+
+
 def test_report_restores_only_an_exact_terminal_identity(tmp_path: Path) -> None:
     store = _Store(tmp_path / "bindings.db")
     clock = _Clock(10.0)
