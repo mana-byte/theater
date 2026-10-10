@@ -1009,8 +1009,8 @@ decision and MCP forwards the actual calling participant:
 
 | RPC | CLI | MCP | Semantics |
 | --- | --- | --- | --- |
-| `participant.steer` | `theater steer` | `steer_session` | Amend exactly the current Theater job's active turn. |
-| `participant.queue_followup` | `theater queue` | `queue_followup` | Return a new awaitable send-job handle. |
+| `participant.steer` | `theater steer` | `send(if_busy="amend")` | Amend exactly the current Theater job's active turn. |
+| `participant.queue_followup` | `theater queue` | `send(if_busy="queue")` | Return a new awaitable send-job handle. |
 | `participant.settings.update` | `theater settings` | `update_session_settings` | Idle-only model/reasoning changes. |
 | `participant.controls` | `theater controls` | `get_session_controls` | Effective capabilities, health, settings, active turn, queued handles. |
 | existing interrupt RPC | `theater interrupt` | `interrupt_session` | Cancel the active turn and every pending followup. |

@@ -1607,11 +1607,16 @@ methods are additive:
 
 | RPC | CLI | MCP | Semantics |
 |---|---|---|---|
-| `participant.steer` | `theater steer` | `steer_session` | amend exactly the current job's active turn |
-| `participant.queue_followup` | `theater queue` | `queue_followup` | awaitable send job with a queued delivery phase |
+| `participant.steer` | `theater steer` | `send(if_busy="amend")` | amend exactly the current job's active turn |
+| `participant.queue_followup` | `theater queue` | `send(if_busy="queue")` | awaitable send job with a queued delivery phase |
 | `participant.settings.update` | `theater settings` | `update_session_settings` | idle-only model/reasoning change |
 | `participant.controls` | `theater controls` | `get_session_controls` | capabilities, health, settings, active turn, queued handles |
 | `participant.interrupt` | `theater interrupt` | `interrupt_session` | cancel the active turn *and* every undelivered followup |
+
+On MCP, `send(if_busy=...)` routes a busy direct child daemon-side: `queue`, `amend` (steer,
+else queue only after a definite refusal; an uncertain steer is never retried), or `replace`
+(interrupt, wait up to 30 s for an observed idle, then send with a card naming the child's
+still-running jobs). An idle target always gets a plain send.
 
 - **Ordinary send** keeps the legacy gates and adds the authoritative
   runtime-snapshot idle check: pending native interactions, an active turn,

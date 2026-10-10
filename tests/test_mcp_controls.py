@@ -1,12 +1,9 @@
 """The runtime-control tool bodies: thin forwarders with the caller named.
 
-Wave 4B's contract, pinned here: every control tool reaches the daemon on
-exactly its frozen RPC name (``participant.steer``, ``participant.queue_followup``,
-``participant.settings.update``, ``participant.controls``), forwards the
-actual calling participant so the daemon can authorize, and returns the
-daemon's reply — including its capability and unavailability reasons —
-verbatim. Nothing here decides policy locally; the tests hold that line by
-asserting the exact params that cross the socket.
+Every control tool reaches the daemon on its frozen RPC name
+(``participant.settings.update``, ``participant.controls``), forwards the
+calling participant so the daemon can authorize, and returns the daemon's reply
+verbatim; the tests assert the exact params that cross the socket.
 """
 
 from __future__ import annotations
@@ -16,69 +13,6 @@ import pytest
 from tests.test_mcp_tools import FakeClient, resolved, session
 from theater.mcp import tools
 from theater.protocol import RemoteError
-
-
-async def test_steer_forwards_the_frozen_rpc_with_the_caller_named():
-    """The daemon authorizes against caller_id; the tool must not lose it."""
-    s = resolved(**{"participant.steer": {"handle": "h#2", "amended": True}})
-
-    record = await tools.steer_session(s, target="p-child", prompt="amend")
-
-    assert record == {"handle": "h#2", "amended": True}
-    assert s.client.methods == ["participant.steer"]
-    assert s.client.params("participant.steer") == {
-        "target": "p-child",
-        "prompt": "amend",
-        "job_handle": None,
-        "caller_id": "p-me",
-    }
-
-
-async def test_steer_identifies_first_or_the_daemon_cannot_authorize():
-    s = session(**{"participant.steer": {"handle": "h#2", "amended": True}})
-    await tools.steer_session(s, target="p-child", prompt="amend")
-    assert s.client.methods == ["hello", "participant.steer"]
-
-
-async def test_steer_forwards_the_expected_job_handle():
-    """The caller may pin which job it expects; a mismatch is the daemon's to refuse."""
-    s = resolved(**{"participant.steer": {"handle": "h#2", "amended": True}})
-    await tools.steer_session(s, target="p-child", prompt="amend", job_handle="h#2")
-    assert s.client.params("participant.steer")["job_handle"] == "h#2"
-
-
-async def test_queue_followup_forwards_the_frozen_rpc_with_the_caller_named():
-    s = resolved(**{"participant.queue_followup": {"handle": "p-child#4", "state": "running"}})
-
-    record = await tools.queue_followup(s, target="p-child", prompt="later")
-
-    assert record == {"handle": "p-child#4", "state": "running"}
-    assert s.client.methods == ["participant.queue_followup"]
-    assert s.client.params("participant.queue_followup") == {
-        "target": "p-child",
-        "prompt": "later",
-        "response_format": None,
-        "caller_id": "p-me",
-    }
-
-
-async def test_queue_followup_forwards_response_format_unchanged():
-    """Same contract as send: the schema hint is forwarded, never serialized here."""
-    response_format = {"type": "object"}
-    s = resolved(**{"participant.queue_followup": {"handle": "p-child#4"}})
-    await tools.queue_followup(
-        s,
-        target="p-child",
-        prompt="later",
-        response_format=response_format,
-    )
-    assert s.client.params("participant.queue_followup")["response_format"] is response_format
-
-
-async def test_queue_followup_identifies_first():
-    s = session(**{"participant.queue_followup": {"handle": "p-child#4"}})
-    await tools.queue_followup(s, target="p-child", prompt="later")
-    assert s.client.methods == ["hello", "participant.queue_followup"]
 
 
 async def test_update_session_settings_forwards_the_frozen_rpc_with_the_caller_named():
@@ -185,8 +119,6 @@ async def test_control_tools_propagate_daemon_errors():
     s._resolved = True
 
     for call, kwargs in (
-        (tools.steer_session, {"target": "p-child", "prompt": "amend"}),
-        (tools.queue_followup, {"target": "p-child", "prompt": "later"}),
         (tools.update_session_settings, {"target": "p-child", "model": "opus-5"}),
         (tools.get_session_controls, {"target": "p-child"}),
     ):
