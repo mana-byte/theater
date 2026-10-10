@@ -892,7 +892,7 @@ def test_a_turn_end_mid_batch_still_answers(registry):
         (None, "done", None),
         (TurnTerminal.COMPLETED, "done", None),
         (TurnTerminal.INTERRUPTED, "killed", "interrupted"),
-        (TurnTerminal.FAILED, "crashed", None),
+        (TurnTerminal.FAILED, "crashed", "turn_failed"),
     ],
 )
 def test_the_boundary_outcome_decides_how_the_answered_job_finishes(
@@ -911,6 +911,10 @@ def test_the_boundary_outcome_decides_how_the_answered_job_finishes(
     assert str(job.state) == expected_state
     assert job.error_code == expected_error_code
     assert job.result == "the answer"
+    if terminal is TurnTerminal.FAILED:
+        from theater.daemon.rpc.jobs import _job_to_dict
+
+        assert "turn failed" in _job_to_dict(job)["error"]
 
 
 @pytest.mark.parametrize(
@@ -918,7 +922,7 @@ def test_the_boundary_outcome_decides_how_the_answered_job_finishes(
     [
         (TurnTerminal.COMPLETED, "done", None),
         (TurnTerminal.INTERRUPTED, "killed", "interrupted"),
-        (TurnTerminal.FAILED, "crashed", None),
+        (TurnTerminal.FAILED, "crashed", "turn_failed"),
     ],
 )
 def test_the_attach_time_outcome_decides_how_the_answered_job_finishes(

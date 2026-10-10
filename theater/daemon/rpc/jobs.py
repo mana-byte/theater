@@ -22,6 +22,7 @@ from theater.constants.daemon import (
 from theater.constants.daemon import (
     RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,  # noqa: F401
 )
+from theater.constants.observation import TURN_FAILED_CODE
 from theater.daemon.awaiting import (
     REASON_AWAITING_INPUT,
     AwaitTarget,
@@ -79,6 +80,10 @@ _JOB_ERROR_MESSAGES = {
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE: (
         "The transcript source stayed unavailable past the observation grace. The pane may "
         "still be healthy; inspect it before retrying or replacing any binding."
+    ),
+    TURN_FAILED_CODE: (
+        "The harness reported that the turn failed (see result for the detail). The agent may "
+        "still be usable: inspect it before resending."
     ),
 }
 
