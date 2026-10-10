@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from theater.harness.contracts.events import clip
+
 #: Job fields the caller supplied or cannot act on (its own id, its prompt, its schema).
 _JOB_ECHO = frozenset(
     {
@@ -37,6 +39,9 @@ def compact(record: Mapping[str, object], *, drop: frozenset[str] = frozenset())
 def job_entry(job: Mapping[str, object]) -> dict:
     """One await/send/queue entry: state and outcome, presence only while it matters."""
     entry = compact(job, drop=_JOB_ECHO)
+    answer = _final_answer(job)
+    if answer:
+        entry["result"] = answer
     presence = entry.get("human_presence")
     if isinstance(presence, Mapping):
         if presence.get("state") == "absent" and not presence.get("protected"):
@@ -44,6 +49,14 @@ def job_entry(job: Mapping[str, object]) -> dict:
         else:
             entry["human_presence"] = compact(presence, drop=_PRESENCE_INTERNAL)
     return entry
+
+
+def _final_answer(job: Mapping[str, object]) -> str:
+    """A done job's final message unless a parsed structured result already carries it."""
+    result = job.get("result")
+    if job.get("state") != "done" or job.get("structured_status") == "parsed":
+        return ""
+    return clip(result) if isinstance(result, str) else ""
 
 
 __all__ = ["compact", "job_entry"]

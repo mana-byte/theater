@@ -20,8 +20,13 @@ from typing import Literal
 
 from mcp.server import MCPServer
 
-from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
-from theater.constants.harness import HARNESS_MCP_SERVER_NAME
+from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS, RPC_MAX_AWAIT_SECONDS
+from theater.constants.harness import (
+    CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS,
+    CLAUDE_MCP_AUTO_BACKGROUND_ENV,
+    CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS,
+    HARNESS_MCP_SERVER_NAME,
+)
 from theater.harness import describe
 from theater.mcp import tools
 from theater.mcp.client_pool import DaemonClientPool
@@ -60,7 +65,7 @@ _WAIT_TOOL = "await_sessions"
 AWAIT_DOC = """Wait for child completion, an input request, or a human to leave.
 
 handles: spawn/send job handles, or registered participant ids without a job.
-max_wait: one overall deadline including human holds; default 150 seconds, cap 300.
+max_wait: one overall deadline including human holds; default 150 seconds, cap {cap}.
 Keep it shorter than your MCP client's timeout. Timeout grants no permission to send.
 
 Returns when ANY target qualifies, preserving input order and returning all entries.
@@ -77,10 +82,10 @@ An existing job handle wins over the participant-id interpretation. A protected 
 still return timeout or pending under UNKNOWN presence even when its job is terminal.
 
 Each entry carries handle, state (running/done/crashed/killed), participant_status
-(observed independently, possibly working after departure) and await_reason; empty
-fields, your own ids, and the prompt and schema you sent are omitted. error_code and
-finished_at appear once set. human_presence (state, protected, reason) appears only
-while it is not a plain absence. await_reason is one of: job_terminal, presence_released,
+(observed independently, possibly working after departure) and await_reason; error_code
+and finished_at appear once set; running entries carry quiet_s, seconds of output silence.
+human_presence (state, protected, reason) appears only while it is not a plain absence.
+await_reason is one of: job_terminal, presence_released,
 awaiting_input (a running job needs input; terminal state takes precedence), already_absent,
 timeout, or pending (another target released wait-any). For gated terminal jobs, job_terminal
 and presence_released name the condition observed last — completion or departure;
@@ -88,21 +93,40 @@ job_terminal wins same-evaluation ties.
 An awaiting_input entry also includes pending_interaction when an exact cached native
 snapshot supplies it (kind, optional native_turn_id and details). Inspect the child's
 native UI to answer the request; this result grants no permission to mutate it.
-No-job entries omit state; no synthetic job is created.
+awaiting_input without pending_interaction: the child's screen shows a prompt; answer it with
+send or ask the user; never sleep-poll it. No-job entries omit state.
 Re-await a pending or timed-out entry only while its job or presence can still change.
-The daemon and other agents keep running.
+max_wait=0 returns current state without blocking (running entries read await_reason=timeout):
+use it for status sweeps.
 
-Done means the turn ended, not that its work is correct. Prompt/result text is omitted:
-use read_transcript and inspect artifacts before accepting work. A job spawned or sent with
+Done means the turn ended, not that its work is correct. `result` is the child's final
+message (first 2,000 chars): its claim, not evidence; check the repo. A job spawned or sent with
 response_format returns its final JSON answer as a JSON-encoded string in structured_result
-once done. structured_status is "parsed", or "unavailable" when completion failed, output
-was missing, or the answer was not JSON. A finished job also carries changes: either
+once done, in place of result. structured_status is "parsed", or "unavailable" when completion
+failed, output was missing, or the answer was not JSON. A finished job also carries changes: either
 {"evidence":"none"}, or {"evidence":"tool_paths","modified":[first 20 paths],
-"modified_count":int,"read_count":int}. Only paths the harness reports are seen; evidence
-"none" means Theater saw no file paths, not that nothing changed — check the repo.
-Process every qualified
-entry, not just the first; wait-any may return several ready targets together.
+"modified_count":int,"read_count":int}; evidence "none" means Theater saw no file paths, not
+that nothing changed. Process every qualified entry; several may be ready together.
 """
+
+
+def await_ceiling(harness: str) -> float | None:
+    """Longest wait this client keeps in the foreground; None when it never backgrounds."""
+    if harness != "claude":
+        return None
+    raw = os.environ.get(CLAUDE_MCP_AUTO_BACKGROUND_ENV)
+    try:
+        ms = float(raw) if raw else CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS
+    except ValueError:
+        ms = CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS
+    if ms <= 0:
+        return None
+    return max(ms / 1000 - CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS, 0.0)
+
+
+def _await_doc(ceiling: float | None) -> str:
+    cap = RPC_MAX_AWAIT_SECONDS if ceiling is None else min(ceiling, RPC_MAX_AWAIT_SECONDS)
+    return AWAIT_DOC.replace("{cap}", f"{cap:g}")
 
 
 def _instructions(toolset: str) -> str:
@@ -714,12 +738,16 @@ def build(
             description=description,
         )
 
-    @mcp_tool(description=AWAIT_DOC)
+    ceiling = await_ceiling(harness)
+
+    @mcp_tool(description=_await_doc(ceiling))
     async def await_sessions(
         handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
     ) -> list[dict]:
         """Forward bounded, presence-aware wait-any to the daemon."""
-        return await tools.await_sessions(session, handles=handles, max_wait=max_wait)
+        return await tools.await_sessions(
+            session, handles=handles, max_wait=max_wait, ceiling=ceiling
+        )
 
     @mcp_tool()
     async def send(target: str, prompt: str, response_format: dict | None = None) -> dict:

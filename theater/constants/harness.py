@@ -16,6 +16,15 @@ HARNESS_MCP_WAIT_SERVER_NAME = f"{HARNESS_MCP_SERVER_NAME}_wait"
 #: Per-tool MCP call timeout; 340 = MAX_AWAIT (300s) + 40s client slack. Duplicated, not imported.
 HARNESS_MCP_TOOL_TIMEOUT_SECONDS = 340.0
 
+#: Claude moves MCP calls past this many ms to the background (default 120000, 0 disables).
+CLAUDE_MCP_AUTO_BACKGROUND_ENV = "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"
+#: Launch value: past the tool timeout, so a full-length await stays in the foreground.
+CLAUDE_MCP_AUTO_BACKGROUND_MS = int((HARNESS_MCP_TOOL_TIMEOUT_SECONDS + 20) * 1000)
+#: Claude's own default when the variable is unset.
+CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS = 120_000
+#: Seconds an await stays under Claude's backgrounding threshold.
+CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS = 10.0
+
 #: No default anywhere: the caller must choose — the whole safety story.
 HARNESS_APPROVAL_POLICIES = ("manual", "edits", "yolo")
 

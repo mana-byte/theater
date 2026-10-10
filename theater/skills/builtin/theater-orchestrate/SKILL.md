@@ -99,11 +99,11 @@ create a duplicate participant.
 
 ## Supervise and review
 
-For every `await_sessions` call, set `max_wait=290` by default. The call returns immediately when any
+For every `await_sessions` call, use the longest max_wait await_sessions allows (its cap is stated
+in its description). The call returns immediately when any
 requested handle finishes, so a long ceiling never delays a completed worker. Do not use 30–50-second
-waits to probe progress or interpret such a short expiration as evidence that a worker stalled. Only
-reduce 290 when the current client's tool timeout requires it; then use the longest duration safely
-below that limit. If a wait expires, await the same handles again: timeout means the caller stopped
+waits to probe progress or interpret such a short expiration as evidence that a worker stalled. If a
+wait expires, await the same handles again: timeout means the caller stopped
 waiting, not that a worker stopped. Never replace long waits with rapid conversational polling or
 duplicate spawns. Update the user at meaningful phase boundaries, not after every wait. Read only a
 narrow transcript tail when needed to diagnose status or recover missing context; never load a whole

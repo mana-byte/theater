@@ -17,7 +17,7 @@ from theater import paths
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.mcp import tools as mcp_tools
-from theater.mcp.server import build
+from theater.mcp.server import await_ceiling, build
 from theater.models import JobState
 
 
@@ -139,6 +139,29 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
     assert "partial text chunks" in descriptions["read_transcript"]
     assert "middle_cursor" in descriptions["read_transcript"]
     assert "does not prove the edit was never committed" in descriptions["recall_read"]
+
+
+@pytest.mark.parametrize(
+    ("harness", "env", "ceiling", "cap"),
+    [
+        ("claude", None, 110.0, "cap 110."),
+        ("claude", "120000", 110.0, "cap 110."),
+        ("claude", "360000", 350.0, "cap 300."),
+        ("claude", "0", None, "cap 300."),
+        ("vibe", "120000", None, "cap 300."),
+    ],
+)
+async def test_await_cap_stays_under_claudes_background_threshold(
+    daemon, monkeypatch, harness, env, ceiling, cap
+):
+    """Claude backgrounds a call past its threshold and the await result never arrives."""
+    if env is None:
+        monkeypatch.delenv("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", env)
+    assert await_ceiling(harness) == ceiling
+    tools = {t.name: t for t in await build("p1", harness, "wait").list_tools()}
+    assert cap in tools["await_sessions"].description
 
 
 async def test_the_server_carries_its_instructions(daemon):

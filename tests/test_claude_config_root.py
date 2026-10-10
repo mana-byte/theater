@@ -105,6 +105,8 @@ def test_plan_env_pins_config_dir_only_when_configured(tmp_path, monkeypatch) ->
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     plan = plan_launch(context())
     assert "CLAUDE_CONFIG_DIR" not in plan.env
+    # Past the 340 s tool timeout, so a long await is never moved to the background.
+    assert plan.env["CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"] == "360000"
 
 
 def test_default_root_when_env_unset_is_unchanged(tmp_path, monkeypatch) -> None:

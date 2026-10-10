@@ -58,12 +58,11 @@ Only the leader sends debate prompts and controls progression. After each send, 
 read only the latest relevant transcript segment. Never load the full transcript by default. Keep
 messages focused on the current disagreement instead of repeating the entire brief.
 
-For every `await_sessions` call, set `max_wait=290` by default. The call returns immediately when the
-peer finishes, so a long ceiling never delays a completed response. Do not use 30–50-second waits to
-probe progress or interpret such a short expiration as evidence that the peer stalled. Only reduce
-290 when the current client's tool timeout requires it; then use the longest duration safely below
-that limit. If a wait expires, await the same handle again instead of polling rapidly or prompting the
-peer for status.
+For every `await_sessions` call, use the longest max_wait await_sessions allows (its cap is stated
+in its description). The call returns immediately when the peer finishes, so a long ceiling never
+delays a completed response. Do not use 30–50-second waits to probe progress or interpret such a
+short expiration as evidence that the peer stalled. If a wait expires, await the same handle again
+instead of polling rapidly or prompting the peer for status.
 
 If the peer stalls or disconnects, inspect its state and resume the same participant and worktree
 before considering replacement. Never replace it silently. If recovery fails, end the debate and
