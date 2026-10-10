@@ -67,6 +67,7 @@ class WatchSubscription:
         fallback_seconds: float,
     ) -> None:
         self._watcher = watcher
+        self.loop = watcher._loop
         self.path = path
         self._wake = wake
         self._fallback = fallback_seconds
@@ -190,6 +191,8 @@ class FilesystemWatcher:
         kq, self._kq = self._kq, None
         if kq is None:
             return
+        if _WATCHERS.get(self._loop) is self:
+            del _WATCHERS[self._loop]
         with contextlib.suppress(Exception):
             self._loop.remove_reader(kq.fileno())
         entries = list(self._entries.values())
@@ -305,23 +308,23 @@ class FilesystemWatcher:
             self.close()
 
 
-_shared: FilesystemWatcher | None = None
+_WATCHERS: dict[asyncio.AbstractEventLoop, FilesystemWatcher] = {}
 
 
 def shared_watcher() -> FilesystemWatcher | None:
-    """The running loop's watcher, created lazily; ``None`` when kqueue is unavailable."""
-    global _shared  # noqa: PLW0603
+    """The running loop's watcher (one per loop), created lazily; ``None`` without kqueue."""
     if not kqueue_available():
         return None
     loop = asyncio.get_running_loop()
-    if _shared is not None and (_shared.closed or _shared._loop is not loop):
-        _shared = None
-    if _shared is None:
+    for dead in [other for other in _WATCHERS if other.is_closed()]:
+        _WATCHERS[dead].close()
+    watcher = _WATCHERS.get(loop)
+    if watcher is None or watcher.closed:
         try:
-            _shared = FilesystemWatcher(loop)
+            watcher = _WATCHERS[loop] = FilesystemWatcher(loop)
         except OSError:
             return None
-    return _shared
+    return watcher
 
 
 class WatchGate:
@@ -350,6 +353,13 @@ class WatchGate:
     def due(self, path: Path) -> bool:
         """True when *path* must be checked for real; always True without a live watch."""
         sub = self._sub
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return True
+        if sub is not None and sub.loop is not running:
+            self.release()  # migrated to another loop: its watcher belongs to the old one
+            sub = None
         if sub is not None and (sub.path != Path(path).absolute() or not sub.active):
             if not sub.active and not sub.closed:
                 self._retry_at = time.monotonic() + RETRY_AFTER_FAILURE_SECONDS

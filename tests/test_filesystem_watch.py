@@ -37,9 +37,8 @@ def record(text: str) -> str:
 @pytest.fixture(autouse=True)
 def _fresh_shared_watcher():
     yield
-    if filesystem._shared is not None:
-        filesystem._shared.close()
-        filesystem._shared = None
+    for watcher in list(filesystem._WATCHERS.values()):
+        watcher.close()
 
 
 @pytest.fixture
@@ -142,7 +141,7 @@ async def test_watcher_failure_reverts_the_source_to_full_rate_polling(watched, 
     await attach(s)
     await s.read()
     await s.read()
-    watcher = filesystem._shared
+    watcher = filesystem._WATCHERS.get(asyncio.get_running_loop())
     assert watcher is not None and s._watch_gate.active
 
     class Broken:
@@ -189,7 +188,7 @@ async def test_shutdown_closes_the_kqueue_and_removes_the_reader(watched):
     s, _ = watched
     await attach(s)
     await s.read()
-    watcher = filesystem._shared
+    watcher = filesystem._WATCHERS.get(asyncio.get_running_loop())
     assert watcher is not None and watcher._kq is not None
     kq_fd = watcher._kq.fileno()
     entry_fds = [e.fd for e in watcher._entries.values() if e.fd >= 0]
@@ -262,3 +261,80 @@ async def test_pending_receipt_is_stat_polled_only_when_its_directory_changes(
     batch = await s.read()
     assert calls[0] >= 1 and batch.attached is not None
     await s.aclose()
+
+
+def _run(loop, coro):
+    return loop.run_until_complete(coro)
+
+
+def _fds(watcher: FilesystemWatcher) -> list[int]:
+    assert watcher._kq is not None
+    return [watcher._kq.fileno(), *(e.fd for e in watcher._entries.values() if e.fd >= 0)]
+
+
+def test_one_watcher_per_loop_and_migration_closes_the_old_one(tmp_path):
+    path = tmp_path / "t.jsonl"
+    path.write_text("a\n")
+    loop_a, loop_b = asyncio.new_event_loop(), asyncio.new_event_loop()
+    migrant, peer_a, peer_b = WatchGate(), WatchGate(), WatchGate()
+
+    async def arm(gate):
+        assert gate.due(path)
+        return filesystem.shared_watcher()
+
+    try:
+        watcher_a = _run(loop_a, arm(migrant))
+        assert _run(loop_a, arm(peer_a)) is watcher_a, "one watcher per loop"
+        watcher_b = _run(loop_b, arm(peer_b))
+        assert watcher_b is not watcher_a
+        old_fds, b_fds = _fds(watcher_a), _fds(watcher_b)
+
+        _run(loop_b, arm(migrant))  # A -> B; B's existing watch is shared
+        assert _fds(watcher_b) == b_fds, "dedup per loop: no new descriptors"
+        assert not watcher_a.closed, "peer_a still holds A"
+        peer_a.release()
+        assert watcher_a.closed
+        for fd in old_fds:
+            with pytest.raises(OSError) as info:
+                os.fstat(fd)
+            assert info.value.errno == errno.EBADF
+        assert {loop_b: watcher_b} == filesystem._WATCHERS
+
+        assert _run(loop_a, arm(migrant)) is not watcher_b  # B -> A re-arms on a fresh watcher
+        assert set(filesystem._WATCHERS) == {loop_a, loop_b}
+        assert not watcher_b.closed, "peer_b still holds B"
+    finally:
+        for gate in (migrant, peer_a, peer_b):
+            gate.release()
+        for loop in (loop_a, loop_b):
+            loop.close()
+
+
+def test_closed_loops_leave_no_global_leak(tmp_path):
+    path = tmp_path / "t.jsonl"
+    path.write_text("a\n")
+    dead: list[FilesystemWatcher] = []
+    for _ in range(3):
+        loop = asyncio.new_event_loop()
+
+        async def arm():
+            assert WatchGate().due(path)
+            return filesystem.shared_watcher()
+
+        watcher = _run(loop, arm())
+        assert watcher is not None
+        dead.append(watcher)
+        loop.close()  # the gate is never released: the loop just dies
+
+    loop = asyncio.new_event_loop()
+
+    async def last():
+        return filesystem.shared_watcher()
+
+    try:
+        current = _run(loop, last())
+        assert all(w.closed for w in dead)
+        assert {loop: current} == filesystem._WATCHERS
+    finally:
+        current.close()
+        loop.close()
