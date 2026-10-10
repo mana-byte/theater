@@ -48,6 +48,11 @@ p95 4,848 ms repeats the high-load tail-scale watch item.
 
 ## Confirmation session (post-wakeup-wiring, 3 alternating pairs)
 
+NOTE: the working-load rows below mix runs with unmatched event rates
+(28k-106k events/h) — under the protocol they are INVALID as pass/fail
+evidence and are recorded for observation only. The idle rows remain
+valid (idle has no event-rate dependency).
+
 CPU reconfirmed across 3 pairs: every role in every scenario PASS again.
 
 | scenario | role | base mean (3 runs) | HEAD mean (3 runs) | delta |
@@ -77,7 +82,12 @@ harness write delay excluded), from the same isolated measurement stack:
 |---|---:|---|---|
 | idle10+working5 | 30,617 | 118.1 / 3,108.8 | **1.8 / 12.7** |
 
-The original <50 ms latency aspiration is MET on the honest metric:
-theater-side delivery p95 is 12.7 ms under a 30k events/h load. The
-seconds-scale transcript_to_bus tails are the harness's own write delay
-and agent chattiness, not theater processing.
+Single run, no baseline comparison, and an important scope limit: this
+metric measures read-to-publish (processing inside the daemon) ONLY —
+detection delay (file written -> observer wakes and reads), which is
+exactly what the fs-wakeup work changed, is EXCLUDED. The <50 ms
+aspiration is met for the processing component; the detection component
+needs the synthetic-writer A/B to be measured honestly. The
+seconds-scale transcript_to_bus tails are dominated by harness write
+delay and agent chattiness, but theater detection delay is inside that
+metric and not yet split out.
