@@ -93,9 +93,11 @@ job_terminal wins same-evaluation ties.
 An awaiting_input entry also includes pending_interaction when an exact cached native
 snapshot supplies it (kind, optional native_turn_id and details). Inspect the child's
 native UI to answer the request; this result grants no permission to mutate it.
-No-job entries omit state; no synthetic job is created.
+awaiting_input without pending_interaction: the child's screen shows a prompt; answer it with
+send or ask the user; never sleep-poll it. No-job entries omit state.
 Re-await a pending or timed-out entry only while its job or presence can still change.
-The daemon and other agents keep running.
+max_wait=0 returns current state without blocking (running entries read await_reason=timeout):
+use it for status sweeps.
 
 Done means the turn ended, not that its work is correct. `result` is the child's final
 message (first 2,000 chars): its claim, not evidence; check the repo. A job spawned or sent with
@@ -103,10 +105,8 @@ response_format returns its final JSON answer as a JSON-encoded string in struct
 once done, in place of result. structured_status is "parsed", or "unavailable" when completion
 failed, output was missing, or the answer was not JSON. A finished job also carries changes: either
 {"evidence":"none"}, or {"evidence":"tool_paths","modified":[first 20 paths],
-"modified_count":int,"read_count":int}. Only paths the harness reports are seen; evidence
-"none" means Theater saw no file paths, not that nothing changed — check the repo.
-Process every qualified
-entry, not just the first; wait-any may return several ready targets together.
+"modified_count":int,"read_count":int}; evidence "none" means Theater saw no file paths, not
+that nothing changed. Process every qualified entry; several may be ready together.
 """
 
 
