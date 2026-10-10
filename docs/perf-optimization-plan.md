@@ -104,7 +104,7 @@ Recalibrated 2026-10-10. The original absolute targets were set against `docs/pe
 
 **Latency**
 
-- [ ] `transcript_to_bus` p95 <= 500 ms, and <= the pre-optimization code's p95 on the same host, measured in `idle10+working5` at 12k-16k bus events/h. The metric definition is unchanged: bus `ts` minus the harness record `ts`. It therefore includes the harness's own write delay (see the Caveats section of each report).
+- [ ] `transcript_to_bus` p95 <= 500 ms, and <= the pre-optimization code's p95 on the same host, measured in `idle10+working5` at 12k-16k bus events/h, judged on the mean of at least 3 alternating A/B pairs. Provisional latency noise band: single-run p95 at ~14k events/h has been observed from 443 to 573 ms (`docs/perf-profile-head.md`, `docs/perf-wave3-ab.md`); a single pair differing by less than 150 ms is inconclusive. The metric definition is unchanged: bus `ts` minus the harness record `ts`. It therefore includes the harness's own write delay (see the Caveats section of each report).
   - Evidence: pre-optimization 469.4 ms at 14 200/h (`docs/perf-baseline.md`); HEAD 443.3 ms at 14 311/h (`docs/perf-profile-head.md`). The 500 ms limit leaves about 13 % headroom above the best observed p95.
 - [ ] Watch item, not gating until explained: at 43 240 events/h HEAD's p95 is 8 111.9 ms and p50 is 1 910.9 ms (`docs/perf-final.md`). No pre-optimization measurement exists at that rate. Measure one before deciding whether this is normal load scaling or a regression.
 
