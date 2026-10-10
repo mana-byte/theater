@@ -91,3 +91,28 @@ needs the synthetic-writer A/B to be measured honestly. The
 seconds-scale transcript_to_bus tails are dominated by harness write
 delay and agent chattiness, but theater detection delay is inside that
 metric and not yet split out.
+
+## Final close-out A/B (current HEAD incl. audit fixes, 3 alternating pairs)
+
+Idle scenarios: PASS for every role across all 3 pairs (daemon empty -1.30,
+idle10 -1.13; regie empty -1.69, idle10 -1.54; bridge and tmux improved or flat).
+
+Working load: pair 1 is the only rate-matched pair (~32k events/h both sides):
+daemon +0.17pp — inconclusive within the protocol's 1pp band (working daemon
+CPU is FLAT across the campaign at matched rates); regie -2.56pp PASS;
+bridge -0.47pp PASS. Pairs 2-3 are invalid working evidence (HEAD ran at
+2.2-3.2x the baseline's event rate); their means must not be used.
+
+## Synthetic write-to-bus latency A/B (the honest latency instrument)
+
+Deterministic rate-matched workload (0.73 rec/s x writers, de-aliased from the
+baseline poll cadence, records stamped at write time; scripts/perf_synthetic_writer.py):
+
+| | write-to-bus p50 | write-to-bus p95 | observe_to_bus p50/p95 |
+|---|---:|---:|---|
+| baseline 34625699 | 121.5 ms | 237.6 ms | n/a |
+| HEAD | **1.3 ms** | **2.9 ms** | 0.4 / 0.8 ms |
+
+~93x end-to-end delivery latency improvement at matched rates (13.1k events/h,
+0.3% drift). The kqueue wakeups collapsed detection delay, which polling
+dominated. The <50 ms aspiration is met with ~20x margin on the true metric.
