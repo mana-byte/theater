@@ -15,9 +15,8 @@ async def recall(session: Session, *, paths: list[str], depth: int = 5) -> dict[
     """Per-file timelines of what Theater watched happen.
 
     Returns one timeline per path, keyed by the repo-relative path.
-    Each job point carries a ``session_id`` that composes with
-    ``spawn_session(resume=<session_id>)`` — the session id out of
-    ``recall`` goes straight into ``resume``.
+    A resumable job point carries a ``session_id`` that may be passed to
+    ``spawn_session(resume=<session_id>)``; current launch gates still apply.
 
     Paths may be absolute or repo-relative but must stay inside the repository.
     A path that has never been touched comes back as an empty timeline.
@@ -43,8 +42,8 @@ async def recall_read(session: Session, *, segment_id: str) -> dict:
     Takes the ``segment`` id off a timeline point. A job segment comes
     back with the job's transcript; a gap segment comes back with the
     commits git can find for that blob transition, or an explicit
-    ``explained: false`` when it can find none — which is a different
-    answer from an empty list.
+    ``explained: false`` when no explanation is returned. Missing repository
+    context, rejected paths, and git failures can also cause it.
 
     Separate from `recall` because it is the only call in the feature
     that spends a ``git log``, and because it answers about one segment

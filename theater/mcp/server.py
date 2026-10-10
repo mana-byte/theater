@@ -47,7 +47,9 @@ Address participants by name. Every `target` accepts a live name, and names are
 unique among live participants, so you never need to look up or memorize an id
 to talk to a live agent. Keep ids only for dead participants and resume.
 
-Tool outputs omit empty fields and anything you supplied yourself.
+Participant summaries omit null, empty-list, and empty-object fields. Await,
+send, and queue job entries also omit prompt/schema echoes and routing ids.
+Omission rules are tool-specific.
 
 Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
 """
@@ -64,35 +66,41 @@ Keep it shorter than your MCP client's timeout. Timeout grants no permission to 
 Returns when ANY target qualifies, preserving input order and returning all entries.
 Presence gating is decided once, at admission. A target protected at admission
 (present or unknown) is gated: it requires an observed departure plus either
-terminal job state or current awaiting_input status — departure clears the gate permanently
+a terminal job state (done, crashed, or killed) or current awaiting_input status — departure
+clears the gate permanently
 and re-entry does not restore it. A target unprotected at admission is never
 gated: later human presence is irrelevant; terminal state or a running job whose
 participant is currently awaiting_input qualifies it. Input requests are re-evaluated
 on every status change, never latched. Departure alone cannot release a running job.
 Ids with no job wait only for presence and return immediately if unprotected at admission.
-An existing job handle wins over the participant-id interpretation.
+An existing job handle wins over the participant-id interpretation. A protected target can
+still return timeout or pending under UNKNOWN presence even when its job is terminal.
 
 Each entry carries handle, state (running/done/crashed/killed), participant_status
 (observed independently, possibly working after departure) and await_reason; empty
 fields, your own ids, and the prompt and schema you sent are omitted. error_code and
 finished_at appear once set. human_presence (state, protected, reason) appears only
-while it is not a plain absence. await_reason is one of: job_terminal, presence_released
-(each names the condition observed last; job_terminal wins same-evaluation
-ties), awaiting_input (a running job needs input; terminal state takes precedence),
-already_absent, timeout, or pending (another target released wait-any).
+while it is not a plain absence. await_reason is one of: job_terminal, presence_released,
+awaiting_input (a running job needs input; terminal state takes precedence), already_absent,
+timeout, or pending (another target released wait-any). For gated terminal jobs, job_terminal
+and presence_released name the condition observed last — completion or departure;
+job_terminal wins same-evaluation ties.
 An awaiting_input entry also includes pending_interaction when an exact cached native
 snapshot supplies it (kind, optional native_turn_id and details). Inspect the child's
 native UI to answer the request; this result grants no permission to mutate it.
 No-job entries omit state, kind, prompt, and result; no synthetic job is created.
-Re-await pending or timed-out entries. The daemon and other agents keep running.
+Re-await a pending or timed-out entry only while its job or presence can still change.
+The daemon and other agents keep running.
 
 Done means the turn ended, not that its work is correct. Prompt/result text is omitted:
 use read_transcript and inspect artifacts before accepting work. A job spawned or sent with
-response_format returns its parsed final JSON answer in structured_result once done
-(structured_status "parsed", or "unavailable" when it was not JSON). A finished job also
-carries changes: the files its tools modified (first 20 plus modified_count, read_count).
-Only paths the harness reports are seen; evidence "none" means Theater saw no file paths,
-not that nothing changed — check the repo. Process every qualified
+response_format returns its final JSON answer as a JSON-encoded string in structured_result
+once done. structured_status is "parsed", or "unavailable" when completion failed, output
+was missing, or the answer was not JSON. A finished job also carries changes: either
+{"evidence":"none"}, or {"evidence":"tool_paths","modified":[first 20 paths],
+"modified_count":int,"read_count":int}. Only paths the harness reports are seen; evidence
+"none" means Theater saw no file paths, not that nothing changed — check the repo.
+Process every qualified
 entry, not just the first; wait-any may return several ready targets together.
 """
 
@@ -157,9 +165,10 @@ provider: exact provider id or selector for this launch. When omitted, Theater
           uses terminals.default_provider. A stock-terminal launch needs that
           provider ready; for tmux, have the operator run `regie bridge start`.
 model:    which model the child runs, spelled the way its own CLI spells it
-          (opencode wants provider/model). Optional; omit it and the harness
-          uses its default, which always works. Naming one only works if the
-          config allows it for that harness — call list_models for the set,
+          (opencode wants provider/model). Omitting it bypasses the model
+          allowlist and leaves selection to the CLI; it does not guarantee
+          launch success. Naming one only works if the config allows it for
+          that harness — call list_models for the set,
           which is usually empty until a human writes it. Theater checks
           membership and nothing else: it cannot confirm the CLI honoured the
           name, so a typo someone allowed surfaces as a child on the wrong
@@ -231,11 +240,13 @@ wiring:   "auto" | "native" | "legacy" — how the child's controls are wired.
            The choice changes nothing about `approval`, which stays required.
 
 The returned participant record includes `session_id`, the harness's opaque
-resume identifier. It is normally null at spawn time because the observer
-discovers it asynchronously; call list_participants later to retrieve it.
-Check `operation_state`: only `succeeded` confirms terminal creation. If the
-operation is still running or uncertain, its ID and diagnostic fields are
-returned; do not spawn a replacement while that launch remains unresolved.
+resume identifier, only after the observer discovers it; a new spawn normally
+omits the field. With neither prompt nor response_format, the launch job becomes
+done only after successful terminal binding. Otherwise terminal creation is not
+task completion, and an unmatched turn may leave the job running. Check
+`operation_state`: only `succeeded` confirms terminal creation. If the operation
+is still running or uncertain, its ID and diagnostic fields are returned; do not
+spawn a replacement while that launch remains unresolved.
 """
 
 
@@ -402,8 +413,10 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         coordinate cleanup through their direct parents; do not claim that the
         user's confirmation syntax is the problem.
 
-        Refuses with `no_self_kill`, `not_your_child`, or `not_found`.
-        Killing an already-dead child by id is a harmless no-op.
+        Refusals include `no_self_kill`, `not_your_child`, `not_found`, and
+        `human_present` for a protected live terminal. The list is non-exhaustive.
+        Killing an already-dead child by id returns
+        {"id": str, "killed": false, "reason": "already_dead"}.
 
         For `worktree=True`, verified termination also cleans up the unique
         worktree and deletes its merged branch. Dirty or still-used worktrees
@@ -509,11 +522,13 @@ def build(
 
     @mcp_tool()
     async def whoami() -> dict:
-        """Identify yourself: your id, harness session id, tier, cwd and status.
+        """Identify yourself. Returned fields include id, live name, description,
+        harness, tier, status, cwd, branch, session_id, parent_id, and
+        addressable; unset fields are omitted.
 
         Call this before addressing anyone else, so you can tell yourself apart
         from the other participants in the list. `session_id` is the harness's
-        opaque resume identifier and may be null until Theater's observer finds
+        opaque resume identifier and is omitted until Theater's observer finds
         your transcript; call this tool again later to refresh it.
         """
         return await tools.whoami(session)
@@ -529,12 +544,13 @@ def build(
         """List every agent on this machine that Theater knows about.
 
         Each entry says who they are (harness, id, session_id), where they are
-        (cwd, branch), how they got here (tier, parent_id) and whether you can
-        send work to them (addressable). `session_id` is the harness's opaque
-        resume identifier; it may be null until Theater's observer discovers
-        the transcript, so list again later if you need it. External
-        participants can call out but can never be called: they have no pane
-        to deliver into.
+        (cwd, branch), how they got here (tier, parent_id), and whether Theater
+        currently has a verified physical inbound route (`addressable`). That
+        field is not a readiness or permission verdict. `session_id` is the
+        harness's opaque resume identifier; it is omitted until Theater's
+        observer discovers the transcript, so list again later if you need it.
+        Origin alone does not decide addressability: an external participant is
+        addressable only while an independent delivery route is verified.
 
         Names are unique among live participants and every tool's `target`
         accepts one, so prefer names for live agents. They last while the
@@ -602,9 +618,9 @@ def build(
 
         An allowlist a human writes in Theater's config, not everything the CLI
         could run, and it starts empty: a harness with `models: []` refuses
-        every model you name. That is not a dead end — spawn without `model`
-        and the child comes up on whatever its own CLI is set to, which always
-        works. Suggest the config edit rather than retrying with another name.
+        every model you name. Omitting `model` bypasses the allowlist and leaves
+        selection to the CLI; it does not guarantee launch success. Suggest the
+        config edit rather than retrying with another name.
 
         `supported: false` means the adapter cannot select a model at all, so
         no config edit helps.
@@ -712,7 +728,9 @@ def build(
         Delivery follows the daemon's selected capability route: native runtime
         or the bound terminal provider. The route is chosen before an attempt;
         potentially accepted delivery is never replayed or failed over. The
-        target must be addressable. The returned handle can be awaited.
+        target must be addressable: that means a verified physical inbound route,
+        not readiness or permission. Ordinary send is not ownership-gated. The
+        returned handle can be awaited.
 
         target:    live name (unique among live participants) or id. Names
                    work only while the participant is live and may be
@@ -762,8 +780,12 @@ def build(
         list_participants reports status="idle" before sending a replacement
         prompt.
 
-        Only the direct parent or a local operator may interrupt; the daemon
-        decides from the forwarded caller identity.
+        Returns {"id": str, "interrupted": bool, "reason"?: str,
+        "cancelled_followups"?: [handle, ...]}; cancelled_followups is omitted
+        when empty, and reason is an open set. Refusals are non-exhaustive and
+        include `human_present`, `busy`, and `stale_target`. Only the direct
+        parent or a local operator may interrupt; the daemon decides from the
+        forwarded caller identity.
         """
         return await tools.interrupt_session(session, target=target)
 
@@ -783,10 +805,10 @@ def build(
         shared design decisions, or breadcrumbs. Do not use it for mutual
         exclusion, queues, durable memory, or source-of-truth records.
 
-        Bounded: one value carries at most 256 KiB encoded; a namespace holds
-        at most 512 entries and 1 MiB encoded in aggregate, so store a
-        pointer or a summary, not the payload itself. Names, provided keys,
-        and cursors are bounded to 128 characters.
+        Bounded: one value carries at most 256 KiB of raw UTF-8; a namespace
+        holds at most 512 live entries and 1 MiB of raw UTF-8 keys plus values.
+        On writes, namespace and supplied key are limited to 128 characters.
+        Store a pointer or summary, not the payload itself.
 
         value:     exact string to store.
         namespace: coordination bucket chosen by the agents sharing it.
@@ -809,14 +831,19 @@ def build(
         [key, ...], "truncated": bool, "after_key": str | None}. Entries are
         ordered by key. Pass keys to fetch specific entries (at most 128);
         omit to read the namespace. One page returns at most ~4 MiB encoded;
-        when truncated is true, pass the returned after_key as the next
-        call's after_key to continue after the last returned key. Entries are
-        shared by namespace across this Theater machine; expired entries are
-        omitted and reads never refresh their expiry.
+        when truncated is true and after_key is non-null, pass that after_key to
+        continue after the last returned key. A legacy entry too large to return
+        alone instead reports oversized_digest, oversized_bytes, and a nullable
+        oversized_key; it is unread. Skip it with after_key only when
+        oversized_key is non-null, otherwise delete it by digest or clear the
+        namespace. Current bounded writes cannot create such an entry. Entries
+        are shared by namespace across this Theater machine; expired entries
+        are omitted and reads never refresh their expiry.
 
         namespace: coordination bucket chosen by the agents sharing it.
-        keys:      optional list of entry ids to fetch (at most 128); None means all.
-        after_key: optional cursor; return only entries whose key sorts after it.
+        keys:      optional list of at most 128 entry ids, each at most 128
+                   characters; None means all.
+        after_key: optional cursor with no length limit; return keys after it.
         """
         return await tools.scratchpad_get(
             session, namespace=namespace, keys=keys, after_key=after_key
@@ -829,9 +856,18 @@ def build(
         digests: list[str] | None = None,
         clear: bool = False,
     ) -> dict:
-        """Delete scratchpad entries by key or by the digest a refusal page
-        issued, or clear every entry in the namespace; the response stays
-        bounded, confirming too-large deletions by digest.
+        """Delete scratchpad entries by key or oversized-entry digest, or clear
+        every entry in the namespace.
+
+        keys and digests may be combined, with at most 128 entries in each.
+        digests are the 64-character lowercase oversized_digest values from
+        scratchpad_get. Supply at least one key or digest, or clear=true with
+        neither. Keys have no length limit so legacy entries remain deletable.
+
+        Returns {"namespace": str | null, "deleted": [key, ...],
+        "deleted_oversized"?: [digest, ...]}, or {"namespace": str | null,
+        "deleted_count": int} for clear. A legacy namespace too large to echo
+        returns null.
         """
         return await tools.scratchpad_delete(
             session, namespace=namespace, keys=keys, digests=digests, clear=clear
@@ -876,8 +912,9 @@ def build(
         agent that made each change.
 
         One timeline per path, newest first. Each point carries clipped
-        task/result, outcome, sha before/after, and a ``segment`` that
-        ``recall_read`` expands. Beside the timeline: ``current`` (the
+        task/result, outcome, one `sha` string (`before → after`, with `-` for
+        missing and `?` for unavailable), and a ``segment`` that ``recall_read``
+        expands. Beside the timeline: ``current`` (the
         file's sha now) and ``dirty`` (differs from HEAD). Compare
         ``current`` with the newest point's ending SHA to detect
         post-job changes.
@@ -886,12 +923,13 @@ def build(
         outside Theater edited the file. ``recall_read`` on its segment
         asks git what.
 
-        ``session_id`` goes straight into
-        ``spawn_session(resume=<session_id>)``, so you can put the
-        original author back on its own change.
+        When `resume` is true, `session_id` may be passed to
+        ``spawn_session(resume=<session_id>)`` to attempt restoring the original
+        context; current launch gates may still refuse it. When false,
+        `resume_note` explains why.
 
         paths: repo-relative or absolute within your repository. Outside paths
-               and traversal are rejected. Costs the same for 1 path as for 40.
+               and traversal are rejected.
         depth: points per path, gaps included. Default 5.
 
         Scoped to your git root. Worktree children live under it, so their
@@ -913,9 +951,10 @@ def build(
         older material. A missing transcript is reported as unavailable;
         the job's retained metadata still arrives.
 
-        Gap segment: the commits git can attribute the transition to.
-        `explained: false` means git found none, so the edit was never
-        committed here — not that nothing happened.
+        Gap segment: the commits git can attribute to the transition.
+        `explained: false` means no explaining commits were returned; it does
+        not prove the edit was never committed. Missing repository context,
+        rejected paths, and git failures can also produce it.
 
         The only Theater call that spends a `git log`, and it answers
         about one segment: let `recall` narrow first, then spend this on

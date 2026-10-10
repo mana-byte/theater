@@ -135,8 +135,8 @@ async def spawn_session(
     cannot carry a prompt.
 
     The returned ``session_id`` is populated asynchronously by the observer,
-    so it is normally None for a newly spawned child. Re-list participants
-    later to retrieve it after Theater has attached to the child's transcript.
+    so the compact MCP projection normally omits it for a newly spawned child.
+    Re-list later after Theater attaches to the child's transcript.
 
     ``wiring`` selects a preference: "auto" (default) and "native" use a
     compatible runtime when available, otherwise retain the ordinary launch;
@@ -206,8 +206,9 @@ async def send_prompt(
 
     Delivery follows the daemon's selected capability route. A native attempt
     with an unknown or disconnected outcome is never silently retried into
-    the pane. The target must be addressable (Spawned
-    or Adopted). If a human is present at the target pane, the call fails
+    the pane. The target must have a verified physical delivery route; origin
+    and ownership do not decide ordinary send admission. If a human is present
+    at the target pane, the call fails
     with `human_present` — never inject into a session a human is using. If
     the target is working or already owns an outstanding send prompt, the
     call fails with `busy`. To replace a direct child's current turn, call

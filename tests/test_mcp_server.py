@@ -119,6 +119,25 @@ async def test_every_tool_is_documented(daemon):
         assert tool.description and tool.description.strip(), tool.name
 
 
+async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
+    mcp = build("p1", "vibe")
+    descriptions = {
+        tool.name: " ".join(tool.description.split()) for tool in await mcp.list_tools()
+    }
+
+    assert "Omission rules are tool-specific" in mcp.instructions
+    assert "done, crashed, or killed" in descriptions["await_sessions"]
+    assert "JSON-encoded string" in descriptions["await_sessions"]
+    assert '{"evidence":"none"}' in descriptions["await_sessions"]
+    assert "successful terminal binding" in descriptions["spawn_session"]
+    assert "does not guarantee launch success" in descriptions["spawn_session"]
+    assert "human_present" in descriptions["put_child_back_in_the_wound"]
+    assert "already_dead" in descriptions["put_child_back_in_the_wound"]
+    assert "nullable" in descriptions["scratchpad_get"]
+    assert "may be combined" in descriptions["scratchpad_delete"]
+    assert "does not prove the edit was never committed" in descriptions["recall_read"]
+
+
 async def test_the_server_carries_its_instructions(daemon):
     assert build("p1", "vibe").instructions.strip()
 
@@ -328,6 +347,9 @@ async def test_interrupt_description_states_turn_and_followup_cancellation(daemo
     assert "queued followup" in description
     assert "undelivered" in description
     assert 'error_code "interrupted"' in description
+    assert "cancelled_followups" in description
+    assert "busy" in description
+    assert "stale_target" in description
 
 
 async def test_control_tool_descriptions_point_policy_at_the_daemon(daemon):
@@ -347,6 +369,8 @@ async def test_send_description_states_daemon_selected_delivery(daemon):
     assert "send-keys" not in description
     assert "route is chosen before" in description
     assert "never replayed" in description
+    assert "verified physical inbound route" in description
+    assert "not ownership-gated" in description
 
 
 async def test_spawn_wiring_description_names_the_daemon_owned_rollout(daemon):
