@@ -1026,6 +1026,7 @@ async def test_rename_rejects_taken_name_over_rpc(client, terminal_provider):
     with pytest.raises(RemoteError) as exc:
         await client.call("participant.rename", id=b["id"], name=a["name"])
     assert exc.value.code == "name_taken"
+    assert exc.value.details == {"next": "omit name to get a free one"}
 
 
 async def test_send_addressed_by_name_reaches_the_right_target(client, terminal_provider, daemon):

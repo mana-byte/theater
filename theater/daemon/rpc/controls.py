@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
+from theater.constants.refusals import NEXT_STEER_STALE
 from theater.daemon.controls.interaction_wire import interaction_to_wire
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
@@ -30,6 +31,7 @@ from theater.harness.contracts.runtime import (
     RuntimeHost,
     RuntimeWiring,
 )
+from theater.models import StaleTarget
 
 #: The one-word reason a pane without native wiring cannot offer a native
 #: control. The detail string says the same thing the service's refusal does.
@@ -265,12 +267,16 @@ async def _steer(daemon, params: dict) -> dict:
     prompt = _string_param(params, "prompt", method_name=method_name)
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     job_handle = _optional_string_param(params, "job_handle", method_name=method_name)
-    job = await daemon.controls.steer(
-        target.id,
-        caller_id=caller_id,
-        prompt=prompt,
-        job_handle=job_handle,
-    )
+    try:
+        job = await daemon.controls.steer(
+            target.id,
+            caller_id=caller_id,
+            prompt=prompt,
+            job_handle=job_handle,
+        )
+    except StaleTarget as exc:
+        exc.details = exc.details or {"next": NEXT_STEER_STALE}
+        raise
     result = job.to_dict()
     result.update(_steer_receipt(daemon, job))
     daemon.store.bus_append(

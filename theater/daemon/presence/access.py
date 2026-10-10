@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from theater.constants.refusals import human_present_next
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.models import HumanPresent, TerminalBindingRecord
 
@@ -25,7 +26,8 @@ def check_absent(daemon, participant_id: str) -> None:
         raise HumanPresent(
             f"human presence for {participant_id!r} is {snapshot.state.value} "
             f"({snapshot.reason}); not mutating; "
-            f"call await_sessions(handles=[{participant_id!r}]), then retry"
+            f"call await_sessions(handles=[{participant_id!r}]), then retry",
+            details={"next": human_present_next(snapshot.reason)},
         )
 
 

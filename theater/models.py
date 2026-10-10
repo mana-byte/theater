@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 
+from theater.constants.refusals import NEXT_BUSY
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 
@@ -392,6 +393,13 @@ class TheaterError(Exception):
     code = "error"
     # Optional diagnostic detail for a refusal event; the wire error code stays stable.
     refusal_reason: str | None = None
+    # Structured wire details (e.g. {"next": ...}); MCP turns them into the refusal envelope.
+    details: dict | None = None
+
+    def __init__(self, *args: object, details: Mapping[str, object] | None = None) -> None:
+        super().__init__(*args)
+        if details is not None:
+            self.details = dict(details)
 
 
 class NotFound(TheaterError):
@@ -454,6 +462,7 @@ class AwaitingDecision(TheaterError):
 
 class Busy(TheaterError):
     code = "busy"
+    details = {"next": NEXT_BUSY}  # noqa: RUF012 - read-only default; never mutated
 
 
 class StaleTarget(TheaterError):

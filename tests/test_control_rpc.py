@@ -309,6 +309,8 @@ async def test_steer_allows_the_local_operator_and_refuses_others(client, daemon
                 "participant.steer", target=child.id, prompt="amend", caller_id=caller_id
             )
         assert raised.value.code == "not_your_child", label
+        if label == "stranger":
+            assert "control-transfer" in raised.value.details["next"]
     assert len(state.steered) == 1, "refused steers must not reach the runtime"
 
 
@@ -325,6 +327,7 @@ async def test_steer_refuses_a_mismatched_job_handle(client, daemon):
             job_handle="not-a-job",
         )
     assert raised.value.code == "stale_target"
+    assert "interrupt_session" in raised.value.details["next"]
 
 
 async def test_steer_on_legacy_wiring_names_the_alternatives(client, daemon):
@@ -527,6 +530,7 @@ async def test_settings_update_requires_idle_and_authorization(client, daemon):
             reasoning_effort="high",
         )
     assert busy.value.code == "busy"
+    assert "queue_followup" in busy.value.details["next"]
 
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     with pytest.raises(RemoteError) as unauthorized:
