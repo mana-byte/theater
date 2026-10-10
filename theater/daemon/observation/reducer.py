@@ -56,6 +56,8 @@ class _ApplyContext:
     connection: Connection | None
     #: A terminal batch finishes its job in the same unit, so touches must be seen first.
     paths_now: bool = False
+    #: Source read time of the batch, stored on its bus payloads for observe_to_bus.
+    read_at: float | None = None
 
 
 @dataclass
@@ -245,7 +247,9 @@ class Reducer:
         state = _ApplyState(usage_events=[] if self._telemetry_fn is not None else None)
         callbacks = _ApplyCallbacks(answer_turn_fn, turn_result_fn, path_target_fn)
         paths_now = any(event.turn_end for event in batch.events)
-        context = _ApplyContext(pid, clock, turns, callbacks, state, connection, paths_now)
+        context = _ApplyContext(
+            pid, clock, turns, callbacks, state, connection, paths_now, batch.read_at
+        )
         for event in batch.events:
             self._apply_event(event, context)
         self._settle_batch(
@@ -284,19 +288,22 @@ class Reducer:
             return
         if state.observed_at is None:
             state.observed_at = self._wall_now_fn()
+        payload = {
+            "text": event.text,
+            "tool": event.tool_name,
+            "ts": event.ts,
+            "turn_end": event.turn_end,
+            "turn_terminal": event.turn_terminal,
+            "turn": event.turn_id,
+            "index": event.raw_index,
+            "observed_at": state.observed_at,
+        }
+        if context.read_at is not None:
+            payload["read_at"] = context.read_at
         self.store.bus_append(
             f"agent.{event.kind}",
             from_id=pid,
-            payload={
-                "text": event.text,
-                "tool": event.tool_name,
-                "ts": event.ts,
-                "turn_end": event.turn_end,
-                "turn_terminal": event.turn_terminal,
-                "turn": event.turn_id,
-                "index": event.raw_index,
-                "observed_at": state.observed_at,
-            },
+            payload=payload,
             connection=context.connection,
         )
         state.last = event

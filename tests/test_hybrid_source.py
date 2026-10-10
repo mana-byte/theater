@@ -726,3 +726,11 @@ async def test_aclose_closes_both_halves():
     await source.aclose()
 
     assert durable.closed and live.closed
+
+
+async def test_refresh_rotation_attach_keeps_read_at():
+    durable = ScriptedSource(Batch(), Batch(attached=object(), read_at=12.5))
+    source = hybrid(durable, ScriptedSource(Batch(status=Status.WORKING)))
+    await source.read()
+
+    assert (await source.refresh()).read_at == 12.5

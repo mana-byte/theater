@@ -1543,3 +1543,7 @@ def test_ctrl_c_out_of_a_follow_is_not_a_crash(monkeypatch):
 
     monkeypatch.setattr(participants_mod, "call_sync", interrupt)
     assert cli.main(["kill", "p-abc"]) == 130
+
+
+def test_read_at_is_omitted_from_event_display():
+    assert event_summary({"ts": None, "index": 4, "observed_at": 1.0, "read_at": 2.0}) == ""

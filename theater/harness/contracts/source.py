@@ -230,6 +230,8 @@ class Batch:
     #: identity that can complete a Theater job once. Legacy durable sources
     #: never populate it, and a live channel is never a transcript surrogate.
     terminal_evidence: Sequence[NativeTurnOutcome] = ()
+    #: Wall clock when the source read the records; None when unknown. Measurement only.
+    read_at: float | None = None
 
     def __post_init__(self) -> None:
         if type(self.has_more) is not bool:

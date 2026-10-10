@@ -273,6 +273,7 @@ class CompositeSource(Source):
             # enrichment wrap. Enrichments contribute facts only and never
             # produce evidence of their own.
             terminal_evidence=batch.terminal_evidence,
+            read_at=batch.read_at,
         )
 
     async def _read_enrichments(self) -> list[TrajectoryFact]:

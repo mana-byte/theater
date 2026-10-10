@@ -242,6 +242,7 @@ class HybridSource(Source):
             trajectory=facts,
             trajectory_events=durable.trajectory_events,
             terminal_evidence=evidence,
+            read_at=durable.read_at,
         )
 
     def _passive_batch(self, durable: Batch, live: Batch) -> Batch:
@@ -270,6 +271,7 @@ class HybridSource(Source):
             trajectory=(*durable.trajectory, *live.trajectory),
             trajectory_events=durable.trajectory_events,
             terminal_evidence=durable.terminal_evidence,
+            read_at=durable.read_at,
         )
 
     def validate_enrichment_batch(self, batch: Batch) -> Batch:
@@ -476,6 +478,7 @@ class HybridSource(Source):
                 error=batch.error,
                 trajectory=batch.trajectory,
                 trajectory_events=batch.trajectory_events,
+                read_at=batch.read_at,
             )
         return batch
 

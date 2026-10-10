@@ -2427,3 +2427,29 @@ def test_identity_lost_predicate_skips_db_for_non_suspects(registry, monkeypatch
     )
     assert observer.transcript_identity_lost(participant.id) is True
     assert reads == [participant.id]
+
+
+async def test_bus_events_carry_the_source_read_time_for_observe_to_bus(
+    registry, vibe_tree, observing
+):
+    registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+
+    append(vibe_tree["transcript"], USER, WORKING)
+
+    assert await until(lambda: "agent.user" in kinds(registry.store))
+    row = next(r for r in registry.store.bus_tail(limit=500) if r["kind"] == "agent.user")
+    assert row["payload"]["read_at"] > 0
+    assert row["ts"] - row["payload"]["read_at"] >= 0
+
+
+def test_batches_without_read_at_publish_bus_events_without_the_field(registry):
+    p = registry.register(harness="vibe", pane=None, cwd="/tmp")
+    observer = Observer(registry, {"vibe": VibeHarness()})
+    batch = Batch(events=(Event(kind=EventKind.ASSISTANT, text="legacy"),), progressed=True)
+    assert batch.read_at is None
+
+    observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
+
+    row = next(r for r in registry.store.bus_tail(limit=50) if r["kind"] == "agent.assistant")
+    assert "read_at" not in row["payload"]

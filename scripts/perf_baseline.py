@@ -18,6 +18,7 @@ import argparse
 import contextlib
 import itertools
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -83,6 +84,7 @@ class ScenarioResult:
     latency_ms: list[float]
     profiles: dict[str, ProfileSummary]
     profile_errors: dict[str, str]
+    observe_ms: list[float] = field(default_factory=list)
 
 
 class Stack:
@@ -270,19 +272,45 @@ def _cursors(stack: Stack) -> tuple[int, int]:
         return bus, journal.fetchone()[0]
 
 
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _latency_samples(
+    ts: float, kind: str, payload: str | None
+) -> tuple[float | None, float | None]:
+    """(transcript_to_bus, observe_to_bus) in ms for one bus row; None where not measurable."""
+    if not kind.startswith("agent."):
+        return None, None
+    try:
+        data = json.loads(payload)
+    except (ValueError, TypeError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    transcript = observe = None
+    source_ts, read_at = data.get("ts"), data.get("read_at")
+    if isinstance(source_ts, (int, float)):
+        transcript = (ts - source_ts) * 1000
+    # Clock skew or junk makes a sample meaningless; drop it rather than skew percentiles.
+    if _is_number(read_at) and _is_number(ts) and read_at <= ts:
+        observe = (ts - read_at) * 1000
+    return transcript, observe
+
+
 def _events(stack: Stack, bus_after: int, journal_after: int):
     bus_kinds: Counter = Counter()
     latency: list[float] = []
+    observe: list[float] = []
     with contextlib.closing(_db(stack)) as db:
         rows = db.execute("SELECT ts, kind, payload FROM bus WHERE id > ?", (bus_after,))
         for ts, kind, payload in rows:
             bus_kinds[kind] += 1
-            if not kind.startswith("agent."):
-                continue
-            with contextlib.suppress(ValueError, TypeError, KeyError):
-                source_ts = json.loads(payload)["ts"]
-                if isinstance(source_ts, (int, float)):
-                    latency.append((ts - source_ts) * 1000)
+            transcript_ms, observe_ms = _latency_samples(ts, kind, payload)
+            if transcript_ms is not None:
+                latency.append(transcript_ms)
+            if observe_ms is not None:
+                observe.append(observe_ms)
         journal = Counter(
             dict(
                 db.execute(
@@ -292,7 +320,7 @@ def _events(stack: Stack, bus_after: int, journal_after: int):
                 ).fetchall()
             )
         )
-    return bus_kinds, journal, latency
+    return bus_kinds, journal, latency, observe
 
 
 def _start_profiles(
@@ -372,7 +400,7 @@ def measure(stack: Stack, scenario: Scenario, out: Path) -> ScenarioResult:
             samples[role].cpu_seconds = times.user + times.system - start_cpu[role]
             samples[role].rss_mb = proc.memory_info().rss / 2**20
     forks = stack.tmux_lines()[tmux_before:]
-    bus_kinds, journal_kinds, latency = _events(stack, bus_after, journal_after)
+    bus_kinds, journal_kinds, latency, observe = _events(stack, bus_after, journal_after)
     profiles, profile_errors = _finish_profiles(profiling)
     return ScenarioResult(
         scenario=scenario,
@@ -383,6 +411,7 @@ def measure(stack: Stack, scenario: Scenario, out: Path) -> ScenarioResult:
         bus_kinds=bus_kinds,
         journal_kinds=journal_kinds,
         latency_ms=latency,
+        observe_ms=observe,
         profiles=profiles,
         profile_errors=profile_errors,
     )
@@ -438,8 +467,8 @@ def render(results: list[ScenarioResult], args: argparse.Namespace) -> str:
         "",
         "| scenario | tmux_forks_per_s | bus_events_per_h | journal_events_per_h | "
         "controls_changed_per_h_per_agent | transcript_to_bus_p50_ms | "
-        "transcript_to_bus_p95_ms |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "transcript_to_bus_p95_ms | observe_to_bus_p50_ms | observe_to_bus_p95_ms |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in results:
         agents = max(1, result.scenario.idle + result.scenario.working)
@@ -450,7 +479,8 @@ def render(results: list[ScenarioResult], args: argparse.Namespace) -> str:
             f"{_per_hour(sum(result.bus_kinds.values()), result.seconds):.0f} | "
             f"{_per_hour(sum(result.journal_kinds.values()), result.seconds):.0f} | "
             f"{_per_hour(controls, result.seconds) / agents:.1f} | "
-            f"{_pct(result.latency_ms, 0.5):.1f} | {_pct(result.latency_ms, 0.95):.1f} |"
+            f"{_pct(result.latency_ms, 0.5):.1f} | {_pct(result.latency_ms, 0.95):.1f} | "
+            f"{_pct(result.observe_ms, 0.5):.1f} | {_pct(result.observe_ms, 0.95):.1f} |"
         )
     for result in results:
         lines += ["", f"## Scenario `{result.scenario.name}`", ""]
@@ -490,6 +520,8 @@ def render(results: list[ScenarioResult], args: argparse.Namespace) -> str:
         "is absent and nothing repaints a real terminal.",
         "- `transcript_to_bus` is bus `ts` minus the harness record `ts`; it includes harness "
         "write delay and clock granularity (ms).",
+        "- `observe_to_bus` is bus `ts` minus the time the observer read the record (`read_at`); "
+        "theater-side delay only. `nan` when no batch carried `read_at`.",
         "- CPU excludes short-lived children (`ps`, `lsof`, `tmux`); count them via forks.",
         "",
     ]
