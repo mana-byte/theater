@@ -244,6 +244,23 @@ async def test_spawn_names_the_allowed_approval_values(client, terminal_provider
     assert "approval must be one of manual|edits|yolo, got 'auto'" in str(exc.value)
 
 
+async def test_spawn_worktree_outside_git_names_child_repos(client, terminal_provider, tmp_path):
+    (tmp_path / "older" / ".git").mkdir(parents=True)
+    (tmp_path / "linked").mkdir()
+    (tmp_path / "linked" / ".git").write_text("gitdir: /elsewhere\n")
+    (tmp_path / "plain").mkdir()
+    (tmp_path / ".hidden" / ".git").mkdir(parents=True)
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn", harness="vibe", approval="manual", cwd=str(tmp_path), worktree=True
+        )
+    assert exc.value.code == "bad_request"
+    assert "[" in str(exc.value) and "changing harness will not help" in str(exc.value)
+    named = str(exc.value).split("[", 1)[1].split("]", 1)[0]
+    assert sorted(named.split(", ")) == ["linked", "older"]
+    assert terminal_provider.creations == []
+
+
 async def test_spawn_rejects_an_unknown_harness(client, terminal_provider):
     with pytest.raises(RemoteError) as exc:
         await client.call("spawn", harness="cursor", prompt="hi", approval="manual", cwd="/tmp")

@@ -161,6 +161,7 @@ approval: "manual" | "edits" | "yolo" — required, no default. This is
           `approvals` there means the daemon predates the field —
           restart it rather than guess.
 cwd:      where the child works. Defaults to your own directory.
+          worktree=true requires cwd inside a git repo.
 provider: exact provider id or selector for this launch. When omitted, Theater
           uses terminals.default_provider. A stock-terminal launch needs that
           provider ready; for tmux, have the operator run `regie bridge start`.
