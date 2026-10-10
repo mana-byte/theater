@@ -478,6 +478,7 @@ class HybridSource(Source):
                 error=batch.error,
                 trajectory=batch.trajectory,
                 trajectory_events=batch.trajectory_events,
+                read_at=batch.read_at,
             )
         return batch
 

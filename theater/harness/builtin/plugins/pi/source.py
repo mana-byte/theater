@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -172,6 +173,8 @@ class PiTranscriptSource(TranscriptSource):
         self._backlog: list[PiRecord] = []
         self._records = RecordBuffer(PI_RECORD_BYTES)
         self._read_size = 0
+        #: Wall clock of the last stream read, forwarded through backlog batches.
+        self._read_at: float | None = None
         #: Initial restart reconciliation parses only usage through this byte offset.
         self._usage_only_until: int | None = None
         self._pending_usage_only_until: int | None = None
@@ -459,6 +462,7 @@ class PiTranscriptSource(TranscriptSource):
         if not data:
             self.mtime = read_stat.st_mtime_ns
             return Batch()
+        self._read_at = time.time()
         self.offset = offset + len(data)
         self.mtime = read_stat.st_mtime_ns
         self._read_size = read_stat.st_size
@@ -513,12 +517,14 @@ class PiTranscriptSource(TranscriptSource):
             trajectory_events=trajectory_events,
             error_code="pi_transcript_oversized_record" if oversized else None,
             error="Pi record exceeded the raw or projected structural limit" if oversized else None,
+            read_at=self._read_at,
         )
 
     def _clear_live_buffers(self) -> None:
         self._backlog.clear()
         self._records.clear()
         self._read_size = 0
+        self._read_at = None
 
     @staticmethod
     def _usage_only(event: Event) -> Event:

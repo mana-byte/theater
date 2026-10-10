@@ -88,7 +88,7 @@ def event_summary(payload: object) -> str:
     if text:
         bits.append(" ".join(str(text).split()))
     if not bits:
-        omitted = {"ts", "turn_end", "index", "observed_at"}
+        omitted = {"ts", "turn_end", "index", "observed_at", "read_at"}
         rest = {
             key: value for key, value in payload.items() if key not in omitted and value is not None
         }

@@ -2628,3 +2628,23 @@ def test_pi_runtime_routes_only_the_proven_native_controls() -> None:
     assert routes["interrupt"] == ControlTransport.NATIVE_RUNTIME.value
     assert routes["steer"] is None
     assert runtime.unavailable_capabilities == frozenset({RuntimeCapability.STEER})
+
+
+def test_pi_source_stamps_read_at_on_non_empty_reads(tmp_path) -> None:
+    sessions, workdir = tmp_path / "sessions", tmp_path / "work"
+    sessions.mkdir()
+    workdir.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(transcript, _session(session_id="native-id", cwd=workdir))
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+    asyncio.run(source.read())
+    source.commit_attachment()
+    asyncio.run(source.read())
+
+    _append(transcript, _message("user-1", {"role": "user", "content": "hi"}))
+    batch = asyncio.run(source.read())
+
+    assert batch.events
+    assert batch.read_at is not None and batch.read_at > 0

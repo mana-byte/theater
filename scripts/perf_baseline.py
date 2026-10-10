@@ -18,6 +18,7 @@ import argparse
 import contextlib
 import itertools
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -271,6 +272,10 @@ def _cursors(stack: Stack) -> tuple[int, int]:
         return bus, journal.fetchone()[0]
 
 
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _latency_samples(
     ts: float, kind: str, payload: str | None
 ) -> tuple[float | None, float | None]:
@@ -287,7 +292,8 @@ def _latency_samples(
     source_ts, read_at = data.get("ts"), data.get("read_at")
     if isinstance(source_ts, (int, float)):
         transcript = (ts - source_ts) * 1000
-    if isinstance(read_at, (int, float)):
+    # Clock skew or junk makes a sample meaningless; drop it rather than skew percentiles.
+    if _is_number(read_at) and _is_number(ts) and read_at <= ts:
         observe = (ts - read_at) * 1000
     return transcript, observe
 
