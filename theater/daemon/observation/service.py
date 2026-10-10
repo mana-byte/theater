@@ -159,6 +159,7 @@ class Observer(
             LiveObservationHub(on_change=self._on_live_change) if live_hub is None else live_hub
         )
         self._tasks: dict[str, asyncio.Task] = {}
+        self._watch_contexts: dict[str, _WatchContext] = {}
         self._restarts: set[asyncio.Task[None]] = set()
         self._restart_pending: set[str] = set()
         self._readiness_recorded: set[str] = set()
@@ -249,6 +250,7 @@ class Observer(
         context = self._prepare_watch(pid, harness_name)
         if context is None:
             return
+        self._watch_contexts[pid] = context
         try:
             if not self._register_watch_source(context):
                 return
@@ -256,7 +258,16 @@ class Observer(
                 if not await self._watch_iteration(context):
                     return
         finally:
+            if self._watch_contexts.get(pid) is context:
+                del self._watch_contexts[pid]
             await self._close_watch(context)
+
+    def quiet_seconds(self, pid: str) -> float | None:
+        """Seconds since the watched participant's last semantic output; None when unwatched."""
+        context = self._watch_contexts.get(pid)
+        if context is None:
+            return None
+        return context.clock.quiet_for(self._monotonic())
 
     def _prepare_watch(self, pid: str, harness_name: str) -> _WatchContext | None:
         observer = self.harnesses[harness_name].observer

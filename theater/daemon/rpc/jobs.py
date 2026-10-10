@@ -92,6 +92,14 @@ def _job_to_dict(job: Job) -> dict:
     return row
 
 
+def _quiet_seconds(daemon, pid: str | None) -> float | None:
+    """Output silence from the observer's quiet clock, never from last_activity restatements."""
+    accessor = getattr(getattr(daemon, "observer", None), "quiet_seconds", None)
+    if pid is None or accessor is None:
+        return None
+    return accessor(pid)
+
+
 def _entry(daemon, target: AwaitTarget, reasons: dict[str, str]) -> dict:
     """One await result entry: durable job state plus additive presence fields."""
     if target.job is not None:
@@ -99,6 +107,10 @@ def _entry(daemon, target: AwaitTarget, reasons: dict[str, str]) -> dict:
         changes = job_changes(daemon.store, target.job)
         if changes is not None:
             entry["changes"] = changes
+        if target.job.state == JobState.RUNNING:
+            quiet = _quiet_seconds(daemon, target.job.target_id)
+            if quiet is not None:
+                entry["quiet_s"] = int(quiet)
     else:
         entry = {"handle": target.handle, "target_id": target.target_id}
     if target.target_id is not None:

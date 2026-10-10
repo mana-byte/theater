@@ -78,8 +78,9 @@ still return timeout or pending under UNKNOWN presence even when its job is term
 
 Each entry carries handle, state (running/done/crashed/killed), participant_status
 (observed independently, possibly working after departure) and await_reason; error_code
-and finished_at appear once set. human_presence (state, protected, reason) appears only
-while it is not a plain absence. await_reason is one of: job_terminal, presence_released,
+and finished_at appear once set; running entries carry quiet_s, seconds of output silence.
+human_presence (state, protected, reason) appears only while it is not a plain absence.
+await_reason is one of: job_terminal, presence_released,
 awaiting_input (a running job needs input; terminal state takes precedence), already_absent,
 timeout, or pending (another target released wait-any). For gated terminal jobs, job_terminal
 and presence_released name the condition observed last — completion or departure;

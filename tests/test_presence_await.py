@@ -398,6 +398,27 @@ async def test_zero_max_wait_grants_nothing(client, daemon, presence):
     assert jobs[0]["await_reason"] == "timeout"
 
 
+async def test_a_running_entry_reports_output_silence_from_the_quiet_clock(
+    client, daemon, presence, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from theater.daemon.observation.reducer import QuietClock
+
+    record = await _spawn(client)
+    observer = daemon.observer
+    monkeypatch.setattr(observer, "_monotonic", lambda: 1042.9)
+    context = SimpleNamespace(clock=QuietClock(quiet_since=1000.0))
+    monkeypatch.setitem(observer._watch_contexts, record["id"], context)
+
+    jobs = await client.call("jobs.await", handles=[record["handle"]], max_wait=0)
+    assert jobs[0]["quiet_s"] == 42
+
+    daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done")
+    jobs = await client.call("jobs.await", handles=[record["handle"]], max_wait=0)
+    assert "quiet_s" not in jobs[0]
+
+
 async def test_zero_max_wait_still_returns_an_already_qualifying_target(client, daemon, presence):
     record = await _spawn(client)
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done")
