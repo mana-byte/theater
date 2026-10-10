@@ -102,6 +102,21 @@ def _prompt_with_response_format(prompt: str, response_format: str | None) -> st
     return f"{_JSON_REPLY_INSTRUCTION.format(schema=response_format)}\n\n{prompt}"
 
 
+def _prompt_with_interruption_card(
+    prompt: str, *, interrupted: str | None, by: str, running: list[tuple[str, str, str]]
+) -> str:
+    """Tell a replaced child what survived the interrupt so it awaits instead of respawning."""
+    turn = f"your turn {interrupted}" if interrupted else "your turn"
+    card = f"[Theater: {turn} was interrupted by {by}."
+    if running:
+        listed = ", ".join(f"{handle} -> {name} ({state})" for handle, name, state in running)
+        card += (
+            f" Jobs you launched that are still running: {listed}. "
+            "They are still running: await them, do not respawn."
+        )
+    return f"{card}]\n\n{prompt}"
+
+
 def _reject_response_format_resume(
     harness_name: Any, resume: Any, response_format: str | None
 ) -> None:

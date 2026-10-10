@@ -93,6 +93,33 @@ class JobRepository:
         ).fetchone()
         return Job.from_row(row._mapping) if row else None
 
+    def running_for_caller(self, caller_id: str, *, limit: int) -> list[Job]:
+        """Running jobs a participant launched, newest first (idx_jobs_caller)."""
+        rows = self._db.conn.execute(
+            select(jobs)
+            .where(jobs.c.caller_id == caller_id)
+            .where(jobs.c.state == "running")
+            .order_by(jobs.c.created_at.desc())
+            .limit(limit)
+        ).fetchall()
+        return [Job.from_row(r._mapping) for r in rows]
+
+    def first_send_between(
+        self, caller_id: str, target_id: str, *, after: float, until: float
+    ) -> Job | None:
+        """The earliest send job from caller to target created in (after, until]."""
+        row = self._db.conn.execute(
+            select(jobs)
+            .where(jobs.c.caller_id == caller_id)
+            .where(jobs.c.target_id == target_id)
+            .where(jobs.c.kind == "send")
+            .where(jobs.c.created_at > after)
+            .where(jobs.c.created_at <= until)
+            .order_by(jobs.c.created_at.asc())
+            .limit(1)
+        ).fetchone()
+        return Job.from_row(row._mapping) if row else None
+
     def max_send_seq(self) -> int:
         """Highest numeric suffix across every send handle, 0 if none."""
         rows = self._db.conn.execute(

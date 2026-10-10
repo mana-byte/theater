@@ -8,6 +8,17 @@ from theater.daemon.rpc.router import method
 from theater.harness.contracts.runtime import RuntimeCapability
 
 
+def active_job_handle(daemon, target_id: str) -> str | None:
+    """The newest running job actually on the target's turn; queued followups are not."""
+    queued = {
+        operation.job_handle for operation in daemon.store.queued_control_operations(target_id)
+    }
+    for job in daemon.store.running_jobs_for_target(target_id):
+        if job.handle not in queued:
+            return job.handle
+    return None
+
+
 @method("participant.interrupt")
 async def _interrupt(daemon, params: dict) -> dict:
     target = daemon.registry.resolve(
@@ -18,8 +29,11 @@ async def _interrupt(daemon, params: dict) -> dict:
 
     route = daemon.controls.route_for(target_id, RuntimeCapability.INTERRUPT)
     del route
+    active = active_job_handle(daemon, target_id)
     outcome = await daemon.controls.interrupt(target_id, caller_id=caller_id)
     result = {"id": target_id, "interrupted": outcome.interrupted}
+    if outcome.interrupted and active is not None:
+        result["interrupted_job"] = active
     if outcome.reason is not None:
         result["reason"] = outcome.reason
     if outcome.cancelled_followups:
