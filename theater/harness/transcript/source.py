@@ -121,6 +121,8 @@ class TranscriptSource(Source):
         self._drain_buffer = bytearray()
         self._drain_buffer_start = 0
         self._drain_complete_records = 0
+        #: Wall clock of the last buffer fill; stamped on batches to isolate theater-side latency.
+        self._drain_read_at: float | None = None
         self._pending: tuple[Path, int, int, int, str | None] | None = None
         #: Prevent concurrent cursor advancement while a read yields.
         self._draining = False
@@ -904,6 +906,7 @@ class TranscriptSource(Source):
             status=status,
             trajectory=trajectory,
             trajectory_events=trajectory_events,
+            read_at=self._drain_read_at,
         )
 
     async def _fill_drain_buffer(self, path: Path, offset: int) -> tuple[int, int]:
@@ -917,6 +920,7 @@ class TranscriptSource(Source):
                 if not chunk:
                     break
                 self._drain_buffer.extend(chunk)
+                self._drain_read_at = time.time()
                 self._drain_complete_records += chunk.count(b"\n")
                 if self._drain_complete_records:
                     break
