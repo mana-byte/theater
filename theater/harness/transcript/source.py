@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from theater.constants.observation import ROTATION_PROBE_MAX_SECONDS, ROTATION_PROBE_MIN_SECONDS
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
+from theater.harness.channels.filesystem import WatchGate
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import (
     Attachment,
@@ -128,6 +129,16 @@ class TranscriptSource(Source):
         self._missing_trusted_pin_once: Path | None = None
         #: One same-exact-session relocation lookup per missing-pin episode.
         self._relocation_attempted = False
+        #: Notifications only mark this dirty; a quiet watched file skips the per-poll stat.
+        self._watch_gate = WatchGate()
+        self._caught_up = False
+
+    def _bind_wakeup(self, wakeup: Callable[[], None] | None) -> None:
+        """Let filesystem notifications rouse the watch loop; polling stays the fallback."""
+        self._watch_gate.set_wake(wakeup)
+
+    async def aclose(self) -> None:
+        self._watch_gate.release()
 
     async def read(self) -> Batch:
         self._require_decision()
@@ -712,6 +723,7 @@ class TranscriptSource(Source):
         self.path = None
         self.offset = self.index = self.mtime = 0
         self._clear_drain_buffer()
+        self._watch_gate.release()
 
     def _defer_or_detach(self) -> None:
         if self._draining:
@@ -723,6 +735,7 @@ class TranscriptSource(Source):
         self._drain_buffer.clear()
         self._drain_buffer_start = 0
         self._drain_complete_records = 0
+        self._caught_up = False
 
     def _require_decision(self) -> None:
         if self._pending is not None:
@@ -830,6 +843,11 @@ class TranscriptSource(Source):
         assert self.path is not None
         path, offset, index, mtime = self.path, self.offset, self.index, self.mtime
 
+        # Clear-before-read: a change after this point re-marks the gate for the next poll.
+        due = self._watch_gate.due(path)
+        if self._caught_up and not due:
+            return Batch()
+        self._caught_up = False
         st = path.stat()
         size = st.st_size
         # Same-length rewrite is indistinguishable from no-op; guessing wrong corrupts.
@@ -840,6 +858,7 @@ class TranscriptSource(Source):
             self._clear_drain_buffer()
         if size == offset and not self._drain_buffer:
             self.mtime = st.st_mtime_ns
+            self._caught_up = True
             return Batch()
 
         mtime, unread_bytes = await self._fill_drain_buffer(path, offset)
