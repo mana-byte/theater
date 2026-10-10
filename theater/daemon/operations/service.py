@@ -20,6 +20,7 @@ from theater.daemon.operations.errors import (
 )
 from theater.daemon.operations.notifications import OperationNotifier
 from theater.daemon.operations.projection import operation_event_payload, operation_to_wire
+from theater.daemon.operations.request_errors import bad_request_from
 from theater.daemon.persistence.repositories._json import encode_json
 from theater.daemon.persistence.repositories.journal import JournalRepository
 from theater.daemon.persistence.repositories.operations import OperationRepository
@@ -856,9 +857,14 @@ class OperationService:
         spec = METHOD_CATALOG.get(method)
         if spec is None or spec.method_class is not expected_class:
             raise ValueError(f"{method!r} is not a public {expected_class.value} method")
-        validate_public_request(
-            {"id": 1, "method": method, "params": dict(params), "idempotency_key": key}
-        )
+        try:
+            validate_public_request(
+                {"id": 1, "method": method, "params": dict(params), "idempotency_key": key}
+            )
+        except ValidationError as exc:
+            # Report every failing parameter, not just the first one jsonschema met.
+            errors = list(validator_for(spec.params_schema_id).iter_errors(dict(params)))
+            raise bad_request_from(errors or [exc]) from None
 
     @staticmethod
     def _validate_prepared(

@@ -237,6 +237,13 @@ async def test_spawn_requires_an_approval_mode(client, terminal_provider):
     assert exc.value.code == "bad_request"
 
 
+async def test_spawn_names_the_allowed_approval_values(client, terminal_provider):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("spawn", harness="vibe", prompt="hi", approval="auto", cwd="/tmp")
+    assert exc.value.code == "bad_request"
+    assert "approval must be one of manual|edits|yolo, got 'auto'" in str(exc.value)
+
+
 async def test_spawn_rejects_an_unknown_harness(client, terminal_provider):
     with pytest.raises(RemoteError) as exc:
         await client.call("spawn", harness="cursor", prompt="hi", approval="manual", cwd="/tmp")
