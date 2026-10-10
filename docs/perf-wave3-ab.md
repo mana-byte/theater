@@ -45,3 +45,25 @@ p95 4,848 ms repeats the high-load tail-scale watch item.
 - [ ] transcript_to_bus p95 <= 500 ms: inconclusive (573 matched pair; 443 prior session).
 - [x] Event amplification and persistence: met (see prior reports).
 - [ ] tmux forks < 0.5/s idle: unchanged; depends on the fs-wakeup wiring follow-up and Wave 4.
+
+## Confirmation session (post-wakeup-wiring, 3 alternating pairs)
+
+CPU reconfirmed across 3 pairs: every role in every scenario PASS again.
+
+| scenario | role | base mean (3 runs) | HEAD mean (3 runs) | delta |
+|---|---|---:|---:|---:|
+| empty | daemon | 1.70 | 0.59 | -1.11 |
+| empty | regie | 4.35 | 3.00 | -1.35 |
+| idle10 | daemon | 6.48 | 5.44 | -1.04 |
+| idle10 | regie | 3.87 | 2.45 | -1.42 |
+| idle10+working5 | daemon | 18.46 | 16.41 | -2.05 |
+| idle10+working5 | regie | 7.41 | 4.00 | -3.41 |
+
+Latency: NO matched pairs — the workload agents this session produced 28k-106k
+events/h (2-7x the 12k-16k gate band), so no latency verdict is drawable. At
+those high rates BOTH sides show multi-second p95 tails (2.7-14s), confirming
+the tail scales with agent chattiness, not with theater's code. The latency
+gate remains: single valid pair at ~14k (HEAD 443 vs base 469, prior session);
+3 matched pairs still needed.
+
+Controls: tmux cpu/fork matched across all pairs.
