@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 from theater.harness.contracts.source import TranscriptCandidate
 from theater.harness.transcript.diagnostics import report_discovery_matches
+from theater.harness.transcript.scan import scan_domain
 
 if TYPE_CHECKING:
     from theater.harness.contracts.launch import ResumeLaunchOverlay
@@ -75,10 +76,11 @@ class GlobDiscovery:
         if want is None:
             return None
         candidates: list[tuple[float, Path]] = []
-        for path in self.root.glob(self.glob_pattern):
-            try:
-                st = path.stat()
-            except OSError:
+        entries, _ = scan_domain(self.root, self.glob_pattern)
+        for entry in entries:
+            path = entry.path
+            st = entry.followed_stat()
+            if st is None:
                 continue
             if after is not None:
                 born = self.birthtime_of(path, st)
@@ -108,9 +110,16 @@ class GlobDiscovery:
             return []
         want = str(Path(cwd).resolve()) if cwd else None
         resolved_domain = str(root)
+        entries, _ = scan_domain(root, self.glob_pattern)
         rows = [
-            self.candidate_row(path, want=want, after=after, domain=resolved_domain)
-            for path in root.glob(self.glob_pattern)
+            self._row_from_stat(
+                entry.path,
+                entry.followed_stat(),
+                want=want,
+                after=after,
+                domain=resolved_domain,
+            )
+            for entry in entries
         ]
         return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
 
@@ -126,12 +135,10 @@ class GlobDiscovery:
             return None
         want = str(Path(cwd).resolve())
         candidates: list[tuple[int, Path]] = []
-        for path in self.root.glob(self.glob_pattern):
-            if path == current or path.is_symlink():
-                continue
-            try:
-                st = path.stat()
-            except OSError:
+        entries, _ = scan_domain(self.root, self.glob_pattern, fresh=True)
+        for entry in entries:
+            path, st = entry.path, entry.st
+            if path == current or entry.is_symlink or st is None:
                 continue
             if st.st_mtime_ns <= current_mtime_ns:
                 continue
@@ -174,11 +181,24 @@ class GlobDiscovery:
         after: float | None,
         domain: str,
     ) -> TranscriptCandidate:
-        reason = None
-        session_id = self.session_id_of(path)
         try:
             st = path.stat()
         except OSError:
+            st = None
+        return self._row_from_stat(path, st, want=want, after=after, domain=domain)
+
+    def _row_from_stat(
+        self,
+        path: Path,
+        st: os.stat_result | None,
+        *,
+        want: str | None,
+        after: float | None,
+        domain: str,
+    ) -> TranscriptCandidate:
+        reason = None
+        session_id = self.session_id_of(path)
+        if st is None:
             return TranscriptCandidate(
                 location=str(path),
                 session_id=session_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -62,6 +63,38 @@ def _claude_discovery(root: Path) -> GlobDiscovery:
         loss_probes=8,
         collision_warning="test: %d transcripts match cwd %s",
     )
+
+
+class _GatedWalk:
+    """Hold the first walk's pre-gate snapshot until released; later walks run unimpeded."""
+
+    def __init__(self, monkeypatch, *, fail: bool = False) -> None:
+        from theater.harness.transcript import scan
+
+        self.walks = 0
+        self.entered, self.release = threading.Event(), threading.Event()
+        real_walk = scan._walk
+
+        def gated(*args):
+            self.walks += 1
+            if self.walks > 1:
+                yield from real_walk(*args)
+                return
+            snapshot = list(real_walk(*args))
+            self.entered.set()
+            assert self.release.wait(5)
+            if fail:
+                raise RuntimeError("walk failed")
+            yield from snapshot
+
+        monkeypatch.setattr(scan, "_walk", gated)
+
+
+def _wait_for(condition) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not condition():
+        time.sleep(0.005)
+    assert condition()
 
 
 @pytest.fixture
@@ -371,3 +404,194 @@ class TestBirthtimeHelpers:
         st = tmp_path.stat()
         result = parent_birthtime(path, st)
         assert result == st.st_ctime
+
+
+class TestScanReuse:
+    def test_one_scan_stats_each_path_once(self, root, workdir, monkeypatch):
+        from theater.harness.transcript import scan
+
+        current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
+        os.utime(current, ns=(1, 1))
+        for i in range(5):
+            _make_jsonl(root / f"d{i}" / f"new{i}.jsonl", cwd=workdir)
+        stats: list[str] = []
+        real_scandir = os.scandir
+
+        class _Spy:
+            def __init__(self, entry):
+                self._entry = entry
+
+            def __getattr__(self, name):
+                return getattr(self._entry, name)
+
+            def stat(self, **kwargs):
+                stats.append(self._entry.path)
+                return self._entry.stat(**kwargs)
+
+        class _SpyScan:
+            def __init__(self, directory):
+                self._it = real_scandir(directory)
+
+            def __enter__(self):
+                return [_Spy(e) for e in self._it.__enter__()]
+
+            def __exit__(self, *exc):
+                return self._it.__exit__(*exc)
+
+        monkeypatch.setattr(scan.os, "scandir", _SpyScan)
+        path_stats: list[Path] = []
+        real_path_stat = Path.stat
+        monkeypatch.setattr(
+            Path,
+            "stat",
+            lambda self, **kw: (path_stats.append(self), real_path_stat(self, **kw))[1],
+        )
+
+        found = _claude_discovery(root).identity_loss_candidate(
+            cwd=workdir, current=current, current_mtime_ns=1
+        )
+
+        assert found is not None
+        jsonl = [p for p in stats if p.endswith(".jsonl")]
+        assert len(jsonl) == len(set(jsonl)) == 6
+        assert not [p for p in path_stats if p.suffix == ".jsonl"]
+
+    def test_overlapping_scans_share_one_walk(self, root, workdir, monkeypatch):
+        from theater.harness.transcript import scan
+
+        _make_jsonl(root / "a" / "x.jsonl", cwd=workdir)
+        gate = _GatedWalk(monkeypatch)
+        results: list[object] = []
+        threads = [
+            threading.Thread(target=lambda: results.append(scan.scan_domain(root, "*/*.jsonl")))
+            for _ in range(2)
+        ]
+        threads[0].start()
+        assert gate.entered.wait(5)
+        threads[1].start()
+        _wait_for(lambda: any(f.waiters for f in scan._flights.values()))
+        gate.release.set()
+        for thread in threads:
+            thread.join(5)
+
+        assert gate.walks == 1
+        assert sorted(joined for _, joined in results) == [False, True]
+        assert not scan._flights
+
+    def test_joined_leader_failure_reaches_joiners_without_a_second_walk(self, root, monkeypatch):
+        from theater.harness.transcript import scan
+
+        gate = _GatedWalk(monkeypatch, fail=True)
+        errors: list[BaseException] = []
+
+        def call():
+            try:
+                scan.scan_domain(root, "*/*.jsonl")
+            except RuntimeError as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=call) for _ in range(2)]
+        threads[0].start()
+        assert gate.entered.wait(5)
+        threads[1].start()
+        _wait_for(lambda: any(f.waiters for f in scan._flights.values()))
+        gate.release.set()
+        for thread in threads:
+            thread.join(5)
+
+        assert gate.walks == 1
+        assert len(errors) == 2
+        assert not scan._flights
+
+    def _probe_during_stale_walk(self, root, workdir, monkeypatch, *, before, during):
+        """Run an identity probe while a walk holding a pre-``during`` snapshot is in flight."""
+        from theater.harness.transcript import scan
+
+        current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
+        os.utime(current, ns=(1, 1))
+        before(current)
+        gate = _GatedWalk(monkeypatch)
+        stale: list[tuple[scan.ScanEntry, ...]] = []
+        thread = threading.Thread(
+            target=lambda: stale.append(scan.scan_domain(root, "*/*.jsonl")[0])
+        )
+        thread.start()
+        assert gate.entered.wait(5)
+        expected = during()
+        assert scan._flights  # the stale walk is still in flight during the probe
+        found = _claude_discovery(root).identity_loss_candidate(
+            cwd=workdir, current=current, current_mtime_ns=1
+        )
+        gate.release.set()
+        thread.join(5)
+        return found, expected, {entry.path for entry in stale[0]}
+
+    def test_identity_probe_finds_file_created_after_in_flight_walk_started(
+        self, root, workdir, monkeypatch
+    ):
+        found, expected, stale_paths = self._probe_during_stale_walk(
+            root,
+            workdir,
+            monkeypatch,
+            before=lambda current: None,
+            during=lambda: _make_jsonl(root / "b" / "new.jsonl", cwd=workdir),
+        )
+
+        assert expected not in stale_paths  # the held walk really is stale
+        assert found == expected
+
+    def test_identity_probe_returns_changed_winner_not_stale_one(self, root, workdir, monkeypatch):
+        old = {}
+
+        def before(current):
+            old["a"] = _make_jsonl(root / "b" / "a.jsonl", cwd=workdir)
+            os.utime(old["a"], ns=(2, 2))
+
+        def during():
+            newest = _make_jsonl(root / "c" / "b.jsonl", cwd=workdir)
+            os.utime(newest, ns=(3, 3))
+            return newest
+
+        found, expected, stale_paths = self._probe_during_stale_walk(
+            root, workdir, monkeypatch, before=before, during=during
+        )
+
+        assert old["a"] in stale_paths and expected not in stale_paths
+        assert found == expected != old["a"]
+
+    def test_fresh_probe_sees_a_regular_file_swapped_for_a_symlink(self, root, workdir):
+        current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
+        os.utime(current, ns=(1, 1))
+        swapped = _make_jsonl(root / "b" / "swap.jsonl", cwd=workdir)
+        disc = _claude_discovery(root)
+        probe = {"cwd": workdir, "current": current, "current_mtime_ns": 1}
+        assert disc.identity_loss_candidate(**probe) == swapped
+        target = _make_jsonl(root / "c" / "real.jsonl", cwd=workdir)
+        os.utime(target, ns=(1, 1))
+        swapped.unlink()
+        swapped.symlink_to(target)
+
+        assert disc.identity_loss_candidate(**probe) is None
+
+    def test_sequential_probes_walk_afresh_and_revalidate_content(self, root, workdir, monkeypatch):
+        from theater.harness.transcript import scan
+
+        current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
+        os.utime(current, ns=(1, 1))
+        newer = _make_jsonl(root / "b" / "newer.jsonl", cwd=workdir)
+        walks = 0
+        real_walk = scan._walk
+
+        def counting_walk(*args):
+            nonlocal walks
+            walks += 1
+            return real_walk(*args)
+
+        monkeypatch.setattr(scan, "_walk", counting_walk)
+        disc = _claude_discovery(root)
+        probe = {"cwd": workdir, "current": current, "current_mtime_ns": 1}
+
+        assert disc.identity_loss_candidate(**probe) == newer
+        newer.write_text(json.dumps({"cwd": "/elsewhere"}) + "\n", encoding="utf-8")
+        assert disc.identity_loss_candidate(**probe) is None
+        assert walks == 2
