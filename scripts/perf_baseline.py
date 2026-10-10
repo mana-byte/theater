@@ -166,7 +166,8 @@ class Stack:
             home, tmux_dir, shim_dir = (self.tmp / n for n in ("home", "tmux", "bin"))
             for path in (home, tmux_dir, shim_dir):
                 path.mkdir(mode=0o700)
-            if args.config.is_file():  # model allowlists etc. live here
+            # Synthetic runs use pure defaults: ambient config would change observer intervals.
+            if args.synthetic is None and args.config.is_file():  # model allowlists etc.
                 shutil.copy(args.config, home / "config.toml")
             self.tmux_log = self.tmp / "tmux-forks.log"
             self.tmux_log.touch()
@@ -523,6 +524,7 @@ def render(results: list[ScenarioResult], args: argparse.Namespace) -> str:
         f"Mode: {'attach (existing stack)' if args.attach else 'isolated spawn'}; "
         f"harness `{args.harness}`{synthetic_note}; warmup {args.warmup:.0f}s; "
         f"window {args.duration:.0f}s; "
+        f"config {'none (defaults)' if args.synthetic is not None else 'ambient copy'}; "
         f"host {os.uname().sysname} {os.uname().machine}, {psutil.cpu_count()} CPUs.",
         "",
         "CPU % is one core = 100 %. `cpu_pct_mean` = process CPU seconds / wall seconds.",
@@ -635,7 +637,8 @@ def main() -> int:
         metavar="RATE_PER_S",
         help="drive working agents with write-stamped synthetic records at RATE records/s each; "
         "idle agents get a stream with no appends. bus_events_per_h ~= working*RATE*3600 "
-        "(5 working x 0.8 = 14.4k/h, inside the 12k-16k matched-pair band)",
+        "(5 working x 0.73 = 13.1k/h, inside the 12k-16k band; 0.73 s^-1 is not a multiple of "
+        "the 250 ms poll, unlike 0.8, which aliases it)",
     )
     parser.add_argument("--working-prompt", default=DEFAULT_WORKING_PROMPT)
     parser.add_argument("--warmup", type=float, default=20.0)
@@ -650,7 +653,7 @@ def main() -> int:
         "--config",
         type=Path,
         default=Path(os.environ.get("THEATER_HOME", Path.home() / ".theater")) / "config.toml",
-        help="config.toml copied into the isolated home",
+        help="config.toml copied into the isolated home (ignored with --synthetic: pure defaults)",
     )
     parser.add_argument(
         "--cwd", type=Path, default=REPO, help="agent cwd; must be trusted by the harness CLI"

@@ -89,10 +89,10 @@ def test_slow_writer_skips_missed_slots_instead_of_bursting(writer, tmp_path: Pa
 
 
 def test_synthetic_option_selects_plugin_and_validates(perf) -> None:
-    args = Namespace(synthetic=0.8, attach=False, harness="claude", model="haiku")
+    args = Namespace(synthetic=0.73, attach=False, harness="claude", model="haiku")
     perf.apply_synthetic(args)
     assert (args.harness, args.model) == ("synth", None)
-    assert perf.synthetic_prompt(0.8) == "rate=0.8"
+    assert perf.synthetic_prompt(0.73) == "rate=0.73"
     with pytest.raises(SystemExit):
         perf.apply_synthetic(Namespace(synthetic=0, attach=False))
     with pytest.raises(SystemExit):
@@ -111,13 +111,13 @@ def test_install_pins_writer_and_plugin_compiles_and_plans(perf, tmp_path: Path)
     loaded = load_plugin(found)
     assert loaded.error is None and loaded.manifest is not None
     context = LaunchContext(
-        participant_id="p1", prompt="rate=0.8", config_path=tmp_path / "c.json",
+        participant_id="p1", prompt="rate=0.73", config_path=tmp_path / "c.json",
         approval="yolo", cwd=tmp_path / "work",
     )  # fmt: skip
     plan = loaded.manifest.launch.planner(context)
     assert plan.argv[1:] == [
         str(SCRIPTS / "perf_synthetic_writer.py"),
-        *("--file", str(tmp_path / "work/.synth/p1.jsonl"), "--rate", "0.8"),
+        *("--file", str(tmp_path / "work/.synth/p1.jsonl"), "--rate", "0.73"),
     ]
     assert plan.session_id == "p1"
     idle = loaded.manifest.launch.planner(
@@ -174,3 +174,17 @@ def test_plugin_depends_only_on_apis_present_at_the_baseline_commit() -> None:
             external = isinstance(node, ast.ImportFrom) and node.level == 0 and node.module
             if external and node.module.startswith("theater"):
                 assert node.module.startswith(allowed), (module.name, node.module)
+
+
+def test_synthetic_mode_skips_ambient_config(perf, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(perf.shutil, "which", lambda _name: "/usr/bin/true")
+    config = tmp_path / "config.toml"
+    config.write_text("[observer]\npoll = 0.01\n")
+    made = []
+    for synthetic in (0.73, None):
+        args = Namespace(synthetic=synthetic, attach=False, config=config, cwd=tmp_path)
+        stack = perf.Stack(args)
+        made.append(stack.tmp)
+        assert (stack.home / "config.toml").exists() is (synthetic is None)
+    for tmp in made:
+        perf.shutil.rmtree(tmp, ignore_errors=True)
