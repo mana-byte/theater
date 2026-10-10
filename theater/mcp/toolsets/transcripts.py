@@ -5,7 +5,13 @@ from __future__ import annotations
 from theater.mcp.session import Session
 
 
-async def read_transcript(session: Session, *, target: str, cursor: str | None = None) -> dict:
+async def read_transcript(
+    session: Session,
+    *,
+    target: str,
+    cursor: str | None = None,
+    roles: list[str] | None = None,
+) -> dict:
     """Read one bounded newest transcript page, then page toward older content.
 
     Call once with a known live name or stable id, inspect the newest bounded
@@ -19,9 +25,11 @@ async def read_transcript(session: Session, *, target: str, cursor: str | None =
     """
     if not session._resolved:
         await session.identify()
-    params = {"id": target}
+    params: dict[str, object] = {"id": target}
     if cursor is not None:
         params["cursor"] = cursor
+    if roles is not None:
+        params["roles"] = roles
     record = await session.client.call("read_transcript", **params)
     assert isinstance(record, dict)
     record.pop("cursor", None)

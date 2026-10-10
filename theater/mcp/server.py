@@ -875,7 +875,9 @@ def build(
         )
 
     @mcp_tool()
-    async def read_transcript(target: str, cursor: str | None = None) -> dict:
+    async def read_transcript(
+        target: str, cursor: str | None = None, roles: list[str] | None = None
+    ) -> dict:
         """Read a bounded transcript page and continue toward older content.
 
         Call once with a known live name or stable id, inspect the newest
@@ -883,22 +885,24 @@ def build(
         content is necessary. Stop when the needed event is found; do not call
         list_participants first.
 
-        target: stable participant id or current live name. Dead names are
-        cleared and recyclable, so dead reads require the stable id.
         cursor: opaque next_cursor returned by Theater, or null for the
         newest page. Never construct or edit a cursor.
+        roles: any of assistant, user, tool_call, tool_result;
+        ["assistant"] reads the last answer.
 
         Returns id, path, events (chronological; entries may be partial text
-        chunks), next_cursor, and truncated. Continue with next_cursor only when
-        it is non-null and older content is still needed. truncated means the
-        response budget cut this source page before all eligible events were
-        returned. Each event retains index, role, tool_name, and turn_end plus
-        UTF-8 byte offsets; reaches_text_start is true when a suffix-first chunk
-        includes byte zero.
+        chunks), next_cursor, and truncated. truncated means the response budget
+        cut this source page before all eligible events were returned. Each event
+        retains index, role, tool_name, and turn_end plus UTF-8 byte offsets;
+        reaches_text_start is true when a suffix-first chunk includes byte zero.
+        Events over 64 KiB return head text, tail, elided_bytes, middle_cursor
+        (pages the elided middle). The newest page adds first_prompt (earliest
+        retained job prompt), later_prompts, resumed_from when known.
+        Which job edited a file: recall(paths), then git diff in the child's branch.
 
         Refuses if the transcript needs binding or its identity is lost.
         """
-        return await tools.read_transcript(session, target=target, cursor=cursor)
+        return await tools.read_transcript(session, target=target, cursor=cursor, roles=roles)
 
     _register_lifecycle_tools(mcp_tool, session)
 
