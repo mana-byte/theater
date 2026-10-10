@@ -34,6 +34,7 @@ from theater.daemon.rpc.params import (
     _string_param,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.rpc.transcript_context import newest_page_context
 from theater.daemon.rpc.transcript_paging import (
     TRANSCRIPT_COLLAPSE_MIN_BYTES,
     EventProjection,
@@ -717,13 +718,16 @@ async def _read_transcript(daemon, params: dict) -> dict:
     target = daemon.registry.resolve(_require(params, "id"))
     cursor = _optional_string_param(params, "cursor", method_name="read_transcript")
     roles = _roles_param(params.get("roles"))
-    return await read_transcript_page(
+    page = await read_transcript_page(
         daemon,
         participant_id=target.id,
         cursor=cursor,
         roles=roles,
         collapse_over=TRANSCRIPT_COLLAPSE_MIN_BYTES,
     )
+    if cursor is None:
+        page.update(newest_page_context(daemon.registry.store, target))
+    return page
 
 
 def _roles_param(value: object) -> tuple[str, ...] | None:
