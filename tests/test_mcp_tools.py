@@ -193,6 +193,13 @@ async def test_spawn_names_the_caller_as_the_parent():
     assert child["session_id"] == "ses-me"
 
 
+async def test_spawn_echoes_the_requested_model_and_effort():
+    s = resolved(spawn={**RECORD, "model": "anthropic/claude-opus", "reasoning_effort": None})
+    child = await tools.spawn_session(s, harness="opencode", approval="manual")
+    assert child["model"] == "anthropic/claude-opus"
+    assert "reasoning_effort" not in child
+
+
 async def test_spawn_preserves_unconfirmed_operation_and_diagnostics():
     operation = {
         "handle": "child-job",

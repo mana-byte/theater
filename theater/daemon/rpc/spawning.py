@@ -140,6 +140,9 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     result = participant.to_dict()
     route = daemon.controls.route_for(participant_id, RuntimeCapability.SEND)
     result["addressable"] = participant.status is not Status.DEAD and route.route_available
+    # Echo the launch policy so a caller sees which model it actually asked for.
+    result["model"] = params.get("model")
+    result["reasoning_effort"] = params.get("reasoning_effort")
     result.update(
         {
             "handle": accepted.get("job_handle", participant_id),

@@ -34,6 +34,8 @@ def _summarise(p: dict) -> dict:
             "termination_reason": p.get("termination_reason"),
             "termination_incident": p.get("termination_incident"),
             "terminated_at": p.get("terminated_at"),
+            "model": p.get("model"),
+            "reasoning_effort": p.get("reasoning_effort"),
         }
     )
 
