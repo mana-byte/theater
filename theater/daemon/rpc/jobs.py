@@ -34,7 +34,7 @@ from theater.daemon.job_changes import job_changes
 from theater.daemon.rails import check_cycle, check_wait_cycle
 from theater.daemon.rpc.params import _finite_number_param, _require
 from theater.daemon.rpc.router import method
-from theater.models import BadRequest, Job, JobState, new_id
+from theater.models import BadRequest, Job, JobState, NotFound, Status, new_id
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -130,6 +130,32 @@ def _entry(daemon, target: AwaitTarget, reasons: dict[str, str]) -> dict:
     return entry
 
 
+def _missing_hint(daemon, handle: str) -> str:
+    """Name what an unknown handle most likely meant; never alias it into a target."""
+    try:
+        participant = daemon.registry.resolve(handle)
+    except NotFound:
+        participant = None
+    if participant is not None and participant.status is not Status.DEAD:
+        job = daemon.store.oldest_running_job_for_target(participant.id)
+        if job is not None:
+            return f"{handle!r} is participant {participant.id}; await its job {job.handle}"
+        return (
+            f"{handle!r} is participant {participant.id}; it has no running job; "
+            "pass its id to wait for presence"
+        )
+    seq = handle.removeprefix("#")
+    if seq.isdigit():
+        matches = [
+            f"{p.id}#{seq}"
+            for p in daemon.store.list_participants(include_dead=True)
+            if daemon.jobs.get(f"{p.id}#{seq}") is not None
+        ]
+        if len(matches) == 1:
+            return f"{handle!r} (did you mean {matches[0]}?)"
+    return repr(handle)
+
+
 @method("jobs.await")
 async def _jobs_await(daemon, params: dict) -> list[dict]:
     """Wait for job completion, an input request, or departure within max_wait."""
@@ -155,7 +181,11 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     seen = {t.handle for t in targets}
     missing = [h for h in dict.fromkeys(handles) if h not in seen]
     if missing:
-        raise BadRequest(f"no such job(s): {', '.join(sorted(missing))}")
+        hints = "; ".join(_missing_hint(daemon, handle) for handle in sorted(missing))
+        raise BadRequest(
+            f"no such job(s): {hints}. Job handles come only from send/spawn results "
+            "(<participant>#<n>) and cannot be predicted before that call returns."
+        )
 
     # One start row per awaited target, only once the call has really blocked;
     # exactly one end row per start, however the await ends. No start, no end.

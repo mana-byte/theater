@@ -559,3 +559,26 @@ def test_structured_json_and_touch_rows_commit_together(store, tmp_path):
     assert job.structured_status == "parsed"
     rows = list(store.conn.execute(touch.select().where(touch.c.job_handle == "json-touch")))
     assert len(rows) == 1
+
+
+async def test_await_says_what_an_unknown_handle_most_likely_meant(
+    client, terminal_provider, daemon
+):
+    """Agents guessed handles from names and bare sequence numbers, then retried blind."""
+    from theater.daemon.jobs import JobState
+    from theater.protocol import RemoteError
+
+    record = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp", name="scout"
+    )
+    daemon.jobs.finish(record["handle"], state=JobState.DONE, result="ok")
+    send = f"{record['id']}#7"
+    daemon.jobs.create(handle=send, caller_id="cli", target_id=record["id"], kind="send")
+    with pytest.raises(RemoteError) as exc:
+        await client.call("jobs.await", handles=["scout", "#7", "7", "ghost"], max_wait=0.1)
+    message = str(exc.value)
+    assert f"'scout' is participant {record['id']}; await its job {send}" in message
+    assert f"'#7' (did you mean {send}?)" in message
+    assert f"'7' (did you mean {send}?)" in message
+    assert "'ghost'" in message
+    assert "cannot be predicted before that call returns" in message
