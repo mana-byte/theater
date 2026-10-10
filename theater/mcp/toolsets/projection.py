@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from theater.constants.observation import TURN_FAILED_CODE
 from theater.harness.contracts.events import clip
 
 #: Job fields the caller supplied or cannot act on (its own id, its prompt, its schema).
@@ -54,7 +55,9 @@ def job_entry(job: Mapping[str, object]) -> dict:
 def _final_answer(job: Mapping[str, object]) -> str:
     """A done job's final message unless a parsed structured result already carries it."""
     result = job.get("result")
-    if job.get("state") != "done" or job.get("structured_status") == "parsed":
+    # A failed turn's result is its failure text, which the turn_failed error points at.
+    answers = job.get("state") == "done" or job.get("error_code") == TURN_FAILED_CODE
+    if not answers or job.get("structured_status") == "parsed":
         return ""
     return clip(result) if isinstance(result, str) else ""
 

@@ -389,11 +389,13 @@ async def test_await_inlines_only_a_done_jobs_unparsed_final_answer():
         {"handle": "h#2", "state": "done", "result": ""},
         {"handle": "h#3", "state": "running", "result": "partial"},
         {"handle": "h#4", "state": "crashed", "result": "boom"},
+        {"handle": "h#5", "state": "crashed", "error_code": "turn_failed", "result": "why"},
     ]
     s = resolved(**{"jobs.await": rows})
-    entries = await tools.await_sessions(s, handles=["h#1", "h#2", "h#3", "h#4"], max_wait=5.0)
+    handles = [row["handle"] for row in rows]
+    entries = await tools.await_sessions(s, handles=handles, max_wait=5.0)
     assert entries[0]["result"] == "x" * 2000 + "… (+500 chars)"
-    assert [e.get("result") for e in entries[1:]] == [None, None, None]
+    assert [e.get("result") for e in entries[1:]] == [None, None, None, "why"]
 
 
 async def test_await_shows_presence_only_while_it_is_not_a_plain_absence():
