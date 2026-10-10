@@ -67,3 +67,17 @@ gate remains: single valid pair at ~14k (HEAD 443 vs base 469, prior session);
 3 matched pairs still needed.
 
 Controls: tmux cpu/fork matched across all pairs.
+
+## observe_to_bus — first measurement (post-final-pass HEAD)
+
+The new theater-side-only latency metric (bus ts minus observer read time;
+harness write delay excluded), from the same isolated measurement stack:
+
+| scenario | events/h | transcript_to_bus p50/p95 ms | observe_to_bus p50/p95 ms |
+|---|---:|---|---|
+| idle10+working5 | 30,617 | 118.1 / 3,108.8 | **1.8 / 12.7** |
+
+The original <50 ms latency aspiration is MET on the honest metric:
+theater-side delivery p95 is 12.7 ms under a 30k events/h load. The
+seconds-scale transcript_to_bus tails are the harness's own write delay
+and agent chattiness, not theater processing.
