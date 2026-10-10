@@ -50,7 +50,7 @@ async def test_missing_provider_never_grants_mutation_or_projects_absence():
     assert presence_snapshot(daemon, "p1").state is PresenceState.UNKNOWN
     with pytest.raises(HumanPresent):
         check_absent(daemon, "p1")
-    with pytest.raises(HumanPresent, match="await_sessions"):
+    with pytest.raises(HumanPresent, match="no composed presence provider"):
         await require_absent(daemon, "p1")
 
 

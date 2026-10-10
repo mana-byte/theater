@@ -150,8 +150,7 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     result.update(
         {
             # Echo the launch policy so a caller sees which model it actually asked for.
-            "model": params.get("model"),
-            "reasoning_effort": params.get("reasoning_effort"),
+            **{k: params[k] for k in ("model", "reasoning_effort") if params.get(k) is not None},
             "handle": accepted.get("job_handle", participant_id),
             "operation_id": accepted.get("operation_id"),
             "operation_state": operation.state,
