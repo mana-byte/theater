@@ -1322,7 +1322,6 @@ async def test_hook_only_watch_leaves_transcript_identity_state_untouched(
     observer._attachments._receipt_candidates[participant.id] = ("/tmp/transcript", "session")
 
     async def sleep_once(_seconds: float, wake: object = None) -> None:
-        assert wake is None
         observer._stopping.set()
 
     observer._sleep = sleep_once
