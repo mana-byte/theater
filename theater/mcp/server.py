@@ -20,8 +20,13 @@ from typing import Literal
 
 from mcp.server import MCPServer
 
-from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
-from theater.constants.harness import HARNESS_MCP_SERVER_NAME
+from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS, RPC_MAX_AWAIT_SECONDS
+from theater.constants.harness import (
+    CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS,
+    CLAUDE_MCP_AUTO_BACKGROUND_ENV,
+    CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS,
+    HARNESS_MCP_SERVER_NAME,
+)
 from theater.harness import describe
 from theater.mcp import tools
 from theater.mcp.client_pool import DaemonClientPool
@@ -60,7 +65,7 @@ _WAIT_TOOL = "await_sessions"
 AWAIT_DOC = """Wait for child completion, an input request, or a human to leave.
 
 handles: spawn/send job handles, or registered participant ids without a job.
-max_wait: one overall deadline including human holds; default 150 seconds, cap 300.
+max_wait: one overall deadline including human holds; default 150 seconds, cap {cap}.
 Keep it shorter than your MCP client's timeout. Timeout grants no permission to send.
 
 Returns when ANY target qualifies, preserving input order and returning all entries.
@@ -103,6 +108,25 @@ failed, output was missing, or the answer was not JSON. A finished job also carr
 Process every qualified
 entry, not just the first; wait-any may return several ready targets together.
 """
+
+
+def await_ceiling(harness: str) -> float | None:
+    """Longest wait this client keeps in the foreground; None when it never backgrounds."""
+    if harness != "claude":
+        return None
+    raw = os.environ.get(CLAUDE_MCP_AUTO_BACKGROUND_ENV)
+    try:
+        ms = float(raw) if raw else CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS
+    except ValueError:
+        ms = CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS
+    if ms <= 0:
+        return None
+    return max(ms / 1000 - CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS, 0.0)
+
+
+def _await_doc(ceiling: float | None) -> str:
+    cap = RPC_MAX_AWAIT_SECONDS if ceiling is None else min(ceiling, RPC_MAX_AWAIT_SECONDS)
+    return AWAIT_DOC.replace("{cap}", f"{cap:g}")
 
 
 def _instructions(toolset: str) -> str:
@@ -714,12 +738,16 @@ def build(
             description=description,
         )
 
-    @mcp_tool(description=AWAIT_DOC)
+    ceiling = await_ceiling(harness)
+
+    @mcp_tool(description=_await_doc(ceiling))
     async def await_sessions(
         handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
     ) -> list[dict]:
         """Forward bounded, presence-aware wait-any to the daemon."""
-        return await tools.await_sessions(session, handles=handles, max_wait=max_wait)
+        return await tools.await_sessions(
+            session, handles=handles, max_wait=max_wait, ceiling=ceiling
+        )
 
     @mcp_tool()
     async def send(target: str, prompt: str, response_format: dict | None = None) -> dict:

@@ -343,6 +343,12 @@ async def test_await_names_the_caller_so_a_deadlock_can_be_refused():
     assert (p["caller_id"], p["handles"], p["max_wait"]) == ("p-me", ["h#1"], 5.0)
 
 
+async def test_await_clamps_max_wait_to_the_clients_ceiling():
+    s = resolved(**{"jobs.await": []})
+    await tools.await_sessions(s, handles=["h#1"], max_wait=290.0, ceiling=110.0)
+    assert s.client.params("jobs.await")["max_wait"] == 110.0
+
+
 async def test_await_keeps_only_what_the_caller_acts_on():
     """Echoes of the caller's own ids, prompt and schema, and empty fields, cost context
     on every poll; state, outcome and the parsed structured answer (not its raw text) stay."""

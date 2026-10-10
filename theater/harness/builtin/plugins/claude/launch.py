@@ -14,6 +14,7 @@ from pathlib import Path
 
 from theater import paths
 from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
+from theater.constants.harness import CLAUDE_MCP_AUTO_BACKGROUND_ENV, CLAUDE_MCP_AUTO_BACKGROUND_MS
 from theater.harness.base import (
     APPROVALS,
     LaunchPlan,
@@ -115,7 +116,10 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         argv=argv,
         # The child's env comes from the terminal provider, not the daemon, so
         # pin the root only when configured — else observer and child diverge.
-        env=claude_config_env(),
+        env={
+            **claude_config_env(),
+            CLAUDE_MCP_AUTO_BACKGROUND_ENV: str(CLAUDE_MCP_AUTO_BACKGROUND_MS),
+        },
         files={
             settings_path: json.dumps(
                 _claude_receipt_settings(context.participant_id, token_path), indent=2

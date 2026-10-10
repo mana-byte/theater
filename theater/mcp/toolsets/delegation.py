@@ -183,11 +183,18 @@ async def spawn_session(
 
 
 async def await_sessions(
-    session: Session, *, handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
+    session: Session,
+    *,
+    handles: list[str],
+    max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS,
+    ceiling: float | None = None,
 ) -> list[dict]:
     """Forward presence-aware awaits, projecting each entry to what the caller acts on."""
     if not session._resolved:
         await session.identify()
+    if ceiling is not None:
+        # Past the client's own threshold the call is backgrounded and its result lost.
+        max_wait = min(max_wait, ceiling)
     # Caller identity lets the daemon reject mutual-await deadlocks.
     jobs = await session.client.call(
         "jobs.await",
