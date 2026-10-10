@@ -166,6 +166,25 @@ def _pending_input_status(view: UnifiedStoreView) -> Status | None:
     return status if status is Status.AWAITING_INPUT else None
 
 
+def _failure_text(failure: object) -> str:
+    """Name a failed turn even when Vibe leaves ``message`` blank (e.g. a model ReadTimeout)."""
+    if isinstance(failure, str):
+        return failure.strip()
+    if not isinstance(failure, dict):
+        return ""
+    message = failure.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    details = failure.get("details")
+    details = details if isinstance(details, dict) else {}
+    code, exception = failure.get("code"), details.get("exceptionType")
+    route = "/".join(
+        value for value in (details.get("provider"), details.get("model")) if isinstance(value, str)
+    )
+    text = ": ".join(value for value in (code, exception) if isinstance(value, str) and value)
+    return f"{text} ({route})" if text and route else text
+
+
 def _turn_marker(view: UnifiedStoreView) -> tuple[str | None, str | None]:
     turn = _latest_turn(view)
     turn_id = turn.get("id")
@@ -630,9 +649,7 @@ class UnifiedVibeSource(Source):
                 break
         turn = _latest_turn(current)
         if status == "failed":
-            failure = turn.get("error")
-            if isinstance(failure, dict) and isinstance(failure.get("message"), str):
-                text = failure["message"]
+            text = _failure_text(turn.get("error")) or text
         timestamp = _nonnegative_int(turn.get("completedAt"))
         ts = timestamp / 1000 if timestamp is not None else None
         return Event(

@@ -1,0 +1,10 @@
+{
+  "code": "model_stream_failed",
+  "details": {
+    "exceptionType": "ReadTimeout",
+    "model": "zai-glm-5-3",
+    "provider": "mistral",
+    "purpose": "agent"
+  },
+  "message": ""
+}

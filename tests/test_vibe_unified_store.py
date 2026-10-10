@@ -850,6 +850,28 @@ def test_interrupted_turn_boundary_carries_interrupted_terminal(store: Store) ->
     assert boundaries and boundaries[-1].turn_terminal is TurnTerminal.INTERRUPTED
 
 
+def test_failed_turn_with_blank_message_names_the_failure(store: Store) -> None:
+    """A model ReadTimeout leaves message empty; the crash result must still say why."""
+    error = json.loads(
+        (Path(__file__).parent / "fixtures/vibe_failed_turn/latest_turn_error.json").read_text()
+    )
+    user = public_message("user-1", "user", "question")
+    narration = public_message("assistant-1", "assistant", "Let me look at the files.")
+    state = source_state([user], turn_status="in_progress")
+    store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
+    source = VibeObserver(root=store.session_root.parent.parent).open_source(cwd="/tmp/work")
+    asyncio.run(source.read())
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+
+    failed = source_state([user, narration], turn_status="failed")
+    failed["latestTurn"]["error"] = error
+    store.publish(generation=GEN2, snapshot_sequence=1, state=failed, watermark=2)
+    boundary = [event for event in asyncio.run(source.read()).events if event.turn_end][-1]
+    assert boundary.turn_terminal is TurnTerminal.FAILED
+    assert boundary.text == "model_stream_failed: ReadTimeout (mistral/zai-glm-5-3)"
+
+
 def test_expired_checkpoint_rebaselines_without_replaying_entries(store: Store) -> None:
     state = source_state([public_message("user-1", "user", "question")], turn_status="completed")
     store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
