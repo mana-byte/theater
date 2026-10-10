@@ -25,6 +25,8 @@ DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 #: Wire bytes of one read response's fixed JSON structure: the wrapper,
 #: per-entry separators, and the duplicated after_key key string.
 _WIRE_WRAPPER_BYTES = 512
+#: Oldest entries a quota refusal names.
+_QUOTA_HINT_KEYS = 5
 
 
 def _wire_bytes(text: str) -> int:
@@ -50,6 +52,8 @@ class ScratchpadPage:
     oversized_key: str | None = None
     oversized_digest: str | None = None
     oversized_bytes: int = 0
+    #: keys_only reads: one {key, bytes, updated_at, expires_at, actor} per entry, no values.
+    metadata: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +113,27 @@ class ScratchpadRepository:
             .where(ScratchpadRepository._live(namespace, timestamp))
         ).scalar_one()
         return int(count or 0)
+
+    @staticmethod
+    def _quota_hint(connection: Connection, namespace: str, timestamp: float) -> str:
+        """Current usage and the oldest entries, so a refused writer knows what to delete."""
+        size = func.length(cast(global_scratchpad.c.key, BLOB)) + func.length(
+            cast(global_scratchpad.c.value, BLOB)
+        )
+        oldest = connection.execute(
+            select(global_scratchpad.c.key, size)
+            .where(ScratchpadRepository._live(namespace, timestamp))
+            .order_by(global_scratchpad.c.updated_at, global_scratchpad.c.key)
+            .limit(_QUOTA_HINT_KEYS)
+        ).all()
+        count = ScratchpadRepository._entry_count(connection, namespace, timestamp)
+        held = ScratchpadRepository._held_bytes(connection, namespace, timestamp)
+        listed = ", ".join(f"{key!r} ({int(nbytes)} B)" for key, nbytes in oldest)
+        keys = json.dumps([key for key, _ in oldest], ensure_ascii=False)
+        return (
+            f"it holds {count} entries and {held} raw UTF-8 bytes; oldest: {listed} — "
+            f"delete them with scratchpad_delete(keys={keys}) or use another namespace"
+        )
 
     def write(
         self,
@@ -194,10 +219,9 @@ class ScratchpadRepository:
         footprint = len(key.encode("utf-8")) + value_bytes
         if held - (prior or 0) + footprint > SCRATCHPAD_NAMESPACE_QUOTA_BYTES:
             raise BadRequest(
-                f"scratchpad namespace {namespace!r} holds {held} raw UTF-8 bytes of "
-                f"keys and values; this write would exceed the "
-                f"{SCRATCHPAD_NAMESPACE_QUOTA_BYTES}-byte aggregate quota — delete "
-                "entries or split into another namespace"
+                f"scratchpad namespace {namespace!r}: this write would exceed the "
+                f"{SCRATCHPAD_NAMESPACE_QUOTA_BYTES}-byte aggregate quota of keys plus values; "
+                + ScratchpadRepository._quota_hint(connection, namespace, updated_at)
             )
         if (
             prior is None
@@ -205,9 +229,9 @@ class ScratchpadRepository:
             >= SCRATCHPAD_MAX_ENTRIES_PER_NAMESPACE
         ):
             raise BadRequest(
-                f"scratchpad namespace {namespace!r} already holds "
-                f"{SCRATCHPAD_MAX_ENTRIES_PER_NAMESPACE} entries; delete entries or "
-                "split into another namespace"
+                f"scratchpad namespace {namespace!r} is at its "
+                f"{SCRATCHPAD_MAX_ENTRIES_PER_NAMESPACE}-entry cap; "
+                + ScratchpadRepository._quota_hint(connection, namespace, updated_at)
             )
         values = {
             "namespace": namespace,
@@ -238,6 +262,7 @@ class ScratchpadRepository:
         connection: Connection | None = None,
         tree_root_id: str | None = None,
         repo_root: str | None = None,
+        keys_only: bool = False,
     ) -> ScratchpadPage:
         """Read one key-ordered page of live entries within the wire budget."""
         del tree_root_id, repo_root
@@ -245,6 +270,8 @@ class ScratchpadRepository:
             raise ValueError("scratchpad page limit must be positive")
         observed_at = _finite_timestamp(now() if timestamp is None else timestamp, "read timestamp")
         conn = self._db.conn if connection is None else connection
+        if keys_only:
+            return self._metadata_page(conn, namespace, keys, after_key, limit, observed_at)
         stmt = (
             select(global_scratchpad.c.key, global_scratchpad.c.value)
             .where(self._live(namespace, observed_at))
@@ -293,6 +320,70 @@ class ScratchpadRepository:
             keys=returned,
             truncated=truncated,
             after_key=returned[-1] if truncated else None,
+        )
+
+    def _metadata_page(
+        self,
+        conn: Connection,
+        namespace: str,
+        keys: list[str] | None,
+        after_key: str | None,
+        limit: int | None,
+        observed_at: float,
+    ) -> ScratchpadPage:
+        """Per-entry sizes and stamps without values, so listing a full namespace stays cheap."""
+        table = global_scratchpad.c
+        size = func.length(cast(table.key, BLOB)) + func.length(cast(table.value, BLOB))
+        stmt = (
+            select(
+                table.key,
+                size,
+                table.updated_at,
+                table.expires_at,
+                func.coalesce(table.actor_participant_id, table.actor_client_id),
+            )
+            .where(self._live(namespace, observed_at))
+            .order_by(table.key)
+        )
+        if keys is not None:
+            stmt = stmt.where(table.key.in_(keys))
+        if after_key is not None:
+            stmt = stmt.where(table.key > after_key)
+        if limit is not None:
+            stmt = stmt.limit(limit + 1)
+        metadata: list[dict] = []
+        used = _wire_bytes(namespace) + _WIRE_WRAPPER_BYTES
+        truncated = False
+        for row_key, nbytes, updated_at, expires_at, actor in conn.execute(stmt):
+            item = {
+                "key": row_key,
+                "bytes": int(nbytes),
+                "updated_at": updated_at,
+                "expires_at": expires_at,
+                "actor": actor,
+            }
+            # The key repeats in keys and after_key, as in a value page.
+            cost = len(json.dumps(item).encode("utf-8")) + 2 * _wire_bytes(row_key) + 3
+            if limit is not None and len(metadata) >= limit:
+                truncated = True
+                break
+            if used + cost > SCRATCHPAD_READ_BUDGET_BYTES:
+                if not metadata:  # only a legacy key beyond the read budget gets here
+                    return ScratchpadPage(
+                        truncated=True,
+                        oversized_digest=hashlib.sha256(row_key.encode("utf-8")).hexdigest(),
+                        oversized_bytes=cost,
+                    )
+                truncated = True
+                break
+            metadata.append(item)
+            used += cost
+        returned = tuple(item["key"] for item in metadata)
+        return ScratchpadPage(
+            keys=returned,
+            truncated=truncated,
+            after_key=returned[-1] if truncated else None,
+            metadata=tuple(metadata),
         )
 
     def namespaces(

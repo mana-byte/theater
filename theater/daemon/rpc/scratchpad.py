@@ -96,14 +96,18 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
         raise BadRequest(
             "scratchpad.get parameter 'after_key' must be a non-empty string when provided"
         )
+    keys_only = params.get("keys_only") or False
+    if not isinstance(keys_only, bool):
+        raise BadRequest("scratchpad.get parameter 'keys_only' must be a boolean")
     page = service_for_daemon(daemon).get(
         namespace=namespace,
         keys=keys,
         after_key=after_key,
+        keys_only=keys_only,
     )
-    response = {
+    response: dict = {
         "namespace": namespace,
-        "entries": page.entries,
+        "entries": list(page.metadata) if keys_only else page.entries,
         "keys": list(page.keys),
         "truncated": page.truncated,
         "after_key": page.after_key,

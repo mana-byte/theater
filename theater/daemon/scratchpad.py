@@ -119,6 +119,7 @@ class ScratchpadService:
         keys: list[str] | None = None,
         after_key: str | None = None,
         limit: int | None = None,
+        keys_only: bool = False,
     ) -> ScratchpadPage:
         return self._repository.get(
             namespace=namespace,
@@ -126,6 +127,7 @@ class ScratchpadService:
             after_key=after_key,
             limit=limit,
             timestamp=self._timestamp(),
+            keys_only=keys_only,
         )
 
     def namespaces(

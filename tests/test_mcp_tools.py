@@ -467,6 +467,7 @@ async def test_scratchpad_get_identifies_and_forwards_exact_rpc_arguments():
         "namespace": "plan",
         "keys": None,
         "after_key": None,
+        "keys_only": False,
         "caller_id": "p-me",
     }
 
