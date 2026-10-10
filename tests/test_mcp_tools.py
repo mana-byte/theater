@@ -558,6 +558,15 @@ async def test_recall_identifies_first_so_the_daemon_knows_the_caller():
     assert s.client.methods == ["hello", "recall"]
 
 
+async def test_recall_omits_handle_when_segment_already_identifies_the_point():
+    point = {"handle": "p-you#4", "segment": "p-you#4", "outcome": "done"}
+    s = resolved(recall={"x.py": {"timeline": [point]}})
+
+    result = await tools.recall(s, paths=["x.py"])
+
+    assert result["x.py"]["timeline"] == [{"segment": "p-you#4", "outcome": "done"}]
+
+
 async def test_recall_read_forwards_the_segment_id_verbatim():
     """The segment id is a contract between recall and recall_read.
 

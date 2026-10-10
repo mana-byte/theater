@@ -31,6 +31,9 @@ async def recall(session: Session, *, paths: list[str], depth: int = 5) -> dict[
         caller_cwd=str(Path.cwd()),
     )
     assert isinstance(result, dict)
+    for record in result.values():
+        for point in record.get("timeline", []):
+            point.pop("handle", None)
     return result
 
 
