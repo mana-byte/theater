@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 from theater.constants.harness import (
     HARNESS_MANIFEST_API_VERSION as MANIFEST_API_VERSION,
@@ -67,6 +68,12 @@ class McpRenderingManifest:
     """The native renderer for participant-scoped stdio MCP endpoints."""
 
     renderer: McpRenderer
+    #: "result" delivers refusals as successful text for runtimes that hide isError content.
+    error_delivery: Literal["is_error", "result"] = "is_error"
+
+    def __post_init__(self) -> None:
+        if self.error_delivery not in ("is_error", "result"):
+            raise TypeError("mcp.error_delivery must be 'is_error' or 'result'")
 
 
 @dataclass(frozen=True, slots=True)

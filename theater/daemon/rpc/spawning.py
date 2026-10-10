@@ -38,7 +38,7 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
 )
 from theater.harness.registry.lookup import ProbeOutcome
-from theater.models import BadRequest, Status, new_id
+from theater.models import BadRequest, PublicOperationState, Status, new_id
 
 _WIRING_CHOICES = "auto, native, or legacy"
 
@@ -129,7 +129,14 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     if not timed_out and operation.state != "succeeded":
         error = operation.error or {}
         message = str(error.get("message") or "terminal launch did not succeed")
-        raise BadRequest(f"{message} (operation {operation_id})")
+        details = None
+        if operation.state == PublicOperationState.UNCERTAIN:
+            details = {
+                "side_effect": "unknown",
+                "participant_id": accepted.get("participant_id"),
+                "next": "list_participants to find this participant before spawning a replacement",
+            }
+        raise BadRequest(f"{message} (operation {operation_id})", details=details)
     participant_id = accepted.get("participant_id")
     if not isinstance(participant_id, str):
         raise TypeError("provider-backed spawn acceptance omitted participant_id")

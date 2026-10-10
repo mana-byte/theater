@@ -148,7 +148,7 @@ def manifest_for_roots(
         ),
         controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
         models=ModelDiscoveryManifest(discoverer=discover_models),
-        mcp=McpRenderingManifest(renderer=render_mcp_servers),
+        mcp=McpRenderingManifest(renderer=render_mcp_servers, error_delivery="result"),
         native_compatibility=NativeCompatibilityManifest(
             # Derived from the enforced ceiling so the declared range can never
             # outrun the store reader again (the drift behind the stuck jobs).

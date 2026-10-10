@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from typing import NoReturn
 
 from theater import protocol
+from theater.constants.refusals import NEXT_NOT_YOUR_CHILD
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.service import ACTION_SEND
 from theater.daemon.operations import OperationNotFound
@@ -169,7 +170,8 @@ def _authorize(daemon):
             raise NotYourChild(
                 _NOT_YOUR_CHILD_CONTROLS.format(
                     target=participant_id, parent=owner_id, caller=caller_id
-                )
+                ),
+                details={"next": NEXT_NOT_YOUR_CHILD.format(owner=owner_id or owner_kind.value)},
             )
 
     return authorize

@@ -14,11 +14,13 @@ harnesses that do pass their environment through.
 
 from __future__ import annotations
 
+import inspect
 import os
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Any, Literal
 
 from mcp.server import MCPServer
+from mcp.types import CallToolResult
 
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS, RPC_MAX_AWAIT_SECONDS
 from theater.constants.harness import (
@@ -28,9 +30,12 @@ from theater.constants.harness import (
     HARNESS_MCP_SERVER_NAME,
 )
 from theater.harness import describe
+from theater.harness.registry.mcp import ErrorDelivery, mcp_error_delivery
 from theater.mcp import tools
+from theater.mcp.arguments import ignored_arguments, with_ignored_arguments
 from theater.mcp.client_pool import DaemonClientPool
 from theater.mcp.instrumentation import ToolTiming
+from theater.mcp.refusals import refusal_envelope, refusal_result
 from theater.mcp.tools import Session
 
 #: `spawn_session`'s description — harness list from local registry (hint); daemon is authoritative.
@@ -513,6 +518,29 @@ def _client_lifespan(session: Session):
     return lifespan
 
 
+class _TheaterServer(MCPServer):
+    """Refusals become envelopes in the harness's delivery mode; unknown arguments are named."""
+
+    def __init__(self, *args: Any, error_delivery: ErrorDelivery, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.error_delivery: ErrorDelivery = error_delivery
+        #: tool name -> accepted parameter names
+        self.tool_parameters: dict[str, frozenset[str]] = {}
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context=None):
+        try:
+            result = await super().call_tool(name, arguments, context)
+        except Exception as exc:
+            envelope = refusal_envelope(exc)
+            if envelope is None:
+                raise
+            return refusal_result(envelope, self.error_delivery)
+        accepted = self.tool_parameters.get(name)
+        if accepted is None or not isinstance(result, CallToolResult):
+            return result
+        return with_ignored_arguments(result, ignored_arguments(arguments, accepted))
+
+
 def build(
     participant_id: str | None = None,
     harness: str = "unknown",
@@ -526,10 +554,11 @@ def build(
         harness=harness,
         client=DaemonClientPool(),
     )
-    mcp = MCPServer(
+    mcp = _TheaterServer(
         HARNESS_MCP_SERVER_NAME,
         instructions=_instructions(toolset),
         lifespan=_client_lifespan(session),
+        error_delivery=mcp_error_delivery(harness),
     )
     tool_names: set[str] = set()
 
@@ -539,6 +568,7 @@ def build(
         def decorator(fn):
             if _includes_tool(toolset, fn.__name__):
                 tool_names.add(fn.__name__)
+                mcp.tool_parameters[fn.__name__] = frozenset(inspect.signature(fn).parameters)
                 return mcp.tool(description=description)(fn)
             return fn
 

@@ -62,3 +62,16 @@ def test_projection_failure_is_unknown_without_extra_io():
     result = presence_snapshot(daemon, "p1")
     assert result.state is PresenceState.UNKNOWN
     assert result.protected
+
+
+@pytest.mark.parametrize(
+    ("reason", "next_step"),
+    [("focused", "leave the pane"), ("no-terminal-presence-evidence", "no terminal exists")],
+)
+def test_a_presence_refusal_names_the_next_step(reason: str, next_step: str) -> None:
+    snapshot = PresenceSnapshot(PresenceState.UNKNOWN, reason, 1, None)
+    daemon = SimpleNamespace(presence=SimpleNamespace(snapshot=lambda _pid: snapshot))
+    with pytest.raises(HumanPresent) as refused:
+        check_absent(daemon, "p1")
+    assert refused.value.details is not None
+    assert next_step in refused.value.details["next"]

@@ -15,6 +15,7 @@ from theater.constants.presence import (
     PRESENCE_REFRESH_INTERVAL_SECONDS,
     PRESENCE_REFRESH_TIMEOUT_SECONDS,
 )
+from theater.constants.refusals import human_present_next
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.daemon.presence.provider import ExitHandler, ProviderPresenceSource
 from theater.daemon.presence.publisher import (
@@ -153,7 +154,8 @@ class PresenceMonitor:
         if snapshot.state is not PresenceState.ABSENT:
             raise HumanPresent(
                 f"human presence for {participant_id!r} is {snapshot.state.value} "
-                f"({snapshot.reason}); not mutating; {guidance}"
+                f"({snapshot.reason}); not mutating; {guidance}",
+                details={"next": human_present_next(snapshot.reason)},
             )
 
     def configure_terminal_service(

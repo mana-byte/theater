@@ -13,6 +13,7 @@ from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     PARTICIPANTS_LIST_MAX_LIMIT,
 )
+from theater.constants.refusals import NEXT_NOT_YOUR_CHILD
 from theater.daemon.events.publication import next_revision, participant_event
 from theater.daemon.operations.termination import terminate_with_operation
 from theater.daemon.presence import access as presence_access
@@ -68,7 +69,8 @@ def authorize_participant_mutation(target: Participant, caller_id: str) -> None:
     ):
         raise NotYourChild(
             f"refusing to mutate {target.id!r}: its current control owner is "
-            f"{owner_id or owner_kind.value!r}, not you ({caller_id!r})"
+            f"{owner_id or owner_kind.value!r}, not you ({caller_id!r})",
+            details={"next": NEXT_NOT_YOUR_CHILD.format(owner=owner_id or owner_kind.value)},
         )
 
 
@@ -460,7 +462,8 @@ def _authorize_termination(target: Participant, caller_id: str) -> None:
     if owner_kind is not ControlOwnerKind.PARTICIPANT or owner_id != caller_id:
         raise NotYourChild(
             f"refusing to kill {target.id!r}: its current control owner is "
-            f"{owner_id or owner_kind.value!r}, not you ({caller_id!r})"
+            f"{owner_id or owner_kind.value!r}, not you ({caller_id!r})",
+            details={"next": NEXT_NOT_YOUR_CHILD.format(owner=owner_id or owner_kind.value)},
         )
 
 

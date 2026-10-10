@@ -240,6 +240,7 @@ class _CompiledHarness(Harness):
         self._launch = manifest.launch
         self._mcp = manifest.mcp
         self.supports_mcp_rendering = self._mcp is not None
+        self.mcp_error_delivery = self._mcp.error_delivery if self._mcp else "is_error"
         self._models = manifest.models
         self.controls = manifest.controls
         self.runtime = manifest.runtime

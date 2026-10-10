@@ -11,6 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater import names
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_METADATA_CHANGED
+from theater.constants.refusals import NEXT_NAME_TAKEN
 from theater.daemon import lineage
 from theater.daemon.events.publication import next_revision, participant_event
 from theater.daemon.persistence.repositories.journal import MAX_EVENTS_PER_TRANSACTION
@@ -387,7 +388,10 @@ class Registry:
         self.list()
         for other_id, other_name in self._names.items():
             if other_id != participant_id and other_name.casefold() == value.casefold():
-                raise NameTaken(f"name {value!r} is taken by participant {other_id!r}")
+                raise NameTaken(
+                    f"name {value!r} is taken by participant {other_id!r}",
+                    details={"next": NEXT_NAME_TAKEN},
+                )
 
     def rename(self, pid: str, new_name: str) -> Participant:
         """Assign or change a runtime name, by id or current name; same name is a no-op.
