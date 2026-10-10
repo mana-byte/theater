@@ -268,6 +268,11 @@ class _VibeSource(VibeUsageMixin, Source):
             include_full_text=include_full_text,
         )
 
+    def bind_wakeup(self, wakeup) -> None:
+        binder = getattr(self._inner, "bind_wakeup", None)
+        if binder is not None:
+            binder(wakeup)
+
     async def aclose(self) -> None:
         await self._inner.aclose()
 

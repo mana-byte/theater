@@ -12,7 +12,7 @@ import logging
 import math
 import re
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from theater.constants.core import HARNESS_NAME
 from theater.constants.harness import (
@@ -448,6 +448,12 @@ class HybridSource(Source):
         return tuple(output)
 
     # ---- attachment, identity, and history stay durable ------------------------
+
+    def bind_wakeup(self, wakeup: Callable[[], None] | None) -> None:
+        """Route durable filesystem notifications to the observer; live wakeups are separate."""
+        binder = getattr(self._durable, "bind_wakeup", None)
+        if binder is not None:
+            binder(wakeup)
 
     async def refresh(self) -> Batch:
         if self._held_evidence:

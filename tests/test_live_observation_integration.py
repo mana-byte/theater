@@ -1584,3 +1584,18 @@ async def test_hybrid_replacement_routes_and_attributes_with_bound_registration(
     assert observer._path_target("p1", event, old) == "old-job"
     assert routed == [("turn-old", 1)]
     assert lookups == [("old", 1)]
+
+
+async def test_composed_durable_source_binds_the_live_wake_signal(store, registry, monkeypatch):
+    rig = Rig(store, registry, monkeypatch)
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    await rig.open()
+    try:
+        bound: list[object] = []
+        rig.durable.bind_wakeup = bound.append  # type: ignore[attr-defined]
+        rig.register_live()
+        signal = rig.observer.live.wake_signal("p1")
+        assert signal is not None
+        assert await until(lambda: any(w == signal.wake for w in bound))
+    finally:
+        await rig.aclose()

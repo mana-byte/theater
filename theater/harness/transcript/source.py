@@ -133,7 +133,7 @@ class TranscriptSource(Source):
         self._watch_gate = WatchGate()
         self._caught_up = False
 
-    def _bind_wakeup(self, wakeup: Callable[[], None] | None) -> None:
+    def bind_wakeup(self, wakeup: Callable[[], None] | None) -> None:
         """Let filesystem notifications rouse the watch loop; polling stays the fallback."""
         self._watch_gate.set_wake(wakeup)
 
