@@ -18,12 +18,14 @@ import asyncio
 import contextlib
 import errno
 import json
+import os
 import threading
 from pathlib import Path
 
 import pytest
 from shipped import ClaudeCodeObserver
 
+from theater.harness.channels import filesystem
 from theater.harness.source import Batch, History, TranscriptSource
 from theater.harness.transcript import source as transcript_source
 from theater.transcript_identity import (
@@ -939,3 +941,57 @@ async def test_exact_rebind_during_attachment_discards_old_candidate(root, workd
     attached = await s.read()
     assert attached.attached is not None
     assert attached.attached.location == str(replacement)
+
+
+# ---- a mutable tail rewritten in place is not a rewrite of the file ---------
+
+
+def _cost_state(duration: int) -> str:
+    return json.dumps({"type": "cost-state", "sessionId": "s", "totalDuration": duration})
+
+
+def _replace_last_line(path: Path, line: str) -> None:
+    data = path.read_bytes()
+    start = data.rstrip(b"\n").rfind(b"\n") + 1
+    path.write_bytes(data[:start] + line.encode() + b"\n")
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+
+async def _drain_texts(s) -> list[str]:
+    texts = []
+    while True:
+        batch = await s.read()
+        texts.extend(e.text for e in batch.events)
+        if not batch.has_more:
+            return texts
+
+
+async def test_a_cost_state_rewritten_in_place_replays_nothing(root, workdir, monkeypatch):
+    """Claude rewrites its trailing cost-state hourly; re-reading the file would duplicate it."""
+    monkeypatch.setattr(filesystem, "kqueue_available", lambda: False)
+    path = transcript(root, "aaa", workdir)
+    s = source(root, workdir)
+    await attach(s)
+    _append(path, [record("a"), record("b"), _cost_state(10_000)])
+    assert await _drain_texts(s) == ["a", "b"]
+    held = (s.offset, s.index)
+
+    _replace_last_line(path, _cost_state(20_000))  # same length, new mtime
+    assert await _drain_texts(s) == []
+    assert (s.offset, s.index) == held
+    _replace_last_line(path, _cost_state(3_000_000))  # longer
+    assert await _drain_texts(s) == []
+    _replace_last_line(path, record("c"))
+    _append(path, [_cost_state(3_000_001)])
+    assert await _drain_texts(s) == ["c"]
+
+
+async def test_a_cost_state_followed_by_records_is_consumed(root, workdir, monkeypatch):
+    monkeypatch.setattr(filesystem, "kqueue_available", lambda: False)
+    path = transcript(root, "aaa", workdir, record("old"), _cost_state(1))
+    s = source(root, workdir)
+    await attach(s)
+    _append(path, [record("resumed")])
+    assert await _drain_texts(s) == ["resumed"]
+    assert s.offset == path.stat().st_size

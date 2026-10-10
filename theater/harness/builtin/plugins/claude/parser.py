@@ -27,6 +27,13 @@ class ClaudeParser:
     def _decode(line: str) -> dict | None:
         return decode_json_record(line)
 
+    def mutable_tail(self, line: str) -> bool:
+        # Claude rewrites its last-wins cost-state line in place, roughly hourly.
+        if '"cost-state"' not in line:
+            return False
+        record = self._decode(line)
+        return record is not None and record.get("type") == "cost-state"
+
     def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
         record = self._decode(line)
         if record is None:
