@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from theater.harness.channels.filesystem import WatchGate
 from theater.harness.source import Batch, ReceiptAdmission, TranscriptSource
 from theater.harness.transcript.discovery import stateful_history_reader
 from theater.provenance import TranscriptProvenance
@@ -36,6 +37,10 @@ def _open_claude_source(
     )
 
 
+#: Short, because a relocated receipt file is only found by the real check.
+_RECEIPT_FALLBACK_SECONDS = 2.0
+
+
 class _ClaudeSource(TranscriptSource):
     """Keep a receipt pending until its JSONL materializes.
 
@@ -48,6 +53,16 @@ class _ClaudeSource(TranscriptSource):
     def __init__(self, observer: ClaudeCodeObserver, **kwargs) -> None:
         super().__init__(observer, **kwargs)
         self._expected_location: Path | None = None
+        #: A receipt path is stat-polled only when its directory changed or the safety net is due.
+        self._receipt_gate = WatchGate(fallback_seconds=_RECEIPT_FALLBACK_SECONDS)
+
+    def _bind_wakeup(self, wakeup) -> None:
+        super()._bind_wakeup(wakeup)
+        self._receipt_gate.set_wake(wakeup)
+
+    async def aclose(self) -> None:
+        self._receipt_gate.release()
+        await super().aclose()
 
     def _history_reader(self):
         from .observer import ClaudeCodeObserver
@@ -62,7 +77,10 @@ class _ClaudeSource(TranscriptSource):
         self._require_decision()
         path = self._expected_location
         if path is None:
+            self._receipt_gate.release()
             return await super().read()
+        if not self._receipt_gate.due(path):
+            return Batch(waiting=True)
         try:
             path.stat()
         except FileNotFoundError:
