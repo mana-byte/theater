@@ -207,9 +207,9 @@ worktree: if True, create a git worktree for the child with its own
           --delete-branch` once no participant uses them. Dirty worktrees
           and unmerged branches are retained unless separately forced.
           Cannot be combined with resume.
-name:      optional alias. It is case-insensitively unique while the child lives,
-           survives daemon restarts, is released at death, and is not inherited
-           on resume.
+name:      optional alias: 1-24 chars, letter first, then letters/digits/_/-
+           (e.g. Scapin-2); omit it to get a free one. Unique while the child
+           lives (case-insensitive), released at death, not inherited on resume.
 description: highly recommended for user clarity: a short, plain, specific,
            non-verbose summary of the child's purpose (maximum 160 Unicode
            codepoints). It is durable and is inherited by resume unless an
