@@ -142,6 +142,7 @@ class Registry:
         parent_id: str | None = None,
         after: tuple[float, str] | None = None,
         limit: int | None = None,
+        newest_first: bool = False,
     ) -> builtins.list[Participant]:
         return [
             self._named(p)
@@ -151,6 +152,7 @@ class Registry:
                 parent_id=parent_id,
                 after=after,
                 limit=limit,
+                newest_first=newest_first,
             )
         ]
 

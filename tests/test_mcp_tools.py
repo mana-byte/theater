@@ -629,9 +629,18 @@ async def test_list_participants_forwards_keyset_pagination_to_daemon():
         "include_dead": True,
         "ids": None,
         "parent_id": None,
+        "order": "newest",
         "limit": 25,
         "after_id": "p-before",
     }
+
+
+async def test_list_participants_marks_a_full_page_with_its_cursor():
+    rows = [{**_RECORD_WITH_RESUME, "id": "p-a"}, {**_RECORD_WITH_RESUME, "id": "p-b"}]
+    full = await tools.list_participants(resolved(**{"participants.list": rows}), limit=2)
+    short = await tools.list_participants(resolved(**{"participants.list": rows}), limit=3)
+    assert full[-1]["next_after_id"] == "p-b" and "next_after_id" not in full[0]
+    assert all("next_after_id" not in row for row in short)
 
 
 async def test_list_participants_caps_unfiltered_dead_history_for_mcp():

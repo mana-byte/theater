@@ -67,7 +67,12 @@ Do not invent a model or reasoning effort. Pass `model` or `reasoning_effort` on
 actually records that native value; otherwise omit the parameter. Do not change the retained branch
 or request a new worktree.
 
-For every non-resumable row, explain its `resume_state` rather than claiming conversational recovery.
+For every non-resumable row, explain its `resume_state` rather than claiming conversational recovery:
+`live` (still running), `no_session_id` (Theater has not recorded the harness session id),
+`harness_cannot_resume` (the adapter does not support resume), `untrusted` (transcript provenance
+is below operator-level), `owned_by_live` (a live participant holds the trusted session or claims
+this predecessor as a recovery successor), `harness_resume_rejected` (the harness preflight refused
+the session).
 Workspace-only recovery can spawn a replacement auditor only when it is safe and the selected
 recovery mode or user confirmation explicitly permits the fallback. Use the same retained harness and
 cwd with `worktree=False` unless the user explicitly chooses otherwise. Approval is execution policy,

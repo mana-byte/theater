@@ -578,23 +578,16 @@ def build(
         you. It excludes deeper descendants and composes with both `ids` and
         `include_dead`.
 
-        An unfiltered `include_dead=True` listing returns at most 100 rows by
-        default. Pass `limit` (1 through 200) to choose a page size, then use
-        the final row's stable id as `after_id` for the next page; an empty
-        page ends pagination. The order is oldest first. If a cursor was
-        deleted by retention GC, restart from the first page. `limit` and
+        `include_dead=True` lists newest first, 100-row cap. Pass `limit`
+        (1 through 200) to choose a page size; a full page's last row carries
+        `next_after_id`, which you pass as `after_id` for the next page.
+        Live-only lists are oldest first. If a cursor was deleted by retention
+        GC, restart from the first page. `limit` caps an `ids` query;
         `after_id` cannot be used with `ids`.
 
-        Each row includes `resume_state`, which exposes the verdict from the
-        generic identity and capability gates plus any harness resume preflight
-        that `spawn_session(resume=...)` checks. Values: `resumable` (all
-        available current gates passed), `live` (participant is still running), `no_session_id`
-        (Theater has not recorded the harness session id),
-        `harness_cannot_resume` (the harness adapter does not support resume),
-        `untrusted` (session id present but transcript provenance is below
-        operator-level), `owned_by_live` (a live participant holds the trusted
-        session or claims this predecessor as a recovery successor), `harness_resume_rejected`
-        (the harness preflight refused the session).
+        Each row includes `resume_state`, the verdict `spawn_session(resume=...)`
+        checks; `resumable` means every current gate passed. The
+        theater-recover-tmux skill explains the other values.
         """
         return await tools.list_participants(
             session,

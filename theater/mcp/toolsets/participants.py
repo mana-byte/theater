@@ -60,6 +60,8 @@ async def list_participants(
         "ids": ids,
         "parent_id": session.participant_id if children_only else None,
     }
+    if include_dead:
+        params["order"] = "newest"
     if limit is not None:
         params["limit"] = limit
     elif include_dead and ids is None:
@@ -69,9 +71,14 @@ async def list_participants(
     rows = await session.client.call("participants.list", **params)
     assert isinstance(rows, list)
     me = session.participant_id
-    return [
+    out = [
         {**_summarise(p), "is_self": p["id"] == me, "resume_state": p["resume_state"]} for p in rows
     ]
+    page = params.get("limit")
+    if out and ids is None and isinstance(page, int) and len(out) >= page:
+        # A full page may hide more rows; the cursor makes that visible without an error.
+        out[-1]["next_after_id"] = out[-1]["id"]
+    return out
 
 
 async def update_participant(
