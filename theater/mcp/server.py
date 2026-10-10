@@ -356,7 +356,7 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
     """Register kill and adopt: one explicit-approval rule, two ends of a child's life."""
 
     @mcp_tool()
-    async def put_child_back_in_the_wound(target: str) -> dict:
+    async def put_child_back_in_the_wound(target: str, forget: bool = False) -> dict:
         """Permanently kill one direct child session.
 
         **Before killing any child, ask the user for permission and wait for an
@@ -383,10 +383,10 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         coordinate cleanup through their direct parents; do not claim that the
         user's confirmation syntax is the problem.
 
-        Refusals include `no_self_kill`, `not_your_child`, `not_found`, and
-        `human_present` for a protected live terminal. The list is non-exhaustive.
-        Killing an already-dead child by id returns
-        {"id": str, "killed": false, "reason": "already_dead"}.
+        forget: true retires a child with no terminal, route, or live process
+        (a ghost) without terminal I/O; anyone may forget an orphan whose owners
+        are dead. Refusals (e.g. `human_present`) carry `next`. An already-dead
+        child returns {"killed": false, "reason": "already_dead"}.
 
         For `worktree=True`, verified termination also cleans up the unique
         worktree and deletes its merged branch. Dirty or still-used worktrees
@@ -401,7 +401,7 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         A child without a worktree has no worktree or branch to delete.
         The session kill itself cannot be undone.
         """
-        return await tools.put_child_back_in_the_wound(session, target=target)
+        return await tools.put_child_back_in_the_wound(session, target=target, forget=forget)
 
     @mcp_tool()
     async def adopt_session(target: str) -> dict:

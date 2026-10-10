@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from theater.daemon.presence import PresenceMonitor, PresenceState
-from theater.models import HumanPresent, Participant, TerminalBindingRecord
+from theater.models import Participant, TerminalBindingRecord
 
 P1, T1 = "participant-a", "terminal-a"
 P2, T2 = "participant-b", "terminal-b"
@@ -315,20 +315,20 @@ async def test_scoped_recheck_starts_fresh_when_named_inspection_is_in_flight(
     blocked = asyncio.create_task(monitor.require_absent(P1))
     try:
         await asyncio.wait_for(inspecting.wait(), 1)
-        service.responses[T1].append(result("absent", 3, T1))
+        service.responses[T1].extend([result("absent", 3, T1), result("absent", 4, T1)])
         monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[T1])
         assert monitor.snapshot(P1).state is PresenceState.UNKNOWN
 
         release.set()
-        # The pre-invalidation inspection is fenced, so admission stays protected.
-        with pytest.raises(HumanPresent):
-            await blocked
+        # The fenced pre-invalidation inspection never grants absence; admission waits
+        # for a fresh one instead of refusing.
+        await asyncio.wait_for(blocked, 2)
 
         await _settle(monitor)  # the scoped re-check must start a fresh inspection
         assert monitor.snapshot(P1).state is PresenceState.ABSENT
         assert monitor.snapshot(P1).reason == "focus-absent"
         assert monitor.snapshot(P2).state is PresenceState.ABSENT
-        assert service.inspect_calls == {T1: 3, T2: 1}
+        assert service.inspect_calls == {T1: 4, T2: 1}
     finally:
         release.set()
         with contextlib.suppress(BaseException):

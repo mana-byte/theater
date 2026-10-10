@@ -100,9 +100,11 @@ def cmd_spawn(args) -> int:
 
 
 def cmd_kill(args) -> int:
-    result = call_sync("participant.kill", id=args.id)
+    params = {"forget": True} if getattr(args, "forget", False) else {}
+    result = call_sync("participant.kill", id=args.id, **params)
     assert isinstance(result, dict)
-    print(f"killed {args.id}" if result.get("killed") else f"already dead: {args.id}")
+    verb = "forgot" if result.get("forgotten") else "killed"
+    print(f"{verb} {args.id}" if result.get("killed") else f"already dead: {args.id}")
     cleanup = result.get("workspace_cleanup")
     if isinstance(cleanup, dict):
         print(f"workspace {cleanup['workspace_id']}: cleanup {cleanup['state']}")

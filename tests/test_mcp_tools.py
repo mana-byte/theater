@@ -565,6 +565,12 @@ async def test_put_child_back_in_the_wound_names_the_caller_so_the_daemon_can_au
     p = s.client.params("participant.kill")
     assert p["id"] == "p-child"
     assert p["caller_id"] == "p-me"
+    assert "forget" not in p
+    await tools.put_child_back_in_the_wound(s, target="p-child", forget=True)
+    assert s.client.calls[-1] == (
+        "participant.kill",
+        {"id": "p-child", "caller_id": "p-me", "forget": True},
+    )
 
 
 async def test_put_child_back_in_the_wound_identifies_first_or_the_daemon_cannot_authorize():

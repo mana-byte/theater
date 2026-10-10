@@ -71,6 +71,15 @@ def _add_identity_commands(sub) -> None:
             "point at a successor."
         ),
     )
+    kill.add_argument(
+        "--forget",
+        action="store_true",
+        help=(
+            "Retire a participant no terminal or live process embodies (no binding, no "
+            "route, dead pids) without terminal I/O; the operator may also forget an "
+            "uncertain spawn."
+        ),
+    )
 
     name = sub.add_parser("name", help="Rename a participant.")
     name.add_argument("target", help="Participant id or current name (live participants only).")

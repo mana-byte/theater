@@ -15,7 +15,7 @@ from theater.constants.presence import (
     PRESENCE_REFRESH_INTERVAL_SECONDS,
     PRESENCE_REFRESH_TIMEOUT_SECONDS,
 )
-from theater.constants.refusals import human_present_next
+from theater.constants.refusals import TRANSIENT_PRESENCE_REASONS, human_present_next
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.daemon.presence.provider import ExitHandler, ProviderPresenceSource
 from theater.daemon.presence.publisher import (
@@ -24,7 +24,10 @@ from theater.daemon.presence.publisher import (
 )
 from theater.models import HumanPresent, NotFound, TerminalBindingRecord
 
-_AWAIT_GUIDANCE = "call await_sessions(handles=[{participant_id!r}]), then retry"
+#: Overall bound on waiting out provider-state churn before refusing.
+TRANSIENT_WAIT_SECONDS = 5.0
+#: Re-inspect at least this often: a recovered provider need not bump the revision.
+TRANSIENT_RECHECK_SECONDS = 0.25
 logger = logging.getLogger("theater.daemon.presence")
 
 
@@ -47,8 +50,10 @@ class PresenceMonitor:
         clock=time.monotonic,
         on_change: Callable[[str], None] | None = None,
         publish_window: float = PRESENCE_PUBLISH_COALESCE_SECONDS,
+        transient_wait: float = TRANSIENT_WAIT_SECONDS,
     ) -> None:
         del arm_check_interval
+        self._transient_wait = transient_wait
         self._registry = registry
         self._refresh_interval = refresh_interval
         self._stale_after = stale_after
@@ -148,13 +153,26 @@ class PresenceMonitor:
             self._registry.get(participant_id)
         except NotFound:
             return
-        guidance = _AWAIT_GUIDANCE.format(participant_id=participant_id)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._transient_wait
         await self._refresh_target(participant_id, fresh=True)
         snapshot = self.snapshot(participant_id)
+        # Only provider churn is waited out, and only a fresh inspection may grant absence.
+        while snapshot.reason in TRANSIENT_PRESENCE_REASONS and not self._stopping:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self.wait_for_change(snapshot.revision),
+                    min(remaining, TRANSIENT_RECHECK_SECONDS),
+                )
+            await self._refresh_target(participant_id, fresh=True)
+            snapshot = self.snapshot(participant_id)
         if snapshot.state is not PresenceState.ABSENT:
             raise HumanPresent(
                 f"human presence for {participant_id!r} is {snapshot.state.value} "
-                f"({snapshot.reason}); not mutating; {guidance}",
+                f"({snapshot.reason}); not mutating",
                 details={"next": human_present_next(snapshot.reason)},
             )
 

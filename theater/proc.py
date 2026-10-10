@@ -77,6 +77,19 @@ def comm(pid: int) -> str:
     return _comm(pid)
 
 
+def pid_alive(pid: int) -> bool:
+    """True when any process holds *pid*; a reused pid errs towards alive, never dead."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # EPERM: it exists under another user
+    return True
+
+
 def open_files(pid: int) -> list[Path]:
     """Absolute paths of the files *pid* holds open, via ``/proc`` or ``lsof``.
 
