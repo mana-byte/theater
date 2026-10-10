@@ -150,6 +150,7 @@ async def test_harnesses_hides_the_ones_that_cannot_be_spawned():
     got = await tools.harnesses(resolved(harnesses=rows))
     assert [r["name"] for r in got] == ["vibe"]
     assert "installed" not in got[0]
+    assert "icon" not in got[0]
 
 
 async def test_harnesses_forwards_approvals_and_nulls_when_the_daemon_predates_them():

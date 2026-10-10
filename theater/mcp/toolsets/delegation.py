@@ -30,7 +30,6 @@ async def harnesses(session: Session) -> list[dict]:
     return [
         {
             "name": r["name"],
-            "icon": r["icon"],
             "binary": r["binary"],
             "approvals": r.get("approvals"),
         }
