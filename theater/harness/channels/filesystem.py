@@ -18,8 +18,15 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 logger = logging.getLogger("theater.harness.filesystem")
+
+
+def _kqueue_module() -> Any:
+    """kqueue attributes exist only on BSD/macOS; stubs follow the checking platform."""
+    return cast("Any", select)
+
 
 #: Descriptors the process-wide watcher may hold; beyond this a source simply polls.
 MAX_WATCH_FDS = 512
@@ -32,22 +39,19 @@ _EVENTS_PER_PUMP = 64
 _O_EVTONLY = getattr(os, "O_EVTONLY", 0x8000 if sys.platform == "darwin" else os.O_RDONLY)
 
 if hasattr(select, "kqueue"):
+    _kq = _kqueue_module()
     _FILE_FFLAGS = (
-        select.KQ_NOTE_WRITE
-        | select.KQ_NOTE_EXTEND
-        | select.KQ_NOTE_ATTRIB
-        | select.KQ_NOTE_DELETE
-        | select.KQ_NOTE_RENAME
-        | select.KQ_NOTE_REVOKE
-        | select.KQ_NOTE_LINK
+        _kq.KQ_NOTE_WRITE
+        | _kq.KQ_NOTE_EXTEND
+        | _kq.KQ_NOTE_ATTRIB
+        | _kq.KQ_NOTE_DELETE
+        | _kq.KQ_NOTE_RENAME
+        | _kq.KQ_NOTE_REVOKE
+        | _kq.KQ_NOTE_LINK
     )
-    _DIR_FFLAGS = (
-        select.KQ_NOTE_WRITE | select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME | select.KQ_NOTE_REVOKE
-    )
+    _DIR_FFLAGS = _kq.KQ_NOTE_WRITE | _kq.KQ_NOTE_DELETE | _kq.KQ_NOTE_RENAME | _kq.KQ_NOTE_REVOKE
     #: The watched inode is gone or replaced; the descriptor must be reopened by path.
-    _REPLACED = (
-        select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME | select.KQ_NOTE_REVOKE | select.KQ_NOTE_LINK
-    )
+    _REPLACED = _kq.KQ_NOTE_DELETE | _kq.KQ_NOTE_RENAME | _kq.KQ_NOTE_REVOKE | _kq.KQ_NOTE_LINK
 else:  # pragma: no cover - non-kqueue platforms
     _FILE_FFLAGS = _DIR_FFLAGS = _REPLACED = 0
 
@@ -125,7 +129,7 @@ class FilesystemWatcher:
 
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
-        self._kq: select.kqueue | None = select.kqueue()
+        self._kq: Any | None = _kqueue_module().kqueue()
         self._entries: dict[tuple[bool, Path], _Entry] = {}
         self._by_fd: dict[int, _Entry] = {}
         loop.add_reader(self._kq.fileno(), self.pump)
@@ -235,10 +239,11 @@ class FilesystemWatcher:
             fd = os.open(entry.path, _O_EVTONLY)
         except OSError:
             return False
-        flags = select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_CLEAR
+        _kq = _kqueue_module()
+        flags = _kq.KQ_EV_ADD | _kq.KQ_EV_ENABLE | _kq.KQ_EV_CLEAR
         fflags = _DIR_FFLAGS if entry.is_dir else _FILE_FFLAGS
         try:
-            self._kq.control([select.kevent(fd, select.KQ_FILTER_VNODE, flags, fflags)], 0, 0)
+            self._kq.control([_kq.kevent(fd, _kq.KQ_FILTER_VNODE, flags, fflags)], 0, 0)
         except OSError:
             os.close(fd)
             return False
@@ -254,12 +259,12 @@ class FilesystemWatcher:
                 os.close(entry.fd)  # closing the descriptor also removes its kevent
             entry.fd = -1
 
-    def _dispatch(self, event: select.kevent) -> None:
+    def _dispatch(self, event: Any) -> None:
         entry = self._by_fd.get(event.ident)
         if entry is None:
             return
         subs = tuple(entry.subs)
-        if event.flags & select.KQ_EV_ERROR:
+        if event.flags & _kqueue_module().KQ_EV_ERROR:
             self._fail_entry(entry)
             return
         for sub in subs:
