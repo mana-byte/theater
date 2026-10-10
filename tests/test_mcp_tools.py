@@ -305,15 +305,6 @@ async def test_spawn_forwards_an_explicit_wiring_choice():
     assert s.client.params("spawn")["wiring"] == "legacy"
 
 
-async def test_register_pane_settles_identity_on_the_pane_it_was_told():
-    """The MCP env allowlist hides TMUX_PANE, so the agent reads it and tells us."""
-    s = session(hello={**RECORD, "id": "p-adopted"})
-    adopted = await tools.register_pane(s, pane="%12")
-    assert s.client.params("hello")["pane"] == "%12"
-    assert (s.participant_id, s._resolved) == ("p-adopted", True)
-    assert adopted["session_id"] == "ses-me"
-
-
 async def test_update_participant_identifies_and_forwards_metadata():
     s = session(**{"participant.update": {**RECORD, "description": "Updated"}})
     updated = await tools.update_participant(

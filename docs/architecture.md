@@ -96,19 +96,17 @@ Route 1 exists because of a specific bug in the middle of the stack: the MCP
 SDK replaces the inherited environment with a six-variable allowlist
 (`DEFAULT_INHERITED_ENV_VARS` in the SDK's `mcp/client/stdio.py`). Environment
 variables set on the tmux
-window do not reach the MCP server process. `$TMUX_PANE` is lost the same way,
-which is why `register_pane` exists as an adoption fallback — the agent reads
-its own pane id with its shell tool and hands it over, because it can see what
-its MCP server cannot.
+window do not reach the MCP server process. `$TMUX_PANE` is lost the same way.
+The MCP process therefore cannot manufacture a trusted terminal binding;
+addressability arrives through a verified provider or native-runtime route.
 
 The participant id belongs to Theater; `session_id` belongs to the underlying
 harness and is the opaque value accepted by `spawn_session(resume=...)`. The
 observer fills it in only after finding the participant's transcript, so the
-agent-facing `whoami`, `list_participants`, `spawn_session`, and `register_pane`
-records always carry the field but may initially report it as null. A later
-`whoami` or `list_participants` call reads the persisted value once discovery
-has completed. Like the rest of the machine-wide participant list, session ids
-follow Theater's single-user trust model; they are routing metadata, not
+agent-facing `whoami`, `list_participants`, and `spawn_session` records may
+initially omit it. A later `whoami` or `list_participants` call reads the
+persisted value once discovery has completed. Like the rest of the machine-wide
+participant list, session ids follow Theater's single-user trust model; they are routing metadata, not
 authorization tokens.
 
 Participant names are recyclable aliases of live participants: they make
@@ -218,7 +216,7 @@ jobs or participants or rejecting otherwise valid inventory. Régie archives
 those receipts for inspection instead of replaying them on every reconnect.
 
 The daemon exposes 48 methods (`theater/daemon/rpc/`); the MCP tools
-number 22 (`theater/mcp/server.py`), registered under bare
+number 23 (`theater/mcp/server.py`), registered under bare
 names — namespacing is by server name, not a tool prefix. Agents in fact see
 two servers: `theater` carries everything except `await_sessions`, which lives
 on a separate `theater_wait` stdio server so a cancelled long wait can never

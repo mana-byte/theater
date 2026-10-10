@@ -672,15 +672,6 @@ def build(
         )
 
     @mcp_tool()
-    async def register_pane(pane: str) -> dict:
-        """Compatibility endpoint; pane-only attachment is no longer accepted.
-
-        Addressability requires an exact terminal-provider binding. Use a
-        provider-aware frontend adoption flow instead.
-        """
-        return await tools.register_pane(session, pane=pane)
-
-    @mcp_tool()
     async def update_participant(
         target: str | None = None,
         name: str | None = None,

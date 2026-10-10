@@ -6,8 +6,6 @@ machine. ``_summarise`` is shared with the delegation toolset.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
 from theater.mcp.session import Session
 from theater.mcp.toolsets.projection import compact
@@ -72,21 +70,6 @@ async def list_participants(
     return [
         {**_summarise(p), "is_self": p["id"] == me, "resume_state": p["resume_state"]} for p in rows
     ]
-
-
-async def register_pane(session: Session, *, pane: str) -> dict:
-    """Call the retained private endpoint, which refuses unsafe pane-only adoption."""
-    record = await session.client.call(
-        "hello",
-        id=session.participant_id,
-        harness=session.harness,
-        pane=pane,
-        cwd=str(Path.cwd()),
-    )
-    assert isinstance(record, dict)
-    session.participant_id = record["id"]
-    session._resolved = True
-    return _summarise(record)
 
 
 async def update_participant(

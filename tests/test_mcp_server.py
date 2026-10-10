@@ -62,7 +62,6 @@ async def test_tools_are_registered(daemon):
         "list_skills",
         "load_skill",
         "spawn_session",
-        "register_pane",
         "update_participant",
         "await_sessions",
         "send",
@@ -623,15 +622,6 @@ async def test_whoami_registers_on_first_call(daemon):
     async with DaemonClient(autostart=False) as c:
         rows = await c.call("participants.list")
     assert [r["id"] for r in rows] == ["chosen-id"]
-
-
-async def test_register_pane_refuses_implicit_adoption(daemon):
-    mcp = build("chosen-id", "vibe")
-    assert _payload(await mcp.call_tool("whoami", {}))["tier"] == "external"
-
-    with pytest.raises(Exception) as exc:
-        await mcp.call_tool("register_pane", {"pane": "%42"})
-    assert "provider terminal identity" in str(exc.value)
 
 
 async def test_list_participants_marks_the_caller(daemon):

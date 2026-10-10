@@ -28,7 +28,6 @@ from theater.mcp.toolsets.delegation import (
 from theater.mcp.toolsets.participants import (
     _summarise,
     list_participants,
-    register_pane,
     update_participant,
     whoami,
 )
@@ -53,7 +52,6 @@ __all__ = [
     "read_transcript",
     "recall",
     "recall_read",
-    "register_pane",
     "scratchpad_delete",
     "scratchpad_get",
     "scratchpad_write",
