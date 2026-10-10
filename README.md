@@ -87,10 +87,10 @@ Python 3.12, `tmux`, `git`, and all Python dependencies, including the
 `observability` extra for OTLP export (still disabled unless configured):
 
 ```sh
-nix profile add github:mana-byte/theater/v1.0.0rc10#theater github:mana-byte/theater/v1.0.0rc10#regie
+nix profile add github:mana-byte/theater/v1.0.0rc11#theater github:mana-byte/theater/v1.0.0rc11#regie
 ```
 
-Drop `/v1.0.0rc10` to track `main` instead. From a local checkout, use `nix profile add .#theater .#regie` instead.
+Drop `/v1.0.0rc11` to track `main` instead. From a local checkout, use `nix profile add .#theater .#regie` instead.
 `nix run .#theater -- --help` and `nix run .#regie -- --help` run either CLI
 without adding it to your profile. The default package and app remain Theater;
 install both named packages to use Régie. Neither package exposes Python or
@@ -104,14 +104,14 @@ manager first. The packages are not published on PyPI; install both from the
 release tag, and Régie picks up the matching Theater from the same checkout:
 
 ```sh
-uv tool install "theater @ git+https://github.com/mana-byte/theater@v1.0.0rc10"
-uv tool install "regie @ git+https://github.com/mana-byte/theater@v1.0.0rc10#subdirectory=packages/regie"
+uv tool install "theater @ git+https://github.com/mana-byte/theater@v1.0.0rc11"
+uv tool install "regie @ git+https://github.com/mana-byte/theater@v1.0.0rc11#subdirectory=packages/regie"
 theater --version
 regie --help
 ```
 
 The wheels and sdists are also attached to the
-[GitHub release](https://github.com/mana-byte/theater/releases/tag/v1.0.0rc10).
+[GitHub release](https://github.com/mana-byte/theater/releases/tag/v1.0.0rc11).
 
 ## Quick start
 
@@ -403,7 +403,7 @@ RC10's guarded cleanup is not in effect until the upgrade has completed.
 
 1. Drain sessions and jobs, then stop the RC9 daemon and MCP sidecars. Keep a
    consistent backup of the stopped database, config, and needed worktrees.
-2. Install the matching `theater==1.0.0rc10` and `regie==1.0.0rc10`
+2. Install the matching `theater==1.0.0rc11` and `regie==1.0.0rc11`
    distributions. The migration refuses non-dead participants or running jobs;
    it never kills or rewrites them to pass the check.
 3. Move the existing `[regie]` table intact from
