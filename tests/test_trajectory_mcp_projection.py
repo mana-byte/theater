@@ -120,3 +120,21 @@ def test_mcp_identity_is_atomic_and_strict_on_wire() -> None:
     wire.pop("mcp_tool")
     with pytest.raises(TrajectoryValidationError, match="requires both server and tool"):
         TrajectoryRecord.from_wire(wire)
+
+
+@pytest.mark.parametrize("server", ["theater", "theater_wait"])
+def test_a_refusal_delivered_as_text_is_still_an_error(server: str) -> None:
+    text = 'REFUSED busy: working\n{"ok":false,"error":{"code":"busy","message":"working"}}'
+    fact = TrajectoryFact(
+        kind=TrajectoryKind.TOOL_RESULT,
+        lane=TrajectoryLane.TOOLS,
+        summary=text,
+        status=TrajectoryStatus.COMPLETED,
+        native_id="result",
+        call_id="call-1",
+        mcp_server=server,
+        mcp_tool="send",
+    )
+    record = fact_to_record(fact, participant_id="participant", source_epoch="epoch")
+    assert record.status is TrajectoryStatus.ERROR
+    assert record.failure is not None and record.failure.code == "busy"
