@@ -505,10 +505,13 @@ async def test_read_transcript_forwards_only_the_returned_cursor():
             "has_more": False,
         }
     )
-    page = await tools.read_transcript(s, target="Arlequin", cursor="trc1.cursor")
+    page = await tools.read_transcript(
+        s, target="Arlequin", cursor="trc1.cursor", roles=["assistant"]
+    )
     assert s.client.params("read_transcript") == {
         "id": "Arlequin",
         "cursor": "trc1.cursor",
+        "roles": ["assistant"],
     }
     assert page == {"id": "p-you", "events": [], "next_cursor": None}
 

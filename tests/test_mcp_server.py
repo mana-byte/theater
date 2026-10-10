@@ -137,6 +137,7 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
     assert "else stop and report it" in descriptions["scratchpad_get"]
     assert "may be combined" in descriptions["scratchpad_delete"]
     assert "partial text chunks" in descriptions["read_transcript"]
+    assert "middle_cursor" in descriptions["read_transcript"]
     assert "does not prove the edit was never committed" in descriptions["recall_read"]
 
 
@@ -292,7 +293,7 @@ async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
     transcript = schema["read_transcript"]
     assert "target" in transcript["properties"]
     assert "target_id" not in transcript["properties"]
-    assert set(transcript["properties"]) == {"target", "cursor"}
+    assert set(transcript["properties"]) == {"target", "cursor", "roles"}
     assert transcript["properties"]["cursor"]["default"] is None
     assert transcript["required"] == ["target"]
 

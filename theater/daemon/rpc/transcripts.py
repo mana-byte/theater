@@ -34,7 +34,9 @@ from theater.daemon.rpc.params import (
     _string_param,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.rpc.transcript_context import newest_page_context
 from theater.daemon.rpc.transcript_paging import (
+    TRANSCRIPT_COLLAPSE_MIN_BYTES,
     EventProjection,
     TranscriptCursorError,
     TranscriptPager,
@@ -619,6 +621,8 @@ async def read_transcript_page(
     cursor: str | None = None,
     max_bytes: int = TRANSCRIPT_READ_RESPONSE_MAX_BYTES,
     event_projection: EventProjection | None = None,
+    roles: tuple[str, ...] | None = None,
+    collapse_over: int | None = None,
 ) -> dict:
     """Read one bounded, reverse-paginated transcript page.
 
@@ -658,6 +662,8 @@ async def read_transcript_page(
                 event_filter=lambda event: event.kind.value in _READABLE,
                 max_bytes=max_bytes,
                 event_projection=event_projection,
+                roles=roles,
+                collapse_over=collapse_over,
             ).read(cursor)
         except TranscriptCursorError as exc:
             raise BadRequest(str(exc)) from None
@@ -711,7 +717,28 @@ async def _read_transcript(daemon, params: dict) -> dict:
         )
     target = daemon.registry.resolve(_require(params, "id"))
     cursor = _optional_string_param(params, "cursor", method_name="read_transcript")
-    return await read_transcript_page(daemon, participant_id=target.id, cursor=cursor)
+    roles = _roles_param(params.get("roles"))
+    page = await read_transcript_page(
+        daemon,
+        participant_id=target.id,
+        cursor=cursor,
+        roles=roles,
+        collapse_over=TRANSCRIPT_COLLAPSE_MIN_BYTES,
+    )
+    if cursor is None:
+        page.update(newest_page_context(daemon.registry.store, target))
+    return page
+
+
+def _roles_param(value: object) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value or any(role not in _READABLE for role in value):
+        raise BadRequest(
+            f"read_transcript roles must be a non-empty list drawn from {list(_READABLE)}; "
+            "omit roles to read every kind"
+        )
+    return tuple(role for role in _READABLE if role in value)
 
 
 __all__ = [

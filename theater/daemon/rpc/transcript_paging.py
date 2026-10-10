@@ -21,8 +21,12 @@ from theater.constants.trajectory import TRAJECTORY_CURSOR_MAX_BYTES
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import HistoryPage, Source
 
-_CURSOR_PREFIX = "trc2."
+_CURSOR_PREFIX = "trc3."
+_CURSOR_VERSION = 3
 _EVENT_DIGEST_BYTES = 32
+# Agent reads collapse only events this large; smaller ones stay byte-split (at most ~5 calls).
+TRANSCRIPT_COLLAPSE_MIN_BYTES = 64 * 1024
+TRANSCRIPT_COLLAPSE_EDGE_BYTES = 6 * 1024
 _CURSOR_SECRET = secrets.token_bytes(32)
 EventFilter = Callable[[Event], bool]
 EventProjection = Callable[[dict[str, object]], dict[str, object]]
@@ -43,6 +47,9 @@ class TranscriptEventChunk:
     start: int
     end: int
     total: int
+    tail: str | None = None
+    elided_bytes: int = 0
+    middle_cursor: str | None = None
 
     @property
     def reaches_text_start(self) -> bool:
@@ -50,7 +57,7 @@ class TranscriptEventChunk:
         return self.start == 0
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        wire: dict[str, object] = {
             "event_position": self.position,
             "index": self.event.raw_index,
             "role": str(self.event.kind),
@@ -63,6 +70,11 @@ class TranscriptEventChunk:
             "text_total_bytes": self.total,
             "reaches_text_start": self.reaches_text_start,
         }
+        if self.tail is not None:
+            wire.update(
+                tail=self.tail, elided_bytes=self.elided_bytes, middle_cursor=self.middle_cursor
+            )
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +113,7 @@ class _EventRef:
     position: int
     event: Event
     encoded: bytes
+    digest: str
 
 
 class TranscriptPager:
@@ -114,12 +127,16 @@ class TranscriptPager:
         event_filter: EventFilter,
         max_bytes: int = TRANSCRIPT_READ_RESPONSE_MAX_BYTES,
         event_projection: EventProjection | None = None,
+        roles: tuple[str, ...] | None = None,
+        collapse_over: int | None = None,
     ) -> None:
         self._source = source
         self._target = target
         self._event_filter = event_filter
         self._max_bytes = max_bytes
         self._event_projection = event_projection
+        self._roles = roles
+        self._collapse_over = collapse_over
 
     async def read(self, cursor: str | None = None) -> TranscriptReadPage:
         state = self._decode_cursor(cursor)
@@ -130,6 +147,8 @@ class TranscriptPager:
         start_at, current_end = self._resume_position(page, refs, state)
         if start_at < 0:
             return self._empty_page(page, cursor)
+        if state and state["mode"] == "event" and state["stop"] > 0:
+            return self._select_middle(page, refs, cursor, start_at, state["end"], state["stop"])
         return self._select_page(page, refs, cursor, start_at, current_end)
 
     async def _read_source_page(
@@ -177,7 +196,7 @@ class TranscriptPager:
             if start_at is None:
                 raise TranscriptCursorError("transcript cursor event is no longer available")
             current_end = state["end"]
-            if current_end > len(refs[start_at].encoded):
+            if current_end > len(refs[start_at].encoded) or state["stop"] > current_end:
                 raise TranscriptCursorError("transcript cursor text offset is outside its event")
             return start_at, current_end
         return len(refs) - 1, None
@@ -208,10 +227,26 @@ class TranscriptPager:
                 if ref_index == start_at and current_end is not None
                 else len(ref.encoded)
             )
-            full_candidate = self._chunk(ref, 0, end)
             full_next_cursor = self._continuation(
                 page, refs, ref_index, 0, end, page.snapshot_cursor
             )
+            if self._collapses(ref, end):
+                collapsed = self._collapsed_chunk(page, cursor, selected, ref, full_next_cursor)
+                if collapsed is None:
+                    if not selected:
+                        raise TranscriptCursorError(
+                            "transcript event metadata cannot fit within the response budget"
+                        )
+                    truncated = True
+                    next_cursor = self._continuation(
+                        page, refs, ref_index, end, end, page.snapshot_cursor
+                    )
+                    break
+                selected.append(collapsed)
+                next_cursor = full_next_cursor
+                current_end = None
+                continue
+            full_candidate = self._chunk(ref, 0, end)
             if self._fits(
                 page, cursor, selected, full_candidate, full_next_cursor, truncated=False
             ):
@@ -252,18 +287,86 @@ class TranscriptPager:
             raise TranscriptCursorError("transcript response exceeds the response budget")
         return result
 
-    def _event_refs(self, page: HistoryPage) -> tuple[_EventRef, ...]:
-        return tuple(
-            _EventRef(
-                position=position,
-                event=event,
-                encoded=(event.raw_text if event.raw_text is not None else event.text).encode(
-                    "utf-8"
-                ),
+    def _collapses(self, ref: _EventRef, end: int) -> bool:
+        limit = self._collapse_over
+        return limit is not None and end == len(ref.encoded) and end > limit
+
+    def _collapsed_chunk(
+        self,
+        page: HistoryPage,
+        cursor: str | None,
+        selected: list[TranscriptEventChunk],
+        ref: _EventRef,
+        next_cursor: str | None,
+    ) -> TranscriptEventChunk | None:
+        """Head and tail of one huge event; middle_cursor pages only the elided range."""
+        edge = TRANSCRIPT_COLLAPSE_EDGE_BYTES
+        total = len(ref.encoded)
+        while True:
+            head_end = _utf8_floor(ref.encoded, edge)
+            tail_start = _utf8_floor(ref.encoded, total - edge)
+            middle = _encode_event_cursor(
+                ref, tail_start, self._target, page.snapshot_cursor, self._roles, stop=head_end
             )
-            for position, event in enumerate(page.transcript_events)
-            if self._event_filter(event)
+            candidate = TranscriptEventChunk(
+                ref.event,
+                ref.position,
+                ref.encoded[:head_end].decode("utf-8"),
+                0,
+                total,
+                total,
+                tail=ref.encoded[tail_start:].decode("utf-8"),
+                elided_bytes=tail_start - head_end,
+                middle_cursor=middle,
+            )
+            if self._fits(page, cursor, selected, candidate, next_cursor, truncated=False):
+                return candidate
+            if edge == 0 or selected:
+                return None
+            edge //= 2
+
+    def _select_middle(
+        self,
+        page: HistoryPage,
+        refs: tuple[_EventRef, ...],
+        cursor: str | None,
+        start_at: int,
+        end: int,
+        stop: int,
+    ) -> TranscriptReadPage:
+        ref = refs[start_at]
+        start = self._largest_fitting_start(
+            cursor=cursor,
+            page=page,
+            selected=[],
+            ref=ref,
+            end=end,
+            snapshot=page.snapshot_cursor,
+            refs=refs,
+            ref_index=start_at,
+            stop=stop,
         )
+        if start == end:
+            raise TranscriptCursorError(
+                "transcript event metadata cannot fit within the response budget"
+            )
+        chunk = self._chunk(ref, start, end)
+        next_cursor = self._continuation(
+            page, refs, start_at, start, end, page.snapshot_cursor, stop=stop
+        )
+        return TranscriptReadPage(page, cursor, (chunk,), next_cursor, start > stop)
+
+    def _event_refs(self, page: HistoryPage) -> tuple[_EventRef, ...]:
+        refs = []
+        for position, event in enumerate(page.transcript_events):
+            if not self._event_filter(event):
+                continue
+            if self._roles is not None and event.kind.value not in self._roles:
+                continue
+            raw = event.raw_text if event.raw_text is not None else event.text
+            encoded = raw.encode("utf-8")
+            refs.append(_EventRef(position, event, encoded, hashlib.sha256(encoded).hexdigest()))
+        return tuple(refs)
 
     def _validate_snapshot(self, page: HistoryPage, state: dict[str, Any]) -> None:
         if page.snapshot_cursor != state["snapshot"]:
@@ -318,8 +421,9 @@ class TranscriptPager:
         snapshot: str | None,
         refs: tuple[_EventRef, ...],
         ref_index: int,
+        stop: int = 0,
     ) -> int:
-        boundaries = _utf8_boundaries(ref.encoded, end, window=self._max_bytes)
+        boundaries = _utf8_boundaries(ref.encoded, end, window=self._max_bytes, floor=stop)
         low, high, best = 0, len(boundaries) - 1, end
         while low <= high:
             middle_index = (low + high) // 2
@@ -330,8 +434,8 @@ class TranscriptPager:
                 cursor,
                 selected,
                 candidate,
-                self._continuation(page, refs, ref_index, middle, end, snapshot),
-                truncated=middle > 0,
+                self._continuation(page, refs, ref_index, middle, end, snapshot, stop=stop),
+                truncated=middle > stop,
             ):
                 best = middle
                 high = middle_index - 1
@@ -347,16 +451,24 @@ class TranscriptPager:
         start: int,
         end: int,
         snapshot: str | None,
+        *,
+        stop: int = 0,
     ) -> str | None:
-        if start > 0:
-            return _encode_event_cursor(refs[ref_index], start, self._target, snapshot)
+        if start > stop:
+            return _encode_event_cursor(
+                refs[ref_index], start, self._target, snapshot, self._roles, stop=stop
+            )
+        if stop > 0:
+            return None
         if ref_index > 0:
             ref = refs[ref_index - 1]
-            return _encode_event_cursor(ref, len(ref.encoded), self._target, snapshot)
+            return _encode_event_cursor(ref, len(ref.encoded), self._target, snapshot, self._roles)
         return self._older_cursor(page)
 
     def _older_cursor(self, page: HistoryPage) -> str | None:
-        return _encode_older_cursor(page.older_cursor, self._target) if page.older_cursor else None
+        if not page.older_cursor:
+            return None
+        return _encode_older_cursor(page.older_cursor, self._target, self._roles)
 
     def _decode_cursor(self, cursor: str | None) -> dict[str, Any] | None:
         if cursor is None:
@@ -374,6 +486,8 @@ class TranscriptPager:
 
     @staticmethod
     def _decode_cursor_payload(cursor: str) -> dict[str, Any]:
+        if isinstance(cursor, str) and cursor.startswith("trc2."):
+            raise TranscriptCursorError("read_transcript cursor version is unsupported")
         if not isinstance(cursor, str) or not cursor.startswith(_CURSOR_PREFIX):
             raise TranscriptCursorError(
                 "read_transcript cursor is malformed; use only next_cursor from Theater"
@@ -396,7 +510,11 @@ class TranscriptPager:
             payload = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError) as exc:
             raise TranscriptCursorError("read_transcript cursor is malformed") from exc
-        if not isinstance(payload, dict) or type(payload.get("v")) is not int or payload["v"] != 2:
+        if (
+            not isinstance(payload, dict)
+            or type(payload.get("v")) is not int
+            or payload["v"] != _CURSOR_VERSION
+        ):
             raise TranscriptCursorError("read_transcript cursor version is unsupported")
         return payload
 
@@ -412,10 +530,12 @@ class TranscriptPager:
             )
         if payload.get("target") != self._target:
             raise TranscriptCursorError("read_transcript cursor belongs to another participant")
+        if payload.get("roles") != _roles_wire(self._roles):
+            raise TranscriptCursorError("read_transcript cursor was issued for different roles")
 
     @staticmethod
     def _validate_older_cursor(payload: dict[str, Any]) -> None:
-        if set(payload) != {"v", "target", "mode", "source", "sig"}:
+        if set(payload) != {"v", "target", "mode", "source", "roles", "sig"}:
             raise TranscriptCursorError("read_transcript cursor payload is malformed")
         if not _valid_cursor_string(payload.get("source")):
             raise TranscriptCursorError("read_transcript cursor source is malformed")
@@ -434,6 +554,8 @@ class TranscriptPager:
             "tool_name",
             "digest",
             "end",
+            "stop",
+            "roles",
             "sig",
         }
         if set(payload) != required:
@@ -450,14 +572,25 @@ def _event_matches(ref: _EventRef, state: dict[str, Any]) -> bool:
         and ref.event.source_offset == state["source_offset"]
         and ref.event.kind.value == state["kind"]
         and ref.event.tool_name == state["tool_name"]
-        and hashlib.sha256(ref.encoded).hexdigest() == state["digest"]
+        and ref.digest == state["digest"]
     )
 
 
-def _utf8_boundaries(encoded: bytes, end: int, *, window: int) -> tuple[int, ...]:
-    if end < 0 or end > len(encoded):
+def _utf8_floor(encoded: bytes, offset: int) -> int:
+    offset = max(0, min(offset, len(encoded)))
+    while 0 < offset < len(encoded) and encoded[offset] & 0xC0 == 0x80:
+        offset -= 1
+    return offset
+
+
+def _roles_wire(roles: tuple[str, ...] | None) -> list[str] | None:
+    return None if roles is None else list(roles)
+
+
+def _utf8_boundaries(encoded: bytes, end: int, *, window: int, floor: int = 0) -> tuple[int, ...]:
+    if end < 0 or end > len(encoded) or floor > end:
         raise TranscriptCursorError("transcript cursor text offset is outside its event")
-    start = max(0, end - window)
+    start = max(floor, end - window)
     while start < end and encoded[start] & 0xC0 == 0x80:
         start += 1
     boundaries = [start]
@@ -487,6 +620,8 @@ def _valid_event_identity(payload: dict[str, Any]) -> bool:
         or type(payload.get("index")) is not int
         or type(payload.get("end")) is not int
         or payload["end"] < 0
+        or type(payload.get("stop")) is not int
+        or payload["stop"] < 0
         or (
             payload.get("source_offset") is not None
             and (type(payload["source_offset"]) is not int or payload["source_offset"] < 0)
@@ -500,12 +635,17 @@ def _valid_event_identity(payload: dict[str, Any]) -> bool:
 
 
 def _event_cursor_payload(
-    ref: _EventRef, end: int, target: str, snapshot: str | None
+    ref: _EventRef,
+    end: int,
+    target: str,
+    snapshot: str | None,
+    roles: tuple[str, ...] | None,
+    stop: int,
 ) -> dict[str, object]:
     if snapshot is None:
         raise TranscriptCursorError("transcript source did not return a stable cursor")
     return {
-        "v": 2,
+        "v": _CURSOR_VERSION,
         "target": target,
         "mode": "event",
         "snapshot": snapshot,
@@ -514,19 +654,37 @@ def _event_cursor_payload(
         "source_offset": ref.event.source_offset,
         "kind": ref.event.kind.value,
         "tool_name": ref.event.tool_name,
-        "digest": hashlib.sha256(ref.encoded).hexdigest(),
+        "digest": ref.digest,
         "end": end,
+        "stop": stop,
+        "roles": _roles_wire(roles),
     }
 
 
-def _encode_event_cursor(ref: _EventRef, end: int, target: str, snapshot: str | None) -> str:
-    return _encode_cursor(_event_cursor_payload(ref, end, target, snapshot))
+def _encode_event_cursor(
+    ref: _EventRef,
+    end: int,
+    target: str,
+    snapshot: str | None,
+    roles: tuple[str, ...] | None,
+    *,
+    stop: int = 0,
+) -> str:
+    return _encode_cursor(_event_cursor_payload(ref, end, target, snapshot, roles, stop))
 
 
-def _encode_older_cursor(source: str | None, target: str) -> str:
+def _encode_older_cursor(source: str | None, target: str, roles: tuple[str, ...] | None) -> str:
     if source is None:
         raise TranscriptCursorError("transcript source did not return an older cursor")
-    return _encode_cursor({"v": 2, "target": target, "mode": "older", "source": source})
+    return _encode_cursor(
+        {
+            "v": _CURSOR_VERSION,
+            "target": target,
+            "mode": "older",
+            "source": source,
+            "roles": _roles_wire(roles),
+        }
+    )
 
 
 def _encode_cursor(payload: dict[str, object]) -> str:
@@ -554,6 +712,7 @@ def _encoded_size(payload: dict[str, object]) -> int:
 
 
 __all__ = [
+    "TRANSCRIPT_COLLAPSE_MIN_BYTES",
     "TranscriptCursorError",
     "TranscriptEventChunk",
     "TranscriptPager",
