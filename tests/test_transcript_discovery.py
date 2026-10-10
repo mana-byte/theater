@@ -371,3 +371,122 @@ class TestBirthtimeHelpers:
         st = tmp_path.stat()
         result = parent_birthtime(path, st)
         assert result == st.st_ctime
+
+
+class TestScanReuse:
+    def test_one_scan_stats_each_path_once(self, root, workdir, monkeypatch):
+        from theater.harness.transcript import scan
+
+        current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
+        os.utime(current, ns=(1, 1))
+        for i in range(5):
+            _make_jsonl(root / f"d{i}" / f"new{i}.jsonl", cwd=workdir)
+        stats: list[str] = []
+        real_scandir = os.scandir
+
+        class _Spy:
+            def __init__(self, entry):
+                self._entry = entry
+
+            def __getattr__(self, name):
+                return getattr(self._entry, name)
+
+            def stat(self, **kwargs):
+                stats.append(self._entry.path)
+                return self._entry.stat(**kwargs)
+
+        class _SpyScan:
+            def __init__(self, directory):
+                self._it = real_scandir(directory)
+
+            def __enter__(self):
+                return [_Spy(e) for e in self._it.__enter__()]
+
+            def __exit__(self, *exc):
+                return self._it.__exit__(*exc)
+
+        monkeypatch.setattr(scan.os, "scandir", _SpyScan)
+        path_stats: list[Path] = []
+        real_path_stat = Path.stat
+        monkeypatch.setattr(
+            Path,
+            "stat",
+            lambda self, **kw: (path_stats.append(self), real_path_stat(self, **kw))[1],
+        )
+
+        found = _claude_discovery(root).identity_loss_candidate(
+            cwd=workdir, current=current, current_mtime_ns=1
+        )
+
+        assert found is not None
+        jsonl = [p for p in stats if p.endswith(".jsonl")]
+        assert len(jsonl) == len(set(jsonl)) == 6
+        assert not [p for p in path_stats if p.suffix == ".jsonl"]
+
+    def test_overlapping_scans_share_one_walk(self, root, workdir, monkeypatch):
+        import threading
+
+        from theater.harness.transcript import scan
+
+        current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
+        os.utime(current, ns=(1, 1))
+        newer = _make_jsonl(root / "b" / "newer.jsonl", cwd=workdir)
+        walks = 0
+        entered, release = threading.Event(), threading.Event()
+        real_walk = scan._walk
+
+        def gated_walk(*args):
+            nonlocal walks
+            walks += 1
+            entered.set()
+            assert release.wait(5)
+            yield from real_walk(*args)
+
+        monkeypatch.setattr(scan, "_walk", gated_walk)
+        results: list[Path | None] = []
+
+        def probe():
+            results.append(
+                _claude_discovery(root).identity_loss_candidate(
+                    cwd=workdir, current=current, current_mtime_ns=1
+                )
+            )
+
+        first = threading.Thread(target=probe)
+        first.start()
+        assert entered.wait(5)
+        second = threading.Thread(target=probe)
+        second.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any(f.waiters for f in scan._flights.values()):
+            time.sleep(0.005)
+        release.set()
+        first.join(5)
+        second.join(5)
+
+        assert walks == 1
+        assert results == [newer, newer]
+        assert not scan._flights
+
+    def test_sequential_probes_walk_afresh_and_revalidate_content(self, root, workdir, monkeypatch):
+        from theater.harness.transcript import scan
+
+        current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
+        os.utime(current, ns=(1, 1))
+        newer = _make_jsonl(root / "b" / "newer.jsonl", cwd=workdir)
+        walks = 0
+        real_walk = scan._walk
+
+        def counting_walk(*args):
+            nonlocal walks
+            walks += 1
+            return real_walk(*args)
+
+        monkeypatch.setattr(scan, "_walk", counting_walk)
+        disc = _claude_discovery(root)
+        probe = {"cwd": workdir, "current": current, "current_mtime_ns": 1}
+
+        assert disc.identity_loss_candidate(**probe) == newer
+        newer.write_text(json.dumps({"cwd": "/elsewhere"}) + "\n", encoding="utf-8")
+        assert disc.identity_loss_candidate(**probe) is None
+        assert walks == 2
