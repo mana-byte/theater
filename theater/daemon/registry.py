@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import re
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -142,6 +143,7 @@ class Registry:
         parent_id: str | None = None,
         after: tuple[float, str] | None = None,
         limit: int | None = None,
+        newest_first: bool = False,
     ) -> builtins.list[Participant]:
         return [
             self._named(p)
@@ -151,6 +153,7 @@ class Registry:
                 parent_id=parent_id,
                 after=after,
                 limit=limit,
+                newest_first=newest_first,
             )
         ]
 
@@ -388,10 +391,21 @@ class Registry:
         self.list()
         for other_id, other_name in self._names.items():
             if other_id != participant_id and other_name.casefold() == value.casefold():
-                raise NameTaken(
-                    f"name {value!r} is taken by participant {other_id!r}",
-                    details={"next": NEXT_NAME_TAKEN},
-                )
+                message = f"name {value!r} is taken by participant {other_id!r}"
+                free = self._free_variant(value)
+                if free is not None:
+                    message += f"; {free!r} is free"
+                raise NameTaken(message, details={"next": NEXT_NAME_TAKEN})
+
+    def _free_variant(self, value: str) -> str | None:
+        """The first unused ``<base>-N`` (N=2..9) within the name length cap, if any."""
+        base = re.sub(r"-[0-9]$", "", value)[:22]
+        taken = {name.casefold() for name in self._names.values()}
+        for n in range(2, 10):
+            candidate = f"{base}-{n}"
+            if candidate.casefold() not in taken:
+                return candidate
+        return None
 
     def rename(self, pid: str, new_name: str) -> Participant:
         """Assign or change a runtime name, by id or current name; same name is a no-op.

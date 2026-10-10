@@ -55,7 +55,9 @@ def resolve_resume_reference(req: SpawnRequest, registry: Registry) -> SpawnRequ
     return replace(req, resume=participant.session_id)
 
 
-def reject_unsafe_resume_shape(req: SpawnRequest, harness) -> None:
+def reject_unsafe_resume_shape(
+    req: SpawnRequest, harness, registry: Registry | None = None
+) -> None:
     """Refuse resume combinations that are unsafe or silently dropped."""
     if req.resume and req.prompt and not harness.resume_takes_prompt:
         raise BadRequest(
@@ -68,10 +70,24 @@ def reject_unsafe_resume_shape(req: SpawnRequest, harness) -> None:
             f"resume it without one and use send to deliver the task"
         )
     if req.resume and req.worktree:
+        cwd = None if registry is None else _predecessor_cwd(req, registry)
+        target = "the predecessor's cwd" if cwd is None else f"cwd={cwd!r}"
         raise BadRequest(
             "cannot resume into a worktree: the session's transcript "
-            "describes files that are not the worktree's files"
+            "describes files that are not the worktree's files. Resume reuses the "
+            f"predecessor's workspace: omit worktree and pass {target}"
         )
+
+
+def _predecessor_cwd(req: SpawnRequest, registry: Registry) -> str | None:
+    """Best-effort cwd of the participant being resumed, for the repair hint only."""
+    participant = registry.store.get_participant(req.resume) if req.resume else None
+    if participant is None:
+        try:
+            participant, _owners = validate_resume_identity(req, registry)
+        except BadRequest:
+            return None
+    return None if participant is None else participant.cwd
 
 
 async def validate_before_create(
@@ -86,7 +102,7 @@ async def validate_before_create(
     check_model(req.harness, req.model)
     check_reasoning(req.harness, req.reasoning_effort)
     check_resume(req.harness, req.resume)
-    reject_unsafe_resume_shape(req, harness)
+    reject_unsafe_resume_shape(req, harness, registry)
     predecessor, trusted_owners = validate_resume_identity(req, registry)
     fingerprint = resume_identity_fingerprint(predecessor, trusted_owners)
     overlay: ResumeLaunchOverlay | None = None
@@ -114,7 +130,7 @@ def revalidate_resume_identity(
     check_model(req.harness, req.model)
     check_reasoning(req.harness, req.reasoning_effort)
     check_resume(req.harness, req.resume)
-    reject_unsafe_resume_shape(req, harness)
+    reject_unsafe_resume_shape(req, harness, registry)
     predecessor, trusted_owners = validate_resume_identity(req, registry)
     if resume_identity_fingerprint(predecessor, trusted_owners) != expected:
         raise BadRequest("resume identity changed while the spawn was being admitted; retry")

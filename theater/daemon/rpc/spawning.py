@@ -19,6 +19,7 @@ from theater.daemon.rpc.params import (
     _validate_worktree_param,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.spawning.git_cwd import reject_worktree_outside_git
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import (
     HARNESSES,
@@ -88,6 +89,8 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
         daemon.config.reasoning_for(harness_name),
     )
     worktree = _validate_worktree_param(params.get("worktree", False))
+    if worktree:
+        reject_worktree_outside_git(_require(params, "cwd"))
     prompt = _prompt_with_response_format(params.get("prompt") or "", response_format)
     wiring = _wiring_param(params)
     request: dict[str, object] = {
@@ -144,6 +147,9 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     result = participant.to_dict()
     route = daemon.controls.route_for(participant_id, RuntimeCapability.SEND)
     result["addressable"] = participant.status is not Status.DEAD and route.route_available
+    # Echo the launch policy so a caller sees which model it actually asked for.
+    result["model"] = params.get("model")
+    result["reasoning_effort"] = params.get("reasoning_effort")
     result.update(
         {
             "handle": accepted.get("job_handle", participant_id),

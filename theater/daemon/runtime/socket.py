@@ -17,7 +17,10 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
+from jsonschema.exceptions import ValidationError
+
 from theater import protocol, timing
+from theater.daemon.operations.request_errors import bad_request_from
 from theater.frontend.capabilities import PUBLIC_LIMITS
 from theater.models import TheaterError
 from theater.observability.catalog import RPC_AWAIT, RPC_SERVER
@@ -225,6 +228,17 @@ async def handle_connection(
             await writer.wait_closed()
 
 
+def _unexpected_error(sp, name: str, exc: Exception) -> tuple[str, str, None]:
+    """A schema rejection is the caller's mistake; anything else is ours."""
+    if isinstance(exc, ValidationError):
+        sp.set_result("error", error_type="bad_request")
+        return ("bad_request", str(bad_request_from([exc])), None)
+    et = f"{type(exc).__module__}.{type(exc).__qualname__}"
+    sp.set_result("error", error_type=et)
+    logger.exception("handler %s failed", name)
+    return ("internal", f"{type(exc).__name__}: {exc}", None)
+
+
 async def dispatch(daemon, line: bytes, *, methods) -> bytes:
     """Parse one NDJSON request, call the handler, and return a response."""
     try:
@@ -270,10 +284,7 @@ async def dispatch(daemon, line: bytes, *, methods) -> bytes:
             details = getattr(exc, "details", None)
             error = (exc.code, str(exc), details if isinstance(details, dict) else None)
         except Exception as exc:
-            et = f"{type(exc).__module__}.{type(exc).__qualname__}"
-            sp.set_result("error", error_type=et)
-            logger.exception("handler %s failed", name)
-            error = ("internal", f"{type(exc).__name__}: {exc}", None)
+            error = _unexpected_error(sp, name, exc)
         else:
             error = None
 

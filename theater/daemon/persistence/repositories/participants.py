@@ -99,6 +99,7 @@ class ParticipantRepository:
         parent_id: str | None = None,
         after: tuple[float, str] | None = None,
         limit: int | None = None,
+        newest_first: bool = False,
         connection: Connection | None = None,
     ) -> list[Participant]:
         stmt = select(participants)
@@ -112,16 +113,27 @@ class ParticipantRepository:
             stmt = stmt.where(participants.c.parent_id == parent_id)
         if after is not None:
             created_at, participant_id = after
-            stmt = stmt.where(
-                or_(
+            if newest_first:
+                keyset = or_(
+                    participants.c.created_at < created_at,
+                    and_(
+                        participants.c.created_at == created_at,
+                        participants.c.id < participant_id,
+                    ),
+                )
+            else:
+                keyset = or_(
                     participants.c.created_at > created_at,
                     and_(
                         participants.c.created_at == created_at,
                         participants.c.id > participant_id,
                     ),
                 )
-            )
-        stmt = stmt.order_by(participants.c.created_at.asc(), participants.c.id.asc())
+            stmt = stmt.where(keyset)
+        if newest_first:
+            stmt = stmt.order_by(participants.c.created_at.desc(), participants.c.id.desc())
+        else:
+            stmt = stmt.order_by(participants.c.created_at.asc(), participants.c.id.asc())
         if limit is not None:
             stmt = stmt.limit(limit)
         conn = self._db.conn if connection is None else connection

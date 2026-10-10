@@ -102,7 +102,7 @@ async def test_me_identifies_first_when_it_has_not_yet():
 
 
 async def test_whoami_answers_who_where_and_reachable():
-    got = await tools.whoami(resolved())
+    got = await tools.whoami(resolved(**{"participants.list": []}))
     assert got == {
         "id": "p-me",
         "name": "Arlequin",
@@ -119,8 +119,20 @@ async def test_whoami_answers_who_where_and_reachable():
 
 
 async def test_whoami_omits_a_lazy_session_id_until_discovered():
-    got = await tools.whoami(resolved(**{"participants.get": {**RECORD, "session_id": None}}))
+    got = await tools.whoami(
+        resolved(**{"participants.get": {**RECORD, "session_id": None}, "participants.list": []})
+    )
     assert "session_id" not in got
+
+
+async def test_whoami_lists_live_direct_children_capped():
+    rows = [{**RECORD, "id": f"c{i}", "name": f"Kid-{i}", "parent_id": "p-me"} for i in range(21)]
+    s = resolved(**{"participants.list": rows})
+    got = await tools.whoami(s)
+    assert s.client.params("participants.list") == {"parent_id": "p-me"}
+    assert got["children"][0] == {"name": "Kid-0", "status": "idle", "harness": "vibe"}
+    assert len(got["children"]) == 20
+    assert got["children_total"] == 21
 
 
 async def test_list_participants_marks_which_row_is_the_caller():
@@ -191,6 +203,13 @@ async def test_spawn_names_the_caller_as_the_parent():
     child = await tools.spawn_session(s, harness="vibe", prompt="hi", approval="manual")
     assert s.client.params("spawn")["parent_id"] == "p-me"
     assert child["session_id"] == "ses-me"
+
+
+async def test_spawn_echoes_the_requested_model_and_effort():
+    s = resolved(spawn={**RECORD, "model": "anthropic/claude-opus", "reasoning_effort": None})
+    child = await tools.spawn_session(s, harness="opencode", approval="manual")
+    assert child["model"] == "anthropic/claude-opus"
+    assert "reasoning_effort" not in child
 
 
 async def test_spawn_preserves_unconfirmed_operation_and_diagnostics():
@@ -649,9 +668,18 @@ async def test_list_participants_forwards_keyset_pagination_to_daemon():
         "include_dead": True,
         "ids": None,
         "parent_id": None,
+        "order": "newest",
         "limit": 25,
         "after_id": "p-before",
     }
+
+
+async def test_list_participants_marks_a_full_page_with_its_cursor():
+    rows = [{**_RECORD_WITH_RESUME, "id": "p-a"}, {**_RECORD_WITH_RESUME, "id": "p-b"}]
+    full = await tools.list_participants(resolved(**{"participants.list": rows}), limit=2)
+    short = await tools.list_participants(resolved(**{"participants.list": rows}), limit=3)
+    assert full[-1]["next_after_id"] == "p-b" and "next_after_id" not in full[0]
+    assert all("next_after_id" not in row for row in short)
 
 
 async def test_list_participants_caps_unfiltered_dead_history_for_mcp():

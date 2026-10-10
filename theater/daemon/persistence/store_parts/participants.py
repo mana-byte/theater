@@ -105,6 +105,7 @@ class ParticipantStore(StoreHost):
         parent_id: str | None = None,
         after: tuple[float, str] | None = None,
         limit: int | None = None,
+        newest_first: bool = False,
         connection=None,
     ) -> list[Participant]:
         return self._participants.list_all(
@@ -113,6 +114,7 @@ class ParticipantStore(StoreHost):
             parent_id=parent_id,
             after=after,
             limit=limit,
+            newest_first=newest_first,
             connection=connection,
         )
 

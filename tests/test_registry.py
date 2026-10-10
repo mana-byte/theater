@@ -85,6 +85,16 @@ def test_rename_rejects_a_taken_name(registry):
         registry.rename(b.id, a.name)
 
 
+def test_name_taken_suggests_the_first_free_variant(registry):
+    a = registry.register(harness="vibe", pane=None, cwd="/tmp")
+    registry.rename(a.id, "Scapin")
+    b = registry.register(harness="vibe", pane=None, cwd="/tmp")
+    registry.rename(b.id, "Scapin-2")
+    c = registry.register(harness="vibe", pane=None, cwd="/tmp")
+    with pytest.raises(NameTaken, match="'Scapin-3' is free"):
+        registry.rename(c.id, "Scapin-2")
+
+
 def test_rename_to_own_current_name_succeeds(registry):
     p = registry.register(harness="vibe", pane=None, cwd="/tmp")
     result = registry.rename(p.id, p.name)

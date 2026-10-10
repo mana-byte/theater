@@ -10,6 +10,9 @@ from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
 from theater.mcp.session import Session
 from theater.mcp.toolsets.projection import compact
 
+#: whoami lists at most this many live direct children; children_total reports the rest.
+WHOAMI_CHILDREN_CAP = 20
+
 
 def _summarise(p: dict) -> dict:
     """Trim a participant record to what another agent needs to route work.
@@ -34,12 +37,25 @@ def _summarise(p: dict) -> dict:
             "termination_reason": p.get("termination_reason"),
             "termination_incident": p.get("termination_incident"),
             "terminated_at": p.get("terminated_at"),
+            "model": p.get("model"),
+            "reasoning_effort": p.get("reasoning_effort"),
         }
     )
 
 
 async def whoami(session: Session) -> dict:
-    return _summarise(await session.me())
+    me = _summarise(await session.me())
+    rows = await session.client.call("participants.list", parent_id=me["id"])
+    assert isinstance(rows, list)
+    children = [
+        compact({"name": p.get("name"), "status": p.get("status"), "harness": p.get("harness")})
+        for p in rows[:WHOAMI_CHILDREN_CAP]
+    ]
+    if children:
+        me["children"] = children
+    if len(rows) > WHOAMI_CHILDREN_CAP:
+        me["children_total"] = len(rows)
+    return me
 
 
 async def list_participants(
@@ -58,6 +74,8 @@ async def list_participants(
         "ids": ids,
         "parent_id": session.participant_id if children_only else None,
     }
+    if include_dead:
+        params["order"] = "newest"
     if limit is not None:
         params["limit"] = limit
     elif include_dead and ids is None:
@@ -67,9 +85,14 @@ async def list_participants(
     rows = await session.client.call("participants.list", **params)
     assert isinstance(rows, list)
     me = session.participant_id
-    return [
+    out = [
         {**_summarise(p), "is_self": p["id"] == me, "resume_state": p["resume_state"]} for p in rows
     ]
+    page = params.get("limit")
+    if out and ids is None and isinstance(page, int) and len(out) >= page:
+        # A full page may hide more rows; the cursor makes that visible without an error.
+        out[-1]["next_after_id"] = out[-1]["id"]
+    return out
 
 
 async def update_participant(

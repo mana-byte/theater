@@ -199,9 +199,10 @@ def _pagination(
     if after_id is not None and (not isinstance(after_id, str) or not after_id):
         raise BadRequest("after_id must be a non-empty participant id, or absent")
 
-    if ids is not None and (raw_limit is not None or after_id is not None):
+    if ids is not None and after_id is not None:
         raise BadRequest(
-            "limit and after_id cannot be used with ids; request ids without pagination"
+            "after_id cannot be used with ids; request ids without a cursor "
+            "(limit still caps the result)"
         )
 
     after = None
@@ -260,6 +261,10 @@ async def _list(daemon, params: dict) -> list[dict]:
             raise BadRequest(f"ids list is capped at {PARTICIPANTS_LIST_MAX_LIMIT} entries")
         ids = raw_ids
 
+    order = params.get("order", "oldest")
+    if order not in ("oldest", "newest"):
+        raise BadRequest(f"order must be 'oldest' or 'newest', got {order!r}")
+
     after, limit = _pagination(daemon, params, ids=ids)
 
     page = daemon.registry.list(
@@ -268,6 +273,7 @@ async def _list(daemon, params: dict) -> list[dict]:
         parent_id=parent_id,
         after=after,
         limit=limit,
+        newest_first=order == "newest",
     )
 
     live_peers = daemon.registry.list(include_dead=False) if include_dead else []

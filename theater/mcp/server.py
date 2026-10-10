@@ -190,6 +190,7 @@ approval: "manual" | "edits" | "yolo" — required, no default. This is
           `approvals` there means the daemon predates the field —
           restart it rather than guess.
 cwd:      where the child works. Defaults to your own directory.
+          worktree=true requires cwd inside a git repo.
 provider: exact provider id or selector for this launch. When omitted, Theater
           uses terminals.default_provider. A stock-terminal launch needs that
           provider ready; for tmux, have the operator run `regie bridge start`.
@@ -235,9 +236,9 @@ worktree: if True, create a git worktree for the child with its own
           --delete-branch` once no participant uses them. Dirty worktrees
           and unmerged branches are retained unless separately forced.
           Cannot be combined with resume.
-name:      optional alias. It is case-insensitively unique while the child lives,
-           survives daemon restarts, is released at death, and is not inherited
-           on resume.
+name:      optional alias: 1-24 chars, letter first, then letters/digits/_/-
+           (e.g. Scapin-2); omit it to get a free one. Unique while the child
+           lives (case-insensitive), released at death, not inherited on resume.
 description: highly recommended for user clarity: a short, plain, specific,
            non-verbose summary of the child's purpose (maximum 160 Unicode
            codepoints). It is durable and is inherited by resume unless an
@@ -578,7 +579,8 @@ def build(
     async def whoami() -> dict:
         """Identify yourself. Returned fields include id, live name, description,
         harness, tier, status, cwd, branch, session_id, parent_id, and
-        addressable; unset fields are omitted.
+        addressable; unset fields are omitted. Includes live direct children
+        (name, status, harness; first 20, children_total beyond).
 
         Call this before addressing anyone else, so you can tell yourself apart
         from the other participants in the list. `session_id` is the harness's
@@ -631,23 +633,16 @@ def build(
         you. It excludes deeper descendants and composes with both `ids` and
         `include_dead`.
 
-        An unfiltered `include_dead=True` listing returns at most 100 rows by
-        default. Pass `limit` (1 through 200) to choose a page size, then use
-        the final row's stable id as `after_id` for the next page; an empty
-        page ends pagination. The order is oldest first. If a cursor was
-        deleted by retention GC, restart from the first page. `limit` and
+        `include_dead=True` lists newest first, 100-row cap. Pass `limit`
+        (1 through 200) to choose a page size; a full page's last row carries
+        `next_after_id`, which you pass as `after_id` for the next page.
+        Live-only lists are oldest first. If a cursor was deleted by retention
+        GC, restart from the first page. `limit` caps an `ids` query;
         `after_id` cannot be used with `ids`.
 
-        Each row includes `resume_state`, which exposes the verdict from the
-        generic identity and capability gates plus any harness resume preflight
-        that `spawn_session(resume=...)` checks. Values: `resumable` (all
-        available current gates passed), `live` (participant is still running), `no_session_id`
-        (Theater has not recorded the harness session id),
-        `harness_cannot_resume` (the harness adapter does not support resume),
-        `untrusted` (session id present but transcript provenance is below
-        operator-level), `owned_by_live` (a live participant holds the trusted
-        session or claims this predecessor as a recovery successor), `harness_resume_rejected`
-        (the harness preflight refused the session).
+        Each row includes `resume_state`, the verdict `spawn_session(resume=...)`
+        checks; `resumable` means every current gate passed. The
+        theater-recover-tmux skill explains the other values.
         """
         return await tools.list_participants(
             session,

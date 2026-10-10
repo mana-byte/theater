@@ -237,6 +237,30 @@ async def test_spawn_requires_an_approval_mode(client, terminal_provider):
     assert exc.value.code == "bad_request"
 
 
+async def test_spawn_names_the_allowed_approval_values(client, terminal_provider):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("spawn", harness="vibe", prompt="hi", approval="auto", cwd="/tmp")
+    assert exc.value.code == "bad_request"
+    assert "approval must be one of manual|edits|yolo, got 'auto'" in str(exc.value)
+
+
+async def test_spawn_worktree_outside_git_names_child_repos(client, terminal_provider, tmp_path):
+    (tmp_path / "older" / ".git").mkdir(parents=True)
+    (tmp_path / "linked").mkdir()
+    (tmp_path / "linked" / ".git").write_text("gitdir: /elsewhere\n")
+    (tmp_path / "plain").mkdir()
+    (tmp_path / ".hidden" / ".git").mkdir(parents=True)
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn", harness="vibe", approval="manual", cwd=str(tmp_path), worktree=True
+        )
+    assert exc.value.code == "bad_request"
+    assert "[" in str(exc.value) and "changing harness will not help" in str(exc.value)
+    named = str(exc.value).split("[", 1)[1].split("]", 1)[0]
+    assert sorted(named.split(", ")) == ["linked", "older"]
+    assert terminal_provider.creations == []
+
+
 async def test_spawn_rejects_an_unknown_harness(client, terminal_provider):
     with pytest.raises(RemoteError) as exc:
         await client.call("spawn", harness="cursor", prompt="hi", approval="manual", cwd="/tmp")
@@ -1386,11 +1410,33 @@ async def test_list_rejects_missing_keyset_cursor(client):
     assert "restart pagination" in str(exc.value)
 
 
-@pytest.mark.parametrize("params", [{"limit": 1}, {"after_id": "p-any"}])
-async def test_list_rejects_pagination_with_ids(client, params):
+async def test_list_rejects_a_cursor_with_ids(client):
     with pytest.raises(RemoteError) as exc:
-        await client.call("participants.list", ids=[], **params)
+        await client.call("participants.list", ids=[], after_id="p-any")
     assert exc.value.code == "bad_request"
+
+
+async def test_list_newest_first_pages_backwards_and_caps_ids(client, daemon):
+    for index in range(5):
+        daemon.store.upsert_participant(
+            Participant(
+                id=f"dead-{index}", harness="vibe", status=Status.DEAD, created_at=float(index)
+            )
+        )
+    first = await client.call("participants.list", include_dead=True, order="newest", limit=2)
+    second = await client.call(
+        "participants.list",
+        include_dead=True,
+        order="newest",
+        limit=2,
+        after_id=first[-1]["id"],
+    )
+    capped = await client.call(
+        "participants.list", include_dead=True, ids=["dead-0", "dead-1", "dead-2"], limit=2
+    )
+    assert [row["id"] for row in first] == ["dead-4", "dead-3"]
+    assert [row["id"] for row in second] == ["dead-2", "dead-1"]
+    assert [row["id"] for row in capped] == ["dead-0", "dead-1"]
 
 
 async def test_list_keyset_composes_with_direct_children_and_dead_rows(client, daemon):
