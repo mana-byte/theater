@@ -134,6 +134,8 @@ class TranscriptSource(Source):
         #: Notifications only mark this dirty; a quiet watched file skips the per-poll stat.
         self._watch_gate = WatchGate()
         self._caught_up = False
+        #: File end behind a held-back mutable tail; unchanged size and mtime mean nothing new.
+        self._held_tail_end: int | None = None
 
     def bind_wakeup(self, wakeup: Callable[[], None] | None) -> None:
         """Let filesystem notifications rouse the watch loop; polling stays the fallback."""
@@ -738,6 +740,7 @@ class TranscriptSource(Source):
         self._drain_buffer_start = 0
         self._drain_complete_records = 0
         self._caught_up = False
+        self._held_tail_end = None
 
     def _require_decision(self) -> None:
         if self._pending is not None:
@@ -828,7 +831,12 @@ class TranscriptSource(Source):
             semantic = [event for event in parsed.events if not event.usage_only]
             last_event = semantic[-1] if semantic else None
             status = parsed.status
-        self._pending = (path, size, lines, mtime, session_id)
+        offset, index = size, lines
+        if last_line is not None and await asyncio.to_thread(
+            self._ends_with_tail, path, last_line, size
+        ):
+            offset, index = size - len(last_line.encode("utf-8")) - 1, lines - 1
+        self._pending = (path, offset, index, mtime, session_id)
         return Attachment(
             location=str(path),
             session_id=session_id,
@@ -839,6 +847,52 @@ class TranscriptSource(Source):
             correlation=self.correlation_for(path, session_id),
             collision_domain=self.collision_domain,
         )
+
+    def _ends_with_tail(self, path: Path, last_line: str, size: int) -> bool:
+        """Whether the file ends exactly with a mutable-tail record, so attach stops before it."""
+        mutable_tail = getattr(self._observer, "mutable_tail", None)
+        if not callable(mutable_tail) or not mutable_tail(last_line):
+            return False
+        expected = last_line.encode("utf-8") + b"\n"
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() != size or size < len(expected):
+                return False
+            fh.seek(-len(expected), os.SEEK_END)
+            return fh.read() == expected
+
+    @staticmethod
+    def _log_rewrite(path: Path, size: int, end: int, mtime: int, new_mtime: int) -> None:
+        logger.info(
+            "transcript %s was rewritten (size %d, offset %d, mtime %d -> %d); "
+            "re-reading from the top",
+            path,
+            size,
+            end,
+            mtime,
+            new_mtime,
+        )
+
+    def _nothing_new(self, size: int, offset: int, new_mtime: int, mtime: int) -> bool:
+        """Caught up at the end, or behind an untouched held-back tail."""
+        if self._drain_buffer:
+            return False
+        if size == offset:
+            self.mtime = new_mtime
+        elif size != self._held_tail_end or new_mtime != mtime:
+            self._held_tail_end = None
+            return False
+        self._caught_up = True
+        return True
+
+    def _holds_tail(self, line: str, unread_bytes: int) -> bool:
+        """A mutable tail ending the file stays unconsumed until something follows it."""
+        mutable_tail = getattr(self._observer, "mutable_tail", None)
+        return unread_bytes == 0 and callable(mutable_tail) and bool(mutable_tail(line))
+
+    def _hold_tail(self, end: int | None) -> None:
+        if end is not None:
+            self._held_tail_end, self._caught_up = end, True
 
     async def _drain(self) -> Batch:
         """Read and parse one bounded, cancellation-safe batch."""
@@ -855,12 +909,10 @@ class TranscriptSource(Source):
         # Same-length rewrite is indistinguishable from no-op; guessing wrong corrupts.
         buffered_end = offset + len(self._drain_buffer) - self._drain_buffer_start
         if size < buffered_end or (size == buffered_end and st.st_mtime_ns != mtime):
-            logger.info("transcript %s was rewritten; re-reading from the top", path)
+            self._log_rewrite(path, size, buffered_end, mtime, st.st_mtime_ns)
             offset = index = 0
             self._clear_drain_buffer()
-        if size == offset and not self._drain_buffer:
-            self.mtime = st.st_mtime_ns
-            self._caught_up = True
+        if self._nothing_new(size, offset, st.st_mtime_ns, mtime):
             return Batch()
 
         mtime, unread_bytes = await self._fill_drain_buffer(path, offset)
@@ -876,11 +928,16 @@ class TranscriptSource(Source):
         status: Status | None = None
         record_offset = offset
         consumed = self._drain_buffer_start
+        held_tail_end: int | None = None
         for _ in range(selected_count):
             separator = self._drain_buffer.find(b"\n", consumed)
             assert separator >= 0
             raw = self._drain_buffer[consumed:separator]
             line = raw.decode("utf-8", errors="replace")
+            if separator + 1 == len(self._drain_buffer) and self._holds_tail(line, unread_bytes):
+                # Stop before it: its in-place rewrite must neither re-emit nor reset the cursor.
+                consumed, held_tail_end = separator + 1, record_offset + len(raw) + 1
+                break
             parsed = self._parse_record(line, index, clip_text=True)
             decorated = self._decorate_parsed(parsed, record_offset)
             events.extend(decorated.events)
@@ -897,6 +954,7 @@ class TranscriptSource(Source):
         self._drain_complete_records -= selected_count
         if self._drain_buffer_start == len(self._drain_buffer):
             self._clear_drain_buffer()
+        self._hold_tail(held_tail_end)
         has_more = self._drain_complete_records > 0 or unread_bytes > 0
         self.offset, self.index, self.mtime = offset, index, mtime
         return Batch(

@@ -264,3 +264,30 @@ def test_concurrent_first_writes_are_serialized_before_quota_checks(store, monke
 def test_ttl_days_must_be_positive_and_finite(store, ttl_days):
     with pytest.raises((TypeError, ValueError), match="positive finite"):
         _service(store, Clock(1.0), ttl_days=ttl_days)
+
+
+async def test_a_full_namespace_names_its_oldest_keys_and_lists_without_values(store, monkeypatch):
+    from theater.daemon.persistence.repositories import scratchpad as repository_module
+
+    monkeypatch.setattr(repository_module, "SCRATCHPAD_MAX_ENTRIES_PER_NAMESPACE", 7)
+    clock = Clock(100.0)
+    daemon = _daemon(store, clock)
+    for i in range(7):
+        clock.value = 100.0 + i
+        await _scratchpad_write(daemon, {"namespace": "full", "key": f"k{6 - i}", "value": "v"})
+
+    with pytest.raises(BadRequest) as refused:
+        await _scratchpad_write(daemon, {"namespace": "full", "key": "new", "value": "v"})
+    assert "holds 7 entries and 21 raw UTF-8 bytes" in str(refused.value)
+    assert "'k6' (3 B), 'k5' (3 B), 'k4' (3 B), 'k3' (3 B), 'k2' (3 B)" in str(refused.value)
+    assert 'scratchpad_delete(keys=["k6", "k5", "k4", "k3", "k2"])' in str(refused.value)
+
+    listed = await _scratchpad_get(daemon, {"namespace": "full", "keys_only": True})
+    assert listed["keys"] == [f"k{i}" for i in range(7)]
+    assert listed["entries"][0] == {
+        "key": "k0",
+        "bytes": 3,
+        "updated_at": 106.0,
+        "expires_at": 106.0 + 7 * 86_400,
+        "actor": None,
+    }

@@ -823,7 +823,10 @@ def build(
 
     @mcp_tool()
     async def scratchpad_get(
-        namespace: str, keys: list[str] | None = None, after_key: str | None = None
+        namespace: str,
+        keys: list[str] | None = None,
+        after_key: str | None = None,
+        keys_only: bool = False,
     ) -> dict:
         """Read non-expired entries from the machine-wide TTL scratchpad.
 
@@ -833,21 +836,19 @@ def build(
         omit to read the namespace. One page returns at most ~4 MiB encoded;
         when truncated is true and after_key is non-null, pass that after_key to
         continue after the last returned key. A legacy entry too large to return
-        alone instead reports oversized_digest, oversized_bytes, and a nullable
-        oversized_key; it is unread. Pass oversized_key as after_key to skip it
-        only when non-null; otherwise stop and report the unread entry. Delete
-        by digest or clear only when cleanup is intended. Current bounded writes
-        cannot create such an entry. Entries
-        are shared by namespace across this Theater machine; expired entries
-        are omitted and reads never refresh their expiry.
+        reports oversized_digest, oversized_bytes and a nullable oversized_key:
+        skip it with after_key only when non-null, else delete by digest or clear.
+        Entries are shared by namespace across this Theater machine; expired
+        entries are omitted and reads never refresh their expiry.
 
         namespace: coordination bucket chosen by the agents sharing it.
         keys:      optional list of at most 128 entry ids, each at most 128
                    characters; None means all.
         after_key: optional cursor with no length limit; return keys after it.
+        keys_only: list [{key, bytes, updated_at, expires_at, actor}] as entries, no values.
         """
         return await tools.scratchpad_get(
-            session, namespace=namespace, keys=keys, after_key=after_key
+            session, namespace=namespace, keys=keys, after_key=after_key, keys_only=keys_only
         )
 
     @mcp_tool()

@@ -134,7 +134,7 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
     assert "human_present" in descriptions["put_child_back_in_the_wound"]
     assert "already_dead" in descriptions["put_child_back_in_the_wound"]
     assert "nullable" in descriptions["scratchpad_get"]
-    assert "stop and report the unread entry" in descriptions["scratchpad_get"]
+    assert "else delete by digest or clear" in descriptions["scratchpad_get"]
     assert "may be combined" in descriptions["scratchpad_delete"]
     assert "partial text chunks" in descriptions["read_transcript"]
     assert "does not prove the edit was never committed" in descriptions["recall_read"]
@@ -593,8 +593,9 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         namespace: str,
         keys: list[str] | None = None,
         after_key: str | None = None,
+        keys_only: bool = False,
     ) -> dict:
-        calls.append(("scratchpad_get", session, namespace, keys, after_key))
+        calls.append(("scratchpad_get", session, namespace, keys, after_key, keys_only))
         return {"namespace": namespace, "entries": {"k1": "v1"}}
 
     async def fake_scratchpad_delete(
@@ -629,7 +630,7 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
 
     assert [(call[0], *call[2:]) for call in calls] == [
         ("scratchpad_write", "plan", "p-you", None),
-        ("scratchpad_get", "plan", None, None),
+        ("scratchpad_get", "plan", None, None, False),
         ("scratchpad_delete", "plan", ["abc123"], None, False),
     ]
     assert all(isinstance(call[1], mcp_tools.Session) for call in calls)

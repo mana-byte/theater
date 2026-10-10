@@ -241,6 +241,13 @@ class TranscriptObserver(HarnessObserver):
         ``clip_text=False`` keeps full text for history paging.
         """
 
+    def mutable_tail(self, line: str) -> bool:
+        """True for a record the harness rewrites in place while it is the file's last line.
+
+        The source holds such a record back, so its rewrite is not mistaken for a new file.
+        """
+        return False
+
     def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
         """Adapt the legacy parser once; richer adapters may override this seam."""
         return ParsedRecord(events=tuple(self.parse(line, index, clip_text=clip_text)))

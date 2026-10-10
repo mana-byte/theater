@@ -389,6 +389,7 @@ async def scratchpad_get(
     namespace: str,
     keys: list[str] | None = None,
     after_key: str | None = None,
+    keys_only: bool = False,
 ) -> dict:
     if not session._resolved:
         await session.identify()
@@ -397,6 +398,7 @@ async def scratchpad_get(
         namespace=namespace,
         keys=keys,
         after_key=after_key,
+        keys_only=keys_only,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)
