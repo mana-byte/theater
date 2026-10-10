@@ -2405,3 +2405,25 @@ def test_a_watcher_with_no_progress_for_a_while_polls_slower_and_progress_restor
     assert observer._quiet_poll(context, 0) == 0  # a batch with more to read is never delayed
     context.active_at = now[0]
     assert observer._quiet_poll(context, 0.25) == 0.25  # new output restores the fast poll
+
+
+def test_identity_lost_predicate_skips_db_for_non_suspects(registry, monkeypatch):
+    """Non-suspects return False with no participant SELECT; suspects still check the store."""
+    observer = Observer(registry, harnesses={}, failure_grace=30.0)
+    participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
+
+    def boom(_pid):
+        raise AssertionError("participant read for a non-suspect")
+
+    monkeypatch.setattr(registry.store, "get_participant", boom)
+    assert observer.transcript_identity_lost(participant.id) is False
+    monkeypatch.undo()
+
+    observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
+    reads: list[str] = []
+    real = registry.store.get_participant
+    monkeypatch.setattr(
+        registry.store, "get_participant", lambda pid: (reads.append(pid), real(pid))[1]
+    )
+    assert observer.transcript_identity_lost(participant.id) is True
+    assert reads == [participant.id]
