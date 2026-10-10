@@ -276,9 +276,8 @@ async def test_a_disabled_skill_is_hidden_from_list_and_refused_on_load(theater_
             "theater-recover-tmux",
         ]
 
-        with pytest.raises(Exception) as exc:
-            await mcp.call_tool("load_skill", {"name": "theater-configure"})
-        assert "not_found" in str(exc.value)
+        refused = await mcp.call_tool("load_skill", {"name": "theater-configure"})
+        assert refused.structured_content["error"]["code"] == "not_found"
 
         loaded = _payload(await mcp.call_tool("load_skill", {"name": "theater-debate"}))
         assert loaded["name"] == "theater-debate"
@@ -674,14 +673,36 @@ async def test_list_participants_marks_the_caller(daemon):
     assert session_ids == {"me": None, "them": "ses-them"}
 
 
-async def test_a_failing_tool_reports_the_daemon_error(daemon, monkeypatch):
-    mcp = build("me", "vibe")
-    with pytest.raises(Exception) as exc:
-        await mcp.call_tool(
-            "spawn_session",
-            {"harness": "cursor", "prompt": "hi", "approval": "manual"},
-        )
-    assert "bad_request" in str(exc.value)
+@pytest.mark.parametrize(
+    ("harness", "is_error", "prefix"),
+    [("codex", True, "bad_request: "), ("vibe", False, "REFUSED bad_request: ")],
+)
+async def test_a_refusal_is_one_envelope_in_the_harness_delivery_mode(
+    daemon, harness, is_error, prefix
+):
+    """Vibe hides isError content, so its manifest asks for the envelope as plain text."""
+    mcp = build("me", harness)
+    result = await mcp.call_tool(
+        "spawn_session", {"harness": "cursor", "prompt": "hi", "approval": "manual"}
+    )
+    head, line = result.content[0].text.split("\n")
+    assert result.is_error is is_error
+    assert head.startswith(prefix) and "cursor" in head
+    assert json.loads(line) == result.structured_content
+    assert result.structured_content["ok"] is False
+    assert result.structured_content["error"]["retryable"] is False
+
+
+async def test_a_daemon_that_does_not_answer_is_daemon_unavailable(daemon, monkeypatch):
+    mcp = build("me", "codex")
+
+    async def broken(*args, **kwargs):
+        raise ConnectionError("socket closed")
+
+    monkeypatch.setattr(DaemonClient, "call", broken)
+    error = (await mcp.call_tool("whoami", {})).structured_content["error"]
+    assert error["code"] == "daemon_unavailable"
+    assert error["side_effect"] == "unknown" and error["next"]
 
 
 # ---- list_participants: resume_state pinned to spawner --------------------

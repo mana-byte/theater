@@ -110,7 +110,8 @@ async def test_stdio_timing_correlates_daemon_without_payload_changes(
             payload = result.structured_content or json.loads(result.content[0].text)
             assert payload["id"] == "p-timing"
             refused = await session.call_tool("load_skill", {"name": "secret-missing-skill"})
-            assert refused.is_error
+            # vibe delivers refusals as text; the envelope still names the code.
+            assert refused.structured_content["error"]["code"] == "not_found"
         text = log.read_text()
         assert "mcp.tool whoami" in text and "mcp.tool load_skill" in text
         assert "result=error" in text and "secret-missing-skill" not in text

@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp.server.mcpserver.exceptions import ToolError
 
 from tests.test_harness_plugins import install, write_plugin
 from theater.config import Config
@@ -185,11 +184,11 @@ async def test_a_model_not_listed_is_refused(daemon, terminal_provider, all_inst
     """
     mcp = build("parent", "vibe")
 
-    with pytest.raises(ToolError) as exc:
-        await mcp.call_tool(
-            "spawn_session",
-            {"harness": "vibe", "approval": "manual", "model": "not-on-the-list"},
-        )
+    refused = await mcp.call_tool(
+        "spawn_session",
+        {"harness": "vibe", "approval": "manual", "model": "not-on-the-list"},
+    )
 
-    assert "not-on-the-list" in str(exc.value)
-    assert "opus-5" in str(exc.value)
+    message = refused.structured_content["error"]["message"]
+    assert "not-on-the-list" in message
+    assert "opus-5" in message
