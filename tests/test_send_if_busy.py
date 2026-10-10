@@ -95,6 +95,10 @@ async def test_replace_interrupts_waits_for_idle_and_tells_the_child(client, dae
     assert f"{launched.handle} -> " in state.sent[-1]
     assert "await them, do not respawn.]\n\nnew plan" in state.sent[-1]
 
+    status = await client.call("jobs.status", handle=active["handle"])
+    assert status["replaced_by"] == replaced["handle"]
+    assert "Re-send the prompt" in status["error"]
+
 
 async def test_replace_times_out_without_sending(client, daemon, monkeypatch):
     parent, child, state = await _native_pair(daemon)

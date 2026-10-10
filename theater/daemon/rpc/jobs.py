@@ -30,6 +30,7 @@ from theater.daemon.awaiting import (
     parse_targets,
     snapshot_for,
 )
+from theater.daemon.controls._common import INTERRUPTED_ERROR_CODE
 from theater.daemon.controls.interaction_wire import cached_pending_interaction
 from theater.daemon.job_changes import job_changes
 from theater.daemon.rails import check_cycle, check_wait_cycle
@@ -60,7 +61,12 @@ _JOB_ERROR_MESSAGES = {
     SEND_SUPERSEDED_ERROR_CODE: (
         "A newer prompt was accepted after this send's delivery claim expired. This handle was "
         "closed so it cannot consume the newer prompt's completion; await the newer send handle "
-        "instead."
+        "(replaced_by, when known) instead."
+    ),
+    INTERRUPTED_ERROR_CODE: (
+        "This job was interrupted before it finished: its turn was cancelled, or, as a queued "
+        "followup, it was never delivered. Re-send the prompt if the work is still wanted; "
+        "replaced_by names the send that followed, if any."
     ),
     "transcript_correlation_failed": (
         "Theater could not correlate this participant with its transcript. "
@@ -86,14 +92,27 @@ _JOB_ERROR_MESSAGES = {
         "still be usable: inspect it before resending."
     ),
 }
+#: Error codes whose job a later send may have replaced; window for deriving ``replaced_by``.
+_REPLACEABLE = frozenset({INTERRUPTED_ERROR_CODE, SEND_SUPERSEDED_ERROR_CODE})
+_REPLACED_BY_WINDOW_SECONDS = 60.0
 
 
-def _job_to_dict(job: Job) -> dict:
+def _job_to_dict(job: Job, store=None) -> dict:
     """Serialize a job with the actionable explanation for known terminal errors."""
     row = job.to_dict()
     message = _JOB_ERROR_MESSAGES.get(job.error_code or "")
     if message is not None:
         row["error"] = message
+    if store is not None and job.error_code in _REPLACEABLE and job.finished_at is not None:
+        # Derived, not stored: the caller's next send to the same target within the window.
+        successor = store.first_send_between(
+            job.caller_id,
+            job.target_id,
+            after=job.finished_at,
+            until=job.finished_at + _REPLACED_BY_WINDOW_SECONDS,
+        )
+        if successor is not None and successor.handle != job.handle:
+            row["replaced_by"] = successor.handle
     return row
 
 
@@ -108,7 +127,7 @@ def _quiet_seconds(daemon, pid: str | None) -> float | None:
 def _entry(daemon, target: AwaitTarget, reasons: dict[str, str]) -> dict:
     """One await result entry: durable job state plus additive presence fields."""
     if target.job is not None:
-        entry = _job_to_dict(target.job)
+        entry = _job_to_dict(target.job, daemon.store)
         changes = job_changes(daemon.store, target.job)
         if changes is not None:
             entry["changes"] = changes
@@ -344,4 +363,4 @@ async def _jobs_status(daemon, params: dict) -> dict:
     job = daemon.jobs.get(handle)
     if job is None:
         raise BadRequest(f"no job {handle!r}")
-    return _job_to_dict(job)
+    return _job_to_dict(job, daemon.store)
