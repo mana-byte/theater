@@ -134,7 +134,7 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
     assert "human_present" in descriptions["put_child_back_in_the_wound"]
     assert "already_dead" in descriptions["put_child_back_in_the_wound"]
     assert "nullable" in descriptions["scratchpad_get"]
-    assert "else delete by digest or clear" in descriptions["scratchpad_get"]
+    assert "else stop and report it" in descriptions["scratchpad_get"]
     assert "may be combined" in descriptions["scratchpad_delete"]
     assert "partial text chunks" in descriptions["read_transcript"]
     assert "does not prove the edit was never committed" in descriptions["recall_read"]

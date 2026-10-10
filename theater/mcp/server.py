@@ -837,7 +837,8 @@ def build(
         when truncated is true and after_key is non-null, pass that after_key to
         continue after the last returned key. A legacy entry too large to return
         reports oversized_digest, oversized_bytes and a nullable oversized_key:
-        skip it with after_key only when non-null, else delete by digest or clear.
+        skip it with after_key only when non-null, else stop and report it;
+        delete by digest or clear only when cleanup is intended.
         Entries are shared by namespace across this Theater machine; expired
         entries are omitted and reads never refresh their expiry.
 
