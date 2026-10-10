@@ -705,6 +705,15 @@ async def test_a_daemon_that_does_not_answer_is_daemon_unavailable(daemon, monke
     assert error["side_effect"] == "unknown" and error["next"]
 
 
+async def test_unknown_arguments_are_reported_not_dropped(daemon):
+    mcp = build("me", "vibe")
+    payload = _payload(await mcp.call_tool("whoami", {"tail": 5, "x": 1}))
+    assert payload["id"] == "me"
+    assert payload["ignored_arguments"] == [{"tail": "removed; page with next_cursor"}, "x"]
+    rows = await mcp.call_tool("list_harnesses", {"harness": "vibe"})
+    assert "ignored_arguments" not in rows.content[0].text
+
+
 # ---- list_participants: resume_state pinned to spawner --------------------
 #
 # Each case asserts the resume_state value and then calls spawn(resume=...)
