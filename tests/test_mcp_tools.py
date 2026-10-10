@@ -345,7 +345,7 @@ async def test_await_names_the_caller_so_a_deadlock_can_be_refused():
 
 async def test_await_keeps_only_what_the_caller_acts_on():
     """Echoes of the caller's own ids, prompt and schema, and empty fields, cost context
-    on every poll; state, outcome and the parsed structured answer stay."""
+    on every poll; state, outcome and the parsed structured answer (not its raw text) stay."""
     job = {
         "handle": "h#1",
         "caller_id": "p-me",
@@ -373,6 +373,21 @@ async def test_await_keeps_only_what_the_caller_acts_on():
             "finished_at": 2.0,
         }
     ]
+
+
+async def test_await_inlines_only_a_done_jobs_unparsed_final_answer():
+    """The final message saves a read_transcript call; a parsed answer already carries it."""
+    long = "x" * 2500
+    rows = [
+        {"handle": "h#1", "state": "done", "result": long, "structured_status": "unavailable"},
+        {"handle": "h#2", "state": "done", "result": ""},
+        {"handle": "h#3", "state": "running", "result": "partial"},
+        {"handle": "h#4", "state": "crashed", "result": "boom"},
+    ]
+    s = resolved(**{"jobs.await": rows})
+    entries = await tools.await_sessions(s, handles=["h#1", "h#2", "h#3", "h#4"], max_wait=5.0)
+    assert entries[0]["result"] == "x" * 2000 + "… (+500 chars)"
+    assert [e.get("result") for e in entries[1:]] == [None, None, None]
 
 
 async def test_await_shows_presence_only_while_it_is_not_a_plain_absence():

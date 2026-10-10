@@ -77,9 +77,8 @@ An existing job handle wins over the participant-id interpretation. A protected 
 still return timeout or pending under UNKNOWN presence even when its job is terminal.
 
 Each entry carries handle, state (running/done/crashed/killed), participant_status
-(observed independently, possibly working after departure) and await_reason; empty
-fields, your own ids, and the prompt and schema you sent are omitted. error_code and
-finished_at appear once set. human_presence (state, protected, reason) appears only
+(observed independently, possibly working after departure) and await_reason; error_code
+and finished_at appear once set. human_presence (state, protected, reason) appears only
 while it is not a plain absence. await_reason is one of: job_terminal, presence_released,
 awaiting_input (a running job needs input; terminal state takes precedence), already_absent,
 timeout, or pending (another target released wait-any). For gated terminal jobs, job_terminal
@@ -92,11 +91,11 @@ No-job entries omit state; no synthetic job is created.
 Re-await a pending or timed-out entry only while its job or presence can still change.
 The daemon and other agents keep running.
 
-Done means the turn ended, not that its work is correct. Prompt/result text is omitted:
-use read_transcript and inspect artifacts before accepting work. A job spawned or sent with
+Done means the turn ended, not that its work is correct. `result` is the child's final
+message (first 2,000 chars): its claim, not evidence; check the repo. A job spawned or sent with
 response_format returns its final JSON answer as a JSON-encoded string in structured_result
-once done. structured_status is "parsed", or "unavailable" when completion failed, output
-was missing, or the answer was not JSON. A finished job also carries changes: either
+once done, in place of result. structured_status is "parsed", or "unavailable" when completion
+failed, output was missing, or the answer was not JSON. A finished job also carries changes: either
 {"evidence":"none"}, or {"evidence":"tool_paths","modified":[first 20 paths],
 "modified_count":int,"read_count":int}. Only paths the harness reports are seen; evidence
 "none" means Theater saw no file paths, not that nothing changed — check the repo.
