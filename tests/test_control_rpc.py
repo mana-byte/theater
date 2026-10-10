@@ -327,7 +327,7 @@ async def test_steer_refuses_a_mismatched_job_handle(client, daemon):
             job_handle="not-a-job",
         )
     assert raised.value.code == "stale_target"
-    assert "interrupt_session" in raised.value.details["next"]
+    assert "if_busy" in raised.value.details["next"]
 
 
 async def test_steer_on_legacy_wiring_names_the_alternatives(client, daemon):
@@ -530,7 +530,7 @@ async def test_settings_update_requires_idle_and_authorization(client, daemon):
             reasoning_effort="high",
         )
     assert busy.value.code == "busy"
-    assert "queue_followup" in busy.value.details["next"]
+    assert "if_busy" in busy.value.details["next"]
 
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     with pytest.raises(RemoteError) as unauthorized:

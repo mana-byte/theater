@@ -65,8 +65,6 @@ async def test_tools_are_registered(daemon):
         "update_participant",
         "await_sessions",
         "send",
-        "steer_session",
-        "queue_followup",
         "update_session_settings",
         "get_session_controls",
         "interrupt_session",
@@ -322,7 +320,15 @@ async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
     send = schema["send"]
     assert "target" in send["properties"]
     assert "target_id" not in send["properties"]
-    assert set(send["properties"]) == {"target", "prompt", "response_format"}
+    assert set(send["properties"]) == {
+        "target",
+        "prompt",
+        "if_busy",
+        "job_handle",
+        "response_format",
+    }
+    assert send["properties"]["if_busy"]["default"] == "refuse"
+    assert set(send["properties"]["if_busy"]["enum"]) == {"refuse", "queue", "amend", "replace"}
     assert set(send["required"]) == {"target", "prompt"}
 
 
@@ -345,16 +351,8 @@ async def test_spawn_wiring_schema_offers_auto_native_legacy_daemon_default_auto
 
 
 async def test_control_tool_schemas_are_thin_targeted_forwards(daemon):
-    """The tools carry no policy surface: one target, the amendment, nothing else."""
+    """The tools carry no policy surface: one target, the change, nothing else."""
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
-
-    steer = schema["steer_session"]
-    assert set(steer["properties"]) == {"target", "prompt", "job_handle"}
-    assert steer["required"] == ["target", "prompt"]
-
-    queue = schema["queue_followup"]
-    assert set(queue["properties"]) == {"target", "prompt", "response_format"}
-    assert queue["required"] == ["target", "prompt"]
 
     settings = schema["update_session_settings"]
     assert set(settings["properties"]) == {"target", "model", "reasoning_effort"}
@@ -380,8 +378,7 @@ async def test_interrupt_description_states_turn_and_followup_cancellation(daemo
 async def test_control_tool_descriptions_point_policy_at_the_daemon(daemon):
     """Unsupported actions show the daemon's reason; nothing is decided locally."""
     tools = {t.name: t for t in await build("p1", "vibe").list_tools()}
-    for name in ("steer_session", "queue_followup", "update_session_settings"):
-        assert "daemon" in tools[name].description, name
+    assert "daemon" in tools["update_session_settings"].description
     assert "reason" in tools["get_session_controls"].description
 
 
@@ -411,13 +408,9 @@ async def test_spawn_wiring_description_names_the_daemon_owned_rollout(daemon):
 async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     calls = {}
 
-    async def fake_steer(session, **kwargs):
-        calls["steer"] = (session, kwargs)
-        return {"amended": True}
-
-    async def fake_queue(session, **kwargs):
-        calls["queue"] = (session, kwargs)
-        return {"handle": "p-child#4"}
+    async def fake_send(session, **kwargs):
+        calls["send"] = (session, kwargs)
+        return {"handle": "p-child#4", "route": "queued"}
 
     async def fake_settings(session, **kwargs):
         calls["settings"] = (session, kwargs)
@@ -427,8 +420,7 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         calls["controls"] = (session, kwargs)
         return {"capabilities": {}}
 
-    monkeypatch.setattr(mcp_tools, "steer_session", fake_steer)
-    monkeypatch.setattr(mcp_tools, "queue_followup", fake_queue)
+    monkeypatch.setattr(mcp_tools, "send_prompt", fake_send)
     monkeypatch.setattr(mcp_tools, "update_session_settings", fake_settings)
     monkeypatch.setattr(mcp_tools, "get_session_controls", fake_controls)
 
@@ -436,16 +428,16 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     response_format = {"type": "object"}
     assert _payload(
         await mcp.call_tool(
-            "steer_session",
-            {"target": "child", "prompt": "amend", "job_handle": "h#2"},
+            "send",
+            {
+                "target": "child",
+                "prompt": "later",
+                "if_busy": "queue",
+                "job_handle": "h#2",
+                "response_format": response_format,
+            },
         )
-    ) == {"amended": True}
-    assert _payload(
-        await mcp.call_tool(
-            "queue_followup",
-            {"target": "child", "prompt": "later", "response_format": response_format},
-        )
-    ) == {"handle": "p-child#4"}
+    ) == {"handle": "p-child#4", "route": "queued"}
     assert _payload(
         await mcp.call_tool("update_session_settings", {"target": "child", "model": "opus-5"})
     ) == {"applied": True}
@@ -454,10 +446,11 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     }
 
     assert all(isinstance(call[0], mcp_tools.Session) for call in calls.values())
-    assert calls["steer"][1] == {"target": "child", "prompt": "amend", "job_handle": "h#2"}
-    assert calls["queue"][1] == {
-        "target": "child",
+    assert calls["send"][1] == {
+        "target_id": "child",
         "prompt": "later",
+        "if_busy": "queue",
+        "job_handle": "h#2",
         "response_format": response_format,
     }
     assert calls["settings"][1] == {

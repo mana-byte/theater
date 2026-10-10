@@ -297,75 +297,12 @@ def _spawn_description() -> str:
 
 
 def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> None:
-    """Register the runtime-control tools (steer, queue, settings, controls).
+    """Register the runtime-control tools (settings, controls).
 
     Every one of them is a thin forwarder: the daemon authorizes from the
     forwarded caller identity and its refusal reason is the answer, so nothing
     is decided here. They belong to the control lane, never to the wait lane.
     """
-
-    @mcp_tool()
-    async def steer_session(target: str, prompt: str, job_handle: str | None = None) -> dict:
-        """Amend what a working direct child is doing right now.
-
-        The prompt amends the child's current turn in place: no new job
-        handle is created, the job keeps the handle you already hold, and
-        its await continues to cover the amended work. Pass `job_handle`
-        when you want certainty — the call is refused if the active turn
-        maps to a different job or to no Theater job at all (a human started
-        it in the native UI).
-
-        target: the child's stable participant id or current live name.
-        prompt: the amendment, delivered through the child's native runtime.
-        job_handle: optional handle you believe is running; the daemon
-                refuses a mismatch instead of amending the wrong job.
-
-        Steering needs an active turn and either native runtime wiring or a
-        harness that declares Enter steers a running turn in its terminal (the
-        text is submitted with Enter; codex and pi declare it). The daemon
-        refuses with `stale_target` and its reason when the turn is missing
-        (wait for status="idle" and use send, or call queue_followup) and with
-        `bad_request` when neither route exists. A refusal is final: a steer is
-        never retried and never reinterpreted as a send, so after a
-        refusal queue a followup instead of retrying. Only the
-        direct parent or a local operator may steer; the daemon decides from
-        the forwarded caller identity.
-        """
-        return await tools.steer_session(
-            session,
-            target=target,
-            prompt=prompt,
-            job_handle=job_handle,
-        )
-
-    @mcp_tool()
-    async def queue_followup(target: str, prompt: str, response_format: dict | None = None) -> dict:
-        """Queue a prompt for a child's next idle moment and get its handle now.
-
-        Unlike send — which refuses a busy target — this returns a new
-        awaitable send-job handle immediately and delivers it later, when the
-        child finishes its current work and the daemon observes it idle.
-        Pass the returned handle to await_sessions like any send handle.
-
-        target: the child's stable participant id or current live name.
-        prompt: the text to deliver when the child becomes idle.
-        response_format: optional JSON Schema hint, guidance only, same
-                semantics as send.
-
-        Ownership and policy are revalidated when the item actually
-        dispatches: a followup that no longer qualifies finishes with an
-        explicit error, and one whose native backend restarted before
-        dispatch is never replayed into the new backend. The queue is
-        bounded and the daemon names the bound in its refusal. Queueing
-        requires the direct parent or a local operator; the daemon decides
-        from the forwarded caller identity.
-        """
-        return await tools.queue_followup(
-            session,
-            target=target,
-            prompt=prompt,
-            response_format=response_format,
-        )
 
     @mcp_tool()
     async def update_session_settings(
@@ -405,7 +342,7 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         settings_update, interrupt), its own reason for each unavailable
         one, the control connection's health, the effective settings, the
         active turn, and the handles of queued followups. Call this before
-        steer_session or update_session_settings to learn whether the
+        send(if_busy=...) or update_session_settings to learn whether the
         harness supports the operation at all; when it does not, the reason
         is the daemon's, and it is the thing to tell the user rather than
         retrying.
@@ -778,7 +715,13 @@ def build(
         )
 
     @mcp_tool()
-    async def send(target: str, prompt: str, response_format: dict | None = None) -> dict:
+    async def send(
+        target: str,
+        prompt: str,
+        if_busy: Literal["refuse", "queue", "amend", "replace"] = "refuse",
+        job_handle: str | None = None,
+        response_format: dict | None = None,
+    ) -> dict:
         """Send a prompt to an already-running agent mid-session.
 
         Delivery follows the daemon's selected capability route: native runtime
@@ -792,25 +735,31 @@ def build(
                    work only while the participant is live and may be
                    recycled after a death.
         prompt:    the text to deliver to the target.
+        if_busy:   what to do when the target is busy; an idle target always
+                   gets a plain send (route "send"). "queue": deliver at its next
+                   idle, new handle now (route "queued"). "amend": steer the
+                   active turn, same handle (route "steer"), else queue; an
+                   uncertain steer is reported, never retried. "replace": cancel
+                   its queue, interrupt, wait up to 30 s for idle, send (route
+                   "replace"). All but "refuse" need a direct child.
+        job_handle: amend/replace act only while this job is the active turn.
         response_format: optional JSON Schema hint, guidance only. Pass a
                    JSON object or null. Theater parses the whole final answer with
                    json.loads — no schema validation, fence stripping, or retry.
                    Recommended when you will act on the answer; await_sessions
                    returns it in structured_result.
         Fails with `human_present` (human at the terminal), `busy` (target is
-        working or already owns an outstanding send), `transcript_untrusted`
-        or `transcript_identity_lost` (transcript needs binding). If a busy
-        target is your direct child and the new prompt should replace its
-        current turn, call interrupt_session, wait until list_participants
-        reports status="idle", then retry send. Otherwise wait for it to
-        become idle — or call queue_followup to have Theater deliver the
-        prompt at its next idle moment and hand you the handle now.
+        working or already owns an outstanding send, if_busy="refuse"),
+        `transcript_untrusted` or `transcript_identity_lost` (transcript needs
+        binding).
         """
         return await tools.send_prompt(
             session,
             target_id=target,
             prompt=prompt,
             response_format=response_format,
+            if_busy=if_busy,
+            job_handle=job_handle,
         )
 
     @mcp_tool()
@@ -832,13 +781,12 @@ def build(
         becomes idle. Delivery follows the daemon's route for interrupt:
         the native runtime or the bound provider's declared terminal sequence
         — never one universal key assumed to work everywhere — and Theater
-        refuses to mutate a terminal a human is using. After interruption, wait until
-        list_participants reports status="idle" before sending a replacement
-        prompt.
+        refuses to mutate a terminal a human is using. To interrupt and send a
+        replacement in one call, use send(if_busy="replace").
 
-        Returns {"id": str, "interrupted": bool, "reason"?: str,
-        "cancelled_followups"?: [handle, ...]}; cancelled_followups is omitted
-        when empty, and reason is an open set. Refusals are non-exhaustive and
+        Returns {"id": str, "interrupted": bool, "interrupted_job"?: handle,
+        "reason"?: str, "cancelled_followups"?: [handle, ...]}; cancelled_followups
+        is omitted when empty, and reason is an open set. Refusals are non-exhaustive and
         include `human_present`, `busy`, and `stale_target`. Only the direct
         parent or a local operator may interrupt; the daemon decides from the
         forwarded caller identity.

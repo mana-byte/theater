@@ -20,6 +20,7 @@ from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import ControlKind, ControlTransport, DeliveryResult
 from theater.models import (
+    Busy,
     TheaterError,
     Tier,
     TranscriptIdentityLost,
@@ -146,31 +147,54 @@ def _publish_routed_send_event(
 
 @method("send")
 async def _send(daemon, params: dict) -> dict:
-    """Send through the daemon's selected capability route."""
+    """Send through the daemon's selected capability route; if_busy redirects a busy child."""
+    from theater.daemon.rpc import redirect
+
     target = daemon.registry.resolve(_require(params, "target"))
     target_id = target.id
+    if_busy = redirect.if_busy_param(params)
     response_format = _serialized_response_format(params)
     prompt = _prompt_with_response_format(_require(params, "prompt"), response_format)
     caller_id = params.get("caller_id") or "cli"
 
     refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
 
-    try:
+    async def deliver(decorate: Callable[[str], str] | None = None) -> dict:
+        text = prompt if decorate is None else decorate(prompt)
         job = await daemon.controls.send(
             target_id,
             caller_id=caller_id,
-            prompt=prompt,
+            prompt=text,
             response_format=response_format,
         )
-    except Exception as exc:
-        if isinstance(exc, TheaterError):
-            refuse(exc, reason=exc.refusal_reason or exc.code)
-        raise
-    _publish_routed_send_event(
-        daemon,
-        caller_id=caller_id,
-        target_id=target_id,
-        handle=job.handle,
-        prompt=prompt,
-    )
-    return job.to_dict()
+        _publish_routed_send_event(
+            daemon,
+            caller_id=caller_id,
+            target_id=target_id,
+            handle=job.handle,
+            prompt=text,
+        )
+        return job.to_dict()
+
+    async def plain() -> dict:
+        result = await deliver()
+        if if_busy != "refuse":
+            result["route"] = "send"
+        return result
+
+    try:
+        if if_busy == "refuse":
+            return await plain()
+        redirect.authorize_redirect(daemon, target_id, caller_id)
+        try:
+            return await plain()
+        except Busy:
+            pass
+        routed = {**params, "target": target_id, "caller_id": caller_id}
+        if if_busy == "queue":
+            return await redirect.queue(daemon, routed)
+        if if_busy == "amend":
+            return await redirect.amend(daemon, routed, send=plain)
+        return await redirect.replace(daemon, routed, send=deliver)
+    except TheaterError as exc:
+        refuse(exc, reason=exc.refusal_reason or exc.code)

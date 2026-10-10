@@ -114,6 +114,7 @@ async def test_native_interrupt_cancels_queued_followups_and_requests_the_turn(
 
     assert result["id"] == child.id
     assert result["interrupted"] is True
+    assert result["interrupted_job"] == active["handle"]
     assert result["cancelled_followups"] == [queued["handle"]]
     assert state.interrupted == [active_turn]
     assert daemon.store.get_job(queued["handle"]).state == "killed"

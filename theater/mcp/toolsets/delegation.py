@@ -1,4 +1,4 @@
-"""Spawning, sending, steering, queued followups, settings, adoption, and killing.
+"""Spawning, sending (and redirecting a busy child), settings, adoption, and killing.
 
 These are the tools an agent uses to delegate work to other agents and
 coordinate with them. ``_summarise`` is imported from the participants toolset
@@ -207,7 +207,13 @@ async def await_sessions(
 
 
 async def send_prompt(
-    session: Session, *, target_id: str, prompt: str, response_format: dict | None = None
+    session: Session,
+    *,
+    target_id: str,
+    prompt: str,
+    response_format: dict | None = None,
+    if_busy: str = "refuse",
+    job_handle: str | None = None,
 ) -> dict:
     """Send a prompt to an already-running agent on its selected transport.
 
@@ -218,9 +224,9 @@ async def send_prompt(
     at the target pane, the call fails
     with `human_present` — never inject into a session a human is using. If
     the target is working or already owns an outstanding send prompt, the
-    call fails with `busy`. To replace a direct child's current turn, call
-    `interrupt_session`, wait until `list_participants` reports it idle,
-    then retry the send. Only a direct parent may interrupt a participant.
+    call fails with `busy` unless ``if_busy`` asks the daemon to queue, amend
+    (steer), or replace; those modes are the daemon's to route and require a
+    direct child.
 
     ``target_id`` may be a participant id or a name. Names work only
     while the participant is live; a dead participant's name is null and
@@ -244,6 +250,8 @@ async def send_prompt(
         prompt=prompt,
         caller_id=session.participant_id,
         response_format=response_format,
+        if_busy=if_busy,
+        job_handle=job_handle,
     )
     assert isinstance(record, dict)
     return job_entry(record)
@@ -260,71 +268,6 @@ async def interrupt_session(session: Session, *, target: str) -> dict:
     )
     assert isinstance(result, dict)
     return result
-
-
-async def steer_session(
-    session: Session, *, target: str, prompt: str, job_handle: str | None = None
-) -> dict:
-    """Amend exactly the current Theater job of one direct child.
-
-    The prompt amends the child's active native turn in place: no new job
-    handle is created, the job's original prompt and response-format contract
-    are preserved, and the handle the caller already holds keeps awaiting the
-    amended work. An optional ``job_handle`` asks the daemon to verify the
-    amendment lands on exactly the job the caller expects; a mismatch is
-    refused rather than amended.
-
-    The daemon owns every decision: direct-parent authorization, native
-    wiring, an active turn bound to a Theater job, and the capability check.
-    A refusal is final — a steer is never retried and never reinterpreted as a
-    send or a queue entry — so a ``stale_target`` refusal means the caller
-    should queue a followup, not retry. The daemon's reply is returned verbatim,
-    including any delivery-uncertainty it reports.
-    """
-    if not session._resolved:
-        await session.identify()
-    record = await session.client.call(
-        "participant.steer",
-        target=target,
-        prompt=prompt,
-        job_handle=job_handle,
-        caller_id=session.participant_id,
-    )
-    assert isinstance(record, dict)
-    return record
-
-
-async def queue_followup(
-    session: Session, *, target: str, prompt: str, response_format: dict | None = None
-) -> dict:
-    """Queue a prompt for a child's next idle moment; return its handle now.
-
-    The queue is Theater's own: the returned handle is an ordinary send job
-    the caller can pass to ``await_sessions``, but it is not delivered until
-    the target's current work ends and the daemon observes it idle. Ownership
-    and policy are revalidated when the item actually dispatches — a followup
-    that no longer qualifies finishes with an explicit error, and one whose
-    native backend restarted before dispatch is never replayed into the new
-    backend.
-
-    ``response_format`` mirrors ``send``: a JSON Schema hint the daemon
-    attaches to the job, forwarded unchanged.
-
-    Authorization (direct parent or local operator), the pending bound, and
-    delivery are all the daemon's to decide from the forwarded caller
-    identity; the daemon's refusal and its reason are the answer.
-    """
-    if not session._resolved:
-        await session.identify()
-    record = await session.client.call(
-        "participant.queue_followup",
-        target=target,
-        prompt=prompt,
-        response_format=response_format,
-        caller_id=session.participant_id,
-    )
-    assert isinstance(record, dict)
-    return job_entry(record)
 
 
 async def update_session_settings(

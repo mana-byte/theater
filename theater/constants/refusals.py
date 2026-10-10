@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Final
 
-NEXT_BUSY: Final = "queue_followup, or interrupt_session then send once it is idle"
-NEXT_STEER_STALE: Final = "interrupt_session, then send once it is idle; or queue_followup"
+NEXT_BUSY: Final = 'send again with if_busy="queue", "amend", or "replace"'
+NEXT_STEER_STALE: Final = 'send with if_busy="queue", or if_busy="replace"'
+NEXT_REPLACE_TIMEOUT: Final = (
+    "nothing was sent and the interrupt stays applied; await the interrupted handle, then send"
+)
 NEXT_NAME_TAKEN: Final = "omit name to get a free one"
 NEXT_HUMAN_PRESENT: Final = "ask the user to leave the pane, then retry"
 NEXT_NO_TERMINAL: Final = "no terminal exists for this participant; do not retry this control"
