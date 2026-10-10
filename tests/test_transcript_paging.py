@@ -441,3 +441,69 @@ async def test_opencode_snapshot_excludes_a_newer_message_between_chunks(tmp_pat
 
     assert "newer" not in "".join(chunk.text for chunk in chunks)
     assert "".join(chunk.text for chunk in reversed(chunks)) == text
+
+
+async def test_roles_filter_events_and_bind_the_cursor() -> None:
+    source = StaticSource(
+        {
+            None: page(
+                (
+                    Event(kind=EventKind.ASSISTANT, text="answer", raw_index=1),
+                    Event(kind=EventKind.TOOL_RESULT, text="x" * 30_000, raw_index=2),
+                ),
+                cursor="newest",
+                older_cursor="older",
+            ),
+            "older": page((Event(kind=EventKind.USER, text="ask", raw_index=0),), cursor="o"),
+        }
+    )
+    assistant = TranscriptPager(
+        source, target="p1", event_filter=lambda _event: True, roles=("assistant",)
+    )
+
+    first = await assistant.read()
+
+    assert [chunk.text for chunk in first.events] == ["answer"]
+    assert first.next_cursor is not None
+    assert (await assistant.read(first.next_cursor)).events == ()
+    with pytest.raises(TranscriptCursorError, match=r"different roles.*omit cursor"):
+        await pager(source).read(first.next_cursor)
+    with pytest.raises(TranscriptCursorError, match=r"version.*omit cursor"):
+        await pager(source).read("trc2." + first.next_cursor.removeprefix("trc3."))
+
+
+async def test_huge_event_collapses_and_middle_cursor_stays_inside_it() -> None:
+    huge = "".join(chr(0x61 + index % 26) for index in range(100 * 1024))
+    source = StaticSource(
+        {
+            None: page(
+                (
+                    Event(kind=EventKind.USER, text="older", raw_index=0),
+                    Event(kind=EventKind.TOOL_RESULT, text=huge, raw_index=1),
+                    Event(kind=EventKind.ASSISTANT, text="newest", raw_index=2),
+                ),
+                cursor="newest",
+            )
+        }
+    )
+    collapsing = TranscriptPager(
+        source, target="p1", event_filter=lambda _event: True, collapse_over=64 * 1024
+    )
+
+    first = await collapsing.read()
+
+    assert [chunk.event.raw_index for chunk in first.events] == [0, 1, 2]
+    collapsed = first.events[1].to_wire()
+    head, tail = collapsed["text"], collapsed["tail"]
+    assert huge.startswith(head) and huge.endswith(tail)
+    assert len(head) == len(tail) == 6 * 1024
+    assert collapsed["elided_bytes"] == len(huge) - len(head) - len(tail)
+    assert first.next_cursor is None
+    middle: list[str] = []
+    cursor = collapsed["middle_cursor"]
+    while cursor is not None:
+        current = await collapsing.read(cursor)
+        assert [chunk.event.raw_index for chunk in current.events] == [1]
+        middle.extend(chunk.text for chunk in current.events)
+        cursor = current.next_cursor
+    assert head + "".join(reversed(middle)) + tail == huge
