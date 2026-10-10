@@ -74,7 +74,8 @@ class ProviderCallbackRejected(TheaterError):
         code = error.get("code")
         message = error.get("message")
         self.code = str(code) if isinstance(code, str) and code else "provider_unavailable"
-        self.details = error.get("details") if isinstance(error.get("details"), Mapping) else None
+        raw = error.get("details")
+        self.details = dict(raw) if isinstance(raw, Mapping) else None
         super().__init__(str(message) if isinstance(message, str) else "provider callback failed")
 
 

@@ -358,7 +358,7 @@ class ProviderPresenceSource:
         binding: TerminalBindingRecord,
         stale: StaleReportRevision,
     ) -> bool:
-        stale_revision = stale.details.get("report_revision")
+        stale_revision = (stale.details or {}).get("report_revision")
         observation = self._observations.get(participant_id)
         return (
             type(stale_revision) is int
