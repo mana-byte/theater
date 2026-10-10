@@ -1599,3 +1599,32 @@ async def test_composed_durable_source_binds_the_live_wake_signal(store, registr
         assert await until(lambda: any(w == signal.wake for w in bound))
     finally:
         await rig.aclose()
+
+
+async def test_durable_only_watch_gets_a_wake_signal_and_releases_it(store, registry, monkeypatch):
+    rig = Rig(store, registry, monkeypatch)
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    try:
+        bound: list[object] = []
+        rig.durable.bind_wakeup = bound.append  # type: ignore[attr-defined]
+        hub = rig.observer.live
+        assert await until(lambda: bool(bound))
+        assert hub._wakeups.keys() == ("p1",)
+        assert any(w == hub.wake_signal("p1").wake for w in bound)
+        assert hub.registration_for("p1") is None
+    finally:
+        await rig.aclose()
+    assert hub._wakeups.keys() == ()
+
+
+async def test_watch_close_keeps_a_live_registrations_signal(store, registry, monkeypatch):
+    rig = Rig(store, registry, monkeypatch)
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    await rig.open()
+    try:
+        rig.register_live()
+        signal = rig.observer.live.wake_signal("p1")
+        rig.observer.live.release_watch_signal("p1")
+        assert rig.observer.live.wake_signal("p1") is signal
+    finally:
+        await rig.aclose()

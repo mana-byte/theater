@@ -4,6 +4,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from theater.harness.builtin.plugins.vibe.source import _VibeSource
 from theater.harness.source import Batch, Source, TranscriptSource
 from theater.trajectory.enums import CostProvenance, TrajectoryKind
@@ -297,3 +299,83 @@ def test_wrapper_preserves_the_public_transcript_source_surface(tmp_path):
     missing = {name for name in public - copied_not_delegated if not hasattr(source, name)}
     assert not missing
     assert source.collision_domain == inner.collision_domain
+
+
+async def test_inner_replacement_moves_the_bound_wakeup(tmp_path, monkeypatch):
+    from theater.harness.builtin.plugins.vibe import source as vibe_source
+
+    class Inner(FakeTranscriptSource):
+        def __init__(self, path):
+            super().__init__(path)
+            self.bound: list[object] = []
+
+        def bind_wakeup(self, wakeup):
+            self.bound.append(wakeup)
+
+    class FakeUnified(Inner):
+        def __init__(self, *args, **kwargs):
+            super().__init__(tmp_path / "unified" / "s" / "CURRENT")
+
+    monkeypatch.setattr(vibe_source, "UnifiedVibeSource", FakeUnified)
+    old = Inner(tmp_path / "messages.jsonl")
+    source = _VibeSource(
+        old,
+        after=None,
+        session_id=None,
+        known_location=None,
+        observer=object(),  # type: ignore[arg-type]
+    )
+    callback = lambda: None  # noqa: E731
+    source.bind_wakeup(callback)
+    source._select_path(tmp_path / "unified" / "s" / "CURRENT")
+
+    assert isinstance(source._inner, FakeUnified)
+    assert old.bound == [callback, None]
+    assert source._inner.bound == [callback]
+
+
+async def test_failed_wakeup_bind_keeps_previous_inner_bound_and_retries(tmp_path, monkeypatch):
+    from theater.harness.builtin.plugins.vibe import source as vibe_source
+
+    class Inner(FakeTranscriptSource):
+        def __init__(self, path):
+            super().__init__(path)
+            self.bound: list[object] = []
+
+        def bind_wakeup(self, wakeup):
+            self.bound.append(wakeup)
+
+    class FakeUnified(Inner):
+        failures = 1
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(tmp_path / "unified" / "s" / "CURRENT")
+
+        def bind_wakeup(self, wakeup):
+            if FakeUnified.failures:
+                FakeUnified.failures -= 1
+                raise RuntimeError("bind failed")
+            super().bind_wakeup(wakeup)
+
+    monkeypatch.setattr(vibe_source, "UnifiedVibeSource", FakeUnified)
+    old = Inner(tmp_path / "messages.jsonl")
+    source = _VibeSource(
+        old,
+        after=None,
+        session_id=None,
+        known_location=None,
+        observer=object(),  # type: ignore[arg-type]
+    )
+    callback = lambda: None  # noqa: E731
+    source.bind_wakeup(callback)
+    current = tmp_path / "unified" / "s" / "CURRENT"
+
+    with pytest.raises(RuntimeError, match="bind failed"):
+        source._select_path(current)
+    assert source._inner is old
+    assert old.bound == [callback]
+
+    source._select_path(current)
+    assert isinstance(source._inner, FakeUnified)
+    assert source._inner.bound == [callback]
+    assert old.bound == [callback, None]

@@ -138,6 +138,7 @@ class _VibeSource(VibeUsageMixin, Source):
         source_checkpoint: str | None = None,
     ) -> None:
         self._inner = inner
+        self._wakeup = None
         self._observer = observer
         self._cwd = cwd
         self._after = after
@@ -160,10 +161,11 @@ class _VibeSource(VibeUsageMixin, Source):
 
     def _select_path(self, path: Path) -> None:
         is_unified = self._is_unified_path(path)
-        if is_unified and not isinstance(self._inner, UnifiedVibeSource):
+        previous = self._inner
+        successor: Source | None = None
+        if is_unified and not isinstance(previous, UnifiedVibeSource):
             assert self._observer is not None
-            count_initial = self._count_initial
-            self._inner = UnifiedVibeSource(
+            successor = UnifiedVibeSource(
                 self._observer,
                 cwd=self._cwd,
                 session_id=self._session_id,
@@ -171,12 +173,11 @@ class _VibeSource(VibeUsageMixin, Source):
                 session_provenance=self._session_provenance,
                 known_location=str(path),
                 source_checkpoint=self._source_checkpoint,
-                count_initial=count_initial,
+                count_initial=self._count_initial,
             )
-            self._count_initial = False
-        elif not is_unified and isinstance(self._inner, UnifiedVibeSource):
+        elif not is_unified and isinstance(previous, UnifiedVibeSource):
             assert self._observer is not None
-            self._inner = _VibeTranscriptSource(
+            successor = _VibeTranscriptSource(
                 self._observer,
                 cwd=self._cwd,
                 session_id=self._session_id,
@@ -187,7 +188,25 @@ class _VibeSource(VibeUsageMixin, Source):
                 collision_domain=str(self._observer.root.resolve()),
                 known_location=str(path),
             )
+        if successor is not None:
+            # Bind first: a failing bind leaves the previous inner current and still bound.
+            self._bind_inner(successor, self._wakeup)
+            self._inner = successor
+            if is_unified:
+                self._count_initial = False
+            self._bind_inner(previous, None, strict=False)
         self.collision_domain = self._inner.collision_domain
+
+    @staticmethod
+    def _bind_inner(source: Source, wakeup, *, strict: bool = True) -> None:
+        binder = getattr(source, "bind_wakeup", None)
+        if binder is None or (wakeup is None and strict):
+            return
+        try:
+            binder(wakeup)
+        except Exception:
+            if strict:
+                raise
 
     async def _select_discovered_backend(self) -> None:
         if self._observer is None or self.path is not None:
@@ -269,6 +288,7 @@ class _VibeSource(VibeUsageMixin, Source):
         )
 
     def bind_wakeup(self, wakeup) -> None:
+        self._wakeup = wakeup
         binder = getattr(self._inner, "bind_wakeup", None)
         if binder is not None:
             binder(wakeup)
