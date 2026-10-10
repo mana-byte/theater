@@ -36,6 +36,10 @@ except ImportError:  # pragma: no cover - dev script
     sys.exit("perf_baseline: psutil missing; run with `uv run --all-packages --with psutil ...`")
 
 REPO = Path(__file__).resolve().parent.parent
+SCRIPTS = Path(__file__).resolve().parent
+SYNTH_PLUGIN = SCRIPTS / "perf_synth_plugin"
+SYNTH_WRITER = SCRIPTS / "perf_synthetic_writer.py"
+SYNTH_STREAMS = ".synth"  # under the agent cwd; mirrors perf_synth_plugin/launch.py STREAM_DIR
 ROLES = ("daemon", "bridge", "regie", "tmux")
 DEFAULT_WORKING_PROMPT = (
     "This is a load-generation run. Call your shell tool with exactly `sleep 2; date`, read the "
@@ -85,6 +89,65 @@ class ScenarioResult:
     profiles: dict[str, ProfileSummary]
     profile_errors: dict[str, str]
     observe_ms: list[float] = field(default_factory=list)
+    synthetic: SyntheticStats | None = None
+
+
+@dataclass
+class SyntheticStats:
+    """What the writers actually produced inside the measurement window (from the files)."""
+
+    configured_rate: float
+    writers: int
+    records: int
+    seconds: float
+
+    @property
+    def achieved_rate(self) -> float:
+        return self.records / self.seconds / self.writers if self.seconds and self.writers else 0.0
+
+
+def apply_synthetic(args: argparse.Namespace) -> None:
+    """--synthetic swaps the agent CLI for the write-stamping writer under the `synth` plugin."""
+    if args.synthetic is None:
+        return
+    if args.synthetic <= 0:
+        sys.exit("perf_baseline: --synthetic needs a positive records/s rate")
+    if args.attach:
+        sys.exit("perf_baseline: --synthetic builds its own stack; drop --attach")
+    args.harness, args.model = "synth", None
+
+
+def synthetic_prompt(rate: float) -> str:
+    return f"rate={rate:g}"
+
+
+def install_synthetic_plugin(home: Path, bin_dir: Path) -> None:
+    """Copy the plugin into the isolated home and pin the writer path.
+
+    Spawn insists the harness binary is on PATH, so a stub `synth` goes in the shim dir; the
+    planner never runs it.
+    """
+    stub = bin_dir / "synth"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    target = home / "plugins" / "synth"
+    shutil.copytree(SYNTH_PLUGIN, target, ignore=shutil.ignore_patterns("__pycache__"))
+    (target / "_paths.py").write_text(f"WRITER = {str(SYNTH_WRITER)!r}\n")
+
+
+def synthetic_stats(workdir: Path, rate: float, start: float, end: float) -> SyntheticStats:
+    """Count writer records stamped inside [start, end) wall-clock across every stream file."""
+    records = writers = 0
+    for stream in sorted((workdir / SYNTH_STREAMS).glob("*.jsonl")):
+        count = 0
+        for line in stream.read_text().splitlines():
+            with contextlib.suppress(ValueError, AttributeError):
+                if start <= json.loads(line)["ts"] < end:
+                    count += 1
+        if count:
+            writers += 1
+            records += count
+    return SyntheticStats(rate, writers, records, end - start)
 
 
 class Stack:
@@ -122,6 +185,11 @@ class Stack:
         self.home = Path(self.env.get("THEATER_HOME", Path.home() / ".theater"))
         # Agents need a directory their CLI already trusts, or they sit at a trust prompt.
         self.workdir = args.cwd
+        if args.synthetic is not None:
+            assert self.tmp is not None
+            install_synthetic_plugin(self.home, self.tmp / "bin")
+            self.workdir = self.tmp / "work"  # no CLI trust needed; keeps streams out of the repo
+            self.workdir.mkdir()
 
     def theater(self, *argv: str, check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -388,12 +456,14 @@ def measure(stack: Stack, scenario: Scenario, out: Path) -> ScenarioResult:
         proc.cpu_percent(None)
     profiling = _start_profiles(stack, procs, stack.args.duration, out, scenario.name)
     started = time.monotonic()
+    wall_start = time.time()
     while time.monotonic() - started < stack.args.duration:
         time.sleep(1.0)
         for role, proc in procs.items():
             with contextlib.suppress(psutil.Error):
                 samples[role].percent.append(proc.cpu_percent(None))
     elapsed = time.monotonic() - started
+    wall_end = time.time()
     for role, proc in procs.items():
         with contextlib.suppress(psutil.Error):
             times = proc.cpu_times()
@@ -402,6 +472,9 @@ def measure(stack: Stack, scenario: Scenario, out: Path) -> ScenarioResult:
     forks = stack.tmux_lines()[tmux_before:]
     bus_kinds, journal_kinds, latency, observe = _events(stack, bus_after, journal_after)
     profiles, profile_errors = _finish_profiles(profiling)
+    synthetic = None
+    if stack.args.synthetic is not None and scenario.working:
+        synthetic = synthetic_stats(stack.workdir, stack.args.synthetic, wall_start, wall_end)
     return ScenarioResult(
         scenario=scenario,
         seconds=elapsed,
@@ -414,6 +487,7 @@ def measure(stack: Stack, scenario: Scenario, out: Path) -> ScenarioResult:
         observe_ms=observe,
         profiles=profiles,
         profile_errors=profile_errors,
+        synthetic=synthetic,
     )
 
 
@@ -430,6 +504,11 @@ def _per_hour(count: int, seconds: float) -> float:
 
 def render(results: list[ScenarioResult], args: argparse.Namespace) -> str:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S %Z")
+    synthetic_note = (
+        f" (synthetic, {args.synthetic:g} rec/s per working writer)"
+        if args.synthetic is not None
+        else ""
+    )
     commit = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"],
         capture_output=True,
@@ -442,7 +521,8 @@ def render(results: list[ScenarioResult], args: argparse.Namespace) -> str:
         "",
         f"Generated by `scripts/perf_baseline.py` at {stamp} on commit `{commit}`.",
         f"Mode: {'attach (existing stack)' if args.attach else 'isolated spawn'}; "
-        f"harness `{args.harness}`; warmup {args.warmup:.0f}s; window {args.duration:.0f}s; "
+        f"harness `{args.harness}`{synthetic_note}; warmup {args.warmup:.0f}s; "
+        f"window {args.duration:.0f}s; "
         f"host {os.uname().sysname} {os.uname().machine}, {psutil.cpu_count()} CPUs.",
         "",
         "CPU % is one core = 100 %. `cpu_pct_mean` = process CPU seconds / wall seconds.",
@@ -489,6 +569,14 @@ def render(results: list[ScenarioResult], args: argparse.Namespace) -> str:
             f"{result.seconds:.0f}s window, {len(result.latency_ms)} latency samples "
             f"(max {max(result.latency_ms, default=float('nan')):.0f} ms)."
         )
+        if result.synthetic is not None:
+            synth = result.synthetic
+            lines.append(
+                f"\nSynthetic writers: {synth.writers} active x {synth.configured_rate:g} rec/s "
+                f"configured; {synth.records} records in the window = "
+                f"{synth.achieved_rate:.3f} rec/s per writer achieved "
+                f"(drift {100 * (synth.achieved_rate / synth.configured_rate - 1):+.2f}%)."
+            )
         for title, counter in (
             ("Journal events/hour by kind", result.journal_kinds),
             ("Bus events/hour by kind", result.bus_kinds),
@@ -519,7 +607,12 @@ def render(results: list[ScenarioResult], args: argparse.Namespace) -> str:
         "- Spawn mode runs Régie in a detached tmux session: no attached client, so presence "
         "is absent and nothing repaints a real terminal.",
         "- `transcript_to_bus` is bus `ts` minus the harness record `ts`; it includes harness "
-        "write delay and clock granularity (ms).",
+        "write delay and clock granularity (ms)."
+        + (
+            " With `--synthetic` the record `ts` is stamped at write, so it is write-to-bus."
+            if args.synthetic is not None
+            else ""
+        ),
         "- `observe_to_bus` is bus `ts` minus the time the observer read the record (`read_at`); "
         "theater-side delay only. `nan` when no batch carried `read_at`.",
         "- CPU excludes short-lived children (`ps`, `lsof`, `tmux`); count them via forks.",
@@ -535,6 +628,15 @@ def main() -> int:
     parser.add_argument("--working", type=int, default=5)
     parser.add_argument("--harness", default="claude")
     parser.add_argument("--model", default="haiku")
+    parser.add_argument(
+        "--synthetic",
+        type=float,
+        default=None,
+        metavar="RATE_PER_S",
+        help="drive working agents with write-stamped synthetic records at RATE records/s each; "
+        "idle agents get a stream with no appends. bus_events_per_h ~= working*RATE*3600 "
+        "(5 working x 0.8 = 14.4k/h, inside the 12k-16k matched-pair band)",
+    )
     parser.add_argument("--working-prompt", default=DEFAULT_WORKING_PROMPT)
     parser.add_argument("--warmup", type=float, default=20.0)
     parser.add_argument("--duration", type=float, default=120.0)
@@ -558,6 +660,7 @@ def main() -> int:
     for role in ROLES:
         parser.add_argument(f"--{role}-pid", type=int, default=None)
     args = parser.parse_args()
+    apply_synthetic(args)
 
     stack = Stack(args)
     artifacts = args.out.with_suffix("")
@@ -578,7 +681,10 @@ def main() -> int:
         for scenario in scenarios:
             previous = results[-1].scenario if results else Scenario("", 0, 0)
             stack.spawn(scenario.idle - previous.idle, None)
-            stack.spawn(scenario.working - previous.working, args.working_prompt)
+            working_prompt = (
+                args.working_prompt if args.synthetic is None else synthetic_prompt(args.synthetic)
+            )
+            stack.spawn(scenario.working - previous.working, working_prompt)
             print(f"perf_baseline: measuring {scenario.name}", file=sys.stderr)
             results.append(measure(stack, scenario, artifacts))
     finally:
