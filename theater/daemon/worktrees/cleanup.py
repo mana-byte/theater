@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from theater.constants.worktree import (
@@ -10,6 +11,7 @@ from theater.constants.worktree import (
     GIT_WORKTREE_REMOVE_TIMEOUT_SECONDS,
 )
 from theater.daemon.worktrees.identity import (
+    GitFactsError,
     PartialCreationInspection,
     inspect_partial_creation,
     inspect_registered_worktree,
@@ -17,6 +19,9 @@ from theater.daemon.worktrees.identity import (
 )
 from theater.daemon.worktrees.repository import _git
 from theater.models import WorkspaceRecord
+
+UNMERGED = "unmerged"
+UNMERGED_REFUSAL = "branch delete: branch is not fully merged; use force_branch=true"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,19 +31,39 @@ class ExactCleanupResult:
     branch_retained: bool
     errors: tuple[str, ...] = ()
     uncertain: bool = False
+    # Why a branch or worktree was kept: "unmerged" settles as success, "branch_moved" does not.
+    reason: str | None = None
+    details: Mapping[str, object] | None = None
 
     @property
     def ok(self) -> bool:
         return self.worktree_removed and not self.errors
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        wire: dict[str, object] = {
             "worktree_removed": self.worktree_removed,
             "branch_removed": self.branch_removed,
             "branch_retained": self.branch_retained,
             "errors": list(self.errors),
             "uncertain": self.uncertain,
         }
+        if self.reason is not None:
+            wire["reason"] = self.reason
+        if self.details:
+            wire.update(self.details)
+        return wire
+
+
+def refused_cleanup(exc: GitFactsError) -> ExactCleanupResult:
+    """Keep a refused identity check's reason and fix-it details in the durable result."""
+    return ExactCleanupResult(
+        False,
+        False,
+        True,
+        (str(exc),),
+        reason=getattr(exc, "reason", None),
+        details=getattr(exc, "details", None),
+    )
 
 
 def cleanup_exact_worktree(
@@ -50,7 +75,7 @@ def cleanup_exact_worktree(
 ) -> ExactCleanupResult:
     if force_branch and not delete_branch:
         raise ValueError("force_branch requires delete_branch")
-    inspection = inspect_registered_worktree(record)
+    inspection = inspect_registered_worktree(record, force=force)
     args = ["git", "worktree", "remove"]
     if force:
         args.append("--force")
@@ -113,12 +138,16 @@ def cleanup_retained_branch(
     if force_branch and not delete_branch:
         raise ValueError("force_branch requires delete_branch")
     root = validate_canonical_repository(record.canonical_repository_root)
-    return _finish_branch(
+    result = _finish_branch(
         root,
         record.branch,
         delete_branch=delete_branch,
         force_branch=force_branch,
     )
+    if result.reason == UNMERGED:
+        # Branch deletion was the whole request here, so keeping it is still a refusal.
+        return ExactCleanupResult(True, False, True, (UNMERGED_REFUSAL,), reason=UNMERGED)
+    return result
 
 
 def inspect_cleanup_result(record: WorkspaceRecord, *, delete_branch: bool) -> ExactCleanupResult:
@@ -261,12 +290,7 @@ def _delete_exact_partial_branch(
             timeout=GIT_QUERY_TIMEOUT_SECONDS,
         )
         if merged.returncode == 1:
-            return ExactCleanupResult(
-                True,
-                False,
-                True,
-                ("branch delete: branch is not fully merged; use force_branch=true",),
-            )
+            return ExactCleanupResult(True, False, True, reason=UNMERGED)
         if merged.returncode != 0:
             detail = merged.stderr.strip() or merged.stdout.strip() or "no diagnostic"
             return ExactCleanupResult(
@@ -356,8 +380,22 @@ def _finish_branch(
         return ExactCleanupResult(True, False, True, (str(exc),), uncertain=True)
     if not retained:
         return ExactCleanupResult(True, True, False)
+    if not force_branch and _is_unmerged(root, branch):
+        return ExactCleanupResult(True, False, True, reason=UNMERGED)
     detail = deleted.stderr.strip() or deleted.stdout.strip() or "no diagnostic"
     return ExactCleanupResult(True, False, retained, (f"branch delete: {detail}",))
+
+
+def _is_unmerged(root: str, branch: str) -> bool:
+    merged = _git(
+        ["git", "merge-base", "--is-ancestor", f"refs/heads/{branch}", "HEAD"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=GIT_QUERY_TIMEOUT_SECONDS,
+    )
+    return merged.returncode == 1
 
 
 def _branch_exists(root: str, branch: str) -> bool:
@@ -385,4 +423,5 @@ __all__ = [
     "cleanup_reconcile_creation",
     "cleanup_retained_branch",
     "inspect_cleanup_result",
+    "refused_cleanup",
 ]

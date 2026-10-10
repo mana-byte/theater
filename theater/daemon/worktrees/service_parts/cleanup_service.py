@@ -18,6 +18,7 @@ from theater.daemon.worktrees.cleanup import (
     cleanup_exact_worktree,
     cleanup_reconcile_creation,
     cleanup_retained_branch,
+    refused_cleanup,
 )
 from theater.daemon.worktrees.identity import (
     GitFactsError,
@@ -306,7 +307,7 @@ class WorkspaceCleanup(WorkspaceHost):
                     label="workspace.cleanup.worktree",
                 )
         except GitFactsError as exc:
-            result = ExactCleanupResult(False, False, True, (str(exc),))
+            result = refused_cleanup(exc)
         with self._store.write_unit() as unit:
             current = self.get(workspace.workspace_id, connection=unit.connection)
             operation_id = current.deletion_operation_id

@@ -307,7 +307,7 @@ async def test_dirty_cleanup_refusal_then_explicit_force(
     assert not Path(reservation.workspace.path).exists()
 
 
-@pytest.mark.parametrize("contents", ["clean", "dirty", "unmerged", "shared", "in_use"])
+@pytest.mark.parametrize("contents", ["clean", "dirty", "unmerged", "moved", "shared", "in_use"])
 async def test_kill_cleans_only_unused_unique_workspaces(daemon, repository, monkeypatch, contents):
     participant_id = _target(daemon)
     _online(monkeypatch, daemon)
@@ -335,6 +335,8 @@ async def test_kill_cleans_only_unused_unique_workspaces(daemon, repository, mon
     if contents == "unmerged":
         _git(workspace.path, "add", "work.txt")
         _git(workspace.path, "commit", "-m", "child work")
+    if contents == "moved":
+        _git(workspace.path, "checkout", "-b", "child-switched")
 
     async def terminate(_provider, generation, method, params):
         assert method == "terminal.terminate"
@@ -354,7 +356,7 @@ async def test_kill_cleans_only_unused_unique_workspaces(daemon, repository, mon
     assert result["killed"] is True
     usages = daemon.store.workspaces.active_usages(workspace.workspace_id)
     assert [usage.usage_id for usage in usages] == ([other_usage] if other_usage else [])
-    retained = contents in {"dirty", "shared", "in_use"}
+    retained = contents in {"dirty", "moved", "shared", "in_use"}
     assert Path(workspace.path).exists() is retained
     assert (workspace.path in _git(repository, "worktree", "list", "--porcelain")) is retained
     assert bool(_git(repository, "branch", "--list", workspace.branch)) is (contents != "clean")
@@ -362,8 +364,15 @@ async def test_kill_cleans_only_unused_unique_workspaces(daemon, repository, mon
         assert "workspace_cleanup" not in result
     else:
         assert result["workspace_cleanup"]["state"] == (
-            "succeeded" if contents == "clean" else "retained" if contents == "in_use" else "failed"
+            "succeeded"
+            if contents in {"clean", "unmerged"}
+            else "retained"
+            if contents in {"in_use", "moved"}
+            else "failed"
         )
+    if contents == "moved":
+        assert result["workspace_cleanup"]["reason"] == "branch_moved"
+        assert result["workspace_cleanup"]["next"].endswith("--force")
     if contents == "dirty":
         assert work.read_text() == "retain this work\n"
     if contents == "unmerged":
@@ -472,10 +481,10 @@ async def test_unmerged_branch_requires_separate_force_branch(
         params={"workspace_id": workspace.workspace_id, "delete_branch": True},
     )
     partial = await _settled(operations, retained)
-    assert partial.state == "failed"
-    assert partial.error is not None
-    assert partial.error["details"]["worktree_removed"] is True
-    assert partial.error["details"]["branch_retained"] is True
+    assert partial.state == "succeeded"
+    assert partial.result["worktree_removed"] is True
+    assert partial.result["branch_retained"] is True
+    assert partial.result["reason"] == "unmerged"
     assert _git(repository, "show-ref", "--verify", f"refs/heads/{workspace.branch}")
 
     forced = service.cleanup(
@@ -490,6 +499,47 @@ async def test_unmerged_branch_requires_separate_force_branch(
     )
     completed = await _settled(operations, forced)
     assert completed.result["branch_removed"] is True
+
+
+async def test_moved_branch_cleanup_requires_force_and_keeps_both_branches(
+    repository: str, workspace_services
+) -> None:
+    _store, operations, service = workspace_services
+    reservation = await service.reserve(
+        WorkspaceRequest(cwd=repository, worktree=True), reservation_id="reservation-moved"
+    )
+    workspace = reservation.workspace
+    service.release_usage(reservation.usage.usage_id, reason="participant_exit")
+    _git(workspace.path, "checkout", "-b", "child-switched")
+
+    refused = service.cleanup(
+        client_id="operator-a",
+        actor_participant_id=None,
+        idempotency_key="cleanup-moved-refused",
+        params={"workspace_id": workspace.workspace_id, "delete_branch": True},
+    )
+    failed = await _settled(operations, refused)
+    assert failed.state == "failed"
+    assert failed.error is not None
+    details = failed.error["details"]
+    assert details["reason"] == "branch_moved"
+    assert details["recorded_branch"] == workspace.branch
+    assert details["current_branch"] == "child-switched"
+    assert details["next"] == f"theater workspaces cleanup {workspace.workspace_id} --force"
+    assert service.get(workspace.workspace_id).cleanup_result["reason"] == "branch_moved"
+
+    forced = service.cleanup(
+        client_id="operator-a",
+        actor_participant_id=None,
+        idempotency_key="cleanup-moved-force",
+        params={"workspace_id": workspace.workspace_id, "force": True, "delete_branch": True},
+    )
+    succeeded = await _settled(operations, forced)
+    assert succeeded.state == "succeeded"
+    assert not Path(workspace.path).exists()
+    assert _git(repository, "show-ref", "--verify", "refs/heads/child-switched")
+    # The recorded branch was merged (never advanced), so the exact -d rule deleted it.
+    assert succeeded.result["branch_removed"] is True
 
 
 async def test_named_workspace_joins_then_retained_branch_blocks_recreation(

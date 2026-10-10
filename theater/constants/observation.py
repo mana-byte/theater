@@ -36,6 +36,9 @@ UNMATCHED_CAP = 256
 #: Job released because its prompt was never seen after UNMATCHED_LIMIT turn ends.
 UNDELIVERED_CODE = "prompt_never_seen"
 
+#: The harness reported a failed turn; the job crashed but the agent may still be usable.
+TURN_FAILED_CODE = "turn_failed"
+
 #: Grace window (seconds) before a source failure crashes a running job.
 OBSERVATION_FAILURE_GRACE = 30.0
 

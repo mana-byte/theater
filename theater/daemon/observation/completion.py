@@ -15,6 +15,7 @@ from theater.constants.observability import AGENT_RESULT_INTERRUPTED
 from theater.constants.observation import (
     RAW_RESULT_UNSET,
     RESCUE_CODE,
+    TURN_FAILED_CODE,
     UNDELIVERED_CODE,
     UNMATCHED_CAP,
     UNMATCHED_LIMIT,
@@ -31,7 +32,7 @@ logger = logging.getLogger("theater.observer")
 _FINISHED_FOR_TERMINAL: dict[TurnTerminal | None, tuple[JobState, str | None]] = {
     None: (JobState.DONE, None),
     TurnTerminal.INTERRUPTED: (JobState.KILLED, AGENT_RESULT_INTERRUPTED),
-    TurnTerminal.FAILED: (JobState.CRASHED, None),
+    TurnTerminal.FAILED: (JobState.CRASHED, TURN_FAILED_CODE),
     TurnTerminal.COMPLETED: (JobState.DONE, None),
 }
 

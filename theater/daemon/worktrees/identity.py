@@ -70,6 +70,24 @@ class GitFactsError(BadRequest):
     """Git could not establish a safe, exact workspace identity."""
 
 
+class WorkspaceBranchMoved(GitFactsError):
+    """The worktree is exact but its HEAD left the recorded branch; only --force may remove it."""
+
+    reason = "branch_moved"
+
+    def __init__(self, workspace_id: str, recorded_branch: str, current_branch: str | None):
+        self.details = {
+            "recorded_branch": recorded_branch,
+            "current_branch": current_branch,
+            "next": f"theater workspaces cleanup {workspace_id} --force",
+        }
+        super().__init__(
+            f"the workspace has a different branch checked out ({current_branch or 'detached'}"
+            f" instead of {recorded_branch}); run `theater workspaces cleanup {workspace_id}"
+            " --force` to remove the worktree while keeping both branches"
+        )
+
+
 def inspect_existing_path(path: str) -> ExistingPathFacts:
     resolved = _directory(path)
     top = _query(["git", "rev-parse", "--show-toplevel"], cwd=resolved, non_repo=True)
@@ -104,7 +122,9 @@ def resolve_creation_facts(path: str, base_ref: str | None = None) -> WorktreeCr
     )
 
 
-def inspect_registered_worktree(record: WorkspaceRecord) -> WorktreeInspection:
+def inspect_registered_worktree(
+    record: WorkspaceRecord, *, force: bool = False
+) -> WorktreeInspection:
     if record.canonical_repository_root is None or record.branch is None:
         raise GitFactsError("Theater-owned workspaces require a stored repository root and branch")
     facts = inspect_existing_path(record.path)
@@ -120,10 +140,11 @@ def inspect_registered_worktree(record: WorkspaceRecord) -> WorktreeInspection:
         raise GitFactsError("the workspace now belongs to a different canonical repository")
     if facts.repository_root != expected_path:
         raise GitFactsError("the stored workspace path is not its Git worktree root")
-    if facts.branch != record.branch:
-        raise GitFactsError("the workspace has a different branch checked out")
+    moved = facts.branch != record.branch
+    if moved and not force:
+        raise WorkspaceBranchMoved(record.workspace_id, record.branch, facts.branch)
     metadata = _listed_worktree_metadata(expected_root, expected_path)
-    if metadata is None or metadata.branch != record.branch:
+    if metadata is None or metadata.branch != facts.branch:
         raise GitFactsError("Git worktree metadata does not match the stored path and branch")
     status = _query(
         ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -333,6 +354,7 @@ __all__ = [
     "ExistingPathFacts",
     "GitFactsError",
     "PartialCreationInspection",
+    "WorkspaceBranchMoved",
     "WorktreeCreationFacts",
     "WorktreeInspection",
     "WorktreeMetadata",
