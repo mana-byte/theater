@@ -18,6 +18,8 @@ from theater.protocol import RemoteError
 
 DAEMON_UNAVAILABLE = "daemon_unavailable"
 _ENVELOPE_KEYS = frozenset({"next", "side_effect", "retryable"})
+# DaemonClient raises ConnectionError/TimeoutError; other OSErrors are not the daemon's fault.
+_CAUSES = (RemoteError, TheaterError, ConnectionError, TimeoutError, EOFError)
 _RETRYABLE: dict[str, bool | str] = {
     "busy": "when idle",
     "human_present": "after the human leaves",
@@ -31,7 +33,7 @@ def _cause(exc: BaseException) -> BaseException | None:
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (RemoteError, TheaterError, OSError, EOFError)):
+        if isinstance(current, _CAUSES):
             return current
         current = current.__cause__
     return None
@@ -44,7 +46,7 @@ def refusal_envelope(exc: BaseException) -> dict[str, Any] | None:
         code, message, details = cause.code, cause.message, dict(cause.details or {})
     elif isinstance(cause, TheaterError):
         code, message, details = cause.code, str(cause), dict(cause.details or {})
-    elif isinstance(cause, (OSError, EOFError)):
+    elif isinstance(cause, (ConnectionError, TimeoutError, EOFError)):
         code = DAEMON_UNAVAILABLE
         message = f"the Theater daemon did not answer: {cause or type(cause).__name__}"
         details = {"side_effect": "unknown", "next": NEXT_DAEMON_UNAVAILABLE}

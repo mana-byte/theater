@@ -1111,3 +1111,12 @@ async def test_resume_state_owned_by_live_untrusted_dead_spawn_refuses(daemon, p
         # Must hit the live-owner gate, not the untrusted gate.
         assert "still live" in exc.value.message
         assert lo_id in exc.value.message
+
+
+def test_only_daemon_transport_failures_map_to_daemon_unavailable():
+    """A removed cwd (FileNotFoundError) is the caller's problem, not a daemon outage."""
+    from theater.mcp.refusals import refusal_envelope
+
+    assert refusal_envelope(FileNotFoundError("cwd")) is None
+    envelope = refusal_envelope(ConnectionError("daemon closed the connection"))
+    assert envelope is not None and envelope["error"]["code"] == "daemon_unavailable"
