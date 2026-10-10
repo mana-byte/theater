@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from theater.harness.builtin.plugins.vibe.source import _VibeSource
+from theater.harness.channels import filesystem
 from theater.harness.source import Batch, Source, TranscriptSource
 from theater.trajectory.enums import CostProvenance, TrajectoryKind
 
@@ -379,3 +380,36 @@ async def test_failed_wakeup_bind_keeps_previous_inner_bound_and_retries(tmp_pat
     assert isinstance(source._inner, FakeUnified)
     assert source._inner.bound == [callback]
     assert old.bound == [callback, None]
+
+
+@pytest.mark.skipif(not filesystem.kqueue_available(), reason="needs kqueue")
+async def test_inner_replacement_releases_the_old_inners_watch(tmp_path, monkeypatch):
+    from theater.harness.builtin.plugins.vibe import source as vibe_source
+
+    class FakeUnified(FakeTranscriptSource):
+        def __init__(self, *args, **kwargs):
+            super().__init__(tmp_path / "unified" / "s" / "CURRENT")
+
+    monkeypatch.setattr(vibe_source, "UnifiedVibeSource", FakeUnified)
+    transcript = tmp_path / "messages.jsonl"
+    transcript.write_text("")
+    old = TranscriptSource(object(), cwd=None)  # type: ignore[arg-type]
+    old._watch_gate.due(transcript)
+    watcher = filesystem.shared_watcher()
+    assert watcher is not None and old._watch_gate.active and watcher._by_fd
+    source = _VibeSource(
+        old,
+        after=None,
+        session_id=None,
+        known_location=None,
+        observer=object(),  # type: ignore[arg-type]
+    )
+
+    source._select_path(tmp_path / "unified" / "s" / "CURRENT")
+
+    assert isinstance(source._inner, FakeUnified)
+    assert not old._watch_gate.active
+    assert not watcher._by_fd and not watcher._entries
+    filesystem.shared_watcher()  # a later watcher is still creatable
+    for leftover in list(filesystem._WATCHERS.values()):
+        leftover.close()
