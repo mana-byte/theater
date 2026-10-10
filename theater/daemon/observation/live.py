@@ -148,9 +148,14 @@ class LiveObservationHub:
         """
         self._wakeups.wake(participant_id)
 
-    def wake_signal(self, participant_id: str) -> WakeupSignal | None:
-        """The participant's wake signal, or None without live wiring."""
-        return self._wakeups.existing(participant_id)
+    def wake_signal(self, participant_id: str) -> WakeupSignal:
+        """The wake signal of a watched participant, created on first use (durable-only too)."""
+        return self._wakeups.signal(participant_id)
+
+    def release_watch_signal(self, participant_id: str) -> None:
+        """Drop a watch-created signal; a live registration keeps owning its own."""
+        if participant_id not in self._registrations:
+            self._wakeups.discard(participant_id)
 
     # ---- arrival-driven activity --------------------------------------------
 

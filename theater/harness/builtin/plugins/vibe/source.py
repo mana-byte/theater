@@ -138,6 +138,7 @@ class _VibeSource(VibeUsageMixin, Source):
         source_checkpoint: str | None = None,
     ) -> None:
         self._inner = inner
+        self._wakeup = None
         self._observer = observer
         self._cwd = cwd
         self._after = after
@@ -160,6 +161,7 @@ class _VibeSource(VibeUsageMixin, Source):
 
     def _select_path(self, path: Path) -> None:
         is_unified = self._is_unified_path(path)
+        previous = self._inner
         if is_unified and not isinstance(self._inner, UnifiedVibeSource):
             assert self._observer is not None
             count_initial = self._count_initial
@@ -187,7 +189,18 @@ class _VibeSource(VibeUsageMixin, Source):
                 collision_domain=str(self._observer.root.resolve()),
                 known_location=str(path),
             )
+        if self._inner is not previous:
+            self._rebind_wakeup(previous)
         self.collision_domain = self._inner.collision_domain
+
+    def _rebind_wakeup(self, previous: Source) -> None:
+        """Move the bound wakeup from a replaced inner source to its successor."""
+        if self._wakeup is None:
+            return
+        for source, wakeup in ((previous, None), (self._inner, self._wakeup)):
+            binder = getattr(source, "bind_wakeup", None)
+            if binder is not None:
+                binder(wakeup)
 
     async def _select_discovered_backend(self) -> None:
         if self._observer is None or self.path is not None:
@@ -269,6 +282,7 @@ class _VibeSource(VibeUsageMixin, Source):
         )
 
     def bind_wakeup(self, wakeup) -> None:
+        self._wakeup = wakeup
         binder = getattr(self._inner, "bind_wakeup", None)
         if binder is not None:
             binder(wakeup)

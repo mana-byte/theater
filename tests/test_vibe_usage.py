@@ -297,3 +297,36 @@ def test_wrapper_preserves_the_public_transcript_source_surface(tmp_path):
     missing = {name for name in public - copied_not_delegated if not hasattr(source, name)}
     assert not missing
     assert source.collision_domain == inner.collision_domain
+
+
+async def test_inner_replacement_moves_the_bound_wakeup(tmp_path, monkeypatch):
+    from theater.harness.builtin.plugins.vibe import source as vibe_source
+
+    class Inner(FakeTranscriptSource):
+        def __init__(self, path):
+            super().__init__(path)
+            self.bound: list[object] = []
+
+        def bind_wakeup(self, wakeup):
+            self.bound.append(wakeup)
+
+    class FakeUnified(Inner):
+        def __init__(self, *args, **kwargs):
+            super().__init__(tmp_path / "unified" / "s" / "CURRENT")
+
+    monkeypatch.setattr(vibe_source, "UnifiedVibeSource", FakeUnified)
+    old = Inner(tmp_path / "messages.jsonl")
+    source = _VibeSource(
+        old,
+        after=None,
+        session_id=None,
+        known_location=None,
+        observer=object(),  # type: ignore[arg-type]
+    )
+    callback = lambda: None  # noqa: E731
+    source.bind_wakeup(callback)
+    source._select_path(tmp_path / "unified" / "s" / "CURRENT")
+
+    assert isinstance(source._inner, FakeUnified)
+    assert old.bound == [callback, None]
+    assert source._inner.bound == [callback]

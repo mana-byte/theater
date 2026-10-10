@@ -242,6 +242,7 @@ class Observer(
             await self._watch_source(pid, harness_name)
         finally:
             self._source_processes.pop(pid, None)
+            self.live.release_watch_signal(pid)
             self._discard_agent_telemetry(pid)
 
     async def _watch_source(self, pid: str, harness_name: str) -> None:
