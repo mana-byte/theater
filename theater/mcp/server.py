@@ -61,6 +61,9 @@ Participant summaries omit null, empty-list, and empty-object fields. Await,
 send, and queue job entries also omit prompt/schema echoes and routing ids.
 Omission rules are tool-specific.
 
+Wait with await_sessions, never a shell sleep or poll loop. A refused call
+returns a code, and `next` when known: follow it instead of retrying unchanged.
+
 Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
 """
 
