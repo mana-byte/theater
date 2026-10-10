@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 from theater import __version__
+from theater.cli.help import GroupedHelpFormatter, validate_command_groups
 from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 from theater.harness import APPROVALS
 
@@ -25,8 +26,7 @@ class _HiddenSubParsersAction(argparse._SubParsersAction):
     def metavar(self):
         if self._metavar is not None:
             return self._metavar
-        visible = [name for name in self._name_parser_map if name not in self._hidden_names]
-        return f"{{{','.join(visible)}}}"
+        return "<command>"
 
     @metavar.setter
     def metavar(self, value):
@@ -46,7 +46,7 @@ class _HiddenSubParsersAction(argparse._SubParsersAction):
 
 def _add_model_commands(sub) -> None:
     """Register `theater models`."""
-    models = sub.add_parser("models", help="Show, or discover, the models a spawn may name.")
+    models = sub.add_parser("models", help="Show or discover the models a spawn may name.")
     models.add_argument(
         "--discover",
         metavar="HARNESS",
@@ -61,10 +61,7 @@ def _add_model_commands(sub) -> None:
 
 def _add_identity_commands(sub) -> None:
     """Register small participant-targeting commands."""
-    kill = sub.add_parser(
-        "kill",
-        help="Terminate a participant through its verified provider/runtime routes.",
-    )
+    kill = sub.add_parser("kill", help="Terminate a participant.")
     kill.add_argument(
         "id",
         help=(
@@ -79,16 +76,13 @@ def _add_identity_commands(sub) -> None:
     name.add_argument("target", help="Participant id or current name (live participants only).")
     name.add_argument("new_name", help="The new name.")
 
-    candidates = sub.add_parser(
-        "candidates",
-        help="List transcript candidates for operator recovery.",
-    )
+    candidates = sub.add_parser("candidates", help="List transcript candidates for recovery.")
     candidates.add_argument("id", help="Stable participant id or live name.")
     candidates.add_argument("--json", action="store_true")
 
     bind = sub.add_parser(
         "bind",
-        help="Bind a participant to a transcript candidate (same-UID operator authority).",
+        help="Bind a participant to a transcript candidate.",
         description=(
             "Bind a participant to a transcript candidate. This is CLI/operator RPC "
             "authority, the same trust boundary as `theater kill`: it is not human "
@@ -118,7 +112,7 @@ def _add_identity_commands(sub) -> None:
 
 def _add_gc_commands(sub) -> None:
     """Register `theater gc`."""
-    gc = sub.add_parser("gc", help="Sweep old data from the database now.")
+    gc = sub.add_parser("gc", help="Sweep old data from the database.")
     gc.add_argument(
         "--vacuum",
         action="store_true",
@@ -142,9 +136,7 @@ def _add_management_commands(sub) -> None:
     provider_get.add_argument("provider_id")
     provider_get.add_argument("--json", action="store_true")
 
-    workspaces = sub.add_parser(
-        "workspaces", help="Inspect or explicitly clean retained workspaces."
-    )
+    workspaces = sub.add_parser("workspaces", help="Inspect or clean retained workspaces.")
     workspace_commands = workspaces.add_subparsers(dest="workspaces_command", required=True)
     workspace_list = workspace_commands.add_parser("list", help="List retained workspaces.")
     workspace_list.add_argument("--cursor", default=None)
@@ -164,9 +156,7 @@ def _add_management_commands(sub) -> None:
     workspace_cleanup.add_argument("--idempotency-key", default=None)
     workspace_cleanup.add_argument("--json", action="store_true")
 
-    transfer = sub.add_parser(
-        "control-transfer", help="Transfer current control with explicit participant revisions."
-    )
+    transfer = sub.add_parser("control-transfer", help="Transfer control with explicit revisions.")
     transfer.add_argument("participant_ids", nargs="+", metavar="PARTICIPANT_ID")
     transfer.add_argument(
         "--expected-revision",
@@ -251,7 +241,7 @@ def _add_plugin_commands(sub) -> None:
     """Register the JSON-only sidecar compatibility gateway."""
     plugin = sub.add_parser(
         "plugin",
-        help="Call one capability-scoped MCP-plugin operation using JSON stdin/stdout.",
+        help="MCP-plugin sidecar JSON gateway.",
         description=(
             "Compatibility gateway for a Theater-launched MCP-plugin sidecar. "
             "Run `theater plugin call OPERATION`, provide exactly one JSON object on stdin, "
@@ -290,7 +280,8 @@ def _add_control_commands(sub) -> None:
     """
     steer = sub.add_parser(
         "steer",
-        help="Amend the current turn of a busy participant (native wiring only).",
+        help="Amend the current turn of a busy participant.",
+        description="Amend the current turn of a busy participant (native wiring only).",
     )
     steer.add_argument("target", help="Participant id or live name.")
     steer.add_argument("prompt", help="The amendment, applied to the active turn.")
@@ -304,7 +295,7 @@ def _add_control_commands(sub) -> None:
 
     queue = sub.add_parser(
         "queue",
-        help="Queue a followup prompt; it dispatches when the target goes idle.",
+        help="Queue a followup prompt for when the target goes idle.",
     )
     queue.add_argument("target", help="Participant id or live name.")
     queue.add_argument("prompt", help="The prompt to deliver on the next idle.")
@@ -312,7 +303,7 @@ def _add_control_commands(sub) -> None:
 
     settings = sub.add_parser(
         "settings",
-        help="Change the model or reasoning effort of an idle participant.",
+        help="Change model or reasoning effort of an idle participant.",
     )
     settings.add_argument("target", help="Participant id or live name.")
     settings.add_argument(
@@ -329,14 +320,14 @@ def _add_control_commands(sub) -> None:
 
     controls = sub.add_parser(
         "controls",
-        help="Show a participant's effective controls, health, settings, and queue.",
+        help="Show effective controls, health, settings, and queue.",
     )
     controls.add_argument("target", help="Participant id or live name.")
     controls.add_argument("--json", action="store_true")
 
     interrupt = sub.add_parser(
         "interrupt",
-        help="Ask a direct child to stop its current turn; cancels queued followups.",
+        help="Stop a participant's current turn; cancels queued followups.",
     )
     interrupt.add_argument("target", help="Participant id or live name.")
     interrupt.add_argument("--json", action="store_true")
@@ -376,6 +367,7 @@ def _add_compatibility_commands(sub) -> None:
     adopt = sub.add_parser(
         "adopt",
         help="Explain the provider-aware replacement for retired pane adoption.",
+        hidden=True,
     )
     adopt.add_argument(
         "--harness",
@@ -390,10 +382,10 @@ def _add_catalog_commands(sub) -> None:
     harnesses.add_argument("--json", action="store_true")
     plugins = sub.add_parser(
         "plugins",
-        help="Diagnose local harness and MCP-server plugin packages without starting the daemon.",
+        help="Diagnose local plugin packages.",
     )
     plugins.add_argument("--json", action="store_true")
-    skills = sub.add_parser("skills", help="List declarative agent skills from the running daemon.")
+    skills = sub.add_parser("skills", help="List declarative agent skills.")
     skills.add_argument("--json", action="store_true")
     conf = sub.add_parser("config", help="Show resolved settings and where they came from.")
     conf.add_argument(
@@ -422,12 +414,9 @@ def _add_stats_commands(sub) -> None:
 
 
 def _add_lifecycle_commands(sub) -> None:
-    sub.add_parser("regie", help="Moved to the standalone `regie` command.")
+    sub.add_parser("regie", help="Moved to the standalone `regie` command.", hidden=True)
     sub.add_parser("stop", help="Shut the daemon down.")
-    sub.add_parser(
-        "restart",
-        help="Restart the daemon, applying config changes. Agents keep running.",
-    )
+    sub.add_parser("restart", help="Restart the daemon; agents keep running.")
 
 
 _add_controls_parsers = _add_control_commands
@@ -443,7 +432,11 @@ _add_receipt_parser = _add_receipt_commands
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="theater",
-        description="Cross-harness orchestration for coding agents.",
+        description=(
+            "Cross-harness orchestration for coding agents.\n"
+            "Terminal UI: `regie` (standalone command). The daemon autostarts on first use."
+        ),
+        formatter_class=GroupedHelpFormatter,
     )
     # `--version` prints and exits during parsing, before argparse checks for a subcommand.
     p.add_argument(
@@ -453,6 +446,8 @@ def _parser() -> argparse.ArgumentParser:
         version=f"theater {__version__}",
     )
     sub = p.add_subparsers(dest="command", required=False, action=_HiddenSubParsersAction)
+    # The grouped command block replaces argparse's "positional arguments:" heading.
+    p._positionals.title = argparse.SUPPRESS
 
     _add_process_commands(sub)
     _add_plugin_commands(sub)
@@ -469,6 +464,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_management_commands(sub)
     _add_stats_commands(sub)
     _add_lifecycle_commands(sub)
+    validate_command_groups(sub)
     return p
 
 

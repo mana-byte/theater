@@ -122,6 +122,24 @@ def test_hidden_hook_commands_are_absent_from_top_level_help(capsys):
         assert command not in out
 
 
+def test_top_level_help_is_grouped_and_hides_retired_commands():
+    from theater.cli.help import COMMAND_GROUPS
+
+    out = cli._parser().format_help()
+    usage = out.splitlines()[0]
+    assert "<command> ..." in usage
+    assert "{" not in usage
+    for title, subgroups in COMMAND_GROUPS:
+        assert f"{title}:" in out
+        for sub_title, names in subgroups:
+            if sub_title is not None:
+                assert f"  {sub_title}:" in out
+            for name in names:
+                assert f"  {name} " in out
+    assert "adopt" not in out
+    assert "Moved to the standalone" not in out
+
+
 @pytest.mark.parametrize("argv", HIDDEN_HOOK_ARGS)
 def test_hidden_hook_commands_remain_parseable_and_dispatchable(monkeypatch, argv):
     command = argv[0]
