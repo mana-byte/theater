@@ -195,7 +195,15 @@ class _VibeSource(VibeUsageMixin, Source):
             if is_unified:
                 self._count_initial = False
             self._bind_inner(previous, None, strict=False)
+            self._release_watch(previous)
         self.collision_domain = self._inner.collision_domain
+
+    @staticmethod
+    def _release_watch(source: Source) -> None:
+        """Drop the replaced inner's fd; aclose is async and only releases this gate anyway."""
+        gate = getattr(source, "_watch_gate", None)
+        if gate is not None:
+            gate.release()
 
     @staticmethod
     def _bind_inner(source: Source, wakeup, *, strict: bool = True) -> None:

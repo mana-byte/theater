@@ -1321,12 +1321,18 @@ async def test_hook_only_watch_leaves_transcript_identity_state_untouched(
     observer._failures._identity_loss_replayed.add(participant.id)
     observer._attachments._receipt_candidates[participant.id] = ("/tmp/transcript", "session")
 
+    same_signal: list[bool] = []
+
     async def sleep_once(_seconds: float, wake: object = None) -> None:
+        same_signal.append(wake is not None and wake is observer.live.wake_signal(participant.id))
         observer._stopping.set()
 
     observer._sleep = sleep_once
     try:
-        await observer._watch_source(participant.id, "acme")
+        # _watch (not _watch_source) owns releasing the watch-created signal.
+        await observer._watch(participant.id, "acme")
+        assert same_signal == [True]
+        assert observer.live._wakeups.keys() == ()
         assert participant.id in observer._failures._identity_lost
         assert participant.id in observer._failures._identity_loss_replayed
         assert participant.id in observer._attachments._receipt_candidates
