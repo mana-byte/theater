@@ -525,7 +525,8 @@ def build(
     async def whoami() -> dict:
         """Identify yourself. Returned fields include id, live name, description,
         harness, tier, status, cwd, branch, session_id, parent_id, and
-        addressable; unset fields are omitted.
+        addressable; unset fields are omitted. Includes live direct children
+        (name, status, harness; first 20, children_total beyond).
 
         Call this before addressing anyone else, so you can tell yourself apart
         from the other participants in the list. `session_id` is the harness's

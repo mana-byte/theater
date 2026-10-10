@@ -10,6 +10,9 @@ from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
 from theater.mcp.session import Session
 from theater.mcp.toolsets.projection import compact
 
+#: whoami lists at most this many live direct children; children_total reports the rest.
+WHOAMI_CHILDREN_CAP = 20
+
 
 def _summarise(p: dict) -> dict:
     """Trim a participant record to what another agent needs to route work.
@@ -41,7 +44,18 @@ def _summarise(p: dict) -> dict:
 
 
 async def whoami(session: Session) -> dict:
-    return _summarise(await session.me())
+    me = _summarise(await session.me())
+    rows = await session.client.call("participants.list", parent_id=me["id"])
+    assert isinstance(rows, list)
+    children = [
+        compact({"name": p.get("name"), "status": p.get("status"), "harness": p.get("harness")})
+        for p in rows[:WHOAMI_CHILDREN_CAP]
+    ]
+    if children:
+        me["children"] = children
+    if len(rows) > WHOAMI_CHILDREN_CAP:
+        me["children_total"] = len(rows)
+    return me
 
 
 async def list_participants(

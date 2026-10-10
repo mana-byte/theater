@@ -102,7 +102,7 @@ async def test_me_identifies_first_when_it_has_not_yet():
 
 
 async def test_whoami_answers_who_where_and_reachable():
-    got = await tools.whoami(resolved())
+    got = await tools.whoami(resolved(**{"participants.list": []}))
     assert got == {
         "id": "p-me",
         "name": "Arlequin",
@@ -119,8 +119,20 @@ async def test_whoami_answers_who_where_and_reachable():
 
 
 async def test_whoami_omits_a_lazy_session_id_until_discovered():
-    got = await tools.whoami(resolved(**{"participants.get": {**RECORD, "session_id": None}}))
+    got = await tools.whoami(
+        resolved(**{"participants.get": {**RECORD, "session_id": None}, "participants.list": []})
+    )
     assert "session_id" not in got
+
+
+async def test_whoami_lists_live_direct_children_capped():
+    rows = [{**RECORD, "id": f"c{i}", "name": f"Kid-{i}", "parent_id": "p-me"} for i in range(21)]
+    s = resolved(**{"participants.list": rows})
+    got = await tools.whoami(s)
+    assert s.client.params("participants.list") == {"parent_id": "p-me"}
+    assert got["children"][0] == {"name": "Kid-0", "status": "idle", "harness": "vibe"}
+    assert len(got["children"]) == 20
+    assert got["children_total"] == 21
 
 
 async def test_list_participants_marks_which_row_is_the_caller():
