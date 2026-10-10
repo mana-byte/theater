@@ -30,11 +30,12 @@ class ScanEntry:
 
 
 class _Flight:
-    __slots__ = ("done", "entries", "waiters")
+    __slots__ = ("done", "entries", "error", "waiters")
 
     def __init__(self) -> None:
         self.done = threading.Event()
         self.entries: tuple[ScanEntry, ...] | None = None
+        self.error: BaseException | None = None
         self.waiters = 0
 
 
@@ -42,28 +43,36 @@ _lock = threading.Lock()
 _flights: dict[tuple[str, str], _Flight] = {}
 
 
-def scan_domain(root: Path, pattern: str) -> tuple[tuple[ScanEntry, ...], bool]:
+def scan_domain(
+    root: Path, pattern: str, *, fresh: bool = False
+) -> tuple[tuple[ScanEntry, ...], bool]:
     """Walk ``root`` for ``pattern``; the flag is True when an in-flight walk was joined.
 
-    Only a walk still running is shared: a call starting after it finished walks afresh, so
-    sequential observations (identity-loss confirmations) never reuse one another's results.
+    Only a walk still running is shared, and a leader's failure reaches its joiners. ``fresh``
+    never joins: fail-closed consumers need a walk that started after their own call.
     """
+    if fresh:
+        return tuple(_walk(root, pattern)), False
     key = (str(root), pattern)
-    while True:
-        with _lock:
-            flight = _flights.get(key)
-            leader = flight is None
-            if flight is None:
-                flight = _flights[key] = _Flight()
-            else:
-                flight.waiters += 1
-        if leader:
-            break
+    with _lock:
+        flight = _flights.get(key)
+        leader = flight is None
+        if flight is None:
+            flight = _flights[key] = _Flight()
+        else:
+            flight.waiters += 1
+    if not leader:
         flight.done.wait()
-        if flight.entries is not None:
-            return flight.entries, True
+        if flight.error is not None:
+            raise flight.error
+        assert flight.entries is not None
+        return flight.entries, True
     try:
         flight.entries = tuple(_walk(root, pattern))
+    except BaseException as exc:
+        flight.error = exc
+        raise
+    else:
         return flight.entries, False
     finally:
         with _lock:

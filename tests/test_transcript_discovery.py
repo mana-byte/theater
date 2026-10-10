@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -62,6 +63,34 @@ def _claude_discovery(root: Path) -> GlobDiscovery:
         loss_probes=8,
         collision_warning="test: %d transcripts match cwd %s",
     )
+
+
+class _GatedWalk:
+    """Block the first scan walk until released so tests can overlap callers deterministically."""
+
+    def __init__(self, monkeypatch, *, fail: bool = False) -> None:
+        from theater.harness.transcript import scan
+
+        self.walks = 0
+        self.entered, self.release = threading.Event(), threading.Event()
+        real_walk = scan._walk
+
+        def gated(*args):
+            self.walks += 1
+            self.entered.set()
+            assert self.release.wait(5)
+            if fail:
+                raise RuntimeError("walk failed")
+            yield from real_walk(*args)
+
+        monkeypatch.setattr(scan, "_walk", gated)
+
+
+def _wait_for(condition) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not condition():
+        time.sleep(0.005)
+    assert condition()
 
 
 @pytest.fixture
@@ -424,49 +453,82 @@ class TestScanReuse:
         assert not [p for p in path_stats if p.suffix == ".jsonl"]
 
     def test_overlapping_scans_share_one_walk(self, root, workdir, monkeypatch):
-        import threading
+        from theater.harness.transcript import scan
 
+        _make_jsonl(root / "a" / "x.jsonl", cwd=workdir)
+        gate = _GatedWalk(monkeypatch)
+        results: list[object] = []
+        threads = [
+            threading.Thread(target=lambda: results.append(scan.scan_domain(root, "*/*.jsonl")))
+            for _ in range(2)
+        ]
+        threads[0].start()
+        assert gate.entered.wait(5)
+        threads[1].start()
+        _wait_for(lambda: any(f.waiters for f in scan._flights.values()))
+        gate.release.set()
+        for thread in threads:
+            thread.join(5)
+
+        assert gate.walks == 1
+        assert sorted(joined for _, joined in results) == [False, True]
+        assert not scan._flights
+
+    def test_joined_leader_failure_reaches_joiners_without_a_second_walk(self, root, monkeypatch):
+        from theater.harness.transcript import scan
+
+        gate = _GatedWalk(monkeypatch, fail=True)
+        errors: list[BaseException] = []
+
+        def call():
+            try:
+                scan.scan_domain(root, "*/*.jsonl")
+            except RuntimeError as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=call) for _ in range(2)]
+        threads[0].start()
+        assert gate.entered.wait(5)
+        threads[1].start()
+        _wait_for(lambda: any(f.waiters for f in scan._flights.values()))
+        gate.release.set()
+        for thread in threads:
+            thread.join(5)
+
+        assert gate.walks == 1
+        assert len(errors) == 2
+
+    def test_identity_probe_never_joins_a_walk_started_before_it(self, root, workdir, monkeypatch):
         from theater.harness.transcript import scan
 
         current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
         os.utime(current, ns=(1, 1))
+        gate = _GatedWalk(monkeypatch)
+        stale = threading.Thread(target=lambda: scan.scan_domain(root, "*/*.jsonl"))
+        stale.start()
+        assert gate.entered.wait(5)
         newer = _make_jsonl(root / "b" / "newer.jsonl", cwd=workdir)
-        walks = 0
-        entered, release = threading.Event(), threading.Event()
-        real_walk = scan._walk
+        gate.release.set()
+        found = _claude_discovery(root).identity_loss_candidate(
+            cwd=workdir, current=current, current_mtime_ns=1
+        )
+        stale.join(5)
 
-        def gated_walk(*args):
-            nonlocal walks
-            walks += 1
-            entered.set()
-            assert release.wait(5)
-            yield from real_walk(*args)
+        assert found == newer
 
-        monkeypatch.setattr(scan, "_walk", gated_walk)
-        results: list[Path | None] = []
+    def test_fresh_probe_sees_a_regular_file_swapped_for_a_symlink(self, root, workdir):
+        current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
+        os.utime(current, ns=(1, 1))
+        swapped = _make_jsonl(root / "b" / "swap.jsonl", cwd=workdir)
+        disc = _claude_discovery(root)
+        probe = {"cwd": workdir, "current": current, "current_mtime_ns": 1}
+        assert disc.identity_loss_candidate(**probe) == swapped
+        target = _make_jsonl(root / "c" / "real.jsonl", cwd=workdir)
+        os.utime(target, ns=(1, 1))
+        swapped.unlink()
+        swapped.symlink_to(target)
 
-        def probe():
-            results.append(
-                _claude_discovery(root).identity_loss_candidate(
-                    cwd=workdir, current=current, current_mtime_ns=1
-                )
-            )
-
-        first = threading.Thread(target=probe)
-        first.start()
-        assert entered.wait(5)
-        second = threading.Thread(target=probe)
-        second.start()
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not any(f.waiters for f in scan._flights.values()):
-            time.sleep(0.005)
-        release.set()
-        first.join(5)
-        second.join(5)
-
-        assert walks == 1
-        assert results == [newer, newer]
-        assert not scan._flights
+        assert disc.identity_loss_candidate(**probe) is None
 
     def test_sequential_probes_walk_afresh_and_revalidate_content(self, root, workdir, monkeypatch):
         from theater.harness.transcript import scan

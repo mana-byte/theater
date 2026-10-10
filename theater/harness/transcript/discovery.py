@@ -135,7 +135,7 @@ class GlobDiscovery:
             return None
         want = str(Path(cwd).resolve())
         candidates: list[tuple[int, Path]] = []
-        entries, joined = scan_domain(self.root, self.glob_pattern)
+        entries, _ = scan_domain(self.root, self.glob_pattern, fresh=True)
         for entry in entries:
             path, st = entry.path, entry.st
             if path == current or entry.is_symlink or st is None:
@@ -148,19 +148,9 @@ class GlobDiscovery:
                 continue
             candidates.append((st.st_mtime_ns, path))
         for _mtime, path in sorted(candidates, reverse=True)[: self.loss_probes]:
-            if self.cwd_of(path) == want and (
-                not joined or self._still_newer(path, current_mtime_ns)
-            ):
+            if self.cwd_of(path) == want:
                 return path
         return None
-
-    @staticmethod
-    def _still_newer(path: Path, current_mtime_ns: int) -> bool:
-        """A joined scan may predate this call; revalidate the winner before it is evidence."""
-        try:
-            return path.stat().st_mtime_ns > current_mtime_ns
-        except OSError:
-            return False
 
     def admit_operator_candidate(
         self,
