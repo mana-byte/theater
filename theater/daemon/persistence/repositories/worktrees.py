@@ -54,9 +54,7 @@ class WorktreeRepository:
             )
         )
 
-    def delete(
-        self, *, repo_root: str, name: str, connection: Connection | None = None
-    ) -> None:
+    def delete(self, *, repo_root: str, name: str, connection: Connection | None = None) -> None:
         conn = self._db.conn if connection is None else connection
         conn.execute(
             named_worktrees.delete()

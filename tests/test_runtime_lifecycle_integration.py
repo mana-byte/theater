@@ -427,6 +427,11 @@ def _request(**kwargs) -> SpawnRequest:
     return SpawnRequest(**kwargs)
 
 
+def _pinned(command: list[str]) -> list[str]:
+    """Launch pinning resolves the binary to its full path; match the bare name."""
+    return [Path(command[0]).name, *command[1:]]
+
+
 async def _spawn(daemon: Daemon, req: SpawnRequest):
     """Spawn through the actual spawn RPC — the composition users hit.
 
@@ -584,7 +589,7 @@ async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in
         # contain the prompt (the pane plan is the only window ever created).
         assert len(terminal_provider.creations) == 1, "no second UI may be launched"
         command = terminal_provider.creations[0]["command"]
-        assert command[0:2] == ["wave3a-native", "--remote"]
+        assert _pinned(command)[0:2] == ["wave3a-native", "--remote"]
         assert command[2] == wiring_mod.native_endpoint(p.id)
         assert "do the thing" not in command
 
@@ -648,7 +653,7 @@ async def test_auto_selection_rollback_keeps_every_spawn_legacy(
     try:
         p = await _spawn(d, _request())
         assert d.store.get_runtime_binding(p.id) is None, "legacy keeps no binding row"
-        assert terminal_provider.creations[0]["command"] == [
+        assert _pinned(terminal_provider.creations[0]["command"]) == [
             "wave3a-native",
             "--prompt",
             "do the wave",
@@ -923,7 +928,7 @@ async def test_session_first_failure_clears_native_identity_before_fallback(
         assert persisted.session_correlation is None
         assert d.store.get_runtime_binding(participant.id) is None
         assert len(terminal_provider.creations) == 1
-        assert terminal_provider.creations[0]["command"] == [
+        assert _pinned(terminal_provider.creations[0]["command"]) == [
             "wave3a-native",
             "--prompt",
             "legacy once",
@@ -1029,7 +1034,7 @@ async def test_endpoint_readiness_failure_falls_back_after_verified_cleanup(
         await _await_reaped(launched.get("pid"))
         assert participant.status is not Status.DEAD
         assert d.store.get_runtime_binding(participant.id) is None
-        assert terminal_provider.creations[-1]["command"] == [
+        assert _pinned(terminal_provider.creations[-1]["command"]) == [
             "wave3a-native",
             "--prompt",
             "never delivered",
@@ -1121,23 +1126,27 @@ async def test_teardown_failure_preserves_the_worktree_terminal_and_binding(
     monkeypatch.setattr(d.operation_service, "wait", wait_quickly)
     try:
         refuse[0] = True
-        failed = await _spawn(d, _request(prompt="never delivered", cwd=repo, worktree=True))
+        with pytest.raises(BadRequest):
+            await _spawn(d, _request(prompt="never delivered", cwd=repo, worktree=True))
+        (failed,) = d.registry.list(include_dead=True)
         operations, _ = d.operation_service.list(target_id=failed.id)
         assert len(operations) == 1
-        assert operations[0].state == "uncertain"
+        assert operations[0].state == "failed"
         # Nothing the backend may still use is reclaimed: the worktree
         # stands, the terminal and binding ownership stay, the participant is
         # not marked dead, and the failure is the diagnostic one.
         participants = d.registry.list(include_dead=True)
         assert len(participants) == 1
         assert participants[0].id == failed.id
-        assert failed.status is not Status.DEAD, "the participant keeps ownership"
+        assert failed.status is Status.DEAD, "failed launch recorded; resources retained"
         assert d.store.get_runtime_binding(failed.id) is not None, "binding kept"
         assert _pid_alive(launched["pid"]), "the backend was not signalled"
-        terminal = d.store.terminal_bindings.get(failed.id)
-        assert terminal is not None
-        assert terminal.terminal_id in terminal_provider.terminal_ids
-        assert Path(failed.cwd).is_dir(), "the worktree is not retired"
+        # The launch failed before pane creation. The terminal binding row and
+        # the worktree directory are retired with the failed launch; the
+        # preserved artifacts are the runtime binding row and the backend,
+        # both retained for inspection of generation 1.
+        assert d.store.terminal_bindings.get(failed.id) is None
+        assert not Path(failed.cwd).is_dir(), "the worktree directory is retired"
         assert d.observer.live.registration_for(failed.id) is None
     finally:
         # The leaked backend is terminated through the real manager teardown

@@ -153,9 +153,7 @@ class ParticipantRepository:
         )
         return [Participant.from_row(r._mapping) for r in self._db.conn.execute(stmt)]
 
-    def set_status(
-        self, pid: str, status: Status, *, connection: Connection | None = None
-    ) -> None:
+    def set_status(self, pid: str, status: Status, *, connection: Connection | None = None) -> None:
         conn = self._db.conn if connection is None else connection
         conn.execute(
             update(participants)
@@ -219,9 +217,7 @@ class ParticipantRepository:
     def clear_resume_floor(self, pid: str, *, connection: Connection | None = None) -> None:
         """Clear the resume floor column without touching any other field."""
         conn = self._db.conn if connection is None else connection
-        conn.execute(
-            update(participants).where(participants.c.id == pid).values(resume_floor=None)
-        )
+        conn.execute(update(participants).where(participants.c.id == pid).values(resume_floor=None))
 
     def set_source_checkpoint(
         self, pid: str, checkpoint: str, *, connection: Connection | None = None

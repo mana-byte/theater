@@ -372,8 +372,6 @@ def test_terminal_batch_commits_once_and_replay_never_completes_the_next_job(
 
 
 @pytest.mark.parametrize("entry", ["source_batch", "direct_apply"])
-
-
 def test_second_turn_touches_go_to_the_next_job_without_file_io_in_the_unit(
     tmp_path, monkeypatch, entry
 ) -> None:
