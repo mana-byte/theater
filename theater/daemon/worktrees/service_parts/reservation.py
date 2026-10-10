@@ -194,6 +194,25 @@ class WorkspaceReservationFlow(WorkspaceHost):
         )
         return WorkspaceReservation(workspace, usage, False)
 
+    def _owned_path_hint(self, workspace: WorkspaceRecord, *, connection: Connection) -> str:
+        """Name the live holder so a resume caller knows whom to wait for."""
+        holders = [
+            usage.holder_id
+            for usage in self._store.workspaces.active_usages(
+                workspace.workspace_id, connection=connection
+            )
+            if usage.holder_kind == WorkspaceUsageHolderKind.PARTICIPANT.value
+        ]
+        if holders:
+            return (
+                f"path {workspace.path!r} is owned by live participant {holders[0]}; "
+                "kill it or wait, then resume"
+            )
+        return (
+            f"path {workspace.path!r} is a {workspace.ownership_kind}-owned workspace "
+            "that cannot be borrowed"
+        )
+
     def _reserve_borrowed_in_connection(
         self,
         facts: ExistingPathFacts,
@@ -221,7 +240,11 @@ class WorkspaceReservationFlow(WorkspaceHost):
             self._store.workspaces.create(workspace, connection=connection)
             created_workspace = True
         elif workspace.ownership_kind != WorkspaceOwnershipKind.BORROWED.value:
-            raise WorkspaceOwnershipConflict(workspace.workspace_id, "path_already_owned")
+            raise WorkspaceOwnershipConflict(
+                workspace.workspace_id,
+                "path_already_owned",
+                hint=self._owned_path_hint(workspace, connection=connection),
+            )
         usage, _created_usage = self._acquire_reservation_in_connection(
             workspace, reservation_id=reservation_id, connection=connection
         )

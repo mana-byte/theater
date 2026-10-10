@@ -120,6 +120,23 @@ async def _persist_creation_intent(
         )
 
 
+async def test_borrowing_an_owned_path_names_its_live_holder(
+    tmp_path: Path, workspace_services
+) -> None:
+    _store, _operations, service = workspace_services
+    directory = tmp_path / "frontend-workspace"
+    directory.mkdir()
+    registered = await service.register(
+        client_id="operator-a", idempotency_key="register-a", params=_external_params(directory)
+    )
+    reservation = await service.reserve(
+        WorkspaceRequest(workspace_id=str(registered["workspace_id"])), reservation_id="r-a"
+    )
+    service.handoff_usage(reservation.usage.usage_id, participant_id="participant-a")
+    with pytest.raises(WorkspaceOwnershipConflict, match="owned by live participant participant-a"):
+        await service.reserve(WorkspaceRequest(cwd=str(directory)), reservation_id="r-b")
+
+
 async def test_external_deletion_fence_serializes_usage_and_exact_token(
     tmp_path: Path, workspace_services
 ) -> None:

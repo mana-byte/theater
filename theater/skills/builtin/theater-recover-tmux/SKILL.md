@@ -60,6 +60,9 @@ For a resumable row, call `spawn_session` with:
 - `worktree=False`;
 - the same `harness` and the chosen `approval`.
 
+Resume reuses the predecessor's workspace: never combine it with `worktree`, and if the path is
+owned by a live participant, kill it or wait for it, then resume.
+
 Do not invent a model or reasoning effort. Pass `model` or `reasoning_effort` only when the row
 actually records that native value; otherwise omit the parameter. Do not change the retained branch
 or request a new worktree.

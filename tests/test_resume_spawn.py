@@ -710,6 +710,9 @@ async def test_resume_with_worktree_refused(registry, resume_harness, monkeypatc
     )
     with pytest.raises(BadRequest, match="cannot resume into a worktree"):
         await spawner.reserve(req)
+    _trusted_resume(registry, harness="resume-spawn-test")
+    with pytest.raises(BadRequest, match="omit worktree and pass cwd='/tmp'"):
+        await spawner.reserve(req)
 
 
 async def test_resume_with_named_worktree_refused(registry, resume_harness, monkeypatch):

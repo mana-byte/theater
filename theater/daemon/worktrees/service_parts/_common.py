@@ -42,9 +42,10 @@ class WorkspaceDeleting(TheaterError):
 class WorkspaceOwnershipConflict(TheaterError):
     code = "ownership_conflict"
 
-    def __init__(self, workspace_id: str, reason: str) -> None:
+    def __init__(self, workspace_id: str, reason: str, *, hint: str | None = None) -> None:
         self.details = {"workspace_id": workspace_id, "reason": reason}
-        super().__init__(f"workspace {workspace_id!r} ownership check failed: {reason}")
+        suffix = "" if hint is None else f"; {hint}"
+        super().__init__(f"workspace {workspace_id!r} ownership check failed: {reason}{suffix}")
 
 
 @dataclass(frozen=True, slots=True)
