@@ -66,7 +66,7 @@ def _claude_discovery(root: Path) -> GlobDiscovery:
 
 
 class _GatedWalk:
-    """Block the first scan walk until released so tests can overlap callers deterministically."""
+    """Hold the first walk's pre-gate snapshot until released; later walks run unimpeded."""
 
     def __init__(self, monkeypatch, *, fail: bool = False) -> None:
         from theater.harness.transcript import scan
@@ -77,11 +77,15 @@ class _GatedWalk:
 
         def gated(*args):
             self.walks += 1
+            if self.walks > 1:
+                yield from real_walk(*args)
+                return
+            snapshot = list(real_walk(*args))
             self.entered.set()
             assert self.release.wait(5)
             if fail:
                 raise RuntimeError("walk failed")
-            yield from real_walk(*args)
+            yield from snapshot
 
         monkeypatch.setattr(scan, "_walk", gated)
 
@@ -497,24 +501,63 @@ class TestScanReuse:
 
         assert gate.walks == 1
         assert len(errors) == 2
+        assert not scan._flights
 
-    def test_identity_probe_never_joins_a_walk_started_before_it(self, root, workdir, monkeypatch):
+    def _probe_during_stale_walk(self, root, workdir, monkeypatch, *, before, during):
+        """Run an identity probe while a walk holding a pre-``during`` snapshot is in flight."""
         from theater.harness.transcript import scan
 
         current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
         os.utime(current, ns=(1, 1))
+        before(current)
         gate = _GatedWalk(monkeypatch)
-        stale = threading.Thread(target=lambda: scan.scan_domain(root, "*/*.jsonl"))
-        stale.start()
+        stale: list[tuple[scan.ScanEntry, ...]] = []
+        thread = threading.Thread(
+            target=lambda: stale.append(scan.scan_domain(root, "*/*.jsonl")[0])
+        )
+        thread.start()
         assert gate.entered.wait(5)
-        newer = _make_jsonl(root / "b" / "newer.jsonl", cwd=workdir)
-        gate.release.set()
+        expected = during()
+        assert scan._flights  # the stale walk is still in flight during the probe
         found = _claude_discovery(root).identity_loss_candidate(
             cwd=workdir, current=current, current_mtime_ns=1
         )
-        stale.join(5)
+        gate.release.set()
+        thread.join(5)
+        return found, expected, {entry.path for entry in stale[0]}
 
-        assert found == newer
+    def test_identity_probe_finds_file_created_after_in_flight_walk_started(
+        self, root, workdir, monkeypatch
+    ):
+        found, expected, stale_paths = self._probe_during_stale_walk(
+            root,
+            workdir,
+            monkeypatch,
+            before=lambda current: None,
+            during=lambda: _make_jsonl(root / "b" / "new.jsonl", cwd=workdir),
+        )
+
+        assert expected not in stale_paths  # the held walk really is stale
+        assert found == expected
+
+    def test_identity_probe_returns_changed_winner_not_stale_one(self, root, workdir, monkeypatch):
+        old = {}
+
+        def before(current):
+            old["a"] = _make_jsonl(root / "b" / "a.jsonl", cwd=workdir)
+            os.utime(old["a"], ns=(2, 2))
+
+        def during():
+            newest = _make_jsonl(root / "c" / "b.jsonl", cwd=workdir)
+            os.utime(newest, ns=(3, 3))
+            return newest
+
+        found, expected, stale_paths = self._probe_during_stale_walk(
+            root, workdir, monkeypatch, before=before, during=during
+        )
+
+        assert old["a"] in stale_paths and expected not in stale_paths
+        assert found == expected != old["a"]
 
     def test_fresh_probe_sees_a_regular_file_swapped_for_a_symlink(self, root, workdir):
         current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
