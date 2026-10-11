@@ -875,6 +875,26 @@ async def test_recorded_native_evidence_pins_git_before_finishing_without_an_obs
     _assert_pinned_off_loop(daemon, threads)
 
 
+async def test_a_retained_evidence_retry_pins_git_off_the_loop_and_is_not_replayed(
+    daemon, launches, tmp_path, monkeypatch
+):
+    await _review_source(daemon, tmp_path)
+    threads = _git_spy(monkeypatch)
+    calls: list[str] = []
+
+    async def sink(pid, *, backend_generation, outcome):
+        calls.append(outcome)
+        daemon.jobs.finish("src#1", state=JobState.DONE, result="ok")
+
+    daemon.observer._pending_evidence["src"] = {(1, "s", "t"): (sink, SimpleNamespace(), "outcome")}
+
+    assert await daemon.observer._flush_pending_evidence("src") is True
+    assert await daemon.observer._flush_pending_evidence("src") is True
+
+    _assert_pinned_off_loop(daemon, threads)
+    assert calls == ["outcome"] and "src" not in daemon.observer._pending_evidence
+
+
 async def test_overlapping_pins_share_one_git_read_until_the_last_release(
     daemon, launches, tmp_path, monkeypatch
 ):

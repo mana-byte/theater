@@ -23,6 +23,7 @@ class TerminalEvidenceRouting:
         live: LiveObservationHub
 
         async def _pin_ahead(self, pid: str) -> list[str]: ...
+
         def _release_pins(self, handles: list[str]) -> None: ...
 
         _pending_evidence: dict[
@@ -159,6 +160,7 @@ class TerminalEvidenceRouting:
                     pid,
                 )
                 return False
+            pinned = await self._pin_ahead(pid)  # a retry finishes jobs like first routing
             try:
                 await sink(pid, backend_generation=key[0], outcome=outcome)
             except asyncio.CancelledError:
@@ -166,6 +168,8 @@ class TerminalEvidenceRouting:
             except Exception:
                 logger.exception("retrying retained terminal evidence for %s failed", pid)
                 return False
+            finally:
+                self._release_pins(pinned)
             del pending[key]
             if not any(candidate_source is source for _, candidate_source, _ in pending.values()):
                 # All observer-owned outcomes from this source are durable.
