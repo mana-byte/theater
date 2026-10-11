@@ -7,7 +7,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 
-from theater.constants.daemon import CONTROL_QUEUE_MAX_PENDING, CONTROL_QUEUE_SENDER_MAX_PENDING
+from theater.constants.daemon import (
+    CONTROL_QUEUE_MAX_PENDING,
+    CONTROL_QUEUE_PEER_MAX_PENDING,
+    CONTROL_QUEUE_SENDER_MAX_PENDING,
+)
 from theater.daemon.controls._common import (
     ACTION_QUEUE_FOLLOWUP,
     ACTION_SEND,
@@ -28,7 +32,7 @@ from theater.harness.contracts.runtime import (
     RuntimeCapability,
     RuntimeSnapshot,
 )
-from theater.models import BadRequest, Busy, Job, JobState
+from theater.models import BadRequest, Busy, Job, JobState, NotYourChild
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +105,12 @@ class FollowupControls(ControlHost):
         """The queue-followup body; returns its job and the reserved transport."""
         participant_id = request.participant_id
         peer = request.origin == QUEUE_ORIGIN_SEND
+        if peer and request.caller_id == participant_id:
+            # Self-control stays banned: a participant never queues work onto its own next turn.
+            raise NotYourChild(
+                f"participant {participant_id!r} cannot queue a message to itself; "
+                "send to itself only while it is idle"
+            )
         async with self._lock(participant_id):
             # A peer's send keeps ordinary send's open permission; explicit queue stays parent-only.
             self._gates.authorize(
@@ -154,6 +164,16 @@ class FollowupControls(ControlHost):
                     f"you already have {held} messages waiting for participant "
                     f"{participant_id!r} (bound {CONTROL_QUEUE_SENDER_MAX_PENDING}); await one "
                     "of them or cancel_job a message you no longer need before sending another"
+                )
+            peers = sum(
+                self._queue_origin(operation) == QUEUE_ORIGIN_SEND
+                for operation in self._store.queued_control_operations(participant_id)
+            )
+            if peers >= CONTROL_QUEUE_PEER_MAX_PENDING:
+                raise Busy(
+                    f"participant {participant_id!r} already holds {peers} queued messages from "
+                    f"peers (bound {CONTROL_QUEUE_PEER_MAX_PENDING}); the rest is reserved for "
+                    "its parent — await a pending handle or retry later"
                 )
         pending = self._store.queued_control_operation_count(participant_id)
         queue_full = (

@@ -36,6 +36,8 @@ class MessageControls(ControlHost):
                 response_format=response_format,
             )
         except TEMPORARY_REFUSALS:
+            if caller_id == participant_id:
+                raise  # a self-send keeps ordinary send's refusal; it is never queued
             job = await self.queue_followup(
                 participant_id,
                 caller_id=caller_id,

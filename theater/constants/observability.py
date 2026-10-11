@@ -223,8 +223,8 @@ CONTROL_DELIVERY_UNKNOWN_METRIC = "theater.control.delivery.unknown"
 #: Counter for public ``send`` admissions by bounded ``outcome`` (delivered | queued).
 CONTROL_SEND_ADMISSION_METRIC = "theater.control.send.admissions"
 
-#: Counter for ``cancel_job`` requests by bounded ``outcome`` (cancelled | too_late | uncertain |
-#: finished | not_cancellable).
+#: Counter for ``cancel_job`` requests by bounded ``outcome`` (cancelled | delivered |
+#: delivery_uncertain | finished | not_cancellable).
 CONTROL_CANCEL_METRIC = "theater.control.cancel"
 
 #: Counter name for strict response contracts that ended ``unable_to_parse``; observed with one

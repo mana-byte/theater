@@ -171,6 +171,10 @@ CONTROL_QUEUE_MAX_PENDING = 32
 #: other senders and the parent's explicit followups.
 CONTROL_QUEUE_SENDER_MAX_PENDING = 8
 
+#: Pending peer-queued sends all senders together may hold on one target, so the parent's explicit
+#: followups always keep ``CONTROL_QUEUE_MAX_PENDING - this`` slots.
+CONTROL_QUEUE_PEER_MAX_PENDING = 24
+
 #: The bounded reconciliation window for a native prompt whose transmission or
 #: acknowledgement is uncertain.  The operation remains a durable execution
 #: barrier after this deadline until exact native evidence or an authoritative

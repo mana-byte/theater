@@ -169,9 +169,10 @@ class SendControls(ControlHost):
         else:
             await self._gates.legacy_busy_check(participant_id)
             self._reject_provider_send_busy(participant_id, exclude=None)
-            # require() can still refuse a route that changed during the awaits above; it must do
-            # so before the job exists, or the refusal strands a running job without a control row.
+            # The route and presence can still change during the awaits above. Both are rechecked
+            # here with no await before delivery re-checks them, so a refusal never strands a job.
             self._provider.require(participant_id, RuntimeCapability.SEND, route)
+            self._gates.check_absent(participant_id)
             provider_job = self._create_send_job(
                 participant_id,
                 caller_id=request.caller_id,

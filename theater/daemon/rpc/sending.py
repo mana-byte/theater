@@ -149,7 +149,7 @@ def _publish_routed_send_event(
 async def _send(daemon, params: dict) -> dict:
     """Send through the daemon's selected route: once when safe, else queued under one handle.
 
-    An explicit ``if_busy`` (refuse, queue, amend, replace) keeps its stricter parent-only meaning.
+    Explicit ``refuse`` is open to anyone; ``queue``, ``amend`` and ``replace`` stay parent-only.
     """
     from theater.daemon.rpc import redirect
 

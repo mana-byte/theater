@@ -9,10 +9,15 @@ from tests._presence_doubles import AbsentPresence
 from tests.test_control_rpc import _active_send, _native_pair
 from tests.test_presence_controls import Rig, _operation_rows
 from tests.test_send import _target
-from theater.constants.daemon import CONTROL_QUEUE_SENDER_MAX_PENDING
+from theater.constants.daemon import (
+    CONTROL_QUEUE_MAX_PENDING,
+    CONTROL_QUEUE_PEER_MAX_PENDING,
+    CONTROL_QUEUE_SENDER_MAX_PENDING,
+)
 from theater.daemon.persistence.repositories.job_repairs import RepairAttempt, RepairState
+from theater.daemon.presence import PresenceState
 from theater.daemon.schema import jobs as jobs_table
-from theater.models import Busy, JobState, NotYourJob, TranscriptUntrusted
+from theater.models import Busy, JobState, NotYourChild, NotYourJob, TranscriptUntrusted
 from theater.protocol import RemoteError
 
 
@@ -207,3 +212,58 @@ async def test_provider_route_refusal_after_admission_checks_leaves_one_job(
     assert _job_handles(daemon.store, target["id"]) == [sent["handle"]], (
         "the refused plain attempt created no job"
     )
+
+
+async def test_presence_arriving_during_the_modal_check_leaves_one_queued_job(
+    client, daemon, terminal_provider, monkeypatch
+):
+    real_capture = daemon.presence.capture_screen
+    presence = AbsentPresence()
+
+    async def capture_then_human_arrives(participant_id, *, max_bytes):
+        screen = await real_capture(participant_id, max_bytes=max_bytes)
+        presence.set_state(PresenceState.PRESENT, "human arrived mid-send")
+        return screen
+
+    presence._capture_screen = capture_then_human_arrives
+    monkeypatch.setattr(daemon, "presence", presence, raising=False)
+    target = await _target(client, daemon)
+
+    sent = await client.call("send", target=target["id"], prompt="hi", caller_id="peer")
+
+    assert sent["delivery"] == "queued"
+    assert _job_handles(daemon.store, target["id"]) == [sent["handle"]], "no stranded second job"
+    assert [row["delivery_phase"] for row in _operation_rows(daemon.store, target["id"])] == [
+        "queued"
+    ]
+    assert terminal_provider.deliveries == []
+
+
+async def test_peers_cannot_take_the_parents_share_of_the_queue(rig):
+    await _busy(rig)
+    peers = CONTROL_QUEUE_PEER_MAX_PENDING // CONTROL_QUEUE_SENDER_MAX_PENDING
+    for peer in range(peers):
+        for _ in range(CONTROL_QUEUE_SENDER_MAX_PENDING):
+            await rig.service.send_when_safe("p1", caller_id=f"peer{peer}", prompt="x")
+
+    with pytest.raises(Busy, match="reserved for its parent"):
+        await rig.service.send_when_safe("p1", caller_id="one-more-peer", prompt="x")
+    parent_job = await rig.service.queue_followup("p1", caller_id="parent", prompt="explicit")
+
+    assert rig.store.get_job(parent_job.handle).state == JobState.RUNNING
+    assert rig.store.queued_control_operation_count("p1") == CONTROL_QUEUE_PEER_MAX_PENDING + 1
+    assert CONTROL_QUEUE_PEER_MAX_PENDING < CONTROL_QUEUE_MAX_PENDING
+
+
+async def test_a_participant_never_queues_a_message_to_itself(rig):
+    await _busy(rig)
+
+    with pytest.raises(Busy):
+        await rig.service.send_when_safe("p1", caller_id="p1", prompt="note to self")
+    with pytest.raises(NotYourChild):
+        await rig.service.queue_followup("p1", caller_id="p1", prompt="x", origin="send")
+    assert _operation_rows(rig.store, "p1") == [] and _job_handles(rig.store, "p1") == []
+
+    _free(rig)
+    _job, queued = await rig.service.send_when_safe("p1", caller_id="p1", prompt="idle self send")
+    assert queued is False and rig.state("p1").sent == ["idle self send"]

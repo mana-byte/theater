@@ -764,12 +764,13 @@ def build(
         if_busy:   omit it. The default "auto" delivers once when safe and otherwise
                    queues the message behind the target's work (or a human at its
                    terminal), returning one handle either way; delivery="queued"
-                   marks a message not yet sent, and cancel_job withdraws it. The
-                   explicit modes need a direct child: "refuse" fails busy;
-                   "queue" always queues (route "queued"); "amend" steers the
-                   active turn (route "steer"), else queues; "replace" cancels its
-                   queue, interrupts, waits up to 30 s for idle, sends (route
-                   "replace").
+                   marks a message not yet sent, and cancel_job withdraws it.
+                   "refuse" is open to anyone and fails busy or human_present
+                   instead of queueing. The other explicit modes need a direct
+                   child: "queue" always queues (route "queued"); "amend" steers
+                   the active turn (route "steer"), else queues; "replace" cancels
+                   its queue, interrupts, waits up to 30 s for idle, sends (route
+                   "replace"). A participant cannot queue a message to itself.
         job_handle: amend/replace act only while this job is the active turn.
         response_format: optional JSON object, as for spawn_session. A bare JSON Schema
                    object is a prompt hint only (parsed with json.loads, never validated
@@ -783,9 +784,10 @@ def build(
                    an invalid one where it can prove which turn answered, and otherwise ends
                    the job with structured_status "unable_to_parse". await_sessions returns
                    a valid answer in structured_result.
-        Fails with `busy` only for if_busy="refuse" or a full per-sender queue, and
-        with `transcript_untrusted` or `transcript_identity_lost` (transcript needs
-        binding); `human_present` only for if_busy="refuse".
+        Fails with `busy` for if_busy="refuse", a target whose queue (or your share of
+        it) is full, or a send to yourself while you are working; with
+        `transcript_untrusted` or `transcript_identity_lost` (transcript needs
+        binding); and with `human_present` only for if_busy="refuse".
         """
         return await tools.send_prompt(
             session,

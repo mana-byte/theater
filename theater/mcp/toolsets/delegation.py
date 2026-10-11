@@ -224,9 +224,9 @@ async def send_prompt(
     the pane. The target must have a verified physical delivery route; origin
     and ownership do not decide ordinary send admission. By default the daemon
     delivers once when it is safe and otherwise queues the message, behind the
-    target's work or a human at its pane, under the same handle; explicit
-    ``if_busy`` modes (refuse, queue, amend, replace) keep their stricter,
-    direct-parent-only meaning.
+    target's work or a human at its pane, under the same handle. Explicit
+    ``refuse`` is open to anyone; ``queue``, ``amend`` and ``replace`` stay
+    direct-parent-only.
 
     ``target_id`` may be a participant id or a name. Names work only
     while the participant is live; a dead participant's name is null and

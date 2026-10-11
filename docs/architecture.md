@@ -1699,7 +1699,10 @@ prompt bounds, route) refuse before anything is accepted. Admission does not che
 the queued row touches no pane — but dispatch re-gates fresh presence, so an attended target
 receives it only after the human leaves, and nothing is replayed after an uncertain delivery.
 There is no default TTL. One sender holds a bounded share of a target's queue
-(`CONTROL_QUEUE_SENDER_MAX_PENDING`); dispatch takes the lowest-sequence head of each sender's
+(`CONTROL_QUEUE_SENDER_MAX_PENDING`) and all peers together a bounded share
+(`CONTROL_QUEUE_PEER_MAX_PENDING`), so the parent's explicit followups keep their slots; a
+participant never queues a message to itself (a busy self-send keeps ordinary send's refusal);
+dispatch takes the lowest-sequence head of each sender's
 lane, so one sender never overtakes itself. A peer's queued send authorizes at dispatch as the
 open ordinary send it is. `cancel_job` (`jobs.cancel`) lets the requester withdraw it while its
 control row is still `QUEUED` (under the participant lock the dispatcher holds); afterwards
