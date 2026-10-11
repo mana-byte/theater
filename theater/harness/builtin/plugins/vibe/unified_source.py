@@ -324,6 +324,10 @@ class UnifiedVibeSource(Source):
             source_checkpoint if _checkpoint(source_checkpoint) is not None else None
         )
         self._checkpoint_gap = False
+        #: Turn ends since the acknowledged point could not be replayed; every batch says so,
+        #: and stages a checkpoint, until the observer has applied one and acknowledged it.
+        self._unproven = False
+        self._attach_unproven = False
         self.collision_domain = str(observer.root.resolve())
 
     @property
@@ -423,11 +427,9 @@ class UnifiedVibeSource(Source):
             raise RuntimeError("source checkpoint must be acknowledged before reading again")
         if self._checkpoint_gap:
             self._checkpoint_gap = False
-            # The skipped history may hold turn ends: say so, rather than claim it held none.
             return Batch(
                 error_code="vibe_unified_checkpoint_expired",
                 error="Unified Vibe history advanced beyond its retained recovery journals",
-                turn_state=None if self._view is None else _turn_state(self._view, complete=False),
             )
         if self._view is None or not self._count_initial:
             return None
@@ -444,7 +446,7 @@ class UnifiedVibeSource(Source):
             progressed=True,
             status=_pending_input_status(self._view),
             trajectory=(usage_fact,) if usage_fact is not None else (),
-            turn_state=_turn_state(self._view),
+            turn_state=_turn_state(self._view, complete=not self._unproven),
         )
 
     async def _read_attachment(self) -> Batch:
@@ -477,8 +479,26 @@ class UnifiedVibeSource(Source):
         except (OSError, UnifiedStoreError, ValueError) as exc:
             return self._attachment_path_error(self._view.current) or self._error_batch(exc)
         current = update.view
+        if current.sequence < self._view.sequence or current.watermark < self._view.watermark:
+            # An append-only journal went backwards: keep the acknowledged point and its open
+            # turn, and report the turn ends in between as unprovable.
+            self._unproven = True
+            return Batch(
+                error_code="vibe_unified_store_invalid",
+                error=(
+                    f"Unified Vibe history moved backwards from sequence {self._view.sequence} "
+                    f"to {current.sequence}; keeping the acknowledged point"
+                ),
+                turn_state=_turn_state(self._view, complete=False),
+            )
         if current.sequence == self._view.sequence and current.watermark == self._view.watermark:
-            return Batch(status=_pending_input_status(current), turn_state=_turn_state(current))
+            if self._unproven:
+                self._pending_view = current
+                self._pending_checkpoint = _encode_checkpoint(current)
+            return Batch(
+                status=_pending_input_status(current),
+                turn_state=_turn_state(current, complete=not self._unproven),
+            )
         # The reader's change set is only meaningful relative to the exact
         # view this source last acknowledged; anything else — an attachment
         # restore, a discarded checkpoint, a rollback — must fall back to the
@@ -510,7 +530,7 @@ class UnifiedVibeSource(Source):
             and saved["session_id"] == current.session_id
         ):
             saved_watermark = int(saved["watermark"])
-            if saved_watermark > current.watermark:
+            if saved_watermark > current.watermark or int(saved["sequence"]) > current.sequence:
                 return Batch(
                     waiting=True,
                     error_code="vibe_unified_store_invalid",
@@ -525,7 +545,9 @@ class UnifiedVibeSource(Source):
                 if restored is not None and restored.watermark == saved_watermark:
                     baseline = restored
                 else:
+                    # Reported on the attachment itself, before any checkpoint can advance.
                     self._checkpoint_gap = True
+                    self._attach_unproven = True
                     self._pending_checkpoint = _encode_checkpoint(current)
                     self._pending_view = current
             elif (
@@ -557,7 +579,7 @@ class UnifiedVibeSource(Source):
                 correlation=self._correlation(current.current, current.session_id),
                 collision_domain=self.collision_domain,
             ),
-            turn_state=_turn_state(current),
+            turn_state=_turn_state(current, complete=not (self._unproven or self._attach_unproven)),
         )
 
     def _diff(
@@ -602,6 +624,7 @@ class UnifiedVibeSource(Source):
             facts.extend(parsed.trajectory)
             baseline_events.extend(parsed.baseline_events)
         known = () if turns is None else turns
+        self._unproven = self._unproven or turns is None
         events = self._place_boundaries(
             events,
             self._turn_boundaries(current, previous=previous, turns=known),
@@ -625,7 +648,7 @@ class UnifiedVibeSource(Source):
             status=status,
             trajectory=facts,
             trajectory_events=baseline_events,
-            turn_state=_turn_state(current, known, complete=turns is not None),
+            turn_state=_turn_state(current, known, complete=not self._unproven),
         )
 
     def _rows(self, view: UnifiedStoreView) -> list[tuple[str, dict, int]]:
@@ -843,6 +866,8 @@ class UnifiedVibeSource(Source):
             self._correlation(self._view.current, self._view.session_id)
         )
         self._pending_attachment = None
+        self._unproven = self._unproven or self._attach_unproven
+        self._attach_unproven = False
 
     def discard_attachment(self) -> None:
         if self._pending_attachment is None:
@@ -851,6 +876,7 @@ class UnifiedVibeSource(Source):
         self._pending_view = None
         self._pending_checkpoint = None
         self._checkpoint_gap = False
+        self._attach_unproven = False
 
     def revoke_attachment(self) -> None:
         self._view = None
@@ -862,6 +888,7 @@ class UnifiedVibeSource(Source):
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
         self._checkpoint_gap = False
+        self._unproven = self._attach_unproven = False
         self._initial_usage_inflight = False
         self._reader = UnifiedStoreReader()
         self._rows_view = None
@@ -894,6 +921,9 @@ class UnifiedVibeSource(Source):
         self._acknowledged_checkpoint = self._pending_checkpoint
         self._source_checkpoint = self._pending_checkpoint
         self._pending_checkpoint = None
+        # Only an applied batch is acknowledged, and one carrying the unproven fact has had its
+        # delivered jobs ended unverified first.
+        self._unproven = False
         if self._pending_view is not None:
             self._view = self._pending_view
             self._pending_view = None

@@ -1097,11 +1097,41 @@ def test_expired_checkpoint_rebaselines_without_replaying_entries(store: Store) 
     assert corrupt.waiting and corrupt.error_code == "vibe_unified_store_invalid"
 
     shutil.rmtree(store.generation_dir(GEN1))
-    assert asyncio.run(resumed.read()).attached is not None
+    attached = asyncio.run(resumed.read())
+    assert attached.attached is not None
+    # The attachment itself, not a later read, says the skipped history is unprovable.
+    assert attached.turn_state is not None and not attached.turn_state.complete
     resumed.commit_attachment()
     resumed.acknowledge_source_checkpoint()
     assert asyncio.run(resumed.read()).error_code == "vibe_unified_checkpoint_expired"
     assert asyncio.run(resumed.read()).events == ()
+
+
+def test_a_journal_moving_backwards_keeps_the_acknowledged_open_turn(store: Store) -> None:
+    """Truncated under acknowledged open B: no older closed A, no checkpoint moved back."""
+    source = attached_to_running_a(store)
+    store.publish(
+        generation=GEN1,
+        snapshot_sequence=0,
+        state=RUNNING_A,
+        watermark=1,
+        journal=[A_ENDS, B_STARTS],
+    )
+    asyncio.run(source.read())
+    source.acknowledge_source_checkpoint()
+    acknowledged = source.source_checkpoint()
+    store.publish(
+        generation=GEN1, snapshot_sequence=0, state=RUNNING_A, watermark=1, journal=[A_ENDS]
+    )
+
+    regressed = asyncio.run(source.read())
+
+    assert regressed.error_code == "vibe_unified_store_invalid" and regressed.events == ()
+    assert regressed.turn_state is not None
+    assert (regressed.turn_state.turn_id, regressed.turn_state.open) == ("turn-b", True)
+    assert not regressed.turn_state.complete
+    assert source.pending_source_checkpoint() is None
+    assert source.source_checkpoint() == acknowledged
 
 
 def test_history_cursor_pages_fresh_source_without_attaching(store: Store) -> None:

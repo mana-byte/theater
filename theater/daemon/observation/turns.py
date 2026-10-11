@@ -109,15 +109,15 @@ class TurnAccumulator:
                 while len(self._fenced) > FENCED_TURNS:
                     self._fenced.popleft()
 
-    def note_origins(self, state: NativeTurnState | None) -> tuple[str, ...]:
-        """Fence each turn started from a fenced queue item; return the newly fenced turns."""
-        promoted = tuple(
-            turn_id
-            for turn_id, item in (() if state is None else state.origins)
-            if f"queue:{item}" in self._fenced and turn_id not in self._fenced
+    def promotions(self, state: NativeTurnState | None) -> tuple[str, ...]:
+        """Turns started from a fenced queue item and not fenced yet; nothing is changed."""
+        return tuple(
+            dict.fromkeys(
+                turn_id
+                for turn_id, item in (() if state is None else state.origins)
+                if f"queue:{item}" in self._fenced and turn_id not in self._fenced
+            )
         )
-        self.remember(promoted)
-        return promoted
 
     def is_fenced(self, turn_id: str | None) -> bool:
         return turn_id is not None and turn_id in self._fenced

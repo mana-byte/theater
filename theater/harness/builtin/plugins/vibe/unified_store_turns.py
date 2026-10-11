@@ -60,9 +60,12 @@ def retained_turn_changes(
 ) -> tuple[dict[str, Any], ...] | None:
     """Turn changes of records ``after`` < sequence <= ``through``, segment by retained segment.
 
-    None when the retained generations' journals do not cover that range contiguously.
+    None when the retained generations' journals do not cover that range contiguously, or
+    when ``through`` lies behind ``after``: history that moved backwards replays nothing.
     """
-    if through <= after:
+    if through < after:
+        return None
+    if through == after:
         return ()
     try:
         return _replay_segments(session_root, after=after, through=through, since=since)

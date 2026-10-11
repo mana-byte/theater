@@ -347,8 +347,20 @@ class Observer(
             return False
         except Exception:
             logger.exception("observing %s failed", context.pid)
+            self._unstage_unproven(context, iteration)
         await self._finish_iteration(context, iteration)
         return True
+
+    @staticmethod
+    def _unstage_unproven(context: _WatchContext, iteration: _WatchIteration) -> None:
+        """An unproven batch that never applied must not advance the checkpoint next pass."""
+        batch = iteration.batch
+        if iteration.applied or batch is None or batch.turn_state is None:
+            return
+        if batch.turn_state.complete:
+            return
+        with contextlib.suppress(Exception):
+            context.source.rollback_source_checkpoint()
 
     async def _prepare_iteration(self, context: _WatchContext) -> bool:
         pid = context.pid
@@ -383,11 +395,10 @@ class Observer(
         self._note_turn_state(context, batch)
         return batch
 
-    def _note_turn_state(self, context: _WatchContext, batch: Batch) -> None:
-        # Before the batch applies, so a turn born of a fenced queue item is fenced in time.
+    @staticmethod
+    def _note_turn_state(context: _WatchContext, batch: Batch) -> None:
         if batch.turn_state is not None:
             context.turn_state = batch.turn_state
-            self._note_turn_fences(context.pid, context.turns, batch.turn_state)
         elif batch.attached is not None:
             context.turn_state = None
 

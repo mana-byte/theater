@@ -15,7 +15,7 @@ from .unified_store_loading import (
     _read_current_bytes,
     _session_root,
 )
-from .unified_store_turns import TurnTracker, latest_turn, retained_turn_changes
+from .unified_store_turns import TurnTracker, latest_turn
 from .unified_store_types import (
     _MAX_DOCUMENT_BYTES,
     _READER_CHUNK_CACHE_BYTES,
@@ -131,13 +131,13 @@ class UnifiedStoreReader:
         _reject_symlink_components(session_root, current_path)
         data = _read_current_bytes(session_root)
         if data is None or data != state.current_bytes:
-            return self._resync(state, current_path)
+            return self._reload(session_root, session_id, current_path)
         _reject_symlink_components(session_root, session_root / "generations" / state.generation)
         _reject_symlink_components(session_root, state.journal_path)
         try:
             stat = os.lstat(state.journal_path)
         except OSError:
-            return self._resync(state, current_path)
+            return self._reload(session_root, session_id, current_path)
         if stat.st_size == state.journal_size and stat.st_mtime_ns == state.journal_mtime_ns:
             return UnifiedStoreUpdate(state.view, frozenset(), state.view)
         if stat.st_size < state.journal_verified or (
@@ -145,7 +145,7 @@ class UnifiedStoreReader:
         ):
             # Truncated, or rewritten in place at the same size: the journal
             # is only ever appended to, so neither can be an ordinary write.
-            return self._resync(state, current_path)
+            return self._reload(session_root, session_id, current_path)
         return self._consume(state, stat, current_path)
 
     def _consume(
@@ -158,7 +158,7 @@ class UnifiedStoreReader:
             # exists; the new records are everything after that pinned one.
             new_records = records if state.last_digest is None else records[1:]
         except (OSError, UnifiedStoreError, ValueError):
-            return self._resync(state, current_path)
+            return self._reload(state.session_root, state.session_id, current_path)
         if not new_records:
             # The store has not advanced past the last verified record — the
             # tail is still torn, or only non-projection bytes have landed.
@@ -168,7 +168,7 @@ class UnifiedStoreReader:
         try:
             changed, unknown, watermark, snapshot, turns = self._replay(state, new_records)
         except UnifiedStoreError:
-            return self._resync(state, current_path)
+            return self._reload(state.session_root, state.session_id, current_path)
         sequence = new_records[-1].sequence
         prior_fingerprint = state.journal_fingerprint or ()
         fingerprint = (*prior_fingerprint, *(r.record_sha256 for r in new_records))
@@ -245,21 +245,6 @@ class UnifiedStoreReader:
         view, report = _load_active_detailed(session_root, session_id, current_path, self._chunks)
         self._state = self._state_from(session_root, session_id, view, report)
         return UnifiedStoreUpdate(view, None, None)
-
-    def _resync(self, state: _ReaderState, current_path: Path) -> UnifiedStoreUpdate:
-        """Reload a newer publication or rewritten journal, proving the turn changes since.
-
-        Every retained generation segment between the last view and the new one is replayed in
-        order; a range they do not cover reports its turns as unknown, never as none.
-        """
-        view = self._reload(state.session_root, state.session_id, current_path).view
-        turns = retained_turn_changes(
-            state.session_root,
-            after=state.view.sequence,
-            through=view.sequence,
-            since=latest_turn(state.view.snapshot),
-        )
-        return UnifiedStoreUpdate(view, None, state.view, turns)
 
     @staticmethod
     def _state_from(

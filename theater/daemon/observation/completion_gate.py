@@ -15,7 +15,7 @@ from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.observation.turns import TurnAccumulator
 from theater.harness import HarnessObserver, TurnTerminal
 from theater.harness.contracts.source import NativeTurnState
-from theater.models import JobState, now
+from theater.models import JobState
 
 if TYPE_CHECKING:
     from theater.daemon.store import Store
@@ -89,19 +89,6 @@ class CompletionGate:
         turns = TurnAccumulator()
         turns.remember(self.store.turn_fences.keys(pid))
         return turns
-
-    def _note_turn_fences(self, pid: str, turns: TurnAccumulator, state: NativeTurnState) -> None:
-        """Fence, durably, each turn started from a fenced queue item, before its batch applies."""
-        promoted = turns.note_origins(state)
-        if not promoted:
-            return
-        try:
-            with self.store.write_unit() as unit:
-                self.store.turn_fences.add(
-                    pid, promoted, job_handle=None, created_at=now(), connection=unit.connection
-                )
-        except Exception:
-            logger.exception("persisting turn fences for %s failed", pid)
 
     async def _release_unproven(
         self,

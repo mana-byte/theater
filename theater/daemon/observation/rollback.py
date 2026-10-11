@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
-_JOURNALED = ("say", "hear", "take", "mark_handled")
+_JOURNALED = ("say", "hear", "take", "mark_handled", "remember")
 
 
 def _journal_turns(turns, undo: list[Callable[[], None]]) -> None:
@@ -56,7 +56,17 @@ def _journal_turns(turns, undo: list[Callable[[], None]]) -> None:
             undo.append(restore)
         original["mark_handled"](turn_id)
 
-    for wrapper in (say, hear, take, mark_handled):
+    def remember(fences):
+        fenced = list(turns._fenced)
+        original["remember"](fences)
+
+        def restore() -> None:
+            turns._fenced.clear()
+            turns._fenced.extend(fenced)
+
+        undo.append(restore)
+
+    for wrapper in (say, hear, take, mark_handled, remember):
         setattr(turns, wrapper.__name__, wrapper)
 
 

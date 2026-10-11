@@ -16,7 +16,7 @@ from theater.daemon.persistence.transactions import active_write_unit
 from theater.harness import Event, HarnessObserver
 from theater.harness.contracts.source import NativeTurnState
 from theater.harness.source import Batch, Source
-from theater.models import Status
+from theater.models import Status, now
 
 if TYPE_CHECKING:
     from theater.daemon.store import Store
@@ -100,8 +100,13 @@ class BatchApplication:
             else None
         )
         answer_turn_fn = partial(self._answer_turn, registration=registration)
+        promoted = turns.promotions(batch.turn_state)
         try:
-            if self._reducer.is_write_free(batch) and source.pending_source_checkpoint() is None:
+            if (
+                self._reducer.is_write_free(batch)
+                and source.pending_source_checkpoint() is None
+                and not promoted
+            ):
                 # Nothing to write or acknowledge: skip the unit; apply fast-paths itself.
                 return self._reducer.apply(
                     pid,
@@ -118,6 +123,13 @@ class BatchApplication:
                 self._reducer.staged_hashes(pid, batch),
                 self.store.write_unit() as unit,
             ):
+                if promoted:
+                    # A turn born of a fenced queue item is fenced durably with this batch, so a
+                    # failure leaves it unapplied and unacknowledged for the retry.
+                    self.store.turn_fences.add(
+                        pid, promoted, job_handle=None, created_at=now(), connection=unit.connection
+                    )
+                    turns.remember(promoted)
                 result = self._reducer.apply(
                     pid,
                     batch,
