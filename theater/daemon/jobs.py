@@ -554,8 +554,12 @@ class JobManager:
                     return candidate, STRUCTURED_PARSED, None
                 # Reaching here means no exact-turn route repaired the answer: fail closed.
                 failure = ContractFailure(
-                    audit.UNSUPPORTED_ROUTE,
-                    f"{verdict.reason}: no exact turn correlation to repair; {verdict.detail}",
+                    audit.CONTRACT_UNAVAILABLE
+                    if verdict.reason == "contract_unavailable"
+                    else audit.UNSUPPORTED_ROUTE,
+                    verdict.detail
+                    if verdict.reason == "contract_unavailable"
+                    else f"{verdict.reason}: no exact turn correlation to repair; {verdict.detail}",
                 )
             return None, STRUCTURED_UNABLE_TO_PARSE, failure
         try:

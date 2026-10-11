@@ -135,6 +135,8 @@ class RepairControls(ControlHost):
             audit.record(self._store, job, audit.REPAIR_SUCCEEDED, f"attempt {attempt.attempt}")
             self._settle_repair(attempt, audit.REPAIR_SUCCEEDED)
             return finished
+        if verdict.reason == "contract_unavailable":
+            return self._end_repair(attempt, job, text, audit.CONTRACT_UNAVAILABLE, verdict.detail)
         if attempt.attempt < REPAIR_MAX_ATTEMPTS:
             return self._next_attempt(attempt, job, evidence, verdict)
         return self._end_repair(attempt, job, text, audit.REPAIR_EXHAUSTED, verdict.detail)

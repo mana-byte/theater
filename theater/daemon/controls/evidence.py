@@ -6,8 +6,9 @@ import logging
 
 from theater.daemon.controls._common import INTERRUPTED_ERROR_CODE
 from theater.daemon.controls._host import ControlHost
+from theater.daemon.jobs import ContractFailure
 from theater.daemon.persistence.repositories.native_evidence import NativeTerminalEvidence
-from theater.daemon.response_contracts import parse_stored
+from theater.daemon.response_contracts import audit, parse_stored
 from theater.harness.contracts.runtime import (
     ControlTransport,
     NativeTurnOutcome,
@@ -143,6 +144,15 @@ class EvidenceControls(ControlHost):
         if contract is not None and state is JobState.DONE and evidence.error_code is None:
             verdict = self._evaluate(contract, evidence)
             if not verdict.ok:
+                if verdict.reason == "contract_unavailable":
+                    return self._jobs.finish(
+                        job_handle,
+                        state=JobState.DONE,
+                        result=result,
+                        contract_failure=ContractFailure(
+                            audit.CONTRACT_UNAVAILABLE, verdict.detail
+                        ),
+                    )
                 # The turn is exactly this job's, so Theater may ask the same agent to answer again.
                 return self._begin_repair(participant_id, job, evidence, verdict)
         if evidence.terminal is NativeTurnTerminal.INTERRUPTED:

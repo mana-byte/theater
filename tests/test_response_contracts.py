@@ -173,7 +173,7 @@ def test_references_and_combinators_are_refused_and_never_evaluated(store, schem
     deep = "[" * 16 + "]" * 16
     # A stored envelope from before this rule is judged invalid, not evaluated: no hang, no raise.
     verdict = parse_stored(legacy).validate(deep)
-    assert (verdict.ok, verdict.reason) == (False, "schema")
+    assert (verdict.ok, verdict.reason) == (False, "contract_unavailable")
     assert time.perf_counter() - started < 1.0
 
 

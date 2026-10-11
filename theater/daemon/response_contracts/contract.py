@@ -99,11 +99,17 @@ class StrictContract:
             )
         compiled = _compiled(self.schema_text)
         if isinstance(compiled, str):
-            return Verdict(False, "schema", f"the stored schema cannot be evaluated: {compiled}")
+            return Verdict(
+                False,
+                "contract_unavailable",
+                f"the stored schema cannot be evaluated: {compiled}",
+            )
         try:
             found = list(islice(compiled.iter_errors(value), _ERRORS_SCANNED))
         except Exception:  # a schema the validator cannot evaluate must never strand the job
-            return Verdict(False, "schema", "the answer could not be checked against the schema")
+            return Verdict(
+                False, "contract_unavailable", "the answer could not be checked against the schema"
+            )
         errors = sorted(found, key=lambda error: [str(part) for part in error.absolute_path])
         if not errors:
             return Verdict(True)

@@ -372,7 +372,7 @@ async def test_a_repair_turn_past_the_deadline_ends_the_job_but_keeps_the_fence_
     assert store.get_job(job.handle).structured_status == "unable_to_parse"
 
 
-async def test_a_stored_schema_the_validator_cannot_run_is_repaired_not_raised(store):
+async def test_a_stored_schema_the_validator_cannot_run_fails_without_repair(store):
     """A snapshot from before the keyword rules: evidence must not raise and strand the job."""
     harness = await open_harness(store, "p1")
     legacy = json.dumps(
@@ -380,7 +380,10 @@ async def test_a_stored_schema_the_validator_cannot_run_is_repaired_not_raised(s
     )
     job = await harness.service.send("p1", caller_id="caller", prompt="go", response_format=legacy)
 
-    await end_turn(harness, '{"a": 1}')  # no AttributeError: the job is handed to a repair
+    await end_turn(harness, '{"a": 1}')
 
-    assert store.get_job(job.handle).state == JobState.RUNNING
-    assert len(store.repair_attempts_for_job(job.handle)) == 1
+    finished = store.get_job(job.handle)
+    assert finished.state == JobState.DONE
+    assert finished.structured_status == "unable_to_parse"
+    assert store.repair_attempts_for_job(job.handle) == []
+    assert audit_events(store, job.handle)[-1] == "contract_unavailable"

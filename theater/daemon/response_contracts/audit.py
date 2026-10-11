@@ -13,6 +13,7 @@ from theater.observability.metrics import MetricKind, MetricSpec
 REPAIR_STARTED = "repair_started"
 REPAIR_SUCCEEDED = "repair_succeeded"
 UNSUPPORTED_ROUTE = "unsupported_route"
+CONTRACT_UNAVAILABLE = "contract_unavailable"
 REPAIR_BLOCKED = "repair_blocked"
 REPAIR_REJECTED = "repair_rejected"
 REPAIR_UNKNOWN = "repair_unknown"
@@ -26,6 +27,7 @@ REPAIR_INTERRUPTED = "repair_interrupted"
 FAILURE_EVENTS = frozenset(
     {
         UNSUPPORTED_ROUTE,
+        CONTRACT_UNAVAILABLE,
         REPAIR_BLOCKED,
         REPAIR_REJECTED,
         REPAIR_UNKNOWN,
