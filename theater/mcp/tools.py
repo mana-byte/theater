@@ -11,6 +11,7 @@ from theater.mcp.session import Session
 from theater.mcp.toolsets.delegation import (
     adopt_session,
     await_sessions,
+    cancel_job,
     get_session_controls,
     harnesses,
     interrupt_session,
@@ -38,6 +39,7 @@ __all__ = [
     "_summarise",
     "adopt_session",
     "await_sessions",
+    "cancel_job",
     "get_session_controls",
     "harnesses",
     "interrupt_session",

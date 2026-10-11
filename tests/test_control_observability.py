@@ -406,7 +406,7 @@ async def test_control_service_registers_counter_on_the_one_bridge(store, spy) -
     jobs = JobManager(store)
     for _ in range(3):
         ControlService(store=store, jobs=jobs, runtime_for=lambda pid: None, gates=gates)
-    assert all(spec is _CONTROL_METRIC_SPECS[0] for spec in spy.registered)
+    assert all(spec in _CONTROL_METRIC_SPECS for spec in spy.registered)
     assert spy.registered[0].name == CONTROL_UNKNOWN
     assert spy.registered[0].attribute_keys == ("kind", "reason")
     # The catalog stays one vocabulary: shared metric, metric-only gap.

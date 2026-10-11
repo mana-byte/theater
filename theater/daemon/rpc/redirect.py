@@ -10,7 +10,8 @@ from theater.constants.refusals import NEXT_REPLACE_TIMEOUT
 from theater.daemon.controls._common import ACTION_INTERRUPT
 from theater.models import BadRequest, Busy, StaleTarget, TheaterError
 
-IF_BUSY_MODES: Final = ("refuse", "queue", "amend", "replace")
+#: "auto" is the default: Theater delivers when safe and queues otherwise. The rest are explicit.
+IF_BUSY_MODES: Final = ("auto", "refuse", "queue", "amend", "replace")
 #: Replace waits this long for an observed idle; it stays under the client CALL_TIMEOUT (40 s).
 REPLACE_IDLE_WAIT_SECONDS: Final = 30.0
 _REPLACE_POLL_SECONDS: Final = 0.2
@@ -25,7 +26,7 @@ class ReplaceTimeout(TheaterError):
 
 
 def if_busy_param(params: dict) -> str:
-    value = params.get("if_busy") or "refuse"
+    value = params.get("if_busy") or "auto"
     if value not in IF_BUSY_MODES:
         raise BadRequest(
             f"send parameter 'if_busy' must be one of {', '.join(IF_BUSY_MODES)}; got {value!r}"

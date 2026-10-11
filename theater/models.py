@@ -474,6 +474,12 @@ class StaleTarget(TheaterError):
     code = "stale_target"
 
 
+class NotYourJob(TheaterError):
+    """``cancel_job`` named a job another participant requested."""
+
+    code = "not_your_job"
+
+
 class NotYourChild(TheaterError):
     """A kill was attempted on a participant the caller did not spawn.
     Unlike ``NotFound``, the id exists; checked after the fetch, so it reveals nothing

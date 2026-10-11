@@ -147,7 +147,10 @@ def _publish_routed_send_event(
 
 @method("send")
 async def _send(daemon, params: dict) -> dict:
-    """Send through the daemon's selected capability route; if_busy redirects a busy child."""
+    """Send through the daemon's selected route: once when safe, else queued under one handle.
+
+    An explicit ``if_busy`` (refuse, queue, amend, replace) keeps its stricter parent-only meaning.
+    """
     from theater.daemon.rpc import redirect
 
     target = daemon.registry.resolve(_require(params, "target"))
@@ -183,6 +186,31 @@ async def _send(daemon, params: dict) -> dict:
         return result
 
     try:
+        if if_busy == "auto":
+            job, queued = await daemon.controls.send_when_safe(
+                target_id,
+                caller_id=caller_id,
+                prompt=prompt,
+                response_format=response_format,
+            )
+            result = job.to_dict()
+            if queued:
+                result["delivery"] = "queued"
+                daemon.store.bus_append(
+                    "agent.queue_followup",
+                    from_id=caller_id,
+                    to_id=target_id,
+                    payload={"handle": job.handle, "prompt": prompt[:200]},
+                )
+            else:
+                _publish_routed_send_event(
+                    daemon,
+                    caller_id=caller_id,
+                    target_id=target_id,
+                    handle=job.handle,
+                    prompt=prompt,
+                )
+            return result
         if if_busy == "refuse":
             return await plain()
         redirect.authorize_redirect(daemon, target_id, caller_id)

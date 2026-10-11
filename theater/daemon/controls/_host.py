@@ -61,6 +61,25 @@ if TYPE_CHECKING:
         _closing: bool
 
         def _count_unknown_delivery(self, kind: ControlKind, reason: str) -> None: ...
+        async def send(
+            self,
+            participant_id: str,
+            *,
+            caller_id: str,
+            prompt: str,
+            response_format: str | None = None,
+        ) -> Job: ...
+        async def queue_followup(
+            self,
+            participant_id: str,
+            *,
+            caller_id: str,
+            prompt: str,
+            response_format: str | None = None,
+            origin: str | None = None,
+        ) -> Job: ...
+        def _count_send_admission(self, outcome: str) -> None: ...
+        def _count_cancel(self, outcome: str) -> None: ...
         def _control_latency(self, kind: ControlKind, participant_id: str) -> _ControlLatency: ...
         def route_for(
             self, participant_id: str, capability: RuntimeCapability, *, connection=None
@@ -69,7 +88,12 @@ if TYPE_CHECKING:
         async def _require_absent(self, participant_id: str, route: ControlRoute) -> None: ...
         def notify_persisted_settlement(self, operation_id: str) -> None: ...
         async def _snapshot_for_control(
-            self, runtime: HarnessRuntime, participant_id: str, *, initial_dispatch: bool = False
+            self,
+            runtime: HarnessRuntime,
+            participant_id: str,
+            *,
+            initial_dispatch: bool = False,
+            defer_presence: bool = False,
         ) -> RuntimeSnapshot: ...
         def _require_current_native_route(
             self,
@@ -107,6 +131,8 @@ if TYPE_CHECKING:
         ) -> str | None: ...
         @staticmethod
         def _callback_operation_id(operation: ControlOperation) -> str | None: ...
+        @staticmethod
+        def _queue_origin(operation: ControlOperation) -> str | None: ...
         def _bind_queued_predecessor(
             self, participant_id: str, snapshot: RuntimeSnapshot, turn: str, *, connection=None
         ) -> None: ...

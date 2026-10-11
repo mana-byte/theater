@@ -228,6 +228,38 @@ class ControlOperationRepository:
         ).fetchall()
         return [self._from_row(dict(row._mapping)) for row in rows]
 
+    def queued_callers(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> dict[str, str | None]:
+        """``operation_id -> requesting caller`` for the participant's queued rows."""
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
+            select(control_operations.c.operation_id, jobs.c.caller_id)
+            .select_from(
+                control_operations.outerjoin(jobs, jobs.c.handle == control_operations.c.job_handle)
+            )
+            .where(control_operations.c.participant_id == participant_id)
+            .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.QUEUED))
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def queued_count_for_caller(
+        self, participant_id: str, caller_id: str, *, connection: Connection | None = None
+    ) -> int:
+        """How many queued rows one requester holds on one participant."""
+        conn = self._db.conn if connection is None else connection
+        return int(
+            conn.execute(
+                select(func.count())
+                .select_from(
+                    control_operations.join(jobs, jobs.c.handle == control_operations.c.job_handle)
+                )
+                .where(control_operations.c.participant_id == participant_id)
+                .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.QUEUED))
+                .where(jobs.c.caller_id == caller_id)
+            ).scalar_one()
+        )
+
     def set_queued_payload(
         self, operation_id: str, payload: str, *, connection: Connection | None = None
     ) -> None:

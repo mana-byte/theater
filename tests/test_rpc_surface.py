@@ -14,6 +14,7 @@ EXPECTED_RPC_METHODS = {
     "harness.event",
     "hello",
     "jobs.await",
+    "jobs.cancel",
     "jobs.status",
     "models",
     "participant.adopt",

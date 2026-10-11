@@ -13,7 +13,12 @@ from typing import Literal, TypeVar
 
 from theater import timing
 from theater.constants.daemon import CONTROL_MAINTENANCE_INTERVAL_SECONDS
-from theater.constants.observability import CONTROL_DELIVERY_UNKNOWN_METRIC, MAX_ERROR_TYPE_LEN
+from theater.constants.observability import (
+    CONTROL_CANCEL_METRIC,
+    CONTROL_DELIVERY_UNKNOWN_METRIC,
+    CONTROL_SEND_ADMISSION_METRIC,
+    MAX_ERROR_TYPE_LEN,
+)
 from theater.daemon.controls._common import (
     ACTION_INTERRUPT,
     ACTION_QUEUE_DISPATCH,
@@ -35,6 +40,7 @@ from theater.daemon.controls._common import (
 )
 from theater.daemon.controls.activity import ActivityControls, BusyFacts
 from theater.daemon.controls.admission import AdmissionControls
+from theater.daemon.controls.cancellation import CancelControls
 from theater.daemon.controls.dispatch import (
     TEMPORARY_REFUSALS,
     DispatchControls,
@@ -44,6 +50,7 @@ from theater.daemon.controls.evidence import EvidenceControls
 from theater.daemon.controls.followups import FollowupControls
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.interrupts import InterruptControls, InterruptOutcome
+from theater.daemon.controls.messaging import MessageControls
 from theater.daemon.controls.native_delivery import NativeDeliveryControls
 from theater.daemon.controls.projection import ControlActionProjector
 from theater.daemon.controls.provider_delivery import ProviderControlDelivery
@@ -109,8 +116,22 @@ _CONTROL_METRIC_SPECS: tuple[MetricSpec, ...] = (
         MetricKind.COUNTER,
         ("kind", "reason"),
     ),
+    MetricSpec(
+        CONTROL_SEND_ADMISSION_METRIC,
+        "Public sends accepted, by whether they were delivered at once or queued.",
+        "1",
+        MetricKind.COUNTER,
+        ("outcome",),
+    ),
+    MetricSpec(
+        CONTROL_CANCEL_METRIC,
+        "cancel_job requests by bounded outcome.",
+        "1",
+        MetricKind.COUNTER,
+        ("outcome",),
+    ),
 )
-_UNKNOWN_DELIVERY_SPEC = _CONTROL_METRIC_SPECS[0]
+_UNKNOWN_DELIVERY_SPEC, _SEND_ADMISSION_SPEC, _CANCEL_SPEC = _CONTROL_METRIC_SPECS
 
 #: The latency catalog spec per public control kind.
 _LATENCY_SPECS = {
@@ -190,6 +211,8 @@ class _ControlLatency:
 class ControlService(
     AdmissionControls,
     SendControls,
+    MessageControls,
+    CancelControls,
     SteerControls,
     FollowupControls,
     DispatchControls,
@@ -335,6 +358,18 @@ class ControlService(
             bridge = metric_bridge()
             if bridge is not None:
                 bridge.observe(_UNKNOWN_DELIVERY_SPEC, 1, {"kind": kind.value, "reason": reason})
+
+    def _count_send_admission(self, outcome: str) -> None:
+        with contextlib.suppress(Exception):
+            bridge = metric_bridge()
+            if bridge is not None:
+                bridge.observe(_SEND_ADMISSION_SPEC, 1, {"outcome": outcome})
+
+    def _count_cancel(self, outcome: str) -> None:
+        with contextlib.suppress(Exception):
+            bridge = metric_bridge()
+            if bridge is not None:
+                bridge.observe(_CANCEL_SPEC, 1, {"outcome": outcome})
 
     def _control_latency(self, kind: ControlKind, participant_id: str) -> _ControlLatency:
         """Time one public control; setup is fail-open and can never raise."""

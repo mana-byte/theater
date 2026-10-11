@@ -320,6 +320,17 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
     """
 
     @mcp_tool()
+    async def cancel_job(handle: str) -> dict:
+        """Withdraw a message you sent that Theater has not yet transmitted.
+
+        Only the requester can cancel. Returns {"handle", "cancelled"}; when it is too
+        late, `reason` is "delivered", "delivery_uncertain" (it may have reached the
+        target; never assume it did not), "finished" (with `state`), or
+        "not_cancellable".
+        """
+        return await tools.cancel_job(session, handle=handle)
+
+    @mcp_tool()
     async def update_session_settings(
         target: str, model: str | None = None, reasoning_effort: str | None = None
     ) -> dict:
@@ -733,7 +744,7 @@ def build(
     async def send(
         target: str,
         prompt: str,
-        if_busy: Literal["refuse", "queue", "amend", "replace"] = "refuse",
+        if_busy: Literal["auto", "refuse", "queue", "amend", "replace"] = "auto",
         job_handle: str | None = None,
         response_format: dict | None = None,
     ) -> dict:
@@ -750,13 +761,15 @@ def build(
                    work only while the participant is live and may be
                    recycled after a death.
         prompt:    the text to deliver to the target.
-        if_busy:   what to do when the target is busy; an idle target always
-                   gets a plain send (route "send"). "queue": deliver at its next
-                   idle, new handle now (route "queued"). "amend": steer the
-                   active turn, same handle (route "steer"), else queue; an
-                   uncertain steer is reported, never retried. "replace": cancel
-                   its queue, interrupt, wait up to 30 s for idle, send (route
-                   "replace"). All but "refuse" need a direct child.
+        if_busy:   omit it. The default "auto" delivers once when safe and otherwise
+                   queues the message behind the target's work (or a human at its
+                   terminal), returning one handle either way; delivery="queued"
+                   marks a message not yet sent, and cancel_job withdraws it. The
+                   explicit modes need a direct child: "refuse" fails busy;
+                   "queue" always queues (route "queued"); "amend" steers the
+                   active turn (route "steer"), else queues; "replace" cancels its
+                   queue, interrupts, waits up to 30 s for idle, sends (route
+                   "replace").
         job_handle: amend/replace act only while this job is the active turn.
         response_format: optional JSON object, as for spawn_session. A bare JSON Schema
                    object is a prompt hint only (parsed with json.loads, never validated
@@ -770,10 +783,9 @@ def build(
                    an invalid one where it can prove which turn answered, and otherwise ends
                    the job with structured_status "unable_to_parse". await_sessions returns
                    a valid answer in structured_result.
-        Fails with `human_present` (human at the terminal), `busy` (target is
-        working or already owns an outstanding send, if_busy="refuse"),
-        `transcript_untrusted` or `transcript_identity_lost` (transcript needs
-        binding).
+        Fails with `busy` only for if_busy="refuse" or a full per-sender queue, and
+        with `transcript_untrusted` or `transcript_identity_lost` (transcript needs
+        binding); `human_present` only for if_busy="refuse".
         """
         return await tools.send_prompt(
             session,

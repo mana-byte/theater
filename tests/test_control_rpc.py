@@ -817,7 +817,9 @@ async def test_send_records_native_refusals_and_refuses_unbound_delivery(client,
     await _active_send(client, parent, child)
 
     with pytest.raises(RemoteError) as busy:
-        await client.call("send", target=child.id, prompt="too soon", caller_id=parent.id)
+        await client.call(
+            "send", target=child.id, prompt="too soon", caller_id=parent.id, if_busy="refuse"
+        )
     assert busy.value.code == "busy"
     assert (parent.id, child.id, "busy") in _refusals(daemon)
 

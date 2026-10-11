@@ -104,8 +104,19 @@ async def test_protected_rpc_mutations_leave_jobs_controls_and_participant_uncha
     presence.set(protected)
     original = daemon.registry.get(child.id).to_dict()
     mutations = [
-        ("send", {"target": child.id, "prompt": "agent send", "caller_id": parent.id}),
-        ("send", {"target": child.id, "prompt": "CLI send", "caller_id": "cli"}),
+        (
+            "send",
+            {
+                "target": child.id,
+                "prompt": "agent send",
+                "caller_id": parent.id,
+                "if_busy": "refuse",
+            },
+        ),
+        (
+            "send",
+            {"target": child.id, "prompt": "CLI send", "caller_id": "cli", "if_busy": "refuse"},
+        ),
         ("participant.steer", {"target": child.id, "prompt": "amend", "caller_id": parent.id}),
         (
             "participant.queue_followup",
@@ -277,7 +288,7 @@ async def test_native_activity_during_presence_refresh_refuses_stale_idle_contro
         assert daemon.store.queued_control_operation_count(child.id) == 1
     else:
         method, params = (
-            ("send", {"prompt": "must not merge"})
+            ("send", {"prompt": "must not merge", "if_busy": "refuse"})
             if action == "send"
             else ("participant.settings.update", {"reasoning_effort": "high"})
         )

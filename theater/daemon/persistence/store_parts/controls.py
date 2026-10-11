@@ -56,6 +56,17 @@ class ControlOperationStore(StoreHost):
             participant_id, connection=connection
         )
 
+    def queued_control_callers(self, participant_id: str, *, connection=None) -> dict:
+        """``operation_id -> requesting caller`` for queued rows; lane heads derive from it."""
+        return self._control_operations.queued_callers(participant_id, connection=connection)
+
+    def queued_control_count_for_caller(
+        self, participant_id: str, caller_id: str, *, connection=None
+    ) -> int:
+        return self._control_operations.queued_count_for_caller(
+            participant_id, caller_id, connection=connection
+        )
+
     def set_queued_control_payload(
         self, operation_id: str, payload: str, *, connection=None
     ) -> None:

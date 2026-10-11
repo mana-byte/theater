@@ -142,7 +142,7 @@ theater/
 │   └── plugins.py      generic loader compatibility facade
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
 │   └── builtin/        theater-configure · theater-debate · theater-orchestrate · theater-recover-tmux
-└── mcp/                server.py (20 agent tools) · session.py · toolsets/
+└── mcp/                server.py (21 agent tools) · session.py · toolsets/
 │   ├── toolsets/       delegation, participants, recall, transcripts, skills
 │   ├── server.py       composition surface — registers @mcp.tool entries
 │   └── tools.py        compatibility facade — re-exports toolsets + session
@@ -219,7 +219,9 @@ packages/regie/src/regie/
   fresh one — consumers refresh at admission and wait on revisions, never on
   reported timestamps. Existing-participant mutations that touch a pane or its
   control flow require absence; registry metadata (name, description) is not gated —
-  it has no pane channel;
+  it has no pane channel, and neither does *admission* of a peer's plain `send` as a
+  durable queued message: it touches no pane, and every promotion to delivery
+  (`dispatch_queue`) re-gates fresh presence, so absence is never inferred from admission;
   `jobs.await` gates a target only on the presence observed at admission; a gated target waits for both an observed departure and a terminal job — a departure alone never releases a still-running job.
   Do not add screen-scraping heuristics here (one was removed for this).
 - **`AWAITING_INPUT` is a display hint** — never gate a control decision on it.

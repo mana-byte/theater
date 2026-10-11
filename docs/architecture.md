@@ -1691,6 +1691,20 @@ methods are additive:
 | `participant.controls` | `theater controls` | `get_session_controls` | capabilities, health, settings, active turn, queued handles |
 | `participant.interrupt` | `theater interrupt` | `interrupt_session` | cancel the active turn *and* every undelivered followup |
 
+A plain `send` (`if_busy` omitted, "auto") delivers once when safe and otherwise admits the
+message as one durable job plus one `QUEUED` control row in a single write unit — same handle
+either way, `origin: "send"` in the row payload. The temporary refusals that queue it are busy,
+human present, awaiting a decision, and a repair fence; permanent ones (transcript trust,
+prompt bounds, route) refuse before anything is accepted. Admission does not check presence —
+the queued row touches no pane — but dispatch re-gates fresh presence, so an attended target
+receives it only after the human leaves, and nothing is replayed after an uncertain delivery.
+There is no default TTL. One sender holds a bounded share of a target's queue
+(`CONTROL_QUEUE_SENDER_MAX_PENDING`); dispatch takes the lowest-sequence head of each sender's
+lane, so one sender never overtakes itself. A peer's queued send authorizes at dispatch as the
+open ordinary send it is. `cancel_job` (`jobs.cancel`) lets the requester withdraw it while its
+control row is still `QUEUED` (under the participant lock the dispatcher holds); afterwards
+it answers `delivered`, `delivery_uncertain`, or `finished`.
+
 On MCP, `send(if_busy=...)` routes a busy direct child daemon-side: `queue`, `amend` (steer,
 else queue only after a definite refusal; an uncertain steer is never retried), or `replace`
 (interrupt, wait up to 30 s for an observed idle, then send with a card naming the child's

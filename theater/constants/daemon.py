@@ -167,6 +167,10 @@ CONTROL_OPERATION_PAYLOAD_MAX_BYTES = 65_536
 #: Default bound on pending followups per participant; enforced before queueing.
 CONTROL_QUEUE_MAX_PENDING = 32
 
+#: Pending peer-queued sends one sender may hold on one target; the rest of the bound stays for
+#: other senders and the parent's explicit followups.
+CONTROL_QUEUE_SENDER_MAX_PENDING = 8
+
 #: The bounded reconciliation window for a native prompt whose transmission or
 #: acknowledgement is uncertain.  The operation remains a durable execution
 #: barrier after this deadline until exact native evidence or an authoritative

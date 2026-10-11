@@ -214,7 +214,7 @@ async def send_prompt(
     target_id: str,
     prompt: str,
     response_format: dict | None = None,
-    if_busy: str = "refuse",
+    if_busy: str = "auto",
     job_handle: str | None = None,
 ) -> dict:
     """Send a prompt to an already-running agent on its selected transport.
@@ -222,13 +222,11 @@ async def send_prompt(
     Delivery follows the daemon's selected capability route. A native attempt
     with an unknown or disconnected outcome is never silently retried into
     the pane. The target must have a verified physical delivery route; origin
-    and ownership do not decide ordinary send admission. If a human is present
-    at the target pane, the call fails
-    with `human_present` — never inject into a session a human is using. If
-    the target is working or already owns an outstanding send prompt, the
-    call fails with `busy` unless ``if_busy`` asks the daemon to queue, amend
-    (steer), or replace; those modes are the daemon's to route and require a
-    direct child.
+    and ownership do not decide ordinary send admission. By default the daemon
+    delivers once when it is safe and otherwise queues the message, behind the
+    target's work or a human at its pane, under the same handle; explicit
+    ``if_busy`` modes (refuse, queue, amend, replace) keep their stricter,
+    direct-parent-only meaning.
 
     ``target_id`` may be a participant id or a name. Names work only
     while the participant is live; a dead participant's name is null and
@@ -256,6 +254,17 @@ async def send_prompt(
     )
     assert isinstance(record, dict)
     return job_entry(record)
+
+
+async def cancel_job(session: Session, *, handle: str) -> dict:
+    """Withdraw a send the requester made that was provably not yet transmitted."""
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "jobs.cancel", handle=handle, caller_id=session.participant_id
+    )
+    assert isinstance(result, dict)
+    return result
 
 
 async def interrupt_session(session: Session, *, target: str) -> dict:

@@ -628,7 +628,7 @@ async def test_composed_send_refused_while_present_and_recorded(client, daemon, 
     daemon.presence = PresentPresence(capture_screen=daemon.presence.capture_screen)
 
     with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="hi")
+        await client.call("send", target=target["id"], prompt="hi", if_busy="refuse")
 
     assert exc.value.code == "human_present"
     assert terminal_provider.deliveries == []
@@ -646,7 +646,7 @@ async def test_cli_and_agent_callers_face_the_same_present_gate(client, daemon, 
     daemon.presence = PresentPresence()
 
     for caller_id in (None, "some-parent"):
-        params = {"target": child.id, "prompt": "hi"}
+        params = {"target": child.id, "prompt": "hi", "if_busy": "refuse"}
         if caller_id is not None:
             params["caller_id"] = caller_id
         with pytest.raises(RemoteError) as exc:
@@ -710,7 +710,7 @@ async def test_missing_provider_never_grants_absence(client, daemon, terminal_pr
     daemon.presence = None
 
     with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="hi")
+        await client.call("send", target=target["id"], prompt="hi", if_busy="refuse")
     assert exc.value.code == "human_present"
     assert "no composed presence provider" in exc.value.message
     assert terminal_provider.deliveries == []
@@ -771,7 +771,7 @@ async def test_focus_arriving_during_native_snapshot_refuses_send(
         return await original()
 
     monkeypatch.setattr(runtime, "snapshot", blocked_snapshot)
-    send = asyncio.create_task(client.call("send", target=child.id, prompt="hi"))
+    send = asyncio.create_task(client.call("send", target=child.id, prompt="hi", if_busy="refuse"))
     await entered.wait()
     daemon.presence.set_state(PresenceState.PRESENT, "human arrived")
     release.set()

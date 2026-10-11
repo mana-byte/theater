@@ -70,6 +70,7 @@ async def test_tools_are_registered(daemon):
         "update_session_settings",
         "get_session_controls",
         "interrupt_session",
+        "cancel_job",
         "scratchpad_write",
         "scratchpad_get",
         "scratchpad_delete",
@@ -336,8 +337,14 @@ async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
         "job_handle",
         "response_format",
     }
-    assert send["properties"]["if_busy"]["default"] == "refuse"
-    assert set(send["properties"]["if_busy"]["enum"]) == {"refuse", "queue", "amend", "replace"}
+    assert send["properties"]["if_busy"]["default"] == "auto"
+    assert set(send["properties"]["if_busy"]["enum"]) == {
+        "auto",
+        "refuse",
+        "queue",
+        "amend",
+        "replace",
+    }
     assert set(send["required"]) == {"target", "prompt"}
 
 

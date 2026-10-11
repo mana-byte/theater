@@ -169,6 +169,9 @@ class SendControls(ControlHost):
         else:
             await self._gates.legacy_busy_check(participant_id)
             self._reject_provider_send_busy(participant_id, exclude=None)
+            # require() can still refuse a route that changed during the awaits above; it must do
+            # so before the job exists, or the refusal strands a running job without a control row.
+            self._provider.require(participant_id, RuntimeCapability.SEND, route)
             provider_job = self._create_send_job(
                 participant_id,
                 caller_id=request.caller_id,
@@ -324,13 +327,19 @@ class SendControls(ControlHost):
             raise Busy(f"participant {participant_id!r} has a running send job")
 
     async def _snapshot_for_control(
-        self, runtime: HarnessRuntime, participant_id: str, *, initial_dispatch: bool = False
+        self,
+        runtime: HarnessRuntime,
+        participant_id: str,
+        *,
+        initial_dispatch: bool = False,
+        defer_presence: bool = False,
     ) -> RuntimeSnapshot:
         """Refresh focus first, then read runtime state and recheck focus without yielding."""
-        if not initial_dispatch:
+        gated = not (initial_dispatch or defer_presence)
+        if gated:
             await self._gates.require_absent(participant_id)
         snapshot = await runtime.snapshot()
-        if not initial_dispatch:
+        if gated:
             self._gates.check_absent(participant_id)
         if runtime is not self._runtime_for(participant_id):
             raise StaleTarget(f"runtime for {participant_id!r} changed during control preparation")

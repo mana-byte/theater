@@ -197,7 +197,7 @@ async def test_a_refused_send_is_recorded_on_the_bus(
         await client.call("send", target=target["id"], prompt="first")
 
     with pytest.raises(RemoteError):
-        await client.call("send", target=target["id"], prompt="second")
+        await client.call("send", target=target["id"], prompt="second", if_busy="refuse")
 
     assert daemon.store.refusal_counts() == {reason: 1}
     refusals = [e for e in daemon.store.bus_tail() if e["kind"] == "send.refused"]

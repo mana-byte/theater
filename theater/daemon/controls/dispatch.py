@@ -6,8 +6,11 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from theater.constants.daemon import CONTROL_QUEUE_MAX_PENDING
 from theater.daemon.controls._common import (
     ACTION_QUEUE_DISPATCH,
+    ACTION_SEND,
+    QUEUE_ORIGIN_SEND,
     SEND_REJECTED_ERROR_CODE,
     _error_code_of,
 )
@@ -49,6 +52,8 @@ class QueueDispatchOutcome:
     failed: tuple[tuple[str, str], ...] = ()
     #: True when the queue head stayed queued on a temporary condition.
     deferred: bool = False
+    #: True when only this head cannot go now; the next sender's head may still be tried.
+    skip: bool = False
 
 
 class DispatchControls(ControlHost):
@@ -95,16 +100,26 @@ class DispatchControls(ControlHost):
             await self._advance_repairs_locked(participant_id)
             if self._store.repair_fence_active(participant_id):
                 return QueueDispatchOutcome(deferred=True)
+            skipped: set[str] = set()
             while True:
-                queued = self._store.queued_control_operations(participant_id)
-                head_id = queued[0].operation_id if queued else None
-                outcome = await self._dispatch_head(participant_id)
+                heads = [
+                    head
+                    for head in self._lane_heads(participant_id)
+                    if head.operation_id not in skipped
+                ]
+                if not heads:
+                    break
+                head = heads[0]
+                outcome = await self._dispatch_head(participant_id, head)
                 dispatched.extend(outcome.dispatched)
                 failed.extend(outcome.failed)
                 if outcome.deferred:
                     deferred = True
-                if head_id is not None and (outcome.dispatched or outcome.failed):
-                    self._control_notifier.notify(head_id)
+                if outcome.dispatched or outcome.failed:
+                    self._control_notifier.notify(head.operation_id)
+                if outcome.skip:
+                    skipped.add(head.operation_id)
+                    continue
                 if not outcome.dispatched and not outcome.failed:
                     break
                 # A definitive failure removed one item; try the next.
@@ -114,11 +129,26 @@ class DispatchControls(ControlHost):
             dispatched=tuple(dispatched), failed=tuple(failed), deferred=deferred
         )
 
-    async def _dispatch_head(self, participant_id: str) -> QueueDispatchOutcome:
-        queued = self._store.queued_control_operations(participant_id)
-        if not queued:
-            return QueueDispatchOutcome()
-        head = queued[0]
+    def _lane_heads(self, participant_id: str) -> list[ControlOperation]:
+        """Each requester's oldest queued row, in send order: one sender never overtakes itself.
+
+        Scans at most the queue bound; a row whose job vanished heads a lane of its own.
+        """
+        callers = self._store.queued_control_callers(participant_id)
+        seen: set[str] = set()
+        heads: list[ControlOperation] = []
+        for operation in self._store.queued_control_operations(participant_id)[
+            :CONTROL_QUEUE_MAX_PENDING
+        ]:
+            lane = callers.get(operation.operation_id) or operation.operation_id
+            if lane not in seen:
+                seen.add(lane)
+                heads.append(operation)
+        return heads
+
+    async def _dispatch_head(
+        self, participant_id: str, head: ControlOperation
+    ) -> QueueDispatchOutcome:
         job = self._store.get_job(head.job_handle) if head.job_handle else None
         if job is None or job.state != JobState.RUNNING:
             # The job vanished before dispatch (crash residue); the queue
@@ -138,8 +168,15 @@ class DispatchControls(ControlHost):
                 job,
                 BadRequest(f"queued job {job.handle!r} has no caller identity"),
             )
+        # A peer's queued send authorizes as the open ordinary send it is; other rows are parent
+        # controls and are re-authorized against the current owner.
+        action = (
+            ACTION_SEND
+            if self._queue_origin(head) == QUEUE_ORIGIN_SEND
+            else (ACTION_QUEUE_DISPATCH)
+        )
         try:
-            self._gates.authorize(participant_id, caller_id, ACTION_QUEUE_DISPATCH)
+            self._gates.authorize(participant_id, caller_id, action)
         except Exception as exc:
             return self._fail_queued_item(head, job, exc)
         try:
@@ -272,7 +309,7 @@ class DispatchControls(ControlHost):
                 payload=None,
             )
             if selected is None:
-                return QueueDispatchOutcome(deferred=True)
+                return QueueDispatchOutcome(deferred=True, skip=True)
             head = selected
         try:
             await self._gates.require_absent(participant_id)
@@ -358,7 +395,7 @@ class DispatchControls(ControlHost):
                 payload=None,
             )
             if selected is None:
-                return QueueDispatchOutcome(deferred=True)
+                return QueueDispatchOutcome(deferred=True, skip=True)
             head = selected
         if (
             head.backend_generation is None

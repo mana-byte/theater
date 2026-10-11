@@ -707,7 +707,12 @@ async def test_plugin_identity_is_credential_owned_and_send_keeps_busy_protectio
             "plugin.call",
             credential=credential.credential,
             operation="sessions.send",
-            params={"target": target["id"], "prompt": "work", "caller_id": "spoofed"},
+            params={
+                "target": target["id"],
+                "prompt": "work",
+                "caller_id": "spoofed",
+                "if_busy": "refuse",
+            },
         )
     assert busy.value.code == "busy"
 

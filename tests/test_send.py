@@ -326,7 +326,7 @@ async def test_send_to_busy_target_rejected(client, terminal_provider, daemon):
     await client.call("send", target=target["id"], prompt="first")
     # Second send to the same target is rejected
     with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="second")
+        await client.call("send", target=target["id"], prompt="second", if_busy="refuse")
     assert exc.value.code == "busy"
     # Only the first prompt was delivered
     assert len(terminal_provider.deliveries) == 1
@@ -339,7 +339,7 @@ async def test_send_to_working_target_without_a_job_is_rejected(client, terminal
     daemon.registry.set_status(target["id"], Status.WORKING)
 
     with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="replacement")
+        await client.call("send", target=target["id"], prompt="replacement", if_busy="refuse")
 
     assert exc.value.code == "busy"
     assert "not delivering now" in exc.value.message
@@ -466,7 +466,7 @@ async def test_send_ttl_supersedes_expired_job_before_refusing_fresh_job(
     monkeypatch.setattr(sending_mod, "now", lambda: current)
 
     with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="another")
+        await client.call("send", target=target["id"], prompt="another", if_busy="refuse")
 
     assert exc.value.code == "busy"
     assert terminal_provider.deliveries == []
@@ -555,7 +555,7 @@ async def test_a_spawn_that_asked_for_something_is_still_pending(client, termina
     )
     assert daemon.jobs.get(child["handle"]).state == JobState.RUNNING
     with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=child["id"], prompt="and another thing")
+        await client.call("send", target=child["id"], prompt="and another thing", if_busy="refuse")
     assert exc.value.code == "busy"
 
 
@@ -576,7 +576,7 @@ async def test_unknown_provider_evidence_blocks_send(client, terminal_provider, 
     target = await _target(client, daemon)
     daemon.presence = UnknownPresence()
     with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="go ahead")
+        await client.call("send", target=target["id"], prompt="go ahead", if_busy="refuse")
     assert exc.value.code == "human_present"
     assert terminal_provider.deliveries == []
 
@@ -652,7 +652,7 @@ async def test_second_native_send_while_busy_is_refused_and_counted(
 
     await client.call("send", target=target["id"], prompt="first")
     with pytest.raises(RemoteError) as busy:
-        await client.call("send", target=target["id"], prompt="second")
+        await client.call("send", target=target["id"], prompt="second", if_busy="refuse")
     assert busy.value.code == "busy"
     assert state.sent == ["first"], "nothing was re-delivered after the refusal"
     assert daemon.store.refusal_counts().get("busy") == 1

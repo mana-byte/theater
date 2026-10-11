@@ -27,6 +27,10 @@ INTERRUPTED_ERROR_CODE = "interrupted"
 CONTROL_TRANSFERRED_ERROR_CODE = "control_transferred"
 NATIVE_TURN_CONFLICT_ERROR_CODE = "native_turn_conflict"
 SEND_REJECTED_ERROR_CODE = "send_rejected"
+CANCELLED_ERROR_CODE = "cancelled"
+
+#: Payload ``origin`` of a queued row that a peer's plain ``send`` enqueued (not a parent control).
+QUEUE_ORIGIN_SEND = "send"
 
 #: Delivery outcome labels for the control latency metric.
 CONTROL_DELIVERY_ACCEPTED = DeliveryResult.ACCEPTED.value
@@ -69,6 +73,8 @@ class NativeControlPreparation:
     refusal_label: str
     initial_dispatch: bool = False
     require_available: bool = True
+    #: Admit without a presence check: a queued message touches no pane until dispatch re-gates.
+    defer_presence: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +97,7 @@ async def prepare_native_control(
         runtime,
         participant_id,
         initial_dispatch=preparation.initial_dispatch,
+        defer_presence=preparation.defer_presence,
     )
     route = host._require_current_native_route(
         participant_id,

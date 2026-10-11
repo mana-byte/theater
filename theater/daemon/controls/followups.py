@@ -5,18 +5,20 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 
-from theater.constants.daemon import CONTROL_QUEUE_MAX_PENDING
+from theater.constants.daemon import CONTROL_QUEUE_MAX_PENDING, CONTROL_QUEUE_SENDER_MAX_PENDING
 from theater.daemon.controls._common import (
     ACTION_QUEUE_FOLLOWUP,
     ACTION_SEND,
     CONTROL_DELIVERY_QUEUED,
+    QUEUE_ORIGIN_SEND,
     NativeControlPreparation,
     prepare_native_control,
 )
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.routing import ControlRoute
-from theater.daemon.events.publication import control_event, next_revision
+from theater.daemon.events.publication import control_event, job_event, next_revision
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.harness.contracts.runtime import (
     ConnectionHealth,
@@ -41,6 +43,8 @@ class _FollowupRequest:
     actor_client_id: str | None
     actor_participant_id: str | None
     pre_reserved: bool
+    #: ``QUEUE_ORIGIN_SEND`` for a peer's plain send that found the target busy or attended.
+    origin: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +72,7 @@ class FollowupControls(ControlHost):
         actor_client_id: str | None = None,
         actor_participant_id: str | None = None,
         pre_reserved: bool = False,
+        origin: str | None = None,
     ) -> Job:
         """Create an awaitable send job immediately and reserve its queue slot."""
         with self._control_latency(ControlKind.QUEUE_FOLLOWUP, participant_id) as latency:
@@ -83,6 +88,7 @@ class FollowupControls(ControlHost):
                     actor_client_id,
                     actor_participant_id,
                     pre_reserved,
+                    origin,
                 )
             )
             # The queue accepted the item; its delivery is observed when a
@@ -94,15 +100,29 @@ class FollowupControls(ControlHost):
     async def _queue_followup(self, request: _FollowupRequest) -> tuple[Job, str]:
         """The queue-followup body; returns its job and the reserved transport."""
         participant_id = request.participant_id
+        peer = request.origin == QUEUE_ORIGIN_SEND
         async with self._lock(participant_id):
-            self._gates.authorize(participant_id, request.caller_id, ACTION_QUEUE_FOLLOWUP)
+            # A peer's send keeps ordinary send's open permission; explicit queue stays parent-only.
+            self._gates.authorize(
+                participant_id,
+                request.caller_id,
+                ACTION_SEND if peer else ACTION_QUEUE_FOLLOWUP,
+            )
             if (existing := self._settled_followup(request)) is not None:
                 return existing
-            await self._gates.require_absent(participant_id)
+            # A peer message touches no pane until dispatch, which re-gates fresh presence.
+            if not peer:
+                await self._gates.require_absent(participant_id)
             self._gates.check_prompt(request.prompt)
-            self._require_followup_capacity(participant_id, pre_reserved=request.pre_reserved)
-            prepared = await self._prepare_followup_route(participant_id)
-            self._gates.check_absent(participant_id)
+            await self._gates.send_preflight(participant_id)
+            self._require_followup_capacity(
+                participant_id,
+                pre_reserved=request.pre_reserved,
+                sender_id=request.caller_id if peer else None,
+            )
+            prepared = await self._prepare_followup_route(participant_id, defer_presence=peer)
+            if not peer:
+                self._gates.check_absent(participant_id)
             if request.pre_reserved:
                 return self._reuse_followup(request, prepared)
             job, transport = self._reserve_followup(request, prepared)
@@ -124,7 +144,17 @@ class FollowupControls(ControlHost):
             return self._require_job(existing.job_handle), existing.transport.value
         return None
 
-    def _require_followup_capacity(self, participant_id: str, *, pre_reserved: bool) -> None:
+    def _require_followup_capacity(
+        self, participant_id: str, *, pre_reserved: bool, sender_id: str | None = None
+    ) -> None:
+        if sender_id is not None:
+            held = self._store.queued_control_count_for_caller(participant_id, sender_id)
+            if held >= CONTROL_QUEUE_SENDER_MAX_PENDING:
+                raise Busy(
+                    f"you already have {held} messages waiting for participant "
+                    f"{participant_id!r} (bound {CONTROL_QUEUE_SENDER_MAX_PENDING}); await one "
+                    "of them or cancel_job a message you no longer need before sending another"
+                )
         pending = self._store.queued_control_operation_count(participant_id)
         queue_full = (
             pending > CONTROL_QUEUE_MAX_PENDING
@@ -138,7 +168,9 @@ class FollowupControls(ControlHost):
                 "interrupt the pending handles before queueing another"
             )
 
-    async def _prepare_followup_route(self, participant_id: str) -> _FollowupRoute:
+    async def _prepare_followup_route(
+        self, participant_id: str, *, defer_presence: bool = False
+    ) -> _FollowupRoute:
         route = self.route_for(participant_id, RuntimeCapability.QUEUE_FOLLOWUP)
         if route.transport is None:
             raise BadRequest(f"participant {participant_id!r} does not offer a followup transport")
@@ -158,6 +190,7 @@ class FollowupControls(ControlHost):
                 action=ACTION_SEND,
                 refusal_label=ACTION_QUEUE_FOLLOWUP,
                 require_available=False,
+                defer_presence=defer_presence,
             ),
         )
         snapshot = prepared.snapshot
@@ -209,7 +242,27 @@ class FollowupControls(ControlHost):
             payload = self._queue_payload(
                 predecessor=prepared.predecessor,
                 callback_operation_id=request.callback_operation_id,
+                origin=request.origin,
             )
+            timestamp = self._clock()
+            # The job and its control row commit together: a handle never exists half-admitted.
+            job = Job(
+                handle=handle,
+                caller_id=request.caller_id,
+                target_id=participant_id,
+                kind="send",
+                prompt=request.prompt,
+                state=JobState.RUNNING.value,
+                result=None,
+                error_code=None,
+                created_at=timestamp,
+                finished_at=None,
+                response_format=request.response_format,
+                actor_client_id=request.actor_client_id,
+                actor_participant_id=request.actor_participant_id,
+            )
+            self._store.create_job(job, connection=connection)
+            unit.after_commit(partial(self._publish_job_created, job))
             if prepared.route.is_provider:
                 self._provider.reserve(
                     control_id,
@@ -238,25 +291,12 @@ class FollowupControls(ControlHost):
                 )
             reserved = self._store.get_control_operation(control_id, connection=connection)
             assert reserved is not None
-            event = control_event(
-                self._store,
-                reserved,
-                connection,
-                revision=next_revision(self._store, connection),
-            )
-            if event is not None:
-                self._store.journal.append_group(unit, [event])
-        self._jobs.create(
-            handle=handle,
-            caller_id=request.caller_id,
-            target_id=participant_id,
-            kind="send",
-            prompt=request.prompt,
-            cwd=None,
-            response_format=request.response_format,
-            actor_client_id=request.actor_client_id,
-            actor_participant_id=request.actor_participant_id,
-        )
+            revision = next_revision(self._store, connection)
+            events = [job_event(job, revision=revision, recorded_at=timestamp)]
+            projected = control_event(self._store, reserved, connection, revision=revision + 1)
+            if projected is not None:
+                events.append(projected)
+            self._store.journal.append_group(unit, events)
         self._notify_reserved(request.on_reserved, control_id, handle)
         return self._require_job(handle), transport
 
@@ -292,17 +332,42 @@ class FollowupControls(ControlHost):
                 return None
         return turn
 
+    def _publish_job_created(self, job: Job) -> None:
+        self._store.bus_append(
+            "job.created",
+            from_id=job.caller_id,
+            to_id=job.target_id,
+            payload={"handle": job.handle, "kind": str(job.kind)},
+        )
+
     @staticmethod
-    def _queue_payload(*, predecessor: str | None, callback_operation_id: str | None) -> str | None:
+    def _queue_payload(
+        *,
+        predecessor: str | None,
+        callback_operation_id: str | None,
+        origin: str | None = None,
+    ) -> str | None:
         values = {
             key: value
             for key, value in (
                 ("queue_predecessor_turn", predecessor),
                 ("callback_operation_id", callback_operation_id),
+                ("origin", origin),
             )
             if value is not None
         }
         return json.dumps(values) if values else None
+
+    @staticmethod
+    def _queue_origin(operation: ControlOperation) -> str | None:
+        if operation.payload is None:
+            return None
+        try:
+            value = json.loads(operation.payload)
+        except (TypeError, ValueError):
+            return None
+        origin = value.get("origin") if isinstance(value, dict) else None
+        return origin if isinstance(origin, str) and origin else None
 
     @staticmethod
     def _callback_operation_id(operation: ControlOperation) -> str | None:
@@ -330,6 +395,7 @@ class FollowupControls(ControlHost):
             payload = self._queue_payload(
                 predecessor=turn,
                 callback_operation_id=self._callback_operation_id(operation),
+                origin=self._queue_origin(operation),
             )
             assert payload is not None
             if (
