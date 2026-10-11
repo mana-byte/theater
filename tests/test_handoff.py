@@ -951,3 +951,37 @@ async def test_a_permanent_provider_refusal_ends_the_gate_instead_of_retrying(
         "handoff_launch_refused",
     )
     assert reason in gate.error and not daemon.handoff._retrying
+
+
+async def test_failed_terminal_write_rolls_back_evidence_so_retry_records_its_own_facts(
+    daemon, launches, tmp_path
+):
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    await _defer(daemon, repo)
+    head = _git(repo, "rev-parse", "HEAD")
+    real = daemon.store.journal.append_group
+    calls = []
+
+    def boom(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("injected after evidence write")
+
+    daemon.store.journal.append_group = boom
+    with pytest.raises(RuntimeError, match="injected"):
+        await _end(daemon, state=JobState.DONE, result="first")
+    daemon.store.journal.append_group = real
+
+    assert calls and daemon.store.get_job("src#1").state == JobState.RUNNING
+    assert daemon.store.get_job_evidence("src#1") is None
+
+    await _end(daemon, state=JobState.CRASHED, result="second", error_code="boom")
+
+    job = daemon.store.get_job("src#1")
+    evidence = daemon.store.get_job_evidence("src#1")
+    assert (job.state, job.result) == (JobState.CRASHED, "second")
+    assert (evidence.outcome, evidence.answer, evidence.git.commit_sha) == (
+        "crashed",
+        "second",
+        head,
+    )

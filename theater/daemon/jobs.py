@@ -540,33 +540,19 @@ class JobManager:
             raw_result=raw_result,
             in_unit=False,
         )
-        if acc:
-            # Write job result and touches in one transaction; store connection is autocommit.
-            self._finish_with_touches(
-                handle,
-                state=str(state),
-                result=result,
-                error_code=error_code,
-                finished_at=finished_at,
-                response_format=job.response_format,
-                structured_result=structured_result,
-                structured_status=structured_status,
-                touches=acc.rows(handle),
-                evidence=evidence,
-            )
-        else:
-            if evidence is not None:
-                self.store.put_job_evidence(evidence)
-            self.store.finish_job(
-                handle,
-                state=str(state),
-                result=result,
-                error_code=error_code,
-                finished_at=finished_at,
-                response_format=job.response_format,
-                structured_result=structured_result,
-                structured_status=structured_status,
-            )
+        # One transaction: a failed finish must not leave evidence behind.
+        self._finish_with_touches(
+            handle,
+            state=str(state),
+            result=result,
+            error_code=error_code,
+            finished_at=finished_at,
+            response_format=job.response_format,
+            structured_result=structured_result,
+            structured_status=structured_status,
+            touches=acc.rows(handle) if acc else [],
+            evidence=evidence,
+        )
         if failure is not None:
             audit.record(self.store, job, failure.event, failure.detail)
 
