@@ -8,8 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -228,6 +228,7 @@ class JobManager:
         self._staged_git: dict[str, GitFacts] = {}
         #: Git state captured off the event loop just ahead of a terminal batch, keyed by job.
         self._prepinned: dict[str, GitFacts] = {}
+        self._pin_refs: dict[str, int] = {}
         #: Called with a job handle after its terminal state is committed and awaiters are woken.
         self._terminal_listeners: list[Callable[[str], None]] = []
 
@@ -387,14 +388,36 @@ class JobManager:
         ]
         if not jobs:
             return []
-        facts = await asyncio.to_thread(self.evidence.capture, jobs[0])
-        for job in jobs:
-            self._prepinned[job.handle] = facts
+        fresh = [job for job in jobs if job.handle not in self._prepinned]
+        if fresh:
+            facts = await asyncio.to_thread(self.evidence.capture, fresh[0])
+            for job in fresh:
+                self._prepinned.setdefault(job.handle, facts)
+        for job in jobs:  # overlapping callers share one pin until the last releases it
+            self._pin_refs[job.handle] = self._pin_refs.get(job.handle, 0) + 1
         return [job.handle for job in jobs]
 
     def release_pins(self, handles: list[str]) -> None:
         for handle in handles:
-            self._prepinned.pop(handle, None)
+            left = self._pin_refs.get(handle, 1) - 1
+            if left > 0:
+                self._pin_refs[handle] = left
+            else:
+                self._pin_refs.pop(handle, None)
+                self._prepinned.pop(handle, None)
+
+    @asynccontextmanager
+    async def pinned(self, target_id: str) -> AsyncIterator[None]:
+        """Hold a thread-made Git pin across a sync completion; a pin failure fails closed."""
+        try:
+            handles = await self.prepare_pins(target_id)
+        except Exception:
+            logger.exception("pinning completion evidence for %s failed", target_id)
+            handles = []
+        try:
+            yield
+        finally:
+            self.release_pins(handles)
 
     def track(self, handle: str) -> None:
         """Give a running job its wake event; a daemon restart loses the in-memory one."""

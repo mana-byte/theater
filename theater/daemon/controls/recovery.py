@@ -218,7 +218,7 @@ class RecoveryControls(ControlHost):
             }
             # The commit-before-finish crash window is resolved before the deadline path.
             if operations:
-                resolved.extend(self.finish_jobs_from_pending_evidence([participant_id]))
+                resolved.extend(await self.settle_pending_evidence([participant_id]))
                 operations = {
                     operation.operation_id: operation
                     for operation in (

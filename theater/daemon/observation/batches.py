@@ -35,6 +35,7 @@ class BatchApplication:
         _finish: Callable[..., Any]
         _is_untrusted_rotation: Callable[..., Any]
         mark_transcript_identity_lost: Callable[..., Any]
+        _pinned_for: Callable[..., Any]
         _rescue_jobs: Callable[..., Any]
         _reset_identity_loss_confirmation: Callable[..., Any]
         _validate_batch: Callable[..., Any]
@@ -219,6 +220,7 @@ class BatchApplication:
             reset_identity_loss_fn=self._reset_identity_loss_confirmation,
             is_untrusted_rotation_fn=self._is_untrusted_rotation,
             rescue_jobs_fn=self._rescue_jobs,
+            pinned_fn=self._pinned_for,
         )
 
     def _settle_from_event(

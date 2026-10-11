@@ -17,6 +17,7 @@ from tests.test_control_rpc import _native_pair
 from theater.constants.daemon import CONTROL_QUEUE_PEER_MAX_PENDING
 from theater.daemon.gc import _sweep_stale_running
 from theater.daemon.handoff import gitfacts
+from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.operations import OperationOutcome
 from theater.daemon.rails import BudgetExceeded, CycleDetected
 from theater.daemon.rpc.jobs import _jobs_await
@@ -769,6 +770,123 @@ async def test_a_path_nobody_staged_fails_closed_without_running_git_on_the_loop
     evidence = daemon.store.get_job_evidence("src#1")
     assert (evidence.git.pin_state, evidence.git.reason) == ("unpinned", "not_staged")
     assert threads == []
+
+
+# ---- completion paths outside an ordinary turn-end batch pin Git in a thread --------------------
+
+
+async def _review_source(daemon, tmp_path):
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    await _defer(daemon, repo, task_kind="independent_review", worktree=True, prompt="Review it")
+    return repo
+
+
+def _assert_pinned_off_loop(daemon, threads) -> None:
+    git = daemon.store.get_job_evidence("src#1").git
+    assert git.pin_state == "pinned" and git.commit_sha
+    assert threads and threading.get_ident() not in threads, "Git ran off the event loop"
+
+
+def _finish_source(daemon):
+    return lambda *_a, **_k: daemon.jobs.finish("src#1", state=JobState.DONE, result="ok") or True
+
+
+async def test_an_attach_time_turn_end_pins_git_off_the_loop(
+    daemon, launches, tmp_path, monkeypatch
+):
+    await _review_source(daemon, tmp_path)
+    threads = _git_spy(monkeypatch)
+    monkeypatch.setattr(daemon.observer, "_accept_attachment", _finish_source(daemon))
+    batch = SimpleNamespace(
+        events=[], attached=SimpleNamespace(last_event=SimpleNamespace(turn_end=True))
+    )
+    context = SimpleNamespace(pid="src", source=None, registration=None)
+
+    assert await daemon.observer._handle_rejected_attachment(context, batch) is False
+
+    _assert_pinned_off_loop(daemon, threads)
+
+
+async def test_an_attach_without_a_turn_end_costs_no_git(daemon, launches, tmp_path, monkeypatch):
+    await _review_source(daemon, tmp_path)
+    threads = _git_spy(monkeypatch)
+    monkeypatch.setattr(daemon.observer, "_accept_attachment", lambda *_a, **_k: True)
+    batch = SimpleNamespace(
+        events=[], attached=SimpleNamespace(last_event=SimpleNamespace(turn_end=False))
+    )
+
+    await daemon.observer._handle_rejected_attachment(
+        SimpleNamespace(pid="src", source=None, registration=None), batch
+    )
+
+    assert threads == []
+
+
+async def test_a_relocated_transcript_turn_end_pins_git_off_the_loop(
+    daemon, launches, tmp_path, monkeypatch
+):
+    await _review_source(daemon, tmp_path)
+    threads = _git_spy(monkeypatch)
+    reducer = daemon.observer._reducer
+    monkeypatch.setattr(type(reducer), "relocate", property(lambda _self: -1.0))
+    batch = SimpleNamespace(events=[SimpleNamespace(turn_end=True)], attached=None)
+
+    async def refresh():
+        return batch
+
+    async def on_progress(*_a):
+        return None
+
+    await reducer.on_quiet(
+        "src",
+        None,
+        SimpleNamespace(refresh=refresh, discard_attachment=lambda: None),
+        QuietClock(),
+        None,
+        validate_batch_fn=lambda *_a: None,
+        report_source_error_fn=lambda *_a: None,
+        accept_attachment_fn=lambda *_a: True,
+        apply_fn=_finish_source(daemon),
+        on_progress_fn=on_progress,
+        evidence_bound_fn=None,
+        confirm_identity_loss_fn=None,
+        mark_identity_lost_fn=None,
+        reset_identity_loss_fn=None,
+        is_untrusted_rotation_fn=lambda *_a: False,
+        rescue_jobs_fn=None,
+        pinned_fn=daemon.observer._pinned_for,
+    )
+
+    _assert_pinned_off_loop(daemon, threads)
+
+
+async def test_recorded_native_evidence_pins_git_before_finishing_without_an_observer(
+    daemon, launches, tmp_path, monkeypatch
+):
+    """A buffered outcome reaches the sink on reconnect, with no observer pin around it."""
+    await _review_source(daemon, tmp_path)
+    threads = _git_spy(monkeypatch)
+    finish = _finish_source(daemon)
+    monkeypatch.setattr(daemon.controls, "_record_terminal_evidence_locked", finish)
+
+    await daemon.controls.record_terminal_evidence("src", backend_generation=1, outcome=None)
+
+    _assert_pinned_off_loop(daemon, threads)
+
+
+async def test_overlapping_pins_share_one_git_read_until_the_last_release(
+    daemon, launches, tmp_path, monkeypatch
+):
+    await _review_source(daemon, tmp_path)
+    threads = _git_spy(monkeypatch)
+
+    async with daemon.jobs.pinned("src"):
+        async with daemon.jobs.pinned("src"):
+            pass
+        assert "src#1" in daemon.jobs._prepinned  # the inner release leaves the outer pin held
+    assert not daemon.jobs._prepinned and not daemon.jobs._pin_refs
+    assert len(threads) == 1 and threading.get_ident() not in threads
 
 
 # ---- H1 round two: only an absent provider is waited for -----------------------------------------

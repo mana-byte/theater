@@ -27,6 +27,7 @@ class ScreenReading:
         store: Store
         _terminal_evidence_provider: Any
         _answer_turn: Callable[..., Any]
+        _pinned: Callable[..., Any]
         _discard_agent_telemetry: Callable[..., Any]
         _settle: Callable[..., Any]
         _sleep: Callable[..., Any]
@@ -50,7 +51,8 @@ class ScreenReading:
                         if idle_streak >= IDLE_CONFIRMATIONS:
                             if not ended:
                                 ended = True
-                                self._end_turn_from_screen(pid, capture)
+                                async with self._pinned(pid):
+                                    self._end_turn_from_screen(pid, capture)
                             self._settle(pid, Status.IDLE)
                         elif idle_streak == 0:
                             ended = False

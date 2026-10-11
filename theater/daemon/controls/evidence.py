@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import Iterator
 
 from theater.daemon.controls._common import INTERRUPTED_ERROR_CODE
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.jobs import ContractFailure
+from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.persistence.repositories.native_evidence import NativeTerminalEvidence
 from theater.daemon.response_contracts import audit, parse_stored
 from theater.harness.contracts.runtime import (
@@ -36,7 +39,7 @@ class EvidenceControls(ControlHost):
         outcome: NativeTurnOutcome,
     ) -> Job | None:
         """Persist and process evidence under its participant's control lock."""
-        async with self._lock(participant_id):
+        async with self._lock(participant_id), self._jobs.pinned(participant_id):
             return self._record_terminal_evidence_locked(
                 participant_id, backend_generation=backend_generation, outcome=outcome
             )
@@ -171,34 +174,64 @@ class EvidenceControls(ControlHost):
         )
         return self._jobs.finish(job_handle, state=state, result=result, error_code=error_code)
 
+    def _pending_evidence(
+        self, participant_id: str
+    ) -> Iterator[tuple[Job, ControlOperation, NativeTerminalEvidence]]:
+        """Committed terminal evidence whose delivered job is still running."""
+        for job in self._store.completion_candidate_jobs_for_target(participant_id):
+            for operation in self._store.control_operations_for_job(job.handle):
+                if operation.transport is not ControlTransport.NATIVE_RUNTIME:
+                    continue
+                if (
+                    operation.backend_generation is None
+                    or operation.native_session_id is None
+                    or operation.native_turn_id is None
+                ):
+                    continue
+                evidence = self._store.get_native_terminal_evidence(
+                    participant_id=participant_id,
+                    backend_generation=operation.backend_generation,
+                    native_session_id=operation.native_session_id,
+                    native_turn_id=operation.native_turn_id,
+                )
+                if evidence is not None:
+                    yield job, operation, evidence
+
+    def _evidence_pending(self, participant_id: str) -> bool:
+        if next(self._pending_evidence(participant_id), None) is not None:
+            return True
+        return any(
+            self._repair_evidence(attempt) is not None
+            for attempt in self._store.open_repair_attempts(participant_id)
+        )
+
+    async def settle_pending_evidence(self, participant_ids: list[str]) -> list[Job]:
+        """``finish_jobs_from_pending_evidence`` with Git pinned off the loop, only when needed."""
+        finished: list[Job] = []
+        for participant_id in participant_ids:
+            hold = (
+                self._jobs.pinned(participant_id)
+                if self._evidence_pending(participant_id)
+                else contextlib.nullcontext()
+            )
+            async with hold:
+                finished.extend(self.finish_jobs_from_pending_evidence([participant_id]))
+        return finished
+
     def finish_jobs_from_pending_evidence(self, participant_ids: list[str]) -> list[Job]:
         """Close the crash window between the evidence commit and job finish."""
         finished: list[Job] = []
         for participant_id in participant_ids:
-            for job in self._store.completion_candidate_jobs_for_target(participant_id):
-                for operation in self._store.control_operations_for_job(job.handle):
-                    if operation.transport is not ControlTransport.NATIVE_RUNTIME:
-                        continue
-                    if (
-                        operation.backend_generation is None
-                        or operation.native_session_id is None
-                        or operation.native_turn_id is None
-                    ):
-                        continue
-                    evidence = self._store.get_native_terminal_evidence(
-                        participant_id=participant_id,
-                        backend_generation=operation.backend_generation,
-                        native_session_id=operation.native_session_id,
-                        native_turn_id=operation.native_turn_id,
-                    )
-                    if evidence is None:
-                        continue
-                    if evidence.terminal is NativeTurnTerminal.INTERRUPTED:
-                        self._cancel_pending_followups(participant_id, evidence)
-                    self._clear_execution_barrier_for_operation(operation)
-                    result = self._finish_from_evidence(participant_id, job.handle, evidence)
-                    if result is not None and result.state != JobState.RUNNING:
-                        finished.append(result)
-                        break
+            settled: set[str] = set()
+            for job, operation, evidence in self._pending_evidence(participant_id):
+                if job.handle in settled:
+                    continue
+                if evidence.terminal is NativeTurnTerminal.INTERRUPTED:
+                    self._cancel_pending_followups(participant_id, evidence)
+                self._clear_execution_barrier_for_operation(operation)
+                result = self._finish_from_evidence(participant_id, job.handle, evidence)
+                if result is not None and result.state != JobState.RUNNING:
+                    finished.append(result)
+                    settled.add(job.handle)
         self.resolve_repairs_from_pending_evidence(participant_ids)
         return finished

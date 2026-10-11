@@ -8,6 +8,7 @@ attempts, only the single public job.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 
@@ -233,7 +234,18 @@ class RepairControls(ControlHost):
             await self._advance_repairs_locked(participant_id)
 
     async def _advance_repairs_locked(self, participant_id: str) -> None:
-        for attempt in self._store.open_repair_attempts(participant_id):
+        attempts = self._store.open_repair_attempts(participant_id)
+        # Git is pinned off the loop only for a pass that will end a job, not every poll.
+        hold = (
+            self._jobs.pinned(participant_id)
+            if any(self._repair_will_finish(attempt) for attempt in attempts)
+            else contextlib.nullcontext()
+        )
+        async with hold:
+            await self._advance_attempts(attempts)
+
+    async def _advance_attempts(self, attempts: list[RepairAttempt]) -> None:
+        for attempt in attempts:
             if attempt.state is RepairState.PENDING:
                 if self._repair_overdue(attempt):
                     self._time_out_unsent(attempt)
@@ -468,6 +480,30 @@ class RepairControls(ControlHost):
             attempt.native_session_id,
         )
 
+    def _repair_deadline_event(self, attempt: RepairAttempt) -> tuple[str, str] | None:
+        """The audit event that ends the caller's wait on an unanswered repair, if one is due."""
+        if attempt.state in (RepairState.DISPATCHED, RepairState.UNKNOWN):
+            ambiguous = max(
+                attempt.updated_at + AMBIGUOUS_DELIVERY_DEADLINE_SECONDS,
+                self._deadline_not_before.get(attempt.attempt_id, -math.inf),
+            )
+            if self._clock() < ambiguous and not self._repair_overdue(attempt):
+                return None
+            return audit.REPAIR_UNKNOWN, "the repair delivery was never confirmed"
+        if attempt.state is RepairState.AWAITING and self._repair_overdue(attempt):
+            return audit.REPAIR_TIMEOUT, "the repair turn did not finish in its deadline"
+        return None
+
+    def _repair_will_finish(self, attempt: RepairAttempt) -> bool:
+        """Whether reconciling this attempt now ends its job (mirrors ``_reconcile_repair``)."""
+        if attempt.state is RepairState.PENDING:
+            return self._repair_overdue(attempt)
+        if self._repair_evidence(attempt) is not None or self._repair_context_gone(attempt):
+            return True
+        job = self._store.get_job(attempt.job_handle)
+        running = job is not None and job.state == JobState.RUNNING
+        return running and not self._recovering and self._repair_deadline_event(attempt) is not None
+
     def _reconcile_repair(self, attempt: RepairAttempt) -> None:
         """Resolve an in-flight attempt from exact facts only; idle alone proves nothing."""
         evidence = self._repair_evidence(attempt)
@@ -490,18 +526,10 @@ class RepairControls(ControlHost):
             return
         if job is None or not running or self._recovering:
             return
-        if attempt.state in (RepairState.DISPATCHED, RepairState.UNKNOWN):
-            ambiguous = max(
-                attempt.updated_at + AMBIGUOUS_DELIVERY_DEADLINE_SECONDS,
-                self._deadline_not_before.get(attempt.attempt_id, -math.inf),
-            )
-            if self._clock() < ambiguous and not self._repair_overdue(attempt):
-                return
-            event, detail = audit.REPAIR_UNKNOWN, "the repair delivery was never confirmed"
-        elif attempt.state is RepairState.AWAITING and self._repair_overdue(attempt):
-            event, detail = audit.REPAIR_TIMEOUT, "the repair turn did not finish in its deadline"
-        else:
+        due = self._repair_deadline_event(attempt)
+        if due is None:
             return
+        event, detail = due
         # The caller is not kept waiting on a turn that may still run; the attempt stays open, so
         # the fence holds until that turn's evidence arrives or its context is gone.
         self._jobs.finish(

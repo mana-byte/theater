@@ -479,6 +479,7 @@ class Reducer:
         reset_identity_loss_fn,
         is_untrusted_rotation_fn,
         rescue_jobs_fn,
+        pinned_fn=None,
     ) -> None:
         """Nothing arrived this tick. Run the three quiet timers.
 
@@ -497,8 +498,11 @@ class Reducer:
             )
             if untrusted_refresh:
                 source.discard_attachment()
-            accepted = not untrusted_refresh and accept_attachment_fn(pid, source, batch)
-            if accepted and apply_fn(pid, batch, clock, turns):
+            # A relocated transcript can end a job on attach or in its events; pin Git first.
+            async with pinned_fn(pid, batch) if pinned_fn else nullcontext():
+                accepted = not untrusted_refresh and accept_attachment_fn(pid, source, batch)
+                progressed = accepted and apply_fn(pid, batch, clock, turns)
+            if progressed:
                 await on_progress_fn(pid, observer, batch, clock)
                 return
             evidence = await source.probe_identity_loss()

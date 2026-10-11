@@ -530,7 +530,7 @@ async def _reconcile_one_binding(daemon, binding) -> None:
     store.upsert_participant(participant)
     # Consume stored evidence first (the recoverable crash window between the
     # evidence commit and the job finish), then reconcile ambiguous delivery.
-    daemon.controls.finish_jobs_from_pending_evidence([participant_id])
+    await daemon.controls.settle_pending_evidence([participant_id])
     await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
 
 

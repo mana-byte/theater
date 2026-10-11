@@ -29,6 +29,7 @@ from theater.daemon.observation.evidence import TerminalEvidenceRouting
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.identity_loss import IdentityLossWiring
 from theater.daemon.observation.live import EvidenceSink, LiveObservationHub, LiveRegistration
+from theater.daemon.observation.pinning import CompletionPinning
 from theater.daemon.observation.process import ObservationProcess, observation_process
 from theater.daemon.observation.reducer import QuietClock, Reducer
 from theater.daemon.observation.screen_reading import ScreenReading
@@ -104,6 +105,7 @@ class Observer(
     WatchSupervision,
     SourceChannels,
     TerminalEvidenceRouting,
+    CompletionPinning,
     BatchApplication,
     ScreenReading,
     TranscriptBinding,
@@ -446,9 +448,11 @@ class Observer(
         return min(interval * QUIET_POLL_FACTOR, max(interval, QUIET_POLL_MAX_SECONDS))
 
     async def _handle_rejected_attachment(self, context: _WatchContext, batch: Batch) -> bool:
-        if self._accept_attachment(
-            context.pid, context.source, batch, registration=context.registration
-        ):
+        async with self._pinned_for(context.pid, batch):  # an attach-time turn end finishes a job
+            accepted = self._accept_attachment(
+                context.pid, context.source, batch, registration=context.registration
+            )
+        if accepted:
             return False
         await self._screen_only(
             context.pid, context.observer, context.clock, source_status=batch.status
@@ -465,8 +469,7 @@ class Observer(
     ) -> None:
         self._capture_trajectory(context.pid, batch)
         self._failures.clear_source_error_on_progress(context.pid, batch)
-        pinned = await self._prepare_pins(context.pid, batch)
-        try:
+        async with self._pinned_for(context.pid, batch):
             applied = self._apply_source_batch(
                 context.pid,
                 context.source,
@@ -475,8 +478,6 @@ class Observer(
                 context.turns,
                 registration=context.registration,
             )
-        finally:
-            self._release_pins(pinned)
         if applied:
             iteration.applied = True
             context.active_at = self._monotonic()
@@ -507,30 +508,9 @@ class Observer(
             reset_identity_loss_fn=self._reset_identity_loss_confirmation,
             is_untrusted_rotation_fn=self._is_untrusted_rotation,
             rescue_jobs_fn=partial(self._rescue_jobs, registration=context.registration),
+            pinned_fn=self._pinned_for,
         )
         iteration.applied = True
-
-    async def _prepare_pins(self, pid: str, batch: Batch) -> list[str]:
-        """A terminal batch's jobs are pinned in a thread so Git never blocks the event loop."""
-        if not any(event.turn_end for event in batch.events):
-            return []
-        return await self._pin_ahead(pid)
-
-    async def _pin_ahead(self, pid: str) -> list[str]:
-        """Pin what may complete off the loop; a failure leaves those jobs unpinned."""
-        jobs = getattr(self, "jobs", None)
-        if jobs is None:
-            return []
-        try:
-            return await jobs.prepare_pins(pid)
-        except Exception:
-            logger.exception("pinning completion evidence for %s failed", pid)
-            return []
-
-    def _release_pins(self, handles: list[str]) -> None:
-        jobs = getattr(self, "jobs", None)
-        if handles and jobs is not None:
-            jobs.release_pins(handles)
 
     def _apply_inner(
         self,
