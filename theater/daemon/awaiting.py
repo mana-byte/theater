@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from theater.daemon.controls._common import (
     CANCELLED_ERROR_CODE,
     CONTROL_TRANSFERRED_ERROR_CODE,
+    DAEMON_RESTARTED_ERROR_CODE,
     INTERRUPTED_ERROR_CODE,
 )
 from theater.daemon.presence.contracts import PresenceProvider, PresenceSnapshot, PresenceState
@@ -92,13 +93,23 @@ def parse_targets(daemon, handles: list[str]) -> list[AwaitTarget]:
 
 
 _UNSENT_CODES = frozenset(
-    {CANCELLED_ERROR_CODE, INTERRUPTED_ERROR_CODE, CONTROL_TRANSFERRED_ERROR_CODE}
+    {
+        CANCELLED_ERROR_CODE,
+        INTERRUPTED_ERROR_CODE,
+        CONTROL_TRANSFERRED_ERROR_CODE,
+        DAEMON_RESTARTED_ERROR_CODE,
+    }
 )
 
 
 def never_transmitted(store, job: Job) -> bool:
-    """Durable proof a killed send was cancelled while queued; anything doubtful stays held."""
-    if job.kind != "send" or job.state != JobState.KILLED or job.error_code not in _UNSENT_CODES:
+    """Durable proof a send ended before transmission, incl. restart recovery; doubt stays held.
+
+    Killed by cancel, or crashed by restart recovery, which closes such rows crashed.
+    """
+    if job.kind != "send" or job.error_code not in _UNSENT_CODES:
+        return False
+    if job.state not in (JobState.KILLED, JobState.CRASHED):
         return False
     operations = store.control_operations_for_job(job.handle)
     return bool(operations) and all(

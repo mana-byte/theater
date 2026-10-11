@@ -10,6 +10,7 @@ from tests._presence_doubles import AbsentPresence, PresentPresence
 from tests.test_control_rpc import _native_pair
 from theater.daemon.awaiting import never_transmitted
 from theater.daemon.rpc.cancellation import _cancel
+from theater.harness.contracts.runtime import DeliveryResult
 from theater.models import BadRequest, JobState
 from theater.protocol import RemoteError
 
@@ -206,6 +207,69 @@ async def test_await_releases_a_queued_send_cancelled_by_interrupt(client, daemo
 
     assert daemon.store.get_job(reply["handle"]).error_code == "interrupted"
     assert state.sent == [] and job["await_reason"] == "job_terminal"
+
+
+async def test_await_releases_a_queued_send_failed_by_restart_recovery(client, daemon):
+    parent, child, state = await _native_pair(daemon)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", PresentPresence(), raising=False)
+        reply, waiter = await _queued_plain_send_await(client, daemon, parent, child)
+        daemon.controls.fail_undelivered_followups([child.id])
+        (job,) = await asyncio.wait_for(waiter, 1.0)
+
+    stored = daemon.store.get_job(reply["handle"])
+    assert stored.state == JobState.CRASHED and stored.error_code == "daemon_restarted"
+    assert state.sent == [] and job["await_reason"] == "job_terminal"
+
+
+async def test_restart_closes_a_cancelled_row_whose_job_never_finished_as_unsent(client, daemon):
+    parent, child, _ = await _native_pair(daemon)
+    reply = await _send(client, child, parent, prompt="hello")
+    (op,) = daemon.store.control_operations_for_job(reply["handle"])
+    daemon.store.settle_control_operation(  # crash between settlement and job finish
+        op.operation_id,
+        result=DeliveryResult.REJECTED,
+        error_code="cancelled",
+        error="cancelled",
+        updated_at=1.0,
+    )
+
+    daemon.controls.fail_undelivered_followups([child.id])
+
+    stored = daemon.store.get_job(reply["handle"])
+    assert stored.state == JobState.CRASHED and never_transmitted(daemon.store, stored)
+
+
+@pytest.mark.parametrize("shape", ["accepted", "dispatched", "turn", "barrier"])
+async def test_a_restart_crashed_send_that_may_have_transmitted_stays_held(client, daemon, shape):
+    parent, child, _ = await _native_pair(daemon)
+    reply = await _send(client, child, parent, prompt="hello")
+    (op,) = daemon.store.control_operations_for_job(reply["handle"])
+    store, rejected = daemon.store, DeliveryResult.REJECTED
+    store.mark_control_operation_dispatched(op.operation_id, updated_at=1.0)
+    if shape == "accepted":
+        store.settle_control_operation(
+            op.operation_id, result=DeliveryResult.ACCEPTED, updated_at=2.0
+        )
+    elif shape == "turn":
+        store.settle_control_operation(
+            op.operation_id,
+            result=rejected,
+            native_turn_id="t1",
+            error_code="daemon_restarted",
+            updated_at=2.0,
+        )
+    elif shape == "barrier":
+        store.settle_control_operation(
+            op.operation_id,
+            result=rejected,
+            execution_barrier=True,
+            error_code="daemon_restarted",
+            updated_at=2.0,
+        )
+    daemon.jobs.finish(reply["handle"], state=JobState.CRASHED, error_code="daemon_restarted")
+
+    assert never_transmitted(store, store.get_job(reply["handle"])) is False
 
 
 async def test_a_delivered_send_with_an_opened_gate_stays_held_by_presence(client, daemon):
