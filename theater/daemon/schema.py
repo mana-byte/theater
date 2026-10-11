@@ -370,6 +370,56 @@ job_contract_audit = Table(
 
 Index("idx_job_contract_audit_job", job_contract_audit.c.job_handle)
 
+# What a source job left behind at completion, written in the same unit as its terminal state:
+# the bounded answer, who vouches for it, and the Git state pinned then (not observed later).
+job_evidence = Table(
+    "job_evidence",
+    metadata,
+    Column("job_handle", Text, primary_key=True),
+    Column("outcome", Text, nullable=False),
+    Column("error_code", Text),
+    Column("answer", Text),
+    Column("answer_chars", Integer, nullable=False, server_default=text("0")),
+    # raw | result | none
+    Column("answer_source", Text, nullable=False, server_default=text("'none'")),
+    Column("provenance", Text),
+    Column("harness", Text),
+    Column("participant_id", Text),
+    Column("workspace_id", Text),
+    Column("cwd", Text),
+    Column("branch", Text),
+    Column("commit_sha", Text),
+    Column("dirty_entries", Integer),
+    # pinned | dirty | unpinned
+    Column("pin_state", Text, nullable=False),
+    Column("pin_reason", Text),
+    Column("captured_at", REAL, nullable=False),
+)
+
+# One deferred task, keyed by the job that will carry it, waiting for a source job to finish.
+handoff_gates = Table(
+    "handoff_gates",
+    metadata,
+    Column("job_handle", Text, primary_key=True),
+    Column("caller_id", Text),
+    Column("source_handle", Text, nullable=False),
+    Column("source_participant_id", Text),
+    Column("source_name", Text),
+    # work | independent_review
+    Column("task_kind", Text, nullable=False),
+    # The spawn request exactly as admitted, so a restart rebuilds the launch from durable state.
+    Column("request", Text, nullable=False),
+    # waiting | opening | opened | failed | cancelled
+    Column("state", Text, nullable=False),
+    Column("error_code", Text),
+    Column("error", Text),
+    Column("created_at", REAL, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+)
+
+Index("idx_handoff_gates_source", handoff_gates.c.state, handoff_gates.c.source_handle)
+Index("idx_handoff_gates_caller", handoff_gates.c.caller_id, handoff_gates.c.state)
+
 # First-write exact terminal proof survives crashes before job completion; late evidence cannot
 # rewrite jobs.
 native_terminal_evidence = Table(

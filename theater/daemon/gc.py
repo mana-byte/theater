@@ -358,6 +358,8 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
                 unit.connection.execute(
                     delete(table).where(table.c.job_handle.in_(retained_handles))
                 )
+            store.delete_job_evidence(retained_handles, connection=unit.connection)
+            store.delete_handoff_gates(retained_handles, connection=unit.connection)
             job_result = unit.connection.execute(
                 delete(jobs).where(jobs.c.handle.in_(retained_handles))
             )

@@ -398,6 +398,24 @@ _CATALOG: tuple[OperationSpec, ...] = (
         ),
     ),
     OperationSpec(
+        key="HANDOFF_GATE",
+        log_template="handoff.gate",
+        trace_template=None,
+        metric_name="theater.handoff.gate.duration",
+        description="Time a deferred task waited for its source job; result tells how it ended.",
+        slow_ms=0,
+        trace_kind=TraceKind.NONE,
+        attrs=(
+            AttrMapping(
+                source="task_kind",
+                prose_key="task_kind",
+                otel_log_key="task_kind",
+                metric_key="task_kind",
+            ),
+            AttrMapping(source="id", prose_key="id", otel_log_key="id"),
+        ),
+    ),
+    OperationSpec(
         key="KILL_PANE",
         log_template="kill.pane",
         trace_template="kill.pane",
@@ -678,6 +696,7 @@ WORKER_WAIT = BY_KEY["WORKER_WAIT"]
 WORKER_EXECUTION = BY_KEY["WORKER_EXECUTION"]
 SPAWN_WORKTREE = BY_KEY["SPAWN_WORKTREE"]
 SPAWN_LAUNCH = BY_KEY["SPAWN_LAUNCH"]
+HANDOFF_GATE = BY_KEY["HANDOFF_GATE"]
 LIFECYCLE_STAGE = BY_KEY["LIFECYCLE_STAGE"]
 KILL_PANE = BY_KEY["KILL_PANE"]
 KILL_TEARDOWN = BY_KEY["KILL_TEARDOWN"]

@@ -60,6 +60,9 @@ class AwaitTarget:
     #: Sticky — the job was observed in a terminal state (done/crashed/killed).
     #: Never unset. Only meaningful for job targets.
     terminal_observed: bool = False
+    #: Sticky - the job is durably proven never to have been dispatched (a gated task that
+    #: never launched). Nothing was ever sent to a pane, so presence has nothing to protect.
+    never_dispatched: bool = False
     #: Which sticky condition transitioned last: REASON_JOB_TERMINAL or
     #: REASON_PRESENCE_RELEASED. Updated only on a False→True transition; a
     #: dual transition inside one evaluation records REASON_JOB_TERMINAL —
@@ -127,6 +130,8 @@ def _qualifying_reason(target: AwaitTarget) -> str | None:
             target.job.state == JobState.RUNNING
             and target.participant_status == Status.AWAITING_INPUT
         )
+        if target.terminal_observed and target.never_dispatched:
+            return REASON_JOB_TERMINAL
         if not target.admission_protected:
             if target.terminal_observed:
                 return REASON_JOB_TERMINAL
@@ -153,6 +158,11 @@ def _evaluate(
     for target in targets:
         if target.job is not None:
             target.job = daemon.jobs.get(target.handle) or target.job
+            if target.job.state != JobState.RUNNING and not target.never_dispatched:
+                service = getattr(daemon, "handoff", None)
+                target.never_dispatched = service is not None and service.never_dispatched(
+                    target.handle
+                )
         if target.target_id is not None:
             target.presence = _ERRORED if failed else snapshot_for(provider, target.target_id)
             participant = daemon.store.get_participant(target.target_id)

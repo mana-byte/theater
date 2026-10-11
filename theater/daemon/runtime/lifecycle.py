@@ -100,6 +100,7 @@ async def start(daemon, *, check_path) -> None:
     recovery.prepare_provider_control_recovery(daemon)
     await daemon._reconcile()
     await recovery.reconcile_public_control_operations(daemon)
+    await daemon.handoff.recover()
     finish_provider_recovery = getattr(daemon.terminal_service, "finish_startup_recovery", None)
     if callable(finish_provider_recovery):
         finish_provider_recovery()

@@ -22,6 +22,12 @@ from theater.constants.daemon import (
 from theater.constants.daemon import (
     RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,  # noqa: F401
 )
+from theater.constants.handoff import (
+    ERROR_CANCELLED,
+    ERROR_LAUNCH_REFUSED,
+    ERROR_SOURCE_GONE,
+    ERROR_SOURCE_NOT_REVIEWABLE,
+)
 from theater.constants.observation import TURN_FAILED_CODE
 from theater.daemon.awaiting import (
     REASON_AWAITING_INPUT,
@@ -33,7 +39,7 @@ from theater.daemon.awaiting import (
 from theater.daemon.controls._common import INTERRUPTED_ERROR_CODE
 from theater.daemon.controls.interaction_wire import cached_pending_interaction
 from theater.daemon.job_changes import job_changes
-from theater.daemon.rails import check_cycle, check_wait_cycle
+from theater.daemon.rails import CycleDetected, check_cycle, check_wait_cycle
 from theater.daemon.rpc.params import _finite_number_param, _require
 from theater.daemon.rpc.router import method
 from theater.models import BadRequest, Job, JobState, NotFound, Status, new_id
@@ -91,6 +97,18 @@ _JOB_ERROR_MESSAGES = {
         "The harness reported that the turn failed (see result for the detail). The agent may "
         "still be usable: inspect it before resending."
     ),
+    ERROR_SOURCE_NOT_REVIEWABLE: (
+        "The deferred review never launched: its source did not leave a clean, pinned commit. "
+        "The handoff entry says why; have the source commit, then request the review again."
+    ),
+    ERROR_SOURCE_GONE: (
+        "The deferred task never launched: the job it waited for no longer exists."
+    ),
+    ERROR_LAUNCH_REFUSED: (
+        "The deferred task never launched: the launch was refused once its source ended. "
+        "The handoff entry says why."
+    ),
+    ERROR_CANCELLED: "The deferred task ended before its source did, so it never launched.",
 }
 #: Error codes whose job a later send may have replaced; window for deriving ``replaced_by``.
 _REPLACEABLE = frozenset({INTERRUPTED_ERROR_CODE, SEND_SUPERSEDED_ERROR_CODE})
@@ -146,12 +164,36 @@ def _entry(daemon, target: AwaitTarget, reasons: dict[str, str]) -> dict:
         entry["participant_status"] = str(participant.status) if participant else None
     else:
         entry["participant_status"] = None
+    service = getattr(daemon, "handoff", None)
+    handoff = service.describe(target.handle) if service is not None else None
+    if handoff is not None:
+        entry["handoff"] = handoff
     entry["await_reason"] = reasons.get(target.handle, "timeout")
     if entry["await_reason"] == REASON_AWAITING_INPUT and target.target_id is not None:
         interaction = cached_pending_interaction(daemon, target.target_id)
         if interaction is not None:
             entry["pending_interaction"] = interaction
     return entry
+
+
+def _check_dependency_cycle(
+    daemon, caller_id: str, targets: list[AwaitTarget], dependency_ids: list[str]
+) -> None:
+    """A gated task starts only after its source job's participant finishes that job.
+
+    Awaiting it therefore also waits on that participant; a loop through it is a real deadlock.
+    """
+    if not dependency_ids:
+        return
+    try:
+        check_wait_cycle(daemon.jobs.wait_graph, caller_id, dependency_ids)
+    except CycleDetected as exc:
+        gated = ", ".join(t.handle for t in targets if daemon.handoff.describe(t.handle))
+        raise CycleDetected(
+            f"awaiting {gated} would deadlock: it starts only after a job of "
+            f"{', '.join(dependency_ids)} ends, and that job is waiting on you ({exc}). "
+            "End your turn so the source can finish, or await it from a later turn."
+        ) from None
 
 
 def _missing_hint(daemon, handle: str) -> str:
@@ -198,9 +240,12 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     targets = parse_targets(daemon, handles)
     # Rails before the unknown-handle complaint and before any bus row.
     target_ids = [t.target_id for t in targets if t.target_id]
+    handoff = getattr(daemon, "handoff", None)
+    dependency_ids = handoff.dependency_targets([t.handle for t in targets]) if handoff else []
     if caller_id:
         check_cycle(daemon.store, caller_id, target_ids)
         check_wait_cycle(daemon.jobs.wait_graph, caller_id, target_ids)
+        _check_dependency_cycle(daemon, caller_id, targets, dependency_ids)
 
     seen = {t.handle for t in targets}
     missing = [h for h in dict.fromkeys(handles) if h not in seen]
@@ -221,7 +266,7 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     reasons: dict[str, str] = {}
     outcome: str | None = None
     try:
-        with daemon.jobs.waiting(caller_id, target_ids):
+        with daemon.jobs.waiting(caller_id, [*target_ids, *dependency_ids]):
             try:
                 reasons = await _await_announced(
                     daemon,

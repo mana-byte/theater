@@ -21,7 +21,7 @@ from theater.observability.catalog import (
 
 def test_tuple_unique():
     keys = [s.key for s in OPERATIONS]
-    assert len(keys) == len(set(keys)) == 32
+    assert len(keys) == len(set(keys)) == 33
 
 
 def test_by_key_readonly():

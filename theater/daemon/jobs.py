@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +23,8 @@ from theater.constants.daemon import (
 from theater.constants.response_contract import STRUCTURED_UNABLE_TO_PARSE
 from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
 from theater.daemon.events.publication import job_event, next_revision
+from theater.daemon.handoff.evidence import EvidencePinner
+from theater.daemon.handoff.models import GitFacts, JobEvidence
 from theater.daemon.persistence.transactions import active_write_unit, after_commit
 from theater.daemon.response_contracts import audit, parse_stored
 from theater.daemon.schema import jobs as jobs_table
@@ -220,6 +222,12 @@ class JobManager:
         self._accumulators: dict[str, TouchAccumulator] = {}
         #: Hashes staged outside a write unit; set only while a terminal batch is applied.
         self._staged: StagedHashes | None = None
+        #: Completion evidence for sources and isolated workers; None leaves jobs unpinned.
+        self.evidence: EvidencePinner | None = None
+        #: Git state pinned before a terminal batch's write unit opens, keyed by job.
+        self._staged_git: dict[str, GitFacts] = {}
+        #: Called with a job handle after its terminal state is committed and awaiters are woken.
+        self._terminal_listeners: list[Callable[[str], None]] = []
 
     def create(
         self,
@@ -320,10 +328,61 @@ class JobManager:
                     pools[owner] = max(0, pools[owner] - outcome.size)
         handles = {handle for handle, _acc in accs}
         self._staged = StagedHashes(frozenset(handles), normalized, hashes)
+        pinned = self._stage_git(target_id)
         try:
             yield
         finally:
             self._staged = None
+            for handle in pinned:
+                self._staged_git.pop(handle, None)
+
+    def _stage_git(self, target_id: str) -> list[str]:
+        """Pin Git for this target's running jobs that leave evidence, before the unit opens."""
+        if self.evidence is None:
+            return []
+        staged: list[str] = []
+        for job in self.store.running_jobs_for_target(target_id):
+            if self.evidence.required(job):
+                self._staged_git[job.handle] = self.evidence.capture(job)
+                staged.append(job.handle)
+        return staged
+
+    def track(self, handle: str) -> None:
+        """Give a running job its wake event; a daemon restart loses the in-memory one."""
+        self._events.setdefault(handle, asyncio.Event())
+
+    def add_terminal_listener(self, listener: Callable[[str], None]) -> None:
+        self._terminal_listeners.append(listener)
+
+    def _notify_terminal(self, handle: str) -> None:
+        for listener in self._terminal_listeners:
+            try:
+                listener(handle)
+            except Exception:
+                logger.exception("terminal listener failed for job %s", handle)
+
+    def _build_evidence(
+        self,
+        job: Job,
+        *,
+        state: JobState,
+        result: str | None,
+        error_code: str | None,
+        raw_result: object,
+        in_unit: bool,
+    ) -> JobEvidence | None:
+        """Evidence for a job that leaves any; Git is pinned here only outside a write unit."""
+        pinner = self.evidence
+        if pinner is None or not pinner.required(job):
+            return None
+        if in_unit:
+            git = self._staged_git.get(job.handle) or GitFacts.unpinned("not_staged")
+        else:
+            git = pinner.capture(job)
+        raw = None if raw_result is _RAW_UNSET else raw_result
+        return pinner.build(
+            job, git, state=str(state), result=result, error_code=error_code, raw_result=raw
+        )
 
     def _staged_for(self, handle: str) -> StagedHashes | None:
         if self._staged is None:
@@ -401,6 +460,14 @@ class JobManager:
             raw_result=raw_result,
             failure=contract_failure,
         )
+        evidence = self._build_evidence(
+            job,
+            state=state,
+            result=result,
+            error_code=error_code,
+            raw_result=raw_result,
+            in_unit=False,
+        )
         if acc:
             # Write job result and touches in one transaction; store connection is autocommit.
             self._finish_with_touches(
@@ -413,8 +480,11 @@ class JobManager:
                 structured_result=structured_result,
                 structured_status=structured_status,
                 touches=acc.rows(handle),
+                evidence=evidence,
             )
         else:
+            if evidence is not None:
+                self.store.put_job_evidence(evidence)
             self.store.finish_job(
                 handle,
                 state=str(state),
@@ -434,6 +504,7 @@ class JobManager:
         event = self._events.pop(handle, None)
         if event:
             event.set()
+        self._notify_terminal(handle)
         self.store.bus_append(
             "job.finished",
             from_id=job.target_id,
@@ -487,6 +558,14 @@ class JobManager:
             structured_result=structured_result,
             structured_status=structured_status,
             touches=acc.rows(handle, staged=self._staged_for(handle)) if acc else [],
+            evidence=self._build_evidence(
+                job,
+                state=state,
+                result=result,
+                error_code=error_code,
+                raw_result=raw_result,
+                in_unit=True,
+            ),
         )
         self.store.bus_append(
             "job.finished",
@@ -504,6 +583,7 @@ class JobManager:
         event = self._events.pop(handle, None)
         if event:
             event.set()
+        self._notify_terminal(handle)
 
     def notify_committed_finish(self, job: Job) -> None:
         """Wake local consumers after another domain writer commits job completion."""
@@ -511,6 +591,7 @@ class JobManager:
         event = self._events.pop(job.handle, None)
         if event:
             event.set()
+        self._notify_terminal(job.handle)
         self.store.bus_append(
             "job.finished",
             from_id=job.target_id,
@@ -580,6 +661,7 @@ class JobManager:
         structured_result: str | None,
         structured_status: str | None,
         touches: list[dict],
+        evidence: JobEvidence | None = None,
     ) -> None:
         """Write the job result and its touch rows in one transaction.
 
@@ -597,6 +679,7 @@ class JobManager:
                 structured_result=structured_result,
                 structured_status=structured_status,
                 touches=touches,
+                evidence=evidence,
             )
 
     def _write_finish(
@@ -612,10 +695,13 @@ class JobManager:
         structured_result: str | None,
         structured_status: str | None,
         touches: list[dict],
+        evidence: JobEvidence | None = None,
     ) -> None:
         """Job row, touch rows and public event, all on the caller's unit connection."""
         unit = active_write_unit(connection)
         assert unit is not None
+        if evidence is not None:
+            self.store.put_job_evidence(evidence, connection=connection)
         connection.execute(
             update(jobs_table)
             .where(jobs_table.c.handle == handle)

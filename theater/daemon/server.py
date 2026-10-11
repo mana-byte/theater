@@ -35,6 +35,7 @@ from theater.daemon.events.snapshot import (
     CachedParticipantProjection,
     configure_participant_projection,
 )
+from theater.daemon.handoff.service import HandoffService
 from theater.daemon.harness_runtime.compatibility import CompatibilityProbeCache
 from theater.daemon.harness_runtime.frontend import FrontendRuntimeHost
 from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
@@ -211,6 +212,7 @@ class Daemon:
 
     def _compose_persistence_services(self) -> None:
         self.operation_service = OperationService(self.store)
+        self.handoff = HandoffService(self)
         self.scratchpad_service = ScratchpadService(
             self.store._scratchpad,
             self.store.write_unit,

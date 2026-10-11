@@ -852,6 +852,42 @@ Three details carry the safety:
   undelivered followup, and a restart turns a `dispatched` attempt into
   `unknown` — never replayed.
 
+### Handoffs: `after` and deferred spawn
+
+`spawn(after=<live name | exact job handle>, task_kind=work|independent_review)`
+resolves the source **once** to a job handle (`daemon/handoff/resolution.py`), so
+a name recycled later cannot redirect it. The caller states the task; Theater
+supplies a labelled, bounded **card** (`handoff/card.py`) about the source.
+
+- **Deferred, not blocked.** Admission reserves only rows: the participant
+  (name included), the one task job (`handle == participant id`, kept for the
+  child's whole life) and a `handoff_gates` row holding the request. No worktree,
+  argv or terminal exists until the source reaches a terminal state; then the
+  normal launch runs into the reserved participant and job
+  (`SpawnAdmission(reserved_participant_id=…)`). A restart re-arms `waiting`
+  gates (`HandoffService.recover`); an `opening` gate with no launch reservation
+  goes back to `waiting`, one with a reservation is `opened` — a launch is never
+  replayed. Killing a still-waiting task cancels the gate (nothing to verify);
+  `job.await` on a gate that never launched returns on its terminal state alone,
+  because durably-undispatched work has no pane for presence to protect — this
+  does not make any participant `ABSENT`.
+- **Evidence before publication.** A job that a gate waits on, or that ran in a
+  Theater-owned worktree, writes `job_evidence` in the same write unit (or just
+  before the autocommit finish) as its terminal state: the bounded answer, the
+  transcript provenance, and the **pinned** commit, branch and dirty count. Git
+  is read by bounded, lock-free commands *before* the unit opens, next to the
+  file hashing (`JobManager.stage_hashes`); a unit that was not staged records
+  `unpinned: not_staged` rather than guessing.
+- **`independent_review`** gets the source's facts but never its answer, runs in
+  an isolated worktree (`worktree=true`, no `base_branch`) based on exactly the
+  pinned commit, and is **rejected** (`source_not_reviewable`) when the source
+  was dirty, unpinned or left no evidence. `work` may include the source's report,
+  labelled unverified; a failed source yields a labelled failure card.
+- **Await cycles.** Awaiting a gated task also waits on the participant running
+  its source job, so `await_sessions` on a task gated on your own running job
+  raises `CycleDetected`. Deferring after your own job stays legal: the task
+  launches once your turn ends.
+
 ---
 
 ## 8. Safety rails

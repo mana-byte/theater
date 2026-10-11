@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
-from sqlalchemy import insert
+from sqlalchemy import insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from theater.daemon.operations import (
@@ -36,6 +36,7 @@ from theater.models import (
     LaunchReservationRecord,
     Participant,
     PublicOperationRecord,
+    Status,
     WorkspaceState,
     new_id,
     now,
@@ -61,8 +62,13 @@ class SpawnAdmission(ParticipantLaunchHost):
         launch_prompt: str | None = None,
         launch_wiring: RuntimeWiring | None = None,
         launch_response_format: str | None = None,
+        reserved_participant_id: str | None = None,
     ) -> Mapping[str, object]:
-        """Accept a spawn and detach all filesystem/provider work from the request."""
+        """Accept a spawn and detach all filesystem/provider work from the request.
+
+        ``reserved_participant_id`` launches a deferred spawn into the participant and job
+        handle it already holds, so the caller's one task handle never changes.
+        """
         replay = self._replay_spawn_if_known(client_id, idempotency_key, params)
         if replay is not None:
             return replay.response
@@ -84,6 +90,7 @@ class SpawnAdmission(ParticipantLaunchHost):
                 params=launch_params,
                 captured=captured,
                 prepared=prepared,
+                reserved_participant_id=reserved_participant_id,
             )
 
         acceptance = self.operations.accept_operation(
@@ -154,6 +161,7 @@ class SpawnAdmission(ParticipantLaunchHost):
         params: Mapping[str, object],
         captured: dict[str, object],
         prepared: _PreparedSpawn,
+        reserved_participant_id: str | None = None,
     ) -> PreparedOperation:
         admission = self._validate_spawn_admission(params, unit, prepared)
         if admission.workspace_request != prepared.preparation.request:
@@ -173,43 +181,28 @@ class SpawnAdmission(ParticipantLaunchHost):
         rails = self.daemon.config.rails
         check_depth(self.store, admission.parent_id, cap=rails.depth_cap)
         check_budget(self.store, admission.parent_id, limit=rails.budget)
-        participant_id = new_id()
-        try:
-            participant = self.registry.create_spawned(
-                pid=participant_id,
-                harness=request.harness,
-                cwd=cwd,
-                parent_id=admission.parent_id,
-                has_prompt=bool(request.prompt),
-                resumed_from_id=(
-                    admission.resume_predecessor.id
-                    if admission.resume_predecessor is not None
-                    else None
-                ),
-                name=self._optional_text(params.get("name")),
-                description=description,
-                workspace_id=workspace.workspace.workspace_id,
-                connection=unit.connection,
+        participant_id = reserved_participant_id or new_id()
+        if reserved_participant_id is not None:
+            participant = self._claim_reserved_participant(
+                reserved_participant_id, workspace, cwd, unit
             )
-            participant.branch = workspace.workspace.branch
-            self.registry.persist_in_connection(participant, unit.connection)
-        except IntegrityError:
-            if admission.resume_predecessor is None:
-                raise
-            raise BadRequest(
-                f"cannot resume participant {admission.resume_predecessor.id!r}: a live successor "
-                "already claims this recovery"
-            ) from None
+        else:
+            participant = self._create_spawned_participant(
+                participant_id, request, admission, params, description, workspace, cwd, unit
+            )
         timestamp = now()
-        job = self._reserve_spawn_job(
-            unit,
-            participant_id=participant_id,
-            parent_id=admission.parent_id,
-            client_id=client_id,
-            prompt=request.prompt,
-            response_format=request.response_format,
-            timestamp=timestamp,
-        )
+        if reserved_participant_id is not None:
+            job = self._claim_reserved_job(unit, reserved_participant_id, request.prompt)
+        else:
+            job = self._reserve_spawn_job(
+                unit,
+                participant_id=participant_id,
+                parent_id=admission.parent_id,
+                client_id=client_id,
+                prompt=request.prompt,
+                response_format=request.response_format,
+                timestamp=timestamp,
+            )
         launch = LaunchReservationRecord(
             operation_id=operation_id,
             participant_id=participant_id,
@@ -239,7 +232,14 @@ class SpawnAdmission(ParticipantLaunchHost):
             resume_predecessor=admission.resume_predecessor,
             resume_overlay=admission.resume_overlay,
         )
-        self._stage_spawn_caches(unit, participant, job, cwd, has_prompt=bool(request.prompt))
+        self._stage_spawn_caches(
+            unit,
+            participant,
+            job,
+            cwd,
+            has_prompt=bool(request.prompt),
+            announce=reserved_participant_id is None,
+        )
         events = self._spawn_acceptance_events(unit, participant, job, workspace, timestamp)
         return PreparedOperation(
             record=PublicOperationRecord(
@@ -338,6 +338,74 @@ class SpawnAdmission(ParticipantLaunchHost):
             raise BadRequest(f"workspace {workspace.workspace_id!r} is not active")
         return workspace.path
 
+    def _create_spawned_participant(
+        self,
+        participant_id: str,
+        request,
+        admission: _SpawnAdmission,
+        params: Mapping[str, object],
+        description: str | None,
+        workspace: WorkspaceReservation,
+        cwd: str,
+        unit: WriteUnit,
+    ) -> Participant:
+        try:
+            participant = self.registry.create_spawned(
+                pid=participant_id,
+                harness=request.harness,
+                cwd=cwd,
+                parent_id=admission.parent_id,
+                has_prompt=bool(request.prompt),
+                resumed_from_id=(
+                    admission.resume_predecessor.id
+                    if admission.resume_predecessor is not None
+                    else None
+                ),
+                name=self._optional_text(params.get("name")),
+                description=description,
+                workspace_id=workspace.workspace.workspace_id,
+                connection=unit.connection,
+            )
+            participant.branch = workspace.workspace.branch
+            self.registry.persist_in_connection(participant, unit.connection)
+        except IntegrityError:
+            if admission.resume_predecessor is None:
+                raise
+            raise BadRequest(
+                f"cannot resume participant {admission.resume_predecessor.id!r}: a live successor "
+                "already claims this recovery"
+            ) from None
+        return participant
+
+    def _claim_reserved_participant(
+        self,
+        participant_id: str,
+        workspace: WorkspaceReservation,
+        cwd: str,
+        unit: WriteUnit,
+    ) -> Participant:
+        """Give a deferred spawn's placeholder the workspace it finally got."""
+        participant = self._participant_in_connection(participant_id, unit.connection)
+        if participant is None or participant.status is Status.DEAD:
+            raise BadRequest(f"deferred participant {participant_id!r} is no longer launchable")
+        participant.cwd = cwd
+        participant.workspace_id = workspace.workspace.workspace_id
+        participant.branch = workspace.workspace.branch
+        self.registry.persist_in_connection(participant, unit.connection)
+        return participant
+
+    def _claim_reserved_job(self, unit: WriteUnit, handle: str, prompt: str) -> Job:
+        """Render the deferred task into the job it already carries."""
+        changed = unit.connection.execute(
+            update(jobs_table)
+            .where(jobs_table.c.handle == handle, jobs_table.c.state == JobState.RUNNING.value)
+            .values(prompt=prompt)
+        )
+        if changed.rowcount != 1:
+            raise BadRequest(f"deferred job {handle!r} is no longer running")
+        row = unit.connection.execute(select(jobs_table).where(jobs_table.c.handle == handle)).one()
+        return Job.from_row(row._mapping)
+
     def _reserve_spawn_job(
         self,
         unit: WriteUnit,
@@ -368,12 +436,21 @@ class SpawnAdmission(ParticipantLaunchHost):
         return job
 
     def _stage_spawn_caches(
-        self, unit: WriteUnit, participant: Participant, job: Job, cwd: str, *, has_prompt: bool
+        self,
+        unit: WriteUnit,
+        participant: Participant,
+        job: Job,
+        cwd: str,
+        *,
+        has_prompt: bool,
+        announce: bool = True,
     ) -> None:
         def attach_touch_accumulator() -> None:
             self.daemon.jobs.attach_touch_accumulator(participant.id, cwd=cwd)
 
         unit.after_commit(attach_touch_accumulator)
+        if not announce:
+            return  # A deferred spawn announced its participant and job when it was reserved.
         if participant.name is not None:
             unit.after_commit(
                 lambda: self.registry.remember_reserved_name(participant.id, participant.name or "")

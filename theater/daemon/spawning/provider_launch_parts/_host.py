@@ -81,6 +81,17 @@ if TYPE_CHECKING:
         ) -> PublicOperationRecord: ...
         @staticmethod
         def _resolve_binary(name: str) -> str | None: ...
+        def _reserve_spawn_job(
+            self,
+            unit: WriteUnit,
+            *,
+            participant_id: str,
+            parent_id: str | None,
+            client_id: str,
+            prompt: str,
+            response_format: str | None,
+            timestamp: float,
+        ) -> Job: ...
         def _rollback_adoption_reservation(self, participant_id: str) -> None: ...
         async def _rollback_spawn_reservation(
             self,

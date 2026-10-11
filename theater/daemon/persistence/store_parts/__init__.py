@@ -4,6 +4,7 @@ from theater.daemon.persistence.store_parts.bus import BusStore
 from theater.daemon.persistence.store_parts.contracts import ContractStore
 from theater.daemon.persistence.store_parts.controls import ControlOperationStore
 from theater.daemon.persistence.store_parts.credentials import CredentialStore
+from theater.daemon.persistence.store_parts.handoff import HandoffStore
 from theater.daemon.persistence.store_parts.jobs import JobStore
 from theater.daemon.persistence.store_parts.participants import ParticipantStore
 from theater.daemon.persistence.store_parts.runtime import RuntimeBindingStore
@@ -15,6 +16,7 @@ __all__ = [
     "ContractStore",
     "ControlOperationStore",
     "CredentialStore",
+    "HandoffStore",
     "JobStore",
     "ParticipantStore",
     "RuntimeBindingStore",

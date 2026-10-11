@@ -9,6 +9,7 @@ from theater.daemon.operations import OperationService
 from theater.daemon.spawning.models import SpawnRequest
 from theater.daemon.spawning.provider_launch_parts.admission import SpawnAdmission
 from theater.daemon.spawning.provider_launch_parts.adoption import ParticipantAdoption
+from theater.daemon.spawning.provider_launch_parts.deferred import SpawnDeferral
 from theater.daemon.spawning.provider_launch_parts.execution import SpawnExecution
 from theater.daemon.spawning.provider_launch_parts.rollback import SpawnRollback
 from theater.daemon.spawning.provider_launch_parts.validation import LaunchValidation
@@ -18,6 +19,7 @@ from theater.models import BadRequest
 
 class ParticipantLaunchService(
     SpawnAdmission,
+    SpawnDeferral,
     SpawnExecution,
     SpawnRollback,
     ParticipantAdoption,

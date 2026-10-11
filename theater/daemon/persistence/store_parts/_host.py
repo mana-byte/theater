@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from theater.daemon.persistence.repositories.control_operations import (
         ControlOperationRepository,
     )
+    from theater.daemon.persistence.repositories.handoff import HandoffRepository
     from theater.daemon.persistence.repositories.job_repairs import JobRepairRepository
     from theater.daemon.persistence.repositories.jobs import JobRepository
     from theater.daemon.persistence.repositories.journal import JournalRepository
@@ -68,6 +69,7 @@ class StoreHost:
         _native_evidence: NativeTerminalEvidenceRepository
         _response_contracts: ResponseContractRepository
         _repairs: JobRepairRepository
+        _handoff: HandoffRepository
         _bus_listeners: list[BusListener]
 
         def write_unit(self) -> SQLiteWriteUnit: ...

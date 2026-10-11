@@ -15,6 +15,7 @@ from theater.daemon.persistence.repositories.channels import ChannelCredentialRe
 from theater.daemon.persistence.repositories.control_operations import (
     ControlOperationRepository,
 )
+from theater.daemon.persistence.repositories.handoff import HandoffRepository
 from theater.daemon.persistence.repositories.job_repairs import JobRepairRepository
 from theater.daemon.persistence.repositories.jobs import JobRepository
 from theater.daemon.persistence.repositories.journal import JournalRepository
@@ -43,6 +44,7 @@ from theater.daemon.persistence.store_parts import (
     ContractStore,
     ControlOperationStore,
     CredentialStore,
+    HandoffStore,
     JobStore,
     ParticipantStore,
     RuntimeBindingStore,
@@ -66,6 +68,7 @@ class Store(
     RuntimeBindingStore,
     ControlOperationStore,
     ContractStore,
+    HandoffStore,
     BusStore,
 ):
     """Compatibility façade over ``Database`` and explicit repositories."""
@@ -94,6 +97,7 @@ class Store(
         self._native_evidence = NativeTerminalEvidenceRepository(self._db)
         self._response_contracts = ResponseContractRepository(self._db)
         self._repairs = JobRepairRepository(self._db)
+        self._handoff = HandoffRepository(self._db)
         self.providers = ProviderRepository(self._db)
         self.terminal_bindings = TerminalBindingRepository(self._db)
         self.operations = OperationRepository(self._db)

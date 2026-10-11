@@ -509,6 +509,9 @@ async def terminate_participant(
     _authorize_termination(target, caller_id)
     if target.status is Status.DEAD:
         return {"id": pid, "killed": False, "reason": "already_dead"}
+    if daemon.handoff.cancel_unlaunched(pid):
+        # A deferred task has no terminal, pane or process: there is nothing to verify or kill.
+        return {"id": pid, "killed": True, "reason": "never_launched"}
     if operation_id is None:
         return await terminate_with_operation(
             daemon,

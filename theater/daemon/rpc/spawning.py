@@ -51,7 +51,11 @@ def _wiring_param(params: dict) -> RuntimeWiring:
 
     ``legacy`` is the explicit opt-out. Approval has no default and no connection to wiring.
     """
-    raw = params.get("wiring")
+    return wiring_from_value(params.get("wiring"))
+
+
+def wiring_from_value(raw: object) -> RuntimeWiring:
+    """The ``wiring`` choice from a stored or wire value; None means ``auto``."""
     if raw is None:
         return RuntimeWiring.AUTO
     if not isinstance(raw, str):
@@ -93,8 +97,12 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     worktree = _validate_worktree_param(params.get("worktree", False))
     if worktree:
         reject_worktree_outside_git(_require(params, "cwd"))
-    prompt = _prompt_with_response_format(params.get("prompt") or "", response_format)
     wiring = _wiring_param(params)
+    if params.get("after") is not None or params.get("task_kind") is not None:
+        return _defer_until_source(
+            daemon, params, response_format, worktree, wiring, provider=provider
+        )
+    prompt = _prompt_with_response_format(params.get("prompt") or "", response_format)
     request: dict[str, object] = {
         "harness": harness_name,
         "approval": _require(params, "approval"),
@@ -166,6 +174,24 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
             "operation is unresolved; inspect the operation and provider before retrying."
         )
     return result
+
+
+def _defer_until_source(daemon, params, response_format, worktree, wiring, *, provider) -> dict:
+    """Reserve the task now and launch it when its source ends; nothing is created until then."""
+    if params.get("idempotency_key") is not None:
+        raise BadRequest("spawn parameter 'idempotency_key' is not supported with after")
+    return daemon.handoff.admit_spawn(
+        {
+            **params,
+            "approval": _require(params, "approval"),
+            "cwd": _require(params, "cwd"),
+            "worktree": worktree,
+            "wiring": wiring.value,
+            "provider": provider,
+        },
+        task=params.get("prompt") or "",
+        response_format=response_format,
+    )
 
 
 @method("harnesses")
