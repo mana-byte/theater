@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
-from theater.models import BadRequest, Job, JobState, NotFound, Participant
+from theater.models import BadRequest, Job, NotFound, Participant
 
 _SCAN_LIMIT = 64
 
@@ -39,16 +39,23 @@ def _current_tasked_job(daemon, participant_id: str) -> Job | None:
     Another sender's message still waiting in the queue is not this participant's work yet,
     and naming the participant must not silently mean it.
     """
-    waiting = {
-        operation.job_handle for operation in daemon.store.queued_control_operations(participant_id)
-    }
-    candidates = [
-        job
-        for job in daemon.store.recent_turn_jobs(participant_id, limit=_SCAN_LIMIT)
-        if job.handle not in waiting and _was_started(daemon, job)
-    ]
-    return next((job for job in candidates if job.state == JobState.RUNNING), None) or (
-        candidates[0] if candidates else None
+    running = next(
+        (
+            job
+            for job in daemon.store.running_jobs_for_target(participant_id)
+            if job.prompt and _was_started(daemon, job)
+        ),
+        None,
+    )
+    if running is not None:
+        return running
+    return next(
+        (
+            job
+            for job in daemon.store.recent_turn_jobs(participant_id, limit=_SCAN_LIMIT)
+            if _was_started(daemon, job)
+        ),
+        None,
     )
 
 

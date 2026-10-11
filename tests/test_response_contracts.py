@@ -174,6 +174,7 @@ def test_references_and_combinators_are_refused_and_never_evaluated(store, schem
     # A stored envelope from before this rule is judged invalid, not evaluated: no hang, no raise.
     verdict = parse_stored(legacy).validate(deep)
     assert (verdict.ok, verdict.reason) == (False, "contract_unavailable")
+    assert parse_stored(legacy).validate("not json").reason == "contract_unavailable"
     assert time.perf_counter() - started < 1.0
 
 

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from sqlalchemy import Connection, delete, func, select, update
+from sqlalchemy import Connection, delete, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.handoff.models import GitFacts, HandoffGate, JobEvidence
 from theater.daemon.persistence.database import Database
-from theater.daemon.schema import handoff_gates, job_evidence, jobs, touch
+from theater.daemon.schema import control_operations, handoff_gates, job_evidence, jobs, touch
+from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
 from theater.models import Job
 
 
@@ -176,13 +177,30 @@ class HandoffRepository:
     # ---- source lookups ----------------------------------------------------
 
     def recent_turn_jobs(self, target_id: str, *, limit: int) -> list[Job]:
-        """Spawn and send jobs that carried a task, newest first; a promptless launch is absent."""
+        """Recently started tasks, excluding queued or refused sends before limiting."""
+        control = control_operations.c.job_handle == jobs.c.handle
+        has_control = select(control_operations.c.operation_id).where(control).exists()
+        started = (
+            select(control_operations.c.operation_id)
+            .where(control)
+            .where(
+                or_(
+                    control_operations.c.delivery_phase == str(ControlDeliveryPhase.DISPATCHED),
+                    control_operations.c.delivery_result.in_(
+                        [str(DeliveryResult.ACCEPTED), str(DeliveryResult.UNKNOWN)]
+                    ),
+                    control_operations.c.native_turn_id.is_not(None),
+                )
+            )
+            .exists()
+        )
         rows = self._db.conn.execute(
             select(jobs)
             .where(jobs.c.target_id == target_id)
             .where(jobs.c.kind.in_(["spawn", "send"]))
             .where(jobs.c.prompt.is_not(None))
             .where(jobs.c.prompt != "")
+            .where(or_(jobs.c.kind == "spawn", ~has_control, started))
             .order_by(jobs.c.created_at.desc(), jobs.c.handle.desc())
             .limit(limit)
         ).fetchall()

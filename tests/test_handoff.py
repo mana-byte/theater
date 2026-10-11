@@ -553,6 +553,11 @@ async def test_naming_a_participant_never_selects_a_peers_queued_message(client,
     ]
     job, _ = resolve_source(daemon, daemon.registry.get(child.id).name)
     assert job.handle == mine.handle, "cancelling an undelivered message cannot make it the source"
+    for _ in range(65):
+        later = await client.call("send", target=child.id, prompt="hi", caller_id=stranger.id)
+        await client.call("jobs.cancel", handle=later["handle"], caller_id=stranger.id)
+    job, _ = resolve_source(daemon, daemon.registry.get(child.id).name)
+    assert job.handle == mine.handle, "the history limit cannot hide started work"
     daemon.jobs.finish(mine.handle, state=JobState.DONE, result="complete")
     job, _ = resolve_source(daemon, daemon.registry.get(child.id).name)
     assert job.handle == mine.handle

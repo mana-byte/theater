@@ -78,6 +78,13 @@ class StrictContract:
 
     def validate(self, text: str | None) -> Verdict:
         """Check the WHOLE answer: one bare JSON value that satisfies the schema."""
+        compiled = _compiled(self.schema_text)
+        if isinstance(compiled, str):
+            return Verdict(
+                False,
+                "contract_unavailable",
+                f"the stored schema cannot be evaluated: {compiled}",
+            )
         if text is None or not text.strip():
             return Verdict(False, "empty", "the final answer was empty")
         if len(text) > self.answer_cap:
@@ -96,13 +103,6 @@ class StrictContract:
                 False,
                 "too_large",
                 f"the final answer holds more than {CONTRACT_ANSWER_MAX_VALUES} values; shorten it",
-            )
-        compiled = _compiled(self.schema_text)
-        if isinstance(compiled, str):
-            return Verdict(
-                False,
-                "contract_unavailable",
-                f"the stored schema cannot be evaluated: {compiled}",
             )
         try:
             found = list(islice(compiled.iter_errors(value), _ERRORS_SCANNED))

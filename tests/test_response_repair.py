@@ -431,7 +431,8 @@ async def test_a_repair_turn_past_the_deadline_ends_the_job_but_keeps_the_fence_
     assert store.get_job(job.handle).structured_status == "unable_to_parse"
 
 
-async def test_a_stored_schema_the_validator_cannot_run_fails_without_repair(store):
+@pytest.mark.parametrize("answer", ['{"a": 1}', "not json"])
+async def test_a_stored_schema_the_validator_cannot_run_fails_without_repair(store, answer):
     """A snapshot from before the keyword rules: evidence must not raise and strand the job."""
     harness = await open_harness(store, "p1")
     legacy = json.dumps(
@@ -439,7 +440,7 @@ async def test_a_stored_schema_the_validator_cannot_run_fails_without_repair(sto
     )
     job = await harness.service.send("p1", caller_id="caller", prompt="go", response_format=legacy)
 
-    await end_turn(harness, '{"a": 1}')
+    await end_turn(harness, answer)
 
     finished = store.get_job(job.handle)
     assert finished.state == JobState.DONE
