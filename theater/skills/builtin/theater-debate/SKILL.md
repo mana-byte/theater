@@ -55,8 +55,11 @@ and attack the proposed decision. Stop after exchange 3 once consensus survives.
 exists after exchange 15, stop and present the unresolved decision to the user.
 
 Only the leader sends debate prompts and controls progression. After each send, await completion and
-read only the latest relevant transcript segment. Never load the full transcript by default. Keep
-messages focused on the current disagreement instead of repeating the entire brief.
+use the awaited `result` or parsed `structured_result` first. Read only the latest relevant
+transcript segment when the answer is clipped or missing, a failed structured parse hides required
+fields, or you must check actual tool or action evidence. Never load the full transcript by default.
+Do not require `response_format` for every exchange. Keep messages focused on the current
+disagreement instead of repeating the entire brief.
 
 For every `await_sessions` call, use the longest max_wait await_sessions allows (its cap is stated
 in its description). The call returns immediately when the peer finishes, so a long ceiling never

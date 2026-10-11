@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
+from theater.harness.contracts.events import clip
 from theater.mcp import tools
 
 RECORD = {
@@ -415,6 +416,21 @@ async def test_await_inlines_only_a_done_jobs_unparsed_final_answer():
     entries = await tools.await_sessions(s, handles=handles, max_wait=5.0)
     assert entries[0]["result"] == "x" * 2000 + "… (+500 chars)"
     assert [e.get("result") for e in entries[1:]] == [None, None, None, "why"]
+
+
+async def test_await_does_not_reclip_a_parser_clipped_answer():
+    """Re-clipping the parser's 2015-char output rewrote its "+3000" count as "+15"."""
+    clipped = clip("x" * 5000)
+    spoofed = "y" * 2500 + "… (+1 chars)"  # an agent-written suffix is not clipping provenance
+    rows = [
+        {"handle": "h#1", "state": "done", "result": clipped},
+        {"handle": "h#2", "state": "done", "result": spoofed},
+    ]
+    s = resolved(**{"jobs.await": rows})
+    entries = await tools.await_sessions(s, handles=["h#1", "h#2"], max_wait=5.0)
+    assert entries[0]["result"] == clipped
+    assert entries[0]["result"].endswith("… (+3000 chars)")
+    assert entries[1]["result"] == "y" * 2000 + "… (+512 chars)"
 
 
 async def test_await_shows_presence_only_while_it_is_not_a_plain_absence():

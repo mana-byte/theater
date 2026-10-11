@@ -7,8 +7,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from theater.constants.harness import HARNESS_EVENT_TEXT_MAX_CHARS
 from theater.constants.observation import TURN_FAILED_CODE
 from theater.harness.contracts.events import clip
+
+#: Longest text clip() emits: the cap plus its "… (+N chars)" marker for an N of up to 12 digits.
+_CLIPPED_MAX = HARNESS_EVENT_TEXT_MAX_CHARS + len("… (+999999999999 chars)")
 
 #: Job fields the caller supplied or cannot act on (its own id, its prompt, its schema).
 _JOB_ECHO = frozenset(
@@ -59,7 +63,15 @@ def _final_answer(job: Mapping[str, object]) -> str:
     answers = job.get("state") == "done" or job.get("error_code") == TURN_FAILED_CODE
     if not answers or job.get("structured_status") == "parsed":
         return ""
-    return clip(result) if isinstance(result, str) else ""
+    return _bounded(result) if isinstance(result, str) else ""
+
+
+def _bounded(text: str) -> str:
+    """Parser-clipped text keeps its original omission count; only longer text is clipped here.
+
+    Length is the only test: a "(+N chars)" suffix in agent text is not clipping provenance.
+    """
+    return text if len(text) <= _CLIPPED_MAX else clip(text)
 
 
 __all__ = ["compact", "job_entry"]
