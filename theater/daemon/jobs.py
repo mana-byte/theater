@@ -390,8 +390,11 @@ class JobManager:
             return []
         fresh = [job for job in jobs if job.handle not in self._prepinned]
         if fresh:
-            facts = await asyncio.to_thread(self.evidence.capture, fresh[0])
-            for job in fresh:
+            # Store reads stay on the loop (SQLite is loop-thread-only); the worker gets a path.
+            cwd = self.evidence.workspace_of(fresh[0])
+            facts = await asyncio.to_thread(self.evidence.pin, cwd)
+            # Every listed job, so an earlier holder releasing during the hop strands none.
+            for job in jobs:
                 self._prepinned.setdefault(job.handle, facts)
         for job in jobs:  # overlapping callers share one pin until the last releases it
             self._pin_refs[job.handle] = self._pin_refs.get(job.handle, 0) + 1

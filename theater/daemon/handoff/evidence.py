@@ -59,9 +59,14 @@ class EvidencePinner:
         participant = self._store.get_participant(job.target_id) if job.target_id else None
         return participant.cwd if participant is not None else None
 
+    @staticmethod
+    def pin(cwd: str | None) -> GitFacts:
+        """Pure Git read of an already-resolved workspace; the only part safe off the loop."""
+        return pin_git_facts(cwd)
+
     def capture(self, job: Job) -> GitFacts:
         """Pin the target's Git state now; call it before any write unit opens."""
-        return pin_git_facts(self.workspace_of(job))
+        return self.pin(self.workspace_of(job))
 
     def build(
         self,

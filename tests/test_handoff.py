@@ -616,13 +616,13 @@ async def test_terminal_pins_run_in_a_thread_before_the_unit_and_once_per_worksp
             handle=handle, caller_id="cli", target_id="src", kind="send", prompt="work"
         )
     threads: list[int] = []
-    real = daemon.jobs.evidence.capture
+    real = daemon.jobs.evidence.pin
 
-    def capture(job):
+    def pin(cwd):
         threads.append(threading.get_ident())
-        return real(job)
+        return real(cwd)
 
-    monkeypatch.setattr(daemon.jobs.evidence, "capture", capture)
+    monkeypatch.setattr(daemon.jobs.evidence, "pin", pin)
     monkeypatch.setattr(daemon.jobs.evidence, "required", lambda job: True)
 
     pinned = await daemon.jobs.prepare_pins("src")
@@ -637,6 +637,67 @@ async def test_terminal_pins_run_in_a_thread_before_the_unit_and_once_per_worksp
         head,
         head,
     ]
+
+
+async def test_pin_reads_store_on_the_loop_and_runs_git_on_a_worker(daemon, tmp_path, monkeypatch):
+    from theater.daemon.handoff import evidence as evidence_module
+
+    repo = _repository(tmp_path)
+    daemon.registry.create_spawned(harness="codex", cwd=str(repo), pid="src", name="Writer")
+    daemon.jobs.create(handle="src#1", caller_id="cli", target_id="src", kind="send", prompt="w")
+    loop_thread = threading.get_ident()
+    store_threads: list[int] = []
+    git_threads: list[int] = []
+    real_get = daemon.store.get_participant
+    real_pin = evidence_module.pin_git_facts
+
+    def get_participant(*args, **kwargs):
+        store_threads.append(threading.get_ident())
+        return real_get(*args, **kwargs)
+
+    def pin_git_facts(cwd):
+        git_threads.append(threading.get_ident())
+        assert isinstance(cwd, str)
+        return real_pin(cwd)
+
+    monkeypatch.setattr(daemon.store, "get_participant", get_participant)
+    monkeypatch.setattr(evidence_module, "pin_git_facts", pin_git_facts)
+    monkeypatch.setattr(daemon.jobs.evidence, "required", lambda job: True)
+
+    pinned = await daemon.jobs.prepare_pins("src")
+
+    assert store_threads and set(store_threads) == {loop_thread}
+    assert git_threads and loop_thread not in git_threads
+    assert daemon.jobs._prepinned["src#1"].commit_sha == _git(repo, "rev-parse", "HEAD")
+    daemon.jobs.release_pins(pinned)
+
+
+async def test_release_during_the_thread_hop_leaves_no_referenced_job_without_facts(
+    daemon, tmp_path, monkeypatch
+):
+    repo = _repository(tmp_path)
+    daemon.registry.create_spawned(harness="codex", cwd=str(repo), pid="src", name="Writer")
+    daemon.jobs.create(handle="src#1", caller_id="cli", target_id="src", kind="send", prompt="w")
+    monkeypatch.setattr(daemon.jobs.evidence, "required", lambda job: True)
+    first = await daemon.jobs.prepare_pins("src")
+    daemon.jobs.create(handle="src#2", caller_id="cli", target_id="src", kind="send", prompt="w")
+    loop = asyncio.get_running_loop()
+    real = daemon.jobs.evidence.pin
+
+    def pin(cwd):
+        released = threading.Event()
+        loop.call_soon_threadsafe(lambda: (daemon.jobs.release_pins(first), released.set()))
+        assert released.wait(5)
+        return real(cwd)
+
+    monkeypatch.setattr(daemon.jobs.evidence, "pin", pin)
+
+    second = await daemon.jobs.prepare_pins("src")
+
+    assert set(second) == {"src#1", "src#2"}
+    assert all(handle in daemon.jobs._prepinned for handle in second)
+    daemon.jobs.release_pins(second)
+    assert not daemon.jobs._prepinned and not daemon.jobs._pin_refs
 
 
 # ---- L1: the GC marks a source crashed behind the listener's back -----------------------------
