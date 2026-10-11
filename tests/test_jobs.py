@@ -444,14 +444,10 @@ def test_structured_json_invalid_fenced_or_trailing_prose_is_unavailable(store, 
     assert job.structured_status == "unavailable"
 
 
-def test_structured_json_recursion_error_is_unavailable(store, monkeypatch):
-    import theater.daemon.jobs as jobs_mod
+def test_structured_json_recursion_error_is_unavailable(store):
     from theater.daemon.jobs import JobManager, JobState
 
-    def too_deep(_raw):
-        raise RecursionError("too deeply nested")
-
-    monkeypatch.setattr(jobs_mod.json, "loads", too_deep)
+    raw = "[" * 2000 + "0" + "]" * 2000
     jm = JobManager(store)
     jm.create(
         handle="bad-recursion",
@@ -464,14 +460,62 @@ def test_structured_json_recursion_error_is_unavailable(store, monkeypatch):
     jm.finish(
         "bad-recursion",
         state=JobState.DONE,
-        result="[[...]]",
-        raw_result="[[...]]",
+        result=raw[:20],
+        raw_result=raw,
     )
 
     job = jm.get("bad-recursion")
     assert job is not None
     assert job.structured_result is None
     assert job.structured_status == "unavailable"
+
+
+@pytest.mark.parametrize("raw", ["NaN", "1e10000", "[1e10000]"])
+def test_structured_json_nonfinite_is_unavailable(store, raw):
+    from theater.daemon.jobs import JobManager, JobState
+
+    jm = JobManager(store)
+    jm.create(
+        handle="json-nonfinite",
+        caller_id="cli",
+        target_id="target",
+        kind="send",
+        response_format="json",
+    )
+    job = jm.finish("json-nonfinite", state=JobState.DONE, result=raw, raw_result=raw)
+    assert job.structured_result is None
+    assert job.structured_status == "unavailable"
+
+
+@pytest.mark.parametrize(
+    ("response_format", "expected"),
+    [
+        ("json", "unavailable"),
+        (json.dumps({"$theater": "custom", "schema": {"type": "number"}}), "unable_to_parse"),
+    ],
+)
+def test_jobs_rpc_corrects_corrupt_parsed_rows_without_changing_storage(response_format, expected):
+    from theater.daemon.rpc.jobs import _job_to_dict
+    from theater.models import Job
+
+    job = Job(
+        handle="legacy",
+        caller_id="cli",
+        target_id="target",
+        kind="send",
+        prompt="answer",
+        state="done",
+        result="1e10000",
+        error_code=None,
+        created_at=1.0,
+        finished_at=2.0,
+        response_format=response_format,
+        structured_result="1e10000",
+        structured_status="parsed",
+    )
+    row = _job_to_dict(job)
+    assert (row["structured_status"], row["structured_result"]) == (expected, None)
+    assert (job.structured_status, job.structured_result) == ("parsed", "1e10000")
 
 
 def test_structured_json_null_is_a_parsed_raw_result(store):

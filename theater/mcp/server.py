@@ -36,6 +36,7 @@ from theater.mcp.arguments import ignored_arguments, with_ignored_arguments
 from theater.mcp.client_pool import DaemonClientPool
 from theater.mcp.instrumentation import ToolTiming
 from theater.mcp.refusals import refusal_envelope, refusal_result
+from theater.mcp.result_delivery import with_structured_object
 from theater.mcp.tools import Session
 
 #: `spawn_session`'s description — harness list from local registry (hint); daemon is authoritative.
@@ -123,7 +124,7 @@ releases the await.
 
 Done means the turn ended, not that its work is correct. `result` is a bounded preview of the
 child's final message (about 2,000 chars): its claim, not evidence; check the repo.
-With response_format, a spawned or sent job returns its final JSON answer as a JSON-encoded string
+With response_format, a spawned or sent job returns its final answer as a native JSON value
 in structured_result instead of result. structured_status is "parsed"; "unavailable" when completion
 failed, output was missing, or a hint-only answer was not JSON; or "unable_to_parse" when a strict
 contract never produced a valid answer (the job is done; its result holds the last answer read).
@@ -535,7 +536,8 @@ class _TheaterServer(MCPServer):
         accepted = self.tool_parameters.get(name)
         if accepted is None or not isinstance(result, CallToolResult):
             return result
-        return with_ignored_arguments(result, ignored_arguments(arguments, accepted))
+        result = with_ignored_arguments(result, ignored_arguments(arguments, accepted))
+        return with_structured_object(result, tool_name=name)
 
 
 def build(

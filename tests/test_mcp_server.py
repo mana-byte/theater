@@ -42,9 +42,8 @@ async def daemon(theater_home):
 def _payload(result):
     """Take the structured half of a CallToolResult.
 
-    A tool annotated `-> dict` structures as that dict; one annotated
-    `-> list[dict]` cannot be a JSON object at the root under this protocol
-    revision, so the SDK wraps it as {"result": [...]}. Unwrap both.
+    Theater structures small bare `-> dict` controls. The SDK wraps `-> list[dict]`
+    output as {"result": [...]}; bulk bare-dict tools still return JSON text.
     """
     structured = result.structured_content
     if isinstance(structured, dict) and set(structured) == {"result"}:
@@ -109,6 +108,43 @@ async def test_wait_toolset_reuses_the_control_participant_identity(daemon, pres
     assert [row["id"] for row in rows] == ["p1"]
 
 
+async def test_await_returns_a_native_structured_result(daemon, presence):
+    daemon.jobs.create(
+        handle="structured",
+        caller_id="p1",
+        target_id=None,
+        kind="send",
+        response_format="json",
+    )
+    daemon.jobs.finish(
+        "structured",
+        state=JobState.DONE,
+        result='{"answer":42}',
+        raw_result='{"answer":42}',
+    )
+
+    result = await build("p1", "vibe", "wait").call_tool(
+        "await_sessions", {"handles": ["structured"]}
+    )
+    entry = _payload(result)[0]
+    assert entry["structured_status"] == "parsed"
+    assert entry["structured_result"] == {"answer": 42}
+
+
+async def test_bare_dict_tools_return_one_native_object_with_the_text_mirror(daemon):
+    mcp = build("p1", "vibe")
+    whoami = next(tool for tool in await mcp.list_tools() if tool.name == "whoami")
+    result = await mcp.call_tool("whoami", {"tail": 5})
+    bulk = await mcp.call_tool("scratchpad_get", {"namespace": "empty"})
+
+    assert whoami.output_schema is None
+    assert result.structured_content == json.loads(result.content[0].text)
+    assert result.structured_content["ignored_arguments"] == [
+        {"tail": "removed; page with next_cursor"}
+    ]
+    assert bulk.structured_content is None
+
+
 def test_mcp_toolset_must_be_known():
     with pytest.raises(ValueError, match="unknown MCP toolset"):
         build("p1", "vibe", "unknown")
@@ -128,7 +164,7 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
 
     assert "Omission rules are tool-specific" in mcp.instructions
     assert "done, crashed, or killed" in descriptions["await_sessions"]
-    assert "JSON-encoded string" in descriptions["await_sessions"]
+    assert "native JSON value" in descriptions["await_sessions"]
     assert '{"evidence":"none"}' in descriptions["await_sessions"]
     assert "successful terminal binding" in descriptions["spawn_session"]
     assert "does not guarantee launch success" in descriptions["spawn_session"]

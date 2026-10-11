@@ -6,7 +6,6 @@ wakes on ANY terminal job; touches commit with the result in one transaction.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -32,6 +31,7 @@ from theater.daemon.schema import touch as touch_table
 from theater.daemon.store import Store
 from theater.daemon.touch_paths import normalize_touch_path
 from theater.harness.base import EventPath
+from theater.json_values import decode_finite_json
 from theater.models import Job, JobKind, JobState, now
 
 logger = logging.getLogger("theater.jobs")
@@ -708,9 +708,8 @@ class JobManager:
                     else f"{verdict.reason}: no exact turn correlation to repair; {verdict.detail}",
                 )
             return None, STRUCTURED_UNABLE_TO_PARSE, failure
-        try:
-            json.loads(candidate)
-        except (ValueError, RecursionError):
+        valid, _ = decode_finite_json(candidate)
+        if not valid:
             return None, STRUCTURED_UNAVAILABLE, None
         return candidate, STRUCTURED_PARSED, None
 

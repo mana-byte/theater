@@ -27,6 +27,7 @@ from theater.daemon.response_contracts.schema_rules import (
     schema_problem,
     value_count,
 )
+from theater.json_values import finite_json_value
 from theater.models import BadRequest
 
 
@@ -98,6 +99,11 @@ class StrictContract:
         except (ValueError, RecursionError) as exc:
             detail = f"the final answer is not a single bare JSON value: {_clip(str(exc), 200)}"
             return Verdict(False, "not_json", detail)
+        try:
+            if not finite_json_value(value):
+                return Verdict(False, "not_json", "the final answer contains a non-finite number")
+        except RecursionError:
+            return Verdict(False, "not_json", "the final answer is nested too deeply")
         if value_count(value, CONTRACT_ANSWER_MAX_VALUES) > CONTRACT_ANSWER_MAX_VALUES:
             return Verdict(
                 False,

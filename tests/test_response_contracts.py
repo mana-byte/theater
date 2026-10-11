@@ -211,6 +211,7 @@ def test_a_property_named_like_a_forbidden_keyword_is_not_a_keyword(store):
         ("```json\n" + DELEGATE + "\n```", False, "not_json"),
         (DELEGATE + "\nDone.", False, "not_json"),
         ('{"commit": NaN}', False, "not_json"),
+        ('{"commit": 1e10000}', False, "not_json"),
         ('{"commit": "x"}', False, "schema"),
         ("", False, "empty"),
         (None, False, "empty"),

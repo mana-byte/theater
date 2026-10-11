@@ -33,7 +33,7 @@ def with_ignored_arguments(result: CallToolResult, ignored: list) -> CallToolRes
     if not ignored or result.is_error:
         return result
     structured = result.structured_content
-    # Untyped `-> dict` tools carry their payload only as JSON text.
+    # Bare `-> dict` has no SDK output schema; call_tool adds native values to small controls.
     textual = structured is None
     if textual and len(result.content) == 1 and isinstance(result.content[0], TextContent):
         try:

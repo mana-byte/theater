@@ -29,6 +29,7 @@ from theater.constants.handoff import (
     ERROR_SOURCE_NOT_REVIEWABLE,
 )
 from theater.constants.observation import TURN_FAILED_CODE
+from theater.constants.response_contract import STRUCTURED_UNABLE_TO_PARSE
 from theater.daemon.awaiting import (
     REASON_AWAITING_INPUT,
     AwaitTarget,
@@ -39,9 +40,12 @@ from theater.daemon.awaiting import (
 from theater.daemon.controls._common import INTERRUPTED_ERROR_CODE
 from theater.daemon.controls.interaction_wire import cached_pending_interaction
 from theater.daemon.job_changes import job_changes
+from theater.daemon.jobs import STRUCTURED_PARSED, STRUCTURED_UNAVAILABLE
 from theater.daemon.rails import CycleDetected, check_cycle, check_wait_cycle
+from theater.daemon.response_contracts import parse_stored
 from theater.daemon.rpc.params import _finite_number_param, _require
 from theater.daemon.rpc.router import method
+from theater.json_values import decode_finite_json
 from theater.models import BadRequest, Job, JobState, NotFound, Status, new_id
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
@@ -118,6 +122,15 @@ _REPLACED_BY_WINDOW_SECONDS = 60.0
 def _job_to_dict(job: Job, store=None) -> dict:
     """Serialize a job with the actionable explanation for known terminal errors."""
     row = job.to_dict()
+    if job.structured_status == STRUCTURED_PARSED:
+        valid, _ = decode_finite_json(job.structured_result)
+        if not valid:
+            row["structured_status"] = (
+                STRUCTURED_UNABLE_TO_PARSE
+                if parse_stored(job.response_format) is not None
+                else STRUCTURED_UNAVAILABLE
+            )
+            row["structured_result"] = None
     message = _JOB_ERROR_MESSAGES.get(job.error_code or "")
     if message is not None:
         row["error"] = message

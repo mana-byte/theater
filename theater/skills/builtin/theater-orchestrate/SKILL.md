@@ -66,8 +66,8 @@ remove ambiguity. Workers preserve unrelated user changes, commit when changes a
 run the full test suite, and create no report file unless a report is the requested artifact.
 
 Ask for the result you will act on with `response_format={"$theater": "delegate"}` (status,
-summary, blockers, plus commit, changed paths, and checks): `await_sessions` returns it parsed in
-`structured_result`. Use `{"$theater": "review"}` for reviewers. A preset is a validated shape, not
+summary, blockers, plus commit, changed paths, and checks): `await_sessions` returns a native JSON
+value in `structured_result`. Use `{"$theater": "review"}` for reviewers. A preset is a validated shape, not
 proof that the work is right. Leave `response_format` off for open-ended investigations, and where
 a resume cannot carry it.
 

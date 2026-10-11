@@ -394,11 +394,26 @@ async def test_await_keeps_only_what_the_caller_acts_on():
         {
             "handle": "h#1",
             "state": "done",
-            "structured_result": '{"answer": 42}',
+            "structured_result": {"answer": 42},
             "structured_status": "parsed",
             "finished_at": 2.0,
         }
     ]
+
+
+async def test_await_preserves_falsy_structured_values():
+    rows = [
+        {
+            "handle": f"h#{index}",
+            "state": "done",
+            "structured_status": "parsed",
+            "structured_result": raw,
+        }
+        for index, raw in enumerate(("null", "false", "0", "[]", "{}"))
+    ]
+    s = resolved(**{"jobs.await": rows})
+    entries = await tools.await_sessions(s, handles=[row["handle"] for row in rows], max_wait=5.0)
+    assert [entry["structured_result"] for entry in entries] == [None, False, 0, [], {}]
 
 
 async def test_await_inlines_only_a_done_jobs_unparsed_final_answer():

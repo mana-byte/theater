@@ -43,7 +43,7 @@ Omit `base_branch` for this review: Theater fixes the base to that commit.
 ## Run bounded exchanges
 
 Ask for `response_format={"$theater": "debate"}` on the spawn and on every `send`: each reply then
-arrives as validated JSON in `structured_result` with the verdict (`agree`, `disagree`, or `uncertain`), its
+arrives as a native JSON object in `structured_result` with the verdict (`agree`, `disagree`, or `uncertain`), its
 strongest evidence, weakest assumption, position change, and remaining blocker. Send follow-ups to
 the peer by name, in a plain `send`: Theater queues it behind the peer's current turn and delivers
 it in order, so never wait for idle or poll. If an undelivered native message ends

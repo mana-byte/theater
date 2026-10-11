@@ -723,8 +723,8 @@ def test_task_and_result_are_clipped(store, tmp_path):
 
     result = recall(store, paths=["f.py"], caller_cwd=root)
     point = result["f.py"]["timeline"][0]
-    assert len(point["task"]) == CLIP
-    assert len(point["result"]) == CLIP
+    assert point["task"] == long_task[:CLIP] + f"… (+{len(long_task) - CLIP} chars)"
+    assert point["result"] == long_result[:CLIP] + f"… (+{len(long_result) - CLIP} chars)"
 
 
 # ---- depth caps the timeline -----------------------------------------------

@@ -107,7 +107,8 @@ async def test_stdio_timing_correlates_daemon_without_payload_changes(
             await session.initialize()
             result = await session.call_tool("whoami", {})
             assert not result.is_error, result.content
-            payload = result.structured_content or json.loads(result.content[0].text)
+            assert result.structured_content == json.loads(result.content[0].text)
+            payload = result.structured_content
             assert payload["id"] == "p-timing"
             refused = await session.call_tool("load_skill", {"name": "secret-missing-skill"})
             # vibe delivers refusals as text; the metric still reads the envelope's code.

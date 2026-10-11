@@ -33,7 +33,9 @@ def _clip(text: str | None) -> str | None:
     """Clip to ``CLIP`` chars; ``None`` stays ``None`` so "no result" is not "said nothing"."""
     if text is None:
         return None
-    return text[:CLIP]
+    if len(text) <= CLIP:
+        return text
+    return text[:CLIP] + f"… (+{len(text) - CLIP} chars)"
 
 
 def _sha_or_dash(sha: str | None) -> str:

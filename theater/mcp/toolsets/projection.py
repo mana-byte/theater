@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from theater.constants.harness import HARNESS_EVENT_TEXT_MAX_CHARS
 from theater.constants.observation import TURN_FAILED_CODE
 from theater.harness.contracts.events import clip
+from theater.json_values import decode_finite_json
 
 #: Longest text clip() emits: the cap plus its "… (+N chars)" marker for an N of up to 12 digits.
 _CLIPPED_MAX = HARNESS_EVENT_TEXT_MAX_CHARS + len("… (+999999999999 chars)")
@@ -44,6 +45,12 @@ def compact(record: Mapping[str, object], *, drop: frozenset[str] = frozenset())
 def job_entry(job: Mapping[str, object]) -> dict:
     """One await/send/queue entry: state and outcome, presence only while it matters."""
     entry = compact(job, drop=_JOB_ECHO)
+    if entry.get("structured_status") == "parsed":
+        raw = entry.get("structured_result")
+        if isinstance(raw, str):
+            valid, value = decode_finite_json(raw)
+            if valid:
+                entry["structured_result"] = value
     answer = _final_answer(job)
     if answer:
         entry["result"] = answer
