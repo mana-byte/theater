@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 from typing import Literal
 
@@ -12,11 +13,16 @@ from theater.harness.normalization.timing import iso_epoch as _epoch
 from theater.harness.normalization.values import decode_json_record
 
 from .constants import _READ_TOOLS, _WRITE_TOOLS
+from .seal import FinalAnswerSeal, Sealed, seal_supported
 from .usage import _token_usage
 from .values import _relativise
 
+logger = logging.getLogger("theater.harness.claude")
+
 
 class ClaudeParser:
+    _seal: FinalAnswerSeal
+
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         record = self._decode(line)
         if record is None:
@@ -39,9 +45,12 @@ class ClaudeParser:
         if record is None:
             return ParsedRecord()
         self._remember_mcp_calls(record)  # type: ignore[attr-defined]
+        events = tuple(self._parse_decoded(record, index, clip_text=clip_text))
         return ParsedRecord(
-            events=tuple(self._parse_decoded(record, index, clip_text=clip_text)),
+            events=events,
             trajectory=tuple(self._trajectory_facts(record, index)),  # type: ignore[attr-defined]
+            # The marker's boundary repeats text its assistant record already projected.
+            trajectory_events=() if events and _is_turn_marker(record) else None,
         )
 
     def _parse_decoded(self, record: dict, index: int, *, clip_text: bool = True) -> list[Event]:
@@ -49,7 +58,11 @@ class ClaudeParser:
         kind = record.get("type")
         message = record.get("message")
         message = message if isinstance(message, dict) else {}
+        if (expired := self._seal.observe(record)) is not None and clip_text:
+            _report_seal("unavailable", expired)
 
+        if _is_turn_marker(record):
+            return self._seal_boundary(record, ts, index, clip_text=clip_text)
         if kind == "assistant":
             return self._assistant(record, message, ts, index, clip_text=clip_text)
         if kind == "user":
@@ -80,7 +93,9 @@ class ClaudeParser:
     ) -> list[Event]:
         _clip = clipper(clip_text)
         stop = message.get("stop_reason")
-        turn_end = stop is not None and stop != "tool_use"
+        sidechain = record.get("isSidechain") is True
+        turn_end = stop is not None and stop != "tool_use" and not sidechain
+        final_candidate = turn_end and stop == "end_turn" and seal_supported(record)
         tid = message.get("id") or record.get("requestId")
         tid = tid if isinstance(tid, str) and tid else None
         cwd = record.get("cwd")
@@ -116,7 +131,7 @@ class ClaudeParser:
                 )
         if usage is not None and out:
             out[-1] = replace(out[-1], usage=usage)
-        elif usage is not None and not out and not turn_end:
+        elif usage is not None:
             out.append(
                 Event(
                     kind=EventKind.ASSISTANT,
@@ -126,21 +141,41 @@ class ClaudeParser:
                     usage=usage,
                 )
             )
-        if turn_end:
-            if out:
-                out[-1] = replace(out[-1], turn_end=True)
-            else:
-                out.append(
-                    Event(
-                        kind=EventKind.ASSISTANT,
-                        ts=ts,
-                        turn_end=True,
-                        turn_id=tid,
-                        raw_index=index,
-                        usage=usage,
-                    )
-                )
+        if sidechain:
+            return out
+        if final_candidate:
+            self._seal.expect_marker(tid)
+        elif turn_end and out and _carries_answer(out[-1]):
+            # Fail closed: a thinking-only or blank fragment is never a boundary.
+            out[-1] = replace(out[-1], turn_end=True)
+            if clip_text and stop == "end_turn":
+                _report_seal("unavailable", "unsupported_version")
         return out
+
+    def _seal_boundary(
+        self, record: dict, ts: float | None, index: int, *, clip_text: bool
+    ) -> list[Event]:
+        """One terminal event, only when the marker's parent chain proves which message ended."""
+        if record.get("isSidechain") is True or not seal_supported(record):
+            return []
+        outcome = self._seal.resolve(record)
+        if not isinstance(outcome, Sealed):
+            if clip_text:
+                _report_seal("unavailable", outcome.reason)
+            return []
+        if clip_text:
+            _report_seal("sealed", "empty" if not outcome.raw_text else "text")
+        return [
+            Event(
+                kind=EventKind.ASSISTANT,
+                text=clipper(clip_text)(outcome.raw_text),
+                raw_text=outcome.raw_text,
+                ts=ts,
+                turn_end=True,
+                turn_id=outcome.message_id,
+                raw_index=index,
+            )
+        ]
 
     def _tool_paths(
         self, name: str | None, tool_input: object, cwd: str | None
@@ -201,3 +236,23 @@ class ClaudeParser:
                     )
                 )
         return out
+
+
+def _is_turn_marker(record: dict) -> bool:
+    return record.get("type") == "system" and record.get("subtype") == "turn_duration"
+
+
+def _carries_answer(event: Event) -> bool:
+    return event.kind is not EventKind.ASSISTANT or bool(event.text or event.raw_text)
+
+
+def _report_seal(state: str, reason: str) -> None:
+    """One low-volume, OTLP-bridged log per live completion: sealed or unavailable, and why."""
+    degraded = state != "sealed" and reason != "unsupported_version"
+    logger.log(
+        logging.WARNING if degraded else logging.INFO,
+        "claude completion %s (%s)",
+        state,
+        reason,
+        extra={"theater_completion_seal": state, "theater_completion_reason": reason},
+    )

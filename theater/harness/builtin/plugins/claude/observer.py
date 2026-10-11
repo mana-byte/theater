@@ -13,6 +13,7 @@ from .config_root import claude_projects_root
 from .identity import ClaudeIdentity
 from .parser import ClaudeParser
 from .screen import ClaudeScreen
+from .seal import FinalAnswerSeal
 from .timing import _ClaudeCausalRecord, _ClaudeRequestClock
 from .trajectory import ClaudeTrajectory
 
@@ -48,6 +49,7 @@ class ClaudeCodeObserver(
         self._causal_records: dict[str, _ClaudeCausalRecord] = {}
         self._request_clocks: dict[str, _ClaudeRequestClock] = {}
         self._main_turn_id: str | None = None
+        self._seal = FinalAnswerSeal()
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
         return self.open_source_for(

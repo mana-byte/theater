@@ -29,3 +29,11 @@ _WRITE_TOOLS: dict[str, str] = {
     "NotebookEdit": "notebook_path",
 }
 _READ_TOOLS: dict[str, str] = {"Read": "file_path"}
+
+#: Oldest CLI whose checked-in fixture carries the causal ``turn_duration`` completion marker.
+SEAL_MIN_VERSION: Final = (2, 1, 220)
+#: Records and messages remembered to resolve a marker's parent chain across transcript reads.
+SEAL_NODE_LIMIT: Final = 2048
+SEAL_MESSAGE_LIMIT: Final = 32
+#: Non-assistant records (an attachment) allowed between a marker and its final assistant record.
+SEAL_MAX_HOPS: Final = 4

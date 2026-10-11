@@ -93,8 +93,8 @@ def test_claude_raw_index_tracks_the_source_record():
     assert [e.raw_index for e in events] == [0, 1, 2, 3, 4, 5, 6]
 
 
-def test_a_thinking_only_record_still_ends_the_turn():
-    """The boundary must survive the block being filtered out."""
+def test_a_thinking_only_record_never_ends_the_turn():
+    """Its text half may follow in the same message; the empty half proves nothing."""
     record = {
         "type": "assistant",
         "message": {
@@ -102,11 +102,7 @@ def test_a_thinking_only_record_still_ends_the_turn():
             "content": [{"type": "thinking", "thinking": "quietly"}],
         },
     }
-    events = ClaudeCodeObserver().parse(json.dumps(record), 0)
-    assert len(events) == 1
-    assert events[0].kind is EventKind.ASSISTANT
-    assert events[0].turn_end is True
-    assert events[0].text == ""
+    assert ClaudeCodeObserver().parse(json.dumps(record), 0) == []
 
 
 @pytest.mark.parametrize(

@@ -42,6 +42,7 @@ from theater.trajectory.enums import (
 )
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
+from .seal import FinalAnswerSeal
 from .timing import (
     _claude_first_token,
     _claude_request_bounds,
@@ -77,6 +78,7 @@ class ClaudeTrajectory:
     _causal_records: dict[str, _ClaudeCausalRecord]
     _request_clocks: dict[str, _ClaudeRequestClock]
     _main_turn_id: str | None
+    _seal: FinalAnswerSeal
 
     @staticmethod
     def _starts_turn(record: dict) -> bool:
@@ -195,6 +197,7 @@ class ClaudeTrajectory:
         self._causal_records.clear()
         self._request_clocks.clear()
         self._main_turn_id = None
+        self._seal.reset()
         scan_start = max(0, start - TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES)
         fh.seek(scan_start)
         context = fh.read(start - scan_start)
@@ -207,6 +210,7 @@ class ClaudeTrajectory:
             if record is not None:
                 self._remember_mcp_calls(record)
                 self._trajectory_timing(record, _epoch(record.get("timestamp")))
+                self._seal.observe(record)
 
     def _assistant_trajectory_facts(
         self,
