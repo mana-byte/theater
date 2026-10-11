@@ -534,6 +534,14 @@ async def test_naming_a_participant_never_selects_a_peers_queued_message(client,
     job, _ = resolve_source(daemon, daemon.registry.get(child.id).name)
 
     assert job.handle == mine.handle != queued["handle"]
+    assert (await client.call("jobs.cancel", handle=queued["handle"], caller_id=stranger.id))[
+        "cancelled"
+    ]
+    job, _ = resolve_source(daemon, daemon.registry.get(child.id).name)
+    assert job.handle == mine.handle, "cancelling an undelivered message cannot make it the source"
+    daemon.jobs.finish(mine.handle, state=JobState.DONE, result="complete")
+    job, _ = resolve_source(daemon, daemon.registry.get(child.id).name)
+    assert job.handle == mine.handle
 
 
 # ---- M2: pinning is one Git process, once per workspace, off the loop -------------------------

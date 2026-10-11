@@ -9,7 +9,7 @@ import pytest
 from tests._presence_doubles import AbsentPresence, PresentPresence
 from tests.test_control_rpc import _native_pair
 from theater.daemon.rpc.cancellation import _cancel
-from theater.models import JobState
+from theater.models import BadRequest, JobState
 from theater.protocol import RemoteError
 
 
@@ -149,7 +149,7 @@ async def test_cancel_withdraws_a_waiting_send_and_closes_its_gate(client, daemo
     assert state.sent == []
 
 
-async def test_awaiting_a_gated_send_that_depends_on_you_is_a_cycle(client, daemon):
+async def test_awaiting_a_gated_send_that_depends_on_you_is_a_cycle(client, daemon, monkeypatch):
     parent, child, _ = await _native_pair(daemon)
     source, source_job = _source(daemon)
     gated = await _send(client, child, parent, prompt="A", after=source_job.handle)
@@ -162,6 +162,9 @@ async def test_awaiting_a_gated_send_that_depends_on_you_is_a_cycle(client, daem
     assert daemon.handoff.dependency_targets([behind["handle"]]) == [source.id]
     with pytest.raises(RemoteError, match="deadlock"):
         await client.call("jobs.await", handles=[behind["handle"]], max_wait=1, caller_id=source.id)
+    monkeypatch.setattr("theater.daemon.handoff.service.MAX_CHAIN", 1)
+    with pytest.raises(BadRequest, match="exceed"):
+        daemon.handoff.dependency_targets([behind["handle"]])
 
 
 async def test_restart_fails_a_queued_native_gate_closed_and_recover_keeps_a_live_one(

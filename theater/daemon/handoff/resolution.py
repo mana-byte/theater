@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from theater.models import BadRequest, Job, NotFound, Participant
+from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
+from theater.models import BadRequest, Job, JobState, NotFound, Participant
 
 _SCAN_LIMIT = 64
 
@@ -41,10 +42,29 @@ def _current_tasked_job(daemon, participant_id: str) -> Job | None:
     waiting = {
         operation.job_handle for operation in daemon.store.queued_control_operations(participant_id)
     }
-    for job in daemon.store.recent_turn_jobs(participant_id, limit=_SCAN_LIMIT):
-        if job.handle not in waiting:
-            return job
-    return None
+    candidates = [
+        job
+        for job in daemon.store.recent_turn_jobs(participant_id, limit=_SCAN_LIMIT)
+        if job.handle not in waiting and _was_started(daemon, job)
+    ]
+    return next((job for job in candidates if job.state == JobState.RUNNING), None) or (
+        candidates[0] if candidates else None
+    )
+
+
+def _was_started(daemon, job: Job) -> bool:
+    """A settled queue rejection is never the participant's work, even after cancellation."""
+    if job.kind != "send":
+        return True
+    operations = daemon.store.control_operations_for_job(job.handle)
+    if not operations:  # legacy sends and older jobs may have no control row
+        return True
+    return any(
+        operation.delivery_phase is ControlDeliveryPhase.DISPATCHED
+        or operation.delivery_result in (DeliveryResult.ACCEPTED, DeliveryResult.UNKNOWN)
+        or operation.native_turn_id is not None
+        for operation in operations
+    )
 
 
 def participant_of(daemon, participant_id: str | None) -> Participant | None:

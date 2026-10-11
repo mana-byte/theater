@@ -54,9 +54,10 @@ author's conclusions, spawn_session(task_kind="independent_review", worktree=tru
 gives the reviewer the facts, not the verdict, in a worktree at the exact commit.
 
 Ask for a structured answer with response_format when you will act on it; await_sessions
-returns it parsed. A child's "done" is the end of its turn, not a verdict on its work: check
-the work (the repo, a review) before you rely on it. read_transcript and get_session_controls
-diagnose a stuck, failed or surprising child; they are not how you read answers.
+returns validated JSON in structured_result. A child's "done" is the end of its turn, not a
+verdict on its work: check the repo or a review before you rely on it.
+read_transcript and get_session_controls diagnose a stuck, failed or surprising child;
+they are not how you read answers.
 
 Children that share a file do not run in parallel, they produce a conflict; split the
 work so each owns files no sibling touches.
@@ -816,9 +817,10 @@ def build(
                    or {"$theater": "custom", "name": "x", "schema": {...}}. Theater validates
                    and, where it can, repairs the answer; await_sessions returns a valid one
                    in structured_result, else structured_status "unable_to_parse".
-        after:     a live participant name or an exact job handle. The message is queued
-                   (delivery="queued", handoff.state="waiting") and delivered only after that
-                   work ends, followed by a labelled card: its outcome, pinned Git commit and
+        after:     a live participant name or an exact job handle. If that work is running,
+                   the message is queued (delivery="queued", handoff.state="waiting") until
+                   it ends. If already done, the message may deliver immediately. Theater adds
+                   a labelled card: its outcome, pinned Git commit and
                    dirty state, and its answer marked unverified (a failed source gives a
                    labelled failure). You write the task; copy no path or handle. The same
                    handle covers the wait and the reply; cancel_job withdraws it while it

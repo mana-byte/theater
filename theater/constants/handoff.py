@@ -29,9 +29,9 @@ PATHS_MAX: Final = 20
 #: Hard bound on the Git subprocesses that pin a source at completion.
 GIT_PIN_TIMEOUT_SECONDS: Final = 3
 GIT_DIRTY_OUTPUT_MAX_BYTES: Final = 65_536
-#: Open gates one caller may hold, and the longest chain of gated sources followed.
+#: Open gates one caller may hold, and the bounded dependency walk before await refuses.
 MAX_WAITING_PER_CALLER: Final = 16
-MAX_CHAIN: Final = 16
+MAX_CHAIN: Final = 128
 
 ERROR_SOURCE_NOT_REVIEWABLE: Final = "source_not_reviewable"
 ERROR_SOURCE_GONE: Final = "handoff_source_gone"

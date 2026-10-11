@@ -595,7 +595,7 @@ class HandoffService:
         """Participants whose running jobs must finish before an awaited message or task can go.
 
         Follows a gate to its source job, and a send to the earlier gated sends of its own lane
-        (one caller to one target stays in order), at most ``MAX_CHAIN`` hops each.
+        (one caller to one target stays in order); an oversized graph is refused.
         """
         targets: list[str] = []
         for handle in handles:
@@ -616,6 +616,11 @@ class HandoffService:
                 job = self.store.get_job(current)
                 if job is not None:
                     pending.extend(self._lane_predecessors(job))
+            if pending:
+                raise BadRequest(
+                    f"after dependencies for {handle!r} exceed {MAX_CHAIN} jobs; await a nearer "
+                    "source or shorten the chain"
+                )
         return targets
 
     def _lane_predecessors(self, job: Job) -> list[str]:

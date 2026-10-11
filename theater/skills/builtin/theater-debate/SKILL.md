@@ -32,21 +32,23 @@ Give the peer a neutral brief containing:
 - exact paths, symbols, line numbers, and short snippets needed for inspection.
 
 Do not include the leader's conclusion in the opening brief; require an independent initial
-position. Base the peer's worktree on the recorded commit (`base_branch`). If relevant files change
-during the debate, invalidate affected claims and inspect the new version before seeking consensus.
+position. For a general design debate, base the peer's worktree on the recorded commit
+(`base_branch`). If relevant files change, invalidate affected claims and inspect the new version.
 
 When the question is about another agent's finished work, name it instead of copying its commit
 or paths: `spawn_session(task_kind="independent_review", worktree=true, after=<that agent>)` gives
 the peer that work's facts, not its conclusions, in a worktree at the exact commit it finished on.
+Omit `base_branch` for this review: Theater fixes the base to that commit.
 
 ## Run bounded exchanges
 
 Ask for `response_format={"$theater": "debate"}` on the spawn and on every `send`: each reply then
-arrives parsed in `structured_result` with the verdict (`agree`, `disagree`, or `uncertain`), its
+arrives as validated JSON in `structured_result` with the verdict (`agree`, `disagree`, or `uncertain`), its
 strongest evidence, weakest assumption, position change, and remaining blocker. Send follow-ups to
 the peer by name, in a plain `send`: Theater queues it behind the peer's current turn and delivers
-it in order, so never wait for idle, poll, or resend. Cancel an unsent message you no longer want
-with `cancel_job`.
+it in order, so never wait for idle or poll. If an undelivered native message ends
+`daemon_restarted`, send it again only if the work is still needed. Cancel an unsent message you
+no longer want with `cancel_job`.
 
 One exchange is one leader message followed by one completed peer response. The response to the
 spawn prompt is exchange 1. Retries and undelivered messages do not count.

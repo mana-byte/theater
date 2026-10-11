@@ -83,6 +83,8 @@ holds the task until that work ends, then adds a labelled card: the outcome, the
 and whether the tree was dirty, and the source's answer marked unverified (a failed source arrives
 as a labelled failure). You write only the task; the same handle covers the wait and the work, so
 a single `await_sessions` call returns the answer.
+If an undelivered native message ends `daemon_restarted`, send it again only if the task is still
+needed; a provider-backed queued message remains pending across restart.
 
 - A successor that must build on a predecessor's commits is spawned with `base_branch` set to the
   predecessor's branch from its spawn result, so its worktree starts from the finished work.
