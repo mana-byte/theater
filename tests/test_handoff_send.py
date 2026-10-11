@@ -149,6 +149,41 @@ async def test_cancel_withdraws_a_waiting_send_and_closes_its_gate(client, daemo
     assert state.sent == []
 
 
+async def test_await_releases_a_protected_cancelled_send_whose_gate_had_opened(client, daemon):
+    parent, child, state = await _native_pair(daemon)
+    _, source_job = _source(daemon)
+    reply = await _send(client, child, parent, prompt="later", after=source_job.handle)
+    daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ok")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", PresentPresence(), raising=False)
+        await _pump(daemon, child, state)  # gate opens; presence keeps the message queued
+        assert daemon.store.get_handoff_gate(reply["handle"]).state == "opened"
+        waiter = asyncio.create_task(
+            client.call("jobs.await", handles=[reply["handle"]], max_wait=2, caller_id=parent.id)
+        )
+        await asyncio.sleep(0.1)
+        assert not waiter.done()
+        cancelled = await _cancel(daemon, {"handle": reply["handle"], "caller_id": parent.id})
+        assert cancelled == {"handle": reply["handle"], "cancelled": True}
+        (job,) = await asyncio.wait_for(waiter, 1.0)
+
+    assert state.sent == []
+    assert daemon.store.get_handoff_gate(reply["handle"]).state == "opened"
+    assert job["state"] == "killed" and job["await_reason"] == "job_terminal"
+
+
+async def test_a_delivered_send_with_an_opened_gate_stays_held_by_presence(client, daemon):
+    parent, child, state = await _native_pair(daemon)
+    _, source_job = _source(daemon)
+    reply = await _send(client, child, parent, prompt="later", after=source_job.handle)
+    daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ok")
+    await _pump(daemon, child, state)
+    assert len(state.sent) == 1
+    daemon.jobs.finish(reply["handle"], state=JobState.KILLED, error_code="cancelled")
+
+    assert daemon.handoff.never_dispatched(reply["handle"]) is False
+
+
 async def test_awaiting_a_gated_send_that_depends_on_you_is_a_cycle(client, daemon, monkeypatch):
     parent, child, _ = await _native_pair(daemon)
     source, source_job = _source(daemon)

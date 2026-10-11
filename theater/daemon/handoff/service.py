@@ -34,6 +34,7 @@ from theater.constants.handoff import (
     TASK_KINDS,
     TRANSIENT_PROVIDER_REASONS,
 )
+from theater.daemon.controls._common import CANCELLED_ERROR_CODE
 from theater.daemon.handoff.card import SourceView, render_card
 from theater.daemon.handoff.evidence import EvidencePinner
 from theater.daemon.handoff.models import HandoffGate
@@ -41,6 +42,7 @@ from theater.daemon.handoff.resolution import participant_of, resolve_source
 from theater.daemon.response_contracts.prompts import prompt_with_guidance
 from theater.daemon.schema import launch_reservations
 from theater.daemon.terminals import ProviderBusy, ProviderUnavailable
+from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
 from theater.models import BadRequest, Job, JobState, TheaterError, now
 from theater.observability.catalog import HANDOFF_GATE
 
@@ -602,7 +604,27 @@ class HandoffService:
     def never_dispatched(self, handle: str) -> bool:
         """Durable proof that this job's work was never launched, for the await exception."""
         gate = self.store.get_handoff_gate(handle)
-        return gate is not None and gate.state in (GATE_FAILED, GATE_CANCELLED)
+        if gate is None:
+            return False
+        if gate.state in (GATE_FAILED, GATE_CANCELLED):
+            return True
+        return gate.state == GATE_OPENED and self._cancelled_before_delivery(handle)
+
+    def _cancelled_before_delivery(self, handle: str) -> bool:
+        """An opened send its requester cancelled while every control row was still untouched."""
+        job = self.store.get_job(handle)
+        if job is None or job.kind != KIND_SEND or job.state != JobState.KILLED:
+            return False
+        if job.error_code != CANCELLED_ERROR_CODE:
+            return False
+        operations = self.store.control_operations_for_job(handle)
+        return bool(operations) and all(
+            op.delivery_phase is ControlDeliveryPhase.SETTLED
+            and op.delivery_result is DeliveryResult.REJECTED
+            and op.error_code == CANCELLED_ERROR_CODE
+            and not op.execution_barrier
+            for op in operations
+        )
 
     def dependency_targets(self, handles: list[str]) -> list[str]:
         """Participants whose running jobs must finish before an awaited message or task can go.
