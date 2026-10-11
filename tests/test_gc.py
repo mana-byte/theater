@@ -20,6 +20,7 @@ import pytest
 from theater import paths
 from theater.config import RetentionSection
 from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
+from theater.constants.observation import FENCED_TURNS
 from theater.daemon import artifacts as artifacts_module
 from theater.daemon import gc as gc_module
 from theater.daemon.artifacts import (
@@ -880,10 +881,23 @@ async def test_eligible_participant_removes_all_owned_artifacts(store):
     global_state = paths.plugin_state_dir("alerts")
     global_state.mkdir()
     (global_state / "state.db").write_text("keep")
+    with store.write_unit() as unit:  # turn fences are bounded, newest kept, and go with it
+        for index in range(FENCED_TURNS + 2):
+            fence = f"turn-{index:03d}"
+            store.turn_fences.add(
+                participant.id,
+                [fence],
+                job_handle=None,
+                created_at=index,
+                connection=unit.connection,
+            )
+    assert store.turn_fences.keys(participant.id)[0] == "turn-002"
+    assert len(store.turn_fences.keys(participant.id)) == FENCED_TURNS
 
     result = await sweep(store, _retention())
 
     assert result.participants == 1
+    assert store.turn_fences.keys(participant.id) == ()
     assert store.get_participant(participant.id) is None
     assert not paths.participant_dir(participant.id).exists()
     assert all(not path.exists() for path in artifact_paths)

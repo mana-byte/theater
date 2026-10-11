@@ -356,7 +356,9 @@ source knows it, is an optional `Status` report; the reducer remains the policy
 owner. `trajectory` is additive rich `TrajectoryFact` data, not a control path.
 `turn_state` is an optional `NativeTurnState` that a store which records its own
 turn lifecycle reports on every read, unchanged ones and attachments included:
-while it says `open`, screen rescue never salvages the last text as an answer.
+while it says `open`, screen rescue never salvages the last text as an answer,
+and `complete=False` (turn ends since the last read could not be replayed) makes
+the observer end delivered jobs unverified instead of guessing.
 Sources never change registry state, complete jobs, publish to the bus, or
 operate tmux.
 

@@ -6,7 +6,7 @@ Pure conversation state: what the agent said and what it was replying to.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 from theater.constants.observation import ANSWERED_TURNS, FENCED_TURNS, PROMPT_MATCH
@@ -101,26 +101,31 @@ class TurnAccumulator:
         while len(self._answered) > ANSWERED_TURNS:
             self._seen.discard(self._answered.popleft())
 
-    def fence(self, state: NativeTurnState | None) -> None:
-        """Remember the open native work a rescue gave up on, so its late end answers no one."""
-        if state is None:
-            return
-        if state.turn_id is not None:
-            self._remember_fence(state.turn_id)
-        for item in state.queued:
-            self._remember_fence(f"queue:{item}")
+    def remember(self, fences: Iterable[str]) -> None:
+        """Remember fences: a fenced turn's late end answers no one."""
+        for key in fences:
+            if key not in self._fenced:
+                self._fenced.append(key)
+                while len(self._fenced) > FENCED_TURNS:
+                    self._fenced.popleft()
 
-    def note_origins(self, state: NativeTurnState | None) -> None:
-        """A turn that started from a fenced queue item is fenced too."""
-        for turn_id, item in () if state is None else state.origins:
-            if f"queue:{item}" in self._fenced:
-                self._remember_fence(turn_id)
+    def note_origins(self, state: NativeTurnState | None) -> tuple[str, ...]:
+        """Fence each turn started from a fenced queue item; return the newly fenced turns."""
+        promoted = tuple(
+            turn_id
+            for turn_id, item in (() if state is None else state.origins)
+            if f"queue:{item}" in self._fenced and turn_id not in self._fenced
+        )
+        self.remember(promoted)
+        return promoted
 
     def is_fenced(self, turn_id: str | None) -> bool:
         return turn_id is not None and turn_id in self._fenced
 
-    def _remember_fence(self, key: str) -> None:
-        if key not in self._fenced:
-            self._fenced.append(key)
-            while len(self._fenced) > FENCED_TURNS:
-                self._fenced.popleft()
+
+def fence_keys(state: NativeTurnState | None) -> tuple[str, ...]:
+    """The open native work a released job may still answer from: its turn and queued input."""
+    if state is None:
+        return ()
+    turn = () if state.turn_id is None else (state.turn_id,)
+    return (*turn, *(f"queue:{item}" for item in state.queued))

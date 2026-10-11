@@ -702,11 +702,17 @@ fact says a turn is in progress, input is queued or the session is busy, the
 last text is never salvaged: five quiet, idle-screen minutes after arming the
 job crashes `completion_unverified` with no answer, and that turn's late end —
 or that of a turn started from input queued then — is logged and answers no
-newer job.
+newer job. The fence is a `turn_fences` row written in the same unit as the
+crash, restored before a new watcher or daemon reads anything, bounded to 64
+per participant and swept with it.
 Vibe's journal can end one turn and start the next between two polls; the
-reader keeps every `latestTurn` change, draining an old journal before a newer
-generation, so each turn keeps its own end. Replaying them is safe only
-because a Vibe provider steer is refused: Enter there queues a separate turn.
+reader keeps every `latestTurn` change, and after a generation switch, a
+restored checkpoint or a rolled-back batch it replays every retained
+generation's journal segment from the acknowledged point. A range those
+segments no longer cover is reported as `complete=False`, and the observer
+fails closed: delivered jobs crash `completion_unverified` rather than take
+another turn's answer. Replaying is safe only because a Vibe provider steer is
+refused: Enter there queues a separate turn.
 
 ---
 

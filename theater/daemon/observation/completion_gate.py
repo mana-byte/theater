@@ -15,7 +15,7 @@ from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.observation.turns import TurnAccumulator
 from theater.harness import HarnessObserver, TurnTerminal
 from theater.harness.contracts.source import NativeTurnState
-from theater.models import JobState
+from theater.models import JobState, now
 
 if TYPE_CHECKING:
     from theater.daemon.store import Store
@@ -83,6 +83,37 @@ class CompletionGate:
             turns=turns,
             turn_state=turn_state,
         )
+
+    def _restored_turns(self, pid: str) -> TurnAccumulator:
+        """Fresh conversation state, holding the turn fences that outlive watchers and restarts."""
+        turns = TurnAccumulator()
+        turns.remember(self.store.turn_fences.keys(pid))
+        return turns
+
+    def _note_turn_fences(self, pid: str, turns: TurnAccumulator, state: NativeTurnState) -> None:
+        """Fence, durably, each turn started from a fenced queue item, before its batch applies."""
+        promoted = turns.note_origins(state)
+        if not promoted:
+            return
+        try:
+            with self.store.write_unit() as unit:
+                self.store.turn_fences.add(
+                    pid, promoted, job_handle=None, created_at=now(), connection=unit.connection
+                )
+        except Exception:
+            logger.exception("persisting turn fences for %s failed", pid)
+
+    async def _release_unproven(
+        self,
+        pid: str,
+        turns: TurnAccumulator,
+        state: NativeTurnState,
+        registration: LiveRegistration | None = None,
+    ) -> None:
+        if self._live_completion_owned(pid, registration):
+            logger.debug("live-wired %s: unproven-history release suppressed", pid)
+            return
+        await self._completion.release_unproven(pid, state, turns)
 
     def _answer_turn(
         self,

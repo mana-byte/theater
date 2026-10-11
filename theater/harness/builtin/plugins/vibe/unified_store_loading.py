@@ -288,8 +288,6 @@ def _load_generation(
         journal_fingerprint=tuple(record.record_sha256 for record in applied) or None,
     )
     _update_load_report(report, manifest, runtime_value, journal_path, journal)
-    if report is not None:
-        report["projection_snapshot"] = projection.snapshot
     return view
 
 

@@ -44,6 +44,7 @@ from theater.daemon.schema import (
     response_contracts,
     terminal_bindings,
     touch,
+    turn_fences,
     workspace_usages,
 )
 from theater.daemon.store import Store
@@ -491,6 +492,7 @@ def _delete_participant_dependents(connection, participant_id: str) -> None:
         participant_names,
         job_repairs,
         job_contract_audit,
+        turn_fences,
     ):
         connection.execute(delete(table).where(table.c.participant_id == participant_id))
     connection.execute(

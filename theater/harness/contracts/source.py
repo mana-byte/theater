@@ -214,22 +214,23 @@ def _native_id(value: object) -> bool:
 class NativeTurnState:
     """A source's own current-turn fact, reported on every read that knows it.
 
-    ``open`` covers a turn in progress and natively queued input. ``origins`` pairs each turn seen
-    by this read with the native queue item it started from.
+    ``open``: a turn in progress or queued native input; ``origins``: (turn, queue item) pairs seen
+    this read; ``complete`` is False when turn ends since the last read could not be replayed.
     """
 
     turn_id: str | None = None
     open: bool = False
     queued: Sequence[str] = ()
     origins: Sequence[tuple[str, str]] = ()
+    complete: bool = True
 
     def __post_init__(self) -> None:
         queued = tuple(self.queued)
         origins = tuple(self.origins)
         if self.turn_id is not None and not _native_id(self.turn_id):
             raise SourceContractError("native turn id must be a bounded non-empty string")
-        if type(self.open) is not bool:
-            raise SourceContractError("native turn open must be a boolean")
+        if type(self.open) is not bool or type(self.complete) is not bool:
+            raise SourceContractError("native turn open and complete must be booleans")
         if len(queued) > NATIVE_TURN_IDS_MAX or not all(_native_id(item) for item in queued):
             raise SourceContractError("native turn queue must hold bounded queue-item ids")
         if len(origins) > NATIVE_TURN_IDS_MAX or not all(

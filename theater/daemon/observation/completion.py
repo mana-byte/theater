@@ -23,11 +23,11 @@ from theater.constants.observation import (
     UNMATCHED_LIMIT,
 )
 from theater.daemon.observation.rescue import RescueVerdict, confirmation_due, rescue_verdict
-from theater.daemon.observation.turns import TurnAccumulator, answers_prompt
+from theater.daemon.observation.turns import TurnAccumulator, answers_prompt, fence_keys
 from theater.daemon.persistence.transactions import active_write_unit, after_commit
 from theater.harness import TurnTerminal
 from theater.harness.contracts.source import NativeTurnState
-from theater.models import JobState
+from theater.models import JobState, now
 
 logger = logging.getLogger("theater.observer")
 
@@ -234,17 +234,58 @@ class CompletionTracker:
                 pid,
                 turn_state.turn_id if turn_state is not None else None,
             )
-            released = self.release_jobs(
-                pid,
-                "",
-                error_code=COMPLETION_UNVERIFIED_CODE,
-                state=JobState.CRASHED,
-                raw_result=None,
-            )
-            if released and turns is not None:
-                turns.fence(turn_state)
+            self.end_unverified(pid, turn_state, turns)
         finally:
             self.jobs.release_pins(pinned)
+
+    async def release_unproven(
+        self, pid: str, turn_state: NativeTurnState, turns: TurnAccumulator | None
+    ) -> None:
+        """The source could not replay every turn end since its last read: fail closed."""
+        if self.jobs is None or not self.store.completion_candidate_jobs_for_target(pid):
+            return
+        logger.warning(
+            "%s: turn ends since the last read are not retained; its delivered jobs end "
+            "unverified rather than take another turn's answer",
+            pid,
+        )
+        pinned = await self.jobs.prepare_pins(pid)
+        try:
+            self.end_unverified(pid, turn_state, turns)
+        finally:
+            self.jobs.release_pins(pinned)
+
+    def end_unverified(
+        self, pid: str, turn_state: NativeTurnState | None, turns: TurnAccumulator | None
+    ) -> None:
+        """Crash delivered jobs without an answer; fence their open native work in the same unit."""
+        assert self.jobs is not None
+        keys = fence_keys(turn_state)
+        with self.store.write_unit() as unit:
+            candidates = self.store.completion_candidate_jobs_for_target(
+                pid, connection=unit.connection
+            )
+            released = True
+            for job in candidates:
+                released &= self._finish(
+                    job.handle,
+                    "",
+                    error_code=COMPLETION_UNVERIFIED_CODE,
+                    state=JobState.CRASHED,
+                    raw_result=None,
+                    connection=unit.connection,
+                )
+            if not (released and candidates and keys):
+                return
+            self.store.turn_fences.add(
+                pid,
+                keys,
+                job_handle=candidates[0].handle,
+                created_at=now(),
+                connection=unit.connection,
+            )
+            if turns is not None:
+                unit.after_commit(lambda: turns.remember(keys))
 
     def finish_identity_lost_jobs(self, pid: str, result_text: str) -> None:
         """Finish all running jobs with the identity-lost error code."""

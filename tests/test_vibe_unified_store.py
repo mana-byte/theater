@@ -999,6 +999,76 @@ def test_a_fold_after_a_generation_published_at_the_read_point_keeps_its_end(sto
     ]
 
 
+def test_a_restored_checkpoint_replays_the_turn_ends_behind_it(store: Store) -> None:
+    """A restart resumes from its checkpoint; A's end, folded after it, must still be read."""
+    checkpoint = attached_to_running_a(store).source_checkpoint()
+    store.publish(
+        generation=GEN1,
+        snapshot_sequence=0,
+        state=RUNNING_A,
+        watermark=1,
+        journal=[A_ENDS, B_STARTS],
+    )
+    resumed = VibeObserver(root=store.session_root.parent.parent).open_source(
+        cwd="/tmp/work",
+        session_id=SESSION_ID,
+        session_provenance=TranscriptProvenance.EXACT,
+        known_location=str(store.current),
+        source_checkpoint=checkpoint,
+    )
+    assert asyncio.run(resumed.read()).attached is not None
+    resumed.commit_attachment()
+    resumed.acknowledge_source_checkpoint()
+
+    replayed = asyncio.run(resumed.read())
+    assert ends(replayed) == [
+        (EventKind.ASSISTANT, "ANSWER A", "turn-a", True),
+        (EventKind.USER, "job B prompt", "turn-b", False),
+    ]
+    assert replayed.turn_state is not None and replayed.turn_state.complete
+
+
+@pytest.mark.parametrize("retained", [True, False])
+def test_turn_ends_across_several_generations_replay_every_retained_segment(
+    store: Store, retained: bool
+) -> None:
+    """GEN2's journal alone holds B's end; without it the read must say so, never claim none."""
+    source = attached_to_running_a(store)
+    store.publish(
+        generation=GEN1, snapshot_sequence=0, state=RUNNING_A, watermark=1, journal=[A_ENDS]
+    )
+    store.publish(
+        generation=GEN2,
+        snapshot_sequence=1,
+        state=turn_doc([USER_A, ANSWER_A], "turn-a", "completed"),
+        watermark=2,
+        journal=[
+            turn_record(3, "turn-b", "in_progress", USER_B),
+            turn_record(4, "turn-b", "completed", ANSWER_B),
+            turn_record(5, "turn-c", "in_progress"),
+        ],
+    )
+    store.publish(
+        generation=GEN3,
+        snapshot_sequence=4,
+        state=turn_doc([USER_A, ANSWER_A, USER_B, ANSWER_B], "turn-c", "in_progress"),
+        watermark=5,
+    )
+    if not retained:
+        shutil.rmtree(store.generation_dir(GEN2))
+
+    batch = asyncio.run(source.read())
+    assert batch.turn_state is not None and batch.turn_state.complete is retained
+    assert [end for end in ends(batch) if end[3]] == (
+        [
+            (EventKind.ASSISTANT, "ANSWER A", "turn-a", True),
+            (EventKind.ASSISTANT, "ANSWER B", "turn-b", True),
+        ]
+        if retained
+        else []
+    )
+
+
 def test_expired_checkpoint_rebaselines_without_replaying_entries(store: Store) -> None:
     state = source_state([public_message("user-1", "user", "question")], turn_status="completed")
     store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)

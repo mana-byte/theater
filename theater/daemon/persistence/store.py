@@ -36,6 +36,7 @@ from theater.daemon.persistence.repositories.runtime_bindings import RuntimeBind
 from theater.daemon.persistence.repositories.scratchpad import ScratchpadRepository
 from theater.daemon.persistence.repositories.statistics import StatisticsRepository
 from theater.daemon.persistence.repositories.terminal_bindings import TerminalBindingRepository
+from theater.daemon.persistence.repositories.turn_fences import TurnFenceRepository
 from theater.daemon.persistence.repositories.usage import UsageRepository
 from theater.daemon.persistence.repositories.workspaces import WorkspaceRepository
 from theater.daemon.persistence.repositories.worktrees import WorktreeRepository
@@ -100,6 +101,7 @@ class Store(
         self._handoff = HandoffRepository(self._db)
         self.providers = ProviderRepository(self._db)
         self.terminal_bindings = TerminalBindingRepository(self._db)
+        self.turn_fences = TurnFenceRepository(self._db)
         self.operations = OperationRepository(self._db)
         self.workspaces = WorkspaceRepository(self._db)
         self.journal = JournalRepository(self._db)

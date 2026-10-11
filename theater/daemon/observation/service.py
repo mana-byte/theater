@@ -311,6 +311,7 @@ class Observer(
             opened_durable=opened_durable,
             finish_fn=finish_fn,
             wake=self.live.wake_signal(pid),
+            turns=self._restored_turns(pid),
             active_at=self._monotonic(),
         )
 
@@ -354,7 +355,7 @@ class Observer(
         if pid in self._attachments._reset_watch_state:
             self._attachments._reset_watch_state.discard(pid)
             context.clock = QuietClock()
-            context.turns = TurnAccumulator()
+            context.turns = self._restored_turns(pid)
             context.turn_state = None
         if not await self._flush_pending_evidence(pid):
             await self._sleep(self.poll, context.wake)
@@ -382,12 +383,11 @@ class Observer(
         self._note_turn_state(context, batch)
         return batch
 
-    @staticmethod
-    def _note_turn_state(context: _WatchContext, batch: Batch) -> None:
+    def _note_turn_state(self, context: _WatchContext, batch: Batch) -> None:
         # Before the batch applies, so a turn born of a fenced queue item is fenced in time.
         if batch.turn_state is not None:
             context.turn_state = batch.turn_state
-            context.turns.note_origins(batch.turn_state)
+            self._note_turn_fences(context.pid, context.turns, batch.turn_state)
         elif batch.attached is not None:
             context.turn_state = None
 
@@ -484,6 +484,11 @@ class Observer(
     ) -> None:
         self._capture_trajectory(context.pid, batch)
         self._failures.clear_source_error_on_progress(context.pid, batch)
+        if batch.turn_state is not None and not batch.turn_state.complete:
+            # Turn ends may hide in history the source cannot replay: no job may take a guess.
+            await self._release_unproven(
+                context.pid, context.turns, batch.turn_state, context.registration
+            )
         async with self._pinned_for(context.pid, batch):
             applied = self._apply_source_batch(
                 context.pid,

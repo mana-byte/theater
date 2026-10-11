@@ -47,6 +47,7 @@ from .unified_store import (
     UnifiedStoreView,
     load_unified_store,
 )
+from .unified_store_turns import turn_changes_between
 from .usage import _configured_model, _cost_from_prices
 
 if TYPE_CHECKING:
@@ -215,7 +216,9 @@ def _native_id(value: object) -> str | None:
     return value if isinstance(value, str) and 0 < len(value) <= NATIVE_TURN_ID_MAX_CHARS else None
 
 
-def _turn_state(view: UnifiedStoreView, turns: tuple[dict, ...] = ()) -> NativeTurnState:
+def _turn_state(
+    view: UnifiedStoreView, turns: tuple[dict, ...] = (), *, complete: bool = True
+) -> NativeTurnState:
     """Vibe's own turn fact: a turn in progress, queued input or a busy session is open work."""
     turn_id, status = _turn_marker(view)
     queue = view.snapshot.get("turnQueue")
@@ -239,6 +242,7 @@ def _turn_state(view: UnifiedStoreView, turns: tuple[dict, ...] = ()) -> NativeT
         open=status == "in_progress" or bool(items) or session_type in _BUSY_SESSIONS,
         queued=tuple(queued[:NATIVE_TURN_IDS_MAX]),
         origins=tuple(origins)[-NATIVE_TURN_IDS_MAX:],
+        complete=complete,
     )
 
 
@@ -316,10 +320,6 @@ class UnifiedVibeSource(Source):
         self._pending_view: UnifiedStoreView | None = None
         self._pending_attachment: UnifiedStoreView | None = None
         self._pending_checkpoint: str | None = None
-        #: Folded turn changes of an unacknowledged batch, with the reader view they lead to;
-        #: a rolled-back batch carries them into the next read instead of losing its turn ends.
-        self._pending_turns: tuple[UnifiedStoreView, tuple[dict, ...]] | None = None
-        self._carried_turns: tuple[UnifiedStoreView, tuple[dict, ...]] | None = None
         self._acknowledged_checkpoint = (
             source_checkpoint if _checkpoint(source_checkpoint) is not None else None
         )
@@ -423,9 +423,11 @@ class UnifiedVibeSource(Source):
             raise RuntimeError("source checkpoint must be acknowledged before reading again")
         if self._checkpoint_gap:
             self._checkpoint_gap = False
+            # The skipped history may hold turn ends: say so, rather than claim it held none.
             return Batch(
                 error_code="vibe_unified_checkpoint_expired",
                 error="Unified Vibe history advanced beyond its retained recovery journals",
+                turn_state=None if self._view is None else _turn_state(self._view, complete=False),
             )
         if self._view is None or not self._count_initial:
             return None
@@ -486,20 +488,17 @@ class UnifiedVibeSource(Source):
             if update.changed_entry_ids is not None and update.baseline is self._view
             else None
         )
-        return self._diff(self._view, current, changed, turns=self._turns_since_view(update))
+        turns = update.turns if _same_point(update.baseline, self._view) else None
+        if turns is None:
+            import asyncio
 
-    def _turns_since_view(self, update: UnifiedStoreUpdate) -> tuple[dict, ...]:
-        """Folded turn changes since the acknowledged view; unknown (empty) after a reload.
-
-        Matched by journal position, not identity: a generation switch with nothing new
-        leaves an equal view behind the reader's.
-        """
-        if _same_point(update.baseline, self._view):
-            return update.turns
-        carried = self._carried_turns
-        if carried is not None and _same_point(update.baseline, carried[0]):
-            return (*carried[1], *update.turns)
-        return ()
+            # A restored checkpoint, a rolled-back batch or a reload: replay the retained
+            # journals from the acknowledged view instead of trusting the reader's own baseline.
+            acknowledged = self._view
+            turns = await asyncio.to_thread(turn_changes_between, acknowledged, current)
+            if self._view is not acknowledged:
+                return Batch()
+        return self._diff(self._view, current, changed, turns=turns)
 
     async def _stage_attachment(self, current: UnifiedStoreView) -> Batch:
         baseline = current
@@ -567,12 +566,12 @@ class UnifiedVibeSource(Source):
         current: UnifiedStoreView,
         changed_entry_ids: frozenset[str] | None = None,
         *,
-        turns: tuple[dict, ...] = (),
+        turns: tuple[dict, ...] | None = (),
     ) -> Batch:
         """Project changed entries; ``None`` means the change set is unknown.
 
-        ``turns`` are the folded ``latestTurn`` changes since ``previous``: each terminal one
-        ends its own turn, in order, so a turn superseded between two reads still ends.
+        ``turns`` are the folded ``latestTurn`` changes since ``previous``, each terminal one
+        ending its own turn in order; None (unprovable) is reported, never taken as none.
         """
         old_rows = self._rows(previous)
         new_rows = self._rows(current)
@@ -602,9 +601,10 @@ class UnifiedVibeSource(Source):
             events.extend(parsed.events)
             facts.extend(parsed.trajectory)
             baseline_events.extend(parsed.baseline_events)
+        known = () if turns is None else turns
         events = self._place_boundaries(
             events,
-            self._turn_boundaries(current, previous=previous, turns=turns),
+            self._turn_boundaries(current, previous=previous, turns=known),
             latest_turn_id=_turn_marker(current)[0],
         )
         usage_event = self._usage_delta(previous, current)
@@ -618,7 +618,6 @@ class UnifiedVibeSource(Source):
         status = new_status if new_status != old_status else _pending_input_status(current)
         self._pending_view = current
         self._pending_checkpoint = _encode_checkpoint(current)
-        self._pending_turns = (current, turns)
         return Batch(
             events=events,
             progressed=current.sequence != previous.sequence
@@ -626,7 +625,7 @@ class UnifiedVibeSource(Source):
             status=status,
             trajectory=facts,
             trajectory_events=baseline_events,
-            turn_state=_turn_state(current, turns),
+            turn_state=_turn_state(current, known, complete=turns is not None),
         )
 
     def _rows(self, view: UnifiedStoreView) -> list[tuple[str, dict, int]]:
@@ -864,7 +863,6 @@ class UnifiedVibeSource(Source):
         self._acknowledged_checkpoint = None
         self._checkpoint_gap = False
         self._initial_usage_inflight = False
-        self._pending_turns = self._carried_turns = None
         self._reader = UnifiedStoreReader()
         self._rows_view = None
         self._rows_cache = None
@@ -879,7 +877,6 @@ class UnifiedVibeSource(Source):
         if self._view is not None and self._view.current == path:
             return "accepted"
         self._view = None
-        self._pending_turns = self._carried_turns = None
         self._reader = UnifiedStoreReader()
         self._rows_view = None
         self._rows_cache = None
@@ -900,7 +897,6 @@ class UnifiedVibeSource(Source):
         if self._pending_view is not None:
             self._view = self._pending_view
             self._pending_view = None
-        self._pending_turns = self._carried_turns = None
         if self._initial_usage_inflight:
             self._count_initial = False
             self._initial_usage_inflight = False
@@ -908,8 +904,6 @@ class UnifiedVibeSource(Source):
     def rollback_source_checkpoint(self) -> None:
         self._pending_checkpoint = None
         self._pending_view = None
-        if self._pending_turns is not None:
-            self._carried_turns, self._pending_turns = self._pending_turns, None
         self._initial_usage_inflight = False
 
     async def _history_view(self) -> tuple[UnifiedStoreView | None, bool, str | None]:

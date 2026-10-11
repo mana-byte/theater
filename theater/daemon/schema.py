@@ -447,6 +447,17 @@ native_terminal_evidence = Table(
 
 Index("idx_native_terminal_evidence_participant", native_terminal_evidence.c.participant_id)
 
+# Native turns (or ``queue:``-prefixed queue items) whose jobs ended unverified: a late end of
+# one answers no newer job. Written with that job's finish; bounded per participant.
+turn_fences = Table(
+    "turn_fences",
+    metadata,
+    Column("participant_id", Text, primary_key=True),
+    Column("fence", Text, primary_key=True),
+    Column("job_handle", Text),
+    Column("created_at", REAL, nullable=False),
+)
+
 # Durable terminal-provider identity; generations fence every connected owner.
 providers = Table(
     "providers",

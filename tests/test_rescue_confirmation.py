@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,9 @@ from theater.constants.observation import (
     RESCUE_CODE,
     STALE_OPEN_TURN_SECONDS,
 )
+from theater.daemon.jobs import JobManager
 from theater.daemon.observation.service import _WatchContext
+from theater.daemon.observer import Observer
 from theater.daemon.rpc.jobs import _job_to_dict
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.source import Batch, NativeTurnState, Source
@@ -42,30 +45,60 @@ class Script(Source):
         return self.batches.pop(0) if self.batches else Batch(turn_state=self.state)
 
 
+class Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
 class Watch:
     """A watcher whose monotonic time the test sets before each ordinary tick."""
 
-    def __init__(self, registry, *, state: NativeTurnState | None = None, **job) -> None:
-        self.now = 0.0
-        self.observer, screen, _, participant, self.jobs = poised(
-            registry, monotonic_clock=lambda: self.now, poll=0.0, **job
+    def __init__(self, observer: Observer, context: _WatchContext, jobs, clock: Clock) -> None:
+        self.observer, self.context, self.jobs, self.clock = observer, context, jobs, clock
+        self.pid = context.pid
+        self.source = context.source
+
+    @classmethod
+    def poised(cls, registry, *, state: NativeTurnState | None = None, **job) -> Watch:
+        clock = Clock()
+        observer, screen, _, participant, jobs = poised(
+            registry, monotonic_clock=clock, poll=0.0, **job
         )
-        self.observer.rescue = 60.0
-        self.pid = participant.id
+        observer.rescue = 60.0
         age_job(registry, "h1", 3600)
-        self.source = Script(state)
-        self.context = _WatchContext(
-            pid=self.pid,
+        context = _WatchContext(
+            pid=participant.id,
             observer=screen,
-            source=self.source,
+            source=Script(state),
             registration=None,
             opened_durable=True,
-            finish_fn=self.observer._finish,
+            finish_fn=observer._finish,
             wake=None,
         )
+        return cls(observer, context, jobs, clock)
+
+    def restarted(self, registry) -> Watch:
+        """The same participant under a new daemon, whose watcher opens the production way."""
+        source = Script(self.source.state)
+        jobs = JobManager(registry.store)
+        observer = Observer(
+            registry,
+            harnesses={"vibe": SimpleNamespace(observer=self.context.observer)},
+            jobs=jobs,
+            monotonic_clock=self.clock,
+            poll=0.0,
+            source_factory=lambda *_args, **_kwargs: source,
+        )
+        observer._capture = self.observer._capture
+        context = observer._prepare_watch(self.pid, "vibe")
+        assert context is not None and context.source is source
+        return Watch(observer, context, jobs, self.clock)
 
     async def tick(self, at: float, *batches: Batch) -> None:
-        self.now = at
+        self.clock.now = at
         self.source.batches.extend(batches)
         await self.observer._watch_iteration(self.context)
 
@@ -83,7 +116,7 @@ async def test_rescue_confirms_on_a_later_read_where_a_late_final_answer_wins(
     registry, caplog, final_lands
 ):
     """be1f903a008c#5911: the final record landed 88 ms before the capture that rescued."""
-    watch = Watch(registry)
+    watch = Watch.poised(registry)
     await watch.quiet_until_armed()
 
     final = Batch(events=[said("FINAL", "turn-a", turn_end=True)])
@@ -102,10 +135,12 @@ async def test_rescue_confirms_on_a_later_read_where_a_late_final_answer_wins(
     assert "observing" not in caplog.text
 
 
+@pytest.mark.parametrize("restart", [False, True])
 async def test_open_native_work_is_never_salvaged_and_its_late_end_answers_no_newer_job(
-    registry, caplog
+    registry, caplog, restart
 ):
-    watch = Watch(registry, state=OPEN_A, prompt=GUIDANCE + "task A", response_format="json")
+    """The fence is durable: neither a new watcher nor a new daemon forgets it."""
+    watch = Watch.poised(registry, state=OPEN_A, prompt=GUIDANCE + "task A", response_format="json")
     await watch.quiet_until_armed(heard(GUIDANCE + "task A", "turn-a"))
     await watch.tick(64.5)  # confirmed, but the source still reports turn-a open: hold
     assert watch.jobs.get("h1").state == JobState.RUNNING
@@ -119,7 +154,10 @@ async def test_open_native_work_is_never_salvaged_and_its_late_end_answers_no_ne
         "unavailable",
     )
     assert "could not be verified" in _job_to_dict(job)["error"]
+    assert registry.store.turn_fences.keys(watch.pid) == ("turn-a",)
 
+    if restart:
+        watch = watch.restarted(registry)
     watch.jobs.create(
         handle="h2", caller_id="caller", target_id=watch.pid, kind="send", prompt=GUIDANCE + "B"
     )
@@ -131,4 +169,23 @@ async def test_open_native_work_is_never_salvaged_and_its_late_end_answers_no_ne
     own_turn = [heard(GUIDANCE + "B", "turn-b"), said("B answer", "turn-b", turn_end=True)]
     await watch.tick(401.0, Batch(events=own_turn))
     assert watch.jobs.get("h2").result == "B answer"
+    assert "observing" not in caplog.text
+
+
+async def test_unprovable_turn_history_ends_delivered_jobs_unverified(registry, caplog):
+    """A source that cannot replay the turn ends behind a read fails closed: no guessed answer."""
+    watch = Watch.poised(registry)
+    gap = NativeTurnState(turn_id="turn-c", open=True, complete=False)
+
+    await watch.tick(
+        0.0, Batch(events=[said("B's answer", "turn-b", turn_end=True)], turn_state=gap)
+    )
+
+    job = watch.jobs.get("h1")
+    assert (job.state, job.result, job.error_code) == (
+        JobState.CRASHED,
+        "",
+        COMPLETION_UNVERIFIED_CODE,
+    )
+    assert registry.store.turn_fences.keys(watch.pid) == ("turn-c",)
     assert "observing" not in caplog.text
