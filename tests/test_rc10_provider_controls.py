@@ -526,6 +526,56 @@ async def test_provider_queue_waits_for_accepted_job_to_finish(
     assert requests == ["terminal.deliver", "terminal.deliver"]
 
 
+async def test_public_provider_queue_reports_presence_refusal_on_its_original_operation(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    calls = 0
+
+    async def deliver(_provider, generation, _method, params):
+        nonlocal calls
+        calls += 1
+        response = {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+        }
+        if calls == 1:
+            return {**response, "delivery": "accepted"}
+        return {
+            **response,
+            "delivery": "rejected",
+            "error": {"code": "human_present", "message": "human arrived"},
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", deliver)
+    sent = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "start"},
+        idempotency_key="provider-public-start",
+    )
+    await _settle(daemon)
+    queued = await controls_queue_followup(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "later"},
+        idempotency_key="provider-public-queue-presence",
+    )
+    await _control_for_public_operation(daemon, queued["operation_id"])
+    first_handle = daemon.operation_service.get(sent["operation_id"]).job_handle
+    daemon.jobs.finish(first_handle, state=JobState.DONE)
+    await daemon.controls.dispatch_queue(participant_id)
+    await _settle(daemon)
+
+    operation = daemon.operation_service.get(queued["operation_id"])
+    assert operation.state == "failed" and operation.control_operation_id is not None
+    assert daemon.store.get_job(operation.job_handle).state == JobState.CRASHED
+    assert daemon.store.queued_control_operations(participant_id) == []
+
+
 async def test_queued_public_operation_waiter_is_owned_and_drained_on_close(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:

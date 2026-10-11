@@ -18,9 +18,15 @@ from theater.daemon.rpc.params import (
 )
 from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
-from theater.harness.contracts.runtime import ControlKind, ControlTransport, DeliveryResult
+from theater.harness.contracts.runtime import (
+    ControlDeliveryPhase,
+    ControlKind,
+    ControlTransport,
+    DeliveryResult,
+)
 from theater.models import (
     Busy,
+    HumanPresent,
     JobState,
     TheaterError,
     Tier,
@@ -52,7 +58,7 @@ def _transcript_identity_lost(daemon, pid: str) -> bool:
 def _refuse_send(
     daemon, exc: Exception, *, reason: str, caller_id: str, target_id: str
 ) -> NoReturn:
-    """Record a send that never became a job, then raise it.
+    """Record a send refused before delivery, then raise it.
 
     One bus kind with a ``reason`` so readers can subscribe to all refusals without the list.
     """
@@ -214,7 +220,19 @@ async def _send(daemon, params: dict) -> dict:
             caller_id=caller_id,
             prompt=text,
             response_format=response_format,
+            defer_provider_presence=if_busy != "refuse",
         )
+        if (
+            if_busy == "refuse"
+            and job.state == JobState.CRASHED
+            and job.error_code == "human_present"
+        ):
+            raise HumanPresent(job.result or "human present at provider delivery")
+        if any(
+            operation.delivery_phase is ControlDeliveryPhase.QUEUED
+            for operation in daemon.store.control_operations_for_job(job.handle)
+        ):
+            return _auto_result(daemon, job, True, caller_id, target_id, text)
         _publish_routed_send_event(
             daemon,
             caller_id=caller_id,
@@ -227,7 +245,7 @@ async def _send(daemon, params: dict) -> dict:
     async def plain() -> dict:
         result = await deliver()
         if if_busy != "refuse":
-            result["route"] = "send"
+            result["route"] = "queued" if result.get("delivery") == "queued" else "send"
         return result
 
     try:

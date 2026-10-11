@@ -182,23 +182,24 @@ class RecoveryControls(ControlHost):
                     if orphan is not None:
                         failed.append(orphan)
                 continue  # a legacy job with no operation: the observer owns it
-            for op in operations:
-                if (
-                    op.kind in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP)
-                    and op.delivery_phase is ControlDeliveryPhase.SETTLED
-                    and op.delivery_result is DeliveryResult.REJECTED
-                ):
-                    # Crash after the operation settled, before the job
-                    # finish: close it from the stored refusal facts.
-                    settled_job = self._jobs.finish(
-                        job.handle,
-                        state=JobState.CRASHED,
-                        result=op.error or "the native backend refused the prompt",
-                        error_code=op.error_code or SEND_REJECTED_ERROR_CODE,
-                    )
-                    if settled_job is not None:
-                        failed.append(settled_job)
-                    break
+            prompts = [
+                op for op in operations if op.kind in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP)
+            ]
+            if prompts and all(
+                op.delivery_phase is ControlDeliveryPhase.SETTLED
+                and op.delivery_result is DeliveryResult.REJECTED
+                for op in prompts
+            ):
+                # A rejected attempt is not the job's outcome while another attempt is queued.
+                last = max(prompts, key=lambda op: (op.created_at, op.operation_id))
+                settled_job = self._jobs.finish(
+                    job.handle,
+                    state=JobState.CRASHED,
+                    result=last.error or "the native backend refused the prompt",
+                    error_code=last.error_code or SEND_REJECTED_ERROR_CODE,
+                )
+                if settled_job is not None:
+                    failed.append(settled_job)
         return failed
 
     async def reconcile_ambiguous_delivery(

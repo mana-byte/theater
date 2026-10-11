@@ -167,6 +167,10 @@ CONTROL_OPERATION_PAYLOAD_MAX_BYTES = 65_536
 #: Default bound on pending followups per participant; enforced before queueing.
 CONTROL_QUEUE_MAX_PENDING = 32
 
+# A definitive provider focus refusal backs off without delaying an ordinary first dispatch.
+PROVIDER_PRESENCE_RETRY_INITIAL_SECONDS = 0.5
+PROVIDER_PRESENCE_RETRY_MAX_SECONDS = 5.0
+
 #: Pending peer-queued sends one sender may hold on one target; the rest of the bound stays for
 #: other senders and the parent's explicit followups.
 CONTROL_QUEUE_SENDER_MAX_PENDING = 8

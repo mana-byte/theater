@@ -804,7 +804,7 @@ def build(
                    marks a message not yet sent, and cancel_job withdraws it.
                    "refuse" is open to anyone and fails busy or human_present
                    instead of queueing. The other explicit modes need a direct
-                   child: "queue" always queues (route "queued"); "amend" steers
+                   child: "queue" queues when busy (route "queued"); "amend" steers
                    the active turn (route "steer"), else queues; "replace" cancels
                    its queue, interrupts, waits up to 30 s for idle, sends (route
                    "replace"). A participant cannot queue a message to itself.

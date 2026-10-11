@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlalchemy import select
 
@@ -236,6 +238,212 @@ async def test_presence_arriving_during_the_modal_check_leaves_one_queued_job(
     assert [row["delivery_phase"] for row in _operation_rows(daemon.store, target["id"])] == [
         "queued"
     ]
+    assert terminal_provider.deliveries == []
+
+
+async def _retry_provider_presence(daemon, presence, monkeypatch, callbacks, refusals, target_id):
+    real_clock = daemon.controls._clock
+    for index in range(refusals):
+        presence.set_state(PresenceState.ABSENT, "human left")
+        monkeypatch.setattr(daemon.controls, "_clock", real_clock)
+        assert (await daemon.controls.dispatch_queue(target_id)).deferred is True
+        assert len(callbacks) == index + 1
+        queued = daemon.store.queued_control_operations(target_id)[0]
+        payload = json.loads(queued.payload)
+        assert queued.operation_id == payload["callback_operation_id"]
+        retry_after = payload["presence_retry_after"]
+        monkeypatch.setattr(daemon.controls, "_clock", lambda after=retry_after: after + 1)
+        await daemon.controls.dispatch_queue(target_id)
+
+
+@pytest.mark.parametrize(
+    ("queued_first", "explicit_queue", "uncertain", "refusals"),
+    [
+        (False, False, False, 1),
+        (True, False, False, 1),
+        (False, True, False, 1),
+        (False, False, True, 1),
+        (False, False, False, 3),
+        (False, False, True, 3),
+    ],
+)
+async def test_provider_presence_rejection_keeps_one_awaitable_message(
+    client,
+    daemon,
+    terminal_provider,
+    _absent,
+    monkeypatch,
+    queued_first,
+    explicit_queue,
+    uncertain,
+    refusals,
+):
+    target = await _target(client, daemon)
+    presence = daemon.presence
+    original = terminal_provider.request
+    callbacks: list[str] = []
+
+    async def reject_once(provider_id, generation, method, params):
+        if method == "terminal.deliver":
+            callbacks.append(params["operation_id"])
+            if len(callbacks) <= refusals:
+                presence.set_state(PresenceState.PRESENT, "human arrived at provider check")
+                return {
+                    "operation_id": params["operation_id"],
+                    "provider_generation": generation,
+                    "terminal_id": params["terminal_id"],
+                    "terminal_incarnation": params["terminal_incarnation"],
+                    "delivery": "rejected",
+                    "error": {"code": "human_present", "message": "human arrived"},
+                }
+            if uncertain:
+                return {
+                    "operation_id": params["operation_id"],
+                    "provider_generation": generation,
+                    "terminal_id": params["terminal_id"],
+                    "terminal_incarnation": params["terminal_incarnation"],
+                    "delivery": "unknown",
+                }
+        return await original(provider_id, generation, method, params)
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", reject_once)
+    if queued_first:
+        presence.set_state(PresenceState.PRESENT, "human at admission")
+    send_params = {"target": target["id"], "prompt": "hi", "caller_id": "peer"}
+    if explicit_queue:
+        send_params.update(caller_id="cli", if_busy="queue")
+    sent = await client.call("send", **send_params)
+    if queued_first:
+        presence.set_state(PresenceState.ABSENT, "human left before dispatch")
+        await daemon.controls.dispatch_queue(target["id"])
+
+    assert sent["delivery"] == "queued"
+    if explicit_queue:
+        assert sent["route"] == "queued"
+    assert daemon.store.get_job(sent["handle"]).state == JobState.RUNNING
+    assert len(daemon.store.queued_control_operations(target["id"])) == 1
+    assert terminal_provider.deliveries == []
+    assert sent["handle"] not in daemon.jobs._accumulators
+    assert daemon.controls.fail_undelivered_followups([target["id"]]) == []
+    assert daemon.store.get_job(sent["handle"]).state == JobState.RUNNING
+
+    await _retry_provider_presence(daemon, presence, monkeypatch, callbacks, refusals, target["id"])
+    assert _job_handles(daemon.store, target["id"]) == [sent["handle"]]
+    assert len(callbacks) == len(set(callbacks)), "each provider retry needs a fresh callback ID"
+    assert sent["handle"] in daemon.jobs._accumulators
+    assert daemon.controls.fail_undelivered_followups([target["id"]]) == []
+    if uncertain:
+        assert terminal_provider.deliveries == []
+        assert daemon.store.has_execution_barrier(target["id"])
+        public, control = daemon.terminal_service.recovery._receipt_records(callbacks[-1])
+        assert public is None and control is not None and control.operation_id == callbacks[-1]
+        await daemon.controls.dispatch_queue(target["id"])
+        assert len(callbacks) == refusals + 1
+        assert daemon.store.get_job(sent["handle"]).state == JobState.RUNNING
+        return
+    assert terminal_provider.deliveries == [(terminal_provider.terminal_ids[0], "hi")]
+    late = await client.call(
+        "jobs.cancel", handle=sent["handle"], caller_id=send_params["caller_id"]
+    )
+    assert late["cancelled"] is False and late["reason"] == "delivered"
+
+
+async def test_provider_presence_deferred_send_can_be_cancelled_while_human_stays(
+    client, daemon, terminal_provider, _absent, monkeypatch
+):
+    target = await _target(client, daemon)
+    original = terminal_provider.request
+
+    async def reject_presence(provider_id, generation, method, params):
+        if method == "terminal.deliver":
+            daemon.presence.set_state(PresenceState.PRESENT, "human arrived at provider check")
+            return {
+                "operation_id": params["operation_id"],
+                "provider_generation": generation,
+                "terminal_id": params["terminal_id"],
+                "terminal_incarnation": params["terminal_incarnation"],
+                "delivery": "rejected",
+                "error": {"code": "human_present", "message": "human arrived"},
+            }
+        return await original(provider_id, generation, method, params)
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", reject_presence)
+    sent = await client.call("send", target=target["id"], prompt="hi", caller_id="peer")
+    cancelled = await client.call("jobs.cancel", handle=sent["handle"], caller_id="peer")
+    awaited = await client.call("jobs.await", handles=[sent["handle"]], max_wait=0)
+
+    assert sent["delivery"] == "queued" and cancelled["cancelled"] is True
+    assert awaited[0]["await_reason"] == "job_terminal"
+    assert terminal_provider.deliveries == []
+    assert daemon.store.queued_control_operations(target["id"]) == []
+
+
+async def test_provider_backoff_does_not_hold_another_senders_lane(
+    client, daemon, terminal_provider, _absent, monkeypatch
+):
+    target = await _target(client, daemon)
+    original = terminal_provider.request
+    calls = 0
+
+    async def reject_first(provider_id, generation, method, params):
+        nonlocal calls
+        if method == "terminal.deliver":
+            calls += 1
+            if calls == 1:
+                daemon.presence.set_state(PresenceState.PRESENT, "human arrived")
+                return {
+                    "operation_id": params["operation_id"],
+                    "provider_generation": generation,
+                    "terminal_id": params["terminal_id"],
+                    "terminal_incarnation": params["terminal_incarnation"],
+                    "delivery": "rejected",
+                    "error": {"code": "human_present", "message": "human arrived"},
+                }
+        return await original(provider_id, generation, method, params)
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", reject_first)
+    first = await client.call("send", target=target["id"], prompt="a", caller_id="sender-a")
+    second = await client.call("send", target=target["id"], prompt="b", caller_id="sender-b")
+    daemon.presence.set_state(PresenceState.ABSENT, "human left")
+    outcome = await daemon.controls.dispatch_queue(target["id"])
+
+    assert first["delivery"] == second["delivery"] == "queued"
+    assert outcome.dispatched == (second["handle"],)
+    assert daemon.store.queued_control_operations(target["id"])[0].job_handle == first["handle"]
+    assert terminal_provider.deliveries == [(terminal_provider.terminal_ids[0], "b")]
+
+
+@pytest.mark.parametrize("self_send", [True, False])
+async def test_provider_presence_refusal_stays_an_error_for_self_and_explicit_refuse(
+    client, daemon, terminal_provider, _absent, monkeypatch, self_send
+):
+    target = await _target(client, daemon)
+    original = terminal_provider.request
+
+    async def reject_presence(provider_id, generation, method, params):
+        if method != "terminal.deliver":
+            return await original(provider_id, generation, method, params)
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "rejected",
+            "error": {"code": "human_present", "message": "human arrived"},
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", reject_presence)
+    params = {
+        "target": target["id"],
+        "prompt": "hi",
+        "caller_id": target["id"] if self_send else "peer",
+    }
+    if not self_send:
+        params["if_busy"] = "refuse"
+    with pytest.raises(RemoteError) as refused:
+        await client.call("send", **params)
+    assert refused.value.code == "human_present"
+    assert daemon.store.queued_control_operations(target["id"]) == []
     assert terminal_provider.deliveries == []
 
 

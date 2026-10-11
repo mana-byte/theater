@@ -6,7 +6,8 @@ from theater.daemon.controls._common import QUEUE_ORIGIN_SEND
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.dispatch import TEMPORARY_REFUSALS
 from theater.daemon.handoff.models import HandoffGate
-from theater.models import Job
+from theater.harness.contracts.runtime import ControlDeliveryPhase
+from theater.models import HumanPresent, Job, JobState
 
 OUTCOME_DELIVERED = "delivered"
 OUTCOME_QUEUED = "queued"
@@ -36,6 +37,7 @@ class MessageControls(ControlHost):
                 caller_id=caller_id,
                 prompt=prompt,
                 response_format=response_format,
+                defer_provider_presence=caller_id != participant_id,
             )
         except TEMPORARY_REFUSALS:
             if caller_id == participant_id:
@@ -49,8 +51,18 @@ class MessageControls(ControlHost):
             )
             self._count_send_admission(OUTCOME_QUEUED)
             return job, True
-        self._count_send_admission(OUTCOME_DELIVERED)
-        return job, False
+        if (
+            caller_id == participant_id
+            and job.state == JobState.CRASHED
+            and job.error_code == "human_present"
+        ):
+            raise HumanPresent(job.result or "human present at provider delivery")
+        queued = any(
+            operation.delivery_phase is ControlDeliveryPhase.QUEUED
+            for operation in self._store.control_operations_for_job(job.handle)
+        )
+        self._count_send_admission(OUTCOME_QUEUED if queued else OUTCOME_DELIVERED)
+        return job, queued
 
     async def queue_gated_send(
         self,

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 from dataclasses import dataclass
 
 from theater.constants.daemon import CONTROL_QUEUE_MAX_PENDING
@@ -15,6 +17,7 @@ from theater.daemon.controls._common import (
     _error_code_of,
 )
 from theater.daemon.controls._host import ControlHost
+from theater.daemon.controls.provider_delivery import ProviderPresenceDeferred
 from theater.daemon.controls.routing import ControlRoute
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.harness.contracts.runtime import (
@@ -252,6 +255,8 @@ class DispatchControls(ControlHost):
         job: Job,
         route: ControlRoute,
     ) -> QueueDispatchOutcome:
+        if self._presence_retry_after(head) > self._clock():
+            return QueueDispatchOutcome(deferred=True, skip=True)
         try:
             terminal = self._provider.require(
                 participant_id, RuntimeCapability.QUEUE_FOLLOWUP, route
@@ -299,19 +304,39 @@ class DispatchControls(ControlHost):
         ):
             return QueueDispatchOutcome(deferred=True)
         callback_operation_id = self._callback_operation_id(head) or head.operation_id
-        result = await self._provider.deliver(
-            route,
-            capability=RuntimeCapability.QUEUE_FOLLOWUP,
-            kind=ControlKind.QUEUE_FOLLOWUP,
-            participant_id=participant_id,
-            control_operation_id=head.operation_id,
-            callback_operation_id=callback_operation_id,
-            action={"kind": "submit_text", "text": job.prompt or ""},
-            job_handle=job.handle,
-        )
+        public = self._store.operations.get(callback_operation_id)
+        public_control = public is not None and public.control_operation_id == head.operation_id
+        try:
+            result = await self._provider.deliver(
+                route,
+                capability=RuntimeCapability.QUEUE_FOLLOWUP,
+                kind=ControlKind.QUEUE_FOLLOWUP,
+                participant_id=participant_id,
+                control_operation_id=head.operation_id,
+                callback_operation_id=callback_operation_id,
+                action={"kind": "submit_text", "text": job.prompt or ""},
+                job_handle=job.handle,
+                # A public operation owns its original control ID and must see its refusal.
+                defer_on_presence=not public_control,
+            )
+        except ProviderPresenceDeferred as exc:
+            self._provider.defer_presence(head.operation_id, error=str(exc))
+            self._jobs.detach_touch_accumulator(job.handle)
+            return QueueDispatchOutcome(deferred=True)
         if result is DeliveryResult.REJECTED:
             return QueueDispatchOutcome(failed=((job.handle, SEND_REJECTED_ERROR_CODE),))
         return QueueDispatchOutcome(dispatched=(job.handle,))
+
+    @staticmethod
+    def _presence_retry_after(head: ControlOperation) -> float:
+        try:
+            payload = json.loads(head.payload or "{}")
+        except (TypeError, ValueError):
+            return 0.0
+        value = payload.get("presence_retry_after") if isinstance(payload, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return float(value)
+        return 0.0
 
     async def _dispatch_head_legacy(
         self,

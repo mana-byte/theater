@@ -70,6 +70,7 @@ if TYPE_CHECKING:
             caller_id: str,
             prompt: str,
             response_format: str | None = None,
+            defer_provider_presence: bool = False,
         ) -> Job: ...
         async def queue_followup(
             self,

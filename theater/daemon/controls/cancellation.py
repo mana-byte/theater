@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from theater.daemon.controls._common import CANCELLED_ERROR_CODE
 from theater.daemon.controls._host import ControlHost
-from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
+from theater.harness.contracts.runtime import ControlDeliveryPhase, ControlKind, DeliveryResult
 from theater.models import JobState, NotFound, NotYourJob
 
 REASON_DELIVERY_UNCERTAIN = "delivery_uncertain"
@@ -68,15 +68,25 @@ class CancelControls(ControlHost):
         assert job is not None
         if job.state != JobState.RUNNING:
             return self._cancel_outcome(handle, REASON_FINISHED, state=str(job.state))
-        operations = self._store.control_operations_for_job(handle)
+        operations = [
+            op
+            for op in self._store.control_operations_for_job(handle)
+            if op.kind in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP)
+        ]
         queued = next(
             (op for op in operations if op.delivery_phase is ControlDeliveryPhase.QUEUED), None
         )
         if queued is None:
             if any(self._delivery_started(op) for op in operations):
+                definitive = all(
+                    op.delivery_phase is ControlDeliveryPhase.SETTLED
+                    and op.delivery_result in (DeliveryResult.ACCEPTED, DeliveryResult.REJECTED)
+                    and not op.execution_barrier
+                    for op in operations
+                )
                 reason = (
                     REASON_DELIVERED
-                    if all(self._accepted(op) for op in operations)
+                    if definitive and any(self._accepted(op) for op in operations)
                     else REASON_DELIVERY_UNCERTAIN
                 )
                 return self._cancel_outcome(handle, reason)

@@ -478,6 +478,10 @@ class JobManager:
             self._accumulators[handle] = TouchAccumulator(cwd=cwd)
         return True
 
+    def detach_touch_accumulator(self, handle: str) -> None:
+        """A proved unsent provider prompt no longer owns the target's file activity."""
+        self._accumulators.pop(handle, None)
+
     def replace_touch_accumulator(self, handle: str, *, cwd: str) -> bool:
         """Retarget a pre-dispatch spawn accumulator after workspace preparation."""
         job = self.store.get_job(handle)

@@ -100,6 +100,7 @@ _UNSENT_CODES = frozenset(
         DAEMON_RESTARTED_ERROR_CODE,
     }
 )
+_UNSENT_OPERATION_CODES = _UNSENT_CODES | {"human_present"}
 
 
 def never_transmitted(store, job: Job) -> bool:
@@ -115,7 +116,7 @@ def never_transmitted(store, job: Job) -> bool:
     return bool(operations) and all(
         op.delivery_phase is ControlDeliveryPhase.SETTLED
         and op.delivery_result is DeliveryResult.REJECTED
-        and op.error_code in _UNSENT_CODES
+        and op.error_code in _UNSENT_OPERATION_CODES
         and op.native_turn_id is None
         and not op.execution_barrier
         for op in operations

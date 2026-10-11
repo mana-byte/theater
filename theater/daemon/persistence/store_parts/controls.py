@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
+from theater.constants.daemon import (
+    PROVIDER_PRESENCE_RETRY_INITIAL_SECONDS,
+    PROVIDER_PRESENCE_RETRY_MAX_SECONDS,
+)
 from theater.daemon.events.publication import control_event, next_revision
+from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.persistence.store_parts._host import StoreHost
-from theater.models import Job
+from theater.harness.contracts.runtime import (
+    ControlDeliveryPhase,
+    ControlKind,
+    ControlTransport,
+    DeliveryResult,
+)
+from theater.models import Job, JobState, new_id
 
 
 class ControlOperationStore(StoreHost):
@@ -219,6 +233,71 @@ class ControlOperationStore(StoreHost):
             current = self._control_operations.get(operation_id, connection=unit.connection)
             if current is not None and current != before:
                 self._append_control_event(unit, current)
+
+    def defer_provider_presence(
+        self, operation_id: str, *, error: str, updated_at: float
+    ) -> ControlOperation:
+        """Queue a proved unsent prompt with a new callback ID in one transaction."""
+        with self.write_unit() as unit:
+            old = self._control_operations.get(operation_id, connection=unit.connection)
+            if (
+                old is None
+                or old.transport is not ControlTransport.PROVIDER_TERMINAL
+                or old.delivery_phase is not ControlDeliveryPhase.DISPATCHED
+                or old.kind not in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP)
+                or old.job_handle is None
+            ):
+                raise RuntimeError("provider presence deferral needs a dispatched prompt")
+            job = self._jobs.get(old.job_handle, connection=unit.connection)
+            if job is None or job.state != JobState.RUNNING:
+                raise RuntimeError("provider presence deferral lost its running job")
+            retry_id = f"{old.job_handle}:presence:{new_id()}"
+            payload = json.loads(old.payload or "{}")
+            refusals = payload.get("presence_refusals")
+            count = min((refusals if type(refusals) is int and refusals > 0 else 0) + 1, 5)
+            delay = min(
+                PROVIDER_PRESENCE_RETRY_INITIAL_SECONDS * 2 ** (count - 1),
+                PROVIDER_PRESENCE_RETRY_MAX_SECONDS,
+            )
+            payload["presence_refusals"] = count
+            payload["presence_retry_after"] = updated_at + delay
+            if old.kind is ControlKind.SEND:
+                payload["origin"] = "send"
+            payload["callback_operation_id"] = retry_id
+            sequence = old.queue_sequence or self.allocate_control_queue_sequence(
+                connection=unit.connection
+            )
+            self._control_operations.settle(
+                operation_id,
+                result=DeliveryResult.REJECTED,
+                error_code="human_present",
+                error=error,
+                updated_at=updated_at,
+                connection=unit.connection,
+            )
+            settled = self._control_operations.get(operation_id, connection=unit.connection)
+            assert settled is not None
+            queued = replace(
+                old,
+                operation_id=retry_id,
+                kind=ControlKind.QUEUE_FOLLOWUP,
+                delivery_phase=ControlDeliveryPhase.QUEUED,
+                delivery_result=None,
+                execution_barrier=False,
+                native_turn_id=None,
+                queue_sequence=sequence,
+                payload=json.dumps(payload),
+                error_code=None,
+                error=None,
+                created_at=updated_at,
+                updated_at=updated_at,
+            )
+            self._control_operations.reserve(queued, connection=unit.connection)
+            if self._control_operations.get(retry_id, connection=unit.connection) != queued:
+                raise RuntimeError("provider presence deferral could not reserve its queued retry")
+            self._append_control_event(unit, settled)
+            self._append_control_event(unit, queued)
+        return queued
 
     def set_control_execution_barrier(
         self,

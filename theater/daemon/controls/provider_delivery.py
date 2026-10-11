@@ -20,6 +20,10 @@ DELIVERY_UNKNOWN_ERROR_CODE = "delivery_unknown"
 SEND_REJECTED_ERROR_CODE = "send_rejected"
 
 
+class ProviderPresenceDeferred(Exception):
+    """A provider proved no input was applied because the human took focus."""
+
+
 class ProviderControlDelivery:
     """Provider-only identity fencing, persistence, and callback dispatch."""
 
@@ -134,6 +138,7 @@ class ProviderControlDelivery:
         callback_operation_id: str,
         action: Mapping[str, object] | str,
         job_handle: str | None,
+        defer_on_presence: bool = False,
     ) -> DeliveryResult:
         terminal = self.require(participant_id, capability, route)
         dispatch = self._gates.provider_dispatch
@@ -150,6 +155,10 @@ class ProviderControlDelivery:
             execution_barrier=barrier,
             updated_at=self._clock(),
         )
+        if barrier and job_handle is not None:
+            cwd = self._gates.cwd_for(participant_id)
+            if cwd is not None:
+                self._jobs.attach_touch_accumulator(job_handle, cwd=cwd)
         params: dict[str, object] = {
             "operation_id": callback_operation_id,
             "provider_generation": terminal.provider_generation,
@@ -179,6 +188,12 @@ class ProviderControlDelivery:
             possibly_executed = (
                 isinstance(details, Mapping) and details.get("possibly_executed") is True
             )
+            if (
+                defer_on_presence
+                and not possibly_executed
+                and getattr(exc, "code", None) == "human_present"
+            ):
+                raise ProviderPresenceDeferred(str(exc)) from exc
             delivery = DeliveryResult.UNKNOWN if possibly_executed else DeliveryResult.REJECTED
             self._settle(
                 control_operation_id,
@@ -198,6 +213,12 @@ class ProviderControlDelivery:
         delivery = DeliveryResult(str(result["delivery"]))
         error = result.get("error")
         error_mapping = error if isinstance(error, Mapping) else {}
+        if (
+            defer_on_presence
+            and delivery is DeliveryResult.REJECTED
+            and error_mapping.get("code") == "human_present"
+        ):
+            raise ProviderPresenceDeferred(str(error_mapping.get("message") or "human present"))
         self._settle(
             control_operation_id,
             delivery,
@@ -245,5 +266,10 @@ class ProviderControlDelivery:
             self._count_unknown(kind, "ack_lost")
         self._notify_settled(operation_id)
 
+    def defer_presence(self, operation_id: str, *, error: str) -> None:
+        """Keep a proved unsent prompt awaitable under its original job handle."""
+        self._store.defer_provider_presence(operation_id, error=error, updated_at=self._clock())
+        self._notify_settled(operation_id)
 
-__all__ = ["ProviderControlDelivery"]
+
+__all__ = ["ProviderControlDelivery", "ProviderPresenceDeferred"]

@@ -8,12 +8,14 @@ from dataclasses import dataclass
 from theater.daemon.controls._common import (
     ACTION_SEND,
     CONTROL_DELIVERY_ACCEPTED,
+    CONTROL_DELIVERY_QUEUED,
     NativeControlPreparation,
     _delivery_label,
     prepare_native_control,
 )
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.busy import BusyOperation
+from theater.daemon.controls.provider_delivery import ProviderPresenceDeferred
 from theater.daemon.controls.routing import ControlRoute
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -40,6 +42,7 @@ class _SendRequest:
     actor_client_id: str | None
     actor_participant_id: str | None
     pre_reserved: bool
+    defer_provider_presence: bool
 
 
 class SendControls(ControlHost):
@@ -59,6 +62,7 @@ class SendControls(ControlHost):
         actor_client_id: str | None = None,
         actor_participant_id: str | None = None,
         pre_reserved: bool = False,
+        defer_provider_presence: bool = False,
     ) -> Job:
         """Ordinary send — or the native initial dispatch of one spawn job."""
         with self._control_latency(ControlKind.SEND, participant_id) as latency:
@@ -75,6 +79,7 @@ class SendControls(ControlHost):
                     actor_client_id,
                     actor_participant_id,
                     pre_reserved,
+                    defer_provider_presence,
                 )
             )
             latency.delivery = delivery
@@ -196,16 +201,27 @@ class SendControls(ControlHost):
                 job_handle=provider_job.handle,
             )
             self._notify_reserved(request.on_reserved, control_id, provider_job.handle)
-        provider_delivery = await self._provider.deliver(
-            route,
-            capability=RuntimeCapability.SEND,
-            kind=ControlKind.SEND,
-            participant_id=participant_id,
-            control_operation_id=control_id,
-            callback_operation_id=request.callback_operation_id or control_id,
-            action={"kind": "submit_text", "text": request.prompt},
-            job_handle=provider_job.handle,
-        )
+        try:
+            provider_delivery = await self._provider.deliver(
+                route,
+                capability=RuntimeCapability.SEND,
+                kind=ControlKind.SEND,
+                participant_id=participant_id,
+                control_operation_id=control_id,
+                callback_operation_id=request.callback_operation_id or control_id,
+                action={"kind": "submit_text", "text": request.prompt},
+                job_handle=provider_job.handle,
+                defer_on_presence=request.defer_provider_presence,
+            )
+        except ProviderPresenceDeferred as exc:
+            self._provider.defer_presence(control_id, error=str(exc))
+            self._jobs.detach_touch_accumulator(provider_job.handle)
+            self.schedule_dispatch(participant_id)
+            return (
+                self._require_job(provider_job.handle),
+                CONTROL_DELIVERY_QUEUED,
+                ControlTransport.PROVIDER_TERMINAL.value,
+            )
         return (
             self._require_job(provider_job.handle),
             _delivery_label(provider_delivery),
