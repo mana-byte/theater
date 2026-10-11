@@ -518,17 +518,19 @@ class Observer(
 
     async def _pin_ahead(self, pid: str) -> list[str]:
         """Pin what may complete off the loop; a failure leaves those jobs unpinned."""
-        if self.jobs is None:
+        jobs = getattr(self, "jobs", None)
+        if jobs is None:
             return []
         try:
-            return await self.jobs.prepare_pins(pid)
+            return await jobs.prepare_pins(pid)
         except Exception:
             logger.exception("pinning completion evidence for %s failed", pid)
             return []
 
     def _release_pins(self, handles: list[str]) -> None:
-        if handles and self.jobs is not None:
-            self.jobs.release_pins(handles)
+        jobs = getattr(self, "jobs", None)
+        if handles and jobs is not None:
+            jobs.release_pins(handles)
 
     def _apply_inner(
         self,
