@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from theater.constants.observation import RESCUE_CONFIRM_SECONDS
 from theater.daemon.jobs import JobManager
 from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observer import QuietClock
@@ -82,6 +83,14 @@ async def _capture(_pid):
     return "$ "
 
 
+async def _rescue(tracker, pid, clock):
+    """Arm on one idle capture, then confirm on a later one."""
+    for at in (0.0, RESCUE_CONFIRM_SECONDS):
+        await tracker.rescue_jobs(
+            pid, PROMPT_OBSERVER, clock, rescue_timeout=60.0, capture_fn=_capture, now=at
+        )
+
+
 def _op_phase(registry, operation_id):
     op = registry.store.get_control_operation(operation_id)
     assert op is not None
@@ -94,9 +103,7 @@ async def test_rescue_finishes_only_the_delivered_job(registry):
     clock = QuietClock()
     clock.last_text = "the last thing it said"
 
-    await tracker.rescue_jobs(
-        p.id, PROMPT_OBSERVER, clock, rescue_timeout=60.0, capture_fn=_capture
-    )
+    await _rescue(tracker, p.id, clock)
 
     a = jobs.get("a")
     assert a.state == JobState.DONE
@@ -141,9 +148,7 @@ async def test_plain_job_without_control_operation_still_completes(registry):
     jobs.create(handle="d", caller_id="caller", target_id=p.id, kind="send", prompt="d prompt")
     clock = QuietClock()
     clock.last_text = "rescued text"
-    await tracker.rescue_jobs(
-        p.id, PROMPT_OBSERVER, clock, rescue_timeout=60.0, capture_fn=_capture
-    )
+    await _rescue(tracker, p.id, clock)
     d = jobs.get("d")
     assert d.state == JobState.DONE
     assert d.error_code == "turn_end_unseen"

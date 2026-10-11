@@ -14,6 +14,7 @@ from theater.daemon.observation.rollback import rollback_observation_state
 from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.persistence.transactions import active_write_unit
 from theater.harness import Event, HarnessObserver
+from theater.harness.contracts.source import NativeTurnState
 from theater.harness.source import Batch, Source
 from theater.models import Status
 
@@ -199,6 +200,7 @@ class BatchApplication:
         turns: TurnAccumulator,
         *,
         source_status: Status | None = None,
+        turn_state: NativeTurnState | None = None,
     ) -> None:
         await self._reducer.on_quiet(
             pid,
@@ -207,6 +209,7 @@ class BatchApplication:
             clock,
             turns,
             source_status=source_status,
+            turn_state=turn_state,
             validate_batch_fn=self._validate_batch,
             report_source_error_fn=lambda p, b: self._failures.report_source_error(
                 p, b, finish_fn=self._finish

@@ -9,7 +9,8 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from theater.constants.observation import ANSWERED_TURNS, PROMPT_MATCH
+from theater.constants.observation import ANSWERED_TURNS, FENCED_TURNS, PROMPT_MATCH
+from theater.harness.contracts.source import NativeTurnState
 
 
 def answers_prompt(heard: Sequence[str], prompt: str | None) -> bool:
@@ -60,6 +61,8 @@ class TurnAccumulator:
     #: Turn ids already handled, newest last; set answers, deque decides what to forget.
     _answered: deque[str] = field(default_factory=deque)
     _seen: set[str] = field(default_factory=set)
+    #: Native turn ids and ``queue:``-prefixed queue items whose jobs a rescue already ended.
+    _fenced: deque[str] = field(default_factory=deque)
 
     def say(self, text: str, raw_text: str | None = None) -> None:
         if text or raw_text:
@@ -97,3 +100,27 @@ class TurnAccumulator:
         self._seen.add(turn_id)
         while len(self._answered) > ANSWERED_TURNS:
             self._seen.discard(self._answered.popleft())
+
+    def fence(self, state: NativeTurnState | None) -> None:
+        """Remember the open native work a rescue gave up on, so its late end answers no one."""
+        if state is None:
+            return
+        if state.turn_id is not None:
+            self._remember_fence(state.turn_id)
+        for item in state.queued:
+            self._remember_fence(f"queue:{item}")
+
+    def note_origins(self, state: NativeTurnState | None) -> None:
+        """A turn that started from a fenced queue item is fenced too."""
+        for turn_id, item in () if state is None else state.origins:
+            if f"queue:{item}" in self._fenced:
+                self._remember_fence(turn_id)
+
+    def is_fenced(self, turn_id: str | None) -> bool:
+        return turn_id is not None and turn_id in self._fenced
+
+    def _remember_fence(self, key: str) -> None:
+        if key not in self._fenced:
+            self._fenced.append(key)
+            while len(self._fenced) > FENCED_TURNS:
+                self._fenced.popleft()

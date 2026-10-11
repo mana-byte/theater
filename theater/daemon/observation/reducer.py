@@ -23,6 +23,7 @@ from theater.daemon.observation.screen import end_turn_from_screen_text
 from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.persistence.transactions import active_write_unit
 from theater.harness import Event, EventKind, HarnessObserver, ScreenKind, status_after
+from theater.harness.contracts.source import NativeTurnState
 from theater.harness.source import Batch, Source
 from theater.models import Status
 from theater.pricing import usage_cost_microcents
@@ -71,6 +72,8 @@ class QuietClock:
     quiet_since: float | None = None
     screen_quiet_since: float | None = None
     rescue_since: float | None = None
+    #: When the rescue timer's bare-prompt capture armed it; any progress disarms.
+    rescue_armed_at: float | None = None
     last_text: str = ""
     screen_backoff: int = 0
     last_screen_kind: ScreenKind | None = None
@@ -80,6 +83,7 @@ class QuietClock:
         self.quiet_since = None
         self.screen_quiet_since = None
         self.rescue_since = None
+        self.rescue_armed_at = None
         self.screen_backoff = 0
         self.last_screen_kind = None
 
@@ -87,6 +91,7 @@ class QuietClock:
         """Input was consumed but produced no event or authoritative status."""
         self.quiet_since = None
         self.rescue_since = None
+        self.rescue_armed_at = None
 
     def begin_quiet(self, now: float) -> None:
         """Start whichever timers are not already running."""
@@ -315,7 +320,16 @@ class Reducer:
             context.turns.hear(event.text)
         if event.turn_end:
             turn = context.turns.take()
-            if not context.turns.already_handled(event.turn_id):
+            if context.turns.is_fenced(event.turn_id) and not context.turns.already_handled(
+                event.turn_id
+            ):
+                logger.warning(
+                    "late turn end at %s: native turn %s ended after a rescue released its "
+                    "jobs; it answers no newer job",
+                    pid,
+                    event.turn_id,
+                )
+            elif not context.turns.already_handled(event.turn_id):
                 result_text, raw_result = context.callbacks.turn_result(event, turn)
                 context.callbacks.answer_turn(
                     pid,
@@ -325,7 +339,7 @@ class Reducer:
                     terminal=event.turn_terminal,
                     connection=context.connection,
                 )
-                context.turns.mark_handled(event.turn_id)
+            context.turns.mark_handled(event.turn_id)
             context.clock.last_text = ""
             # The finished job must not own the next turn's paths.
             state.job_handle = None
@@ -468,6 +482,7 @@ class Reducer:
         turns: TurnAccumulator,
         *,
         source_status: Status | None = None,
+        turn_state: NativeTurnState | None = None,
         validate_batch_fn,
         report_source_error_fn,
         accept_attachment_fn,
@@ -484,7 +499,7 @@ class Reducer:
         """Nothing arrived this tick. Run the three quiet timers.
 
         Ordering: relocate -> identity probe -> screen status -> rescue.
-        None may reset another.
+        None may reset another. An armed rescue keeps its timer due for the next tick.
         """
         now = self._monotonic_fn()
         clock.begin_quiet(now)
@@ -539,9 +554,12 @@ class Reducer:
                 oldest = self.store.oldest_running_job_for_target(pid)
             if oldest is None:
                 clock.rescue_since = now
+                clock.rescue_armed_at = None
             elif self._wall_now_fn() - oldest.created_at > self.rescue:
-                await rescue_jobs_fn(pid, observer, clock)
-                clock.rescue_since = now
+                if not await rescue_jobs_fn(
+                    pid, observer, clock, turns=turns, turn_state=turn_state
+                ):
+                    clock.rescue_since = now
 
     async def screen_only(
         self,

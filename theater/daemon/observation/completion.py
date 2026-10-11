@@ -6,6 +6,7 @@ Owns the split between oldest-only normal completion and all-jobs rescue.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -13,6 +14,7 @@ from sqlalchemy import Connection
 
 from theater.constants.observability import AGENT_RESULT_INTERRUPTED
 from theater.constants.observation import (
+    COMPLETION_UNVERIFIED_CODE,
     RAW_RESULT_UNSET,
     RESCUE_CODE,
     TURN_FAILED_CODE,
@@ -20,9 +22,11 @@ from theater.constants.observation import (
     UNMATCHED_CAP,
     UNMATCHED_LIMIT,
 )
-from theater.daemon.observation.turns import answers_prompt
+from theater.daemon.observation.rescue import RescueVerdict, confirmation_due, rescue_verdict
+from theater.daemon.observation.turns import TurnAccumulator, answers_prompt
 from theater.daemon.persistence.transactions import active_write_unit, after_commit
 from theater.harness import TurnTerminal
+from theater.harness.contracts.source import NativeTurnState
 from theater.models import JobState
 
 logger = logging.getLogger("theater.observer")
@@ -135,18 +139,22 @@ class CompletionTracker:
         result_text: str,
         *,
         error_code: str | None = None,
+        state: JobState = JobState.DONE,
         raw_result: str | object | None = RAW_RESULT_UNSET,
-    ) -> None:
-        """Finish every delivered running job for this participant. Rescue only."""
+    ) -> bool:
+        """Finish every delivered running job for this participant; True when none was skipped."""
         if self.jobs is None:
-            return
+            return False
+        released = True
         for job in self.store.completion_candidate_jobs_for_target(pid):
-            self._finish(
+            released &= self._finish(
                 job.handle,
                 result_text,
                 error_code=error_code,
+                state=state,
                 raw_result=raw_result,
             )
+        return released
 
     async def rescue_jobs(
         self,
@@ -156,38 +164,85 @@ class CompletionTracker:
         *,
         rescue_timeout: float,
         capture_fn,
-    ) -> None:
-        """Finish a job whose turn end was never read, so the caller unblocks.
+        now: float | None = None,
+        turns: TurnAccumulator | None = None,
+        turn_state: NativeTurnState | None = None,
+    ) -> bool:
+        """Finish a job whose turn end was never read; True while a confirmation is still due.
 
-        Deliberately narrow: only ScreenKind.PROMPT triggers rescue. Status is
-        left alone — _check_idle_screen has already had its say.
+        A bare PROMPT capture only arms; a later tick, after its own quiet source read, must
+        confirm it. Status is left alone — _check_idle_screen has already had its say.
         """
         from theater.harness import ScreenKind
 
         if self.jobs is None or not self.store.completion_candidate_jobs_for_target(pid):
-            return
-        p = self.store.get_participant(pid)
-        if p is None:
-            return
+            clock.rescue_armed_at = None
+            return False
+        if self.store.get_participant(pid) is None:
+            return False
+        now = time.monotonic() if now is None else now
+        armed_at = clock.rescue_armed_at
+        if not confirmation_due(armed_at, now):
+            return True
         capture = await capture_fn(pid)
         if capture is None:
-            return
-        # Only a bare PROMPT justifies rescue.
-        if observer_obj.screen_reading(capture).kind is not ScreenKind.PROMPT:
-            return
-        logger.warning(
-            "no turn end seen for %s after %.0fs of quiet; finishing its jobs",
-            pid,
-            rescue_timeout,
+            return False  # an unreadable capture decides nothing
+        verdict = rescue_verdict(
+            armed_at=armed_at,
+            now=now,
+            prompt=observer_obj.screen_reading(capture).kind is ScreenKind.PROMPT,
+            turn=turn_state,
         )
+        if verdict is RescueVerdict.ARM:
+            clock.rescue_armed_at = now
+            logger.info(
+                "idle prompt at %s after %.0fs of quiet; confirming first", pid, rescue_timeout
+            )
+            return True
+        if verdict is RescueVerdict.HOLD:
+            logger.info("%s reports native work open over an idle prompt; rescue holds", pid)
+            return False
+        clock.rescue_armed_at = None
+        if verdict is RescueVerdict.DECLINE:
+            return False
+        await self._rescue(pid, clock, verdict, rescue_timeout, turns, turn_state)
+        return False
+
+    async def _rescue(
+        self,
+        pid: str,
+        clock,
+        verdict: RescueVerdict,
+        rescue_timeout: float,
+        turns: TurnAccumulator | None,
+        turn_state: NativeTurnState | None,
+    ) -> None:
+        assert self.jobs is not None
         pinned = await self.jobs.prepare_pins(pid)
         try:
-            self.release_jobs(
+            if verdict is RescueVerdict.SALVAGE:
+                logger.warning(
+                    "no turn end seen for %s after %.0fs of quiet; finishing its jobs",
+                    pid,
+                    rescue_timeout,
+                )
+                self.release_jobs(pid, clock.last_text, error_code=RESCUE_CODE, raw_result=None)
+                return
+            logger.warning(
+                "%s still reports native turn %s open over an idle prompt; its jobs end "
+                "unverified and that turn's late end will answer no one",
                 pid,
-                clock.last_text,
-                error_code=RESCUE_CODE,
+                turn_state.turn_id if turn_state is not None else None,
+            )
+            released = self.release_jobs(
+                pid,
+                "",
+                error_code=COMPLETION_UNVERIFIED_CODE,
+                state=JobState.CRASHED,
                 raw_result=None,
             )
+            if released and turns is not None:
+                turns.fence(turn_state)
         finally:
             self.jobs.release_pins(pinned)
 
@@ -215,14 +270,14 @@ class CompletionTracker:
         state: JobState = JobState.DONE,
         raw_result: str | object | None = RAW_RESULT_UNSET,
         connection: Connection | None = None,
-    ) -> None:
+    ) -> bool:
         """Resolve one job. The result is already clipped by the parser."""
         assert self.jobs is not None
         if self.store.job_is_repairing(handle, connection=connection):
             # Rescue, identity loss and source errors are heuristics; a repair turn ends only
             # on its exact terminal evidence, so none of them may release its fence.
             logger.info("heuristic finish of %s skipped: it is awaiting an internal repair", handle)
-            return
+            return False
         after_commit(connection, lambda: self._forget_misses(handle))
         extra: dict[str, Any] = {} if raw_result is RAW_RESULT_UNSET else {"raw_result": raw_result}
         if connection is not None:
@@ -230,3 +285,4 @@ class CompletionTracker:
         self.jobs.finish(
             handle, state=state, result=result_text or "", error_code=error_code, **extra
         )
+        return True

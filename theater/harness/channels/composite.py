@@ -274,6 +274,7 @@ class CompositeSource(Source):
             # produce evidence of their own.
             terminal_evidence=batch.terminal_evidence,
             read_at=batch.read_at,
+            turn_state=batch.turn_state,
         )
 
     async def _read_enrichments(self) -> list[TrajectoryFact]:

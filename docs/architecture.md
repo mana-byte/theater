@@ -689,7 +689,24 @@ It stays `DONE` rather than failing, because the caller has a usable answer and
 failing the job would block it on the very thing being rescued. Narrow on
 purpose: no pane means no rescue, and an unreadable capture decides nothing.
 Sixty seconds because firing early hands out a half-written answer, which is
-worse than a slow one.
+worse than a slow one. The await result says so: a `turn_end_unseen` answer
+may be interim narration.
+
+A bare prompt only arms the rescue. The final record can land between a
+tick's read and its capture (`be1f903a008c#5911` lost its answer to an 88 ms
+gap), so the job ends only on a later tick, at least 2 s on, whose ordinary
+read, apply and checkpoint found nothing and whose capture is still a bare
+prompt; any progress disarms. A source that knows its native turn state
+reports it on every read (`Batch.turn_state`; Vibe Unified does). While that
+fact says a turn is in progress, input is queued or the session is busy, the
+last text is never salvaged: five quiet, idle-screen minutes after arming the
+job crashes `completion_unverified` with no answer, and that turn's late end —
+or that of a turn started from input queued then — is logged and answers no
+newer job.
+Vibe's journal can end one turn and start the next between two polls; the
+reader keeps every `latestTurn` change, draining an old journal before a newer
+generation, so each turn keeps its own end. Replaying them is safe only
+because a Vibe provider steer is refused: Enter there queues a separate turn.
 
 ---
 

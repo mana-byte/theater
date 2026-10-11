@@ -202,6 +202,43 @@ def bound_history_event(event: Event) -> Event:
 TrajectoryHistoryPage = HistoryPage
 
 BATCH_TERMINAL_EVIDENCE_MAX = 512
+NATIVE_TURN_IDS_MAX = 64
+NATIVE_TURN_ID_MAX_CHARS = 512
+
+
+def _native_id(value: object) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= NATIVE_TURN_ID_MAX_CHARS
+
+
+@dataclass(frozen=True, slots=True)
+class NativeTurnState:
+    """A source's own current-turn fact, reported on every read that knows it.
+
+    ``open`` covers a turn in progress and natively queued input. ``origins`` pairs each turn seen
+    by this read with the native queue item it started from.
+    """
+
+    turn_id: str | None = None
+    open: bool = False
+    queued: Sequence[str] = ()
+    origins: Sequence[tuple[str, str]] = ()
+
+    def __post_init__(self) -> None:
+        queued = tuple(self.queued)
+        origins = tuple(self.origins)
+        if self.turn_id is not None and not _native_id(self.turn_id):
+            raise SourceContractError("native turn id must be a bounded non-empty string")
+        if type(self.open) is not bool:
+            raise SourceContractError("native turn open must be a boolean")
+        if len(queued) > NATIVE_TURN_IDS_MAX or not all(_native_id(item) for item in queued):
+            raise SourceContractError("native turn queue must hold bounded queue-item ids")
+        if len(origins) > NATIVE_TURN_IDS_MAX or not all(
+            isinstance(pair, tuple) and len(pair) == 2 and all(_native_id(item) for item in pair)
+            for pair in origins
+        ):
+            raise SourceContractError("native turn origins must pair bounded turn and item ids")
+        object.__setattr__(self, "queued", queued)
+        object.__setattr__(self, "origins", origins)
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,10 +269,14 @@ class Batch:
     terminal_evidence: Sequence[NativeTurnOutcome] = ()
     #: Wall clock when the source read the records; None when unknown. Measurement only.
     read_at: float | None = None
+    #: The source's authoritative current-turn fact; None where the source cannot know it.
+    turn_state: NativeTurnState | None = None
 
     def __post_init__(self) -> None:
         if type(self.has_more) is not bool:
             raise SourceContractError("batch has_more must be a boolean")
+        if self.turn_state is not None and not isinstance(self.turn_state, NativeTurnState):
+            raise SourceContractError("batch turn_state must be a NativeTurnState")
         object.__setattr__(self, "trajectory", tuple(self.trajectory))
         if self.trajectory_events is not None:
             object.__setattr__(self, "trajectory_events", tuple(self.trajectory_events))

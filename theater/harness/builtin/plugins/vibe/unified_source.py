@@ -11,10 +11,13 @@ from typing import TYPE_CHECKING
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.contracts.events import Event, EventKind, TokenUsage, TurnTerminal, clip
 from theater.harness.contracts.source import (
+    NATIVE_TURN_ID_MAX_CHARS,
+    NATIVE_TURN_IDS_MAX,
     Attachment,
     Batch,
     History,
     HistoryPage,
+    NativeTurnState,
     ReceiptAdmission,
     Source,
     StreamPoint,
@@ -51,6 +54,7 @@ if TYPE_CHECKING:
 
 _CHECKPOINT_MAX_BYTES = 4096
 _TERMINAL_TURNS = frozenset({"completed", "failed", "interrupted"})
+_BUSY_SESSIONS = frozenset({"running", "blocked"})
 _TERMINAL_OUTCOMES = {
     "completed": TurnTerminal.COMPLETED,
     "failed": TurnTerminal.FAILED,
@@ -185,13 +189,56 @@ def _failure_text(failure: object) -> str:
     return f"{text} ({route})" if text and route else text
 
 
-def _turn_marker(view: UnifiedStoreView) -> tuple[str | None, str | None]:
-    turn = _latest_turn(view)
+def _marker(turn: dict) -> tuple[str | None, str | None]:
     turn_id = turn.get("id")
     status = turn.get("status")
     return (
         turn_id if isinstance(turn_id, str) and turn_id else None,
         status if isinstance(status, str) and status else None,
+    )
+
+
+def _turn_marker(view: UnifiedStoreView) -> tuple[str | None, str | None]:
+    return _marker(_latest_turn(view))
+
+
+def _same_point(left: UnifiedStoreView | None, right: UnifiedStoreView | None) -> bool:
+    return (
+        left is not None
+        and right is not None
+        and (left.session_id, left.sequence, left.watermark)
+        == (right.session_id, right.sequence, right.watermark)
+    )
+
+
+def _native_id(value: object) -> str | None:
+    return value if isinstance(value, str) and 0 < len(value) <= NATIVE_TURN_ID_MAX_CHARS else None
+
+
+def _turn_state(view: UnifiedStoreView, turns: tuple[dict, ...] = ()) -> NativeTurnState:
+    """Vibe's own turn fact: a turn in progress, queued input or a busy session is open work."""
+    turn_id, status = _turn_marker(view)
+    queue = view.snapshot.get("turnQueue")
+    items = queue.get("items") if isinstance(queue, dict) else None
+    items = items if isinstance(items, list) else []
+    queued = [
+        item_id
+        for item in items
+        if isinstance(item, dict) and (item_id := _native_id(item.get("id"))) is not None
+    ]
+    session_status = _session(view).get("status")
+    session_type = session_status.get("type") if isinstance(session_status, dict) else None
+    origins = {
+        (origin_turn, item): None
+        for turn in (*turns, _latest_turn(view))
+        if (origin_turn := _native_id(turn.get("id"))) is not None
+        and (item := _native_id(turn.get("queueItemId"))) is not None
+    }
+    return NativeTurnState(
+        turn_id=_native_id(turn_id),
+        open=status == "in_progress" or bool(items) or session_type in _BUSY_SESSIONS,
+        queued=tuple(queued[:NATIVE_TURN_IDS_MAX]),
+        origins=tuple(origins)[-NATIVE_TURN_IDS_MAX:],
     )
 
 
@@ -269,6 +316,10 @@ class UnifiedVibeSource(Source):
         self._pending_view: UnifiedStoreView | None = None
         self._pending_attachment: UnifiedStoreView | None = None
         self._pending_checkpoint: str | None = None
+        #: Folded turn changes of an unacknowledged batch, with the reader view they lead to;
+        #: a rolled-back batch carries them into the next read instead of losing its turn ends.
+        self._pending_turns: tuple[UnifiedStoreView, tuple[dict, ...]] | None = None
+        self._carried_turns: tuple[UnifiedStoreView, tuple[dict, ...]] | None = None
         self._acknowledged_checkpoint = (
             source_checkpoint if _checkpoint(source_checkpoint) is not None else None
         )
@@ -391,6 +442,7 @@ class UnifiedVibeSource(Source):
             progressed=True,
             status=_pending_input_status(self._view),
             trajectory=(usage_fact,) if usage_fact is not None else (),
+            turn_state=_turn_state(self._view),
         )
 
     async def _read_attachment(self) -> Batch:
@@ -424,7 +476,7 @@ class UnifiedVibeSource(Source):
             return self._attachment_path_error(self._view.current) or self._error_batch(exc)
         current = update.view
         if current.sequence == self._view.sequence and current.watermark == self._view.watermark:
-            return Batch(status=_pending_input_status(current))
+            return Batch(status=_pending_input_status(current), turn_state=_turn_state(current))
         # The reader's change set is only meaningful relative to the exact
         # view this source last acknowledged; anything else — an attachment
         # restore, a discarded checkpoint, a rollback — must fall back to the
@@ -434,7 +486,20 @@ class UnifiedVibeSource(Source):
             if update.changed_entry_ids is not None and update.baseline is self._view
             else None
         )
-        return self._diff(self._view, current, changed)
+        return self._diff(self._view, current, changed, turns=self._turns_since_view(update))
+
+    def _turns_since_view(self, update: UnifiedStoreUpdate) -> tuple[dict, ...]:
+        """Folded turn changes since the acknowledged view; unknown (empty) after a reload.
+
+        Matched by journal position, not identity: a generation switch with nothing new
+        leaves an equal view behind the reader's.
+        """
+        if _same_point(update.baseline, self._view):
+            return update.turns
+        carried = self._carried_turns
+        if carried is not None and _same_point(update.baseline, carried[0]):
+            return (*carried[1], *update.turns)
+        return ()
 
     async def _stage_attachment(self, current: UnifiedStoreView) -> Batch:
         baseline = current
@@ -493,6 +558,7 @@ class UnifiedVibeSource(Source):
                 correlation=self._correlation(current.current, current.session_id),
                 collision_domain=self.collision_domain,
             ),
+            turn_state=_turn_state(current),
         )
 
     def _diff(
@@ -500,8 +566,14 @@ class UnifiedVibeSource(Source):
         previous: UnifiedStoreView,
         current: UnifiedStoreView,
         changed_entry_ids: frozenset[str] | None = None,
+        *,
+        turns: tuple[dict, ...] = (),
     ) -> Batch:
-        """Project changed entries; ``None`` means the change set is unknown."""
+        """Project changed entries; ``None`` means the change set is unknown.
+
+        ``turns`` are the folded ``latestTurn`` changes since ``previous``: each terminal one
+        ends its own turn, in order, so a turn superseded between two reads still ends.
+        """
         old_rows = self._rows(previous)
         new_rows = self._rows(current)
         old = {identity: (entry, index) for identity, entry, index in old_rows}
@@ -530,20 +602,11 @@ class UnifiedVibeSource(Source):
             events.extend(parsed.events)
             facts.extend(parsed.trajectory)
             baseline_events.extend(parsed.baseline_events)
-        boundary = self._turn_boundary(current, previous=previous)
-        if boundary is not None:
-            matched = False
-            if boundary.kind is EventKind.ASSISTANT:
-                for index in range(len(events) - 1, -1, -1):
-                    event = events[index]
-                    if event.kind is EventKind.ASSISTANT and event.turn_id == boundary.turn_id:
-                        events[index] = replace(
-                            event, turn_end=True, turn_terminal=boundary.turn_terminal
-                        )
-                        matched = True
-                        break
-            if not matched:
-                events.append(boundary)
+        events = self._place_boundaries(
+            events,
+            self._turn_boundaries(current, previous=previous, turns=turns),
+            latest_turn_id=_turn_marker(current)[0],
+        )
         usage_event = self._usage_delta(previous, current)
         if usage_event is not None:
             events.append(usage_event)
@@ -555,6 +618,7 @@ class UnifiedVibeSource(Source):
         status = new_status if new_status != old_status else _pending_input_status(current)
         self._pending_view = current
         self._pending_checkpoint = _encode_checkpoint(current)
+        self._pending_turns = (current, turns)
         return Batch(
             events=events,
             progressed=current.sequence != previous.sequence
@@ -562,6 +626,7 @@ class UnifiedVibeSource(Source):
             status=status,
             trajectory=facts,
             trajectory_events=baseline_events,
+            turn_state=_turn_state(current, turns),
         )
 
     def _rows(self, view: UnifiedStoreView) -> list[tuple[str, dict, int]]:
@@ -625,11 +690,54 @@ class UnifiedVibeSource(Source):
     def _turn_boundary(
         current: UnifiedStoreView, *, previous: UnifiedStoreView | None
     ) -> Event | None:
-        turn_id, status = _turn_marker(current)
-        if turn_id is None or status not in _TERMINAL_TURNS:
-            return None
-        if previous is not None and _turn_marker(previous) == (turn_id, status):
-            return None
+        boundaries = UnifiedVibeSource._turn_boundaries(current, previous=previous)
+        return boundaries[-1] if boundaries else None
+
+    @staticmethod
+    def _turn_boundaries(
+        current: UnifiedStoreView,
+        *,
+        previous: UnifiedStoreView | None,
+        turns: tuple[dict, ...] = (),
+    ) -> list[Event]:
+        """One end per turn that reached a terminal status since ``previous``, oldest first."""
+        seen = {_turn_marker(previous)} if previous is not None else set()
+        boundaries: list[Event] = []
+        for turn in (*turns, _latest_turn(current)):
+            marker = _marker(turn)
+            if marker[0] is None or marker[1] not in _TERMINAL_TURNS or marker in seen:
+                continue
+            seen.add(marker)
+            boundaries.append(UnifiedVibeSource._boundary_event(current, turn))
+        return boundaries
+
+    @staticmethod
+    def _place_boundaries(
+        events: list[Event], boundaries: list[Event], *, latest_turn_id: str | None
+    ) -> list[Event]:
+        """Mark or insert each end after its own turn's events, before any later turn's."""
+        floor = 0
+        for position, boundary in enumerate(boundaries):
+            own = [i for i in range(floor, len(events)) if events[i].turn_id == boundary.turn_id]
+            replies = [i for i in own if events[i].kind is EventKind.ASSISTANT]
+            if boundary.kind is EventKind.ASSISTANT and replies:
+                events[replies[-1]] = replace(
+                    events[replies[-1]], turn_end=True, turn_terminal=boundary.turn_terminal
+                )
+                floor = own[-1] + 1
+                continue
+            later = {b.turn_id for b in boundaries[position + 1 :]} | {latest_turn_id}
+            later.discard(boundary.turn_id)
+            starts = (i for i in range(floor, len(events)) if events[i].turn_id in later)
+            at = own[-1] + 1 if own else next(starts, len(events))
+            events.insert(at, boundary)
+            floor = at + 1
+        return events
+
+    @staticmethod
+    def _boundary_event(current: UnifiedStoreView, turn: dict) -> Event:
+        turn_id, status = _marker(turn)
+        assert turn_id is not None and status in _TERMINAL_TURNS
         text = ""
         for entry in reversed(_entries(current)):
             if (
@@ -647,7 +755,6 @@ class UnifiedVibeSource(Source):
                         and isinstance(block.get("text"), str)
                     )
                 break
-        turn = _latest_turn(current)
         if status == "failed":
             text = _failure_text(turn.get("error")) or text
         timestamp = _nonnegative_int(turn.get("completedAt"))
@@ -757,6 +864,7 @@ class UnifiedVibeSource(Source):
         self._acknowledged_checkpoint = None
         self._checkpoint_gap = False
         self._initial_usage_inflight = False
+        self._pending_turns = self._carried_turns = None
         self._reader = UnifiedStoreReader()
         self._rows_view = None
         self._rows_cache = None
@@ -771,6 +879,7 @@ class UnifiedVibeSource(Source):
         if self._view is not None and self._view.current == path:
             return "accepted"
         self._view = None
+        self._pending_turns = self._carried_turns = None
         self._reader = UnifiedStoreReader()
         self._rows_view = None
         self._rows_cache = None
@@ -791,6 +900,7 @@ class UnifiedVibeSource(Source):
         if self._pending_view is not None:
             self._view = self._pending_view
             self._pending_view = None
+        self._pending_turns = self._carried_turns = None
         if self._initial_usage_inflight:
             self._count_initial = False
             self._initial_usage_inflight = False
@@ -798,6 +908,8 @@ class UnifiedVibeSource(Source):
     def rollback_source_checkpoint(self) -> None:
         self._pending_checkpoint = None
         self._pending_view = None
+        if self._pending_turns is not None:
+            self._carried_turns, self._pending_turns = self._pending_turns, None
         self._initial_usage_inflight = False
 
     async def _history_view(self) -> tuple[UnifiedStoreView | None, bool, str | None]:

@@ -28,7 +28,11 @@ from theater.constants.handoff import (
     ERROR_SOURCE_GONE,
     ERROR_SOURCE_NOT_REVIEWABLE,
 )
-from theater.constants.observation import TURN_FAILED_CODE
+from theater.constants.observation import (
+    COMPLETION_UNVERIFIED_CODE,
+    RESCUE_CODE,
+    TURN_FAILED_CODE,
+)
 from theater.constants.response_contract import STRUCTURED_UNABLE_TO_PARSE
 from theater.daemon.awaiting import (
     REASON_AWAITING_INPUT,
@@ -112,7 +116,23 @@ _JOB_ERROR_MESSAGES = {
         "The deferred task never launched: the launch was refused once its source ended. "
         "The handoff entry says why."
     ),
-    ERROR_CANCELLED: "The deferred task ended before its source did, so it never launched.",
+    # One code, several writers (requester cancel, gate close): the detail stays in result or
+    # in the handoff entry's error.
+    ERROR_CANCELLED: (
+        "Cancelled before delivery or launch; nothing reached the target. Request it again if "
+        "needed."
+    ),
+    RESCUE_CODE: (
+        "Theater never read this turn's end; after a quiet, idle-looking screen it returned the "
+        "last text it heard, which may be interim narration rather than the final answer. "
+        "Read the participant's transcript before relying on it."
+    ),
+    COMPLETION_UNVERIFIED_CODE: (
+        "Completion could not be verified: the harness still reported this turn open, or input "
+        "queued, behind an idle-looking screen, so no answer was returned. The agent may still "
+        "be working; inspect its transcript and pane before resending. A late end of that turn "
+        "will not complete a newer job."
+    ),
 }
 #: Error codes whose job a later send may have replaced; window for deriving ``replaced_by``.
 _REPLACEABLE = frozenset({INTERRUPTED_ERROR_CODE, SEND_SUPERSEDED_ERROR_CODE})

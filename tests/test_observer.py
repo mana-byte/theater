@@ -23,6 +23,7 @@ from theater.constants.observation import (
     LAST_ACTIVITY_REFRESH_SECONDS,
     QUIET_POLL_AFTER_SECONDS,
     QUIET_POLL_MAX_SECONDS,
+    RESCUE_CONFIRM_SECONDS,
     SCREEN_CHECK_BACKOFF_CAP_SECONDS,
     WORKING_SCREEN_INTERVAL_CAP_SECONDS,
 )
@@ -614,6 +615,7 @@ def poised(
     capture="$ ",
     prompt: str | None = None,
     response_format: str | None = None,
+    **observer_options,
 ):
     """A participant with one running job, and an observer poised to rescue it.
 
@@ -670,7 +672,7 @@ def poised(
         prompt=prompt,
         response_format=response_format,
     )
-    observer = Observer(registry, harnesses={}, jobs=jobs)
+    observer = Observer(registry, harnesses={}, jobs=jobs, **observer_options)
 
     async def capture_pane(_pane):
         return capture
@@ -683,6 +685,19 @@ def poised(
 
 def expire_rescue_clock(clock: QuietClock, observer: Observer) -> None:
     clock.rescue_since = time.monotonic() - observer.rescue - 1
+
+
+def let_rescue_confirm(clock: QuietClock) -> None:
+    """Age the arming capture past the confirmation window; the next quiet check confirms."""
+    assert clock.rescue_armed_at is not None
+    clock.rescue_armed_at -= RESCUE_CONFIRM_SECONDS
+
+
+async def rescue(observer: Observer, screen, clock: QuietClock, pid: str) -> None:
+    """Rescue's two steps: an idle capture arms, a later one confirms."""
+    assert await observer._rescue_jobs(pid, screen, clock)
+    let_rescue_confirm(clock)
+    assert not await observer._rescue_jobs(pid, screen, clock)
 
 
 def age_job(registry, handle: str, age: float) -> None:
@@ -713,6 +728,9 @@ async def test_rescue_waits_for_the_job_itself_to_age(registry):
 
     age_job(registry, "h1", observer.rescue + 1)
     await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    assert str(jobs.get("h1").state) == "running"  # armed, not ended
+    let_rescue_confirm(clock)
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == "done"
     assert job.error_code == "turn_end_unseen"
@@ -727,6 +745,8 @@ async def test_rescue_gate_uses_the_oldest_running_job(registry):
     jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
     expire_rescue_clock(clock, observer)
 
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    let_rescue_confirm(clock)
     await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
     assert str(jobs.get("h1").state) == "done"
     assert str(jobs.get("h2").state) == "done"
@@ -771,7 +791,7 @@ async def test_rescue_attempts_are_still_throttled(registry):
 @pytest.mark.asyncio
 async def test_a_quiet_participant_over_an_idle_screen_releases_its_caller(registry):
     observer, screen, cursor, p, jobs = poised(registry)
-    await observer._rescue_jobs(p.id, screen, cursor)
+    await rescue(observer, screen, cursor, p.id)
     job = jobs.get("h1")
     # DONE, not a failure: the caller has a usable answer, and failing the job
     # would leave it blocked on exactly the thing being rescued. The error code
@@ -818,7 +838,7 @@ async def test_a_turn_end_that_was_actually_read_carries_no_error_code(registry)
 async def test_structured_rescue_is_unavailable(registry):
     observer, screen, cursor, p, jobs = poised(registry, response_format="json")
     cursor.last_text = '{"answer": 42}'
-    await observer._rescue_jobs(p.id, screen, cursor)
+    await rescue(observer, screen, cursor, p.id)
     job = jobs.get("h1")
     assert str(job.state) == "done"
     assert job.result == '{"answer": 42}'
@@ -1028,7 +1048,7 @@ async def test_rescue_still_releases_every_waiting_caller(registry):
     """
     observer, screen, clock, p, jobs = poised(registry)
     jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
-    await observer._rescue_jobs(p.id, screen, clock)
+    await rescue(observer, screen, clock, p.id)
     assert str(jobs.get("h1").state) == "done"
     assert str(jobs.get("h2").state) == "done"
 

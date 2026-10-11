@@ -697,7 +697,10 @@ def test_historical_pane_without_binding_is_not_a_control_route(daemon) -> None:
     assert not route.is_legacy
 
 
-@pytest.mark.parametrize(("harness", "steers"), [("codex", True), ("claude", False)])
+# Vibe's Enter queues the text as a separate native turn: it must never pass for a steer.
+@pytest.mark.parametrize(
+    ("harness", "steers"), [("codex", True), ("claude", False), ("vibe", False)]
+)
 async def test_provider_steer_submits_with_enter_only_where_the_harness_declares_it(
     daemon, monkeypatch: pytest.MonkeyPatch, harness: str, steers: bool
 ) -> None:

@@ -25,16 +25,73 @@ from .unified_store_types import (
 )
 from .unified_store_validation import _replay_projection
 
+#: Folded latestTurn changes kept per read; far above the turns Vibe can finish between polls.
+_TURN_CHANGES_MAX = 64
+
+
+def _touched_entries(record: _JournalRecord, changed: set[str]) -> bool:
+    """Add a projection record's touched entry IDs; True when they cannot be known."""
+    if record.record_type != "projection_delta":
+        return True
+    unknown = False
+    for op in record.delta or ():
+        kind = op.get("op")
+        if kind in ("replace_entry", "remove_entry"):
+            entry_id: Any = op["id"]
+        elif kind == "append_entry":
+            entry_id = op["entry"].get("id")
+        else:
+            entry_id = None
+            if kind == "set_history_entries":
+                unknown = True
+        if isinstance(entry_id, str) and entry_id:
+            changed.add(entry_id)
+        elif entry_id is not None:
+            unknown = True
+    return unknown
+
+
 # --- Incremental reader --------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class UnifiedStoreUpdate:
-    """A view and its changed entry IDs relative to ``baseline``."""
+    """A view and its changed entry IDs relative to ``baseline``.
+
+    ``turns`` holds each ``latestTurn`` value the journal passed through after ``baseline``,
+    oldest first, so a turn that ended and was superseded between two reads keeps its end.
+    """
 
     view: UnifiedStoreView
     changed_entry_ids: frozenset[str] | None
     baseline: UnifiedStoreView | None
+    turns: tuple[dict[str, Any], ...] = ()
+
+
+def _latest_turn(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    value = snapshot.get("latestTurn")
+    return value if isinstance(value, dict) else None
+
+
+def _turn_key(turn: dict[str, Any] | None) -> tuple[Any, Any]:
+    return (None, None) if turn is None else (turn.get("id"), turn.get("status"))
+
+
+def _turn_changes(
+    snapshot: dict[str, Any], records: tuple[_JournalRecord, ...], *, since: tuple[Any, Any]
+) -> list[dict[str, Any]]:
+    """``latestTurn`` values differing from ``since``, from ``snapshot`` through ``records``."""
+    changes: list[dict[str, Any]] = []
+    key = since
+    for index in range(len(records) + 1):
+        if index:
+            _, snapshot = _replay_projection(0, snapshot, (records[index - 1],))
+        turn = _latest_turn(snapshot)
+        if _turn_key(turn) != key:
+            key = _turn_key(turn)
+            if turn is not None:
+                changes.append(turn)
+    return changes[-_TURN_CHANGES_MAX:]
 
 
 @dataclass(slots=True)
@@ -101,7 +158,7 @@ class UnifiedStoreReader:
         _reject_symlink_components(session_root, current_path)
         data = _read_current_bytes(session_root)
         if data is None or data != state.current_bytes:
-            return self._reload(session_root, session_id, current_path)
+            return self._switch(state, current_path)
         _reject_symlink_components(session_root, session_root / "generations" / state.generation)
         _reject_symlink_components(session_root, state.journal_path)
         try:
@@ -136,7 +193,7 @@ class UnifiedStoreReader:
             state.journal_mtime_ns = stat.st_mtime_ns
             return UnifiedStoreUpdate(state.view, frozenset(), state.view)
         try:
-            changed, unknown, watermark, snapshot = self._replay(state, new_records)
+            changed, unknown, watermark, snapshot, turns = self._replay(state, new_records)
         except UnifiedStoreError:
             return self._reload(state.session_root, state.session_id, current_path)
         sequence = new_records[-1].sequence
@@ -169,7 +226,7 @@ class UnifiedStoreReader:
         state.last_digest = new_records[-1].record_sha256
         state.journal_size = stat.st_size
         state.journal_mtime_ns = stat.st_mtime_ns
-        return UnifiedStoreUpdate(view, None if unknown else frozenset(changed), baseline)
+        return UnifiedStoreUpdate(view, None if unknown else frozenset(changed), baseline, turns)
 
     def _read_tail(self, state: _ReaderState) -> tuple[Any, Any, int, int]:
         """Read from the last verified journal record through the current tail."""
@@ -194,41 +251,72 @@ class UnifiedStoreReader:
 
     def _replay(
         self, state: _ReaderState, records: tuple[_JournalRecord, ...]
-    ) -> tuple[set[str], bool, int, dict[str, Any]]:
-        """Replay records and report touched entry IDs when knowable."""
+    ) -> tuple[set[str], bool, int, dict[str, Any], tuple[dict[str, Any], ...]]:
+        """Replay records; report touched entry IDs when knowable and every turn change."""
         changed: set[str] = set()
         unknown = False
         watermark = state.watermark
         snapshot = state.snapshot
+        turns: list[dict[str, Any]] = []
+        key = _turn_key(_latest_turn(snapshot))
         for record in records:
             if record.watermark is not None:
-                if record.record_type == "projection_delta":
-                    for op in record.delta or ():
-                        kind = op.get("op")
-                        if kind in ("replace_entry", "remove_entry"):
-                            entry_id: Any = op["id"]
-                        elif kind == "append_entry":
-                            entry_id = op["entry"].get("id")
-                        else:
-                            entry_id = None
-                            if kind == "set_history_entries":
-                                unknown = True
-                        if isinstance(entry_id, str) and entry_id:
-                            changed.add(entry_id)
-                        elif entry_id is not None:
-                            unknown = True
-                else:
-                    unknown = True
+                unknown |= _touched_entries(record, changed)
             watermark, snapshot = _replay_projection(watermark, snapshot, (record,))
-        return changed, unknown, watermark, snapshot
+            turn = _latest_turn(snapshot)
+            if _turn_key(turn) != key:
+                key = _turn_key(turn)
+                if turn is not None:
+                    turns.append(turn)
+        return changed, unknown, watermark, snapshot, tuple(turns[-_TURN_CHANGES_MAX:])
 
     def _reload(
         self, session_root: Path, session_id: str, current_path: Path
     ) -> UnifiedStoreUpdate:
         """Full load through the authority path, rebuilding the cached state."""
+        view, _ = self._load_fresh(session_root, session_id, current_path)
+        return UnifiedStoreUpdate(view, None, None)
+
+    def _load_fresh(
+        self, session_root: Path, session_id: str, current_path: Path
+    ) -> tuple[UnifiedStoreView, dict[str, Any]]:
         view, report = _load_active_detailed(session_root, session_id, current_path, self._chunks)
         self._state = self._state_from(session_root, session_id, view, report)
-        return UnifiedStoreUpdate(view, None, None)
+        return view, report
+
+    def _switch(self, state: _ReaderState, current_path: Path) -> UnifiedStoreUpdate:
+        """Load a newer publication, keeping the turn changes made since the last view.
+
+        The old journal's unread tail is drained first; a newer generation's snapshot and
+        journal would otherwise fold away a turn that ended between the two reads.
+        """
+        drained = self._drain(state)
+        view, report = self._load_fresh(state.session_root, state.session_id, current_path)
+        since = drained[-1] if drained else _latest_turn(state.view.snapshot)
+        tail: list[dict[str, Any]] = []
+        # Only a newer generation's base is past the last view; replaying an older base would
+        # re-emit turn ends that were already read.
+        if view.generation != state.generation and view.snapshot_sequence >= state.last_sequence:
+            try:
+                tail = _turn_changes(
+                    report["projection_snapshot"],
+                    report["journal_records"],
+                    since=_turn_key(since),
+                )
+            except (KeyError, UnifiedStoreError):
+                tail = []
+        turns = (*drained, *tail)[-_TURN_CHANGES_MAX:]
+        return UnifiedStoreUpdate(view, None, state.view, turns)
+
+    def _drain(self, state: _ReaderState) -> tuple[dict[str, Any], ...]:
+        """Turn changes in the old journal's unread tail; empty when it is gone or unreadable."""
+        try:
+            _reject_symlink_components(state.session_root, state.journal_path)
+            records, _starts, _complete, _region = self._read_tail(state)
+            new_records = records if state.last_digest is None else records[1:]
+            return self._replay(state, new_records)[4]
+        except (OSError, UnifiedStoreError, ValueError):
+            return ()
 
     @staticmethod
     def _state_from(

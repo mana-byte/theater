@@ -45,6 +45,7 @@ from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.channels.wakeup import WakeupSignal
 from theater.harness.contracts.channels import ChannelHealth
 from theater.harness.contracts.runtime import NativeTurnOutcome
+from theater.harness.contracts.source import NativeTurnState
 from theater.harness.source import Batch, Source, SourceContractError
 from theater.harness.transcript.observer import open_participant_source
 from theater.models import Status
@@ -91,6 +92,9 @@ class _WatchContext:
     turns: TurnAccumulator = field(default_factory=TurnAccumulator)
     last_live_observation_at: float | None = None
     active_at: float = 0.0
+    #: The source's latest native turn fact; only an attachment that cannot report one clears it,
+    #: so a failed or replaced read never turns open work into a salvageable prompt.
+    turn_state: NativeTurnState | None = None
 
 
 @dataclass(slots=True)
@@ -351,6 +355,7 @@ class Observer(
             self._attachments._reset_watch_state.discard(pid)
             context.clock = QuietClock()
             context.turns = TurnAccumulator()
+            context.turn_state = None
         if not await self._flush_pending_evidence(pid):
             await self._sleep(self.poll, context.wake)
             return False
@@ -374,7 +379,17 @@ class Observer(
             iteration.next_poll = 0
         self._validate_batch(context.source, batch)
         self._track_pending_transcript(context, batch)
+        self._note_turn_state(context, batch)
         return batch
+
+    @staticmethod
+    def _note_turn_state(context: _WatchContext, batch: Batch) -> None:
+        # Before the batch applies, so a turn born of a fenced queue item is fenced in time.
+        if batch.turn_state is not None:
+            context.turn_state = batch.turn_state
+            context.turns.note_origins(batch.turn_state)
+        elif batch.attached is not None:
+            context.turn_state = None
 
     def _measure_observation_gap(self, context: _WatchContext, batch: Batch) -> None:
         if context.registration is None or not _batch_carries_observation(batch):
@@ -491,6 +506,7 @@ class Observer(
             context.clock,
             context.turns,
             source_status=batch.status,
+            turn_state=context.turn_state,
             validate_batch_fn=self._validate_batch,
             report_source_error_fn=lambda p, b: self._failures.report_source_error(
                 p, b, finish_fn=context.finish_fn
@@ -522,6 +538,7 @@ class Observer(
         turns: TurnAccumulator,
     ) -> bool:
         """A quiet-time (relocation) batch that makes progress is activity like any other."""
+        self._note_turn_state(context, batch)
         progressed = self._apply_and_collect(
             pid, context.source, batch, clock, turns, iteration.inner, context.registration
         )

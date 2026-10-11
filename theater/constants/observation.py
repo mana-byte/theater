@@ -8,6 +8,19 @@ from __future__ import annotations
 #: Salvage, not a reply the harness declared complete.
 RESCUE_CODE = "turn_end_unseen"
 
+#: Rescue never ends on the capture that armed it: a later tick, after its own source read, must
+#: still see a bare prompt and no progress at least this long after arming.
+RESCUE_CONFIRM_SECONDS = 2.0
+
+#: Native work a source still reports open over a stable idle prompt is unverifiable after this.
+STALE_OPEN_TURN_SECONDS = 300.0
+
+#: Crashed, not salvaged: the source still reported the turn open, so no answer is trustworthy.
+COMPLETION_UNVERIFIED_CODE = "completion_unverified"
+
+#: Native turn ids and queue items whose jobs a rescue already ended; their late ends answer no one.
+FENCED_TURNS = 64
+
 #: Two, not one: a harness that clears the pane mid-work shows a bare prompt for one frame.
 IDLE_CONFIRMATIONS = 2
 

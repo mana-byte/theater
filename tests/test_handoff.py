@@ -14,13 +14,14 @@ from sqlalchemy import func, select, update
 
 from tests._presence_doubles import AbsentPresence
 from tests.test_control_rpc import _native_pair
+from tests.test_handoff_send import CANCELLED_BEFORE_DELIVERY
 from theater.constants.daemon import CONTROL_QUEUE_PEER_MAX_PENDING
 from theater.daemon.gc import _sweep_stale_running
 from theater.daemon.handoff import gitfacts
 from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.operations import OperationOutcome
 from theater.daemon.rails import BudgetExceeded, CycleDetected
-from theater.daemon.rpc.jobs import _jobs_await
+from theater.daemon.rpc.jobs import _job_to_dict, _jobs_await
 from theater.daemon.rpc.spawning import _spawn
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import launch_reservations
@@ -414,6 +415,8 @@ async def test_cancel_job_withdraws_a_waiting_spawn_but_never_a_launching_one(
     assert outcome.cancelled is True
     assert daemon.store.get_handoff_gate(handle).state == "cancelled"
     assert daemon.store.get_job(handle).state == JobState.KILLED
+    assert _job_to_dict(daemon.store.get_job(handle))["error"] == CANCELLED_BEFORE_DELIVERY
+    assert daemon.handoff.describe(handle)["error"] == "cancelled before its source ended"
     assert launches == [] and _launch_rows(daemon) == 0
     again = await daemon.controls.cancel_job(handle, requester_id="cli")
     assert (again.cancelled, again.reason) == (False, "finished")

@@ -872,6 +872,133 @@ def test_failed_turn_with_blank_message_names_the_failure(store: Store) -> None:
     assert boundary.text == "model_stream_failed: ReadTimeout (mistral/zai-glm-5-3)"
 
 
+def turn_doc(
+    entries: list[dict[str, Any]], turn_id: str, status: str, *, queued: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    state = make_state(entries, status="running" if status == "in_progress" else "idle")
+    state["latestTurn"] = {
+        "id": turn_id,
+        "sessionId": SESSION_ID,
+        "status": status,
+        "queueItemId": f"queue-{turn_id}",
+        "startedAt": 1_000,
+        **({"completedAt": 2_500} if status != "in_progress" else {}),
+    }
+    state["turnQueue"]["items"] = [
+        {"id": item, "createdAt": 1_000, "entries": [{"role": "user", "content": []}]}
+        for item in queued
+    ]
+    return state
+
+
+def turn_record(watermark: int, turn_id: str, status: str, *entries: dict, **queue: Any):
+    appended = ({"op": "append_entry", "entry": entry} for entry in entries)
+    envelope = {"op": "set_envelope", "state": turn_doc([], turn_id, status, **queue)}
+    return projection_delta(watermark, *appended, envelope)
+
+
+USER_A = public_message("user-a", "user", "job A prompt", turn_id="turn-a")
+ANSWER_A = public_message("asst-a", "assistant", "ANSWER A", turn_id="turn-a")
+USER_B = public_message("user-b", "user", "job B prompt", turn_id="turn-b")
+ANSWER_B = public_message("asst-b", "assistant", "ANSWER B", turn_id="turn-b")
+RUNNING_A = turn_doc([USER_A], "turn-a", "in_progress")
+A_ENDS = turn_record(2, "turn-a", "completed", ANSWER_A)
+B_STARTS = turn_record(3, "turn-b", "in_progress", USER_B, queued=("q",))
+
+
+def attached_to_running_a(store: Store):
+    store.publish(generation=GEN1, snapshot_sequence=0, state=RUNNING_A, watermark=1)
+    source = VibeObserver(root=store.session_root.parent.parent).open_source(cwd="/tmp/work")
+    attached = asyncio.run(source.read())
+    assert attached.attached is not None and attached.turn_state is not None
+    assert (attached.turn_state.turn_id, attached.turn_state.open) == ("turn-a", True)
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+    return source
+
+
+def ends(batch) -> list[tuple[EventKind, str, str | None, bool]]:
+    return [
+        (event.kind, event.text, event.turn_id, event.turn_end)
+        for event in batch.events
+        if not event.usage_only
+    ]
+
+
+def test_turns_folded_into_one_read_each_keep_their_end(store: Store) -> None:
+    """A ends and B starts between two polls: A's end must still precede B's prompt."""
+    source = attached_to_running_a(store)
+    journal = [A_ENDS, B_STARTS]
+    store.publish(
+        generation=GEN1, snapshot_sequence=0, state=RUNNING_A, watermark=1, journal=journal
+    )
+
+    folded = asyncio.run(source.read())
+    assert ends(folded) == [
+        (EventKind.ASSISTANT, "ANSWER A", "turn-a", True),
+        (EventKind.USER, "job B prompt", "turn-b", False),
+    ]
+    assert folded.turn_state is not None
+    assert (folded.turn_state.turn_id, folded.turn_state.open) == ("turn-b", True)
+    assert folded.turn_state.queued == ("q",)
+    assert ("turn-b", "queue-turn-b") in folded.turn_state.origins
+    source.acknowledge_source_checkpoint()
+    unchanged = asyncio.run(source.read())
+    assert unchanged.events == () and unchanged.turn_state is not None
+    assert (unchanged.turn_state.turn_id, unchanged.turn_state.queued) == ("turn-b", ("q",))
+
+    journal.append(turn_record(4, "turn-b", "completed", ANSWER_B))
+    store.publish(
+        generation=GEN1, snapshot_sequence=0, state=RUNNING_A, watermark=1, journal=journal
+    )
+    later = asyncio.run(source.read())
+    assert ends(later) == [(EventKind.ASSISTANT, "ANSWER B", "turn-b", True)]
+    assert later.turn_state is not None and not later.turn_state.open
+
+
+def test_a_turn_end_folded_into_a_newer_generation_is_drained(store: Store) -> None:
+    """A newer publication's snapshot folds A's end away; the old journal tail keeps it."""
+    source = attached_to_running_a(store)
+    store.publish(
+        generation=GEN1, snapshot_sequence=0, state=RUNNING_A, watermark=1, journal=[A_ENDS]
+    )
+    store.publish(
+        generation=GEN2,
+        snapshot_sequence=1,
+        state=turn_doc([USER_A, ANSWER_A, USER_B], "turn-b", "in_progress"),
+        watermark=3,
+    )
+
+    assert ends(asyncio.run(source.read())) == [
+        (EventKind.ASSISTANT, "ANSWER A", "turn-a", True),
+        (EventKind.USER, "job B prompt", "turn-b", False),
+    ]
+
+
+def test_a_fold_after_a_generation_published_at_the_read_point_keeps_its_end(store: Store):
+    """Vibe publishes a generation right after a turn ends; the next fold must survive it."""
+    source = attached_to_running_a(store)
+    store.publish(
+        generation=GEN1, snapshot_sequence=0, state=RUNNING_A, watermark=1, journal=[A_ENDS]
+    )
+    asyncio.run(source.read())
+    source.acknowledge_source_checkpoint()
+    settled = turn_doc([USER_A, ANSWER_A], "turn-a", "completed")
+    store.publish(generation=GEN2, snapshot_sequence=1, state=settled, watermark=2)
+    assert asyncio.run(source.read()).events == ()
+
+    journal = [
+        turn_record(3, "turn-b", "in_progress", USER_B),
+        turn_record(4, "turn-b", "completed", ANSWER_B),
+        turn_record(5, "turn-c", "in_progress"),
+    ]
+    store.publish(generation=GEN2, snapshot_sequence=1, state=settled, watermark=2, journal=journal)
+    assert ends(asyncio.run(source.read())) == [
+        (EventKind.USER, "job B prompt", "turn-b", False),
+        (EventKind.ASSISTANT, "ANSWER B", "turn-b", True),
+    ]
+
+
 def test_expired_checkpoint_rebaselines_without_replaying_entries(store: Store) -> None:
     state = source_state([public_message("user-1", "user", "question")], turn_status="completed")
     store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)

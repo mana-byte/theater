@@ -12,7 +12,9 @@ from theater.constants.observation import RAW_RESULT_UNSET
 from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observation.live import LiveObservationHub, LiveRegistration
 from theater.daemon.observation.reducer import QuietClock
+from theater.daemon.observation.turns import TurnAccumulator
 from theater.harness import HarnessObserver, TurnTerminal
+from theater.harness.contracts.source import NativeTurnState
 from theater.models import JobState
 
 if TYPE_CHECKING:
@@ -28,6 +30,7 @@ class CompletionGate:
         rescue: float
         store: Store
         _capture: Callable[..., Any]
+        _monotonic: Callable[[], float]
 
     def _finish(
         self,
@@ -59,16 +62,26 @@ class CompletionGate:
         clock: QuietClock,
         *,
         registration: LiveRegistration | None = None,
-    ) -> None:
+        turns: TurnAccumulator | None = None,
+        turn_state: NativeTurnState | None = None,
+    ) -> bool:
+        """Run one rescue step; True while an armed confirmation is still to come."""
         if self._live_completion_owned(pid, registration):
             # Screen rescue is a heuristic; live-wired jobs finish through
             # exact terminal evidence only.
             logger.debug("live-wired %s: screen rescue suppressed for exact evidence", pid)
-            return
+            return False
         if self.store.terminal_bindings.get(pid) is None:
-            return
-        await self._completion.rescue_jobs(
-            pid, observer, clock, rescue_timeout=self.rescue, capture_fn=self._capture
+            return False
+        return await self._completion.rescue_jobs(
+            pid,
+            observer,
+            clock,
+            rescue_timeout=self.rescue,
+            capture_fn=self._capture,
+            now=self._monotonic(),
+            turns=turns,
+            turn_state=turn_state,
         )
 
     def _answer_turn(

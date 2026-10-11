@@ -10,9 +10,15 @@ from tests._presence_doubles import AbsentPresence, PresentPresence
 from tests.test_control_rpc import _native_pair
 from theater.daemon.awaiting import never_transmitted
 from theater.daemon.rpc.cancellation import _cancel
+from theater.daemon.rpc.jobs import _job_to_dict
 from theater.harness.contracts.runtime import DeliveryResult
 from theater.models import BadRequest, JobState
 from theater.protocol import RemoteError
+
+#: Every writer of the shared ``cancelled`` code acts before delivery or launch.
+CANCELLED_BEFORE_DELIVERY = (
+    "Cancelled before delivery or launch; nothing reached the target. Request it again if needed."
+)
 
 
 @pytest.fixture(autouse=True)
@@ -146,6 +152,10 @@ async def test_cancel_withdraws_a_waiting_send_and_closes_its_gate(client, daemo
 
     assert cancelled == {"handle": reply["handle"], "cancelled": True}
     assert daemon.store.get_handoff_gate(reply["handle"]).state == "cancelled"
+    row = _job_to_dict(daemon.store.get_job(reply["handle"]))
+    assert row["error"] == CANCELLED_BEFORE_DELIVERY
+    assert row["result"].startswith("Cancelled by its requester before delivery")
+    assert daemon.handoff.describe(reply["handle"])["error"] == "the task ended before it launched"
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ok")
     await _pump(daemon, child, state)
     assert state.sent == []
@@ -195,6 +205,8 @@ async def test_await_releases_a_plain_send_cancelled_while_queued(client, daemon
         (job,) = await asyncio.wait_for(waiter, 1.0)
 
     assert state.sent == [] and job["await_reason"] == "job_terminal"
+    assert job["error"] == CANCELLED_BEFORE_DELIVERY
+    assert job["result"].startswith("Cancelled by its requester before delivery")
 
 
 async def test_await_releases_a_queued_send_cancelled_by_interrupt(client, daemon):

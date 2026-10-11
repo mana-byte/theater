@@ -354,6 +354,9 @@ so an initially missing `pane_pid` does not permanently disable discovery after 
 input was consumed even when it yielded no events. `status`, when a durable
 source knows it, is an optional `Status` report; the reducer remains the policy
 owner. `trajectory` is additive rich `TrajectoryFact` data, not a control path.
+`turn_state` is an optional `NativeTurnState` that a store which records its own
+turn lifecycle reports on every read, unchanged ones and attachments included:
+while it says `open`, screen rescue never salvages the last text as an answer.
 Sources never change registry state, complete jobs, publish to the bus, or
 operate tmux.
 
