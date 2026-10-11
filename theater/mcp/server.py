@@ -107,10 +107,10 @@ Re-await a pending or timed-out entry only while its job or presence can still c
 max_wait=0 returns current state without blocking (running entries read await_reason=timeout):
 use it for status sweeps.
 
-Done means the turn ended, not that its work is correct. `result` is the child's final
-message (first 2,000 chars): its claim, not evidence; check the repo. A job spawned or sent with
-response_format returns its final JSON answer as a JSON-encoded string in structured_result
-once done, in place of result. structured_status is "parsed", or "unavailable" when completion
+Done means the turn ended, not that its work is correct. `result` is a bounded preview of the
+child's final message (about 2,000 chars): its claim, not evidence; check the repo.
+With response_format, a spawned or sent job returns its final JSON answer as a string in
+structured_result instead of result. structured_status is "parsed", or "unavailable" when completion
 failed, output was missing, or the answer was not JSON. A finished job also carries changes: either
 {"evidence":"none"}, or {"evidence":"tool_paths","modified":[first 20 paths],
 "modified_count":int,"read_count":int}; evidence "none" means Theater saw no file paths, not
