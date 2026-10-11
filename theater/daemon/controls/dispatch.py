@@ -91,6 +91,10 @@ class DispatchControls(ControlHost):
         failed: list[tuple[str, str]] = []
         deferred = False
         async with self._lock(participant_id):
+            # An internal repair outranks every queued followup, and a fence holds them all back.
+            await self._advance_repairs_locked(participant_id)
+            if self._store.repair_fence_active(participant_id):
+                return QueueDispatchOutcome(deferred=True)
             while True:
                 queued = self._store.queued_control_operations(participant_id)
                 head_id = queued[0].operation_id if queued else None

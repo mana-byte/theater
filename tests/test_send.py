@@ -273,6 +273,28 @@ async def test_send_response_format_augments_prompt_and_survives_await_shape(
         assert row["structured_status"] == "parsed"
 
 
+async def test_send_strict_response_format_validates_and_fails_closed_off_native(
+    client, terminal_provider, daemon
+):
+    """A provider-terminal route has no exact turn to repair, so an invalid answer ends closed."""
+    target = await _target(client, daemon)
+    job = await client.call(
+        "send", target=target["id"], prompt="review it", response_format={"$theater": "review"}
+    )
+    assert job["response_format"].startswith('{"$theater":"review","schema":')
+    assert "validates against this JSON Schema" in job["prompt"]
+
+    daemon.jobs.finish(job["handle"], state=JobState.DONE, result="looks fine to me")
+    status = await client.call("jobs.status", handle=job["handle"])
+
+    assert status["state"] == "done"
+    assert status["structured_status"] == "unable_to_parse"
+    assert status["structured_result"] is None
+    assert [e for e, _ in daemon.store.contract_audit_for_job(job["handle"])] == [
+        "unsupported_route"
+    ]
+
+
 async def test_send_response_format_rejects_non_object_before_delivery(client, terminal_provider):
     target = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
 

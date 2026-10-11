@@ -303,7 +303,7 @@ async def _queue_followup(daemon, params: dict) -> dict:
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
     prompt = _string_param(params, "prompt", method_name=method_name)
     caller_id = _string_param(params, "caller_id", method_name=method_name)
-    response_format = _serialized_response_format(params)
+    response_format = _serialized_response_format(daemon, params, creator_id=caller_id)
     job = await daemon.controls.queue_followup(
         target.id,
         caller_id=caller_id,

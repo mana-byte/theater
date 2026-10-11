@@ -103,11 +103,12 @@ theater/
 │   │   ├── service.py  Observer: the watch loop, composed from concern mixins beside it
 │   │   └── reducer.py  QuietClock — the three quiet timers live here
 │   ├── controls/       durable control state machine; ControlService composed from
-│   │                   send, steer, followup, dispatch, settings, interrupt… mixins
+│   │                   send, steer, followup, dispatch, repairs, settings, interrupt… mixins
 │   ├── persistence/    Store (per-domain mixins in store_parts/), database, repositories
 │   ├── presence/       shared contracts, pure classification, monitor, provider access
 │   ├── terminals/      provider registry, leases, callbacks, binding reconciliation
 │   ├── rpc/            handler modules registered via @method into METHODS
+│   ├── response_contracts/  strict response_format: admission, presets, whole-answer validation, audit
 │   ├── runtime/        socket dispatch, maintenance loops, lifecycle
 │   ├── spawning/       launch planning, resume, service
 │   ├── worktrees/      unique and named shared worktree paths and repos
@@ -222,6 +223,14 @@ packages/regie/src/regie/
   `jobs.await` gates a target only on the presence observed at admission; a gated target waits for both an observed departure and a terminal job — a departure alone never releases a still-running job.
   Do not add screen-scraping heuristics here (one was removed for this).
 - **`AWAITING_INPUT` is a display hint** — never gate a control decision on it.
+- **A strict job's repair fence is its own fact.** `job_repairs.fence` is not
+  `control_operations.execution_barrier`, and only positive evidence releases it:
+  exact terminal evidence for the repair turn, a definitive rejection, or a gone
+  native context. Never release it on idle, screen rescue, or identity loss, and
+  never repair a route that cannot name the answering turn — fail closed to
+  `unable_to_parse` and audit it. Completion matchers use
+  `completion_candidate_jobs_for_target`; safety checks keep
+  `active_running_jobs_for_target`.
 - **The three quiet timers stay separate** (`RELOCATE`, `AWAITING_INPUT`,
   `RESCUE` in `observation/reducer.py`). Sharing them was a v1 bug; the comments call it a
   scar, not a preference.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import REAL, Column, Index, Integer, MetaData, Table, Text, text
+from sqlalchemy import REAL, Column, Index, Integer, MetaData, Table, Text, UniqueConstraint, text
 
 metadata = MetaData()
 
@@ -315,6 +315,60 @@ Index(
     control_operations.c.participant_id,
     control_operations.c.queue_sequence,
 )
+
+# Custom strict response contracts; a creator's names die with the creator.
+response_contracts = Table(
+    "response_contracts",
+    metadata,
+    Column("creator_id", Text, primary_key=True),
+    Column("name", Text, primary_key=True),
+    Column("schema", Text, nullable=False),
+    Column("created_at", REAL, nullable=False),
+)
+
+# One internal repair attempt of a strict job. ``fence`` is the durable safety fence: it stays 1
+# until positive evidence the repair turn is over, so idle alone never releases it, and it is
+# deliberately not ``control_operations.execution_barrier``, which an idle snapshot clears.
+job_repairs = Table(
+    "job_repairs",
+    metadata,
+    Column("attempt_id", Text, primary_key=True),
+    Column("job_handle", Text, nullable=False),
+    Column("participant_id", Text, nullable=False),
+    Column("attempt", Integer, nullable=False),
+    # pending | dispatched | awaiting | unknown | settled
+    Column("state", Text, nullable=False),
+    Column("fence", Integer, nullable=False, server_default=text("1")),
+    # The exact native context whose answer failed; a repair never leaves it.
+    Column("backend_generation", Integer),
+    Column("native_session_id", Text),
+    Column("source_turn_id", Text),
+    # The turn the repair prompt started, and whether Theater could prove it was only ours.
+    Column("native_turn_id", Text),
+    Column("turn_proven", Integer, nullable=False, server_default=text("0")),
+    Column("reason", Text),
+    Column("outcome", Text),
+    Column("created_at", REAL, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+    UniqueConstraint("job_handle", "attempt", name="uq_job_repairs_job_attempt"),
+)
+
+Index("idx_job_repairs_participant", job_repairs.c.participant_id, job_repairs.c.fence)
+
+# Internal audit of strict-contract failures; never projected to callers.
+job_contract_audit = Table(
+    "job_contract_audit",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("job_handle", Text, nullable=False),
+    Column("participant_id", Text),
+    Column("at", REAL, nullable=False),
+    Column("event", Text, nullable=False),
+    Column("detail", Text),
+    sqlite_autoincrement=True,
+)
+
+Index("idx_job_contract_audit_job", job_contract_audit.c.job_handle)
 
 # First-write exact terminal proof survives crashes before job completion; late evidence cannot
 # rewrite jobs.

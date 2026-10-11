@@ -84,12 +84,15 @@ Every worker must:
 - commit its work when changes are requested;
 - run only focused tests for its owned change, never the full test suite;
 - never create a report unless the user's requested artifact is itself a report;
-- return only the commit, changed paths, focused checks run, and blockers.
+- return only status, summary, commit, changed paths, checks, and blockers.
 
 Prefer `response_format` for bounded results the orchestrator will consume mechanically, such as an
-implementation handoff containing the commit, changed paths, focused checks, and blockers. Keep it
-optional for investigations, audits, reviews, debates, and resume paths that cannot carry it. It is
-only a prompt hint plus JSON parsing, not schema validation or evidence that the work is correct.
+implementation handoff or an investigation's answer: use `{"$theater": "delegate"}` (status,
+summary, blockers; optional commit, changed_paths, checks, findings, limitations). `review`,
+`debate`, and `custom` (your own schema) cover other answers. A tagged form validates the whole
+final answer and ends `unable_to_parse` when none is produced; a bare schema stays a prompt hint plus
+JSON parsing. Keep it optional for resume paths that cannot carry it. Neither proves the work is
+correct; check the repository.
 
 Yolo approval does not broaden the user's requested scope or authorize destructive or external
 actions unrelated to the task.

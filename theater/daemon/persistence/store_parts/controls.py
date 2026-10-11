@@ -252,6 +252,20 @@ class ControlOperationStore(StoreHost):
         """Running jobs actually dispatched to the target, oldest first."""
         return self._control_operations.active_running_for_target(target_id, connection=connection)
 
+    def completion_candidate_jobs_for_target(self, target_id: str, *, connection=None) -> list[Job]:
+        """Delivered running jobs a completion matcher may finish, oldest first.
+
+        A job awaiting an internal repair answer stays in ``active_running_jobs_for_target`` for
+        every safety query, but no heuristic matcher may treat a later turn as its answer.
+        """
+        delivered = self._control_operations.active_running_for_target(
+            target_id, connection=connection
+        )
+        repairing = self._repairs.repairing(
+            [job.handle for job in delivered], connection=connection
+        )
+        return [job for job in delivered if job.handle not in repairing]
+
     def allocate_control_queue_sequence(self, *, connection=None) -> int:
         """One queue position from the persisted send-sequence allocator."""
         return self._meta.allocate_send_seq(connection=connection)

@@ -153,9 +153,9 @@ async def _send(daemon, params: dict) -> dict:
     target = daemon.registry.resolve(_require(params, "target"))
     target_id = target.id
     if_busy = redirect.if_busy_param(params)
-    response_format = _serialized_response_format(params)
-    prompt = _prompt_with_response_format(_require(params, "prompt"), response_format)
     caller_id = params.get("caller_id") or "cli"
+    response_format = _serialized_response_format(daemon, params, creator_id=caller_id)
+    prompt = _prompt_with_response_format(_require(params, "prompt"), response_format)
 
     refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
 

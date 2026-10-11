@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from theater.daemon.persistence.repositories.control_operations import (
         ControlOperationRepository,
     )
+    from theater.daemon.persistence.repositories.job_repairs import JobRepairRepository
     from theater.daemon.persistence.repositories.jobs import JobRepository
     from theater.daemon.persistence.repositories.journal import JournalRepository
     from theater.daemon.persistence.repositories.mcp_plugins import (
@@ -28,6 +29,9 @@ if TYPE_CHECKING:
     )
     from theater.daemon.persistence.repositories.participants import ParticipantRepository
     from theater.daemon.persistence.repositories.receipts import ReceiptRepository
+    from theater.daemon.persistence.repositories.response_contracts import (
+        ResponseContractRepository,
+    )
     from theater.daemon.persistence.repositories.runtime_bindings import (
         RuntimeBindingRepository,
     )
@@ -62,6 +66,8 @@ class StoreHost:
         _runtime_bindings: RuntimeBindingRepository
         _control_operations: ControlOperationRepository
         _native_evidence: NativeTerminalEvidenceRepository
+        _response_contracts: ResponseContractRepository
+        _repairs: JobRepairRepository
         _bus_listeners: list[BusListener]
 
         def write_unit(self) -> SQLiteWriteUnit: ...

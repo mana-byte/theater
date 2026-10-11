@@ -49,6 +49,7 @@ from theater.daemon.controls.projection import ControlActionProjector
 from theater.daemon.controls.provider_delivery import ProviderControlDelivery
 from theater.daemon.controls.public_admission import PublicControlAdmission
 from theater.daemon.controls.recovery import RecoveryControls
+from theater.daemon.controls.repairs import RepairControls
 from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
 from theater.daemon.controls.sending import SendControls
 from theater.daemon.controls.settings import SettingsControls, SettingsOutcome
@@ -196,6 +197,7 @@ class ControlService(
     InterruptControls,
     EvidenceControls,
     RecoveryControls,
+    RepairControls,
     NativeDeliveryControls,
     ActivityControls,
 ):
@@ -273,13 +275,21 @@ class ControlService(
         for participant_id in participant_ids:
             barriers = self._store.execution_barrier_control_operations(participant_id)
             pending = self._store.unresolved_prompt_delivery_operations(participant_id)
+            repairs = self._store.open_repair_attempts(participant_id)
             if recovery_floor:
                 operations = {
                     operation.operation_id: operation for operation in (*barriers, *pending)
                 }
                 for operation in operations.values():
                     self._deadline_not_before[operation.operation_id] = floor
-            if barriers or pending or self._store.queued_control_operation_count(participant_id):
+                for repair in repairs:
+                    self._deadline_not_before[repair.attempt_id] = floor
+            if (
+                barriers
+                or pending
+                or repairs
+                or self._store.queued_control_operation_count(participant_id)
+            ):
                 self._schedule_maintenance(participant_id)
 
     async def aclose(self) -> None:
@@ -403,9 +413,13 @@ class ControlService(
             participant_id
         ) or self._store.unresolved_prompt_delivery_operations(participant_id):
             await self.reconcile_ambiguous_delivery(participant_id, now_ts=self._clock())
+        if self._store.repair_fence_active(participant_id):
+            await self.maintain_repairs(participant_id)
         # A still-unresolved execution is a hard boundary: never let the
         # queued head reach native or legacy delivery while it remains.
         if self._store.has_execution_barrier(participant_id):
+            return
+        if self._store.repair_fence_active(participant_id):
             return
         if self._store.queued_control_operation_count(participant_id):
             await self.dispatch_queue(participant_id)
@@ -415,6 +429,7 @@ class ControlService(
         return bool(
             self._store.has_execution_barrier(participant_id)
             or self._store.unresolved_prompt_delivery_operations(participant_id)
+            or self._store.repair_fence_active(participant_id)
             or self._store.queued_control_operation_count(participant_id)
         )
 

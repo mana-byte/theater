@@ -15,6 +15,8 @@ from presence_fakes import FakePresence
 
 from theater import paths
 from theater.client import DaemonClient
+from theater.constants.response_contract import CONTRACT_PRESET_NAMES
+from theater.daemon.response_contracts.presets import PRESET_SCHEMAS
 from theater.daemon.server import Daemon
 from theater.mcp import tools as mcp_tools
 from theater.mcp.server import await_ceiling, build
@@ -137,6 +139,13 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
     assert "partial text chunks" in descriptions["read_transcript"]
     assert "middle_cursor" in descriptions["read_transcript"]
     assert "does not prove the edit was never committed" in descriptions["recall_read"]
+    assert "unable_to_parse" in descriptions["await_sessions"]
+    for tool in ("spawn_session", "send"):
+        for preset in CONTRACT_PRESET_NAMES:
+            assert f'{{"$theater": "{preset}"}}' in descriptions[tool], (tool, preset)
+            for field in PRESET_SCHEMAS[preset]["required"]:
+                assert field in descriptions[tool], (tool, preset, field)
+        assert '"custom"' in descriptions[tool]
 
 
 @pytest.mark.parametrize(

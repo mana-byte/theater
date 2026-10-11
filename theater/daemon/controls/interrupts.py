@@ -417,6 +417,7 @@ class InterruptControls(ControlHost):
 
     async def _cancel_queued_followups(self, participant_id: str) -> tuple[str, ...]:
         """Durably cancel every queued followup; return the cancelled handles."""
+        self._cancel_pending_repairs(participant_id)
         return self._cancel_pending_followups(participant_id)
 
     def _cancel_pending_followups(

@@ -34,11 +34,14 @@ from theater.daemon.persistence.repositories.journal import MAX_EVENTS_PER_TRANS
 from theater.daemon.schema import (
     bus,
     control_operations,
+    job_contract_audit,
+    job_repairs,
     jobs,
     native_terminal_evidence,
     participant_names,
     participant_runtime_bindings,
     participants,
+    response_contracts,
     terminal_bindings,
     touch,
     workspace_usages,
@@ -325,6 +328,10 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
             touch_result = unit.connection.execute(
                 delete(touch).where(touch.c.job_handle.in_(retained_handles))
             )
+            for table in (job_repairs, job_contract_audit):
+                unit.connection.execute(
+                    delete(table).where(table.c.job_handle.in_(retained_handles))
+                )
             job_result = unit.connection.execute(
                 delete(jobs).where(jobs.c.handle.in_(retained_handles))
             )
@@ -454,8 +461,13 @@ def _delete_participant_dependents(connection, participant_id: str) -> None:
         control_operations,
         native_terminal_evidence,
         participant_names,
+        job_repairs,
+        job_contract_audit,
     ):
         connection.execute(delete(table).where(table.c.participant_id == participant_id))
+    connection.execute(
+        delete(response_contracts).where(response_contracts.c.creator_id == participant_id)
+    )
 
 
 async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:

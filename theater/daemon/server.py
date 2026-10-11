@@ -45,6 +45,7 @@ from theater.daemon.observer import Observer
 from theater.daemon.operations import DurableEvidenceReconciler, OperationService
 from theater.daemon.presence import PresenceMonitor
 from theater.daemon.registry import Registry
+from theater.daemon.response_contracts import audit as contract_audit
 from theater.daemon.rpc import METHODS
 from theater.daemon.runtime import lifecycle, maintenance, recovery
 from theater.daemon.runtime import socket as socket_mod
@@ -143,6 +144,7 @@ class Daemon:
             )
             self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
             self.jobs = JobManager(self.store)
+            contract_audit.register_metric_specs()
             self._compose_persistence_services()
             self._compose_runtime_services()
             agent_telemetry = create_agent_telemetry(

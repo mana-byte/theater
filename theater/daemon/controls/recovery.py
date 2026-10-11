@@ -60,6 +60,7 @@ class RecoveryControls(ControlHost):
                 )
             )
             failed.extend(self._reconcile_running_jobs_at_restart(participant_id, error_code))
+        self.settle_repairs_at_restart(participant_ids)
         return failed
 
     def _fail_reserved_operations(self, participant_id: str, error_code: str) -> list[Job]:

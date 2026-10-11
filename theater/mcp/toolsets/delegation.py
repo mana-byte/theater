@@ -126,13 +126,15 @@ async def spawn_session(
     harnesses accept resume but cannot carry a prompt through it — see
     the tool description for the harness-specific behaviour.
 
-    `response_format` is a JSON Schema hint the daemon adds to the prompt
-    guidance exactly once. Theater stores it and later parses the whole
-    final assistant answer with ``json.loads``. It does not validate the
-    schema, scrape JSON from prose, strip fences, coerce types, or retry.
-    The dict is forwarded unchanged; MCP neither serializes nor injects it.
-    Resume plus `response_format` is refused for harnesses whose resume path
-    cannot carry a prompt.
+    `response_format` is forwarded unchanged; MCP neither serializes nor
+    injects it. A bare JSON Schema object is a hint the daemon adds to the
+    prompt guidance exactly once and later parses with ``json.loads``: no
+    validation, scraping, coercion, or retry. A ``{"$theater": ...}`` object
+    is a strict contract (presets ``review``, ``debate``, ``delegate``, or
+    ``custom`` with a name and schema) the daemon validates in full, repairs
+    where it can prove which turn answered, and otherwise ends with
+    ``structured_status`` ``unable_to_parse``. Resume plus `response_format`
+    is refused for harnesses whose resume path cannot carry a prompt.
 
     The returned ``session_id`` is populated asynchronously by the observer,
     so the compact MCP projection normally omits it for a newly spawned child.
@@ -234,11 +236,10 @@ async def send_prompt(
     targeting that spans time or destructive consequences — a
     recycled name can identify a successor.
 
-    `response_format` is a JSON Schema hint the daemon adds to the prompt
-    guidance exactly once. Theater stores it and later parses the whole
-    final assistant answer with ``json.loads``. It does not validate the
-    schema, scrape JSON from prose, strip fences, coerce types, or retry.
-    The dict is forwarded unchanged; MCP neither serializes nor injects it.
+    `response_format` is forwarded unchanged and takes the same forms as for
+    ``spawn_session``: a bare schema is a prompt-only hint parsed with
+    ``json.loads``; a ``{"$theater": ...}`` object is a strict contract the
+    daemon validates in full and repairs where it can prove the turn.
 
     Returns a job handle that can be passed to `await_sessions`.
     """

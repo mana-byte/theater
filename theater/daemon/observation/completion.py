@@ -70,7 +70,7 @@ class CompletionTracker:
         """
         if self.jobs is None:
             return
-        delivered = self.store.active_running_jobs_for_target(pid, connection=connection)
+        delivered = self.store.completion_candidate_jobs_for_target(pid, connection=connection)
         job = delivered[0] if delivered else None
         if job is None:
             return
@@ -140,7 +140,7 @@ class CompletionTracker:
         """Finish every delivered running job for this participant. Rescue only."""
         if self.jobs is None:
             return
-        for job in self.store.active_running_jobs_for_target(pid):
+        for job in self.store.completion_candidate_jobs_for_target(pid):
             self._finish(
                 job.handle,
                 result_text,
@@ -164,7 +164,7 @@ class CompletionTracker:
         """
         from theater.harness import ScreenKind
 
-        if self.jobs is None or not self.store.active_running_jobs_for_target(pid):
+        if self.jobs is None or not self.store.completion_candidate_jobs_for_target(pid):
             return
         p = self.store.get_participant(pid)
         if p is None:
@@ -214,6 +214,11 @@ class CompletionTracker:
     ) -> None:
         """Resolve one job. The result is already clipped by the parser."""
         assert self.jobs is not None
+        if self.store.job_is_repairing(handle, connection=connection):
+            # Rescue, identity loss and source errors are heuristics; a repair turn ends only
+            # on its exact terminal evidence, so none of them may release its fence.
+            logger.info("heuristic finish of %s skipped: it is awaiting an internal repair", handle)
+            return
         after_commit(connection, lambda: self._forget_misses(handle))
         extra: dict[str, Any] = {} if raw_result is RAW_RESULT_UNSET else {"raw_result": raw_result}
         if connection is not None:

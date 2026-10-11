@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import math
 import numbers
 from typing import Any
 
+from theater.daemon.response_contracts import prompt_with_guidance, resolve_response_format
+from theater.daemon.response_contracts.prompts import HINT_INSTRUCTION
 from theater.harness import HARNESSES, normalize
 from theater.models import BadRequest
 
-_JSON_REPLY_INSTRUCTION = (
-    "Return your final answer as a single bare JSON value (no code fences, no prose) "
-    "matching this schema hint: {schema}"
-)
+#: Kept for the ``daemon.methods`` facade; the text lives with the other contract prompts.
+_JSON_REPLY_INSTRUCTION = HINT_INSTRUCTION
 
 
 def _require(params: dict, key: str) -> Any:
@@ -84,22 +83,17 @@ def _validate_worktree_param(value: Any) -> str | bool | None:
     raise BadRequest(f"worktree parameter must be bool, str, or None; got {type(value).__name__}")
 
 
-def _serialized_response_format(params: dict) -> str | None:
-    raw = params.get("response_format")
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise BadRequest(
-            "response_format must be a JSON object or null; pass a schema hint "
-            "object such as {'type': 'object'}"
-        )
-    return json.dumps(raw, sort_keys=True, separators=(",", ":"))
+def _serialized_response_format(daemon, params: dict, *, creator_id: str | None) -> str | None:
+    """The stored form of ``response_format``; custom strict names belong to ``creator_id``."""
+    return resolve_response_format(
+        daemon.store, params.get("response_format"), creator_id=creator_id
+    )
 
 
 def _prompt_with_response_format(prompt: str, response_format: str | None) -> str:
     if response_format is None:
         return prompt
-    return f"{_JSON_REPLY_INSTRUCTION.format(schema=response_format)}\n\n{prompt}"
+    return prompt_with_guidance(prompt, response_format)
 
 
 def _prompt_with_interruption_card(

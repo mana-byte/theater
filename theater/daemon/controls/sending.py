@@ -126,6 +126,11 @@ class SendControls(ControlHost):
             )
         initial_dispatch = request.job_handle is not None
         if not initial_dispatch:
+            if self._store.repair_fence_active(participant_id):
+                raise Busy(
+                    f"participant {participant_id!r} has an unresolved internal delivery; it "
+                    "clears when that turn's evidence arrives or its backend restarts"
+                )
             await self._require_absent(participant_id, route)
         self._gates.check_prompt(request.prompt)
         await self._gates.send_preflight(participant_id)

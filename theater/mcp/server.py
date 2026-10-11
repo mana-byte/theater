@@ -109,9 +109,11 @@ use it for status sweeps.
 
 Done means the turn ended, not that its work is correct. `result` is a bounded preview of the
 child's final message (about 2,000 chars): its claim, not evidence; check the repo.
-With response_format, a spawned or sent job returns its final JSON answer as a string in
-structured_result instead of result. structured_status is "parsed", or "unavailable" when completion
-failed, output was missing, or the answer was not JSON. A finished job also carries changes: either
+With response_format, a spawned or sent job returns its final JSON answer as a JSON-encoded string
+in structured_result instead of result. structured_status is "parsed"; "unavailable" when completion
+failed, output was missing, or a hint-only answer was not JSON; or "unable_to_parse" when a strict
+contract never produced a valid answer (the job is done; its result holds the last answer read).
+A finished job also carries changes: either
 {"evidence":"none"}, or {"evidence":"tool_paths","modified":[first 20 paths],
 "modified_count":int,"read_count":int}; evidence "none" means Theater saw no file paths, not
 that nothing changed. Process every qualified entry; several may be ready together.
@@ -174,15 +176,26 @@ prompt:   the task, delivered on the child's command line at startup.
           handoff, so it has to carry the goal, the files it may change,
           what it must leave alone, how to check its own work, and what
           to report back. Everything you leave out, it will invent.
-response_format: optional JSON Schema hint for prompt guidance only. Pass a
-          JSON object or null. The daemon serializes and injects that guidance
-          exactly once; MCP forwards the object unchanged and does not inject
-          prompt text. After the job finishes, Theater parses the whole final
-          assistant answer with json.loads. It performs no schema validation,
-          JSON scraping, fence stripping, type coercion, or retry.
-          Recommended whenever you will act on the answer (a verdict,
-          status, or list): await_sessions then returns it in
-          structured_result, so you need not read the transcript.
+response_format: optional JSON object. A bare JSON Schema object is a prompt hint
+          only: the daemon injects it once and parses the whole final answer with
+          json.loads, with no validation, scraping, or retry. A tagged object is a strict
+          contract. Presets, each with required fields: {{"$theater": "review"}} (verdict,
+          reviewed, summary, findings), {{"$theater": "debate"}} (verdict, position,
+          strongest_evidence, weakest_assumption, position_change, remaining_blocker),
+          {{"$theater": "delegate"}} (status, summary, blockers). They take optional fields
+          (commit, changed_paths, checks, findings, ...) and extra keys, are written for a
+          caller that never reads the transcript, and are capped at 16,384 characters.
+          Or {{"$theater": "custom", "name": "x", "schema": {{...}}}}: omit schema to reuse
+          a name you registered; a name belongs to your session,
+          the same schema is idempotent and a different one is refused. Custom schemas are
+          JSON Schema 2020-12, at most 32 KiB, without pattern, patternProperties,
+          uniqueItems, $id, or non-local $ref. Theater validates the whole final answer
+          against the schema. Where it can prove which turn answered, it asks the same agent
+          to correct an invalid answer a bounded number of times; the job stays running and
+          you see nothing of it.
+          Otherwise, or when that fails, the job ends with structured_status
+          "unable_to_parse". await_sessions returns a valid answer in structured_result,
+          so you need not read the transcript.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately. A "manual" child may stop
@@ -743,11 +756,18 @@ def build(
                    its queue, interrupt, wait up to 30 s for idle, send (route
                    "replace"). All but "refuse" need a direct child.
         job_handle: amend/replace act only while this job is the active turn.
-        response_format: optional JSON Schema hint, guidance only. Pass a
-                   JSON object or null. Theater parses the whole final answer with
-                   json.loads — no schema validation, fence stripping, or retry.
-                   Recommended when you will act on the answer; await_sessions
-                   returns it in structured_result.
+        response_format: optional JSON object, as for spawn_session. A bare JSON Schema
+                   object is a prompt hint only (parsed with json.loads, never validated
+                   or retried). Tagged objects are strict: {"$theater": "review"} (verdict,
+                   reviewed, summary, findings), {"$theater": "debate"} (verdict, position,
+                   strongest_evidence, weakest_assumption, position_change,
+                   remaining_blocker), {"$theater": "delegate"} (status, summary, blockers),
+                   or {"$theater": "custom", "name": "x", "schema": {...}} (omit schema to
+                   reuse a name you registered). Presets allow extra keys and cap the answer
+                   at 16,384 characters. Theater validates the whole final answer, repairs
+                   an invalid one where it can prove which turn answered, and otherwise ends
+                   the job with structured_status "unable_to_parse". await_sessions returns
+                   a valid answer in structured_result.
         Fails with `human_present` (human at the terminal), `busy` (target is
         working or already owns an outstanding send, if_busy="refuse"),
         `transcript_untrusted` or `transcript_identity_lost` (transcript needs

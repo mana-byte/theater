@@ -556,6 +556,51 @@ async def test_no_touch_row_survives_without_its_job(store):
     assert orphaned == []
 
 
+async def test_repair_and_audit_rows_go_with_their_job_and_contracts_with_their_creator(store):
+    """Repair attempts and the contract audit are keyed by job; custom contracts by creator."""
+    from theater.daemon.persistence.repositories.job_repairs import RepairAttempt, RepairState
+
+    _participant(store, pid="p1")
+    for handle, finished in (("old", now() - 90 * _DAY), ("recent", now())):
+        _job(
+            store,
+            handle=handle,
+            target_id="p1",
+            state=JobState.DONE,
+            finished_at=finished,
+            created_at=finished,
+        )
+        store.create_repair_attempt(
+            RepairAttempt(
+                attempt_id=f"{handle}~repair1",
+                job_handle=handle,
+                participant_id="p1",
+                attempt=1,
+                state=RepairState.SETTLED,
+                fence=False,
+                created_at=now(),
+                updated_at=now(),
+            )
+        )
+        store.record_contract_audit(handle, "p1", "repair_exhausted", None, at=now())
+    store.register_response_contract("p1", "x", "{}", created_at=now(), limit=4)
+
+    await sweep(store, _retention(jobs_days=60))
+
+    assert [a.job_handle for a in store.repair_attempts_for_job("old")] == []
+    assert store.contract_audit_for_job("old") == []
+    assert len(store.repair_attempts_for_job("recent")) == 1
+    assert len(store.contract_audit_for_job("recent")) == 1
+    # The surviving job still references p1, so the participant and its contract stay.
+    assert store.get_response_contract("p1", "x") == "{}"
+
+    store.conn.execute(jobs.delete())
+    await sweep(store, _retention(jobs_days=60))
+    assert store.get_participant("p1") is None
+    assert store.get_response_contract("p1", "x") is None
+    assert store.repair_attempts_for_job("recent") == []
+
+
 async def test_touch_rows_for_surviving_jobs_are_kept(store):
     """Touch rows for a job that is NOT swept must survive."""
     _participant(store, pid="p1")

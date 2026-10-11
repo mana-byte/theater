@@ -20,9 +20,11 @@ from theater.constants.daemon import (
     TOUCH_HASH_MAX_FILE_BYTES,
     TOUCH_HASH_MAX_JOB_BYTES,
 )
+from theater.constants.response_contract import STRUCTURED_UNABLE_TO_PARSE
 from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
 from theater.daemon.events.publication import job_event, next_revision
 from theater.daemon.persistence.transactions import active_write_unit, after_commit
+from theater.daemon.response_contracts import audit, parse_stored
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
 from theater.daemon.store import Store
@@ -34,6 +36,7 @@ logger = logging.getLogger("theater.jobs")
 
 #: Re-exported for callers that think of these as job vocabulary (they live in theater.models).
 __all__ = [
+    "ContractFailure",
     "Job",
     "JobKind",
     "JobManager",
@@ -47,6 +50,14 @@ DEFAULT_MAX_WAIT = RPC_DEFAULT_MAX_WAIT_SECONDS
 STRUCTURED_PARSED = "parsed"
 STRUCTURED_UNAVAILABLE = "unavailable"
 _RAW_UNSET = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ContractFailure:
+    """Why a strict job ends ``unable_to_parse``; only the audit ever sees it."""
+
+    event: str
+    detail: str | None = None
 
 
 class StagingIncomplete(RuntimeError):
@@ -357,6 +368,7 @@ class JobManager:
         error_code: str | None = None,
         raw_result: str | object | None = _RAW_UNSET,
         connection: Connection | None = None,
+        contract_failure: ContractFailure | None = None,
     ) -> Job | None:
         if connection is not None:
             return self._finish_in_unit(
@@ -366,6 +378,7 @@ class JobManager:
                 error_code=error_code,
                 raw_result=raw_result,
                 connection=connection,
+                contract_failure=contract_failure,
             )
         job = self.store.get_job(handle)
         if job is None:
@@ -380,12 +393,13 @@ class JobManager:
 
         acc = self._accumulators.get(handle)
         finished_at = now()
-        structured_result, structured_status = self._structured_values(
+        structured_result, structured_status, failure = self._structured_values(
             job,
             state=state,
             result=result,
             error_code=error_code,
             raw_result=raw_result,
+            failure=contract_failure,
         )
         if acc:
             # Write job result and touches in one transaction; store connection is autocommit.
@@ -411,6 +425,8 @@ class JobManager:
                 structured_result=structured_result,
                 structured_status=structured_status,
             )
+        if failure is not None:
+            audit.record(self.store, job, failure.event, failure.detail)
 
         self._accumulators.pop(handle, None)
 
@@ -440,6 +456,7 @@ class JobManager:
         error_code: str | None,
         raw_result: str | object | None,
         connection: Connection,
+        contract_failure: ContractFailure | None = None,
     ) -> Job | None:
         """Finish inside the caller's write unit; memory wakeups wait for the commit."""
         job = self.store.get_job(handle, connection=connection)
@@ -449,9 +466,16 @@ class JobManager:
             after_commit(connection, lambda: self._wake(handle))
             return job
         acc = self._accumulators.get(handle)
-        structured_result, structured_status = self._structured_values(
-            job, state=state, result=result, error_code=error_code, raw_result=raw_result
+        structured_result, structured_status, failure = self._structured_values(
+            job,
+            state=state,
+            result=result,
+            error_code=error_code,
+            raw_result=raw_result,
+            failure=contract_failure,
         )
+        if failure is not None:
+            audit.record(self.store, job, failure.event, failure.detail, connection=connection)
         self._write_finish(
             connection,
             handle,
@@ -507,24 +531,38 @@ class JobManager:
         result: str | None,
         error_code: str | None,
         raw_result: str | object | None,
-    ) -> tuple[str | None, str | None]:
+        failure: ContractFailure | None = None,
+    ) -> tuple[str | None, str | None, ContractFailure | None]:
+        """The job's structured fields, plus the audit entry when a strict answer failed."""
         if job.response_format is None:
-            return None, None
+            return None, None, None
         if str(state) != str(JobState.DONE) or error_code is not None:
-            return None, STRUCTURED_UNAVAILABLE
+            return None, STRUCTURED_UNAVAILABLE, None
         if raw_result is _RAW_UNSET:
             candidate = result or ""
         elif raw_result is None:
-            return None, STRUCTURED_UNAVAILABLE
+            return None, STRUCTURED_UNAVAILABLE, None
         else:
             if not isinstance(raw_result, str):
-                return None, STRUCTURED_UNAVAILABLE
+                return None, STRUCTURED_UNAVAILABLE, None
             candidate = raw_result
+        contract = parse_stored(job.response_format)
+        if contract is not None:
+            if failure is None:
+                verdict = contract.validate(candidate)
+                if verdict.ok:
+                    return candidate, STRUCTURED_PARSED, None
+                # Reaching here means no exact-turn route repaired the answer: fail closed.
+                failure = ContractFailure(
+                    audit.UNSUPPORTED_ROUTE,
+                    f"{verdict.reason}: no exact turn correlation to repair; {verdict.detail}",
+                )
+            return None, STRUCTURED_UNABLE_TO_PARSE, failure
         try:
             json.loads(candidate)
         except (ValueError, RecursionError):
-            return None, STRUCTURED_UNAVAILABLE
-        return candidate, STRUCTURED_PARSED
+            return None, STRUCTURED_UNAVAILABLE, None
+        return candidate, STRUCTURED_PARSED, None
 
     def _finish_with_touches(
         self,

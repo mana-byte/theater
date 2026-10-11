@@ -85,9 +85,21 @@ class ActivityControls(ControlHost):
             native_turn_id=native_turn_id,
             connection=connection,
         )
-        if operation is None or operation.job_handle is None:
+        if operation is None:
+            # An internal repair turn belongs to the job it is repairing.
+            repair = self._store.repair_attempt_for_turn(
+                participant_id=participant_id,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                native_turn_id=native_turn_id,
+                connection=connection,
+            )
+            handle = repair.job_handle if repair is not None else None
+        else:
+            handle = operation.job_handle
+        if handle is None:
             return None
-        job = self._store.get_job(operation.job_handle, connection=connection)
+        job = self._store.get_job(handle, connection=connection)
         if job is None or job.state != JobState.RUNNING:
             return None
         return job

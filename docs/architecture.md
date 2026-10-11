@@ -776,6 +776,69 @@ restarted daemon has no observer attached yet, so an in-flight await would have
 to re-poll regardless. `await_jobs` recreates a missing event rather than
 failing.
 
+### Response contracts and repair
+
+`response_format` is one argument with two meanings. A bare JSON Schema dict is
+a **hint**: the daemon prepends it to the prompt and later parses the answer
+with `json.loads`, exactly as before. A dict carrying the reserved `$theater`
+key is a **strict contract** — `review`, `debate`, `delegate`, or
+`{"$theater": "custom", "name": ..., "schema": ...}`. Admission
+(`daemon/response_contracts/`) validates the schema (2020-12, 32 KiB, no
+`pattern`/`patternProperties`/`uniqueItems`/`$id`/non-local `$ref`, so no regex or
+quadratic scan runs on the daemon loop and nothing is fetched), resolves the preset or custom name, and
+stores the *resolved* envelope in `jobs.response_format` — the job snapshots its
+schema, and omitting `response_format` never inherits one. A custom name is
+keyed by `(creator participant id, name)` in `response_contracts`; the same
+schema is idempotent, a different one conflicts, and the rows die with the
+creator.
+
+The presets are written for a caller that never reads the transcript: required
+fields carry the outcome, optional ones the evidence, extra keys are allowed, and
+a preset answer is capped at 16,384 characters (custom schemas keep 64 Ki). A
+strict prompt carries its guidance *after* the task, because completion matches a
+prompt by its first `PROMPT_MATCH` characters and constant guidance first would
+make every strict job look alike; a bare hint still prepends.
+
+At completion the **whole** final answer must be one bare JSON value that
+satisfies the schema (`JobManager.finish` is the one choke point). A strict job
+that cannot produce one ends `done` with `structured_status =
+"unable_to_parse"`; callers never see why. Why lives in `job_contract_audit` and
+a bounded `theater.response_contract.failures` counter, so unsupported routes can
+be measured before anyone builds more correlation.
+
+**Repair only where the answering turn is provable.** A native-runtime send
+records the exact native turn, so terminal evidence for that turn is
+unambiguously the job's answer. When it is invalid, `RepairControls` keeps the
+public job `running`, writes a `job_repairs` attempt, and — under the
+participant lock, after the ordinary presence/preflight gates and an
+authoritative-idle precondition — sends a bounded repair prompt through the same
+runtime, recording the turn id of the receipt. Only the terminal evidence of
+*that* turn (or a definitive refusal) resolves the attempt; two attempts at most.
+Every other route — transcript completion, legacy and provider terminals — has no
+exact turn, so it fails closed to `unable_to_parse` with an `unsupported_route`
+audit row. There is deliberately no transcript correlation.
+
+Three details carry the safety:
+
+- `job_repairs.fence` is a **separate durable fence**, not
+  `control_operations.execution_barrier` (an idle snapshot clears that). It is
+  released only by positive evidence: the repair turn's terminal evidence, a
+  definitive rejection, or the native context being gone (participant dead,
+  backend generation or session changed). Idle alone, screen rescue, and
+  identity loss never release it. A repair whose delivery stayed `unknown` ends
+  its job at the ambiguous-delivery deadline but keeps the fence, so Theater's own
+  sends to that participant refuse until its evidence arrives or its backend
+  restarts — a deliberate trade of liveness for never typing into a live turn.
+- `completion_candidate_jobs_for_target` is the matcher's query: it excludes a
+  repairing job, so no later turn is ever matched to it, while
+  `active_running_jobs_for_target` still reports it for every busy, steer, and
+  interrupt check. `CompletionTracker._finish` also refuses to finish a repairing
+  job heuristically.
+- A repair outranks queued followups (`dispatch_queue` advances repairs first and
+  stays deferred while fenced), an interrupt cancels an unsent repair like any
+  undelivered followup, and a restart turns a `dispatched` attempt into
+  `unknown` — never replayed.
+
 ---
 
 ## 8. Safety rails
@@ -1023,10 +1086,12 @@ theater/
 │   │   ├── database.py · repositories/ (participants, jobs, bus, metadata,
 │   │   │   receipts, channels, scratchpad, statistics, usage, worktrees,
 │   │   │   artifacts, mcp_plugins, runtime_bindings, control_operations,
-│   │   │   native_evidence)
+│   │   │   native_evidence, response_contracts, job_repairs)
 │   ├── rpc/            @method handlers, including trajectory snapshot/follow/close/locate/search
 │   ├── runtime/        socket dispatch, lifecycle, maintenance loops
-│   ├── controls/       durable control state machine: send, steer, queue, settings, interrupt
+│   ├── controls/       durable control state machine: send, steer, queue, settings, interrupt,
+│   │                   and repairs (bounded native re-ask of an invalid strict answer)
+│   ├── response_contracts/  strict response_format: admission, presets, validation, audit
 │   ├── harness_runtime/  WebSocket-over-Unix transport, detached backends, runtime manager
 │   ├── spawning/       launch planning, resume, service
 │   ├── worktrees/      repository, unique and named worktree implementations

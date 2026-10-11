@@ -47,8 +47,8 @@ Run at least 3 and at most 15 exchanges:
 3. Require the peer to rebut, revise, or concede.
 4. Continue while a material disagreement remains and the exchange limit permits.
 
-Require each peer response to state its verdict (`agree`, `disagree`, or `uncertain`), strongest
-evidence, weakest assumption, position change since the previous exchange, and remaining blocker.
+Require each peer response to state its verdict (`agree`, `disagree`, or `uncertain`), position,
+strongest evidence, weakest assumption, position change, and remaining blocker.
 
 If agreement arrives before exchange 3, use the remaining minimum exchanges to test counterexamples
 and attack the proposed decision. Stop after exchange 3 once consensus survives. If no consensus
@@ -58,8 +58,9 @@ Only the leader sends debate prompts and controls progression. After each send, 
 use the awaited `result` or parsed `structured_result` first. Read only the latest relevant
 transcript segment when the answer is clipped or missing, a failed structured parse hides required
 fields, or you must check actual tool or action evidence. Never load the full transcript by default.
-Do not require `response_format` for every exchange. Keep messages focused on the current
-disagreement instead of repeating the entire brief.
+Do not require `response_format` for every exchange; when a mechanical verdict helps, use
+`{"$theater": "debate"}`. Keep messages focused on the current disagreement instead of repeating the
+entire brief.
 
 For every `await_sessions` call, use the longest max_wait await_sessions allows (its cap is stated
 in its description). The call returns immediately when the peer finishes, so a long ceiling never

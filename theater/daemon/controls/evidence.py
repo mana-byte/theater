@@ -7,6 +7,7 @@ import logging
 from theater.daemon.controls._common import INTERRUPTED_ERROR_CODE
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.persistence.repositories.native_evidence import NativeTerminalEvidence
+from theater.daemon.response_contracts import parse_stored
 from theater.harness.contracts.runtime import (
     ControlTransport,
     NativeTurnOutcome,
@@ -79,6 +80,18 @@ class EvidenceControls(ControlHost):
                     participant_id,
                     outcome.native_turn_id,
                 )
+        repair = self._store.repair_attempt_for_turn(
+            participant_id=participant_id,
+            backend_generation=backend_generation,
+            native_session_id=outcome.native_session_id,
+            native_turn_id=outcome.native_turn_id,
+        )
+        if repair is not None:
+            # The exact turn an internal repair prompt started: it resolves that job's attempt.
+            repaired = self._resolve_repair_evidence(repair, evidence)
+            self.schedule_dispatch(participant_id)
+            self._schedule_maintenance(participant_id)
+            return repaired
         operation = self._operation_for_turn(
             participant_id=participant_id,
             backend_generation=backend_generation,
@@ -126,6 +139,12 @@ class EvidenceControls(ControlHost):
             return job
         state = _JOB_STATE_FOR_TERMINAL[evidence.terminal]
         result = evidence.result
+        contract = parse_stored(job.response_format)
+        if contract is not None and state is JobState.DONE and evidence.error_code is None:
+            verdict = self._evaluate(contract, evidence)
+            if not verdict.ok:
+                # The turn is exactly this job's, so Theater may ask the same agent to answer again.
+                return self._begin_repair(participant_id, job, evidence, verdict)
         if evidence.terminal is NativeTurnTerminal.INTERRUPTED:
             result = result or (
                 "The native turn was interrupted; the job was cancelled with it. "
@@ -146,7 +165,7 @@ class EvidenceControls(ControlHost):
         """Close the crash window between the evidence commit and job finish."""
         finished: list[Job] = []
         for participant_id in participant_ids:
-            for job in self._store.active_running_jobs_for_target(participant_id):
+            for job in self._store.completion_candidate_jobs_for_target(participant_id):
                 for operation in self._store.control_operations_for_job(job.handle):
                     if operation.transport is not ControlTransport.NATIVE_RUNTIME:
                         continue
@@ -171,4 +190,5 @@ class EvidenceControls(ControlHost):
                     if result is not None and result.state != JobState.RUNNING:
                         finished.append(result)
                         break
+        self.resolve_repairs_from_pending_evidence(participant_ids)
         return finished

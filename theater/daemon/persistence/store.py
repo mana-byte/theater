@@ -15,6 +15,7 @@ from theater.daemon.persistence.repositories.channels import ChannelCredentialRe
 from theater.daemon.persistence.repositories.control_operations import (
     ControlOperationRepository,
 )
+from theater.daemon.persistence.repositories.job_repairs import JobRepairRepository
 from theater.daemon.persistence.repositories.jobs import JobRepository
 from theater.daemon.persistence.repositories.journal import JournalRepository
 from theater.daemon.persistence.repositories.mcp_plugins import McpPluginCredentialRepository
@@ -27,6 +28,9 @@ from theater.daemon.persistence.repositories.participant_names import Participan
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.persistence.repositories.providers import ProviderRepository
 from theater.daemon.persistence.repositories.receipts import ReceiptRepository
+from theater.daemon.persistence.repositories.response_contracts import (
+    ResponseContractRepository,
+)
 from theater.daemon.persistence.repositories.runtime_bindings import RuntimeBindingRepository
 from theater.daemon.persistence.repositories.scratchpad import ScratchpadRepository
 from theater.daemon.persistence.repositories.statistics import StatisticsRepository
@@ -36,6 +40,7 @@ from theater.daemon.persistence.repositories.workspaces import WorkspaceReposito
 from theater.daemon.persistence.repositories.worktrees import WorktreeRepository
 from theater.daemon.persistence.store_parts import (
     BusStore,
+    ContractStore,
     ControlOperationStore,
     CredentialStore,
     JobStore,
@@ -60,6 +65,7 @@ class Store(
     UsageStore,
     RuntimeBindingStore,
     ControlOperationStore,
+    ContractStore,
     BusStore,
 ):
     """Compatibility façade over ``Database`` and explicit repositories."""
@@ -86,6 +92,8 @@ class Store(
         self._runtime_bindings = RuntimeBindingRepository(self._db)
         self._control_operations = ControlOperationRepository(self._db)
         self._native_evidence = NativeTerminalEvidenceRepository(self._db)
+        self._response_contracts = ResponseContractRepository(self._db)
+        self._repairs = JobRepairRepository(self._db)
         self.providers = ProviderRepository(self._db)
         self.terminal_bindings = TerminalBindingRepository(self._db)
         self.operations = OperationRepository(self._db)

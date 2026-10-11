@@ -75,7 +75,9 @@ async def _spawn(daemon, params: dict) -> dict:
 
 async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> dict:
     """Adapt the private request to the shared provider-backed launch service."""
-    response_format = _serialized_response_format(params)
+    response_format = _serialized_response_format(
+        daemon, params, creator_id=params.get("parent_id")
+    )
     harness_name = _require(params, "harness")
     _reject_response_format_resume(harness_name, params.get("resume"), response_format)
     rails = daemon.config.rails

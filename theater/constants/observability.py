@@ -220,6 +220,10 @@ CONTROL_DURATION_METRIC = "theater.control.duration"
 #: retried, never fallen back; observed with bounded kind/reason attributes.
 CONTROL_DELIVERY_UNKNOWN_METRIC = "theater.control.delivery.unknown"
 
+#: Counter name for strict response contracts that ended ``unable_to_parse``; observed with one
+#: bounded ``reason`` attribute so unsupported routes can be measured before correlation grows.
+RESPONSE_CONTRACT_FAILURE_METRIC = "theater.response_contract.failures"
+
 #: Runtime reconnect duration histogram name.
 RUNTIME_RECONNECT_DURATION_METRIC = "theater.runtime.reconnect.duration"
 
