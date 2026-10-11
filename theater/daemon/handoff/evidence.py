@@ -5,6 +5,7 @@ from __future__ import annotations
 from theater.constants.handoff import ANSWER_MAX_CHARS
 from theater.daemon.handoff.gitfacts import pin_git_facts
 from theater.daemon.handoff.models import GitFacts, JobEvidence
+from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
 from theater.models import Job, WorkspaceOwnershipKind, now
 
 _NO_ANSWER = "none"
@@ -20,8 +21,29 @@ class EvidencePinner:
     def __init__(self, store) -> None:
         self._store = store
 
+    def delivered(self, job: Job) -> bool:
+        """Whether the job's prompt may have reached the target; a queued or refused one never did.
+
+        Only a job with a real chance of completing needs Git read; cancelling, interrupting or
+        failing queued work must cost nothing. A job with no control record (a spawn, a legacy
+        send) counts as delivered.
+        """
+        if job.kind != "send":
+            return True
+        operations = self._store.control_operations_for_job(job.handle)
+        if not operations:
+            return True
+        return any(
+            operation.delivery_phase is ControlDeliveryPhase.DISPATCHED
+            or (
+                operation.delivery_phase is ControlDeliveryPhase.SETTLED
+                and operation.delivery_result is not DeliveryResult.REJECTED
+            )
+            for operation in operations
+        )
+
     def required(self, job: Job) -> bool:
-        if job.target_id is None:
+        if job.target_id is None or not self.delivered(job):
             return False
         if self._store.handoff_gates(("waiting", "opening"), source_handle=job.handle):
             return True

@@ -355,11 +355,24 @@ class JobManager:
             if facts is None:
                 workspace = self.evidence.workspace_of(job)
                 if workspace not in by_workspace:
-                    by_workspace[workspace] = self.evidence.capture(job)
+                    by_workspace[workspace] = self._pin_now(job)
                 facts = by_workspace[workspace]
             self._staged_git[job.handle] = facts
             staged.append(job.handle)
         return staged
+
+    def _pin_now(self, job: Job) -> GitFacts:
+        """Git read inline only where nothing is waiting on this thread.
+
+        On the event loop a subprocess would stall every await and status poll, so a path that
+        reached a terminal state without being staged fails closed to ``unpinned`` instead.
+        """
+        assert self.evidence is not None
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return self.evidence.capture(job)
+        return GitFacts.unpinned("not_staged")
 
     async def prepare_pins(self, target_id: str) -> list[str]:
         """Pin a target's Git state in a worker thread, ahead of the terminal batch applying.
@@ -414,7 +427,7 @@ class JobManager:
         if in_unit:
             git = self._staged_git.get(job.handle) or GitFacts.unpinned("not_staged")
         else:
-            git = self._prepinned.get(job.handle) or pinner.capture(job)
+            git = self._prepinned.get(job.handle) or self._pin_now(job)
         raw = None if raw_result is _RAW_UNSET else raw_result
         return pinner.build(
             job, git, state=str(state), result=result, error_code=error_code, raw_result=raw

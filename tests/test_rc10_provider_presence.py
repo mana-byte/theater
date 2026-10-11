@@ -25,6 +25,10 @@ from theater.models import (
 )
 
 
+async def _no_pins(participant_id):
+    return []
+
+
 class Clock:
     def __init__(self, value: float = 100.0) -> None:
         self.value = value
@@ -530,7 +534,11 @@ async def test_authoritative_exit_adapter_revalidates_before_retirement(monkeypa
         store=registry.store,
         registry=registry,
         terminal_service=service,
-        jobs=SimpleNamespace(finish=lambda *args, **kwargs: None),
+        jobs=SimpleNamespace(
+            finish=lambda *args, **kwargs: None,
+            prepare_pins=_no_pins,
+            release_pins=lambda handles: None,
+        ),
         spawner=SimpleNamespace(
             release_workspace_usage=lambda *args, **kwargs: released.append(args)
         ),

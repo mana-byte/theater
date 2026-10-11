@@ -39,12 +39,14 @@ async def retire_authoritative_exit(daemon, evidence: ProviderExitEvidence) -> b
     )
     daemon.registry.mark_dead(participant.id)
     finish_failed = False
+    pinned = await daemon.jobs.prepare_pins(participant.id)
     for job in daemon.store.running_jobs_for_target(participant.id):
         try:
             daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
         except Exception:
             finish_failed = True
             logger.exception("job finish failed after provider exit for %s", participant.id)
+    daemon.jobs.release_pins(pinned)
     if finish_failed:
         return True
 

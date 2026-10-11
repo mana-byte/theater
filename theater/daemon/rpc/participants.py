@@ -566,8 +566,12 @@ async def terminate_participant(
             operation_id=operation_id,
         ):
             # Job completion hashes files before teardown releases workspace usage.
-            for job in daemon.store.running_jobs_for_target(pid):
-                daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
+            pinned = await daemon.jobs.prepare_pins(pid)
+            try:
+                for job in daemon.store.running_jobs_for_target(pid):
+                    daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
+            finally:
+                daemon.jobs.release_pins(pinned)
             # Keep the durable binding through every awaited verification/cancellation boundary.
             # From here teardown performs only synchronous registry and usage transitions.
             daemon.store.delete_runtime_binding(pid)

@@ -21,6 +21,10 @@ _PENDING_EVIDENCE_MAX = 512
 class TerminalEvidenceRouting:
     if TYPE_CHECKING:
         live: LiveObservationHub
+
+        async def _pin_ahead(self, pid: str) -> list[str]: ...
+        def _release_pins(self, handles: list[str]) -> None: ...
+
         _pending_evidence: dict[
             str,
             OrderedDict[
@@ -51,22 +55,27 @@ class TerminalEvidenceRouting:
             )
             self._retain_terminal_evidence(pid, source, batch, registration)
             return False
-        for outcome in batch.terminal_evidence:
-            try:
-                await registration.evidence_sink(
-                    pid,
-                    backend_generation=registration.backend_generation,
-                    outcome=outcome,
-                )
-            except asyncio.CancelledError:
-                self._retain_terminal_evidence(pid, source, batch, registration)
-                raise
-            except Exception:
-                logger.exception(
-                    "routing terminal evidence for %s failed; outcome retained for replay", pid
-                )
-                self._retain_terminal_evidence(pid, source, batch, registration)
-                return False
+        pinned = await self._pin_ahead(pid)  # the sink finishes jobs synchronously
+        try:
+            for outcome in batch.terminal_evidence:
+                try:
+                    await registration.evidence_sink(
+                        pid,
+                        backend_generation=registration.backend_generation,
+                        outcome=outcome,
+                    )
+                except asyncio.CancelledError:
+                    self._retain_terminal_evidence(pid, source, batch, registration)
+                    raise
+                except Exception:
+                    logger.exception(
+                        "routing terminal evidence for %s failed; outcome retained for replay",
+                        pid,
+                    )
+                    self._retain_terminal_evidence(pid, source, batch, registration)
+                    return False
+        finally:
+            self._release_pins(pinned)
         return True
 
     def _retain_terminal_evidence(

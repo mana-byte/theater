@@ -476,8 +476,7 @@ class Observer(
                 registration=context.registration,
             )
         finally:
-            if pinned and self.jobs is not None:
-                self.jobs.release_pins(pinned)
+            self._release_pins(pinned)
         if applied:
             iteration.applied = True
             context.active_at = self._monotonic()
@@ -513,13 +512,23 @@ class Observer(
 
     async def _prepare_pins(self, pid: str, batch: Batch) -> list[str]:
         """A terminal batch's jobs are pinned in a thread so Git never blocks the event loop."""
-        if self.jobs is None or not any(event.turn_end for event in batch.events):
+        if not any(event.turn_end for event in batch.events):
+            return []
+        return await self._pin_ahead(pid)
+
+    async def _pin_ahead(self, pid: str) -> list[str]:
+        """Pin what may complete off the loop; a failure leaves those jobs unpinned."""
+        if self.jobs is None:
             return []
         try:
             return await self.jobs.prepare_pins(pid)
         except Exception:
             logger.exception("pinning completion evidence for %s failed", pid)
             return []
+
+    def _release_pins(self, handles: list[str]) -> None:
+        if handles and self.jobs is not None:
+            self.jobs.release_pins(handles)
 
     def _apply_inner(
         self,

@@ -897,16 +897,21 @@ supplies a labelled, bounded **card** (`handoff/card.py`) about the source.
   waiting spawn (gate `waiting`); once a launch has begun it answers
   `delivery_uncertain`/`delivered`. Killing a still-waiting spawn cancels its gate.
 - **Provider away, GC, budget.** A launch refused only because the provider is
-  unavailable or busy (before any launch reservation exists) leaves the gate
+  offline, reconnecting or busy (before any launch reservation exists) leaves the gate
   `waiting` with the reason in `handoff.error_code` and retries with backoff
-  (1 s doubling to 30 s, no deadline); if a reservation exists the launch is
+  (1 s doubling to 30 s, no deadline). An unregistered provider or one without terminal
+  creation is configuration: it is refused at admission, and at launch it ends the gate
+  (`handoff_launch_refused`). If a reservation exists the launch is
   already the operation's and is never retried. After a retention sweep marks
   stale jobs crashed directly, `HandoffService.wake()` releases what waited on them.
   The placeholder holds its tree-budget slot, so the launch skips the budget and
   depth recheck. A name in `after` means the participant's own running or latest
   tasked job, never another sender's still-queued message. Terminal Git pins are one
-  `git status`, read once per workspace, in a worker thread ahead of the terminal batch
-  (`prepare_pins`), and inline only on paths that finish outside the observer.
+  `git status`, read once per workspace, in a worker thread ahead of the terminal write
+  (`prepare_pins`): observer batches, native terminal evidence, rescue, kill and provider
+  exit do so. Git never runs on the event loop: any other path that finishes a job there
+  records `unpinned: not_staged`, and a job whose prompt was never delivered (queued,
+  cancelled, refused) is not pinned at all.
 - **Await cycles.** Awaiting a gated task or message also waits on the participant
   running its source job, and a message behind an earlier gated message of the same
   lane inherits that dependency, so awaiting it from the source's own work raises

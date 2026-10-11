@@ -32,6 +32,7 @@ from theater.constants.handoff import (
     TASK_KIND_REVIEW,
     TASK_KIND_WORK,
     TASK_KINDS,
+    TRANSIENT_PROVIDER_REASONS,
 )
 from theater.daemon.handoff.card import SourceView, render_card
 from theater.daemon.handoff.evidence import EvidencePinner
@@ -60,6 +61,14 @@ class GateReadiness:
 
     waiting: bool = False
     error: TheaterError | None = None
+
+
+def _provider_is_only_away(exc: TheaterError) -> bool:
+    """A busy provider or one that is offline or reconnecting; not a misconfigured one."""
+    if isinstance(exc, ProviderBusy):
+        return True
+    reason = (exc.details or {}).get("reason") if hasattr(exc, "details") else None
+    return reason in TRANSIENT_PROVIDER_REASONS
 
 
 _READY = GateReadiness()
@@ -94,6 +103,7 @@ class HandoffService:
             )
         from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 
+        ParticipantLaunchService(self.daemon).require_known_provider(params.get("provider"))
         stored = {
             "kind": KIND_SPAWN,
             "params": {k: params.get(k) for k in _REQUEST_KEYS},
@@ -341,7 +351,10 @@ class HandoffService:
         except HandoffRefused as exc:
             self._fail(gate, exc.code, str(exc))
         except (ProviderUnavailable, ProviderBusy) as exc:
-            self._wait_for_provider(gate, exc)
+            if _provider_is_only_away(exc):
+                self._wait_for_provider(gate, exc)
+            else:
+                self._fail(gate, ERROR_LAUNCH_REFUSED, f"{type(exc).__name__}: {exc}")
         except (TheaterError, ValueError) as exc:
             self._fail(gate, ERROR_LAUNCH_REFUSED, f"{type(exc).__name__}: {exc}")
         else:

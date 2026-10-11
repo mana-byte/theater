@@ -180,12 +180,16 @@ class CompletionTracker:
             pid,
             rescue_timeout,
         )
-        self.release_jobs(
-            pid,
-            clock.last_text,
-            error_code=RESCUE_CODE,
-            raw_result=None,
-        )
+        pinned = await self.jobs.prepare_pins(pid)
+        try:
+            self.release_jobs(
+                pid,
+                clock.last_text,
+                error_code=RESCUE_CODE,
+                raw_result=None,
+            )
+        finally:
+            self.jobs.release_pins(pinned)
 
     def finish_identity_lost_jobs(self, pid: str, result_text: str) -> None:
         """Finish all running jobs with the identity-lost error code."""

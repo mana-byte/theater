@@ -7,10 +7,12 @@ import dataclasses
 import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select, update
 
+from tests._presence_doubles import AbsentPresence
 from tests.test_control_rpc import _native_pair
 from theater.constants.daemon import CONTROL_QUEUE_PEER_MAX_PENDING
 from theater.daemon.gc import _sweep_stale_running
@@ -46,6 +48,15 @@ def _repository(path: Path) -> Path:
     _git(root, "add", "README.md")
     _git(root, "commit", "-m", "one")
     return root
+
+
+async def _end(daemon, handle: str = "src#1", *, target: str = "src", **finish) -> None:
+    """Finish a source the way the observer does: pin Git off the loop, then publish."""
+    pinned = await daemon.jobs.prepare_pins(target)
+    try:
+        daemon.jobs.finish(handle, **finish)
+    finally:
+        daemon.jobs.release_pins(pinned)
 
 
 def _commit(repo: Path, name: str) -> str:
@@ -173,7 +184,7 @@ async def test_work_task_waits_then_launches_with_a_labelled_card(
     assert daemon.store.get_job(handle).state == JobState.RUNNING
 
     head = _git(repo, "rev-parse", "HEAD")
-    daemon.jobs.finish("src#1", state=JobState.DONE, result="PLAN: do X")
+    await _end(daemon, state=JobState.DONE, result="PLAN: do X")
     evidence = daemon.store.get_job_evidence("src#1")
     assert (evidence.git.pin_state, evidence.git.commit_sha) == ("pinned", head)
 
@@ -197,7 +208,7 @@ async def test_independent_review_gets_facts_not_conclusions_and_the_pinned_comm
     reply = await _defer(
         daemon, repo, task_kind="independent_review", worktree=True, prompt="Review it"
     )
-    daemon.jobs.finish("src#1", state=JobState.DONE, result="SECRET-CONCLUSION: ship it")
+    await _end(daemon, state=JobState.DONE, result="SECRET-CONCLUSION: ship it")
     _commit(repo, "later.py")  # HEAD moves on; the review must still use the pinned commit
 
     await _launch_all(daemon)
@@ -216,7 +227,7 @@ async def test_dirty_source_is_labelled_for_work_and_rejected_for_review(
     _source(daemon, repo)
     (repo / "scratch.txt").write_text("uncommitted")
     reply = await _defer(daemon, repo, task_kind=kind, worktree=kind == "independent_review")
-    daemon.jobs.finish("src#1", state=JobState.DONE, result="done")
+    await _end(daemon, state=JobState.DONE, result="done")
     await _launch_all(daemon)
 
     gate = daemon.store.get_handoff_gate(reply["handle"])
@@ -351,12 +362,14 @@ async def test_completion_evidence_is_pinned_before_the_terminal_unit_opens(
     await _defer(daemon, repo)
     head = _git(repo, "rev-parse", "HEAD")
 
+    pinned = await daemon.jobs.prepare_pins("src")
     with daemon.jobs.stage_hashes("src", ()):
         _commit(repo, "after-staging.py")  # a later commit must not leak into the pin
         with daemon.store.write_unit() as unit:
             daemon.jobs.finish(
                 "src#1", state=JobState.DONE, result="ok", connection=unit.connection
             )
+    daemon.jobs.release_pins(pinned)
 
     evidence = daemon.store.get_job_evidence("src#1")
     assert (evidence.git.commit_sha, evidence.outcome, evidence.answer) == (head, "done", "ok")
@@ -661,3 +674,142 @@ async def test_the_parents_default_send_is_not_counted_against_the_peer_reserve(
         await daemon.controls.send_when_safe(child.id, caller_id=strangers[3].id, prompt="over")
     job, queued = await daemon.controls.send_when_safe(child.id, caller_id=parent.id, prompt="mine")
     assert queued is True and daemon.store.get_job(job.handle) is not None
+
+
+# ---- M2 round two: no Git on the loop, none for work that never started -----------------------
+
+
+@pytest.fixture
+async def absent_presence(daemon):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
+        yield
+
+
+def _git_spy(monkeypatch) -> list[int]:
+    """Thread ids of every Git process the pinner starts."""
+    threads: list[int] = []
+    real = gitfacts._git
+
+    def spy(argv, **kwargs):
+        threads.append(threading.get_ident())
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(gitfacts, "_git", spy)
+    return threads
+
+
+async def test_cancelled_and_queued_work_never_invokes_git(
+    client, daemon, launches, monkeypatch, absent_presence
+):
+    """A queued message a gate waits on is cancelled: nothing was delivered, nothing is pinned."""
+    parent, child, state = await _native_pair(daemon)
+    state.native_turn_id = "busy"
+    stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    queued = await client.call("send", target=child.id, prompt="hi", caller_id=stranger.id)
+    assert queued["delivery"] == "queued"
+    repo = Path(daemon.registry.get(child.id).cwd)
+    await _defer(daemon, repo, after=queued["handle"], parent_id=parent.id)
+    threads = _git_spy(monkeypatch)
+
+    assert daemon.jobs.evidence.required(daemon.store.get_job(queued["handle"])) is False
+    await daemon.controls.cancel_job(queued["handle"], requester_id=stranger.id)
+
+    assert threads == [] and daemon.store.get_job_evidence(queued["handle"]) is None
+
+
+async def test_only_a_job_that_may_have_reached_its_target_can_need_a_pin(
+    client, daemon, absent_presence
+):
+    parent, child, state = await _native_pair(daemon)
+    stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    delivered = await client.call("send", target=child.id, prompt="go", caller_id=parent.id)
+    state.native_turn_id = "busy"
+    refused = await client.call("send", target=child.id, prompt="later", caller_id=stranger.id)
+    await daemon.controls.cancel_job(refused["handle"], requester_id=stranger.id)
+    queued = await client.call("send", target=child.id, prompt="again", caller_id=stranger.id)
+
+    pinner = daemon.jobs.evidence
+    assert pinner.delivered(daemon.store.get_job(delivered["handle"])) is True
+    assert pinner.delivered(daemon.store.get_job(refused["handle"])) is False
+    assert pinner.delivered(daemon.store.get_job(queued["handle"])) is False
+
+
+async def test_native_terminal_evidence_pins_in_a_thread_before_the_job_is_finished(
+    daemon, launches, tmp_path, monkeypatch
+):
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    await _defer(daemon, repo)
+    threads = _git_spy(monkeypatch)
+
+    async def sink(pid, *, backend_generation, outcome):
+        daemon.jobs.finish("src#1", state=JobState.DONE, result="from evidence")
+
+    registration = SimpleNamespace(evidence_sink=sink, backend_generation=1)
+    batch = SimpleNamespace(terminal_evidence=[object()])
+    routed = await daemon.observer._route_terminal_evidence("src", None, batch, registration)
+
+    evidence = daemon.store.get_job_evidence("src#1")
+    assert routed is True
+    assert evidence.git.pin_state == "pinned" and evidence.git.commit_sha
+    assert threads and threading.get_ident() not in threads, "Git ran off the event loop"
+
+
+async def test_a_path_nobody_staged_fails_closed_without_running_git_on_the_loop(
+    daemon, launches, tmp_path, monkeypatch
+):
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    await _defer(daemon, repo)
+    threads = _git_spy(monkeypatch)
+
+    daemon.jobs.finish("src#1", state=JobState.DONE, result="ok")  # a sync path, on the loop
+
+    evidence = daemon.store.get_job_evidence("src#1")
+    assert (evidence.git.pin_state, evidence.git.reason) == ("unpinned", "not_staged")
+    assert threads == []
+
+
+# ---- H1 round two: only an absent provider is waited for -----------------------------------------
+
+
+async def test_a_provider_that_does_not_exist_is_refused_where_it_is_asked_for(
+    daemon, launches, tmp_path
+):
+    from theater.daemon.terminals import ProviderUnavailable
+
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+
+    with pytest.raises(ProviderUnavailable, match="not_registered"):
+        await _defer(daemon, repo, provider="no-such-provider")
+    assert len(daemon.registry.list()) == 1 and daemon.store.handoff_gates(("waiting",)) == []
+
+
+@pytest.mark.parametrize("reason", ["not_registered", "missing_terminal_create_capability"])
+async def test_a_permanent_provider_refusal_ends_the_gate_instead_of_retrying(
+    daemon, launches, tmp_path, monkeypatch, reason
+):
+    from theater.daemon.spawning.provider_launch import ParticipantLaunchService
+    from theater.daemon.terminals import ProviderUnavailable
+
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    handle = (await _defer(daemon, repo))["handle"]
+
+    async def refuse(self, **_):
+        raise ProviderUnavailable("provider-tmux", reason)
+
+    monkeypatch.setattr(ParticipantLaunchService, "spawn", refuse)
+    await _end(daemon, state=JobState.DONE, result="ok")
+    await daemon.handoff.settle()
+
+    gate = daemon.store.get_handoff_gate(handle)
+    job = daemon.store.get_job(handle)
+    assert (gate.state, job.state, job.error_code) == (
+        "failed",
+        JobState.CRASHED,
+        "handoff_launch_refused",
+    )
+    assert reason in gate.error and not daemon.handoff._retrying

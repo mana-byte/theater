@@ -41,3 +41,17 @@ ERROR_CANCELLED: Final = "cancelled"
 #: A launch refused only because the provider is away is retried: first after, then doubling to.
 RETRY_MIN_SECONDS: Final = 1.0
 RETRY_MAX_SECONDS: Final = 30.0
+
+#: ProviderUnavailable reasons that mean the provider is away or reconnecting, so a gated launch
+#: waits for it. Anything else (not registered, no create capability, bad credentials) is
+#: configuration that waiting cannot fix: the launch is refused for good.
+TRANSIENT_PROVIDER_REASONS: Final = frozenset(
+    {
+        "not_launchable",
+        "no_current_callback_generation",
+        "daemon_recovery_in_progress",
+        "offline",
+        "callback_not_attached",
+        "callback_generation_not_acquired",
+    }
+)

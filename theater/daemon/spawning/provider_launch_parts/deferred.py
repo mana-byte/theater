@@ -5,11 +5,30 @@ from __future__ import annotations
 from theater.daemon.handoff.models import HandoffGate
 from theater.daemon.rails import check_budget, check_depth
 from theater.daemon.spawning.provider_launch_parts._host import ParticipantLaunchHost
+from theater.daemon.terminals import ProviderUnavailable
+from theater.frontend.capabilities import TERMINAL_PROVIDER_CAPABILITY
 from theater.harness import get as get_harness
 from theater.models import BadRequest, Participant, now
 
 
 class SpawnDeferral(ParticipantLaunchHost):
+    def require_known_provider(self, requested: object) -> None:
+        """Refuse now a provider no wait could ever produce; only its health may change later.
+
+        An unregistered provider or one without terminal creation is configuration. Checking at
+        admission means such a task fails where it is asked for, not hours later or never.
+        """
+        token = (
+            requested
+            if isinstance(requested, str) and requested
+            else self.default_provider_selector
+        )
+        record = self.store.providers.get(token) or self.store.providers.get_by_selector(token)
+        if record is None:
+            raise ProviderUnavailable(token, "not_registered")
+        if TERMINAL_PROVIDER_CAPABILITY not in record.capabilities:
+            raise ProviderUnavailable(record.provider_id, "missing_terminal_create_capability")
+
     def reserve_deferred_spawn(
         self,
         *,
