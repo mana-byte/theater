@@ -241,7 +241,7 @@ class _PinSpy(EvidencePinner):
     def workspace_of(self, job) -> str | None:
         return None
 
-    def capture(self, job) -> GitFacts:
+    def pin(self, cwd: str | None) -> GitFacts:
         self.threads.append(threading.get_ident())
         return GitFacts.from_status("c" * 40, "main", 0)
 
