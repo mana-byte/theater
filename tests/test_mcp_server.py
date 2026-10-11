@@ -453,6 +453,8 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
                 "if_busy": "queue",
                 "job_handle": "h#2",
                 "response_format": response_format,
+                "after": "Writer",
+                "task_kind": "work",
             },
         )
     ) == {"handle": "p-child#4", "route": "queued"}
@@ -470,6 +472,8 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         "if_busy": "queue",
         "job_handle": "h#2",
         "response_format": response_format,
+        "after": "Writer",
+        "task_kind": "work",
     }
     assert calls["settings"][1] == {
         "target": "child",

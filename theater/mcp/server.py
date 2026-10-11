@@ -840,6 +840,8 @@ def build(
             response_format=response_format,
             if_busy=if_busy,
             job_handle=job_handle,
+            after=after,
+            task_kind=task_kind,
         )
 
     @mcp_tool()
