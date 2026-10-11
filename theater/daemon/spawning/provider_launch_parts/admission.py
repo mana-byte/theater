@@ -178,9 +178,12 @@ class SpawnAdmission(ParticipantLaunchHost):
         if description is None and admission.resume_predecessor is not None:
             description = admission.resume_predecessor.description
         # The store's autocommit view is safe here: no await separates this recheck from the insert.
-        rails = self.daemon.config.rails
-        check_depth(self.store, admission.parent_id, cap=rails.depth_cap)
-        check_budget(self.store, admission.parent_id, limit=rails.budget)
+        # A deferred spawn was checked when its placeholder was reserved; that live row still holds
+        # its slot, so counting it again would fail a task admitted at the cap.
+        if reserved_participant_id is None:
+            rails = self.daemon.config.rails
+            check_depth(self.store, admission.parent_id, cap=rails.depth_cap)
+            check_budget(self.store, admission.parent_id, limit=rails.budget)
         participant_id = reserved_participant_id or new_id()
         if reserved_participant_id is not None:
             participant = self._claim_reserved_participant(

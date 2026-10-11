@@ -829,7 +829,7 @@ def build(
         Fails with `busy` for if_busy="refuse", a target whose queue (or your share of
         it) is full, or a send to yourself while you are working; with
         `transcript_untrusted` or `transcript_identity_lost` (transcript needs
-        binding); and with `human_present` only for if_busy="refuse".
+        binding); and with `human_present` for if_busy="refuse" or a send to yourself.
         """
         return await tools.send_prompt(
             session,

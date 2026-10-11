@@ -37,3 +37,7 @@ ERROR_SOURCE_NOT_REVIEWABLE: Final = "source_not_reviewable"
 ERROR_SOURCE_GONE: Final = "handoff_source_gone"
 ERROR_LAUNCH_REFUSED: Final = "handoff_launch_refused"
 ERROR_CANCELLED: Final = "cancelled"
+
+#: A launch refused only because the provider is away is retried: first after, then doubling to.
+RETRY_MIN_SECONDS: Final = 1.0
+RETRY_MAX_SECONDS: Final = 30.0

@@ -42,8 +42,8 @@ class HandoffStore(StoreHost):
     def delete_handoff_gates(self, handles, *, connection=None) -> None:
         self._handoff.delete_gates(handles, connection=connection)
 
-    def newest_turn_job(self, target_id: str):
-        return self._handoff.newest_turn_job(target_id)
+    def recent_turn_jobs(self, target_id: str, *, limit: int):
+        return self._handoff.recent_turn_jobs(target_id, limit=limit)
 
     def job_modified_paths(self, job_handle: str, *, limit: int) -> list[str]:
         return self._handoff.modified_paths(job_handle, limit=limit)

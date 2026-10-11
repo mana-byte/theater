@@ -175,18 +175,18 @@ class HandoffRepository:
 
     # ---- source lookups ----------------------------------------------------
 
-    def newest_turn_job(self, target_id: str) -> Job | None:
-        """The newest spawn or send job that carried a task; a promptless launch never counts."""
-        row = self._db.conn.execute(
+    def recent_turn_jobs(self, target_id: str, *, limit: int) -> list[Job]:
+        """Spawn and send jobs that carried a task, newest first; a promptless launch is absent."""
+        rows = self._db.conn.execute(
             select(jobs)
             .where(jobs.c.target_id == target_id)
             .where(jobs.c.kind.in_(["spawn", "send"]))
             .where(jobs.c.prompt.is_not(None))
             .where(jobs.c.prompt != "")
             .order_by(jobs.c.created_at.desc(), jobs.c.handle.desc())
-            .limit(1)
-        ).first()
-        return None if row is None else Job.from_row(row._mapping)
+            .limit(limit)
+        ).fetchall()
+        return [Job.from_row(row._mapping) for row in rows]
 
     def modified_paths(self, job_handle: str, *, limit: int) -> list[str]:
         rows = self._db.conn.execute(

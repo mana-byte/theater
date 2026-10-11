@@ -1151,6 +1151,7 @@ async def test_handoff_arguments_reach_the_tools_and_are_taught_once(daemon):
     assert "source_not_reviewable" in descriptions["spawn_session"]
     assert "pinned commit" in descriptions["spawn_session"]
     assert "queued" in descriptions["send"] and "cancel_job" in descriptions["send"]
+    assert "or a send to yourself" in descriptions["send"]  # human_present is not refuse-only
     assert "waiting for its `after` source" in descriptions["cancel_job"]
     # Shared guidance teaches natural send and `after`, and no longer sends agents to the
     # transcript after every await.

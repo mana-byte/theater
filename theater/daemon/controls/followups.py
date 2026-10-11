@@ -170,11 +170,10 @@ class FollowupControls(ControlHost):
                     f"{participant_id!r} (bound {CONTROL_QUEUE_SENDER_MAX_PENDING}); await one "
                     "of them or cancel_job a message you no longer need before sending another"
                 )
-            peers = sum(
-                self._queue_origin(operation) == QUEUE_ORIGIN_SEND
-                for operation in self._store.queued_control_operations(participant_id)
-            )
-            if peers >= CONTROL_QUEUE_PEER_MAX_PENDING:
+            peers = self._peer_rows_held(participant_id)
+            if peers >= CONTROL_QUEUE_PEER_MAX_PENDING and not self._is_owner(
+                participant_id, sender_id
+            ):
                 raise Busy(
                     f"participant {participant_id!r} already holds {peers} queued messages from "
                     f"peers (bound {CONTROL_QUEUE_PEER_MAX_PENDING}); the rest is reserved for "
@@ -192,6 +191,22 @@ class FollowupControls(ControlHost):
                 f"followups (bound {CONTROL_QUEUE_MAX_PENDING}); await or "
                 "interrupt the pending handles before queueing another"
             )
+
+    def _is_owner(self, participant_id: str, sender_id: str) -> bool:
+        """The parent (current control owner) is the one the peer reserve exists for."""
+        participant = self._store.get_participant(participant_id)
+        if participant is None:
+            return False
+        return sender_id == (participant.control_owner_id or participant.parent_id)
+
+    def _peer_rows_held(self, participant_id: str) -> int:
+        """Queued rows that count against the peers' share: sends not made by the owner."""
+        callers = self._store.queued_control_callers(participant_id)
+        return sum(
+            self._queue_origin(operation) == QUEUE_ORIGIN_SEND
+            and not self._is_owner(participant_id, callers.get(operation.operation_id) or "")
+            for operation in self._store.queued_control_operations(participant_id)
+        )
 
     async def _prepare_followup_route(
         self, participant_id: str, *, defer_presence: bool = False

@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
+from tests.test_control_rpc import _native_pair
+from theater.constants.daemon import CONTROL_QUEUE_PEER_MAX_PENDING
+from theater.daemon.gc import _sweep_stale_running
+from theater.daemon.handoff import gitfacts
 from theater.daemon.operations import OperationOutcome
-from theater.daemon.rails import CycleDetected
+from theater.daemon.rails import BudgetExceeded, CycleDetected
 from theater.daemon.rpc.jobs import _jobs_await
 from theater.daemon.rpc.spawning import _spawn
+from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import launch_reservations
 from theater.daemon.spawning.models import Reservation
 from theater.harness.base import LaunchPlan
-from theater.models import BadRequest, JobState, ProviderRecord, now
+from theater.models import BadRequest, Busy, JobState, ProviderRecord, now
 
 pytestmark = pytest.mark.usefixtures("available_harness_binaries")
 
@@ -404,3 +411,245 @@ async def test_cancel_job_withdraws_a_waiting_spawn_but_never_a_launching_one(
     )
     late = await daemon.controls.cancel_job(second["handle"], requester_id="cli")
     assert (late.cancelled, late.reason) == (False, "delivery_uncertain")
+
+
+async def _until(predicate, *, seconds: float = 3.0) -> None:
+    async with asyncio.timeout(seconds):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+# ---- H1: a provider that is only away --------------------------------------------------------
+
+
+async def test_provider_outage_keeps_the_gate_waiting_and_retries_without_replay(
+    daemon, launches, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("theater.daemon.handoff.service.RETRY_MIN_SECONDS", 0.01)
+    monkeypatch.setattr("theater.daemon.handoff.service.RETRY_MAX_SECONDS", 0.02)
+    online = {"now": False}
+    monkeypatch.setattr(
+        daemon.terminal_service.connections,
+        "health",
+        lambda *_: "online" if online["now"] else "offline",
+    )
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    reply = await _defer(daemon, repo)
+    handle = reply["handle"]
+
+    daemon.jobs.finish("src#1", state=JobState.DONE, result="ok")
+    await _until(lambda: daemon.store.get_handoff_gate(handle).error_code == "provider_unavailable")
+
+    gate = daemon.store.get_handoff_gate(handle)
+    assert gate.state == "waiting" and daemon.store.get_job(handle).state == JobState.RUNNING
+    assert launches == [] and _launch_rows(daemon) == 0
+
+    online["now"] = True
+    await _until(lambda: len(launches) == 1)
+    await _launch_all(daemon)
+    assert daemon.store.get_handoff_gate(handle).state == "opened"
+    await asyncio.sleep(0.1)
+    assert len(launches) == 1, "a retry never launches twice"
+
+
+async def test_a_restart_while_the_provider_is_still_away_keeps_waiting_then_launches(
+    daemon, launches, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("theater.daemon.handoff.service.RETRY_MIN_SECONDS", 0.01)
+    online = {"now": False}
+    monkeypatch.setattr(
+        daemon.terminal_service.connections,
+        "health",
+        lambda *_: "online" if online["now"] else "offline",
+    )
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    handle = (await _defer(daemon, repo))["handle"]
+    # The source ended while the daemon was down; the bridge has not reconnected yet.
+    with daemon.store.write_unit() as unit:
+        unit.connection.execute(
+            update(jobs_table).where(jobs_table.c.handle == "src#1").values(state="done")
+        )
+    daemon.jobs._events.clear()
+
+    await daemon.handoff.recover()
+    await _until(lambda: daemon.store.get_handoff_gate(handle).error_code == "provider_unavailable")
+    assert daemon.store.get_handoff_gate(handle).state == "waiting" and launches == []
+
+    online["now"] = True
+    await _until(lambda: len(launches) == 1)
+
+
+# ---- H2: the placeholder is already in the tree budget ----------------------------------------
+
+
+async def test_a_task_admitted_at_the_budget_still_launches_without_double_counting(
+    daemon, launches, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        daemon,
+        "config",
+        dataclasses.replace(
+            daemon.config, rails=dataclasses.replace(daemon.config.rails, budget=3)
+        ),
+    )
+    repo = _repository(tmp_path)
+    parent = daemon.registry.create_spawned(harness="codex", cwd=str(repo), name="Boss")
+    daemon.registry.create_spawned(
+        harness="codex", cwd=str(repo), pid="src", name="Writer", parent_id=parent.id
+    )
+    daemon.jobs.create(handle="src#1", caller_id="cli", target_id="src", kind="send", prompt="x")
+
+    reply = await _defer(daemon, repo, parent_id=parent.id)  # tree: boss, writer, placeholder
+    with pytest.raises(BudgetExceeded):
+        await _defer(daemon, repo, parent_id=parent.id, name="Another")  # the cap still holds
+
+    daemon.jobs.finish("src#1", state=JobState.DONE, result="ok")
+    await _launch_all(daemon)
+
+    assert daemon.store.get_handoff_gate(reply["handle"]).state == "opened"
+    assert len(launches) == 1
+
+
+# ---- M1: naming a participant means its own work ----------------------------------------------
+
+
+async def test_naming_a_participant_never_selects_a_peers_queued_message(client, daemon):
+    from theater.daemon.handoff.resolution import resolve_source
+
+    parent, child, state = await _native_pair(daemon)
+    mine = daemon.jobs.create(
+        handle=f"{child.id}#own",
+        caller_id=parent.id,
+        target_id=child.id,
+        kind="send",
+        prompt="mine",
+    )
+    state.native_turn_id = "busy"
+    stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    queued = await client.call("send", target=child.id, prompt="hi", caller_id=stranger.id)
+    assert queued["delivery"] == "queued"
+
+    job, _ = resolve_source(daemon, daemon.registry.get(child.id).name)
+
+    assert job.handle == mine.handle != queued["handle"]
+
+
+# ---- M2: pinning is one Git process, once per workspace, off the loop -------------------------
+
+
+def _counting_git(monkeypatch) -> list[list[str]]:
+    calls: list[list[str]] = []
+    real = gitfacts._git
+
+    def counted(argv, **kwargs):
+        calls.append(argv)
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(gitfacts, "_git", counted)
+    return calls
+
+
+def test_one_git_process_pins_commit_branch_and_every_dirty_state(tmp_path, monkeypatch):
+    repo = _repository(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD")
+    calls = _counting_git(monkeypatch)
+
+    clean = gitfacts.pin_git_facts(str(repo))
+    assert (clean.pin_state, clean.commit_sha, clean.branch, clean.dirty_entries) == (
+        "pinned",
+        head,
+        "main",
+        0,
+    )
+    assert len(calls) == 1
+
+    (repo / "README.md").write_text("changed\n")
+    (repo / "new.txt").write_text("untracked")
+    dirty = gitfacts.pin_git_facts(str(repo))
+    assert (dirty.pin_state, dirty.dirty_entries, dirty.commit_sha) == ("dirty", 2, head)
+
+    _git(repo, "checkout", "--detach", "-q", head)
+    assert gitfacts.pin_git_facts(str(repo)).branch is None
+
+    worktree = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-q", str(worktree), "-b", "feature")
+    linked = gitfacts.pin_git_facts(str(worktree))
+    assert (linked.branch, linked.commit_sha) == ("feature", head)
+
+    empty = tmp_path / "empty"
+    subprocess.run(["git", "init", "-q", str(empty)], check=True)
+    assert gitfacts.pin_git_facts(str(empty)).reason == "no_commit"
+    assert gitfacts.pin_git_facts(str(tmp_path / "nowhere")).reason == "workspace_missing"
+
+
+async def test_terminal_pins_run_in_a_thread_before_the_unit_and_once_per_workspace(
+    daemon, tmp_path, monkeypatch
+):
+    repo = _repository(tmp_path)
+    daemon.registry.create_spawned(harness="codex", cwd=str(repo), pid="src", name="Writer")
+    for handle in ("src#1", "src#2"):
+        daemon.jobs.create(
+            handle=handle, caller_id="cli", target_id="src", kind="send", prompt="work"
+        )
+    threads: list[int] = []
+    real = daemon.jobs.evidence.capture
+
+    def capture(job):
+        threads.append(threading.get_ident())
+        return real(job)
+
+    monkeypatch.setattr(daemon.jobs.evidence, "capture", capture)
+    monkeypatch.setattr(daemon.jobs.evidence, "required", lambda job: True)
+
+    pinned = await daemon.jobs.prepare_pins("src")
+    with daemon.jobs.stage_hashes("src", ()), daemon.store.write_unit() as unit:
+        for handle in ("src#1", "src#2"):
+            daemon.jobs.finish(handle, state=JobState.DONE, result="ok", connection=unit.connection)
+    daemon.jobs.release_pins(pinned)
+
+    assert len(threads) == 1 and threads[0] != threading.get_ident()
+    head = _git(repo, "rev-parse", "HEAD")
+    assert [daemon.store.get_job_evidence(h).git.commit_sha for h in ("src#1", "src#2")] == [
+        head,
+        head,
+    ]
+
+
+# ---- L1: the GC marks a source crashed behind the listener's back -----------------------------
+
+
+async def test_a_gate_waiting_on_a_source_the_gc_abandoned_is_woken(daemon, launches, tmp_path):
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    handle = (await _defer(daemon, repo))["handle"]
+    with daemon.store.write_unit() as unit:
+        unit.connection.execute(
+            update(jobs_table).where(jobs_table.c.handle == "src#1").values(created_at=1.0)
+        )
+
+    assert _sweep_stale_running(daemon.store, 100.0, 100, frozenset()) == 1
+    assert daemon.store.get_handoff_gate(handle).state == "waiting", "no listener ran"
+    daemon.handoff.wake()
+    await _launch_all(daemon)
+
+    assert daemon.store.get_handoff_gate(handle).state == "opened"
+    assert "FAILED source" in launches[0].prompt and "abandoned" in launches[0].prompt
+
+
+# ---- polish: the parent's own messages are not the peers' share -------------------------------
+
+
+async def test_the_parents_default_send_is_not_counted_against_the_peer_reserve(client, daemon):
+    parent, child, state = await _native_pair(daemon)
+    state.native_turn_id = "busy"
+    strangers = [daemon.registry.create_spawned(harness="vibe", cwd="/tmp") for _ in range(4)]
+    for index in range(CONTROL_QUEUE_PEER_MAX_PENDING):
+        sender = strangers[index // 8]
+        await daemon.controls.send_when_safe(child.id, caller_id=sender.id, prompt=f"p{index}")
+
+    with pytest.raises(Busy, match="reserved for its parent"):
+        await daemon.controls.send_when_safe(child.id, caller_id=strangers[3].id, prompt="over")
+    job, queued = await daemon.controls.send_when_safe(child.id, caller_id=parent.id, prompt="mine")
+    assert queued is True and daemon.store.get_job(job.handle) is not None

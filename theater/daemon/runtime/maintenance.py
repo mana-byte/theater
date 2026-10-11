@@ -73,6 +73,9 @@ async def gc_loop(daemon) -> None:
                     retention,
                     live_handles=frozenset(daemon.jobs._events),
                 )
+            if result.running_marked:
+                # The sweep wrote those jobs terminal directly; wake whatever waited on them.
+                daemon.handoff.wake()
             if (
                 result.bus
                 or result.jobs

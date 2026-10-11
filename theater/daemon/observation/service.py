@@ -465,14 +465,20 @@ class Observer(
     ) -> None:
         self._capture_trajectory(context.pid, batch)
         self._failures.clear_source_error_on_progress(context.pid, batch)
-        if self._apply_source_batch(
-            context.pid,
-            context.source,
-            batch,
-            context.clock,
-            context.turns,
-            registration=context.registration,
-        ):
+        pinned = await self._prepare_pins(context.pid, batch)
+        try:
+            applied = self._apply_source_batch(
+                context.pid,
+                context.source,
+                batch,
+                context.clock,
+                context.turns,
+                registration=context.registration,
+            )
+        finally:
+            if pinned and self.jobs is not None:
+                self.jobs.release_pins(pinned)
+        if applied:
             iteration.applied = True
             context.active_at = self._monotonic()
             self._reducer.unblock_on_semantic_progress(context.pid, batch)
@@ -504,6 +510,16 @@ class Observer(
             rescue_jobs_fn=partial(self._rescue_jobs, registration=context.registration),
         )
         iteration.applied = True
+
+    async def _prepare_pins(self, pid: str, batch: Batch) -> list[str]:
+        """A terminal batch's jobs are pinned in a thread so Git never blocks the event loop."""
+        if self.jobs is None or not any(event.turn_end for event in batch.events):
+            return []
+        try:
+            return await self.jobs.prepare_pins(pid)
+        except Exception:
+            logger.exception("pinning completion evidence for %s failed", pid)
+            return []
 
     def _apply_inner(
         self,

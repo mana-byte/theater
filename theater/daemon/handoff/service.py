@@ -27,6 +27,8 @@ from theater.constants.handoff import (
     MAX_CHAIN,
     MAX_WAITING_PER_CALLER,
     PATHS_MAX,
+    RETRY_MAX_SECONDS,
+    RETRY_MIN_SECONDS,
     TASK_KIND_REVIEW,
     TASK_KIND_WORK,
     TASK_KINDS,
@@ -37,6 +39,7 @@ from theater.daemon.handoff.models import HandoffGate
 from theater.daemon.handoff.resolution import participant_of, resolve_source
 from theater.daemon.response_contracts.prompts import prompt_with_guidance
 from theater.daemon.schema import launch_reservations
+from theater.daemon.terminals import ProviderBusy, ProviderUnavailable
 from theater.models import BadRequest, Job, JobState, TheaterError, now
 from theater.observability.catalog import HANDOFF_GATE
 
@@ -70,6 +73,9 @@ class HandoffService:
         self.daemon = daemon
         self.store = daemon.store
         self._tasks: set[asyncio.Task] = set()
+        #: Gates whose launch was refused only because the provider is away; retried with backoff.
+        self._retrying: set[str] = set()
+        self._retry_task: asyncio.Task | None = None
         daemon.jobs.evidence = EvidencePinner(daemon.store)
         daemon.jobs.add_terminal_listener(self._on_terminal)
 
@@ -249,14 +255,7 @@ class HandoffService:
         except RuntimeError:
             return
         for gate in self.store.handoff_gates((GATE_WAITING,), source_handle=handle):
-            job = self.store.get_job(gate.job_handle)
-            if job is not None and job.kind == KIND_SEND and job.target_id is not None:
-                # The dispatcher owns a send's gate: it checks readiness itself before delivery.
-                controls = getattr(self.daemon, "controls", None)
-                if controls is not None:
-                    controls.schedule_dispatch(job.target_id)
-            else:
-                self._schedule(gate.job_handle)
+            self._release(gate, self.store.get_job(gate.job_handle))
         own = self.store.get_handoff_gate(handle)
         if own is not None and own.state == GATE_WAITING:
             self._close(
@@ -266,6 +265,37 @@ class HandoffService:
                 "the task ended before it launched",
                 expected=(GATE_WAITING,),
             )
+
+    def _release(self, gate: HandoffGate, job: Job | None) -> None:
+        """The source ended: a send is handed to its dispatcher, a spawn to its launch."""
+        if job is not None and job.kind == KIND_SEND and job.target_id is not None:
+            # The dispatcher owns a send's gate: it checks readiness itself before delivery.
+            controls = getattr(self.daemon, "controls", None)
+            if controls is not None:
+                controls.schedule_dispatch(job.target_id)
+        else:
+            self._schedule(gate.job_handle)
+
+    def wake(self) -> None:
+        """Re-examine every waiting gate: for jobs ended behind the listener's back (the GC).
+
+        A job the retention sweep marks crashed is written directly, so no terminal listener
+        ran; without this its dependents would wait for a restart.
+        """
+        for gate in self.store.handoff_gates((GATE_WAITING,)):
+            job = self.store.get_job(gate.job_handle)
+            if job is None or job.state != JobState.RUNNING:
+                self._close(
+                    gate,
+                    GATE_CANCELLED,
+                    ERROR_CANCELLED,
+                    "the task ended before it launched",
+                    expected=(GATE_WAITING,),
+                )
+                continue
+            source = self.store.get_job(gate.source_handle)
+            if source is None or source.state != JobState.RUNNING:
+                self._release(gate, job)
 
     def _schedule(self, handle: str) -> None:
         try:
@@ -310,6 +340,8 @@ class HandoffService:
             await self._launch(gate, source)
         except HandoffRefused as exc:
             self._fail(gate, exc.code, str(exc))
+        except (ProviderUnavailable, ProviderBusy) as exc:
+            self._wait_for_provider(gate, exc)
         except (TheaterError, ValueError) as exc:
             self._fail(gate, ERROR_LAUNCH_REFUSED, f"{type(exc).__name__}: {exc}")
         else:
@@ -317,6 +349,62 @@ class HandoffService:
                 handle, expected=(GATE_OPENING,), state=GATE_OPENED, updated_at=now()
             )
             self._signal(gate, "success")
+
+    def _launch_reserved(self, handle: str) -> bool:
+        return (
+            self.store.conn.execute(
+                select(launch_reservations.c.operation_id).where(
+                    launch_reservations.c.participant_id == handle
+                )
+            ).first()
+            is not None
+        )
+
+    def _wait_for_provider(self, gate: HandoffGate, exc: TheaterError) -> None:
+        """The provider is away: keep the gate waiting and retry. Nothing was launched.
+
+        A refusal here happens before the launch is accepted, so no reservation exists and a
+        retry cannot replay one; if one does exist the launch is already the operation's.
+        """
+        if self._launch_reserved(gate.job_handle):
+            self.store.move_handoff_gate(
+                gate.job_handle, expected=(GATE_OPENING,), state=GATE_OPENED, updated_at=now()
+            )
+            return
+        self.store.move_handoff_gate(
+            gate.job_handle,
+            expected=(GATE_OPENING,),
+            state=GATE_WAITING,
+            updated_at=now(),
+            error_code=exc.code,
+            error=str(exc)[:1000],
+        )
+        self._retrying.add(gate.job_handle)
+        self._arm_retry()
+        logger.warning("handoff gate %s waits for its provider: %s", gate.job_handle, exc)
+
+    def _arm_retry(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._retry_task is None or self._retry_task.done():
+            self._retry_task = loop.create_task(self._retry_loop())
+
+    async def _retry_loop(self) -> None:
+        delay = RETRY_MIN_SECONDS
+        while self._retrying:
+            await asyncio.sleep(delay)
+            for handle in list(self._retrying):
+                self._retrying.discard(handle)  # _open puts it back if the provider is still away
+                await self._open_guarded(handle)
+            delay = min(delay * 2, RETRY_MAX_SECONDS) if self._retrying else RETRY_MIN_SECONDS
+
+    async def aclose(self) -> None:
+        tasks = [*self._tasks, *([self._retry_task] if self._retry_task else [])]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _launch(self, gate: HandoffGate, source) -> None:
         from theater.daemon.spawning.provider_launch import ParticipantLaunchService
@@ -466,15 +554,10 @@ class HandoffService:
     async def recover(self) -> None:
         """Re-arm every durable gate after a restart; nothing here replays a launch."""
         for gate in self.store.handoff_gates((GATE_OPENING,)):
-            launched = self.store.conn.execute(
-                select(launch_reservations.c.operation_id).where(
-                    launch_reservations.c.participant_id == gate.job_handle
-                )
-            ).first()
             self.store.move_handoff_gate(
                 gate.job_handle,
                 expected=(GATE_OPENING,),
-                state=GATE_OPENED if launched is not None else GATE_WAITING,
+                state=GATE_OPENED if self._launch_reserved(gate.job_handle) else GATE_WAITING,
                 updated_at=now(),
             )
         for gate in self.store.handoff_gates((GATE_WAITING,)):

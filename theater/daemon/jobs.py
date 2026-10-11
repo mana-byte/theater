@@ -226,6 +226,8 @@ class JobManager:
         self.evidence: EvidencePinner | None = None
         #: Git state pinned before a terminal batch's write unit opens, keyed by job.
         self._staged_git: dict[str, GitFacts] = {}
+        #: Git state captured off the event loop just ahead of a terminal batch, keyed by job.
+        self._prepinned: dict[str, GitFacts] = {}
         #: Called with a job handle after its terminal state is committed and awaiters are woken.
         self._terminal_listeners: list[Callable[[str], None]] = []
 
@@ -337,15 +339,49 @@ class JobManager:
                 self._staged_git.pop(handle, None)
 
     def _stage_git(self, target_id: str) -> list[str]:
-        """Pin Git for this target's running jobs that leave evidence, before the unit opens."""
+        """Pin Git for this target's running jobs that leave evidence, before the unit opens.
+
+        One workspace is read once however many of its jobs end; a batch already pinned off the
+        loop (``prepare_pins``) costs nothing here.
+        """
         if self.evidence is None:
             return []
         staged: list[str] = []
+        by_workspace: dict[str | None, GitFacts] = {}
         for job in self.store.running_jobs_for_target(target_id):
-            if self.evidence.required(job):
-                self._staged_git[job.handle] = self.evidence.capture(job)
-                staged.append(job.handle)
+            if not self.evidence.required(job):
+                continue
+            facts = self._prepinned.get(job.handle)
+            if facts is None:
+                workspace = self.evidence.workspace_of(job)
+                if workspace not in by_workspace:
+                    by_workspace[workspace] = self.evidence.capture(job)
+                facts = by_workspace[workspace]
+            self._staged_git[job.handle] = facts
+            staged.append(job.handle)
         return staged
+
+    async def prepare_pins(self, target_id: str) -> list[str]:
+        """Pin a target's Git state in a worker thread, ahead of the terminal batch applying.
+
+        The pin still precedes the terminal write, but its subprocess no longer blocks the event
+        loop; the caller releases the handles once the batch has been applied.
+        """
+        if self.evidence is None:
+            return []
+        jobs = [
+            j for j in self.store.running_jobs_for_target(target_id) if self.evidence.required(j)
+        ]
+        if not jobs:
+            return []
+        facts = await asyncio.to_thread(self.evidence.capture, jobs[0])
+        for job in jobs:
+            self._prepinned[job.handle] = facts
+        return [job.handle for job in jobs]
+
+    def release_pins(self, handles: list[str]) -> None:
+        for handle in handles:
+            self._prepinned.pop(handle, None)
 
     def track(self, handle: str) -> None:
         """Give a running job its wake event; a daemon restart loses the in-memory one."""
@@ -378,7 +414,7 @@ class JobManager:
         if in_unit:
             git = self._staged_git.get(job.handle) or GitFacts.unpinned("not_staged")
         else:
-            git = pinner.capture(job)
+            git = self._prepinned.get(job.handle) or pinner.capture(job)
         raw = None if raw_result is _RAW_UNSET else raw_result
         return pinner.build(
             job, git, state=str(state), result=result, error_code=error_code, raw_result=raw
