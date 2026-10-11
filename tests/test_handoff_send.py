@@ -339,6 +339,7 @@ async def test_restart_fails_a_queued_native_gate_closed_and_recover_keeps_a_liv
     [
         ({"task_kind": "independent_review"}, "spawn_session"),
         ({"if_busy": "queue"}, "default send"),
+        ({"job_handle": "old#1"}, "cannot be combined with job_handle"),
         ({"after": "Nobody"}, "neither a job handle"),
         ({"task_kind": "bogus"}, "task_kind must be"),
     ],

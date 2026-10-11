@@ -54,6 +54,10 @@ async def test_queue_and_amend_route_a_busy_native_child(client, daemon):
     assert amended["route"] == "steer" and amended["handle"] == active["handle"]
     assert state.steered[-1][1] == "new plan"
 
+    with pytest.raises(RemoteError, match="cannot apply response_format"):
+        await _send(client, child, parent, "amend", response_format={"$theater": "delegate"})
+    assert state.steered[-1][1] == "new plan"
+
     with pytest.raises(RemoteError) as guarded:
         await _send(client, child, parent, "amend", job_handle=queued["handle"])
     assert guarded.value.code == "stale_target"

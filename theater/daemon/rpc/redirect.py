@@ -66,7 +66,12 @@ async def amend(daemon, params: dict, *, send) -> dict:
 
     target_id = daemon.registry.resolve(params["target"]).id
     job_handle = params.get("job_handle")
-    require_active_job(daemon, target_id, job_handle)
+    active = require_active_job(daemon, target_id, job_handle)
+    if active is not None and params.get("response_format") is not None:
+        raise BadRequest(
+            "if_busy='amend' cannot apply response_format to an active turn; use "
+            "if_busy='queue' for a new structured answer"
+        )
     steer_params = {k: params[k] for k in ("target", "prompt", "caller_id") if k in params}
     try:
         result = await _steer(daemon, {**steer_params, "job_handle": job_handle})

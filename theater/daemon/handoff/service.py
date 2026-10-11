@@ -165,6 +165,11 @@ class HandoffService:
                 "after works with the default send: Theater queues the message until the source "
                 "ends, so if_busy must be omitted"
             )
+        if params.get("job_handle") is not None:
+            raise BadRequest(
+                "after cannot be combined with job_handle: the handoff creates its own "
+                "awaitable handle after resolving the source"
+            )
         if not task.strip():
             raise BadRequest("after needs a prompt: state the task, Theater supplies the context")
         source, participant = resolve_source(self.daemon, params.get("after"))
