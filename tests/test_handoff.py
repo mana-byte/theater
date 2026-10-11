@@ -1046,3 +1046,92 @@ async def test_failed_terminal_write_rolls_back_evidence_so_retry_records_its_ow
         "second",
         head,
     )
+
+
+def _failing_finish(daemon, handle: str):
+    """Make the first finish of ``handle`` raise after the gate move, like a crash mid-close."""
+    real = daemon.jobs.finish
+    calls: list[int] = []
+
+    def finish(h, **kwargs):
+        if h == handle and not calls:
+            calls.append(1)
+            raise RuntimeError("injected after gate move")
+        return real(h, **kwargs)
+
+    daemon.jobs.finish = finish
+    return calls
+
+
+async def _assert_awaitable(daemon, handle: str, gate_state: str) -> None:
+    entries = await asyncio.wait_for(
+        _jobs_await(daemon, {"handles": [handle], "max_wait": 5, "caller_id": "cli"}), 3
+    )
+    assert entries[0]["await_reason"] == "job_terminal"
+    assert entries[0]["handoff"]["state"] == gate_state
+
+
+async def test_a_failed_job_finish_rolls_the_cancelled_gate_back_and_cancel_retries(
+    daemon, launches, tmp_path
+):
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    handle = (await _defer(daemon, repo))["handle"]
+    calls = _failing_finish(daemon, handle)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        daemon.handoff.cancel_unlaunched(handle)
+    assert calls and daemon.store.get_handoff_gate(handle).state == "waiting"
+    assert daemon.store.get_job(handle).state == JobState.RUNNING
+
+    assert daemon.handoff.cancel_unlaunched(handle) is True
+    assert daemon.store.get_job(handle).state == JobState.KILLED
+    await _assert_awaitable(daemon, handle, "cancelled")
+    assert launches == []
+
+
+async def test_a_failed_job_finish_rolls_the_failed_gate_back_and_recovery_ends_it(
+    daemon, launches, tmp_path, monkeypatch
+):
+    from theater.daemon.spawning.provider_launch import ParticipantLaunchService
+    from theater.daemon.terminals import ProviderUnavailable
+
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    handle = (await _defer(daemon, repo))["handle"]
+
+    async def refuse(self, **_):
+        raise ProviderUnavailable("provider-tmux", "not_registered")
+
+    monkeypatch.setattr(ParticipantLaunchService, "spawn", refuse)
+    calls = _failing_finish(daemon, handle)
+    await _end(daemon, state=JobState.DONE, result="ok")
+    await daemon.handoff.settle()
+
+    assert calls and daemon.store.get_handoff_gate(handle).state == "opening"
+    assert daemon.store.get_job(handle).state == JobState.RUNNING
+
+    await daemon.handoff.recover()
+    await daemon.handoff.settle()
+
+    assert daemon.store.get_handoff_gate(handle).state == "failed"
+    assert daemon.store.get_job(handle).state == JobState.CRASHED
+    await _assert_awaitable(daemon, handle, "failed")
+
+
+async def test_recovery_ends_a_legacy_terminal_gate_that_left_its_job_running(
+    daemon, launches, tmp_path
+):
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    handle = (await _defer(daemon, repo))["handle"]
+    daemon.store.move_handoff_gate(
+        handle, expected=("waiting",), state="cancelled", updated_at=now(), error_code="cancelled"
+    )
+    assert daemon.store.get_job(handle).state == JobState.RUNNING
+
+    await daemon.handoff.recover()
+
+    assert daemon.store.get_job(handle).state == JobState.KILLED
+    await _assert_awaitable(daemon, handle, "cancelled")
+    assert launches == []

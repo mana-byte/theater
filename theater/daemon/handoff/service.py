@@ -41,7 +41,7 @@ from theater.daemon.handoff.resolution import participant_of, resolve_source
 from theater.daemon.response_contracts.prompts import prompt_with_guidance
 from theater.daemon.schema import launch_reservations
 from theater.daemon.terminals import ProviderBusy, ProviderUnavailable
-from theater.models import BadRequest, Job, JobState, TheaterError, now
+from theater.models import BadRequest, Job, JobState, Status, TheaterError, now
 from theater.observability.catalog import HANDOFF_GATE
 
 logger = logging.getLogger("theater.handoff")
@@ -527,28 +527,34 @@ class HandoffService:
         *,
         expected: tuple[str, ...] = (GATE_WAITING, GATE_OPENING),
     ) -> None:
-        if not self.store.move_handoff_gate(
-            gate.job_handle,
-            expected=expected,
-            state=state,
-            updated_at=now(),
-            error_code=code,
-            error=message[:1000],
-        ):
-            return
-        job = self.store.get_job(gate.job_handle)
-        if job is not None and job.state == JobState.RUNNING:
-            self.daemon.jobs.finish(
+        with self.store.write_unit() as unit:
+            if not self.store.move_handoff_gate(
                 gate.job_handle,
-                state=JobState.KILLED if state == GATE_CANCELLED else JobState.CRASHED,
+                expected=expected,
+                state=state,
+                updated_at=now(),
                 error_code=code,
-            )
-        if job is None or job.kind == KIND_SPAWN:
-            self.daemon.registry.mark_dead(
-                gate.job_handle
-            )  # the placeholder child; a send has none
+                error=message[:1000],
+                connection=unit.connection,
+            ):
+                return
+            self._end_in_unit(unit, gate.job_handle, state, code)
         self._signal(gate, "cancelled" if state == GATE_CANCELLED else "error")
         logger.info("handoff gate %s %s: %s", gate.job_handle, state, message)
+
+    def _end_in_unit(self, unit, handle: str, state: str, code: str) -> None:
+        """Finish the gated job with its gate, so a terminal gate never leaves a RUNNING job."""
+        job = self.store.get_job(handle, connection=unit.connection)
+        if job is not None and job.state == JobState.RUNNING:
+            self.daemon.jobs.finish(
+                handle,
+                state=JobState.KILLED if state == GATE_CANCELLED else JobState.CRASHED,
+                error_code=code,
+                connection=unit.connection,
+            )
+        if job is None or job.kind == KIND_SPAWN:
+            # The placeholder child (a send has none); registry state is not unit-aware.
+            unit.after_commit(lambda: self.daemon.registry.mark_dead(handle))
 
     def _signal(self, gate: HandoffGate, result: str) -> None:
         waited = max(0.0, now() - gate.created_at) * 1000.0
@@ -573,6 +579,7 @@ class HandoffService:
                 state=GATE_OPENED if self._launch_reserved(gate.job_handle) else GATE_WAITING,
                 updated_at=now(),
             )
+        self._reconcile_ended()
         for gate in self.store.handoff_gates((GATE_WAITING,)):
             job = self.store.get_job(gate.job_handle)
             if job is None or job.state != JobState.RUNNING:
@@ -581,6 +588,20 @@ class HandoffService:
             self.daemon.jobs.track(gate.job_handle)
             if job.kind == KIND_SPAWN:
                 self._schedule(gate.job_handle)  # a send's queue row is recovered by the controls
+
+    def _reconcile_ended(self) -> None:
+        """Finish a RUNNING job or retire a live placeholder behind an already-ended gate."""
+        for gate in self.store.handoff_gates((GATE_FAILED, GATE_CANCELLED)):
+            job = self.store.get_job(gate.job_handle)
+            if job is None:
+                continue
+            placeholder = self.store.get_participant(gate.job_handle)
+            live = job.kind == KIND_SPAWN and placeholder is not None
+            if job.state == JobState.RUNNING or (live and placeholder.status is not Status.DEAD):
+                with self.store.write_unit() as unit:
+                    self._end_in_unit(
+                        unit, gate.job_handle, gate.state, gate.error_code or ERROR_CANCELLED
+                    )
 
     # ---- facts other layers read ------------------------------------------------------
 
