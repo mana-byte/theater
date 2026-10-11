@@ -14,10 +14,7 @@ from theater.constants.response_contract import (
 )
 from theater.daemon.response_contracts.contract import StrictContract, admit_schema
 from theater.daemon.response_contracts.presets import PRESET_SCHEMAS
-from theater.models import BadRequest, now
-
-#: Creator recorded for callers with no participant identity (the CLI, frontends).
-OPERATOR_CREATOR = "cli"
+from theater.models import BadRequest, Status, now
 
 _CUSTOM_KEYS = frozenset({CONTRACT_TAG, "name", "schema"})
 
@@ -27,6 +24,8 @@ def resolve_response_format(store: Any, raw: object, *, creator_id: str | None) 
 
     A bare dict stays a prompt-only hint. A ``{"$theater": ...}`` dict is a strict contract:
     a preset, or a custom schema registered under the creator's name for the creator's lifetime.
+    A caller with no live participant session (the CLI, a frontend) may only pass a custom schema
+    inline: nothing is registered, so no shared name outlives anyone.
     """
     if raw is None:
         return None
@@ -37,10 +36,18 @@ def resolve_response_format(store: Any, raw: object, *, creator_id: str | None) 
         )
     if CONTRACT_TAG not in raw:
         return json.dumps(raw, sort_keys=True, separators=(",", ":"))
-    return _strict(store, raw, creator_id or OPERATOR_CREATOR).envelope()
+    return _strict(store, raw, _session_of(store, creator_id)).envelope()
 
 
-def _strict(store: Any, raw: dict, creator_id: str) -> StrictContract:
+def _session_of(store: Any, creator_id: str | None) -> str | None:
+    """The creator when it is a live participant; registered names die with that participant."""
+    if creator_id is None:
+        return None
+    participant = store.get_participant(creator_id)
+    return creator_id if participant is not None and participant.status is not Status.DEAD else None
+
+
+def _strict(store: Any, raw: dict, creator_id: str | None) -> StrictContract:
     kind = raw[CONTRACT_TAG]
     if kind in CONTRACT_PRESET_NAMES:
         if raw.keys() != {CONTRACT_TAG}:
@@ -65,14 +72,16 @@ def _strict(store: Any, raw: dict, creator_id: str) -> StrictContract:
             "a custom response contract needs a 'name' of 1-64 letters, digits, '_', '.' or '-'"
         )
     if "schema" not in raw:
-        text = store.get_response_contract(creator_id, name)
+        text = None if creator_id is None else store.get_response_contract(creator_id, name)
         if text is None:
             raise BadRequest(
-                f"no custom response contract {name!r} is registered by {creator_id!r}; "
-                "pass its 'schema' once to register it"
+                f"no custom response contract {name!r} is registered by this session; "
+                "pass its 'schema' once to register it (names need a participant session)"
             )
         return StrictContract(CONTRACT_KIND_CUSTOM, text, name)
     text = admit_schema(raw["schema"])
+    if creator_id is None:
+        return StrictContract(CONTRACT_KIND_CUSTOM, text, name)
     outcome = store.register_response_contract(
         creator_id, name, text, created_at=now(), limit=CONTRACT_MAX_CUSTOM_PER_CREATOR
     )

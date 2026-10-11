@@ -11,7 +11,7 @@ import asyncio
 import logging
 import math
 
-from theater.constants.response_contract import REPAIR_MAX_ATTEMPTS
+from theater.constants.response_contract import REPAIR_DEADLINE_SECONDS, REPAIR_MAX_ATTEMPTS
 from theater.daemon.controls._common import (
     AMBIGUOUS_DELIVERY_DEADLINE_SECONDS,
     CONTROL_UNKNOWN_ACK_LOST,
@@ -233,9 +233,32 @@ class RepairControls(ControlHost):
     async def _advance_repairs_locked(self, participant_id: str) -> None:
         for attempt in self._store.open_repair_attempts(participant_id):
             if attempt.state is RepairState.PENDING:
-                await self._dispatch_repair(attempt)
+                if self._repair_overdue(attempt):
+                    self._time_out_unsent(attempt)
+                else:
+                    await self._dispatch_repair(attempt)
             else:
                 self._reconcile_repair(attempt)
+
+    def _repair_overdue(self, attempt: RepairAttempt) -> bool:
+        """Past the job's whole-repair deadline, counted from its first attempt in any state."""
+        if self._recovering:
+            return False  # startup evidence gets its chance before any wall-clock deadline
+        first = self._store.repair_attempts_for_job(attempt.job_handle)[0].created_at
+        deadline = max(
+            first + REPAIR_DEADLINE_SECONDS,
+            self._deadline_not_before.get(attempt.attempt_id, -math.inf),
+        )
+        return self._clock() >= deadline
+
+    def _time_out_unsent(self, attempt: RepairAttempt) -> None:
+        """A repair that never reached the wire ends safely: nothing can still be running."""
+        job = self._store.get_job(attempt.job_handle)
+        if job is not None and job.state == JobState.RUNNING:
+            detail = "the repair was never sent within its deadline"
+            self._abandon_repair(attempt, job, audit.REPAIR_TIMEOUT, detail)
+        else:
+            self._settle_repair(attempt, "job_finished")
 
     def _abandon_repair(
         self, attempt: RepairAttempt, job: Job, event: str, detail: str | None
@@ -463,32 +486,32 @@ class RepairControls(ControlHost):
             else:
                 self._settle_repair(attempt, "context_gone")
             return
-        if (
-            job is None
-            or not running
-            or attempt.state not in (RepairState.DISPATCHED, RepairState.UNKNOWN)
-            or self._recovering
-        ):
+        if job is None or not running or self._recovering:
             return
-        deadline = max(
-            attempt.updated_at + AMBIGUOUS_DELIVERY_DEADLINE_SECONDS,
-            self._deadline_not_before.get(attempt.attempt_id, -math.inf),
-        )
-        if self._clock() < deadline:
+        if attempt.state in (RepairState.DISPATCHED, RepairState.UNKNOWN):
+            ambiguous = max(
+                attempt.updated_at + AMBIGUOUS_DELIVERY_DEADLINE_SECONDS,
+                self._deadline_not_before.get(attempt.attempt_id, -math.inf),
+            )
+            if self._clock() < ambiguous and not self._repair_overdue(attempt):
+                return
+            event, detail = audit.REPAIR_UNKNOWN, "the repair delivery was never confirmed"
+        elif attempt.state is RepairState.AWAITING and self._repair_overdue(attempt):
+            event, detail = audit.REPAIR_TIMEOUT, "the repair turn did not finish in its deadline"
+        else:
             return
-        # The caller is not kept waiting on a delivery that can no longer be proven; the fence
-        # stays up until the turn's evidence arrives or its context is gone.
+        # The caller is not kept waiting on a turn that may still run; the attempt stays open, so
+        # the fence holds until that turn's evidence arrives or its context is gone.
         self._jobs.finish(
             job.handle,
             state=JobState.DONE,
             result=self._candidate_text(attempt),
-            contract_failure=ContractFailure(
-                audit.REPAIR_UNKNOWN, "the repair delivery was never confirmed"
-            ),
+            contract_failure=ContractFailure(event, detail),
         )
-        self._store.update_repair_attempt(
-            attempt.attempt_id, updated_at=self._clock(), state=RepairState.UNKNOWN
-        )
+        if attempt.state is RepairState.DISPATCHED:
+            self._store.update_repair_attempt(
+                attempt.attempt_id, updated_at=self._clock(), state=RepairState.UNKNOWN
+            )
 
     def settle_repairs_at_restart(self, participant_ids: list[str]) -> None:
         """A dispatched repair may have reached the wire before the restart; never resend it."""

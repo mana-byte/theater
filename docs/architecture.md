@@ -783,14 +783,23 @@ a **hint**: the daemon prepends it to the prompt and later parses the answer
 with `json.loads`, exactly as before. A dict carrying the reserved `$theater`
 key is a **strict contract** — `review`, `debate`, `delegate`, or
 `{"$theater": "custom", "name": ..., "schema": ...}`. Admission
-(`daemon/response_contracts/`) validates the schema (2020-12, 32 KiB, no
-`pattern`/`patternProperties`/`uniqueItems`/`$id`/non-local `$ref`, so no regex or
-quadratic scan runs on the daemon loop and nothing is fetched), resolves the preset or custom name, and
+(`daemon/response_contracts/`) validates the schema against a deliberately small subset
+(2020-12, 32 KiB, 24 levels; `type`, `enum`, `const`, `properties`, `required`,
+`additionalProperties`, `items`, `prefixItems`, bounds), resolves the preset or
+custom name, and
 stores the *resolved* envelope in `jobs.response_format` — the job snapshots its
 schema, and omitting `response_format` never inherits one. A custom name is
 keyed by `(creator participant id, name)` in `response_contracts`; the same
 schema is idempotent, a different one conflicts, and the rows die with the
-creator.
+creator. A caller with no live participant session (the CLI, a frontend) may only
+pass a custom schema inline: nothing is registered and no name is shared.
+
+The subset is what bounds validation. No `$ref`, combinator (`anyOf`, `oneOf`,
+`allOf`, `not`, `if`), regex, `contains`, or `uniqueItems`, so every answer value
+meets exactly one schema node: no exponential recursion, no regex on the daemon
+loop, no reference that can point at a non-schema. Per-node lists are capped at
+64 entries and an answer at 5,000 values; a stored schema outside the subset is
+judged invalid, never evaluated, so no job can be stranded by an exception.
 
 The presets are written for a caller that never reads the transcript: required
 fields carry the outcome, optional ones the evidence, extra keys are allowed, and
@@ -813,7 +822,9 @@ public job `running`, writes a `job_repairs` attempt, and — under the
 participant lock, after the ordinary presence/preflight gates and an
 authoritative-idle precondition — sends a bounded repair prompt through the same
 runtime, recording the turn id of the receipt. Only the terminal evidence of
-*that* turn (or a definitive refusal) resolves the attempt; two attempts at most.
+*that* turn (or a definitive refusal) resolves the attempt; two attempts at most,
+and the whole repair, from its first attempt, ends at 300 seconds. A repair never
+sent just ends; one whose turn may still run ends the job but keeps the fence.
 Every other route — transcript completion, legacy and provider terminals — has no
 exact turn, so it fails closed to `unable_to_parse` with an `unsupported_route`
 audit row. There is deliberately no transcript correlation.
@@ -829,6 +840,8 @@ Three details carry the safety:
   its job at the ambiguous-delivery deadline but keeps the fence, so Theater's own
   sends to that participant refuse until its evidence arrives or its backend
   restarts — a deliberate trade of liveness for never typing into a live turn.
+  GC honours the same rule: it keeps a job with a fenced attempt until its
+  participant is dead or its backend generation or session has changed.
 - `completion_candidate_jobs_for_target` is the matcher's query: it excludes a
   repairing job, so no later turn is ever matched to it, while
   `active_running_jobs_for_target` still reports it for every busy, steer, and

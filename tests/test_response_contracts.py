@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -13,8 +14,9 @@ from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observation.turns import answers_prompt
 from theater.daemon.persistence.repositories.job_repairs import RepairAttempt, RepairState
 from theater.daemon.response_contracts import parse_stored, resolve_response_format
+from theater.daemon.response_contracts.contract import admit_schema
 from theater.daemon.rpc.params import _prompt_with_response_format
-from theater.models import BadRequest, JobState, now
+from theater.models import BadRequest, JobState, Participant, Status, now
 
 DELEGATE = json.dumps(
     {
@@ -51,6 +53,13 @@ def resolve(store, raw, creator="parent"):
     return resolve_response_format(store, raw, creator_id=creator)
 
 
+@pytest.fixture(autouse=True)
+def sessions(store):
+    """Live participants that may register custom names; the CLI has no such session."""
+    for pid in ("parent", "someone-else"):
+        store.upsert_participant(Participant(id=pid, harness="codex"))
+
+
 # ---- admission ----------------------------------------------------------------
 
 
@@ -81,6 +90,21 @@ def test_custom_names_are_idempotent_conflicting_and_creator_scoped(store):
         resolve(store, {"$theater": "custom", "name": "verdict"})
 
 
+@pytest.mark.parametrize("creator", [None, "cli", "no-such-participant"])
+def test_without_a_participant_session_a_custom_schema_is_inline_only(store, creator):
+    inline = resolve(store, CUSTOM, creator=creator)
+    assert parse_stored(inline).name == "verdict"
+    assert store.get_response_contract(creator or "cli", "verdict") is None  # nothing registered
+    with pytest.raises(BadRequest, match="need a participant session"):
+        resolve(store, {"$theater": "custom", "name": "verdict"}, creator=creator)
+
+
+def test_a_dead_participant_registers_nothing(store):
+    store.set_status("parent", Status.DEAD)
+    resolve(store, CUSTOM)
+    assert store.get_response_contract("parent", "verdict") is None
+
+
 @pytest.mark.parametrize(
     ("raw", "message"),
     [
@@ -91,9 +115,18 @@ def test_custom_names_are_idempotent_conflicting_and_creator_scoped(store):
         ({"$theater": "custom", "name": "x", "schema": {"uniqueItems": True}}, "may not use"),
         (
             {"$theater": "custom", "name": "x", "schema": {"$ref": "https://evil.test/s"}},
-            "unresolvable \\$ref",
+            "may not use",
         ),
-        ({"$theater": "custom", "name": "x", "schema": {"$ref": "#"}}, "recurses"),
+        ({"$theater": "custom", "name": "x", "schema": {"$ref": "#"}}, "may not use"),
+        (
+            {"$theater": "custom", "name": "x", "schema": {"anyOf": [{"type": "string"}]}},
+            "branching",
+        ),
+        ({"$theater": "custom", "name": "x", "schema": {"x-extension": {}}}, "may not use"),
+        (
+            {"$theater": "custom", "name": "x", "schema": {"enum": list(range(65))}},
+            "at most 64",
+        ),
         ({"$theater": "custom", "name": "x", "schema": {"type": "nonsense"}}, "not valid"),
         (
             {"$theater": "custom", "name": "x", "schema": {"enum": ["x" * 40_000]}},
@@ -104,6 +137,62 @@ def test_custom_names_are_idempotent_conflicting_and_creator_scoped(store):
 def test_unsafe_or_malformed_strict_forms_are_refused_at_admission(store, raw, message):
     with pytest.raises(BadRequest, match=message):
         resolve(store, raw)
+
+
+def _nested(depth):
+    schema: dict = {"type": "string"}
+    for _ in range(depth):
+        schema = {"type": "array", "items": schema}
+    return schema
+
+
+def test_schema_nesting_is_bounded_without_recursion_errors(store):
+    assert admit_schema(_nested(10))
+    with pytest.raises(BadRequest, match="nest at most"):
+        admit_schema(_nested(5_000))
+
+
+#: The reviewer's repros: recursion through anyOf+$ref, a $ref into an unknown keyword that hides
+#: a regex, and a $ref at a non-schema value; each must be refused before it can run anything.
+UNSAFE = [
+    {"$defs": {"a": {"anyOf": [{"$ref": "#/$defs/a"}, {"type": "array", "items": {"$ref": "#"}}]}}},
+    {"anyOf": [{"$ref": "#"}, {"type": "array", "items": {"$ref": "#"}}]},
+    {"$ref": "#/x-hidden", "x-hidden": {"pattern": "(a+)+$"}},
+    {"$ref": "#/required", "required": ["a"]},
+    {"$ref": "#/type", "type": "object"},
+    {"$ref": "#/minProperties", "minProperties": 1},
+]
+
+
+@pytest.mark.parametrize("schema", UNSAFE)
+def test_references_and_combinators_are_refused_and_never_evaluated(store, schema):
+    started = time.perf_counter()
+    with pytest.raises(BadRequest, match="may not use"):
+        resolve(store, {"$theater": "custom", "name": "x", "schema": schema})
+    legacy = json.dumps({"$theater": "custom", "name": "x", "schema": schema})
+    deep = "[" * 16 + "]" * 16
+    # A stored envelope from before this rule is judged invalid, not evaluated: no hang, no raise.
+    verdict = parse_stored(legacy).validate(deep)
+    assert (verdict.ok, verdict.reason) == (False, "schema")
+    assert time.perf_counter() - started < 1.0
+
+
+def test_worst_case_validation_stays_short_enough_for_the_event_loop(store):
+    contract = parse_stored(
+        resolve(
+            store,
+            {
+                "$theater": "custom",
+                "name": "worst",
+                "schema": {"type": "array", "items": {"enum": list(range(64))}},
+            },
+        )
+    )
+    started = time.perf_counter()
+    assert contract.validate(json.dumps([63] * 4_900)).ok  # as many values as are accepted
+    over = contract.validate(json.dumps([0] * 6_000))
+    assert (over.ok, over.reason) == (False, "too_large") and "shorten" in over.detail
+    assert time.perf_counter() - started < 1.0
 
 
 def test_a_property_named_like_a_forbidden_keyword_is_not_a_keyword(store):

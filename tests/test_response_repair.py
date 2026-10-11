@@ -16,7 +16,7 @@ from tests.test_control_service import (
     wait_until,
     wrap_runtime,
 )
-from theater.constants.response_contract import REPAIR_MAX_ATTEMPTS
+from theater.constants.response_contract import REPAIR_DEADLINE_SECONDS, REPAIR_MAX_ATTEMPTS
 from theater.daemon.persistence.repositories.job_repairs import RepairState
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.persistence.store import Store
@@ -328,3 +328,59 @@ async def test_a_pending_repair_survives_a_restart_and_maintenance_sends_it(thea
         await restarted.service.aclose()
     finally:
         second.close()
+
+
+# ---- the whole-repair deadline ----------------------------------------------------
+
+
+async def test_a_repair_that_never_reached_the_wire_ends_at_the_deadline_and_lifts_its_fence(store):
+    harness = await open_harness(store, "p1")
+    job = await strict_send(harness, store)
+    harness.gates_recorder.presence_refusals.add("p1")  # a human holds the terminal throughout
+    await end_turn(harness, "garbage")
+    await drain()
+    assert store.repair_fence_active("p1")
+
+    harness.service._clock = lambda: now() + REPAIR_DEADLINE_SECONDS + 1
+    await harness.service.maintain_repairs("p1")
+
+    assert store.get_job(job.handle).structured_status == "unable_to_parse"
+    assert audit_events(store, job.handle)[-1] == "repair_timeout"
+    assert len(state_of(harness, "p1").sent) == 1  # nothing was typed into the protected terminal
+    assert not store.repair_fence_active("p1")  # nothing was sent, so nothing can still run
+
+
+async def test_a_repair_turn_past_the_deadline_ends_the_job_but_keeps_the_fence_for_its_turn(store):
+    harness = await open_harness(store, "p1")
+    job = await strict_send(harness, store)
+    await end_turn(harness, "garbage")
+    await repair_sent(harness, 2)  # the repair turn is running and proven
+
+    harness.service._clock = lambda: now() + REPAIR_DEADLINE_SECONDS + 1
+    await harness.service.maintain_repairs("p1")
+
+    finished = store.get_job(job.handle)
+    assert finished.state == JobState.DONE and finished.structured_status == "unable_to_parse"
+    assert audit_events(store, job.handle)[-1] == "repair_timeout"
+    assert store.repair_fence_active("p1")  # the turn may still be typing; idle proves nothing
+    with pytest.raises(Busy):
+        await harness.service.send("p1", caller_id="caller", prompt="next")
+
+    await end_turn(harness, VALID)  # its evidence finally arrives: the fence lifts, the job stays
+
+    assert not store.repair_fence_active("p1")
+    assert store.get_job(job.handle).structured_status == "unable_to_parse"
+
+
+async def test_a_stored_schema_the_validator_cannot_run_is_repaired_not_raised(store):
+    """A snapshot from before the keyword rules: evidence must not raise and strand the job."""
+    harness = await open_harness(store, "p1")
+    legacy = json.dumps(
+        {"$theater": "custom", "name": "old", "schema": {"$ref": "#/required", "required": ["a"]}}
+    )
+    job = await harness.service.send("p1", caller_id="caller", prompt="go", response_format=legacy)
+
+    await end_turn(harness, '{"a": 1}')  # no AttributeError: the job is handed to a repair
+
+    assert store.get_job(job.handle).state == JobState.RUNNING
+    assert len(store.repair_attempts_for_job(job.handle)) == 1

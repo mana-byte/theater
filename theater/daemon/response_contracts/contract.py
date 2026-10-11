@@ -3,24 +3,29 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import lru_cache
-from urllib.parse import unquote
+from itertools import islice
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
 from theater.constants.response_contract import (
     CONTRACT_ANSWER_MAX_CHARS,
+    CONTRACT_ANSWER_MAX_VALUES,
     CONTRACT_DETAIL_MAX_CHARS,
     CONTRACT_DRAFT_URI,
     CONTRACT_ERRORS_MAX,
-    CONTRACT_FORBIDDEN_KEYWORDS,
     CONTRACT_PRESET_ANSWER_MAX_CHARS,
     CONTRACT_PRESET_NAMES,
     CONTRACT_SCHEMA_MAX_BYTES,
+    CONTRACT_SCHEMA_MAX_DEPTH,
     CONTRACT_TAG,
+)
+from theater.daemon.response_contracts.schema_rules import (
+    nesting_depth,
+    schema_problem,
+    value_count,
 )
 from theater.models import BadRequest
 
@@ -86,19 +91,26 @@ class StrictContract:
         except (ValueError, RecursionError) as exc:
             detail = f"the final answer is not a single bare JSON value: {_clip(str(exc), 200)}"
             return Verdict(False, "not_json", detail)
+        if value_count(value, CONTRACT_ANSWER_MAX_VALUES) > CONTRACT_ANSWER_MAX_VALUES:
+            return Verdict(
+                False,
+                "too_large",
+                f"the final answer holds more than {CONTRACT_ANSWER_MAX_VALUES} values; shorten it",
+            )
+        compiled = _compiled(self.schema_text)
+        if isinstance(compiled, str):
+            return Verdict(False, "schema", f"the stored schema cannot be evaluated: {compiled}")
         try:
-            errors = sorted(
-                _validator(self.schema_text).iter_errors(value),
-                key=lambda error: [str(part) for part in error.absolute_path],
-            )[:CONTRACT_ERRORS_MAX]
-        except RecursionError:
+            found = list(islice(compiled.iter_errors(value), _ERRORS_SCANNED))
+        except Exception:  # a schema the validator cannot evaluate must never strand the job
             return Verdict(False, "schema", "the answer could not be checked against the schema")
+        errors = sorted(found, key=lambda error: [str(part) for part in error.absolute_path])
         if not errors:
             return Verdict(True)
         listed = "; ".join(
             f"{'/'.join(str(p) for p in error.absolute_path) or '(root)'}: "
             f"{_clip(error.message, 200)}"
-            for error in errors
+            for error in errors[:CONTRACT_ERRORS_MAX]
         )
         return Verdict(False, "schema", _clip(listed, CONTRACT_DETAIL_MAX_CHARS))
 
@@ -107,9 +119,16 @@ def _reject_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number {value!r}")
 
 
+#: Errors read before sorting; enough to quote the first few, never all of a hostile answer's.
+_ERRORS_SCANNED = 50
+
+
 @lru_cache(maxsize=128)
-def _validator(schema_text: str) -> Draft202012Validator:
-    return Draft202012Validator(json.loads(schema_text))
+def _compiled(schema_text: str) -> Draft202012Validator | str:
+    """The validator for a schema inside the strict subset, or the reason it is not."""
+    schema = json.loads(schema_text)
+    problem = schema_problem(schema) if isinstance(schema, dict) else "the schema is not an object"
+    return problem if problem is not None else Draft202012Validator(schema)
 
 
 @lru_cache(maxsize=256)
@@ -136,64 +155,15 @@ def parse_stored(raw: str | None) -> StrictContract | None:
 
 # ---- admission ------------------------------------------------------------
 
-_SCHEMA_VALUED = (
-    "additionalProperties",
-    "additionalItems",
-    "items",
-    "contains",
-    "not",
-    "if",
-    "then",
-    "else",
-    "propertyNames",
-    "unevaluatedItems",
-    "unevaluatedProperties",
-    "contentSchema",
-)
-_SCHEMA_LISTS = ("allOf", "anyOf", "oneOf", "prefixItems")
-_SCHEMA_MAPS = ("properties", "$defs", "definitions", "dependentSchemas", "patternProperties")
-
-
-def _subschemas(schema: dict) -> Iterator[dict]:
-    """Every schema position, never a property name or a literal such as ``enum``."""
-    stack: list[object] = [schema]
-    while stack:
-        node = stack.pop()
-        if not isinstance(node, dict):
-            continue
-        yield node
-        for key in _SCHEMA_VALUED:
-            value = node.get(key)
-            stack.extend(value if isinstance(value, list) else [value])
-        for key in _SCHEMA_LISTS:
-            value = node.get(key)
-            if isinstance(value, list):
-                stack.extend(value)
-        for key in _SCHEMA_MAPS:
-            value = node.get(key)
-            if isinstance(value, dict):
-                stack.extend(value.values())
-
-
-def _resolves(root: dict, ref: str) -> bool:
-    node: object = root
-    if ref == "#":
-        return True
-    for part in ref[2:].split("/"):
-        key = unquote(part).replace("~1", "/").replace("~0", "~")
-        if isinstance(node, dict) and key in node:
-            node = node[key]
-        elif isinstance(node, list) and key.isdigit() and int(key) < len(node):
-            node = node[int(key)]
-        else:
-            return False
-    return True
-
 
 def admit_schema(schema: object) -> str:
     """Canonical text of a schema a strict job may use, or a ``BadRequest`` saying why not."""
     if not isinstance(schema, dict):
         raise BadRequest("a response contract schema must be a JSON object")
+    if nesting_depth(schema) > CONTRACT_SCHEMA_MAX_DEPTH:
+        raise BadRequest(
+            f"a response contract schema may nest at most {CONTRACT_SCHEMA_MAX_DEPTH} levels"
+        )
     try:
         text = _dumps(schema)
     except (ValueError, TypeError, RecursionError):
@@ -207,34 +177,15 @@ def admit_schema(schema: object) -> str:
         raise BadRequest(
             f"strict schemas are JSON Schema 2020-12; drop $schema or use {CONTRACT_DRAFT_URI}"
         )
-    for node in _subschemas(schema):
-        forbidden = CONTRACT_FORBIDDEN_KEYWORDS & node.keys()
-        if forbidden:
-            raise BadRequest(
-                f"strict response schemas may not use {sorted(forbidden)}: regexes and "
-                "uniqueness scans run on the daemon loop, and identifiers or dynamic "
-                "references reach outside the schema"
-            )
-        ref = node.get("$ref")
-        if ref is not None and not (
-            isinstance(ref, str) and (ref == "#" or ref.startswith("#/")) and _resolves(schema, ref)
-        ):
-            raise BadRequest(
-                f"unresolvable $ref {ref!r}: only '#' or a '#/json/pointer' into the schema"
-            )
+    problem = schema_problem(schema)
+    if problem is not None:
+        raise BadRequest(problem)
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as exc:
         raise BadRequest(
             f"response_format schema is not valid JSON Schema 2020-12: {_clip(exc.message, 300)}"
         ) from None
-    validator = _validator(text)
-    probes: tuple[object, ...] = ({}, [], "", 0, None)
-    for probe in probes:
-        try:
-            next(iter(validator.iter_errors(probe)), None)
-        except RecursionError:
-            raise BadRequest(
-                "response_format schema recurses without consuming the answer"
-            ) from None
+    except RecursionError:
+        raise BadRequest("response_format schema nests too deeply to check") from None
     return text

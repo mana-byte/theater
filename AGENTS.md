@@ -226,7 +226,7 @@ packages/regie/src/regie/
 - **A strict job's repair fence is its own fact.** `job_repairs.fence` is not
   `control_operations.execution_barrier`, and only positive evidence releases it:
   exact terminal evidence for the repair turn, a definitive rejection, or a gone
-  native context. Never release it on idle, screen rescue, or identity loss, and
+  native context. Never release it on idle, screen rescue, identity loss, or GC, and
   never repair a route that cannot name the answering turn — fail closed to
   `unable_to_parse` and audit it. Completion matchers use
   `completion_candidate_jobs_for_target`; safety checks keep

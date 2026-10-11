@@ -185,14 +185,16 @@ response_format: optional JSON object. A bare JSON Schema object is a prompt hin
           {{"$theater": "delegate"}} (status, summary, blockers). They take optional fields
           (commit, changed_paths, checks, findings, ...) and extra keys, are written for a
           caller that never reads the transcript, and are capped at 16,384 characters.
-          Or {{"$theater": "custom", "name": "x", "schema": {{...}}}}: omit schema to reuse
-          a name you registered; a name belongs to your session,
-          the same schema is idempotent and a different one is refused. Custom schemas are
-          JSON Schema 2020-12, at most 32 KiB, without pattern, patternProperties,
-          uniqueItems, $id, or non-local $ref. Theater validates the whole final answer
-          against the schema. Where it can prove which turn answered, it asks the same agent
-          to correct an invalid answer a bounded number of times; the job stays running and
-          you see nothing of it.
+          Or {{"$theater": "custom", "name": "x", "schema": {{...}}}}: a name is registered to
+          your participant session (the same schema is idempotent, a different one is
+          refused); omit schema to reuse it. Without a session a schema works inline only.
+          Custom schemas are JSON Schema 2020-12 limited to type, enum, const, properties,
+          required, additionalProperties, items, prefixItems, and size/range bounds, at most
+          32 KiB and 24 levels; no $ref, anyOf/oneOf/allOf/not, if/then/else, or regexes.
+          Answers hold at most 65,536 characters and 5,000 values. Theater validates the
+          whole final answer against the schema. Where it can prove which turn answered, it
+          asks the same agent to correct an invalid answer a bounded number of times; the
+          job stays running and you see nothing of it.
           Otherwise, or when that fails, the job ends with structured_status
           "unable_to_parse". await_sessions returns a valid answer in structured_result,
           so you need not read the transcript.

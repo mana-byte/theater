@@ -601,6 +601,54 @@ async def test_repair_and_audit_rows_go_with_their_job_and_contracts_with_their_
     assert store.repair_attempts_for_job("recent") == []
 
 
+async def test_a_fenced_repair_keeps_its_job_until_its_context_is_provably_gone(store):
+    """Deleting the job would lift the fence unproven; death or a new generation lifts it."""
+    from theater.daemon.persistence.repositories.job_repairs import RepairAttempt, RepairState
+    from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
+    from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
+
+    _participant(store, pid="p1", status=Status.IDLE)
+    old = now() - 90 * _DAY
+    _job(store, handle="old", target_id="p1", state=JobState.DONE, finished_at=old, created_at=old)
+    store.create_repair_attempt(
+        RepairAttempt(
+            attempt_id="old~repair1",
+            job_handle="old",
+            participant_id="p1",
+            attempt=1,
+            state=RepairState.UNKNOWN,
+            backend_generation=1,
+            native_session_id="s1",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+
+    def bind(generation):
+        store.upsert_runtime_binding(
+            ParticipantRuntimeBinding(
+                participant_id="p1",
+                harness="codex",
+                wiring=RuntimeWiring.NATIVE,
+                backend_generation=generation,
+                lifecycle=RuntimeLifecyclePhase.BOUND,
+                native_session_id="s1",
+                created_at=now(),
+                updated_at=now(),
+            )
+        )
+
+    for binding in (None, 1):  # no binding, then the very same generation and session
+        if binding:
+            bind(binding)
+        assert (await sweep(store, _retention(jobs_days=60))).jobs == 0
+        assert store.get_job("old") is not None and store.repair_fence_active("p1")
+
+    bind(2)  # a new backend generation: the old turn cannot still be running
+    assert (await sweep(store, _retention(jobs_days=60))).jobs == 1
+    assert store.get_job("old") is None and not store.repair_fence_active("p1")
+
+
 async def test_touch_rows_for_surviving_jobs_are_kept(store):
     """Touch rows for a job that is NOT swept must survive."""
     _participant(store, pid="p1")

@@ -290,6 +290,30 @@ def _sweep_stale_running(
     return len(current_handles)
 
 
+def _fenced_repair_jobs():
+    """Jobs whose repair fence is still up: deleting one would lift it without evidence.
+
+    Only the participant's death or a different backend generation or session lifts it.
+    """
+    dead = (
+        exists()
+        .where(participants.c.id == job_repairs.c.participant_id)
+        .where(participants.c.status == "dead")
+    )
+    moved = (
+        exists()
+        .where(participant_runtime_bindings.c.participant_id == job_repairs.c.participant_id)
+        .where(
+            or_(
+                participant_runtime_bindings.c.backend_generation
+                != job_repairs.c.backend_generation,
+                participant_runtime_bindings.c.native_session_id != job_repairs.c.native_session_id,
+            )
+        )
+    )
+    return select(job_repairs.c.job_handle).where(job_repairs.c.fence == 1, ~dead, ~moved)
+
+
 async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tuple[int, int]:
     """Delete finished jobs older than the cutoff with their touch rows, in batches.
     Filters on ``finished_at`` only (NULL while running, so a waited-on job is never deleted, MF1);
@@ -304,6 +328,7 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
             select(jobs.c.handle)
             .where(jobs.c.finished_at.is_not(None))
             .where(jobs.c.finished_at < cutoff)
+            .where(jobs.c.handle.not_in(_fenced_repair_jobs()))
             .limit(event_batch)
         )
         rows = store.conn.execute(stmt).fetchall()
@@ -320,6 +345,7 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
                     .where(jobs.c.handle.in_(handles))
                     .where(jobs.c.finished_at.is_not(None))
                     .where(jobs.c.finished_at < cutoff)
+                    .where(jobs.c.handle.not_in(_fenced_repair_jobs()))
                     .order_by(jobs.c.handle)
                 ).scalars()
             ]

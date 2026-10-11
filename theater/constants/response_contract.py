@@ -36,32 +36,62 @@ CONTRACT_AUDIT_DETAIL_MAX_CHARS = 500
 
 #: Repair prompts sent per public job before it ends ``unable_to_parse``.
 REPAIR_MAX_ATTEMPTS = 2
+#: Wall-clock bound on one job's whole repair, from its first attempt through every state.
+REPAIR_DEADLINE_SECONDS = 300.0
 
 #: The only public outcome of a strict job that never produced a valid answer.
 STRUCTURED_UNABLE_TO_PARSE = "unable_to_parse"
 
-#: Schema keywords refused because they run regexes or quadratic scans on the daemon loop, or
-#: reach outside the schema.
-CONTRACT_FORBIDDEN_KEYWORDS = frozenset(
+#: The only keywords a strict schema may use. Without references or branching, each answer value
+#: meets exactly one schema node, so validation cost is bounded by the answer and the caps below.
+CONTRACT_ALLOWED_KEYWORDS = frozenset(
     {
-        "pattern",
-        "patternProperties",
-        "uniqueItems",
-        "$id",
-        "$dynamicRef",
-        "$recursiveRef",
-        "$dynamicAnchor",
+        "type",
+        "enum",
+        "const",
+        "properties",
+        "required",
+        "additionalProperties",
+        "items",
+        "prefixItems",
+        "minItems",
+        "maxItems",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minProperties",
+        "maxProperties",
+        # Annotations; none is asserted.
+        "title",
+        "description",
+        "default",
+        "examples",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+        "$comment",
+        "format",
     }
 )
+#: Schema nesting (JSON levels), and per-node list sizes every answer value is checked against.
+CONTRACT_SCHEMA_MAX_DEPTH = 24
+CONTRACT_SCHEMA_MAX_LIST = 64
+#: Values in one parsed answer; a dense 64 Ki answer could otherwise hold tens of thousands.
+CONTRACT_ANSWER_MAX_VALUES = 5_000
 CONTRACT_DRAFT_URI = "https://json-schema.org/draft/2020-12/schema"
 
 __all__ = [
+    "CONTRACT_ALLOWED_KEYWORDS",
     "CONTRACT_ANSWER_MAX_CHARS",
+    "CONTRACT_ANSWER_MAX_VALUES",
     "CONTRACT_AUDIT_DETAIL_MAX_CHARS",
     "CONTRACT_DETAIL_MAX_CHARS",
     "CONTRACT_DRAFT_URI",
     "CONTRACT_ERRORS_MAX",
-    "CONTRACT_FORBIDDEN_KEYWORDS",
     "CONTRACT_KIND_CUSTOM",
     "CONTRACT_MAX_CUSTOM_PER_CREATOR",
     "CONTRACT_NAME",
@@ -69,7 +99,10 @@ __all__ = [
     "CONTRACT_PRESET_NAMES",
     "CONTRACT_PRESET_SUMMARY",
     "CONTRACT_SCHEMA_MAX_BYTES",
+    "CONTRACT_SCHEMA_MAX_DEPTH",
+    "CONTRACT_SCHEMA_MAX_LIST",
     "CONTRACT_TAG",
+    "REPAIR_DEADLINE_SECONDS",
     "REPAIR_MAX_ATTEMPTS",
     "STRUCTURED_UNABLE_TO_PARSE",
 ]

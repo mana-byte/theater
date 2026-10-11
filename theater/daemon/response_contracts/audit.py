@@ -19,6 +19,7 @@ REPAIR_UNKNOWN = "repair_unknown"
 REPAIR_TURN_FAILED = "repair_turn_failed"
 REPAIR_TURN_CONFLICT = "repair_turn_conflict"
 REPAIR_EXHAUSTED = "repair_exhausted"
+REPAIR_TIMEOUT = "repair_timeout"
 REPAIR_INTERRUPTED = "repair_interrupted"
 
 #: Events that mean the caller got ``unable_to_parse``; only these are counted.
@@ -31,6 +32,7 @@ FAILURE_EVENTS = frozenset(
         REPAIR_TURN_FAILED,
         REPAIR_TURN_CONFLICT,
         REPAIR_EXHAUSTED,
+        REPAIR_TIMEOUT,
     }
 )
 
