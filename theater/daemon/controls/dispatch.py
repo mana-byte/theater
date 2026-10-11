@@ -129,6 +129,23 @@ class DispatchControls(ControlHost):
             dispatched=tuple(dispatched), failed=tuple(failed), deferred=deferred
         )
 
+    def _check_gate(
+        self, head: ControlOperation, job: Job
+    ) -> tuple[Job, QueueDispatchOutcome | None]:
+        """A message waiting on a source job is not dispatchable yet.
+
+        It keeps its lane head, so nothing the same sender queued later overtakes it, while other
+        senders' lanes go on. Opening the gate renders the source card into the job's prompt.
+        """
+        if self._gate_opener is None:
+            return job, None
+        readiness = self._gate_opener.ready_for_dispatch(job)
+        if readiness.waiting:
+            return job, QueueDispatchOutcome(skip=True)
+        if readiness.error is not None:
+            return job, self._fail_queued_item(head, job, readiness.error)
+        return self._store.get_job(job.handle) or job, None
+
     def _lane_heads(self, participant_id: str) -> list[ControlOperation]:
         """Each requester's oldest queued row, in send order: one sender never overtakes itself.
 
@@ -168,6 +185,9 @@ class DispatchControls(ControlHost):
                 job,
                 BadRequest(f"queued job {job.handle!r} has no caller identity"),
             )
+        job, blocked = self._check_gate(head, job)
+        if blocked is not None:
+            return blocked
         # A peer's queued send authorizes as the open ordinary send it is; other rows are parent
         # controls and are re-authorized against the current owner.
         action = (

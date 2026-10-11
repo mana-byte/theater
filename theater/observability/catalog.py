@@ -402,7 +402,7 @@ _CATALOG: tuple[OperationSpec, ...] = (
         log_template="handoff.gate",
         trace_template=None,
         metric_name="theater.handoff.gate.duration",
-        description="Time a deferred task waited for its source job; result tells how it ended.",
+        description="Time a deferred spawn or send waited for its source; result says how it ended",
         slow_ms=0,
         trace_kind=TraceKind.NONE,
         attrs=(
@@ -412,6 +412,7 @@ _CATALOG: tuple[OperationSpec, ...] = (
                 otel_log_key="task_kind",
                 metric_key="task_kind",
             ),
+            AttrMapping(source="kind", prose_key="kind", otel_log_key="kind", metric_key="kind"),
             AttrMapping(source="id", prose_key="id", otel_log_key="id"),
         ),
     ),

@@ -378,3 +378,29 @@ async def test_gc_removes_evidence_and_settled_gates_with_their_jobs(daemon, lau
     assert deleted >= 2
     assert daemon.store.get_job_evidence("src#1") is None
     assert daemon.store.get_handoff_gate(reply["handle"]) is None
+
+
+async def test_cancel_job_withdraws_a_waiting_spawn_but_never_a_launching_one(
+    daemon, launches, tmp_path
+):
+    repo = _repository(tmp_path)
+    _source(daemon, repo)
+    reply = await _defer(daemon, repo)
+    handle = reply["handle"]
+
+    outcome = await daemon.controls.cancel_job(handle, requester_id="cli")
+
+    assert outcome.cancelled is True
+    assert daemon.store.get_handoff_gate(handle).state == "cancelled"
+    assert daemon.store.get_job(handle).state == JobState.KILLED
+    assert launches == [] and _launch_rows(daemon) == 0
+    again = await daemon.controls.cancel_job(handle, requester_id="cli")
+    assert (again.cancelled, again.reason) == (False, "finished")
+
+    # Once the launch has begun there is something to take back; cancel_job no longer applies.
+    second = await _defer(daemon, repo, name="Second")
+    daemon.store.move_handoff_gate(
+        second["handle"], expected=("waiting",), state="opening", updated_at=1.0
+    )
+    late = await daemon.controls.cancel_job(second["handle"], requester_id="cli")
+    assert (late.cancelled, late.reason) == (False, "delivery_uncertain")

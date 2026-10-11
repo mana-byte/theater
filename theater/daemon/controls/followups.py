@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 
 from theater.constants.daemon import (
@@ -23,6 +23,7 @@ from theater.daemon.controls._common import (
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.routing import ControlRoute
 from theater.daemon.events.publication import control_event, job_event, next_revision
+from theater.daemon.handoff.models import HandoffGate
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.harness.contracts.runtime import (
     ConnectionHealth,
@@ -49,6 +50,8 @@ class _FollowupRequest:
     pre_reserved: bool
     #: ``QUEUE_ORIGIN_SEND`` for a peer's plain send that found the target busy or attended.
     origin: str | None = None
+    #: A source-job dependency: the message stays queued, undispatched, until the source ends.
+    gate: HandoffGate | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +80,7 @@ class FollowupControls(ControlHost):
         actor_participant_id: str | None = None,
         pre_reserved: bool = False,
         origin: str | None = None,
+        gate: HandoffGate | None = None,
     ) -> Job:
         """Create an awaitable send job immediately and reserve its queue slot."""
         with self._control_latency(ControlKind.QUEUE_FOLLOWUP, participant_id) as latency:
@@ -93,6 +97,7 @@ class FollowupControls(ControlHost):
                     actor_participant_id,
                     pre_reserved,
                     origin,
+                    gate,
                 )
             )
             # The queue accepted the item; its delivery is observed when a
@@ -282,6 +287,17 @@ class FollowupControls(ControlHost):
                 actor_participant_id=request.actor_participant_id,
             )
             self._store.create_job(job, connection=connection)
+            if request.gate is not None:
+                # Job, queue row and gate commit together: a gated handle never exists half-made.
+                self._store.create_handoff_gate(
+                    replace(
+                        request.gate,
+                        job_handle=handle,
+                        caller_id=request.caller_id,
+                        created_at=timestamp,
+                    ),
+                    connection=connection,
+                )
             unit.after_commit(partial(self._publish_job_created, job))
             if prepared.route.is_provider:
                 self._provider.reserve(

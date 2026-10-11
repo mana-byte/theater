@@ -21,6 +21,7 @@ from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import ControlKind, ControlTransport, DeliveryResult
 from theater.models import (
     Busy,
+    JobState,
     TheaterError,
     Tier,
     TranscriptIdentityLost,
@@ -145,6 +146,50 @@ def _publish_routed_send_event(
     )
 
 
+def _auto_result(daemon, job, queued: bool, caller_id: str, target_id: str, prompt: str) -> dict:
+    """The reply to an auto send: delivered now, or queued under the same handle."""
+    result = job.to_dict()
+    if queued:
+        result["delivery"] = "queued"
+        daemon.store.bus_append(
+            "agent.queue_followup",
+            from_id=caller_id,
+            to_id=target_id,
+            payload={"handle": job.handle, "prompt": prompt[:200]},
+        )
+    else:
+        _publish_routed_send_event(
+            daemon, caller_id=caller_id, target_id=target_id, handle=job.handle, prompt=prompt
+        )
+    return result
+
+
+async def _send_after(
+    daemon, params: dict, target_id: str, caller_id: str, task: str, response_format
+) -> dict:
+    """Send once the source job ends: queued behind it, or with its card when it already ended."""
+    handoff = daemon.handoff
+    source, source_name = handoff.resolve_send_source(params, task)
+    if source.state == JobState.RUNNING:
+        job = await daemon.controls.queue_gated_send(
+            target_id,
+            caller_id=caller_id,
+            prompt=_prompt_with_response_format(task, response_format),
+            response_format=response_format,
+            gate=handoff.send_gate(source, source_name, task=task, response_format=response_format),
+        )
+        result = _auto_result(daemon, job, True, caller_id, target_id, task)
+        result["handoff"] = handoff.describe(job.handle)
+        return result
+    prompt = handoff.send_prompt_now(source, source_name, task, response_format)
+    job, queued = await daemon.controls.send_when_safe(
+        target_id, caller_id=caller_id, prompt=prompt, response_format=response_format
+    )
+    result = _auto_result(daemon, job, queued, caller_id, target_id, prompt)
+    result["handoff"] = {"state": "opened", "task_kind": "work", "source": source.handle}
+    return result
+
+
 @method("send")
 async def _send(daemon, params: dict) -> dict:
     """Send through the daemon's selected route: once when safe, else queued under one handle.
@@ -186,6 +231,10 @@ async def _send(daemon, params: dict) -> dict:
         return result
 
     try:
+        if params.get("after") is not None or params.get("task_kind") is not None:
+            return await _send_after(
+                daemon, params, target_id, caller_id, _require(params, "prompt"), response_format
+            )
         if if_busy == "auto":
             job, queued = await daemon.controls.send_when_safe(
                 target_id,
@@ -193,24 +242,7 @@ async def _send(daemon, params: dict) -> dict:
                 prompt=prompt,
                 response_format=response_format,
             )
-            result = job.to_dict()
-            if queued:
-                result["delivery"] = "queued"
-                daemon.store.bus_append(
-                    "agent.queue_followup",
-                    from_id=caller_id,
-                    to_id=target_id,
-                    payload={"handle": job.handle, "prompt": prompt[:200]},
-                )
-            else:
-                _publish_routed_send_event(
-                    daemon,
-                    caller_id=caller_id,
-                    target_id=target_id,
-                    handle=job.handle,
-                    prompt=prompt,
-                )
-            return result
+            return _auto_result(daemon, job, queued, caller_id, target_id, prompt)
         if if_busy == "refuse":
             return await plain()
         redirect.authorize_redirect(daemon, target_id, caller_id)

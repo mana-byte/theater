@@ -6,8 +6,8 @@ description: Orchestrate implementation, investigation, or review work through T
 # Theater Orchestrate
 
 Use only Theater MCP for orchestration: participant discovery, spawning, messaging, waiting,
-transcript inspection, and lifecycle control. Do not delegate through harness-native subagents or
-another orchestration system. Remain responsible for the final result.
+cancelling, and lifecycle control. Do not delegate through harness-native subagents or another
+orchestration system. Remain responsible for the final result.
 
 ## Interpret the requested roster
 
@@ -23,10 +23,9 @@ criteria:
 - Give bounded, mechanical, or well-specified tasks to cheaper capable profiles.
 - Reserve the strongest available profiles for architecture, ambiguous changes, integration, and
   difficult review.
-- Avoid duplicate investigations and overlapping ownership.
-- Use the fewest workers that still provide useful parallelism.
+- Avoid duplicate investigations and overlapping ownership; use the fewest workers that still give
+  useful parallelism.
 - Prefer precise prompts and focused checks over broad exploratory turns.
-- Keep correctness, safety, review depth, and required validation unchanged.
 
 Do not claim cost savings when current price or quota information is unavailable.
 
@@ -35,146 +34,132 @@ Do not claim cost savings when current price or quota information is unavailable
 Inspect the repository and relevant instructions. Define:
 
 - starting branch, commit, and existing dirty work that must be preserved;
-- goal and non-goals;
-- phases and dependencies;
-- acceptance criteria;
-- files or modules owned by each worker;
-- shared interfaces that every affected worker must receive verbatim;
-- focused validation each worker must run;
-- integration and final-validation responsibility.
+- goal and non-goals, phases and dependencies, acceptance criteria;
+- files or modules owned by each worker, and shared interfaces every affected worker receives
+  verbatim;
+- focused validation each worker runs; integration and final validation stay with you.
 
 Run tasks in parallel only when their file ownership and interfaces are independent. Otherwise use
-ordered waves. Keep integration responsibility in the orchestrator.
+ordered waves. Show the user a concise plan, then proceed without routine confirmation. Pause only
+for a material ambiguity, unavailable profile, expanded authority, destructive action, or external
+side effect.
 
-Show the user a concise plan, then proceed without requesting routine confirmation. Pause only for a
-material ambiguity, unavailable profile, expanded authority, destructive action, or external side
-effect.
-
-Use the Theater scratchpad when several workers need the same plan, interface, ownership map, or
-decision. Keep entries concise and namespaced to the orchestration. Update stale entries when the
-plan changes. Never place credentials or other secrets there, and do not treat scratchpad state as a
-durable project artifact.
+Use the Theater scratchpad for a plan, interface, or decision several workers share. Keep entries
+concise and namespaced to the orchestration; never place secrets there.
 
 ## Keep orchestration work local
 
 Delegate substantive, independently verifiable work: investigation, reproduction, audit, review,
 implementation, focused tests, migrations, and documentation coupled to an implementation. Keep
-planning, worker coordination, integration, final validation, user updates, final responses, and PR
-descriptions with the orchestrator. Do not delegate a prose-only summary or report merely to save
-context or tokens.
+planning, coordination, integration, final validation, user updates, and PR descriptions with you.
+Do not delegate a prose-only summary merely to save context.
 
-A worker may own a complete bounded delivery workflow only when the user explicitly requests it.
-For example, delegating a PR may include investigating the changes, drafting the description, and
-submitting it; do not delegate only its prose. Submission still requires the user's authority for
-that external side effect, and the orchestrator remains responsible for reviewing the result.
+A worker may own a complete bounded delivery workflow, such as submitting a PR, only when the user
+explicitly requests it; submission still needs the user's authority, and you review the result.
 
 ## Spawn workers
 
-Every worker must:
+Every worker uses `approval="yolo"` and its own worktree (`worktree=true`), and receives one
+concrete task: its owned files, forbidden scope, required interfaces, invariants, acceptance
+criteria, and the focused checks to run, with exact paths, symbols, and short snippets where they
+remove ambiguity. Workers preserve unrelated user changes, commit when changes are requested, never
+run the full test suite, and create no report file unless a report is the requested artifact.
 
-- use `approval="yolo"`;
-- run in its own Theater worktree;
-- receive one concrete, bounded task;
-- receive all task-local context needed to work without reconstructing the plan;
-- know its owned files, forbidden scope, required interfaces, invariants, acceptance criteria, and
-  focused validation commands;
-- receive exact directories, filenames, symbols, and relevant line numbers, plus short code or
-  interface snippets when they remove ambiguity;
-- preserve unrelated user changes;
-- commit its work when changes are requested;
-- run only focused tests for its owned change, never the full test suite;
-- never create a report unless the user's requested artifact is itself a report;
-- return only status, summary, commit, changed paths, checks, and blockers.
+Ask for the result you will act on with `response_format={"$theater": "delegate"}` (status,
+summary, blockers, plus commit, changed paths, and checks): `await_sessions` returns it parsed in
+`structured_result`. Use `{"$theater": "review"}` for reviewers. A preset is a validated shape, not
+proof that the work is right. Leave `response_format` off for open-ended investigations, and where
+a resume cannot carry it.
 
-Prefer `response_format` for bounded results the orchestrator will consume mechanically, such as an
-implementation handoff or an investigation's answer: use `{"$theater": "delegate"}` (status,
-summary, blockers; optional commit, changed_paths, checks, findings, limitations). `review`,
-`debate`, and `custom` (your own schema) cover other answers. A tagged form validates the whole
-final answer and ends `unable_to_parse` when none is produced; a bare schema stays a prompt hint plus
-JSON parsing. Keep it optional for resume paths that cannot carry it. Neither proves the work is
-correct; check the repository.
+Yolo approval does not broaden the user's scope or authorize destructive or unrelated external
+actions. When a spawn fails, inspect Theater state before retrying; never silently pick another
+profile or create a duplicate participant.
 
-Yolo approval does not broaden the user's requested scope or authorize destructive or external
-actions unrelated to the task.
+## Hand work from one agent to the next
 
-When a spawn fails, inspect Theater state before retrying. Never silently choose another profile or
-create a duplicate participant.
+Do not copy a result, hash, branch, or handle into the next prompt. Name the work it depends on:
+`after="Writer"` (a live name, or the exact job handle) on `spawn_session` or `send`. Theater
+holds the task until that work ends, then adds a labelled card: the outcome, the pinned Git commit
+and whether the tree was dirty, and the source's answer marked unverified (a failed source arrives
+as a labelled failure). You write only the task; the same handle covers the wait and the work, so
+a single `await_sessions` call returns the answer.
+
+- A successor that must build on a predecessor's commits is spawned with `base_branch` set to the
+  predecessor's branch from its spawn result, so its worktree starts from the finished work.
+- A prompt that begins "if the handoff outcome is not done, stop and report" lets an unattended
+  successor refuse to build on a failed source.
+- Await a handed-off task from a later turn, not from the work it depends on: Theater refuses an
+  await that would deadlock.
 
 ## Supervise and review
 
-For every `await_sessions` call, use the longest max_wait await_sessions allows (its cap is stated
-in its description). The call returns immediately when any
-requested handle finishes, so a long ceiling never delays a completed worker. Do not use 30–50-second
-waits to probe progress or interpret such a short expiration as evidence that a worker stalled. If a
-wait expires, await the same handles again: timeout means the caller stopped
-waiting, not that a worker stopped. Never replace long waits with rapid conversational polling or
-duplicate spawns. Update the user at meaningful phase boundaries, not after every wait. Read only a
-narrow transcript tail when needed to diagnose status or recover missing context; never load a whole
-transcript by default.
+Use the longest `max_wait` `await_sessions` allows; it returns as soon as any handle finishes, so
+a long ceiling never delays a completed worker. A timeout means you stopped waiting, not that a
+worker stopped: await the same handles again. Never poll with short waits, repeated sends, or
+duplicate spawns. Update the user at phase boundaries, not after every wait.
 
-When the user changes scope or priorities, update the plan first, then redirect or stop affected
-workers before continuing. Do not let superseded tasks keep changing their worktrees.
+`await_sessions` returns the worker's answer. Read a transcript or call `get_session_controls`
+only to diagnose a worker that is stuck, failed, or silent, using the narrowest tail that explains
+it; they are not how you read results. Before replacing a stalled or failed worker, inspect its
+state, worktree, branch, and commits; reuse or resume it when safe, and never create a duplicate
+while its work may still be active.
 
-Before replacing a stalled or failed worker, inspect its participant state, transcript tail,
-worktree, branch, and commits. Reuse or resume it when safe. Never create a duplicate worker while
-the previous worker or its unaccounted work may still be active.
+When the user changes scope, update the plan, then redirect or stop affected workers.
+`cancel_job` withdraws work that has not started, such as a queued message or a spawn still waiting
+for its source, and costs nothing; `interrupt_session` is for work already running.
 
-Never accept a worker's self-report as proof. Review the real commit, diff, affected interfaces,
-tests, and failure paths against the plan and acceptance criteria.
+Never accept a self-report as proof. Review the real commit, diff, interfaces, tests, and failure
+paths against the plan.
+
+For a worker's change, an independent per-worker review is
+`spawn_session(task_kind="independent_review", worktree=true, after=<worker>, response_format=
+{"$theater": "review"})`: the reviewer receives the worker's facts, not its conclusions, in a
+worktree at exactly the commit the worker finished on, and the request is refused when that work
+was left uncommitted or unpinned. Tell the worker to commit before it ends.
 
 When work does not pass review:
 
-1. Send one precise correction request citing concrete defects and expected evidence.
+1. Send one precise correction citing concrete defects and the evidence you expect; a busy worker
+   queues it and Theater delivers it in order, so you never wait for idle.
 2. Review the resulting artifacts again.
-3. If still incorrect, send one final correction request.
+3. If still incorrect, send one final correction.
 4. After two correction rounds, stop delegating that correction and finish it directly.
 
-The initial implementation is not a correction round. Clarifying a blocked requirement is not a
-correction round unless the worker already submitted work for review.
-
-Do not merge rejected work. After acceptance, integrate deliberately and run final validation in the
-orchestrator's branch.
+The initial implementation is not a correction round; clarifying a blocked requirement is not one
+unless the worker already submitted work. Do not merge rejected work; after acceptance, integrate
+deliberately and run final validation in your own branch.
 
 ## Run independent final review
 
-After integrating accepted worker changes, create a reviewable commit and run integration checks.
-Spawn one independent reviewer with `approval="yolo"` in its own worktree at that exact commit. The
-reviewer must use reasoning effort `high` or above and should use a different model from the
-orchestrator when the requested pool and Theater configuration allow it. If the pool contains no
-eligible reviewer, ask before spawning outside it. If no different eligible model exists, use a fresh
-independent session rather than weakening review.
+After integrating accepted work, create a reviewable commit and run integration checks. Spawn one
+independent reviewer with `approval="yolo"` in its own worktree based on that exact commit
+(`worktree=true`, `base_branch` the integrated commit or branch). Do not use `after` here: the
+reviewed commit is yours, not a worker's. The reviewer uses reasoning effort `high` or above and,
+when the pool and configuration allow, a different model from yours; if the pool has no eligible
+reviewer, ask before spawning outside it. It stays read-only despite yolo.
 
-The reviewer remains read-only despite yolo approval. Give it the original request, plan, acceptance
-criteria, diff range, repository invariants, and test evidence, but not the orchestrator's conclusions.
-Require findings to identify severity, location, evidence, and a concrete failure mode. Do not ask it
-to create a report file. The reviewer may run focused checks but never the full test suite.
+Give it the original request, plan, acceptance criteria, diff range, repository invariants, and
+test evidence, but not your conclusions, and ask for `{"$theater": "review"}`. Findings carry
+severity, location, evidence, and a concrete failure mode; it may run focused checks, never the
+full suite, and writes no report file.
 
 Verify every finding independently. Debate disputed findings with evidence until both sides agree
-that no substantiated correctness, safety, architecture, or acceptance-criteria blocker remains.
-Do not prolong subjective style disagreements. After two exchanges without convergence, run a
-decisive check when possible; otherwise ask the user to decide a material blocker and let the
-orchestrator decide a nonblocking preference with recorded rationale.
+no substantiated correctness, safety, architecture, or acceptance blocker remains; do not prolong
+style disagreements. After two exchanges without convergence, run a decisive check, else ask the
+user to decide a material blocker and decide a nonblocking preference yourself with recorded
+rationale.
 
-Delegate a localized correction to its original worker only when that worker retains useful context,
-its branch remains compatible, and its two correction rounds are not exhausted. Otherwise make the
-correction directly. Do not create a new fixing worker. Ask the same reviewer to recheck the affected
-surface, then run final validation in the orchestrator's branch. The reviewer does not implement
-changes.
+Delegate a localized correction to its original worker only when it retains useful context, its
+branch stays compatible, and its correction rounds are not spent; otherwise make it directly, then
+ask the same reviewer to recheck the affected surface and run final validation yourself.
 
-Keep workers and their worktrees available until final review and integration are complete. Never
-kill a participant or remove its worktree while accepted or potentially recoverable work remains
-unintegrated. After the work is complete, name every direct child you intend to kill and ask once.
-Using the harness's native ask-user or confirmation tool is highly recommended when one is
-available; otherwise ask in a normal assistant response. A bare `yes` or `confirm`, returned through
-that native tool or in the user's next reply, authorizes every child you named. Never ask the user to
-repeat or paste the names or ids. Once confirmation arrives, make those authorized calls before
-sending another assistant response and without asking again between calls. Deeper descendants
-remain owned by their direct parents and require bottom-up coordination.
-Adopting a sibling participant as your own child (`adopt_session`) carries the same
-explicit-approval rule: name every participant you intend to adopt and wait for the
-user's yes before calling.
+Keep workers and worktrees until review and integration are complete. After the work is complete,
+name every direct child you intend to kill and ask once (the harness's ask-user tool is
+recommended); a bare `yes` authorizes every child you named, so make those calls without asking
+again and without asking the user to repeat names or ids. Deeper descendants are killed by their
+direct parents, bottom-up. Adopting a sibling (`adopt_session`) needs the same explicit approval.
 
 ## Finish
 
-Report the integrated outcome, important design decisions, validation performed, and any remaining
+Report the integrated outcome, important design decisions, validation performed, and remaining
 risk. Distinguish completed work from unverified worker claims and from deferred scope.

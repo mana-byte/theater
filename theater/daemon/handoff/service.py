@@ -6,10 +6,12 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 
 from sqlalchemy import select
 
 from theater import timing
+from theater.constants.daemon import CONTROL_QUEUE_MAX_PENDING
 from theater.constants.handoff import (
     ERROR_CANCELLED,
     ERROR_LAUNCH_REFUSED,
@@ -20,6 +22,8 @@ from theater.constants.handoff import (
     GATE_OPENED,
     GATE_OPENING,
     GATE_WAITING,
+    KIND_SEND,
+    KIND_SPAWN,
     MAX_CHAIN,
     MAX_WAITING_PER_CALLER,
     PATHS_MAX,
@@ -33,7 +37,7 @@ from theater.daemon.handoff.models import HandoffGate
 from theater.daemon.handoff.resolution import participant_of, resolve_source
 from theater.daemon.response_contracts.prompts import prompt_with_guidance
 from theater.daemon.schema import launch_reservations
-from theater.models import BadRequest, JobState, TheaterError, now
+from theater.models import BadRequest, Job, JobState, TheaterError, now
 from theater.observability.catalog import HANDOFF_GATE
 
 logger = logging.getLogger("theater.handoff")
@@ -45,6 +49,18 @@ class HandoffRefused(TheaterError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class GateReadiness:
+    """Whether a queued send may be dispatched now, must wait, or can never be."""
+
+    waiting: bool = False
+    error: TheaterError | None = None
+
+
+_READY = GateReadiness()
+_WAITING = GateReadiness(waiting=True)
 
 
 class HandoffService:
@@ -73,6 +89,7 @@ class HandoffService:
         from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 
         stored = {
+            "kind": KIND_SPAWN,
             "params": {k: params.get(k) for k in _REQUEST_KEYS},
             "task": task,
             "response_format": response_format,
@@ -113,6 +130,94 @@ class HandoffService:
         )
         return result
 
+    # ---- send ---------------------------------------------------------------
+
+    def resolve_send_source(self, params: dict, task: str) -> tuple[Job, str | None]:
+        """Validate ``after`` on a send and resolve it once; returns the source job and its name."""
+        kind = params.get("task_kind") or TASK_KIND_WORK
+        if kind == TASK_KIND_REVIEW:
+            raise BadRequest(
+                "independent_review needs its own isolated worktree on the source's exact "
+                "commit: use spawn_session with after, not send"
+            )
+        if kind != TASK_KIND_WORK:
+            raise BadRequest(f"task_kind must be one of {', '.join(TASK_KINDS)}; got {kind!r}")
+        if not params.get("after"):
+            raise BadRequest("task_kind needs after: name the source it is about")
+        if (params.get("if_busy") or "auto") != "auto":
+            raise BadRequest(
+                "after works with the default send: Theater queues the message until the source "
+                "ends, so if_busy must be omitted"
+            )
+        if not task.strip():
+            raise BadRequest("after needs a prompt: state the task, Theater supplies the context")
+        source, participant = resolve_source(self.daemon, params.get("after"))
+        return source, participant.name if participant is not None else None
+
+    def send_gate(
+        self, source: Job, source_name: str | None, *, task: str, response_format: str | None
+    ) -> HandoffGate:
+        """The gate row for a send waiting on ``source``; the queue fills in its job handle."""
+        return HandoffGate(
+            job_handle="",
+            caller_id=None,
+            source_handle=source.handle,
+            source_participant_id=source.target_id,
+            source_name=source_name,
+            task_kind=TASK_KIND_WORK,
+            request=json.dumps(
+                {"kind": KIND_SEND, "task": task, "response_format": response_format},
+                sort_keys=True,
+            ),
+            state=GATE_WAITING,
+            error_code=None,
+            error=None,
+            created_at=0.0,
+            updated_at=0.0,
+        )
+
+    def send_prompt_now(self, source: Job, source_name: str | None, task: str, rf) -> str:
+        """The prompt for a send whose source already ended: no gate, the card is rendered now."""
+        gate = self.send_gate(source, source_name, task=task, response_format=rf)
+        return self._render_send(gate, source)
+
+    def _render_send(self, gate: HandoffGate, source: Job) -> str:
+        stored = json.loads(gate.request)
+        prompt = (
+            f"{stored['task']}\n\n{render_card(gate.task_kind, self._source_view(gate, source))}"
+        )
+        rf = stored["response_format"]
+        return prompt_with_guidance(prompt, rf) if rf is not None else prompt
+
+    def ready_for_dispatch(self, job: Job) -> GateReadiness:
+        """Called by the dispatcher before every delivery: open the gate or say why not."""
+        if job.kind != KIND_SEND:
+            return _READY
+        gate = self.store.get_handoff_gate(job.handle)
+        if gate is None or gate.state != GATE_WAITING:
+            return _READY
+        source = self.store.get_job(gate.source_handle)
+        if source is None:
+            message = "the source job no longer exists"
+            self._close(gate, GATE_FAILED, ERROR_SOURCE_GONE, message)
+            return GateReadiness(error=HandoffRefused(ERROR_SOURCE_GONE, message))
+        if source.state == JobState.RUNNING:
+            return _WAITING
+        prompt = self._render_send(gate, source)
+        with self.store.write_unit() as unit:
+            opened = self.store.move_handoff_gate(
+                gate.job_handle,
+                expected=(GATE_WAITING,),
+                state=GATE_OPENED,
+                updated_at=now(),
+                connection=unit.connection,
+            )
+            if opened:
+                self.store.set_job_prompt(gate.job_handle, prompt, connection=unit.connection)
+        if opened:
+            self._signal(gate, "success")
+        return _READY
+
     @staticmethod
     def _validate(params: dict, task: str, kind: object) -> None:
         if kind not in TASK_KINDS:
@@ -138,16 +243,29 @@ class HandoffService:
     # ---- waiting and opening --------------------------------------------------
 
     def _on_terminal(self, handle: str) -> None:
-        """Open every task waiting on this job; cancel a gate whose own job ended first."""
+        """Release every task waiting on this job; cancel a gate whose own job ended first."""
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             return
         for gate in self.store.handoff_gates((GATE_WAITING,), source_handle=handle):
-            self._schedule(gate.job_handle)
+            job = self.store.get_job(gate.job_handle)
+            if job is not None and job.kind == KIND_SEND and job.target_id is not None:
+                # The dispatcher owns a send's gate: it checks readiness itself before delivery.
+                controls = getattr(self.daemon, "controls", None)
+                if controls is not None:
+                    controls.schedule_dispatch(job.target_id)
+            else:
+                self._schedule(gate.job_handle)
         own = self.store.get_handoff_gate(handle)
         if own is not None and own.state == GATE_WAITING:
-            self._close(own, GATE_CANCELLED, ERROR_CANCELLED, "the task ended before it launched")
+            self._close(
+                own,
+                GATE_CANCELLED,
+                ERROR_CANCELLED,
+                "the task ended before it launched",
+                expected=(GATE_WAITING,),
+            )
 
     def _schedule(self, handle: str) -> None:
         try:
@@ -205,14 +323,7 @@ class HandoffService:
 
         stored = json.loads(gate.request)
         params, task, response_format = stored["params"], stored["task"], stored["response_format"]
-        participant = participant_of(self.daemon, source.target_id)
-        view = SourceView(
-            job=source,
-            name=participant.name if participant is not None else gate.source_name,
-            participant_id=source.target_id,
-            evidence=self.store.get_job_evidence(source.handle),
-            paths=tuple(self.store.job_modified_paths(source.handle, limit=PATHS_MAX)),
-        )
+        view = self._source_view(gate, source)
         base = params.get("base_branch")
         if gate.task_kind == TASK_KIND_REVIEW:
             base = await self._review_base(view, str(params["cwd"]))
@@ -247,6 +358,16 @@ class HandoffService:
             launch_wiring=wiring_from_value(params.get("wiring")),
             launch_response_format=response_format,
             reserved_participant_id=gate.job_handle,
+        )
+
+    def _source_view(self, gate: HandoffGate, source: Job) -> SourceView:
+        participant = participant_of(self.daemon, source.target_id)
+        return SourceView(
+            job=source,
+            name=participant.name if participant is not None else gate.source_name,
+            participant_id=source.target_id,
+            evidence=self.store.get_job_evidence(source.handle),
+            paths=tuple(self.store.job_modified_paths(source.handle, limit=PATHS_MAX)),
         )
 
     @staticmethod
@@ -296,10 +417,18 @@ class HandoffService:
         """The task will never launch: end its job crashed and retire the placeholder."""
         self._close(gate, GATE_FAILED, code, message)
 
-    def _close(self, gate: HandoffGate, state: str, code: str, message: str) -> None:
+    def _close(
+        self,
+        gate: HandoffGate,
+        state: str,
+        code: str,
+        message: str,
+        *,
+        expected: tuple[str, ...] = (GATE_WAITING, GATE_OPENING),
+    ) -> None:
         if not self.store.move_handoff_gate(
             gate.job_handle,
-            expected=(GATE_WAITING, GATE_OPENING),
+            expected=expected,
             state=state,
             updated_at=now(),
             error_code=code,
@@ -313,14 +442,23 @@ class HandoffService:
                 state=JobState.KILLED if state == GATE_CANCELLED else JobState.CRASHED,
                 error_code=code,
             )
-        self.daemon.registry.mark_dead(gate.job_handle)
+        if job is None or job.kind == KIND_SPAWN:
+            self.daemon.registry.mark_dead(
+                gate.job_handle
+            )  # the placeholder child; a send has none
         self._signal(gate, "cancelled" if state == GATE_CANCELLED else "error")
         logger.info("handoff gate %s %s: %s", gate.job_handle, state, message)
 
     def _signal(self, gate: HandoffGate, result: str) -> None:
         waited = max(0.0, now() - gate.created_at) * 1000.0
+        kind = json.loads(gate.request).get("kind", KIND_SPAWN)
         timing.emit(
-            HANDOFF_GATE, waited, result=result, task_kind=gate.task_kind, id=gate.job_handle
+            HANDOFF_GATE,
+            waited,
+            result=result,
+            task_kind=gate.task_kind,
+            kind=kind,
+            id=gate.job_handle,
         )
 
     # ---- restart --------------------------------------------------------------------
@@ -345,7 +483,8 @@ class HandoffService:
                 self._close(gate, GATE_CANCELLED, ERROR_CANCELLED, "ended before the restart")
                 continue
             self.daemon.jobs.track(gate.job_handle)
-            self._schedule(gate.job_handle)
+            if job.kind == KIND_SPAWN:
+                self._schedule(gate.job_handle)  # a send's queue row is recovered by the controls
 
     # ---- facts other layers read ------------------------------------------------------
 
@@ -354,8 +493,15 @@ class HandoffService:
         gate = self.store.get_handoff_gate(handle)
         if gate is None or gate.state != GATE_WAITING:
             return False
-        self._close(gate, GATE_CANCELLED, ERROR_CANCELLED, "cancelled before its source ended")
-        return self.store.get_handoff_gate(handle).state == GATE_CANCELLED
+        self._close(
+            gate,
+            GATE_CANCELLED,
+            ERROR_CANCELLED,
+            "cancelled before its source ended",
+            expected=(GATE_WAITING,),
+        )
+        current = self.store.get_handoff_gate(handle)
+        return current is not None and current.state == GATE_CANCELLED
 
     def never_dispatched(self, handle: str) -> bool:
         """Durable proof that this job's work was never launched, for the await exception."""
@@ -363,21 +509,46 @@ class HandoffService:
         return gate is not None and gate.state in (GATE_FAILED, GATE_CANCELLED)
 
     def dependency_targets(self, handles: list[str]) -> list[str]:
-        """Participants whose running jobs must finish before an awaited gated task can start."""
+        """Participants whose running jobs must finish before an awaited message or task can go.
+
+        Follows a gate to its source job, and a send to the earlier gated sends of its own lane
+        (one caller to one target stays in order), at most ``MAX_CHAIN`` hops each.
+        """
         targets: list[str] = []
         for handle in handles:
-            current = handle
-            for _ in range(MAX_CHAIN):
+            pending: list[str] = [handle]
+            seen: set[str] = set()
+            while pending and len(seen) < MAX_CHAIN:
+                current = pending.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
                 gate = self.store.get_handoff_gate(current)
-                if gate is None or gate.state not in (GATE_WAITING, GATE_OPENING):
-                    break
-                source = self.store.get_job(gate.source_handle)
-                if source is None or source.state != JobState.RUNNING or source.target_id is None:
-                    break
-                if source.target_id not in targets:
-                    targets.append(source.target_id)
-                current = source.handle
+                if gate is not None and gate.state in (GATE_WAITING, GATE_OPENING):
+                    source = self.store.get_job(gate.source_handle)
+                    if source is not None and source.state == JobState.RUNNING:
+                        if source.target_id is not None and source.target_id not in targets:
+                            targets.append(source.target_id)
+                        pending.append(source.handle)
+                job = self.store.get_job(current)
+                if job is not None:
+                    pending.extend(self._lane_predecessors(job))
         return targets
+
+    def _lane_predecessors(self, job: Job) -> list[str]:
+        """Earlier queued sends from the same caller to the same target that still hold the lane."""
+        if job.kind != KIND_SEND or job.target_id is None or job.state != JobState.RUNNING:
+            return []
+        callers = self.store.queued_control_callers(job.target_id)
+        before: list[str] = []
+        for operation in self.store.queued_control_operations(job.target_id)[
+            :CONTROL_QUEUE_MAX_PENDING
+        ]:
+            if operation.job_handle == job.handle:
+                return before
+            if callers.get(operation.operation_id) == job.caller_id and operation.job_handle:
+                before.append(operation.job_handle)
+        return []
 
     def describe(self, handle: str) -> dict | None:
         gate = self.store.get_handoff_gate(handle)

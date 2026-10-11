@@ -5,10 +5,12 @@ from __future__ import annotations
 from theater.daemon.controls._common import QUEUE_ORIGIN_SEND
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.dispatch import TEMPORARY_REFUSALS
+from theater.daemon.handoff.models import HandoffGate
 from theater.models import Job
 
 OUTCOME_DELIVERED = "delivered"
 OUTCOME_QUEUED = "queued"
+OUTCOME_GATED = "gated"
 
 
 class MessageControls(ControlHost):
@@ -49,3 +51,24 @@ class MessageControls(ControlHost):
             return job, True
         self._count_send_admission(OUTCOME_DELIVERED)
         return job, False
+
+    async def queue_gated_send(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        prompt: str,
+        response_format: str | None,
+        gate: HandoffGate,
+    ) -> Job:
+        """Queue a message that waits for a source job: always queued, never delivered now."""
+        job = await self.queue_followup(
+            participant_id,
+            caller_id=caller_id,
+            prompt=prompt,
+            response_format=response_format,
+            origin=QUEUE_ORIGIN_SEND,
+            gate=gate,
+        )
+        self._count_send_admission(OUTCOME_GATED)
+        return job

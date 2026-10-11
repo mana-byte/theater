@@ -336,6 +336,8 @@ async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
         "if_busy",
         "job_handle",
         "response_format",
+        "after",
+        "task_kind",
     }
     assert send["properties"]["if_busy"]["default"] == "auto"
     assert set(send["properties"]["if_busy"]["enum"]) == {
@@ -1136,3 +1138,64 @@ def test_only_daemon_transport_failures_map_to_daemon_unavailable():
     assert refusal_envelope(FileNotFoundError("cwd")) is None
     envelope = refusal_envelope(ConnectionError("daemon closed the connection"))
     assert envelope is not None and envelope["error"]["code"] == "daemon_unavailable"
+
+
+async def test_handoff_arguments_reach_the_tools_and_are_taught_once(daemon):
+    mcp = build("p1", "vibe")
+    tools = {t.name: t for t in await mcp.list_tools()}
+    descriptions = {name: " ".join(t.description.split()) for name, t in tools.items()}
+
+    spawn, send = tools["spawn_session"].input_schema, tools["send"].input_schema
+    assert {"after", "task_kind"} <= set(spawn["properties"]) & set(send["properties"])
+    assert "independent_review" in json.dumps(spawn["properties"]["task_kind"])
+    assert "source_not_reviewable" in descriptions["spawn_session"]
+    assert "pinned commit" in descriptions["spawn_session"]
+    assert "queued" in descriptions["send"] and "cancel_job" in descriptions["send"]
+    assert "waiting for its `after` source" in descriptions["cancel_job"]
+    # Shared guidance teaches natural send and `after`, and no longer sends agents to the
+    # transcript after every await.
+    assert 'after="Writer"' in mcp.instructions
+    assert "read_transcript to read what it actually said" not in mcp.instructions
+    assert "diagnose a stuck, failed or surprising child" in mcp.instructions
+    assert "Diagnose" in descriptions["read_transcript"]
+    assert "Diagnose" in descriptions["get_session_controls"]
+
+
+async def test_after_and_task_kind_are_forwarded_unchanged_to_the_daemon():
+    from theater.mcp.session import Session
+
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, method, **params):
+            self.calls.append((method, params))
+            keys = ("name", "description", "tier", "status", "cwd", "branch", "session_id")
+            return {
+                "id": "c1",
+                "handle": "c1",
+                "harness": "codex",
+                "parent_id": "p1",
+                "addressable": False,
+                "handoff": {"state": "waiting"},
+                **dict.fromkeys(keys),
+            }
+
+    client = Recorder()
+    session = Session(participant_id="p1", harness="vibe", client=client, _resolved=True)
+
+    spawned = await mcp_tools.spawn_session(
+        session,
+        harness="codex",
+        approval="yolo",
+        prompt="Review",
+        worktree=True,
+        after="Writer",
+        task_kind="independent_review",
+    )
+    await mcp_tools.send_prompt(session, target_id="Bob", prompt="x", after="Writer")
+
+    (_, spawn_params), (_, send_params) = client.calls
+    assert (spawn_params["after"], spawn_params["task_kind"]) == ("Writer", "independent_review")
+    assert (send_params["after"], send_params["task_kind"]) == ("Writer", None)
+    assert spawned["handoff"] == {"state": "waiting"}

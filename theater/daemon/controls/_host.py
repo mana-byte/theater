@@ -4,7 +4,7 @@ Each control mixin subclasses ``ControlHost``; at runtime it is plain ``object``
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     import asyncio
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from theater.daemon.controls.public_admission import PublicControlAdmission
     from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
     from theater.daemon.controls.service import _ControlLatency
+    from theater.daemon.handoff.models import HandoffGate
     from theater.daemon.jobs import JobManager
     from theater.daemon.operations.notifications import OperationNotifier
     from theater.daemon.persistence.repositories.control_operations import ControlOperation
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
         _store: Store
         _jobs: JobManager
         _gates: ControlGates
+        _gate_opener: Any
         _projection: ControlActionProjector
         _native_identity_fencing: bool
         _routes: ControlRouteResolver
@@ -77,6 +79,7 @@ if TYPE_CHECKING:
             prompt: str,
             response_format: str | None = None,
             origin: str | None = None,
+            gate: HandoffGate | None = None,
         ) -> Job: ...
         def _count_send_admission(self, outcome: str) -> None: ...
         def _count_cancel(self, outcome: str) -> None: ...

@@ -42,16 +42,24 @@ from theater.mcp.tools import Session
 INSTRUCTIONS = """Theater makes the other agents on this machine addressable,
 so you can hand work to them and collect it back.
 
-The loop: spawn_session to create a child, await_sessions to wait for it,
-read_transcript to read what it actually said, the repo to see what it
-actually did, a merge to keep the work, and only then ask the user whether
-to kill it.
+spawn_session starts a child; send gives an agent that is already running more work.
+Each returns one handle, and await_sessions waits for it and returns the answer. Theater
+queues a message for a busy peer and delivers it when that is safe, so you never poll or
+retry; cancel_job withdraws work that has not started.
 
-Two failures belong to orchestration rather than to any one call. Children
-that share a file do not run in parallel, they produce a conflict; split the
-work so each owns files no sibling touches. And a child reports on itself —
-"done" is the end of its turn, not a verdict on its work — so check the repo
-before you trust it.
+To pass one agent's result to the next, name it: after="Writer" on spawn_session or send.
+Theater waits for that work, then adds the facts (outcome, pinned commit, the answer) to the
+task you wrote, so you copy no path, hash or handle. For a review that must not inherit the
+author's conclusions, spawn_session(task_kind="independent_review", worktree=true, after=...)
+gives the reviewer the facts, not the verdict, in a worktree at the exact commit.
+
+Ask for a structured answer with response_format when you will act on it; await_sessions
+returns it parsed. A child's "done" is the end of its turn, not a verdict on its work: check
+the work (the repo, a review) before you rely on it. read_transcript and get_session_controls
+diagnose a stuck, failed or surprising child; they are not how you read answers.
+
+Children that share a file do not run in parallel, they produce a conflict; split the
+work so each owns files no sibling touches.
 
 Address participants by name. Every `target` accepts a live name, and names are
 unique among live participants, so you never need to look up or memorize an id
@@ -63,6 +71,7 @@ Omission rules are tool-specific.
 
 Wait with await_sessions, never a shell sleep or poll loop. A refused call
 returns a code, and `next` when known: follow it instead of retrying unchanged.
+Only ask the user to kill a child once its work is merged or abandoned.
 
 Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
 """
@@ -106,6 +115,10 @@ send or ask the user; never sleep-poll it. No-job entries omit state.
 Re-await a pending or timed-out entry only while its job or presence can still change.
 max_wait=0 returns current state without blocking (running entries read await_reason=timeout):
 use it for status sweeps.
+
+A spawn or send given `after` shows `handoff` (state, source, ...) and stays running while it
+waits for its source; if it never launched (cancelled, refused), its terminal state alone
+releases the await.
 
 Done means the turn ended, not that its work is correct. `result` is a bounded preview of the
 child's final message (about 2,000 chars): its claim, not evidence; check the repo.
@@ -172,10 +185,25 @@ harness:  which CLI to run. This machine has: {harnesses}. Call
           decides whether a spawn succeeds.
 prompt:   the task, delivered on the child's command line at startup.
           Optional; omit it or pass null to start a plain CLI with no task.
-          The child inherits nothing you know. This string is the entire
-          handoff, so it has to carry the goal, the files it may change,
-          what it must leave alone, how to check its own work, and what
-          to report back. Everything you leave out, it will invent.
+          The child inherits nothing you know, so state the goal, the files it
+          may change, what it must leave alone, how to check its own work, and
+          what to report back. With `after`, Theater adds the source's context;
+          you still write the task.
+after:    a live participant name or an exact job handle. The child is reserved
+          now and launches, with the task you wrote plus a labelled card about
+          that work, only when it ends: no worktree, argv or terminal exists
+          before. The same handle follows the whole life: await_sessions waits
+          for the dependency and then for the child, and cancel_job withdraws it
+          while it waits. The card has the source's outcome and its pinned Git
+          commit and dirty state, and, for a task, its answer marked unverified;
+          a failed source gives a labelled failure. Requires a prompt; not with
+          resume. Awaiting it from the source's own work is a cycle, refused.
+task_kind: "work" (default) or "independent_review", needing `after`.
+          "independent_review" gives the reviewer the source's facts without its
+          conclusions and requires worktree=true: the isolated worktree is based
+          on exactly the source's pinned commit, and the review is refused
+          (source_not_reviewable) if the source left uncommitted changes or no
+          pinned commit. Omit base_branch with it.
 response_format: optional JSON object. A bare JSON Schema object is a prompt hint
           only: the daemon injects it once and parses the whole final answer with
           json.loads, with no validation, scraping, or retry. A tagged object is a strict
@@ -196,8 +224,7 @@ response_format: optional JSON object. A bare JSON Schema object is a prompt hin
           asks the same agent to correct an invalid answer a bounded number of times; the
           job stays running and you see nothing of it.
           Otherwise, or when that fails, the job ends with structured_status
-          "unable_to_parse". await_sessions returns a valid answer in structured_result,
-          so you need not read the transcript.
+          "unable_to_parse". await_sessions returns a valid answer in structured_result.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately. A "manual" child may stop
@@ -261,7 +288,8 @@ description: highly recommended for user clarity: a short, plain, specific,
            non-verbose summary of the child's purpose (maximum 160 Unicode
            codepoints). It is durable and is inherited by resume unless an
            explicit replacement or empty string is supplied.
-base_branch: the branch to base the worktree on. Defaults to current HEAD.
+base_branch: the branch to base the worktree on. Defaults to current HEAD. Not with
+           task_kind="independent_review", whose base is the source's pinned commit.
 resume:    a session id, from `recall`, to resume instead of starting cold.
            Also accepts a Theater participant id: if the value matches a
            retained participant, the daemon resolves it to that
@@ -321,12 +349,13 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
 
     @mcp_tool()
     async def cancel_job(handle: str) -> dict:
-        """Withdraw a message you sent that Theater has not yet transmitted.
+        """Withdraw work you requested that has not started.
 
-        Only the requester can cancel. Returns {"handle", "cancelled"}; when it is too
-        late, `reason` is "delivered", "delivery_uncertain" (it may have reached the
-        target; never assume it did not), "finished" (with `state`), or
-        "not_cancellable".
+        A queued message Theater has not transmitted, or a spawn_session still waiting for
+        its `after` source (nothing was created for it). Only the requester can cancel.
+        Returns {"handle", "cancelled"}; when it is too late, `reason` is "delivered",
+        "delivery_uncertain" (it may have reached the target or be launching; never assume
+        it did not), "finished" (with `state`), or "not_cancellable".
         """
         return await tools.cancel_job(session, handle=handle)
 
@@ -361,7 +390,7 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
 
     @mcp_tool()
     async def get_session_controls(target: str) -> dict:
-        """Report one session's effective controls, health, and queue.
+        """Diagnose why a send or setting is not going through: one session's controls.
 
         Read-only — nothing is delivered or changed. The daemon answers
         with the effective capabilities (send, steer, queue_followup,
@@ -683,6 +712,8 @@ def build(
         name: str | None = None,
         description: str | None = None,
         wiring: Literal["auto", "native", "legacy"] = "auto",
+        after: str | None = None,
+        task_kind: Literal["work", "independent_review"] | None = None,
     ) -> dict:
         return await tools.spawn_session(
             session,
@@ -700,6 +731,8 @@ def build(
             name=name,
             description=description,
             wiring=wiring,
+            after=after,
+            task_kind=task_kind,
         )
 
     @mcp_tool()
@@ -747,6 +780,8 @@ def build(
         if_busy: Literal["auto", "refuse", "queue", "amend", "replace"] = "auto",
         job_handle: str | None = None,
         response_format: dict | None = None,
+        after: str | None = None,
+        task_kind: Literal["work"] | None = None,
     ) -> dict:
         """Send a prompt to an already-running agent mid-session.
 
@@ -755,7 +790,8 @@ def build(
         potentially accepted delivery is never replayed or failed over. The
         target must be addressable: that means a verified physical inbound route,
         not readiness or permission. Ordinary send is not ownership-gated. The
-        returned handle can be awaited.
+        returned handle can be awaited. One sender's messages to one target
+        arrive in the order sent; other senders' messages are not held behind them.
 
         target:    live name (unique among live participants) or id. Names
                    work only while the participant is live and may be
@@ -772,18 +808,24 @@ def build(
                    its queue, interrupts, waits up to 30 s for idle, sends (route
                    "replace"). A participant cannot queue a message to itself.
         job_handle: amend/replace act only while this job is the active turn.
-        response_format: optional JSON object, as for spawn_session. A bare JSON Schema
-                   object is a prompt hint only (parsed with json.loads, never validated
-                   or retried). Tagged objects are strict: {"$theater": "review"} (verdict,
-                   reviewed, summary, findings), {"$theater": "debate"} (verdict, position,
+        response_format: optional JSON object, as for spawn_session. A bare JSON Schema is a
+                   prompt hint. Strict presets: {"$theater": "review"} (verdict, reviewed,
+                   summary, findings), {"$theater": "debate"} (verdict, position,
                    strongest_evidence, weakest_assumption, position_change,
-                   remaining_blocker), {"$theater": "delegate"} (status, summary, blockers),
-                   or {"$theater": "custom", "name": "x", "schema": {...}} (omit schema to
-                   reuse a name you registered). Presets allow extra keys and cap the answer
-                   at 16,384 characters. Theater validates the whole final answer, repairs
-                   an invalid one where it can prove which turn answered, and otherwise ends
-                   the job with structured_status "unable_to_parse". await_sessions returns
-                   a valid answer in structured_result.
+                   remaining_blocker), {"$theater": "delegate"} (status, summary, blockers);
+                   or {"$theater": "custom", "name": "x", "schema": {...}}. Theater validates
+                   and, where it can, repairs the answer; await_sessions returns a valid one
+                   in structured_result, else structured_status "unable_to_parse".
+        after:     a live participant name or an exact job handle. The message is queued
+                   (delivery="queued", handoff.state="waiting") and delivered only after that
+                   work ends, followed by a labelled card: its outcome, pinned Git commit and
+                   dirty state, and its answer marked unverified (a failed source gives a
+                   labelled failure). You write the task; copy no path or handle. The same
+                   handle covers the wait and the reply; cancel_job withdraws it while it
+                   waits; an await on it from the source's own work is a cycle, refused.
+                   Presence is still checked when it is delivered. Omit if_busy with it.
+        task_kind: "work" (default). A review that must not see the author's conclusions
+                   needs its own worktree: use spawn_session(task_kind="independent_review").
         Fails with `busy` for if_busy="refuse", a target whose queue (or your share of
         it) is full, or a send to yourself while you are working; with
         `transcript_untrusted` or `transcript_identity_lost` (transcript needs
@@ -920,9 +962,10 @@ def build(
     async def read_transcript(
         target: str, cursor: str | None = None, roles: list[str] | None = None
     ) -> dict:
-        """Read a bounded transcript page and continue toward older content.
+        """Diagnose a child: read a bounded transcript page, newest first.
 
-        Call once with a known live name or stable id, inspect the newest
+        For a stuck, failed or surprising child only; await_sessions already returns the
+        answer. Call once with a known live name or stable id, inspect the newest
         bounded chunk, and use only the returned next_cursor when older
         content is necessary. Stop when the needed event is found; do not call
         list_participants first.

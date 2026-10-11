@@ -883,10 +883,26 @@ supplies a labelled, bounded **card** (`handoff/card.py`) about the source.
   pinned commit, and is **rejected** (`source_not_reviewable`) when the source
   was dirty, unpinned or left no evidence. `work` may include the source's report,
   labelled unverified; a failed source yields a labelled failure card.
-- **Await cycles.** Awaiting a gated task also waits on the participant running
-  its source job, so `await_sessions` on a task gated on your own running job
-  raises `CycleDetected`. Deferring after your own job stays legal: the task
-  launches once your turn ends.
+- **`send(after=…)`** adds no queue: it is a QUEUED control row plus a gate
+  (`handoff_gates`, same `job_handle`), created in the one write unit that mints
+  the job. If the source already ended the card is rendered at once and the send is
+  ordinary. Otherwise `_dispatch_head` calls `HandoffService.ready_for_dispatch`
+  before presence and delivery: still running returns `skip` (the head holds its
+  per-(caller, target) lane, scanned within the queue bound, while other lanes
+  proceed); ended renders the card into the job's prompt, opens the gate and
+  dispatches normally. A source that vanished fails the send (`handoff_source_gone`).
+  A queued row a restart cannot recover is failed, never replayed, and its gate
+  closes with the job. `independent_review` is spawn-only (it needs its own worktree).
+- **Cancel.** `cancel_job` withdraws a waiting send (its row is still QUEUED) or a
+  waiting spawn (gate `waiting`); once a launch has begun it answers
+  `delivery_uncertain`/`delivered`. Killing a still-waiting spawn cancels its gate.
+- **Await cycles.** Awaiting a gated task or message also waits on the participant
+  running its source job, and a message behind an earlier gated message of the same
+  lane inherits that dependency, so awaiting it from the source's own work raises
+  `CycleDetected`. Deferring after your own job stays legal: it proceeds once your
+  turn ends.
+- **Signal.** `theater.handoff.gate.duration` (attributes `result`, `task_kind`,
+  `kind=spawn|send`) records how long a gate waited and how it ended.
 
 ---
 

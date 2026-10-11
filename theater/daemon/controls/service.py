@@ -238,9 +238,12 @@ class ControlService(
         native_capabilities: Callable[[str, object | None], RuntimeCapabilities | None]
         | None = None,
         native_admission: Callable[[str, object | None], Mapping[str, object] | None] | None = None,
+        gate_opener=None,
     ) -> None:
         #: ``None`` means no live runtime.
         self._runtime_for = runtime_for
+        #: Decides whether a queued send waiting on a source job may be dispatched yet.
+        self._gate_opener = gate_opener
         self._store = store
         self._jobs = jobs
         self._gates = gates

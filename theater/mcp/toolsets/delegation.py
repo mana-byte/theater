@@ -83,6 +83,8 @@ async def spawn_session(
     name: str | None = None,
     description: str | None = None,
     wiring: str = "auto",
+    after: str | None = None,
+    task_kind: str | None = None,
 ) -> dict:
     """Create a child agent through a selected terminal provider and return its record.
 
@@ -164,6 +166,8 @@ async def spawn_session(
         description=description,
         response_format=response_format,
         wiring=wiring,
+        after=after,
+        task_kind=task_kind,
     )
     assert isinstance(record, dict)
     return {
@@ -178,6 +182,7 @@ async def spawn_session(
                     "operation_timed_out",
                     "operation_error",
                     "operation_warning",
+                    "handoff",
                 )
             }
         ),
@@ -216,6 +221,8 @@ async def send_prompt(
     response_format: dict | None = None,
     if_busy: str = "auto",
     job_handle: str | None = None,
+    after: str | None = None,
+    task_kind: str | None = None,
 ) -> dict:
     """Send a prompt to an already-running agent on its selected transport.
 
@@ -239,6 +246,9 @@ async def send_prompt(
     ``json.loads``; a ``{"$theater": ...}`` object is a strict contract the
     daemon validates in full and repairs where it can prove the turn.
 
+    `after` (a name or exact job handle) queues the message until that work ends and
+    adds Theater's labelled card about it; the daemon resolves and gates it.
+
     Returns a job handle that can be passed to `await_sessions`.
     """
     if not session._resolved:
@@ -251,13 +261,15 @@ async def send_prompt(
         response_format=response_format,
         if_busy=if_busy,
         job_handle=job_handle,
+        after=after,
+        task_kind=task_kind,
     )
     assert isinstance(record, dict)
     return job_entry(record)
 
 
 async def cancel_job(session: Session, *, handle: str) -> dict:
-    """Withdraw a send the requester made that was provably not yet transmitted."""
+    """Withdraw work the requester made that was provably never started."""
     if not session._resolved:
         await session.identify()
     result = await session.client.call(

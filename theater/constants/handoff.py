@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Final
 
+KIND_SPAWN: Final = "spawn"
+KIND_SEND: Final = "send"
+
 TASK_KIND_WORK: Final = "work"
 TASK_KIND_REVIEW: Final = "independent_review"
 TASK_KINDS: Final = (TASK_KIND_WORK, TASK_KIND_REVIEW)

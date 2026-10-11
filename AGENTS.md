@@ -110,6 +110,7 @@ theater/
 │   ├── rpc/            handler modules registered via @method into METHODS
 │   ├── response_contracts/  strict response_format: admission, presets, whole-answer validation, audit
 │   ├── runtime/        socket dispatch, maintenance loops, lifecycle
+│   ├── handoff/        `after` handoffs: source resolution, completion evidence, cards, gates
 │   ├── spawning/       launch planning, resume, service
 │   ├── worktrees/      unique and named shared worktree paths and repos
 │   ├── trajectory/     canonical projection, ingestion, cache, telemetry, responses
@@ -244,6 +245,16 @@ packages/regie/src/regie/
 - **Observer job 1 (get the text) is the replaceable seam; job 2 (decide what it
   means) is not.** Per-harness behaviour belongs in a `Source` / `HarnessObserver`,
   never in the reducer's policy.
+- **A handoff gate is never a pane write.** `after` on `spawn` reserves only rows
+  (no worktree, argv or terminal) until the source job is terminal; on `send` it is
+  an ordinary QUEUED control row whose readiness is checked in `_dispatch_head`
+  *before* delivery, after which presence is gated fresh as for any queued message.
+  A waiting head keeps its lane (nothing the same sender queued later overtakes it)
+  and other senders' lanes go on. Source evidence (`job_evidence`: answer, provenance,
+  pinned commit and dirty state) is written with the terminal state, from Git read
+  *before* the write unit opens. Awaiting a gated handle also waits on the participant
+  running its source (dependency-aware cycle check), and the await exception for work
+  durably proven never dispatched never makes a participant `ABSENT`.
 - **Schema edits go through Alembic.** A bare `CREATE TABLE IF NOT EXISTS` change
   is a silent no-op against existing databases (the v1.2 hazard). Regenerate a
   revision and run `alembic check`.

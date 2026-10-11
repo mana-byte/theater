@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+from sqlalchemy import update
+
+from theater.daemon.events.publication import job_event, next_revision
 from theater.daemon.handoff.models import HandoffGate, JobEvidence
 from theater.daemon.persistence.store_parts._host import StoreHost
+from theater.daemon.persistence.transactions import active_write_unit
+from theater.daemon.schema import jobs
+from theater.models import now
 
 
 class HandoffStore(StoreHost):
@@ -41,3 +47,22 @@ class HandoffStore(StoreHost):
 
     def job_modified_paths(self, job_handle: str, *, limit: int) -> list[str]:
         return self._handoff.modified_paths(job_handle, limit=limit)
+
+    def set_job_prompt(self, handle: str, prompt: str, *, connection) -> bool:
+        """Render a gated task into the job it already carries; only while the job still runs."""
+        unit = active_write_unit(connection)
+        assert unit is not None
+        changed = connection.execute(
+            update(jobs)
+            .where(jobs.c.handle == handle, jobs.c.state == "running")
+            .values(prompt=prompt)
+        )
+        if changed.rowcount != 1:
+            return False
+        current = self._jobs.get(handle, connection=connection)
+        assert current is not None
+        self.journal.append_group(
+            unit,
+            [job_event(current, revision=next_revision(self, connection), recorded_at=now())],
+        )
+        return True
