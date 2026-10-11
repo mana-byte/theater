@@ -8,6 +8,7 @@ import pytest
 
 from tests._presence_doubles import AbsentPresence, PresentPresence
 from tests.test_control_rpc import _native_pair
+from theater.daemon.awaiting import never_transmitted
 from theater.daemon.rpc.cancellation import _cancel
 from theater.models import BadRequest, JobState
 from theater.protocol import RemoteError
@@ -172,6 +173,41 @@ async def test_await_releases_a_protected_cancelled_send_whose_gate_had_opened(c
     assert job["state"] == "killed" and job["await_reason"] == "job_terminal"
 
 
+async def _queued_plain_send_await(client, daemon, parent, child):
+    """A plain send held queued by a present human, plus a protected await on it."""
+    reply = await _send(client, child, parent, prompt="hello")
+    assert reply["delivery"] == "queued"
+    waiter = asyncio.create_task(
+        client.call("jobs.await", handles=[reply["handle"]], max_wait=2, caller_id=parent.id)
+    )
+    await asyncio.sleep(0.1)
+    assert not waiter.done()
+    return reply, waiter
+
+
+async def test_await_releases_a_plain_send_cancelled_while_queued(client, daemon):
+    parent, child, state = await _native_pair(daemon)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", PresentPresence(), raising=False)
+        reply, waiter = await _queued_plain_send_await(client, daemon, parent, child)
+        await _cancel(daemon, {"handle": reply["handle"], "caller_id": parent.id})
+        (job,) = await asyncio.wait_for(waiter, 1.0)
+
+    assert state.sent == [] and job["await_reason"] == "job_terminal"
+
+
+async def test_await_releases_a_queued_send_cancelled_by_interrupt(client, daemon):
+    parent, child, state = await _native_pair(daemon)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", PresentPresence(), raising=False)
+        reply, waiter = await _queued_plain_send_await(client, daemon, parent, child)
+        await daemon.controls.cancel_queued_followups(child.id)
+        (job,) = await asyncio.wait_for(waiter, 1.0)
+
+    assert daemon.store.get_job(reply["handle"]).error_code == "interrupted"
+    assert state.sent == [] and job["await_reason"] == "job_terminal"
+
+
 async def test_a_delivered_send_with_an_opened_gate_stays_held_by_presence(client, daemon):
     parent, child, state = await _native_pair(daemon)
     _, source_job = _source(daemon)
@@ -181,7 +217,18 @@ async def test_a_delivered_send_with_an_opened_gate_stays_held_by_presence(clien
     assert len(state.sent) == 1
     daemon.jobs.finish(reply["handle"], state=JobState.KILLED, error_code="cancelled")
 
-    assert daemon.handoff.never_dispatched(reply["handle"]) is False
+    job = daemon.store.get_job(reply["handle"])
+    assert never_transmitted(daemon.store, job) is False
+
+
+async def test_a_killed_send_with_a_dispatched_row_is_never_proven_unsent(client, daemon):
+    parent, child, _ = await _native_pair(daemon)
+    reply = await _send(client, child, parent, prompt="hello")
+    (operation,) = daemon.store.control_operations_for_job(reply["handle"])
+    daemon.store.mark_control_operation_dispatched(operation.operation_id, updated_at=1.0)
+    daemon.jobs.finish(reply["handle"], state=JobState.KILLED, error_code="interrupted")
+
+    assert never_transmitted(daemon.store, daemon.store.get_job(reply["handle"])) is False
 
 
 async def test_awaiting_a_gated_send_that_depends_on_you_is_a_cycle(client, daemon, monkeypatch):

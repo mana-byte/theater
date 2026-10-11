@@ -9,7 +9,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from theater.daemon.controls._common import (
+    CANCELLED_ERROR_CODE,
+    CONTROL_TRANSFERRED_ERROR_CODE,
+    INTERRUPTED_ERROR_CODE,
+)
 from theater.daemon.presence.contracts import PresenceProvider, PresenceSnapshot, PresenceState
+from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
 from theater.models import Job, JobState, Status
 
 logger = logging.getLogger("theater.awaiting")
@@ -83,6 +89,26 @@ def parse_targets(daemon, handles: list[str]) -> list[AwaitTarget]:
             continue
         targets.append(AwaitTarget(handle=handle, target_id=participant.id, job=None))
     return targets
+
+
+_UNSENT_CODES = frozenset(
+    {CANCELLED_ERROR_CODE, INTERRUPTED_ERROR_CODE, CONTROL_TRANSFERRED_ERROR_CODE}
+)
+
+
+def never_transmitted(store, job: Job) -> bool:
+    """Durable proof a killed send was cancelled while queued; anything doubtful stays held."""
+    if job.kind != "send" or job.state != JobState.KILLED or job.error_code not in _UNSENT_CODES:
+        return False
+    operations = store.control_operations_for_job(job.handle)
+    return bool(operations) and all(
+        op.delivery_phase is ControlDeliveryPhase.SETTLED
+        and op.delivery_result is DeliveryResult.REJECTED
+        and op.error_code in _UNSENT_CODES
+        and op.native_turn_id is None
+        and not op.execution_barrier
+        for op in operations
+    )
 
 
 def snapshot_for(provider: PresenceProvider | None, participant_id: str) -> PresenceSnapshot:
@@ -160,8 +186,8 @@ def _evaluate(
             target.job = daemon.jobs.get(target.handle) or target.job
             if target.job.state != JobState.RUNNING and not target.never_dispatched:
                 service = getattr(daemon, "handoff", None)
-                target.never_dispatched = service is not None and service.never_dispatched(
-                    target.handle
+                target.never_dispatched = never_transmitted(daemon.store, target.job) or (
+                    service is not None and service.never_dispatched(target.handle)
                 )
         if target.target_id is not None:
             target.presence = _ERRORED if failed else snapshot_for(provider, target.target_id)
