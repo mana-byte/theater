@@ -248,7 +248,7 @@ class RepairControls(ControlHost):
         for attempt in attempts:
             if attempt.state is RepairState.PENDING:
                 if self._repair_overdue(attempt):
-                    self._time_out_unsent(attempt)
+                    await self._time_out_unsent(attempt)
                 else:
                     await self._dispatch_repair(attempt)
             else:
@@ -265,20 +265,24 @@ class RepairControls(ControlHost):
         )
         return self._clock() >= deadline
 
-    def _time_out_unsent(self, attempt: RepairAttempt) -> None:
+    async def _time_out_unsent(self, attempt: RepairAttempt) -> None:
         """A repair that never reached the wire ends safely: nothing can still be running."""
         job = self._store.get_job(attempt.job_handle)
         if job is not None and job.state == JobState.RUNNING:
             detail = "the repair was never sent within its deadline"
-            self._abandon_repair(attempt, job, audit.REPAIR_TIMEOUT, detail)
+            await self._abandon_repair(attempt, job, audit.REPAIR_TIMEOUT, detail)
         else:
             self._settle_repair(attempt, "job_finished")
 
-    def _abandon_repair(
+    async def _abandon_repair(
         self, attempt: RepairAttempt, job: Job, event: str, detail: str | None
     ) -> None:
-        """Nothing was sent, or it was definitively refused: end the job and release the fence."""
-        self._end_repair(attempt, job, self._candidate_text(attempt), event, detail)
+        """Nothing was sent, or it was definitively refused: end the job and release the fence.
+
+        Pinned here, where dispatch ends a delivered job, so a deferred poll costs no Git.
+        """
+        async with self._jobs.pinned(attempt.participant_id):
+            self._end_repair(attempt, job, self._candidate_text(attempt), event, detail)
 
     async def _dispatch_repair(self, attempt: RepairAttempt) -> None:
         job = self._store.get_job(attempt.job_handle)
@@ -296,7 +300,7 @@ class RepairControls(ControlHost):
         try:
             self._gates.check_prompt(prompt)
         except Exception as exc:
-            self._abandon_repair(attempt, job, audit.REPAIR_BLOCKED, str(exc))
+            await self._abandon_repair(attempt, job, audit.REPAIR_BLOCKED, str(exc))
             return
         await self._transmit_repair(runtime, attempt, job, prompt, snapshot)
 
@@ -315,7 +319,7 @@ class RepairControls(ControlHost):
                 await self._gates.require_absent(participant_id)
             except Exception:
                 return False
-            self._abandon_repair(attempt, job, audit.REPAIR_BLOCKED, f"preflight: {exc}")
+            await self._abandon_repair(attempt, job, audit.REPAIR_BLOCKED, f"preflight: {exc}")
             return False
         return True
 
@@ -327,7 +331,7 @@ class RepairControls(ControlHost):
         route = self.route_for(participant_id, RuntimeCapability.SEND)
         if not route.is_native:
             detail = f"the send route is {route.transport}, not an exact native turn"
-            self._abandon_repair(attempt, job, audit.UNSUPPORTED_ROUTE, detail)
+            await self._abandon_repair(attempt, job, audit.UNSUPPORTED_ROUTE, detail)
             return None
         runtime = self._runtime_for(participant_id)
         if runtime is None:
@@ -346,7 +350,7 @@ class RepairControls(ControlHost):
             )
             self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
         except Exception as exc:
-            self._abandon_repair(attempt, job, audit.REPAIR_BLOCKED, str(exc))
+            await self._abandon_repair(attempt, job, audit.REPAIR_BLOCKED, str(exc))
             return None
         if not route.route_available:
             return None
@@ -355,7 +359,7 @@ class RepairControls(ControlHost):
             attempt.native_session_id,
         ):
             detail = "the native session changed before the repair"
-            self._abandon_repair(attempt, job, audit.REPAIR_BLOCKED, detail)
+            await self._abandon_repair(attempt, job, audit.REPAIR_BLOCKED, detail)
             return None
         # Idle is only the precondition to speak; the receipt's turn id is the proof of the answer.
         if not self._is_authoritatively_idle(snapshot):
@@ -394,7 +398,7 @@ class RepairControls(ControlHost):
             self._mark_repair_unknown(attempt, None)
             return
         if receipt.result is DeliveryResult.REJECTED:
-            self._abandon_repair(
+            await self._abandon_repair(
                 attempt, job, audit.REPAIR_REJECTED, receipt.error_code or receipt.error
             )
             return
@@ -497,7 +501,7 @@ class RepairControls(ControlHost):
     def _repair_will_finish(self, attempt: RepairAttempt) -> bool:
         """Whether reconciling this attempt now ends its job (mirrors ``_reconcile_repair``)."""
         if attempt.state is RepairState.PENDING:
-            return self._repair_overdue(attempt)
+            return False  # dispatch and the unsent timeout pin themselves when they end a job
         if self._repair_evidence(attempt) is not None or self._repair_context_gone(attempt):
             return True
         job = self._store.get_job(attempt.job_handle)

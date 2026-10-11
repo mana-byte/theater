@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -17,6 +18,8 @@ from tests.test_control_service import (
     wrap_runtime,
 )
 from theater.constants.response_contract import REPAIR_DEADLINE_SECONDS, REPAIR_MAX_ATTEMPTS
+from theater.daemon.handoff.evidence import EvidencePinner
+from theater.daemon.handoff.models import GitFacts
 from theater.daemon.persistence.repositories.job_repairs import RepairState
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.persistence.store import Store
@@ -223,6 +226,62 @@ async def test_blocked_repair_ends_unable_to_parse_and_hides_the_reason(store):
     assert finished.structured_status == "unable_to_parse" and finished.error_code is None
     assert audit_events(store, job.handle) == ["repair_started", "repair_blocked"]
     assert not store.repair_fence_active("p1")
+
+
+class _PinSpy(EvidencePinner):
+    """Every job leaves evidence; Git is faked, but its thread is recorded."""
+
+    def __init__(self, store) -> None:
+        super().__init__(store)
+        self.threads: list[int] = []
+
+    def required(self, job) -> bool:
+        return True
+
+    def workspace_of(self, job) -> str | None:
+        return None
+
+    def capture(self, job) -> GitFacts:
+        self.threads.append(threading.get_ident())
+        return GitFacts.from_status("c" * 40, "main", 0)
+
+
+def _pins(harness: Harness, store: Store) -> _PinSpy:
+    harness.jobs.evidence = _PinSpy(store)
+    return harness.jobs.evidence
+
+
+@pytest.mark.parametrize("how", ["capability_lost", "receipt_rejected"])
+async def test_a_repair_dispatch_that_ends_a_delivered_job_pins_git_off_the_loop(store, how):
+    harness = await open_harness(store, "p1")
+    pins = _pins(harness, store)
+    job = await strict_send(harness, store)
+    state = state_of(harness, "p1")
+    if how == "capability_lost":
+        state.unavailable[RuntimeCapability.SEND] = CapabilityUnavailableReason.GATED_BY_BACKEND
+    else:
+        state.reject_code = "refused"
+
+    await end_turn(harness, "garbage")
+    await wait_until(lambda: store.get_job(job.handle).state == JobState.DONE)
+
+    assert store.get_job(job.handle).structured_status == "unable_to_parse"
+    evidence = store.get_job_evidence(job.handle)
+    assert evidence.git.reviewable, evidence.git.reason
+    assert pins.threads and threading.get_ident() not in pins.threads
+
+
+async def test_a_deferred_repair_poll_costs_no_git(store):
+    harness = await open_harness(store, "p1")
+    pins = _pins(harness, store)
+    job = await strict_send(harness, store)
+    harness.gates_recorder.presence_refusals.add("p1")  # the repair waits for the human to leave
+    await end_turn(harness, "garbage")
+    pins.threads.clear()  # the strict job's own non-terminal evidence reads are not under test
+
+    await harness.service.maintain_repairs("p1")
+
+    assert store.get_job(job.handle).state == JobState.RUNNING and pins.threads == []
 
 
 class LostAckRuntime(FakeRuntime):
