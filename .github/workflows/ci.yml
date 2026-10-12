@@ -108,6 +108,16 @@ jobs:
         with:
           pattern: coverage-*
           merge-multiple: true
+      - name: Verify all coverage shards arrived
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+
+          expected = {f".coverage.{shard}" for shard in (1, 2, 3)}
+          actual = {path.name for path in Path.cwd().glob(".coverage.*")}
+          if actual != expected:
+              raise SystemExit(f"coverage shards: expected {expected}, got {actual}")
+          PY
       - name: Combine coverage and enforce the gate
         run: |
           uv run coverage combine

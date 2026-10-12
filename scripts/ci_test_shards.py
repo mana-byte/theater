@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SHARD_COUNT = 3
-TEST_ROOTS = (ROOT / "tests", ROOT / "packages/regie/tests")
 
-# Files taking at least five seconds in the 2026-10-10 3.12 CI run; others get one second.
+# Approximate file weights from the 2026-10-10 3.12 CI run; others get one second.
 SLOW_SECONDS = {
     "tests/test_opencode_http.py": 60.2,
     "packages/regie/tests/test_ui.py": 50.6,
@@ -58,10 +61,28 @@ SLOW_SECONDS = {
 }
 
 
+class _CollectedFiles:
+    def __init__(self) -> None:
+        self.files: list[str] = []
+
+    def pytest_collection_finish(self, session: pytest.Session) -> None:
+        self.files = list(
+            dict.fromkeys(item.path.relative_to(ROOT).as_posix() for item in session.items)
+        )
+
+
 def test_files() -> list[str]:
-    return sorted(
-        str(path.relative_to(ROOT)) for root in TEST_ROOTS for path in root.rglob("test_*.py")
-    )
+    collected = _CollectedFiles()
+    output = io.StringIO()
+    with (
+        contextlib.chdir(ROOT),
+        contextlib.redirect_stdout(output),
+        contextlib.redirect_stderr(output),
+    ):
+        result = pytest.main(["--collect-only", "-q"], plugins=[collected])
+    if result != pytest.ExitCode.OK:
+        raise RuntimeError(f"pytest collection failed ({result}):\n{output.getvalue()}")
+    return collected.files
 
 
 def shards(files: list[str]) -> list[list[str]]:
@@ -71,7 +92,8 @@ def shards(files: list[str]) -> list[list[str]]:
         index = min(range(SHARD_COUNT), key=lambda index: (weights[index], index))
         groups[index].append(path)
         weights[index] += SLOW_SECONDS.get(path, 1.0)
-    return [sorted(group) for group in groups]
+    rank = {path: index for index, path in enumerate(files)}
+    return [sorted(group, key=rank.__getitem__) for group in groups]
 
 
 def main() -> int:
@@ -86,7 +108,7 @@ def main() -> int:
     if not selected:
         parser.error(f"shard {args.shard} contains no tests")
     print(f"CI test shard {args.shard}/{SHARD_COUNT}: {len(selected)} files", flush=True)
-    return subprocess.call([sys.executable, "-m", "pytest", *extra, *selected], cwd=ROOT)
+    return subprocess.call([sys.executable, "-m", "pytest", *extra, "--", *selected], cwd=ROOT)
 
 
 if __name__ == "__main__":
