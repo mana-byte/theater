@@ -32,7 +32,9 @@
 
 # Harness used when `theater spawn` is given no harness name, and sorted first
 # in the régie's ctrl+p palette. Must name a harness the registry actually
-# holds — shipped or local, and not disabled below — checked at daemon start.
+# holds — shipped or local, and not disabled below. `theater spawn` checks that
+# when it uses the favourite, and the régie reads it at launch; the daemon
+# never reads it.
 #
 # Left commented because its default is "no favourite", and TOML has no way to
 # write that: the key is either absent or set to a name.
