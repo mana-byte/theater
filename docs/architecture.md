@@ -292,14 +292,17 @@ A deferred spawn is checked when admitted and again when it launches; a resumed
 member keeps its position while its master lives, resumed only by an agent whose
 position may parent it. A `send` carrying play skills is bound, in
 `play_assignments`, to the position its target holds or, from a direct parent,
-is given; the binding is held from reservation, so only an accepted delivery
-settlement applies an assignment, or, after an uncertain (`unknown`) one, a turn
-end that answered the job without an error code; a rescue's `done` carries
-`turn_end_unseen` and proves nothing. Known limitation: until that proof the
-target is unpositioned, so a spawn it tries in that same turn is refused even if
-the message did arrive. Mid-turn transcript text is judged only at turn end and
-on a 120-character prefix, and spawns cannot be revoked, so Theater does not
-guess; the position lands at the verified turn end, or the parent resends it.
+is given; the binding is held from reservation, so an accepted delivery settlement
+applies an assignment at once. After an uncertain (`unknown`) delivery only exact
+native evidence proves arrival: completed terminal evidence for the message's own
+named native turn. Transcript turn matching and rescue never grant, because an
+empty `heard` or a shared 120-character prefix cannot tell which message a turn
+answered, and a position cannot be revoked. Known limitations: an uncertain
+delivery to a terminal-hosted target never assigns, and until proof arrives the
+target is unpositioned, so a spawn it tries in that turn is refused even if the
+message arrived. Resend: if the target still shows no `play` position once that
+message's job has ended, its direct parent sends the position again; an earlier
+binding proven later is a no-op for the same position.
 Queued dispatch rechecks the binding: if the play ended or the position no
 longer fits, the message fails unsent with `play_refused` rather than delivering
 obsolete instructions; ordinary sends are untouched. Adoption never moves a live play's

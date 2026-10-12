@@ -9,11 +9,18 @@ from dataclasses import replace
 from theater.daemon import lineage
 from theater.daemon.persistence.repositories.plays import PlayAssignment, PlayMembership
 from theater.daemon.plays.models import NO_SEAT, PlayPlan, PlayRefused, SpawnSeat
-from theater.harness.contracts.runtime import DeliveryResult
+from theater.harness.contracts.runtime import (
+    ControlKind,
+    ControlTransport,
+    DeliveryResult,
+    NativeTurnTerminal,
+)
 from theater.models import Job, JobState, Status, now
 from theater.skills import Play, PlayRules
 
 logger = logging.getLogger("theater.plays")
+
+_PROMPT_KINDS = (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP)
 
 
 class PlayService:
@@ -251,8 +258,9 @@ class PlayService:
             for operation in self.store.control_operations_for_job(job_handle)
         )
         job = self.store.get_job(job_handle)
+        proven = delivered or self._proven(job)
         with self.store.write_unit() as unit:
-            if delivered or _answered(job):
+            if proven:
                 self._apply(pending, unit.connection)
             elif job is not None and job.state == JobState.RUNNING:
                 self.store.plays.put_assignment(
@@ -279,16 +287,43 @@ class PlayService:
             self._apply(pending, connection)
 
     def _on_job_terminal(self, handle: str) -> None:
-        """Only a verified answer proves an uncertain delivery; any other end drops the binding."""
+        """Only exact turn evidence proves an uncertain delivery; other ends drop the binding."""
         pending = self.store.plays.assignment(handle)
         if pending is None:
             return
-        job = self.store.get_job(handle)
+        proven = self._proven(self.store.get_job(handle))
         with self.store.write_unit() as unit:
-            if _answered(job):
+            if proven:
                 self._apply(pending, unit.connection)
             else:
                 self.store.plays.delete_assignment(handle, connection=unit.connection)
+
+    def _proven(self, job: Job | None) -> bool:
+        """The message's own named native turn completed: exact proof it arrived.
+
+        Transcript turn matching and rescue can end a job ``done`` with no error code too, but
+        they cannot tell which message a turn answered, so they never grant a position.
+        """
+        if job is None:
+            return False
+        for operation in self.store.control_operations_for_job(job.handle):
+            if (
+                operation.kind not in _PROMPT_KINDS
+                or operation.transport is not ControlTransport.NATIVE_RUNTIME
+                or operation.backend_generation is None
+                or operation.native_session_id is None
+                or operation.native_turn_id is None
+            ):
+                continue
+            evidence = self.store.get_native_terminal_evidence(
+                participant_id=operation.participant_id,
+                backend_generation=operation.backend_generation,
+                native_session_id=operation.native_session_id,
+                native_turn_id=operation.native_turn_id,
+            )
+            if evidence is not None and evidence.terminal == NativeTurnTerminal.COMPLETED:
+                return True
+        return False
 
     def _apply(self, pending: PlayAssignment, connection) -> bool:
         """Revalidate against the live play at delivery; a dead master assigns nothing."""
@@ -327,12 +362,6 @@ class PlayService:
         ):
             return f"{pending.assigned_by} can no longer give {pending.participant_id} a position"
         return None
-
-
-def _answered(job: Job | None) -> bool:
-    """A turn verifiably answered this job. A rescue also ends jobs ``done``, with an error code
-    and no proof the prompt ever arrived, so it never counts."""
-    return job is not None and job.state == JobState.DONE and job.error_code is None
 
 
 def _outcome(play: Play, state: str, *, reason: str | None = None) -> dict[str, str]:

@@ -859,10 +859,11 @@ def build(
                    task as for spawn_session; they apply to this message only. Refused
                    with if_busy="amend" while a turn is active. Play skills need the
                    target's live play: a position sent by a direct parent to a child
-                   without one becomes its position once the child receives this
-                   message, and a role must fit the target's position. If the play ends
-                   or the position no longer fits first, the queued message fails
-                   unsent with `play_refused`.
+                   without one becomes its position once Theater confirms delivery,
+                   and a role must fit the target's position. If the play ends or the
+                   position no longer fits first, the queued message fails unsent with
+                   `play_refused`. If the child still has no `play` position after the
+                   job ends, send the position again.
         Fails with `busy` for if_busy="refuse", a target whose queue (or your share of
         it) is full, or a send to yourself while you are working; with
         `transcript_untrusted` or `transcript_identity_lost` (transcript needs

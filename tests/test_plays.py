@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
 from sqlalchemy import select
 
 from tests._presence_doubles import AbsentPresence
+from tests.rig.fake_runtime import FakeRuntime, completed_outcome
 from tests.test_control_rpc import _install_runtime, _native_pair
 from tests.test_handoff_send import _pump, _source
-from theater.constants.observation import RESCUE_CODE
 from theater.daemon.frontend.catalog_handlers import skills_load as frontend_skills_load
 from theater.daemon.gc import _delete_participant_row
+from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.plays import PlayPlan, PlayRefused
 from theater.daemon.plugins.dispatch import _skills_load as plugin_skills_load
 from theater.daemon.rpc.cancellation import _cancel
 from theater.daemon.schema import play_members
+from theater.harness.contracts.runtime import ControlReceipt, DeliveryResult
 from theater.models import JobState, now
 from theater.protocol import RemoteError
 from theater.skills import SkillValidationError, UnknownSkill, discover
@@ -208,6 +213,14 @@ async def test_a_deferred_spawn_is_checked_again_when_it_launches(
     assert daemon.store.get_job(waiting["handle"]).state == JobState.CRASHED
 
 
+class _UncertainSendRuntime(FakeRuntime):
+    """Runs the turn it names, but reports the delivery as unknown."""
+
+    async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+        receipt = await super().send(operation_id=operation_id, prompt=prompt)
+        return replace(receipt, result=DeliveryResult.UNKNOWN)
+
+
 def _sender(client, master):
     async def send(target, *skills, caller=master, **extra):
         return await client.call(
@@ -297,19 +310,56 @@ async def test_queued_play_messages_fail_unsent_once_their_play_ends(client, dae
     assert daemon.plays.membership(late.id) is None
 
 
-async def test_only_a_verified_answer_proves_an_uncertain_delivery(client, daemon):
+async def test_an_unknown_terminal_delivery_is_not_proven_by_another_turns_end(
+    client, daemon, terminal_provider, monkeypatch
+):
+    absent = AbsentPresence(capture_screen=daemon.presence.capture_screen)
+    monkeypatch.setattr(daemon, "presence", absent, raising=False)
     master = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
+    idle = (Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt").read_text()
+    terminal_provider.screens[terminal_provider.bind(daemon, child.id)] = idle
     await _load(client, master.id)
-    binding = daemon.plays.check_send(master.id, child.id, PlayPlan(names=(LEAD,)))
+    request = daemon.terminal_service.connections.request
 
-    for handle, error_code, seated in (("rescued", RESCUE_CODE, False), ("answered", None, True)):
-        daemon.jobs.create(
-            handle=handle, caller_id=master.id, target_id=child.id, kind="send", prompt="lead"
-        )
-        daemon.plays.track_assignment(binding, handle)
-        daemon.jobs.finish(handle, state=JobState.DONE, result="ok", error_code=error_code)
-        assert (daemon.plays.membership(child.id) is not None) is seated, handle
+    async def unknown(provider_id, generation, method, params):
+        reply = await request(provider_id, generation, method, params)
+        return {**reply, "delivery": "unknown"} if method == "terminal.deliver" else reply
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", unknown)
+    sent = await _sender(client, master)(child, LEAD)
+    (operation,) = daemon.store.control_operations_for_job(sent["handle"])
+    assert operation.delivery_result is DeliveryResult.UNKNOWN
+
+    # An unrelated turn with no captured user text still answers the oldest waiting job.
+    tracker = CompletionTracker(daemon.store, daemon.registry, jobs_fn=lambda: daemon.jobs)
+    tracker.answer_turn(child.id, "an unrelated answer", heard=())
+
+    job = daemon.store.get_job(sent["handle"])
+    assert (job.state, job.error_code) == (JobState.DONE, None)
+    assert daemon.plays.membership(child.id) is None
+    assert daemon.store.plays.assignment(sent["handle"]) is None
+
+
+async def test_an_unknown_native_delivery_is_proven_by_its_exact_turn_evidence(
+    client, daemon, absent
+):
+    master = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
+    state = await _install_runtime(daemon, child.id, cls=_UncertainSendRuntime)
+    await _load(client, master.id)
+
+    sent = await _sender(client, master)(child, LEAD)
+    (operation,) = daemon.store.control_operations_for_job(sent["handle"])
+    assert operation.delivery_result is DeliveryResult.UNKNOWN
+    assert daemon.plays.membership(child.id) is None, "no grant before exact evidence"
+
+    await daemon.controls.record_terminal_evidence(
+        child.id, backend_generation=state.backend_generation, outcome=completed_outcome(state)
+    )
+
+    assert daemon.store.get_job(sent["handle"]).state == JobState.DONE
+    assert daemon.plays.membership(child.id).position == "team-lead"
 
 
 async def test_adoption_keeps_one_live_play_and_its_position_hierarchy(client, daemon):

@@ -199,9 +199,9 @@ spawn that attaches it starts a new master. While the master lives, every spawn
 below it attaches exactly one position its spawner may give, plus at most one
 task role (`teams/worker`, `teams/reviewer`, `teams/debater`); outside a live
 play, positions and roles cannot be attached. A parent gives an existing child
-its position with `send(skills=["teams/team-lead"])`; it takes effect once the
-child receives the message, and a queued one fails unsent if the play ends
-first. When the master dies the play ends and its rules lift. `list_skills`
+its position with `send(skills=["teams/team-lead"])`; it takes effect once
+Theater confirms delivery (if the child still shows no `play` position after the
+job ends, send it again), and a queued one fails unsent if the play ends first. When the master dies the play ends and its rules lift. `list_skills`
 shows each play's positions and roles.
 
 **Make Theater yours.** Turn any workflow you repeat into a custom skill—your
