@@ -311,13 +311,9 @@ The daemon owns discovery; MCP tools only forward `skills.list` and
 validates before filtering, so a broken bundled skill stays fatal; user and
 plugin skills are unaffected.
 
-A skill is either a **leader skill** an agent loads for itself, or a **receiver
-skill** a sender attaches with `skills=[...]` on `spawn_session`/`send`. The split
-is a writing convention, not metadata: a receiver skill's description starts with
-`Receiver skill —`, its body is written for the agent receiving the task, and the
-attached cards must fit `SKILL_ATTACH_MAX_BYTES` (16 KiB combined). Every built-in
-must be either a listed leader skill or a marked receiver skill; `tests/test_skills.py`
-checks it. Do not make the daemon parse the phrase or filter on it.
+A sender can also attach skills to another agent's task with `skills=[...]` on
+`spawn_session`/`send`; the attached cards must fit `SKILL_ATTACH_MAX_BYTES`
+(16 KiB combined).
 
 ## Further reading
 

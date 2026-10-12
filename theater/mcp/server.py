@@ -234,8 +234,7 @@ skills:   optional list of skill names from list_skills. Theater appends each on
           before response_format guidance, so the child needs no load_skill call.
           Omitted or empty means none: a child never inherits your skills. Needs a
           prompt; at most 16 KiB combined; refused for an unknown or disabled skill
-          and with resume where the harness cannot carry a prompt. Skills written to
-          be attached are receiver skills: their description starts "Receiver skill —".
+          and with resume where the harness cannot carry a prompt.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately. A "manual" child may stop

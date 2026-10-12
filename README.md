@@ -188,9 +188,8 @@ custom skills, so a workflow written once works from any of your agents.
 
 **Hand a skill to another agent.** Name it in `skills=[...]` on `spawn_session`
 or `send`: Theater appends its instructions after your task, so the receiver
-needs no `load_skill` call. A child gets only the skills you name, never yours.
-Skills written to be attached are receiver skills; their description starts
-with `Receiver skill —`, and attached skills stay under 16 KiB combined.
+needs no `load_skill` call. A child gets only the skills you name, never yours,
+and attached skills stay under 16 KiB combined.
 
 **Make Theater yours.** Turn any workflow you repeat into a custom skill—your
 preferred harnesses, models, roles, worktrees, checks, and handoffs. Add it at

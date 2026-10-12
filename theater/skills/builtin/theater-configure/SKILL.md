@@ -143,8 +143,7 @@ what was granted before the file takes effect.
    nothing. A name in the list is simply not offered to agents. Disabling is presence,
    not refusal — built-in skills stay validated, and an unknown name in the list is
    not an error. A disabled skill also cannot be attached with `skills=[...]`: a
-   spawn or send naming it is refused, so warn before the user disables a receiver
-   skill (its description starts with "Receiver skill —").
+   spawn or send naming it is refused.
 7. `[harness] disabled` — never asked; every CLI is driven by default. Only when
    `theater harnesses` shows a broken plugin, recommend disabling it by its folder name
    and write the denylist entry if the user agrees. Disabling is absence, not refusal,

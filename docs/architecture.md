@@ -260,10 +260,7 @@ and are refused with `amend` on an active turn and with a resume that cannot
 carry a prompt. They are pinned when admitted: a gated handoff stores the
 rendered cards in its request. Nothing is inherited; a child gets only the
 skills its spawner names. Handoff cards quote a source's task without its skill
-cards and neutralise forged skill markers in quoted output. Skills written to be
-attached are *receiver skills*: by convention their description starts with
-`Receiver skill —`. The daemon never parses that phrase; it tells the agent
-reading `list_skills` what the skill is for.
+cards and neutralise forged skill markers in quoted output.
 
 ---
 
