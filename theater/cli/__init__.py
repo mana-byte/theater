@@ -67,6 +67,7 @@ from theater.cli.commands.participants import (  # noqa: F401
 )
 from theater.cli.commands.plugin import cmd_plugin_call  # noqa: F401
 from theater.cli.commands.process import cmd_daemon, cmd_mcp, cmd_regie  # noqa: F401
+from theater.cli.commands.reload import cmd_reload  # noqa: F401
 from theater.cli.commands.skills import cmd_skills  # noqa: F401
 from theater.cli.errors import BadUsage
 from theater.cli.parser import (  # noqa: F401
@@ -130,11 +131,13 @@ def main(argv: list[str] | None = None) -> int:
         return _COMMANDS[args.command](args)
     paths.ensure_home()
     try:
+        # `reload` is exempt: the daemon reads and validates its own file, not this process.
         if args.command not in _PROCESS_COMMANDS and args.command not in {
             "config",
             "harness-event",
             "plugin",
             "plugins",
+            "reload",
             "skills",
         }:
             harness_registry.install(config.load())

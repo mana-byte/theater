@@ -1,4 +1,4 @@
-"""User config ``$THEATER_HOME/config.toml``: read-only, machine-scoped, read once at start.
+"""User config ``$THEATER_HOME/config.toml``: read-only, machine-scoped, read at start and reload.
 Unknown keys are fatal (an ignored typo is worse than an abort); ``[models]`` is checked by the
 daemon. The default approval mode is deliberately not settable.
 """

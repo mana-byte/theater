@@ -215,16 +215,21 @@ batches of 50; ledger page 30; sentence and tip typing pacing; every observer ti
   the user's.
 - Validate: `theater config` reports a malformed file exactly as the daemon would reject
   it, and `theater models` shows the resulting allowlists. Fix until both are clean.
+  The last line of `theater config` says whether the running daemon needs
+  `theater reload` or `theater restart` to pick the file up.
 
 ## Step 4 — Close
 
-Each Theater process reads the file once, at its own start. `theater restart` — offer
-to run it — restarts only the daemon. Two things it does not touch: a régie that is
-already open picks up config-dependent visuals (theme, sidebar width) only when it is
+Each Theater process reads the file at its own start; the daemon also re-reads it on
+`theater reload`. Offer `theater reload` first: it applies `[rails]`, `[models]`,
+`[reasoning]` and `[skills] disabled` in place and never starts a daemon. When it
+names settings only a restart applies, it has applied nothing — then offer
+`theater restart`, which restarts only the daemon. Two things neither touches: a régie
+that is already open picks up config-dependent visuals (theme, sidebar width) only when it is
 closed and relaunched, and agents that are already running keep their old telemetry
 export settings until they are relaunched, because each agent's MCP process configures
 observability from the file at startup. Summarize what was discovered, what was written
 where, what was deliberately left absent (grants and pinned defaults), and what stays
 at its default. Say plainly that theater-configure switched itself off in
 `[skills] disabled`, and that undoing it is removing the name from that list and
-running `theater restart` again. Do not create a report file.
+running `theater reload`. Do not create a report file.

@@ -51,6 +51,7 @@ from theater.cli.commands.process import (
     cmd_mcp,
     cmd_regie,
 )
+from theater.cli.commands.reload import cmd_reload
 from theater.cli.commands.skills import cmd_skills
 from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 
@@ -88,4 +89,5 @@ COMMANDS = {
     "regie": cmd_regie,
     "stop": cmd_stop,
     "restart": cmd_restart,
+    "reload": cmd_reload,
 }

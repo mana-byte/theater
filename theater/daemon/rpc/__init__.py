@@ -10,6 +10,7 @@ from theater.daemon.rpc import (  # noqa: F401
     admin,
     adoption,
     cancellation,
+    config_reload,
     controls,
     hooks,
     interruption,

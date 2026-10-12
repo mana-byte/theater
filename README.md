@@ -296,7 +296,8 @@ theater ls --tree               # print the current agent tree
 theater config                  # show effective settings and their source
 theater config path             # print the config file location
 theater models                  # show allowed model and reasoning choices
-theater restart                 # apply config changes; agents keep running
+theater reload                  # apply [rails], [models], [reasoning], [skills] disabled in place
+theater restart                 # apply any config change; agents keep running
 theater stop                    # stop Theater's background service
 ```
 
@@ -378,10 +379,16 @@ theater models
 After editing the file:
 
 ```sh
-theater config
-theater restart
+theater config      # its last line says whether the daemon needs a reload or a restart
+theater reload      # [rails], [models], [reasoning] and [skills] disabled, in place
+theater restart     # any other setting; agents keep running
 regie bridge start
 ```
+
+`theater reload` never starts a daemon, and it refuses the whole file (applying
+nothing) when any setting outside those four changed. `theater.favourite` and
+`observability.mcp_timing` are read where they are used, by each `theater`
+command and each new Theater MCP process, so they need neither.
 
 Or ask a managed agent: **“Use `theater-configure` to set up Theater with me.”**
 

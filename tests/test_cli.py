@@ -60,6 +60,7 @@ EXPECTED_COMMANDS = {
     "providers",
     "queue",
     "regie",
+    "reload",
     "restart",
     "settings",
     "skills",

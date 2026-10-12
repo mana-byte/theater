@@ -15,7 +15,7 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str | None, list[str]]]]] = [
             ("Control", ["steer", "queue", "settings", "controls", "interrupt"]),
             ("Observe", ["bus", "stats", "skills"]),
             ("Operator", ["providers", "workspaces", "control-transfer", "gc"]),
-            ("Lifecycle", ["stop", "restart"]),
+            ("Lifecycle", ["stop", "restart", "reload"]),
         ],
     ),
     (

@@ -15,7 +15,9 @@
 # changes a default, your copy keeps the old value. Delete a key to track the
 # code's default instead.
 #
-# Read at daemon start. Restart the daemon to apply an edit everywhere.
+# Read at daemon start. `theater reload` applies edits to [rails], [models],
+# [reasoning] and [skills] disabled to the running daemon in place; any other
+# daemon setting needs `theater restart`, and reload then applies nothing.
 # Machine-scoped: there is no project-local config, because there is one daemon
 # per machine holding one registry.
 # An unknown key is a hard error naming the file, the key and the closest legal

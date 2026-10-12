@@ -426,6 +426,21 @@ def _add_lifecycle_commands(sub) -> None:
     sub.add_parser("regie", help="Moved to the standalone `regie` command.", hidden=True)
     sub.add_parser("stop", help="Shut the daemon down.")
     sub.add_parser("restart", help="Restart the daemon; agents keep running.")
+    reload = sub.add_parser(
+        "reload",
+        help="Apply rails, models, reasoning and skills.disabled edits without a restart.",
+        description=(
+            "Ask the running daemon to re-read its config file. Only [rails], [models], "
+            "[reasoning] and [skills] disabled change in place; any other edit refuses the "
+            "whole reload and needs `theater restart`. Never starts a daemon."
+        ),
+    )
+    reload.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what a reload would apply or refuse, and change nothing.",
+    )
+    reload.add_argument("--json", action="store_true")
 
 
 _add_controls_parsers = _add_control_commands

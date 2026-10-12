@@ -10,6 +10,7 @@ import time
 
 from theater import config, paths
 from theater import harness as harness_registry
+from theater.cli.commands.reload import DaemonConfigStatus, daemon_config_status, status_lines
 from theater.cli.errors import BadUsage
 from theater.cli.render import _format_floor, _models_block
 from theater.client import DaemonClient, call_sync
@@ -227,8 +228,8 @@ def _channel_diagnostic(label: str, channel: dict) -> str:
 
 def cmd_config(args) -> int:
     """Show the resolved settings, each tagged with where it came from.
-    Resolved, not the file, to answer "did my edit take effect"; local-only, since a config error is
-    exactly what stops the daemon from starting.
+    Resolved locally first, since a config error is exactly what stops a daemon from starting; then
+    a dry-run reload, never autostarting, says whether the running daemon matches the file.
     """
     if args.topic == "path":
         print(paths.config_path())
@@ -241,6 +242,7 @@ def cmd_config(args) -> int:
         return 1
 
     rows = config.describe(loaded)
+    status = daemon_config_status()
     if args.json:
         print(
             json.dumps(
@@ -251,6 +253,7 @@ def cmd_config(args) -> int:
                         {"key": key, "value": value, "source": source}
                         for key, value, source in rows
                     ],
+                    "daemon": _daemon_status_json(status),
                 },
                 indent=2,
             )
@@ -263,9 +266,18 @@ def cmd_config(args) -> int:
     for key, value, source in rows:
         mark = "" if source == "default" else "  <- config.toml"
         print(f"{key:<{width}}  {value}{mark}")
-    if loaded.exists:
-        print("\nchanges apply on `theater restart`")
+    print()
+    for line in status_lines(status):
+        print(line)
     return 0
+
+
+def _daemon_status_json(status: DaemonConfigStatus) -> dict:
+    keys = ("changed", "restart_required", "outside_daemon")
+    payload: dict = {"status": status.state, **{key: status.result.get(key, []) for key in keys}}
+    if status.message is not None:
+        payload["message"] = status.message
+    return payload
 
 
 def cmd_models(args) -> int:
