@@ -103,7 +103,9 @@ async def test_me_identifies_first_when_it_has_not_yet():
 
 
 async def test_whoami_answers_who_where_and_reachable():
-    got = await tools.whoami(resolved(**{"participants.list": []}))
+    s = resolved(**{"participants.list": []})
+    got = await tools.whoami(s)
+    assert s.client.params("participants.get") == {"id": "p-me", "self_view": True}
     assert got == {
         "id": "p-me",
         "name": "Arlequin",

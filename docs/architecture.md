@@ -281,7 +281,11 @@ master's death ends the play for everyone without a write, and an agent holds at
 most one active membership. Rows are keyed by a fresh instance id per start, so
 GC stays bounded: it deletes a participant's own play rows and the one instance
 it mastered, never its members' rows in bulk, and an id the registry re-creates
-after GC can never revive an ended instance. While a play is live, every spawn below its master —
+after GC can never revive an ended instance. `whoami` reads its own record with
+`participants.get(self_view=true)`, whose `play` adds `spawn_options` from the
+instance's pinned rules (each child position with the roles that fit it), or reports
+an unpositioned descendant's governing play with none; other participant reads keep
+the membership-only `play`. While a play is live, every spawn below its master —
 MCP, CLI, frontend, deferred, resumed — is checked in
 `_prepare_spawn_operation`, inside the transaction that accepts it: the spawner's
 own position must allow exactly one attached position, at most one fitting role

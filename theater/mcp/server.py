@@ -592,8 +592,12 @@ def build(
     async def whoami() -> dict:
         """Identify yourself. Returned fields include id, live name, description,
         harness, tier, status, cwd, branch, session_id, parent_id, addressable,
-        and play (play, position, master) while you hold a position in a live
-        play; unset fields are omitted. Includes live direct children
+        and play inside a live play; unset fields are omitted. play holds play,
+        position, master and spawn_options: each child position you may give,
+        with the task roles that fit it ([] when you may spawn none). Under a
+        live play without a position of your own, position is null, unpositioned
+        is true and spawn_options is []: you cannot spawn until your direct
+        parent sends you a position. Includes live direct children
         (name, status, harness; first 20, children_total beyond).
 
         Call this before addressing anyone else, so you can tell yourself apart

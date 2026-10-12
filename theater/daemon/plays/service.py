@@ -68,6 +68,35 @@ class PlayService:
             "master": held.master_id,
         }
 
+    def self_view(self, participant_id: str) -> dict[str, object] | None:
+        """What an agent may spawn in its live play, from the pinned rules: each child position
+        with the task roles that fit it. An unpositioned descendant sees the play over it, marked
+        unpositioned, with no options; it still holds no membership."""
+        governing = self.governing(participant_id)
+        if governing is None:
+            return None
+        rules = governing.rules
+        if governing.participant_id != participant_id:
+            return {
+                "play": rules.play,
+                "position": None,
+                "master": governing.master_id,
+                "unpositioned": True,
+                "spawn_options": [],
+            }
+        return {
+            "play": rules.play,
+            "position": rules.qualified(governing.position),
+            "master": governing.master_id,
+            "spawn_options": [
+                {
+                    "position": rules.qualified(child),
+                    "roles": [rules.qualified(role) for role in rules.roles_for(child)],
+                }
+                for child in rules.children(governing.position)
+            ],
+        }
+
     # ---- start by load --------------------------------------------------------------------
 
     def start_by_load(self, caller_id: str, play: Play) -> dict[str, str]:

@@ -45,7 +45,14 @@ def _summarise(p: dict) -> dict:
 
 
 async def whoami(session: Session) -> dict:
-    me = _summarise(await session.me())
+    if not session._resolved:
+        await session.identify()
+    # The self view adds what this agent may spawn in its live play.
+    record = await session.client.call(
+        "participants.get", id=session.participant_id, self_view=True
+    )
+    assert isinstance(record, dict)
+    me = _summarise(record)
     rows = await session.client.call("participants.list", parent_id=me["id"])
     assert isinstance(rows, list)
     children = [

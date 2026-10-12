@@ -45,15 +45,20 @@ from theater.observability.catalog import LIFECYCLE_STAGE
 from theater.provenance import is_trusted_provenance
 
 
-def _with_presence(daemon, record: dict) -> dict:
-    """Attach the cached focus projection to one participant wire record."""
+def _with_presence(daemon, record: dict, *, self_view: bool = False) -> dict:
+    """Attach the cached focus projection to one participant wire record.
+
+    ``self_view`` is the agent reading itself: its play adds spawn options, or the live play an
+    unpositioned descendant sits under.
+    """
     route = daemon.controls.route_for(record["id"], RuntimeCapability.SEND)
     record["addressable"] = record.get("status") != Status.DEAD.value and route.route_available
     record["human_presence"] = presence_access.presence_snapshot(daemon, record["id"]).to_dict()
     plays = getattr(daemon, "plays", None)
-    played = None if plays is None else plays.describe(record["id"])
-    if played is not None:
-        record["play"] = played
+    if plays is not None:
+        played = plays.self_view(record["id"]) if self_view else plays.describe(record["id"])
+        if played is not None:
+            record["play"] = played
     return record
 
 
@@ -323,7 +328,8 @@ async def _tree(daemon, params: dict) -> list[dict]:
 
 @method("participants.get")
 async def _get(daemon, params: dict) -> dict:
-    return _with_presence(daemon, daemon.registry.resolve(_require(params, "id")).to_dict())
+    record = daemon.registry.resolve(_require(params, "id")).to_dict()
+    return _with_presence(daemon, record, self_view=params.get("self_view") is True)
 
 
 @method("participant.rename")

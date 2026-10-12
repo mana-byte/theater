@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from tests._presence_doubles import AbsentPresence
 from tests.rig.fake_runtime import FakeRuntime, completed_outcome
 from tests.test_control_rpc import _install_runtime, _native_pair
 from tests.test_handoff_send import _pump, _source
+from tests.test_mcp_server import _payload
+from theater import paths
 from theater.daemon.frontend.catalog_handlers import skills_load as frontend_skills_load
 from theater.daemon.gc import _delete_participant_row
 from theater.daemon.observation.completion import CompletionTracker
@@ -20,6 +23,7 @@ from theater.daemon.plugins.dispatch import _skills_load as plugin_skills_load
 from theater.daemon.rpc.cancellation import _cancel
 from theater.daemon.schema import play_members
 from theater.harness.contracts.runtime import ControlReceipt, DeliveryResult
+from theater.mcp.server import build
 from theater.models import JobState, now
 from theater.protocol import RemoteError
 from theater.skills import SkillValidationError, UnknownSkill, discover
@@ -150,6 +154,57 @@ async def test_a_play_cannot_start_above_a_live_master(client, daemon):
     assert daemon.plays.membership(parent.id) is None
     daemon.registry.mark_dead(child.id)
     assert (await _load(client, parent.id))["state"] == "started", "an ended play no longer blocks"
+
+
+async def test_whoami_lists_each_child_position_with_the_roles_that_fit_it(client, daemon):
+    master = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    lead = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
+    member = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=lead.id)
+    loose = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=lead.id)
+    await _load(client, master.id)
+    _seat(daemon, lead.id, master.id, "team-lead")
+    _seat(daemon, member.id, master.id, "team-member")
+    roles = ["teams/debater", "teams/reviewer", "teams/worker"]
+
+    async def whoami(participant) -> dict:
+        return _payload(await build(participant.id, "vibe").call_tool("whoami", {}))["play"]
+
+    play = {"play": "teams", "master": master.id}
+    assert await whoami(master) == {
+        **play,
+        "position": MASTER,
+        "spawn_options": [{"position": LEAD, "roles": roles}],
+    }
+    assert await whoami(lead) == {
+        **play,
+        "position": LEAD,
+        "spawn_options": [{"position": MEMBER, "roles": roles}],
+    }
+    assert await whoami(member) == {**play, "position": MEMBER, "spawn_options": []}
+    assert await whoami(loose) == {
+        **play,
+        "position": None,
+        "unpositioned": True,
+        "spawn_options": [],
+    }
+    assert "play" not in await client.call("participants.get", id=loose.id), "still no member"
+    with pytest.raises(PlayRefused, match="holds no position"):
+        daemon.plays.check_spawn(loose.id, PlayPlan(names=(MEMBER,)))
+
+
+async def test_spawn_options_come_from_the_pinned_rules_not_the_catalog(client, daemon):
+    squad = paths.skills_dir() / "squad"
+    _write_play(paths.skills_dir(), "squad", ("boss", "lead", "scout"))
+    master = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    loaded = await client.call("skills.load", name="squad/boss", caller_id=master.id)
+    assert loaded["play_start"]["state"] == "started"
+
+    (squad / "PLAY.toml").write_text(SQUAD.split("[roles]", maxsplit=1)[0])
+    shutil.rmtree(squad / "scout")
+    assert (await client.call("skills.list", play="squad"))["plays"][0]["roles"] == []
+
+    got = await client.call("participants.get", id=master.id, self_view=True)
+    assert got["play"]["spawn_options"] == [{"position": "squad/lead", "roles": ["squad/scout"]}]
 
 
 async def test_spawns_in_a_live_play_attach_one_position_the_spawner_may_give(
