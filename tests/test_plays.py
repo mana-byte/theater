@@ -8,6 +8,7 @@ from sqlalchemy import select
 from tests._presence_doubles import AbsentPresence
 from tests.test_control_rpc import _install_runtime, _native_pair
 from tests.test_handoff_send import _pump, _source
+from theater.constants.observation import RESCUE_CODE
 from theater.daemon.frontend.catalog_handlers import skills_load as frontend_skills_load
 from theater.daemon.gc import _delete_participant_row
 from theater.daemon.plays import PlayPlan, PlayRefused
@@ -294,6 +295,21 @@ async def test_queued_play_messages_fail_unsent_once_their_play_ends(client, dae
         assert "has ended; nothing was delivered" in job.result
     assert late_state.sent == [] and len(state.sent) == 1, "an ended play's messages stay unsent"
     assert daemon.plays.membership(late.id) is None
+
+
+async def test_only_a_verified_answer_proves_an_uncertain_delivery(client, daemon):
+    master = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
+    await _load(client, master.id)
+    binding = daemon.plays.check_send(master.id, child.id, PlayPlan(names=(LEAD,)))
+
+    for handle, error_code, seated in (("rescued", RESCUE_CODE, False), ("answered", None, True)):
+        daemon.jobs.create(
+            handle=handle, caller_id=master.id, target_id=child.id, kind="send", prompt="lead"
+        )
+        daemon.plays.track_assignment(binding, handle)
+        daemon.jobs.finish(handle, state=JobState.DONE, result="ok", error_code=error_code)
+        assert (daemon.plays.membership(child.id) is not None) is seated, handle
 
 
 async def test_adoption_keeps_one_live_play_and_its_position_hierarchy(client, daemon):

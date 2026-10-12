@@ -10,7 +10,7 @@ from theater.daemon import lineage
 from theater.daemon.persistence.repositories.plays import PlayAssignment, PlayMembership
 from theater.daemon.plays.models import NO_SEAT, PlayPlan, PlayRefused, SpawnSeat
 from theater.harness.contracts.runtime import DeliveryResult
-from theater.models import JobState, Status, now
+from theater.models import Job, JobState, Status, now
 from theater.skills import Play, PlayRules
 
 logger = logging.getLogger("theater.plays")
@@ -252,7 +252,7 @@ class PlayService:
         )
         job = self.store.get_job(job_handle)
         with self.store.write_unit() as unit:
-            if delivered or (job is not None and job.state == JobState.DONE):
+            if delivered or _answered(job):
                 self._apply(pending, unit.connection)
             elif job is not None and job.state == JobState.RUNNING:
                 self.store.plays.put_assignment(
@@ -279,13 +279,13 @@ class PlayService:
             self._apply(pending, connection)
 
     def _on_job_terminal(self, handle: str) -> None:
-        """A finished turn proves an uncertain delivery; any other end drops the binding."""
+        """Only a verified answer proves an uncertain delivery; any other end drops the binding."""
         pending = self.store.plays.assignment(handle)
         if pending is None:
             return
         job = self.store.get_job(handle)
         with self.store.write_unit() as unit:
-            if job is not None and job.state == JobState.DONE:
+            if _answered(job):
                 self._apply(pending, unit.connection)
             else:
                 self.store.plays.delete_assignment(handle, connection=unit.connection)
@@ -327,6 +327,12 @@ class PlayService:
         ):
             return f"{pending.assigned_by} can no longer give {pending.participant_id} a position"
         return None
+
+
+def _answered(job: Job | None) -> bool:
+    """A turn verifiably answered this job. A rescue also ends jobs ``done``, with an error code
+    and no proof the prompt ever arrived, so it never counts."""
+    return job is not None and job.state == JobState.DONE and job.error_code is None
 
 
 def _outcome(play: Play, state: str, *, reason: str | None = None) -> dict[str, str]:
