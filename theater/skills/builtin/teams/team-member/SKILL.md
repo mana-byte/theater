@@ -7,5 +7,5 @@ description: Work as a member of a team in a teams play. Do the task your team-l
 
 Do the task your team-lead assigned, within its scope, and report the result.
 
-You may give a child no position, so no task role applies either: while the play lives you cannot
-spawn agents of your own, and `whoami` shows `play.spawn_options` as empty.
+While the play lives you cannot spawn agents of your own: you cannot give a child any position,
+so no task role applies either, and `whoami` shows `play.spawn_options` as empty.
