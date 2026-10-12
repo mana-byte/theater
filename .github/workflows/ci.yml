@@ -112,8 +112,9 @@ jobs:
         run: |
           uv run python - <<'PY'
           from pathlib import Path
+          from scripts.ci_test_shards import SHARD_COUNT
 
-          expected = {f".coverage.{shard}" for shard in (1, 2, 3)}
+          expected = {f".coverage.{shard}" for shard in range(1, SHARD_COUNT + 1)}
           actual = {path.name for path in Path.cwd().glob(".coverage.*")}
           if actual != expected:
               raise SystemExit(f"coverage shards: expected {expected}, got {actual}")
