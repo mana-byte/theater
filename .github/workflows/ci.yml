@@ -24,8 +24,6 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Sync dependencies
@@ -36,8 +34,6 @@ jobs:
         run: uv run ruff format --check
       - name: Mypy
         run: uv run mypy
-      - name: Pytest with coverage
-        run: uv run pytest --cov -o faulthandler_timeout=120
       - name: Migrate fresh database to Alembic head
         env:
           THEATER_HOME: ${{ runner.temp }}/theater-home
@@ -49,13 +45,14 @@ jobs:
           THEATER_HOME: ${{ runner.temp }}/theater-home
         run: uv run alembic check
 
-  compatibility:
+  tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.13", "3.14"]
+        python-version: ["3.12", "3.13", "3.14"]
+        shard: [1, 2, 3]
     env:
       UV_PYTHON: ${{ matrix.python-version }}
     steps:
@@ -71,8 +68,50 @@ jobs:
         run: uv python install "${{ matrix.python-version }}"
       - name: Sync dependencies
         run: uv sync --locked --all-packages --group dev
+      - name: Pytest with coverage
+        if: matrix.python-version == '3.12'
+        run: >-
+          uv run python scripts/ci_test_shards.py --shard ${{ matrix.shard }} --
+          --cov --cov-fail-under=0 --cov-report= -o faulthandler_timeout=120
       - name: Pytest
-        run: uv run pytest -o faulthandler_timeout=120
+        if: matrix.python-version != '3.12'
+        run: >-
+          uv run python scripts/ci_test_shards.py --shard ${{ matrix.shard }} --
+          -o faulthandler_timeout=120
+      - name: Stage coverage data
+        if: matrix.python-version == '3.12'
+        run: mv .coverage .coverage.${{ matrix.shard }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.python-version == '3.12'
+        with:
+          name: coverage-${{ matrix.shard }}
+          path: .coverage.${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+
+  coverage:
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Sync dependencies
+        run: uv sync --locked --all-packages --group dev
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+      - name: Combine coverage and enforce the gate
+        run: |
+          uv run coverage combine
+          uv run coverage report --fail-under=80
 
   macos-sensitive:
     runs-on: macos-latest

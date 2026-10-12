@@ -113,6 +113,7 @@ markers = [
 
 [tool.coverage.run]
 source = ["theater", "packages/regie/src/regie"]
+relative_files = true
 
 [tool.coverage.report]
 fail_under = 80
