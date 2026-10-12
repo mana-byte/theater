@@ -179,6 +179,7 @@ async def _send_after(
     task: str,
     response_format,
     skills: str | None = None,
+    on_reserved: Callable[[str, str | None], None] | None = None,
 ) -> dict:
     """Send once the source job ends: queued behind it, or with its card when it already ended."""
     handoff = daemon.handoff
@@ -198,7 +199,11 @@ async def _send_after(
         return result
     prompt = handoff.send_prompt_now(source, source_name, task, response_format, skills)
     job, queued = await daemon.controls.send_when_safe(
-        target_id, caller_id=caller_id, prompt=prompt, response_format=response_format
+        target_id,
+        caller_id=caller_id,
+        prompt=prompt,
+        response_format=response_format,
+        on_reserved=on_reserved,
     )
     result = _auto_result(daemon, job, queued, caller_id, target_id, prompt)
     result["handoff"] = {"state": "opened", "task_kind": "work", "source": source.handle}
@@ -210,6 +215,7 @@ async def _send(daemon, params: dict) -> dict:
     """Send through the daemon's selected route: once when safe, else queued under one handle.
 
     Explicit ``refuse`` is open to anyone; ``queue``, ``amend`` and ``replace`` stay parent-only.
+    A play position among the skills is granted only once this message is delivered.
     """
     from theater.daemon.rpc import redirect
 
@@ -219,10 +225,17 @@ async def _send(daemon, params: dict) -> dict:
     caller_id = params.get("caller_id") or "cli"
     response_format = _serialized_response_format(daemon, params, creator_id=caller_id)
     task = _require(params, "prompt")
-    skills = attach_skills(daemon, params, task=task, sender=caller_id)
+    attachment = attach_skills(daemon, params, task=task, sender=caller_id)
+    skills = attachment.block
     prompt = compose_prompt(task, skills=skills, response_format=response_format)
 
     refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
+    try:
+        assignment = daemon.plays.check_assignment(caller_id, target_id, attachment.plan.names)
+    except TheaterError as exc:
+        refuse(exc, reason=exc.refusal_reason or exc.code)
+    # Held from reservation, before delivery, so the accepting settlement always finds it.
+    hold = daemon.plays.holder(assignment)
 
     async def deliver(decorate: Callable[[str], str] | None = None) -> dict:
         text = prompt if decorate is None else decorate(prompt)
@@ -231,6 +244,7 @@ async def _send(daemon, params: dict) -> dict:
             caller_id=caller_id,
             prompt=text,
             response_format=response_format,
+            on_reserved=hold,
             defer_provider_presence=if_busy != "refuse",
         )
         if (
@@ -259,10 +273,10 @@ async def _send(daemon, params: dict) -> dict:
             result["route"] = "queued" if result.get("delivery") == "queued" else "send"
         return result
 
-    try:
+    async def route() -> dict:
         if params.get("after") is not None or params.get("task_kind") is not None:
             return await _send_after(
-                daemon, params, target_id, caller_id, task, response_format, skills
+                daemon, params, target_id, caller_id, task, response_format, skills, hold
             )
         if if_busy == "auto":
             job, queued = await daemon.controls.send_when_safe(
@@ -270,6 +284,7 @@ async def _send(daemon, params: dict) -> dict:
                 caller_id=caller_id,
                 prompt=prompt,
                 response_format=response_format,
+                on_reserved=hold,
             )
             return _auto_result(daemon, job, queued, caller_id, target_id, prompt)
         if if_busy == "refuse":
@@ -285,5 +300,11 @@ async def _send(daemon, params: dict) -> dict:
         if if_busy == "amend":
             return await redirect.amend(daemon, routed, send=plain)
         return await redirect.replace(daemon, routed, send=deliver)
+
+    try:
+        result = await route()
     except TheaterError as exc:
         refuse(exc, reason=exc.refusal_reason or exc.code)
+    if assignment is not None:
+        daemon.plays.track_assignment(assignment, result["handle"])
+    return result

@@ -27,6 +27,7 @@ from theater.daemon.persistence.repositories.native_evidence import (
 from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.persistence.repositories.participant_names import ParticipantNameRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
+from theater.daemon.persistence.repositories.plays import PlayRepository
 from theater.daemon.persistence.repositories.providers import ProviderRepository
 from theater.daemon.persistence.repositories.receipts import ReceiptRepository
 from theater.daemon.persistence.repositories.response_contracts import (
@@ -52,7 +53,7 @@ from theater.daemon.persistence.store_parts import (
     ScratchpadStore,
     UsageStore,
 )
-from theater.daemon.persistence.store_parts._host import BusListener
+from theater.daemon.persistence.store_parts._host import BusListener, SettlementListener
 from theater.daemon.persistence.transactions import SQLiteWriteUnit
 
 logger = logging.getLogger("theater.store")
@@ -105,11 +106,14 @@ class Store(
         self.operations = OperationRepository(self._db)
         self.workspaces = WorkspaceRepository(self._db)
         self.journal = JournalRepository(self._db)
+        self.plays = PlayRepository(self._db)
         self._bus_listeners: list[BusListener] = []
+        self._settlement_listeners: list[SettlementListener] = []
         self._participant_name_resolver: Callable[[str], str | None] | None = None
 
     def close(self) -> None:
         self._bus_listeners.clear()
+        self._settlement_listeners.clear()
         self._db.close()
 
     def write_unit(self, *, connection: Connection | None = None) -> SQLiteWriteUnit:

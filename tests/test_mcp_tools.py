@@ -185,17 +185,16 @@ async def test_harnesses_forwards_approvals_and_nulls_when_the_daemon_predates_t
     assert got[1]["approvals"] is None
 
 
-async def test_skill_tools_forward_only_the_skills_rpc_methods():
-    listed = {"skills": [{"name": "alpha"}], "rejections": []}
+async def test_skill_tools_group_listing_and_identify_the_loader():
+    listed = {"skills": [{"name": "alpha"}], "plays": [], "rejections": []}
     loaded = {"name": "alpha", "content": "# Alpha\n"}
     s = session(**{"skills.list": listed, "skills.load": loaded})
 
-    assert await tools.list_skills(s) == listed
+    assert await tools.list_skills(s, play="teams") == listed
     assert await tools.load_skill(s, name="alpha") == loaded
-    assert s.client.calls == [
-        ("skills.list", {}),
-        ("skills.load", {"name": "alpha"}),
-    ]
+    assert s.client.methods == ["skills.list", "hello", "skills.load"]
+    assert s.client.params("skills.list") == {"grouped": True, "play": "teams"}
+    assert s.client.params("skills.load") == {"name": "alpha", "caller_id": "p-me"}
 
 
 async def test_spawn_names_the_caller_as_the_parent():

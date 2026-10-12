@@ -185,11 +185,22 @@ custom skills, so a workflow written once works from any of your agents.
 - `theater-debate` — challenge a decision with a second model.
 - `theater-configure` — set up or personalize Theater.
 - `theater-recover-tmux` — recover sessions after a tmux restart.
+- `teams` — a play: a master-lead directs team-leads, who direct team-members.
 
 **Hand a skill to another agent.** Name it in `skills=[...]` on `spawn_session`
 or `send`: Theater appends its instructions after your task, so the receiver
 needs no `load_skill` call. A child gets only the skills you name, never yours,
 and attached skills stay under 16 KiB combined.
+
+**Run a play.** A play is a team structure: `skills/<play>/PLAY.toml` plus one
+skill per member, named `<play>/<member>` (`teams/team-lead`). An agent that
+loads the master skill (`teams/master-lead`) becomes the play's master, and a
+spawn that attaches it starts a new master. While the master lives, every spawn
+below it attaches exactly one position its spawner may give, plus at most one
+task role (`teams/worker`, `teams/reviewer`, `teams/debater`). A parent gives an
+existing child its position with `send(skills=["teams/team-lead"])`; it takes
+effect once the child receives the message. When the master dies the play ends
+and its rules lift. `list_skills` shows each play's positions and roles.
 
 **Make Theater yours.** Turn any workflow you repeat into a custom skill—your
 preferred harnesses, models, roles, worktrees, checks, and handoffs. Add it at

@@ -29,6 +29,12 @@ from theater.skills import (
 )
 from theater.skills import loader as skills_loader
 
+STANDALONE = ["theater-configure", "theater-debate", "theater-orchestrate", "theater-recover-tmux"]
+TEAMS = [
+    f"teams/{member}"
+    for member in ("debater", "master-lead", "reviewer", "team-lead", "team-member", "worker")
+]
+
 
 def write_skill(root: Path, name: str, *, description: str = "A useful skill.") -> Path:
     package = root / name
@@ -52,12 +58,7 @@ def write_raw(root: Path, name: str, content: str | bytes) -> Path:
 def test_shipped_skills_are_discovered_with_their_exact_content(tmp_path):
     registry = discover(user_dir=tmp_path)
 
-    assert [skill.name for skill in registry.skills] == [
-        "theater-configure",
-        "theater-debate",
-        "theater-orchestrate",
-        "theater-recover-tmux",
-    ]
+    assert [skill.name for skill in registry.skills] == [*TEAMS, *STANDALONE]
     skill = registry.load("theater-orchestrate")
     assert skill.source is SkillSource.BUILTIN
     assert skill.content == skill.source_path.read_text(encoding="utf-8")
@@ -67,6 +68,7 @@ def test_disabled_builtin_is_absent_from_the_registry(tmp_path):
     registry = discover(user_dir=tmp_path, disabled=("theater-orchestrate",))
 
     assert [skill.name for skill in registry.skills] == [
+        *TEAMS,
         "theater-configure",
         "theater-debate",
         "theater-recover-tmux",
@@ -78,12 +80,7 @@ def test_disabled_builtin_is_absent_from_the_registry(tmp_path):
 def test_unknown_disabled_builtin_name_is_tolerated(tmp_path):
     registry = discover(user_dir=tmp_path, disabled=("not-a-bundled-skill",))
 
-    assert [skill.name for skill in registry.skills] == [
-        "theater-configure",
-        "theater-debate",
-        "theater-orchestrate",
-        "theater-recover-tmux",
-    ]
+    assert [skill.name for skill in registry.skills] == [*TEAMS, *STANDALONE]
 
 
 def test_shipped_tmux_recovery_skill_has_exact_data_only_package(tmp_path):
@@ -103,14 +100,7 @@ def test_valid_user_skill_is_loadable_in_deterministic_name_order(tmp_path):
 
     registry = discover(user_dir=tmp_path)
 
-    assert [skill.name for skill in registry.skills] == [
-        "alpha",
-        "theater-configure",
-        "theater-debate",
-        "theater-orchestrate",
-        "theater-recover-tmux",
-        "zebra",
-    ]
+    assert [skill.name for skill in registry.skills] == ["alpha", *TEAMS, *STANDALONE, "zebra"]
     skill = registry.load("alpha")
     assert skill.source is SkillSource.USER
     assert skill.content == "---\nname: alpha\ndescription: A useful skill.\n---\n\n# alpha\n"
@@ -378,12 +368,7 @@ def test_invalid_user_skill_is_diagnostic_but_invalid_builtin_is_fatal(tmp_path)
 def test_empty_user_root_is_allowed(tmp_path):
     registry = discover(user_dir=tmp_path / "missing")
 
-    assert [skill.name for skill in registry.skills] == [
-        "theater-configure",
-        "theater-debate",
-        "theater-orchestrate",
-        "theater-recover-tmux",
-    ]
+    assert [skill.name for skill in registry.skills] == [*TEAMS, *STANDALONE]
     assert registry.rejections == ()
 
 
@@ -576,7 +561,7 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
     assert discoveries == [("theater-orchestrate",), ("theater-orchestrate",)]
 
     with pytest.raises(BadRequest, match=r"skills\.list"):
-        await skills_rpc._skills_load(daemon, {"name": "not/a-skill"})
+        await skills_rpc._skills_load(daemon, {"name": "not/a/skill"})
     with pytest.raises(BadRequest, match="non-empty string"):
         await skills_rpc._skills_load(daemon, {"name": ""})
     with pytest.raises(NotFound, match=r"skills\.list"):

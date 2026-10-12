@@ -1,4 +1,4 @@
-"""Validation and loading for one declarative skill package."""
+"""Validation and loading for one declarative skill package or play."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import os
 import stat
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -15,13 +16,18 @@ from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
 from theater.constants.skills import (
+    PLAY_MANIFEST_FILENAME,
+    PLAY_MANIFEST_MAX_BYTES,
+    PLAY_SEPARATOR,
     SKILL_DESCRIPTION_MAX_CHARS,
     SKILL_FRONTMATTER_MAX_BYTES,
     SKILL_MAX_BYTES,
+    SKILL_MAX_COUNT,
     SKILL_NAME,
     SKILL_NAME_MAX_CHARS,
 )
-from theater.skills.models import Skill, SkillSource, SkillValidationError
+from theater.skills.models import Play, Skill, SkillSource, SkillValidationError
+from theater.skills.plays import parse_play_manifest
 
 SKILL_FILENAME = "SKILL.md"
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -66,9 +72,93 @@ def is_canonical_name(name: str) -> bool:
     return len(name) <= SKILL_NAME_MAX_CHARS and SKILL_NAME.fullmatch(name) is not None
 
 
+def is_skill_reference(name: str) -> bool:
+    """A standalone skill name, or a play member qualified as ``<play>/<member>``."""
+    parts = name.split(PLAY_SEPARATOR)
+    return len(parts) <= 2 and all(is_canonical_name(part) for part in parts)
+
+
 def skill_body(content: str) -> str:
     """The Markdown instructions of a validated ``SKILL.md``, without its frontmatter."""
     return _frontmatter(content)[1]
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedPlay:
+    """One validated play and its member skills, named ``<play>/<member>``."""
+
+    play: Play
+    skills: tuple[Skill, ...]
+
+
+def load_entry(name: str, *, source: SkillSource, root: Path, root_fd: int) -> Skill | LoadedPlay:
+    """A directory holding PLAY.toml is a play; any other is one standalone skill package."""
+    if is_canonical_name(name) and _holds_manifest(name, root_fd):
+        return _load_play(name, source=source, root=root, root_fd=root_fd)
+    return _load_package(name, source=source, root=root, root_fd=root_fd)
+
+
+def _holds_manifest(name: str, root_fd: int) -> bool:
+    try:
+        package_fd = _open_directory(name, "skill package", dir_fd=root_fd)
+    except SkillValidationError:
+        return False
+    assert package_fd is not None
+    try:
+        os.stat(PLAY_MANIFEST_FILENAME, dir_fd=package_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    finally:
+        _close_fd(package_fd)
+    return True
+
+
+def _load_play(name: str, *, source: SkillSource, root: Path, root_fd: int) -> LoadedPlay:
+    play_fd = _open_directory(name, "play package", dir_fd=root_fd)
+    assert play_fd is not None
+    try:
+        try:
+            entries, overflow = _bounded_entry_names(play_fd, limit=SKILL_MAX_COUNT + 1)
+        except OSError as exc:
+            raise SkillValidationError(
+                f"cannot list play package: {exc.strerror or 'I/O error'}"
+            ) from exc
+        if overflow:
+            raise SkillValidationError(f"play package exceeds {SKILL_MAX_COUNT} members")
+        manifest_fd = _open_regular_file(PLAY_MANIFEST_FILENAME, play_fd)
+        try:
+            text = _read_utf8(
+                manifest_fd, limit=PLAY_MANIFEST_MAX_BYTES, filename=PLAY_MANIFEST_FILENAME
+            )
+        finally:
+            _close_fd(manifest_fd)
+        description, rules = parse_play_manifest(text, play=name)
+        members = set(entries) - {PLAY_MANIFEST_FILENAME}
+        declared = set(rules.positions) | set(rules.roles)
+        if members != declared:
+            missing = ", ".join(sorted(declared - members)) or "none"
+            extra = ", ".join(sorted(members - declared)) or "none"
+            raise SkillValidationError(
+                f"a play holds {PLAY_MANIFEST_FILENAME} and one member package per declared "
+                f"position and role; missing: {missing}; undeclared: {extra}"
+            )
+        skills: list[Skill] = []
+        for member in sorted(members):
+            try:
+                skill = _load_package(member, source=source, root=root / name, root_fd=play_fd)
+            except SkillValidationError as exc:
+                raise SkillValidationError(f"member {member!r}: {exc}") from exc
+            skills.append(replace(skill, name=rules.qualified(member), play=name))
+    finally:
+        _close_fd(play_fd)
+    play = Play(
+        name=name,
+        description=description,
+        rules=rules,
+        source=source,
+        source_path=root / name / PLAY_MANIFEST_FILENAME,
+    )
+    return LoadedPlay(play=play, skills=tuple(skills))
 
 
 def _load_package(
@@ -202,24 +292,28 @@ def _open_scandir(fd: int):
 
 
 def _open_skill_file(package_fd: int) -> int:
+    return _open_regular_file(SKILL_FILENAME, package_fd)
+
+
+def _open_regular_file(filename: str, directory_fd: int) -> int:
     try:
-        fd = os.open(SKILL_FILENAME, _SKILL_FLAGS, dir_fd=package_fd)
+        fd = os.open(filename, _SKILL_FLAGS, dir_fd=directory_fd)
     except OSError as exc:
-        if exc.errno == errno.ELOOP or _is_symlink(SKILL_FILENAME, dir_fd=package_fd):
-            raise SkillValidationError(f"{SKILL_FILENAME} must not be a symlink") from exc
+        if exc.errno == errno.ELOOP or _is_symlink(filename, dir_fd=directory_fd):
+            raise SkillValidationError(f"{filename} must not be a symlink") from exc
         raise SkillValidationError(
-            f"cannot inspect {SKILL_FILENAME}: {exc.strerror or 'I/O error'}"
+            f"cannot inspect {filename}: {exc.strerror or 'I/O error'}"
         ) from exc
     try:
         mode = os.fstat(fd).st_mode
     except OSError as exc:
         _close_fd(fd)
         raise SkillValidationError(
-            f"cannot inspect {SKILL_FILENAME}: {exc.strerror or 'I/O error'}"
+            f"cannot inspect {filename}: {exc.strerror or 'I/O error'}"
         ) from exc
     if not stat.S_ISREG(mode):
         _close_fd(fd)
-        raise SkillValidationError(f"{SKILL_FILENAME} must be a regular file")
+        raise SkillValidationError(f"{filename} must be a regular file")
     return fd
 
 
@@ -235,24 +329,24 @@ def _is_symlink(path: Path | str, *, dir_fd: int | None) -> bool:
         return False
 
 
-def _read_utf8(fd: int) -> str:
+def _read_utf8(fd: int, *, limit: int = SKILL_MAX_BYTES, filename: str = SKILL_FILENAME) -> str:
     data = bytearray()
     try:
-        while len(data) <= SKILL_MAX_BYTES:
-            chunk = os.read(fd, SKILL_MAX_BYTES + 1 - len(data))
+        while len(data) <= limit:
+            chunk = os.read(fd, limit + 1 - len(data))
             if not chunk:
                 break
             data.extend(chunk)
     except OSError as exc:
         raise SkillValidationError(
-            f"cannot read {SKILL_FILENAME}: {exc.strerror or 'I/O error'}"
+            f"cannot read {filename}: {exc.strerror or 'I/O error'}"
         ) from exc
-    if len(data) > SKILL_MAX_BYTES:
-        raise SkillValidationError(f"{SKILL_FILENAME} exceeds {SKILL_MAX_BYTES} bytes")
+    if len(data) > limit:
+        raise SkillValidationError(f"{filename} exceeds {limit} bytes")
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise SkillValidationError(f"{SKILL_FILENAME} must be valid UTF-8") from exc
+        raise SkillValidationError(f"{filename} must be valid UTF-8") from exc
 
 
 def _frontmatter(content: str) -> tuple[str, str]:

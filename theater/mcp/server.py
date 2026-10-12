@@ -78,6 +78,8 @@ Only ask the user to kill a child once its work is merged or abandoned.
 Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
 To give another agent a skill, name it in skills=[...] on spawn_session or send; Theater
 attaches it after your task, and a child never inherits skills it was not given.
+A play is a team structure named in list_skills; loading its master skill starts it. While
+its master lives, every spawn below it attaches one position the spawner may give.
 """
 
 _TOOLSETS = frozenset({"all", "control", "wait"})
@@ -234,7 +236,11 @@ skills:   optional list of skill names from list_skills. Theater appends each on
           before response_format guidance, so the child needs no load_skill call.
           Omitted or empty means none: a child never inherits your skills. Needs a
           prompt; at most 16 KiB combined; refused for an unknown or disabled skill
-          and with resume where the harness cannot carry a prompt.
+          and with resume where the harness cannot carry a prompt. A play's master
+          skill makes the child the master of a new play. Inside a live play, attach
+          exactly one position your own position may give (list_skills shows them),
+          at most one task role that fits it, and any standalone skills; a resumed
+          member keeps its position. The refusal lists what you may attach.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately. A "manual" child may stop
@@ -584,8 +590,9 @@ def build(
     @mcp_tool()
     async def whoami() -> dict:
         """Identify yourself. Returned fields include id, live name, description,
-        harness, tier, status, cwd, branch, session_id, parent_id, and
-        addressable; unset fields are omitted. Includes live direct children
+        harness, tier, status, cwd, branch, session_id, parent_id, addressable,
+        and play (play, position, master) while you hold a position in a live
+        play; unset fields are omitted. Includes live direct children
         (name, status, harness; first 20, children_total beyond).
 
         Call this before addressing anyone else, so you can tell yourself apart
@@ -605,7 +612,8 @@ def build(
     ) -> list[dict]:
         """List every agent on this machine that Theater knows about.
 
-        Each entry says who they are (harness, id, session_id), where they are
+        Each entry says who they are (harness, id, session_id, and play while
+        they hold a live play position), where they are
         (cwd, branch), how they got here (tier, parent_id), and whether Theater
         currently has a verified physical inbound route (`addressable`). That
         field is not a readiness or permission verdict. `session_id` is the
@@ -689,14 +697,16 @@ def build(
         return await tools.models(session)
 
     @mcp_tool()
-    async def list_skills() -> dict:
+    async def list_skills(play: str | None = None) -> dict:
         """List skill metadata first, before choosing one to load.
 
-        Returns names, descriptions, sources, plugin owners when applicable,
-        and rejected packages or registrations, without instruction content.
-        Choose a listed exact name before calling load_skill.
+        Returns standalone skills, then plays: agent organizations whose members
+        are named <play>/<member>. Each play lists its master skill, its positions
+        (with the positions each may spawn) and its task roles (with the positions
+        they fit). No instruction content; rejected packages are reported. Pass
+        play to list one play only. Choose an exact name before calling load_skill.
         """
-        return await tools.list_skills(session)
+        return await tools.list_skills(session, play=play)
 
     @mcp_tool()
     async def load_skill(name: str) -> dict:
@@ -704,6 +714,9 @@ def build(
 
         Loading returns the complete validated SKILL.md content and consumes
         context, so list metadata first and load only the selected exact skill.
+        Loading a play's master skill starts that play with you as master
+        (play_start reports it); do so only when the user chooses you. Inside a
+        live play it returns the text without starting anything.
         """
         return await tools.load_skill(session, name=name)
 
@@ -843,7 +856,9 @@ def build(
                    needs its own worktree: use spawn_session(task_kind="independent_review").
         skills:    optional skill names from list_skills, attached after this message's
                    task as for spawn_session; they apply to this message only. Refused
-                   with if_busy="amend" while a turn is active.
+                   with if_busy="amend" while a turn is active. A play position sent by
+                   a direct parent to a child without one becomes the child's position
+                   once the child receives this message.
         Fails with `busy` for if_busy="refuse", a target whose queue (or your share of
         it) is full, or a send to yourself while you are working; with
         `transcript_untrusted` or `transcript_identity_lost` (transcript needs

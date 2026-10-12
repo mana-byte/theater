@@ -50,6 +50,10 @@ def _with_presence(daemon, record: dict) -> dict:
     route = daemon.controls.route_for(record["id"], RuntimeCapability.SEND)
     record["addressable"] = record.get("status") != Status.DEAD.value and route.route_available
     record["human_presence"] = presence_access.presence_snapshot(daemon, record["id"]).to_dict()
+    plays = getattr(daemon, "plays", None)
+    played = None if plays is None else plays.describe(record["id"])
+    if played is not None:
+        record["play"] = played
     return record
 
 

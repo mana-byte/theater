@@ -290,8 +290,8 @@ async def test_scratchpad_descriptions_state_machine_wide_ttl_scope(daemon):
 async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     calls = []
 
-    async def fake_list_skills(session) -> dict:
-        calls.append(("list", session))
+    async def fake_list_skills(session, *, play=None) -> dict:
+        calls.append(("list", session, play))
         return {"skills": [], "rejections": []}
 
     async def fake_load_skill(session, *, name: str) -> dict:
@@ -322,6 +322,14 @@ async def test_skill_tools_round_trip_through_the_daemon(daemon):
         "theater-recover-tmux",
     ]
     assert all("content" not in skill for skill in listed["skills"])
+    [teams] = listed["plays"]
+    assert teams["master"] == "teams/master-lead"
+    assert [position["name"] for position in teams["positions"]] == [
+        "teams/master-lead",
+        "teams/team-lead",
+        "teams/team-member",
+    ]
+    assert _payload(await mcp.call_tool("list_skills", {"play": "teams"}))["plays"] == [teams]
 
     loaded = _payload(await mcp.call_tool("load_skill", {"name": "theater-orchestrate"}))
     assert loaded["name"] == "theater-orchestrate"

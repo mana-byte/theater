@@ -14,6 +14,7 @@ from theater.daemon.operations import (
     request_digest,
 )
 from theater.daemon.persistence.transactions import WriteUnit
+from theater.daemon.plays.models import PlayPlan
 from theater.daemon.rails import check_budget, check_depth
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.spawning.provider_launch_parts._common import _SpawnAdmission
@@ -62,12 +63,14 @@ class SpawnAdmission(ParticipantLaunchHost):
         launch_prompt: str | None = None,
         launch_wiring: RuntimeWiring | None = None,
         launch_response_format: str | None = None,
+        launch_play: PlayPlan | None = None,
         reserved_participant_id: str | None = None,
     ) -> Mapping[str, object]:
         """Accept a spawn and detach all filesystem/provider work from the request.
 
         ``reserved_participant_id`` launches a deferred spawn into the participant and job
         handle it already holds, so the caller's one task handle never changes.
+        ``launch_play`` holds the attached skills' play facts; every entry point is checked.
         """
         replay = self._replay_spawn_if_known(client_id, idempotency_key, params)
         if replay is not None:
@@ -90,6 +93,7 @@ class SpawnAdmission(ParticipantLaunchHost):
                 params=launch_params,
                 captured=captured,
                 prepared=prepared,
+                play=launch_play or PlayPlan(),
                 reserved_participant_id=reserved_participant_id,
             )
 
@@ -161,11 +165,20 @@ class SpawnAdmission(ParticipantLaunchHost):
         params: Mapping[str, object],
         captured: dict[str, object],
         prepared: _PreparedSpawn,
+        play: PlayPlan,
         reserved_participant_id: str | None = None,
     ) -> PreparedOperation:
         admission = self._validate_spawn_admission(params, unit, prepared)
         if admission.workspace_request != prepared.preparation.request:
             raise BadRequest("workspace facts changed before spawn acceptance; retry the request")
+        predecessor = admission.resume_predecessor
+        # Checked in the accepting transaction, so a deferred launch sees the play as it is now.
+        seat = self.daemon.plays.check_spawn(
+            admission.parent_id,
+            play,
+            resume_predecessor_id=None if predecessor is None else predecessor.id,
+            connection=unit.connection,
+        )
         workspace = self.workspaces.reserve_for_spawn(
             prepared.preparation,
             reservation_id=operation_id,
@@ -193,6 +206,7 @@ class SpawnAdmission(ParticipantLaunchHost):
             participant = self._create_spawned_participant(
                 participant_id, request, admission, params, description, workspace, cwd, unit
             )
+        self.daemon.plays.record_spawn(seat, participant_id, connection=unit.connection)
         timestamp = now()
         if reserved_participant_id is not None:
             job = self._claim_reserved_job(unit, reserved_participant_id, request.prompt)

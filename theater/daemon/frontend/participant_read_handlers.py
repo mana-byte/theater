@@ -221,7 +221,7 @@ async def participant_to_wire(
     peers = live_peers
     if peers is None:
         peers = daemon.registry.list(include_dead=False)
-    return {
+    wire: dict[str, object] = {
         "participant_id": participant.id,
         "origin": origin,
         "harness": participant.harness,
@@ -244,6 +244,11 @@ async def participant_to_wire(
         "last_activity": participant.last_activity,
         "actions": actions,
     }
+    plays = getattr(daemon, "plays", None)
+    played = None if plays is None else plays.describe(participant.id)
+    if played is not None:
+        wire["play"] = played
+    return wire
 
 
 def _participant_page(daemon, params: dict) -> tuple[list[Participant], str | None]:

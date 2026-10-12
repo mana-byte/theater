@@ -39,6 +39,7 @@ def _summarise(p: dict) -> dict:
             "terminated_at": p.get("terminated_at"),
             "model": p.get("model"),
             "reasoning_effort": p.get("reasoning_effort"),
+            "play": p.get("play"),
         }
     )
 

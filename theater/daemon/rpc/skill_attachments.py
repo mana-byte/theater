@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from theater.constants.skills import SKILL_ATTACH_MAX_BYTES
+from theater.daemon.plays import PlayPlan, plan_for
 from theater.daemon.rpc.redirect import _caller_name
 from theater.daemon.rpc.skills import _snapshot
 from theater.daemon.skill_cards import render_skills
 from theater.harness import HARNESSES, normalize
 from theater.models import BadRequest, NotFound
-from theater.skills import is_canonical_name
+from theater.skills import is_skill_reference
 from theater.skills.models import UnknownSkill
+
+
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    """The rendered cards for a request's skills, and the play facts they carry."""
+
+    block: str | None = None
+    plan: PlayPlan = field(default_factory=PlayPlan)
 
 
 def _names(raw: object) -> tuple[str, ...]:
@@ -21,7 +32,7 @@ def _names(raw: object) -> tuple[str, ...]:
         )
     names = tuple(dict.fromkeys(raw))
     for name in names:
-        if not is_canonical_name(name):
+        if not is_skill_reference(name):
             raise BadRequest(
                 f"skills entry {name!r} is not a canonical skill name; pass names exactly as "
                 "list_skills returns them"
@@ -29,14 +40,14 @@ def _names(raw: object) -> tuple[str, ...]:
     return names
 
 
-def attach_skills(daemon, params: dict, *, task: str, sender: str | None) -> str | None:
-    """The rendered skill cards for this request, or None when it attaches nothing.
+def attach_skills(daemon, params: dict, *, task: str, sender: str | None) -> Attachment:
+    """The request's rendered skill cards and play facts; empty when it attaches nothing.
 
     Resolved from the same snapshot as ``skills.load``, so a disabled built-in is refused here.
     """
     names = _names(params.get("skills"))
     if not names:
-        return None
+        return Attachment()
     if not task.strip():
         raise BadRequest(
             "skills needs a prompt: Theater attaches each skill after your task, so state the task"
@@ -59,7 +70,7 @@ def attach_skills(daemon, params: dict, *, task: str, sender: str | None) -> str
             f"the attached skills render to {size} bytes, over the {SKILL_ATTACH_MAX_BYTES}-byte "
             "bound; attach fewer or shorter skills, or ask the agent to call load_skill itself"
         )
-    return block
+    return Attachment(block=block, plan=plan_for(resolved, snapshot))
 
 
 def reject_skills_resume(harness_name: object, resume: object, skills: str | None) -> None:

@@ -41,6 +41,9 @@ from theater.daemon.schema import (
     participant_names,
     participant_runtime_bindings,
     participants,
+    play_assignments,
+    play_instances,
+    play_members,
     response_contracts,
     terminal_bindings,
     touch,
@@ -355,7 +358,7 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
             touch_result = unit.connection.execute(
                 delete(touch).where(touch.c.job_handle.in_(retained_handles))
             )
-            for table in (job_repairs, job_contract_audit):
+            for table in (job_repairs, job_contract_audit, play_assignments):
                 unit.connection.execute(
                     delete(table).where(table.c.job_handle.in_(retained_handles))
                 )
@@ -497,6 +500,24 @@ def _delete_participant_dependents(connection, participant_id: str) -> None:
         connection.execute(delete(table).where(table.c.participant_id == participant_id))
     connection.execute(
         delete(response_contracts).where(response_contracts.c.creator_id == participant_id)
+    )
+    # A deleted master was dead, so its play had already ended; its rows are only history.
+    connection.execute(delete(play_instances).where(play_instances.c.master_id == participant_id))
+    connection.execute(
+        delete(play_members).where(
+            or_(
+                play_members.c.participant_id == participant_id,
+                play_members.c.master_id == participant_id,
+            )
+        )
+    )
+    connection.execute(
+        delete(play_assignments).where(
+            or_(
+                play_assignments.c.participant_id == participant_id,
+                play_assignments.c.assigned_by == participant_id,
+            )
+        )
     )
 
 

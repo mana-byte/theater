@@ -305,12 +305,14 @@ async def _queue_followup(daemon, params: dict) -> dict:
     prompt = _string_param(params, "prompt", method_name=method_name)
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     response_format = _serialized_response_format(daemon, params, creator_id=caller_id)
-    skills = attach_skills(daemon, params, task=prompt, sender=caller_id)
+    attachment = attach_skills(daemon, params, task=prompt, sender=caller_id)
+    assignment = daemon.plays.check_assignment(caller_id, target.id, attachment.plan.names)
     job = await daemon.controls.queue_followup(
         target.id,
         caller_id=caller_id,
-        prompt=compose_prompt(prompt, skills=skills, response_format=response_format),
+        prompt=compose_prompt(prompt, skills=attachment.block, response_format=response_format),
         response_format=response_format,
+        on_reserved=daemon.plays.holder(assignment),
     )
     daemon.store.bus_append(
         "agent.queue_followup",

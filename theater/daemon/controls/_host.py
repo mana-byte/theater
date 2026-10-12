@@ -70,6 +70,7 @@ if TYPE_CHECKING:
             caller_id: str,
             prompt: str,
             response_format: str | None = None,
+            on_reserved: Callable[[str, str | None], None] | None = None,
             defer_provider_presence: bool = False,
         ) -> Job: ...
         async def queue_followup(
@@ -79,6 +80,7 @@ if TYPE_CHECKING:
             caller_id: str,
             prompt: str,
             response_format: str | None = None,
+            on_reserved: Callable[[str, str | None], None] | None = None,
             origin: str | None = None,
             gate: HandoffGate | None = None,
         ) -> Job: ...

@@ -44,6 +44,7 @@ from theater.daemon.jobs import JobManager
 from theater.daemon.lock import DaemonLock
 from theater.daemon.observer import Observer
 from theater.daemon.operations import DurableEvidenceReconciler, OperationService
+from theater.daemon.plays import PlayService
 from theater.daemon.presence import PresenceMonitor
 from theater.daemon.registry import Registry
 from theater.daemon.response_contracts import audit as contract_audit
@@ -213,6 +214,7 @@ class Daemon:
     def _compose_persistence_services(self) -> None:
         self.operation_service = OperationService(self.store)
         self.handoff = HandoffService(self)
+        self.plays = PlayService(self)
         self.scratchpad_service = ScratchpadService(
             self.store._scratchpad,
             self.store.write_unit,

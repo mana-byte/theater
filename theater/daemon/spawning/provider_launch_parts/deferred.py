@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from theater.daemon.handoff.models import HandoffGate
+from theater.daemon.plays.models import PlayPlan
 from theater.daemon.rails import check_budget, check_depth
 from theater.daemon.spawning.provider_launch_parts._host import ParticipantLaunchHost
 from theater.daemon.terminals import ProviderUnavailable
@@ -40,11 +41,13 @@ class SpawnDeferral(ParticipantLaunchHost):
         task: str,
         response_format: str | None,
         gate: HandoffGate,
+        play: PlayPlan | None = None,
     ) -> Participant:
         """Durably hold the participant name and the one job handle the caller will await.
 
         No worktree, no argv and no terminal exist until the gate opens: the reservation is only
-        rows, so a restart loses nothing and a cancellation releases nothing.
+        rows, so a restart loses nothing and a cancellation releases nothing. The play rules are
+        checked now and again at launch, which alone seats the child.
         """
         adapter = get_harness(harness)
         if self._resolve_binary(adapter.binary) is None:
@@ -59,6 +62,7 @@ class SpawnDeferral(ParticipantLaunchHost):
                 raise BadRequest(f"no initiating participant {parent_id!r} exists")
             check_depth(self.store, parent_id, cap=rails.depth_cap)
             check_budget(self.store, parent_id, limit=rails.budget)
+            self.daemon.plays.check_spawn(parent_id, play or PlayPlan(), connection=unit.connection)
             participant = self.registry.create_spawned(
                 harness=harness,
                 cwd=cwd,

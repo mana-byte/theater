@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from theater.daemon.persistence.transactions import SQLiteWriteUnit
 
 BusListener = Callable[[dict], None]
+#: (operation_id, delivery result, connection of the settling write unit)
+SettlementListener = Callable[[str, object, object], None]
 
 
 class StoreHost:
@@ -71,6 +73,7 @@ class StoreHost:
         _repairs: JobRepairRepository
         _handoff: HandoffRepository
         _bus_listeners: list[BusListener]
+        _settlement_listeners: list[SettlementListener]
 
         def write_unit(self) -> SQLiteWriteUnit: ...
 

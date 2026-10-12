@@ -1,9 +1,9 @@
-"""Fresh, immutable multi-root snapshots of declarative skill packages."""
+"""Fresh, immutable multi-root snapshots of declarative skill packages and plays."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
@@ -15,14 +15,16 @@ from theater.constants.skills import (
     SKILL_MAX_REJECTIONS,
 )
 from theater.skills.loader import (
+    LoadedPlay,
     _bounded_entry_names,
     _close_fd,
-    _load_package,
     _open_directory,
-    is_canonical_name,
+    is_skill_reference,
+    load_entry,
 )
 from theater.skills.models import (
     BuiltinSkillError,
+    Play,
     Skill,
     SkillRejection,
     SkillSource,
@@ -37,6 +39,7 @@ class SkillRegistry:
 
     _skills: Mapping[str, Skill]
     rejections: tuple[SkillRejection, ...]
+    _plays: Mapping[str, Play] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -45,15 +48,27 @@ class SkillRegistry:
             MappingProxyType({name: self._skills[name] for name in sorted(self._skills)}),
         )
         object.__setattr__(self, "rejections", tuple(self.rejections))
+        object.__setattr__(
+            self,
+            "_plays",
+            MappingProxyType({name: self._plays[name] for name in sorted(self._plays)}),
+        )
 
     @property
     def skills(self) -> tuple[Skill, ...]:
-        """Validated skills in deterministic name order."""
+        """Every loadable skill, play members included, in deterministic name order."""
         return tuple(self._skills.values())
 
+    @property
+    def plays(self) -> tuple[Play, ...]:
+        return tuple(self._plays.values())
+
+    def play(self, name: str) -> Play | None:
+        return self._plays.get(name)
+
     def load(self, name: str) -> Skill:
-        """Load a skill by its canonical name from this snapshot."""
-        if not isinstance(name, str) or not is_canonical_name(name):
+        """Load a skill by its canonical name, or a play member by ``<play>/<member>``."""
+        if not isinstance(name, str) or not is_skill_reference(name):
             raise UnknownSkill("skill name must be canonical")
         try:
             return self._skills[name]
@@ -70,7 +85,7 @@ def discover(
 ) -> SkillRegistry:
     """Build a fresh snapshot.
 
-    ``disabled`` applies only to built-ins, all of which are validated before filtering.
+    ``disabled`` applies only to built-ins (a play by its name), all validated before filtering.
     """
     user_root = user_dir if user_dir is not None else paths.skills_dir()
     if builtin_dir is None:
@@ -83,42 +98,58 @@ def discover(
     if builtin_rejection is not None:
         raise BuiltinSkillError(
             f"invalid bundled skill at {builtin_rejection.source_path}: {builtin_rejection.error}. "
-            "Reinstall Theater or repair its packaged SKILL.md."
+            "Reinstall Theater or repair its packaged SKILL.md or PLAY.toml."
         )
     disabled_names = set(disabled)
-    skills = {
-        item.name: item
-        for item in builtins
-        if isinstance(item, Skill) and item.name not in disabled_names
-    }
+    skills: dict[str, Skill] = {}
+    plays: dict[str, Play] = {}
+    for item in builtins:
+        if isinstance(item, SkillRejection) or _entry_name(item) in disabled_names:
+            continue
+        _add(skills, plays, item)
     rejections: list[SkillRejection] = []
     for item in _scan_root(user_root, SkillSource.USER, required=False):
         if isinstance(item, SkillRejection):
             _append_rejection(rejections, item)
             continue
-        builtin = skills.get(item.name)
+        name = _entry_name(item)
+        builtin = plays.get(name) or skills.get(name)
         if builtin is not None:
+            path = item.play.source_path if isinstance(item, LoadedPlay) else item.source_path
             _append_rejection(
                 rejections,
                 _rejection(
-                    item.source,
-                    item.source_path,
-                    item.name,
-                    f"user skill at {item.source_path} conflicts with bundled skill at "
+                    SkillSource.USER,
+                    path,
+                    name,
+                    f"user skill at {path} conflicts with bundled skill at "
                     f"{builtin.source_path}; bundled skill remains authoritative",
                 ),
             )
             continue
+        _add(skills, plays, item)
+    _merge_plugin_skills(skills, rejections, plugin_skills, plays=plays)
+    return SkillRegistry(skills, tuple(rejections), plays)
+
+
+def _entry_name(item: Skill | LoadedPlay) -> str:
+    return item.play.name if isinstance(item, LoadedPlay) else item.name
+
+
+def _add(skills: dict[str, Skill], plays: dict[str, Play], item: Skill | LoadedPlay) -> None:
+    if isinstance(item, LoadedPlay):
+        plays[item.play.name] = item.play
+        skills.update((skill.name, skill) for skill in item.skills)
+    else:
         skills[item.name] = item
-    _merge_plugin_skills(skills, rejections, plugin_skills)
-    ordered = {name: skills[name] for name in sorted(skills)}
-    return SkillRegistry(ordered, tuple(rejections))
 
 
 def _merge_plugin_skills(
     skills: dict[str, Skill],
     rejections: list[SkillRejection],
     plugin_skills: Iterable[Skill],
+    *,
+    plays: Mapping[str, Play] = MappingProxyType({}),
 ) -> None:
     groups: dict[str, list[Skill]] = {}
     for skill in plugin_skills:
@@ -143,7 +174,7 @@ def _merge_plugin_skills(
                 )
             continue
         candidate = candidates[0]
-        existing = skills.get(name)
+        existing: Skill | Play | None = skills.get(name) or plays.get(name)
         if existing is not None:
             _append_rejection(
                 rejections,
@@ -163,7 +194,7 @@ def _merge_plugin_skills(
 
 def _scan_root(
     root: Path, source: SkillSource, *, required: bool
-) -> tuple[Skill | SkillRejection, ...]:
+) -> tuple[Skill | LoadedPlay | SkillRejection, ...]:
     try:
         root_fd = _open_directory(root, "skill root", missing_ok=not required)
     except SkillValidationError as exc:
@@ -188,10 +219,10 @@ def _scan_root(
                     f"skill root exceeds the limit of {SKILL_MAX_COUNT} entries",
                 ),
             )
-        results: list[Skill | SkillRejection] = []
+        results: list[Skill | LoadedPlay | SkillRejection] = []
         for name in sorted(entries):
             try:
-                results.append(_load_package(name, source=source, root=root, root_fd=root_fd))
+                results.append(load_entry(name, source=source, root=root, root_fd=root_fd))
             except SkillValidationError as exc:
                 results.append(_rejection(source, root / name, name, str(exc)))
         return tuple(results)

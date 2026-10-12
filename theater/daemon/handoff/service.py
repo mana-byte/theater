@@ -38,6 +38,7 @@ from theater.daemon.handoff.card import SourceView, render_card
 from theater.daemon.handoff.evidence import EvidencePinner
 from theater.daemon.handoff.models import HandoffGate
 from theater.daemon.handoff.resolution import participant_of, resolve_source
+from theater.daemon.plays.models import PlayPlan
 from theater.daemon.schema import launch_reservations
 from theater.daemon.skill_cards import compose_prompt
 from theater.daemon.terminals import ProviderBusy, ProviderUnavailable
@@ -97,6 +98,7 @@ class HandoffService:
         task: str,
         response_format: str | None,
         skills: str | None = None,
+        play: PlayPlan | None = None,
     ) -> dict:
         """Reserve the child and its one task handle now; launch only when the source ends."""
         kind = params.get("task_kind") or TASK_KIND_WORK
@@ -117,6 +119,7 @@ class HandoffService:
             "task": task,
             "response_format": response_format,
             **({"skills": skills} if skills else {}),
+            **({"play": play.to_wire()} if play is not None and play.names else {}),
         }
         gate = HandoffGate(
             job_handle="",
@@ -141,6 +144,7 @@ class HandoffService:
             task=task,
             response_format=response_format,
             gate=gate,
+            play=play,
         )
         self._schedule(participant.id)
         result = participant.to_dict()
@@ -483,6 +487,7 @@ class HandoffService:
             launch_prompt=prompt,
             launch_wiring=wiring_from_value(params.get("wiring")),
             launch_response_format=response_format,
+            launch_play=PlayPlan.from_wire(stored.get("play")),
             reserved_participant_id=gate.job_handle,
         )
 

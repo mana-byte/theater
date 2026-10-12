@@ -111,6 +111,7 @@ theater/
 │   ├── response_contracts/  strict response_format: admission, presets, whole-answer validation, audit
 │   ├── runtime/        socket dispatch, maintenance loops, lifecycle
 │   ├── handoff/        `after` handoffs: source resolution, completion evidence, cards, gates
+│   ├── plays/          play membership: start by load, spawn seats, assignment on delivery
 │   ├── spawning/       launch planning, resume, service
 │   ├── worktrees/      unique and named shared worktree paths and repos
 │   ├── trajectory/     canonical projection, ingestion, cache, telemetry, responses
@@ -142,7 +143,8 @@ theater/
 │   ├── source.py       compatibility facade — re-exports contracts + transcript
 │   └── plugins.py      generic loader compatibility facade
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
-│   └── builtin/        theater-configure · theater-debate · theater-orchestrate · theater-recover-tmux
+│   ├── plays.py        PLAY.toml parsing into immutable play rules
+│   └── builtin/        theater-configure · theater-debate · theater-orchestrate · theater-recover-tmux · teams (play)
 └── mcp/                server.py (21 agent tools) · session.py · toolsets/
 │   ├── toolsets/       delegation, participants, recall, transcripts, skills
 │   ├── server.py       composition surface — registers @mcp.tool entries
@@ -314,6 +316,14 @@ plugin skills are unaffected.
 A sender can also attach skills to another agent's task with `skills=[...]` on
 `spawn_session`/`send`; the attached cards must fit `SKILL_ATTACH_MAX_BYTES`
 (16 KiB combined).
+
+A **play** is `skills/<play>/PLAY.toml` (data only: description, master,
+`[positions]`, `[roles]`) plus exactly one `<member>/SKILL.md` per declared
+position and role, referenced as `<play>/<member>`. Plays are user or built-in
+only (not MCP-plugin). Membership lives in `daemon/plays/`: loading the master
+skill starts a play with pinned rules, and every spawn below a live master is
+checked inside the spawn's accepting transaction — keep new spawn entry points
+on `ParticipantLaunchService` so none bypass it.
 
 ## Further reading
 

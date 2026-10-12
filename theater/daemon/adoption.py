@@ -145,6 +145,7 @@ class AdoptionService:
             )
         self._check_owner_is_the_shared_parent(caller, target)
         self._check_rails(caller, target)
+        self._daemon.plays.check_adoption(caller.id, target.id, connection=connection)
         if target.id in set(lineage.ancestor_ids(self._daemon.store, caller.id)):
             raise CycleDetected(
                 f"refusing to adopt {target.id!r}: it is an ancestor of {caller.id!r}; "

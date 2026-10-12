@@ -262,6 +262,34 @@ rendered cards in its request. Nothing is inherited; a child gets only the
 skills its spawner names. Handoff cards quote a source's task without its skill
 cards and neutralise forged skill markers in quoted output.
 
+A play is a skill directory holding `PLAY.toml` beside one member package per
+position and task role; members are named `<play>/<member>` and a bare play
+name is never a skill. `PLAY.toml` is data only (`theater/skills/plays.py`): a
+description, the master position, which positions each position may give, and
+which positions each task role fits. A play is disabled by its name. The MCP
+`list_skills` asks for `grouped` output and an optional `play`; the CLI and
+frontend keep the flat list.
+
+Membership is daemon state (`daemon/plays/`, tables `play_instances`,
+`play_members`, `play_assignments`). An agent's own `skills.load` of a master
+skill names its caller and starts the play, pinning the rules JSON and digest
+on `play_instances`; reads that name no caller (CLI, frontend) start nothing.
+A spawn attaching a master skill seats its child as master in the accepting
+transaction. A membership is active only while its master is not `dead`, so the
+master's death ends the play for everyone without a write, and an agent holds at
+most one active membership. While a play is live, every spawn below its master —
+MCP, CLI, frontend, deferred, resumed — is checked in
+`_prepare_spawn_operation`, inside the transaction that accepts it: the spawner's
+own position must allow exactly one attached position, at most one fitting role
+rides along, and anything else is refused with `play_refused` and what is
+allowed. A deferred spawn is checked when admitted and again when it launches;
+a resumed member keeps its position while its master lives. A direct parent's
+`send` of a position to a child without one records a pending assignment that
+only an accepted delivery settlement (or a finished turn after an uncertain one)
+applies, revalidated against the live play; a cancelled, rejected or killed
+message, or a dead master, assigns nothing. Adoption never moves a live play's
+member inside another live play.
+
 ---
 
 ## 5. State

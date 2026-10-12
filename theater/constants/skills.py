@@ -14,8 +14,16 @@ SKILL_DESCRIPTION_MAX_CHARS = 1_000
 SKILL_DIAGNOSTIC_MAX_CHARS = 500
 #: Combined rendered size of the skills one spawn or send attaches; well under harness prompt caps.
 SKILL_ATTACH_MAX_BYTES = 16 * 1024
+#: A play directory holds this manifest beside its member skill packages.
+PLAY_MANIFEST_FILENAME = "PLAY.toml"
+PLAY_MANIFEST_MAX_BYTES = 16 * 1024
+#: Separates a play from its member in a qualified skill name: ``teams/worker``.
+PLAY_SEPARATOR = "/"
 
 __all__ = [
+    "PLAY_MANIFEST_FILENAME",
+    "PLAY_MANIFEST_MAX_BYTES",
+    "PLAY_SEPARATOR",
     "SKILL_ATTACH_MAX_BYTES",
     "SKILL_DESCRIPTION_MAX_CHARS",
     "SKILL_DIAGNOSTIC_MAX_CHARS",

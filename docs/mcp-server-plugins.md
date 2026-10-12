@@ -40,7 +40,9 @@ plugin invalid. Disabled plugins contribute no skills and their skill files are
 not read. The `[skills] disabled` list in `config.toml` filters only bundled
 skills — plugin-registered skills are unaffected by it. Registration needs no
 `PluginCapability`; `SKILLS_READ` only lets a
-running sidecar consume Theater's skill catalog.
+running sidecar consume Theater's skill catalog. A plugin registers standalone
+skills only: plays (`PLAY.toml` with `<play>/<member>` skills) come from the
+bundled or user skill roots.
 
 Enable a sidecar explicitly:
 

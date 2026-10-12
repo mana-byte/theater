@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 
 from theater.constants.daemon import (
@@ -19,6 +20,8 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
 )
 from theater.models import Job, JobState, new_id
+
+logger = logging.getLogger("theater.store")
 
 
 class ControlOperationStore(StoreHost):
@@ -194,6 +197,17 @@ class ControlOperationStore(StoreHost):
             if current is not None:
                 self._append_control_event(unit, current)
 
+    def add_settlement_listener(self, listener) -> None:
+        """Run ``listener`` inside every delivery settlement's own transaction."""
+        self._settlement_listeners.append(listener)
+
+    def _notify_settled(self, operation_id: str, result, connection) -> None:
+        for listener in tuple(self._settlement_listeners):
+            try:
+                listener(operation_id, result, connection)
+            except Exception:
+                logger.exception("settlement listener failed for operation %s", operation_id)
+
     def settle_control_operation(
         self,
         operation_id: str,
@@ -217,6 +231,7 @@ class ControlOperationStore(StoreHost):
                 updated_at=updated_at,
                 connection=connection,
             )
+            self._notify_settled(operation_id, result, connection)
             return
         with self.write_unit() as unit:
             before = self._control_operations.get(operation_id, connection=unit.connection)
@@ -233,6 +248,7 @@ class ControlOperationStore(StoreHost):
             current = self._control_operations.get(operation_id, connection=unit.connection)
             if current is not None and current != before:
                 self._append_control_event(unit, current)
+            self._notify_settled(operation_id, result, unit.connection)
 
     def defer_provider_presence(
         self, operation_id: str, *, error: str, updated_at: float

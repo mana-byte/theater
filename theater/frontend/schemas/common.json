@@ -261,6 +261,16 @@
           "propertyNames": {"maxLength": 128},
           "additionalProperties": {"$ref": "#/$defs/actionCapability"},
           "maxProperties": 64
+        },
+        "play": {
+          "type": "object",
+          "required": ["play", "position", "master"],
+          "properties": {
+            "play": {"$ref": "#/$defs/identifier"},
+            "position": {"$ref": "#/$defs/identifier"},
+            "master": {"$ref": "#/$defs/identifier"}
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": true

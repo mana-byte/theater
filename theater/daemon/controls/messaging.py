@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from theater.daemon.controls._common import QUEUE_ORIGIN_SEND
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.dispatch import TEMPORARY_REFUSALS
@@ -24,6 +26,7 @@ class MessageControls(ControlHost):
         caller_id: str,
         prompt: str,
         response_format: str | None = None,
+        on_reserved: Callable[[str, str | None], None] | None = None,
     ) -> tuple[Job, bool]:
         """Return ``(job, queued)``; permanent refusals raise before anything is accepted.
 
@@ -37,6 +40,7 @@ class MessageControls(ControlHost):
                 caller_id=caller_id,
                 prompt=prompt,
                 response_format=response_format,
+                on_reserved=on_reserved,
                 defer_provider_presence=caller_id != participant_id,
             )
         except TEMPORARY_REFUSALS:
@@ -47,6 +51,7 @@ class MessageControls(ControlHost):
                 caller_id=caller_id,
                 prompt=prompt,
                 response_format=response_format,
+                on_reserved=on_reserved,
                 origin=QUEUE_ORIGIN_SEND,
             )
             self._count_send_admission(OUTCOME_QUEUED)

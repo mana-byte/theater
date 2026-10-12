@@ -220,7 +220,8 @@ async def _skills_load(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
     from theater.daemon.rpc.skills import _skills_load
 
-    return await _skills_load(daemon, params)
+    # A sidecar read names no caller, so it can never start a play.
+    return await _skills_load(daemon, {"name": params.get("name")})
 
 
 async def _skills_read(daemon, params: dict[str, Any], actor_id: str) -> Any:
