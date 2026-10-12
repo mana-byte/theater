@@ -71,6 +71,13 @@ async def _load(client, caller_id: str | None = None) -> dict | None:
     return (await client.call("skills.load", **params)).get("play_start")
 
 
+def _seat(daemon, participant_id: str, master_id: str, position: str) -> None:
+    with daemon.store.write_unit() as unit:
+        daemon.store.plays.add_member(
+            participant_id, master_id, position, created_at=0.0, connection=unit.connection
+        )
+
+
 @pytest.mark.parametrize(
     ("manifest", "error"),
     [
@@ -117,6 +124,20 @@ async def test_loading_the_master_skill_starts_one_play_for_that_agent_only(clie
     row = await client.call("participants.get", id=master.id)
     assert row["play"] == {"play": "teams", "position": MASTER, "master": master.id}
     assert "play" not in await client.call("participants.get", id=child.id)
+
+
+async def test_a_play_cannot_start_above_a_live_master(client, daemon):
+    parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
+    assert (await _load(client, child.id))["state"] == "started"
+
+    refused = await _load(client, parent.id)
+
+    assert refused["state"] == "not_started"
+    assert f"{child.id} below you holds {MASTER}" in refused["reason"]
+    assert daemon.plays.membership(parent.id) is None
+    daemon.registry.mark_dead(child.id)
+    assert (await _load(client, parent.id))["state"] == "started", "an ended play no longer blocks"
 
 
 async def test_spawns_in_a_live_play_attach_one_position_the_spawner_may_give(
@@ -232,15 +253,33 @@ async def test_a_parents_send_assigns_a_position_only_once_delivered(
     assert daemon.plays.membership(late.id) is None, "a dead master assigns nothing"
 
 
-async def test_adoption_never_nests_one_live_play_in_another(client, daemon):
-    adopter = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
-    other = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
-    await _install_runtime(daemon, other.id)
-    for participant in (adopter, other):
-        assert (await _load(client, participant.id))["state"] == "started"
+async def test_adoption_keeps_one_live_play_and_its_position_hierarchy(client, daemon):
+    master = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    await _load(client, master.id)
+    lead_a, lead_b, loose = (
+        daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
+        for _ in range(3)
+    )
+    for lead in (lead_a, lead_b):
+        _seat(daemon, lead.id, master.id, "team-lead")
+    outsider = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    inner = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=outsider.id)
+    await _load(client, inner.id)
+    for target in (lead_b, loose, outsider):
+        await _install_runtime(daemon, target.id)
 
+    async def adopt(target, caller):
+        return await client.call("participant.adopt", id=target.id, caller_id=caller.id)
+
+    with pytest.raises(RemoteError, match="may parent only teams/team-member"):
+        await adopt(lead_b, lead_a)
+    with pytest.raises(RemoteError, match="you hold no position there"):
+        await adopt(lead_b, loose)
     with pytest.raises(RemoteError, match="one play cannot sit inside another"):
-        await client.call("participant.adopt", id=other.id, caller_id=adopter.id)
+        await adopt(outsider, master)
+    assert daemon.registry.get(lead_b.id).parent_id == master.id
+    await adopt(loose, lead_a)
+    assert daemon.registry.get(loose.id).parent_id == lead_a.id, "its new parent assigns it"
 
 
 async def test_gc_drops_a_deleted_masters_play_rows(client, daemon):

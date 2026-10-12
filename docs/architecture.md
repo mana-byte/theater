@@ -273,7 +273,8 @@ frontend keep the flat list.
 Membership is daemon state (`daemon/plays/`, tables `play_instances`,
 `play_members`, `play_assignments`). An agent's own `skills.load` of a master
 skill names its caller and starts the play, pinning the rules JSON and digest
-on `play_instances`; reads that name no caller (CLI, frontend) start nothing.
+on `play_instances`, unless a live play holds the caller, an ancestor, or anyone
+in its subtree; reads that name no caller (CLI, frontend) start nothing.
 A spawn attaching a master skill seats its child as master in the accepting
 transaction. A membership is active only while its master is not `dead`, so the
 master's death ends the play for everyone without a write, and an agent holds at
@@ -288,7 +289,8 @@ a resumed member keeps its position while its master lives. A direct parent's
 only an accepted delivery settlement (or a finished turn after an uncertain one)
 applies, revalidated against the live play; a cancelled, rejected or killed
 message, or a dead master, assigns nothing. Adoption never moves a live play's
-member inside another live play.
+member inside another live play, and inside one a positioned target needs an
+adopter whose position may parent it; an unpositioned target is assigned later.
 
 ---
 

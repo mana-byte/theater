@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 
 from theater.daemon import lineage
@@ -44,6 +44,13 @@ class PlayService:
                 return held
         return None
 
+    def _memberships_in(self, root_id: str, *, connection=None) -> Iterator[PlayMembership]:
+        """Every live membership in ``root_id``'s subtree, the root included."""
+        for participant_id in lineage.subtree_ids(self.store, root_id):
+            held = self.membership(participant_id, connection=connection)
+            if held is not None:
+                yield held
+
     def describe(self, participant_id: str) -> dict[str, str] | None:
         held = self.membership(participant_id)
         if held is None:
@@ -57,7 +64,7 @@ class PlayService:
     # ---- start by load --------------------------------------------------------------------
 
     def start_by_load(self, caller_id: str, play: Play) -> dict[str, str]:
-        """Make the loading agent its play's master, once, and never inside a live play."""
+        """Make the loading agent its play's master, once, never inside or above a live play."""
         with self.store.write_unit() as unit:
             caller = self.store.get_participant(caller_id, connection=unit.connection)
             if caller is None or caller.status is Status.DEAD:
@@ -68,6 +75,9 @@ class PlayService:
                 if mine and governing.play == play.name:
                     return _outcome(play, "already_master")
                 return _outcome(play, "not_started", reason=_inside(governing, caller_id))
+            below = next(self._memberships_in(caller_id, connection=unit.connection), None)
+            if below is not None:
+                return _outcome(play, "not_started", reason=_contains(below))
             self.store.plays.start(
                 caller_id, play.rules, created_at=now(), connection=unit.connection
             )
@@ -117,19 +127,35 @@ class PlayService:
             )
 
     def check_adoption(self, adopter_id: str, target_id: str, *, connection=None) -> None:
-        """Adoption never moves a live play, or a member of one, inside a different live play."""
+        """Adoption never nests live plays, and a positioned target needs an adopter whose own
+        position may parent it; an unpositioned target waits for its new parent's position."""
         governing = self.governing(adopter_id, connection=connection)
         if governing is None:
             return
-        for participant_id in lineage.subtree_ids(self.store, target_id):
-            held = self.membership(participant_id, connection=connection)
-            if held is not None and held.master_id != governing.master_id:
+        for held in self._memberships_in(target_id, connection=connection):
+            if held.master_id != governing.master_id:
                 raise PlayRefused(
-                    f"cannot adopt {target_id!r}: {participant_id} holds "
+                    f"cannot adopt {target_id!r}: {held.participant_id} holds "
                     f"{held.rules.qualified(held.position)} in the live {held.play} play under "
                     f"master {held.master_id}, and you are inside the live {governing.play} "
                     f"play under master {governing.master_id}; one play cannot sit inside another"
                 )
+        target = self.membership(target_id, connection=connection)
+        if target is None:
+            return
+        rules = governing.rules
+        if governing.participant_id != adopter_id:
+            raise PlayRefused(
+                f"cannot adopt {target_id!r}: it holds {rules.qualified(target.position)} in the "
+                f"live {rules.play} play, and you hold no position there to parent it"
+            )
+        allowed = rules.children(governing.position)
+        if target.position not in allowed:
+            raise PlayRefused(
+                f"cannot adopt {target_id!r}: it holds {rules.qualified(target.position)}, and a "
+                f"{rules.qualified(governing.position)} may parent only "
+                f"{_qualified(rules, allowed) or 'no position'} in the live {rules.play} play"
+            )
 
     # ---- assignment by send ---------------------------------------------------------------
 
@@ -334,6 +360,14 @@ def _inside(governing: PlayMembership, participant_id: str | None) -> str:
     return (
         f"{where} in the live {governing.play} play; no play can start inside a live play, "
         "and an agent belongs to one live play at a time"
+    )
+
+
+def _contains(below: PlayMembership) -> str:
+    return (
+        f"{below.participant_id} below you holds {below.rules.qualified(below.position)} in the "
+        f"live {below.play} play under master {below.master_id}; a play cannot contain another "
+        "live play, so start yours once that one ends"
     )
 
 

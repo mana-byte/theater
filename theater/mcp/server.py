@@ -716,7 +716,7 @@ def build(
         context, so list metadata first and load only the selected exact skill.
         Loading a play's master skill starts that play with you as master
         (play_start reports it); do so only when the user chooses you. Inside a
-        live play it returns the text without starting anything.
+        live play, or above one, it returns the text without starting anything.
         """
         return await tools.load_skill(session, name=name)
 
