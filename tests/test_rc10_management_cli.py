@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 from theater.daemon.frontend import provider_handlers, workspace_handlers
+from theater.daemon.plays import PlayPlan
 from theater.daemon.rpc import management, spawning
 from theater.daemon.terminals.service import TerminalProviderService
 from theater.daemon.worktrees.service import WorkspaceService
@@ -251,6 +252,7 @@ async def test_private_spawn_provider_override_adapts_to_the_shared_launch_servi
             "launch_prompt": "work",
             "launch_wiring": RuntimeWiring.AUTO,
             "launch_response_format": None,
+            "launch_play": PlayPlan(),
         }
     ]
 
