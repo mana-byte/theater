@@ -78,6 +78,22 @@ async def test_send_after_queues_until_the_source_ends_then_delivers_one_card(cl
     assert daemon.store.get_handoff_gate(reply["handle"]).state == "opened"
 
 
+async def test_send_after_trails_its_card_with_the_attached_skills(client, daemon):
+    parent, child, state = await _native_pair(daemon)
+    _, source_job = _source(daemon)
+
+    reply = await _send(
+        client, child, parent, prompt="Review the result", after="Writer", skills=["theater-debate"]
+    )
+    daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="PARSER-READY")
+    await _pump(daemon, child, state)
+
+    (delivered,) = state.sent
+    assert delivered.startswith("Review the result\n\n[Theater handoff")
+    assert delivered.index("PARSER-READY") < delivered.index("[Theater skill theater-debate")
+    assert daemon.store.get_job(reply["handle"]).prompt == delivered
+
+
 async def test_source_that_already_ended_sends_with_its_card_at_once(client, daemon):
     parent, child, state = await _native_pair(daemon)
     _, source_job = _source(daemon)

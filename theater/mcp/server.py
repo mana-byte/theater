@@ -76,6 +76,8 @@ returns a code, and `next` when known: follow it instead of retrying unchanged.
 Only ask the user to kill a child once its work is merged or abandoned.
 
 Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
+To give another agent a skill, name it in skills=[...] on spawn_session or send; Theater
+attaches it after your task, and a child never inherits skills it was not given.
 """
 
 _TOOLSETS = frozenset({"all", "control", "wait"})
@@ -227,6 +229,13 @@ response_format: optional JSON object. A bare JSON Schema object is a prompt hin
           job stays running and you see nothing of it.
           Otherwise, or when that fails, the job ends with structured_status
           "unable_to_parse". await_sessions returns a valid answer in structured_result.
+skills:   optional list of skill names from list_skills. Theater appends each one's
+          instructions to your task as a labelled card, after any handoff card and
+          before response_format guidance, so the child needs no load_skill call.
+          Omitted or empty means none: a child never inherits your skills. Needs a
+          prompt; at most 16 KiB combined; refused for an unknown or disabled skill
+          and with resume where the harness cannot carry a prompt. Skills written to
+          be attached are receiver skills: their description starts "Receiver skill —".
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately. A "manual" child may stop
@@ -717,6 +726,7 @@ def build(
         wiring: Literal["auto", "native", "legacy"] = "auto",
         after: str | None = None,
         task_kind: Literal["work", "independent_review"] | None = None,
+        skills: list[str] | None = None,
     ) -> dict:
         return await tools.spawn_session(
             session,
@@ -736,6 +746,7 @@ def build(
             wiring=wiring,
             after=after,
             task_kind=task_kind,
+            skills=skills,
         )
 
     @mcp_tool()
@@ -785,6 +796,7 @@ def build(
         response_format: dict | None = None,
         after: str | None = None,
         task_kind: Literal["work"] | None = None,
+        skills: list[str] | None = None,
     ) -> dict:
         """Send a prompt to an already-running agent mid-session.
 
@@ -830,6 +842,9 @@ def build(
                    Presence is still checked when it is delivered. Omit if_busy with it.
         task_kind: "work" (default). A review that must not see the author's conclusions
                    needs its own worktree: use spawn_session(task_kind="independent_review").
+        skills:    optional skill names from list_skills, attached after this message's
+                   task as for spawn_session; they apply to this message only. Refused
+                   with if_busy="amend" while a turn is active.
         Fails with `busy` for if_busy="refuse", a target whose queue (or your share of
         it) is full, or a send to yourself while you are working; with
         `transcript_untrusted` or `transcript_identity_lost` (transcript needs
@@ -844,6 +859,7 @@ def build(
             job_handle=job_handle,
             after=after,
             task_kind=task_kind,
+            skills=skills,
         )
 
     @mcp_tool()

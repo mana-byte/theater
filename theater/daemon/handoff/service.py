@@ -38,8 +38,8 @@ from theater.daemon.handoff.card import SourceView, render_card
 from theater.daemon.handoff.evidence import EvidencePinner
 from theater.daemon.handoff.models import HandoffGate
 from theater.daemon.handoff.resolution import participant_of, resolve_source
-from theater.daemon.response_contracts.prompts import prompt_with_guidance
 from theater.daemon.schema import launch_reservations
+from theater.daemon.skill_cards import compose_prompt
 from theater.daemon.terminals import ProviderBusy, ProviderUnavailable
 from theater.models import BadRequest, Job, JobState, Status, TheaterError, now
 from theater.observability.catalog import HANDOFF_GATE
@@ -90,7 +90,14 @@ class HandoffService:
 
     # ---- admission ----------------------------------------------------------
 
-    def admit_spawn(self, params: dict, *, task: str, response_format: str | None) -> dict:
+    def admit_spawn(
+        self,
+        params: dict,
+        *,
+        task: str,
+        response_format: str | None,
+        skills: str | None = None,
+    ) -> dict:
         """Reserve the child and its one task handle now; launch only when the source ends."""
         kind = params.get("task_kind") or TASK_KIND_WORK
         self._validate(params, task, kind)
@@ -109,6 +116,7 @@ class HandoffService:
             "params": {k: params.get(k) for k in _REQUEST_KEYS},
             "task": task,
             "response_format": response_format,
+            **({"skills": skills} if skills else {}),
         }
         gate = HandoffGate(
             job_handle="",
@@ -176,9 +184,18 @@ class HandoffService:
         return source, participant.name if participant is not None else None
 
     def send_gate(
-        self, source: Job, source_name: str | None, *, task: str, response_format: str | None
+        self,
+        source: Job,
+        source_name: str | None,
+        *,
+        task: str,
+        response_format: str | None,
+        skills: str | None = None,
     ) -> HandoffGate:
         """The gate row for a send waiting on ``source``; the queue fills in its job handle."""
+        request = {"kind": KIND_SEND, "task": task, "response_format": response_format}
+        if skills:
+            request["skills"] = skills
         return HandoffGate(
             job_handle="",
             caller_id=None,
@@ -186,10 +203,7 @@ class HandoffService:
             source_participant_id=source.target_id,
             source_name=source_name,
             task_kind=TASK_KIND_WORK,
-            request=json.dumps(
-                {"kind": KIND_SEND, "task": task, "response_format": response_format},
-                sort_keys=True,
-            ),
+            request=json.dumps(request, sort_keys=True),
             state=GATE_WAITING,
             error_code=None,
             error=None,
@@ -197,18 +211,21 @@ class HandoffService:
             updated_at=0.0,
         )
 
-    def send_prompt_now(self, source: Job, source_name: str | None, task: str, rf) -> str:
+    def send_prompt_now(
+        self, source: Job, source_name: str | None, task: str, rf, skills: str | None = None
+    ) -> str:
         """The prompt for a send whose source already ended: no gate, the card is rendered now."""
-        gate = self.send_gate(source, source_name, task=task, response_format=rf)
+        gate = self.send_gate(source, source_name, task=task, response_format=rf, skills=skills)
         return self._render_send(gate, source)
 
     def _render_send(self, gate: HandoffGate, source: Job) -> str:
         stored = json.loads(gate.request)
-        prompt = (
-            f"{stored['task']}\n\n{render_card(gate.task_kind, self._source_view(gate, source))}"
+        return compose_prompt(
+            stored["task"],
+            card=render_card(gate.task_kind, self._source_view(gate, source)),
+            skills=stored.get("skills"),
+            response_format=stored["response_format"],
         )
-        rf = stored["response_format"]
-        return prompt_with_guidance(prompt, rf) if rf is not None else prompt
 
     def ready_for_dispatch(self, job: Job) -> GateReadiness:
         """Called by the dispatcher before every delivery: open the gate or say why not."""
@@ -433,9 +450,12 @@ class HandoffService:
         base = params.get("base_branch")
         if gate.task_kind == TASK_KIND_REVIEW:
             base = await self._review_base(view, str(params["cwd"]))
-        prompt = f"{task}\n\n{render_card(gate.task_kind, view)}"
-        if response_format is not None:
-            prompt = prompt_with_guidance(prompt, response_format)
+        prompt = compose_prompt(
+            task,
+            card=render_card(gate.task_kind, view),
+            skills=stored.get("skills"),
+            response_format=response_format,
+        )
         request = {
             "harness": params["harness"],
             "approval": params["approval"],

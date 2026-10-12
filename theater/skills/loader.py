@@ -66,6 +66,11 @@ def is_canonical_name(name: str) -> bool:
     return len(name) <= SKILL_NAME_MAX_CHARS and SKILL_NAME.fullmatch(name) is not None
 
 
+def skill_body(content: str) -> str:
+    """The Markdown instructions of a validated ``SKILL.md``, without its frontmatter."""
+    return _frontmatter(content)[1]
+
+
 def _load_package(
     package_name: str,
     *,

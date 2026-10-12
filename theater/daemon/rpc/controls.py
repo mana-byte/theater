@@ -15,11 +15,12 @@ from theater.daemon.presence import access as presence_access
 from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
 from theater.daemon.rpc.params import (
     _optional_string_param,
-    _prompt_with_response_format,
     _serialized_response_format,
     _string_param,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.rpc.skill_attachments import attach_skills
+from theater.daemon.skill_cards import compose_prompt
 from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
@@ -296,18 +297,19 @@ async def _steer(daemon, params: dict) -> dict:
 async def _queue_followup(daemon, params: dict) -> dict:
     """Create an awaitable send job now; it dispatches on the next idle.
 
-    Response-format guidance is injected once, at queue time, so neither dispatch path
-    re-injects it.
+    Response-format guidance and attached skills are injected once, at queue time, so neither
+    dispatch path re-injects them.
     """
     method_name = "participant.queue_followup"
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
     prompt = _string_param(params, "prompt", method_name=method_name)
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     response_format = _serialized_response_format(daemon, params, creator_id=caller_id)
+    skills = attach_skills(daemon, params, task=prompt, sender=caller_id)
     job = await daemon.controls.queue_followup(
         target.id,
         caller_id=caller_id,
-        prompt=_prompt_with_response_format(prompt, response_format),
+        prompt=compose_prompt(prompt, skills=skills, response_format=response_format),
         response_format=response_format,
     )
     daemon.store.bus_append(

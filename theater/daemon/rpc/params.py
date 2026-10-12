@@ -6,8 +6,9 @@ import math
 import numbers
 from typing import Any
 
-from theater.daemon.response_contracts import prompt_with_guidance, resolve_response_format
+from theater.daemon.response_contracts import resolve_response_format
 from theater.daemon.response_contracts.prompts import HINT_INSTRUCTION
+from theater.daemon.skill_cards import compose_prompt
 from theater.harness import HARNESSES, normalize
 from theater.models import BadRequest
 
@@ -91,9 +92,7 @@ def _serialized_response_format(daemon, params: dict, *, creator_id: str | None)
 
 
 def _prompt_with_response_format(prompt: str, response_format: str | None) -> str:
-    if response_format is None:
-        return prompt
-    return prompt_with_guidance(prompt, response_format)
+    return compose_prompt(prompt, response_format=response_format)
 
 
 def _prompt_with_interruption_card(

@@ -247,6 +247,24 @@ setting; names Theater does not bundle are tolerated. The daemon threads the
 list into `skills.list` and `skills.load` alike, so a disabled built-in is
 neither listed nor loadable.
 
+A sender can also hand a skill to another agent: `skills=[...]` on `spawn` or
+`send` names skills the daemon resolves at admission from the same snapshot as
+`skills.load`, so an unknown or disabled skill is refused before anything is
+created. Each skill is rendered without its frontmatter as a labelled
+`[Theater skill …]` card (source, content digest, sender) and placed by one
+composer, `daemon/skill_cards.py`: task first, then any handoff card, then the
+skills, with response-format guidance keeping its own place. The task stays first
+because completion matches a turn by the prompt's opening characters. Attached
+skills are bounded to `SKILL_ATTACH_MAX_BYTES` (16 KiB) combined, need a prompt,
+and are refused with `amend` on an active turn and with a resume that cannot
+carry a prompt. They are pinned when admitted: a gated handoff stores the
+rendered cards in its request. Nothing is inherited; a child gets only the
+skills its spawner names. Handoff cards quote a source's task without its skill
+cards and neutralise forged skill markers in quoted output. Skills written to be
+attached are *receiver skills*: by convention their description starts with
+`Receiver skill —`. The daemon never parses that phrase; it tells the agent
+reading `list_skills` what the skill is for.
+
 ---
 
 ## 5. State

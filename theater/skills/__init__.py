@@ -1,6 +1,6 @@
 """Declarative, data-only Theater skill packages."""
 
-from theater.skills.loader import is_canonical_name
+from theater.skills.loader import is_canonical_name, skill_body
 from theater.skills.models import (
     BuiltinSkillError,
     Skill,
@@ -21,4 +21,5 @@ __all__ = [
     "UnknownSkill",
     "discover",
     "is_canonical_name",
+    "skill_body",
 ]

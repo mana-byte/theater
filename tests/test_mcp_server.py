@@ -374,6 +374,7 @@ async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
         "response_format",
         "after",
         "task_kind",
+        "skills",
     }
     assert send["properties"]["if_busy"]["default"] == "auto"
     assert set(send["properties"]["if_busy"]["enum"]) == {
@@ -384,6 +385,23 @@ async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
         "replace",
     }
     assert set(send["required"]) == {"target", "prompt"}
+
+
+async def test_skills_are_optional_name_lists_on_spawn_and_send(daemon):
+    mcp = build("p1", "vibe")
+    tools = {t.name: t for t in await mcp.list_tools()}
+
+    for name in ("spawn_session", "send"):
+        schema = tools[name].input_schema
+        assert schema["properties"]["skills"]["default"] is None
+        assert {"type": "array", "items": {"type": "string"}} in schema["properties"]["skills"][
+            "anyOf"
+        ]
+        assert "skills" not in schema.get("required", [])
+    assert "a child never inherits your skills" in " ".join(
+        tools["spawn_session"].description.split()
+    )
+    assert "skills=[...]" in mcp.instructions
 
 
 async def test_kill_schema_uses_target_not_target_id(daemon):
@@ -491,6 +509,7 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
                 "response_format": response_format,
                 "after": "Writer",
                 "task_kind": "work",
+                "skills": ["theater-debate"],
             },
         )
     ) == {"handle": "p-child#4", "route": "queued"}
@@ -510,6 +529,7 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         "response_format": response_format,
         "after": "Writer",
         "task_kind": "work",
+        "skills": ["theater-debate"],
     }
     assert calls["settings"][1] == {
         "target": "child",
@@ -1233,10 +1253,12 @@ async def test_after_and_task_kind_are_forwarded_unchanged_to_the_daemon():
         worktree=True,
         after="Writer",
         task_kind="independent_review",
+        skills=["theater-debate"],
     )
     await mcp_tools.send_prompt(session, target_id="Bob", prompt="x", after="Writer")
 
     (_, spawn_params), (_, send_params) = client.calls
     assert (spawn_params["after"], spawn_params["task_kind"]) == ("Writer", "independent_review")
     assert (send_params["after"], send_params["task_kind"]) == ("Writer", None)
+    assert (spawn_params["skills"], send_params["skills"]) == (["theater-debate"], None)
     assert spawned["handoff"] == {"state": "waiting"}

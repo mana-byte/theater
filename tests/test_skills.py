@@ -10,12 +10,14 @@ import pytest
 
 from theater import paths
 from theater.constants.skills import (
+    SKILL_ATTACH_MAX_BYTES,
     SKILL_DESCRIPTION_MAX_CHARS,
     SKILL_FRONTMATTER_MAX_BYTES,
     SKILL_MAX_BYTES,
     SKILL_MAX_COUNT,
 )
 from theater.daemon.rpc import skills as skills_rpc
+from theater.daemon.skill_cards import render_skills
 from theater.models import BadRequest, NotFound
 from theater.skills import (
     BuiltinSkillError,
@@ -604,3 +606,20 @@ def test_orchestration_skills_teach_after_review_cancel_and_presets_without_tran
     assert '{"$theater": "debate"}' in debate
     assert "exactly the commit" in orchestrate.replace("\n", " ")
     assert "never wait for idle" in debate.replace("\n", " ")
+
+
+#: Built-ins an agent loads for itself; every other built-in must be a marked receiver skill.
+LEADER_BUILTINS = frozenset(
+    {"theater-configure", "theater-debate", "theater-orchestrate", "theater-recover-tmux"}
+)
+RECEIVER_PREFIX = "Receiver skill —"
+
+
+def test_every_builtin_is_a_listed_leader_or_a_marked_attachable_receiver(tmp_path):
+    for skill in discover(user_dir=tmp_path).skills:
+        receiver = skill.description.startswith(RECEIVER_PREFIX)
+        assert receiver is (skill.name not in LEADER_BUILTINS), skill.name
+        if receiver:
+            card = render_skills([skill], attached_by="the operator")
+            assert card is not None
+            assert len(card.encode("utf-8")) <= SKILL_ATTACH_MAX_BYTES, skill.name

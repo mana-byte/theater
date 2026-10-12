@@ -72,6 +72,11 @@ async def amend(daemon, params: dict, *, send) -> dict:
             "if_busy='amend' cannot apply response_format to an active turn; use "
             "if_busy='queue' for a new structured answer"
         )
+    if active is not None and params.get("skills"):
+        raise BadRequest(
+            "if_busy='amend' cannot attach skills to an active turn; use if_busy='queue' "
+            "to attach them to a new turn"
+        )
     steer_params = {k: params[k] for k in ("target", "prompt", "caller_id") if k in params}
     try:
         result = await _steer(daemon, {**steer_params, "job_handle": job_handle})

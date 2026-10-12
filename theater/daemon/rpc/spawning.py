@@ -12,13 +12,14 @@ from theater.daemon.rails import (
     check_reasoning_allowed,
 )
 from theater.daemon.rpc.params import (
-    _prompt_with_response_format,
     _reject_response_format_resume,
     _require,
     _serialized_response_format,
     _validate_worktree_param,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.rpc.skill_attachments import attach_skills, reject_skills_resume
+from theater.daemon.skill_cards import compose_prompt
 from theater.daemon.spawning.git_cwd import reject_worktree_outside_git
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import (
@@ -77,13 +78,26 @@ async def _spawn(daemon, params: dict) -> dict:
     return await _spawn_with_provider(daemon, params, provider)
 
 
+def _resume_safe_skills(
+    daemon, params: dict, harness_name: str, response_format: str | None
+) -> str | None:
+    """The rendered skills; a resume that would drop them or the guidance is refused."""
+    resume = params.get("resume")
+    _reject_response_format_resume(harness_name, resume, response_format)
+    skills = attach_skills(
+        daemon, params, task=params.get("prompt") or "", sender=params.get("parent_id")
+    )
+    reject_skills_resume(harness_name, resume, skills)
+    return skills
+
+
 async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> dict:
     """Adapt the private request to the shared provider-backed launch service."""
     response_format = _serialized_response_format(
         daemon, params, creator_id=params.get("parent_id")
     )
     harness_name = _require(params, "harness")
-    _reject_response_format_resume(harness_name, params.get("resume"), response_format)
+    skills = _resume_safe_skills(daemon, params, harness_name, response_format)
     rails = daemon.config.rails
     parent_id = params.get("parent_id")
     check_depth(daemon.store, parent_id, cap=rails.depth_cap)
@@ -100,9 +114,11 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     wiring = _wiring_param(params)
     if params.get("after") is not None or params.get("task_kind") is not None:
         return _defer_until_source(
-            daemon, params, response_format, worktree, wiring, provider=provider
+            daemon, params, response_format, worktree, wiring, provider=provider, skills=skills
         )
-    prompt = _prompt_with_response_format(params.get("prompt") or "", response_format)
+    prompt = compose_prompt(
+        params.get("prompt") or "", skills=skills, response_format=response_format
+    )
     request: dict[str, object] = {
         "harness": harness_name,
         "approval": _require(params, "approval"),
@@ -176,7 +192,9 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     return result
 
 
-def _defer_until_source(daemon, params, response_format, worktree, wiring, *, provider) -> dict:
+def _defer_until_source(
+    daemon, params, response_format, worktree, wiring, *, provider, skills=None
+) -> dict:
     """Reserve the task now and launch it when its source ends; nothing is created until then."""
     if params.get("idempotency_key") is not None:
         raise BadRequest("spawn parameter 'idempotency_key' is not supported with after")
@@ -191,6 +209,7 @@ def _defer_until_source(daemon, params, response_format, worktree, wiring, *, pr
         },
         task=params.get("prompt") or "",
         response_format=response_format,
+        skills=skills,
     )
 
 

@@ -12,11 +12,12 @@ from theater.constants.daemon import BUS_KIND_SEND_REFUSED
 # Definition re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
 from theater.daemon.rpc.params import (
-    _prompt_with_response_format,
     _require,
     _serialized_response_format,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.rpc.skill_attachments import attach_skills
+from theater.daemon.skill_cards import compose_prompt
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -171,7 +172,13 @@ def _auto_result(daemon, job, queued: bool, caller_id: str, target_id: str, prom
 
 
 async def _send_after(
-    daemon, params: dict, target_id: str, caller_id: str, task: str, response_format
+    daemon,
+    params: dict,
+    target_id: str,
+    caller_id: str,
+    task: str,
+    response_format,
+    skills: str | None = None,
 ) -> dict:
     """Send once the source job ends: queued behind it, or with its card when it already ended."""
     handoff = daemon.handoff
@@ -180,14 +187,16 @@ async def _send_after(
         job = await daemon.controls.queue_gated_send(
             target_id,
             caller_id=caller_id,
-            prompt=_prompt_with_response_format(task, response_format),
+            prompt=compose_prompt(task, skills=skills, response_format=response_format),
             response_format=response_format,
-            gate=handoff.send_gate(source, source_name, task=task, response_format=response_format),
+            gate=handoff.send_gate(
+                source, source_name, task=task, response_format=response_format, skills=skills
+            ),
         )
         result = _auto_result(daemon, job, True, caller_id, target_id, task)
         result["handoff"] = handoff.describe(job.handle)
         return result
-    prompt = handoff.send_prompt_now(source, source_name, task, response_format)
+    prompt = handoff.send_prompt_now(source, source_name, task, response_format, skills)
     job, queued = await daemon.controls.send_when_safe(
         target_id, caller_id=caller_id, prompt=prompt, response_format=response_format
     )
@@ -209,7 +218,9 @@ async def _send(daemon, params: dict) -> dict:
     if_busy = redirect.if_busy_param(params)
     caller_id = params.get("caller_id") or "cli"
     response_format = _serialized_response_format(daemon, params, creator_id=caller_id)
-    prompt = _prompt_with_response_format(_require(params, "prompt"), response_format)
+    task = _require(params, "prompt")
+    skills = attach_skills(daemon, params, task=task, sender=caller_id)
+    prompt = compose_prompt(task, skills=skills, response_format=response_format)
 
     refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
 
@@ -251,7 +262,7 @@ async def _send(daemon, params: dict) -> dict:
     try:
         if params.get("after") is not None or params.get("task_kind") is not None:
             return await _send_after(
-                daemon, params, target_id, caller_id, _require(params, "prompt"), response_format
+                daemon, params, target_id, caller_id, task, response_format, skills
             )
         if if_busy == "auto":
             job, queued = await daemon.controls.send_when_safe(

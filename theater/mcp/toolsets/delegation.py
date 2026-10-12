@@ -85,6 +85,7 @@ async def spawn_session(
     wiring: str = "auto",
     after: str | None = None,
     task_kind: str | None = None,
+    skills: list[str] | None = None,
 ) -> dict:
     """Create a child agent through a selected terminal provider and return its record.
 
@@ -138,6 +139,9 @@ async def spawn_session(
     ``structured_status`` ``unable_to_parse``. Resume plus `response_format`
     is refused for harnesses whose resume path cannot carry a prompt.
 
+    `skills` names are forwarded unchanged; the daemon resolves, renders, and
+    bounds them. Omitted or empty means none: nothing is inherited.
+
     The returned ``session_id`` is populated asynchronously by the observer,
     so the compact MCP projection normally omits it for a newly spawned child.
     Re-list later after Theater attaches to the child's transcript.
@@ -168,6 +172,7 @@ async def spawn_session(
         wiring=wiring,
         after=after,
         task_kind=task_kind,
+        skills=skills,
     )
     assert isinstance(record, dict)
     return {
@@ -223,6 +228,7 @@ async def send_prompt(
     job_handle: str | None = None,
     after: str | None = None,
     task_kind: str | None = None,
+    skills: list[str] | None = None,
 ) -> dict:
     """Send a prompt to an already-running agent on its selected transport.
 
@@ -249,6 +255,8 @@ async def send_prompt(
     `after` (a name or exact job handle) queues the message until that work ends and
     adds Theater's labelled card about it; the daemon resolves and gates it.
 
+    `skills` names are forwarded unchanged and attach to this message only.
+
     Returns a job handle that can be passed to `await_sessions`.
     """
     if not session._resolved:
@@ -263,6 +271,7 @@ async def send_prompt(
         job_handle=job_handle,
         after=after,
         task_kind=task_kind,
+        skills=skills,
     )
     assert isinstance(record, dict)
     return job_entry(record)

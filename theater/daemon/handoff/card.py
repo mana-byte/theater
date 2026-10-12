@@ -16,6 +16,7 @@ from theater.constants.handoff import (
     TASK_MAX_CHARS,
 )
 from theater.daemon.handoff.models import JobEvidence
+from theater.daemon.skill_cards import SKILL_OPEN, quote_skill_markers
 from theater.models import Job, JobState
 
 CARD_OPEN = "[Theater handoff"
@@ -33,16 +34,20 @@ class SourceView:
 
 
 def task_text(prompt: str | None) -> str:
-    """The task a source was given: without Theater's own guidance or an earlier card."""
-    text = (prompt or "").split(CARD_OPEN, 1)[0]
+    """The task a source was given: without Theater's guidance, an earlier card, or skills."""
+    text = prompt or ""
+    for marker in (CARD_OPEN, SKILL_OPEN):
+        text = text.split(marker, 1)[0]
     paragraphs = [p for p in text.split("\n\n") if not p.startswith(_GUIDANCE_PREFIX)]
     return "\n\n".join(paragraphs).strip()
 
 
 def _quote(text: str) -> str:
-    """Keep quoted child output from forging a card boundary."""
-    return text.replace(CARD_OPEN, "[quoted Theater handoff").replace(
-        CARD_CLOSE, "[/quoted Theater handoff]"
+    """Keep quoted child output from forging a card or skill boundary."""
+    return quote_skill_markers(
+        text.replace(CARD_OPEN, "[quoted Theater handoff").replace(
+            CARD_CLOSE, "[/quoted Theater handoff]"
+        )
     )
 
 
