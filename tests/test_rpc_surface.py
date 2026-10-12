@@ -9,6 +9,7 @@ import sys
 EXPECTED_RPC_METHODS = {
     "adopt",
     "bus.tail",
+    "config.reload",
     "gc",
     "harnesses",
     "harness.event",
