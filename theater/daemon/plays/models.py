@@ -50,7 +50,7 @@ class SpawnSeat:
     """What a spawn makes of its child: nothing, a new master, or a position in a live play."""
 
     start: PlayRules | None = None
-    master_id: str | None = None
+    instance_id: str | None = None
     position: str | None = None
 
 

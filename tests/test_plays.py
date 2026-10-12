@@ -9,12 +9,12 @@ from tests._presence_doubles import AbsentPresence
 from tests.test_control_rpc import _install_runtime, _native_pair
 from tests.test_handoff_send import _pump, _source
 from theater.daemon.frontend.catalog_handlers import skills_load as frontend_skills_load
-from theater.daemon.gc import _delete_participant_dependents
+from theater.daemon.gc import _delete_participant_row
 from theater.daemon.plays import PlayPlan, PlayRefused
 from theater.daemon.plugins.dispatch import _skills_load as plugin_skills_load
 from theater.daemon.rpc.cancellation import _cancel
-from theater.daemon.schema import play_instances, play_members
-from theater.models import JobState
+from theater.daemon.schema import play_members
+from theater.models import JobState, now
 from theater.protocol import RemoteError
 from theater.skills import SkillValidationError, UnknownSkill, discover
 from theater.skills.plays import parse_play_manifest
@@ -72,10 +72,16 @@ async def _load(client, caller_id: str | None = None) -> dict | None:
 
 
 def _seat(daemon, participant_id: str, master_id: str, position: str) -> None:
+    instance_id = daemon.plays.membership(master_id).instance_id
     with daemon.store.write_unit() as unit:
         daemon.store.plays.add_member(
-            participant_id, master_id, position, created_at=0.0, connection=unit.connection
+            participant_id, instance_id, position, created_at=0.0, connection=unit.connection
         )
+
+
+def _play_rows(daemon, participant_id: str) -> int:
+    query = select(play_members).where(play_members.c.participant_id == participant_id)
+    return len(daemon.store.conn.execute(query).all())
 
 
 @pytest.mark.parametrize(
@@ -319,13 +325,24 @@ async def test_adoption_keeps_one_live_play_and_its_position_hierarchy(client, d
     assert daemon.registry.get(loose.id).parent_id == lead_a.id, "its new parent assigns it"
 
 
-async def test_gc_drops_a_deleted_masters_play_rows(client, daemon):
+async def test_gc_deletes_only_each_participants_own_play_rows(client, daemon):
     master = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    member = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
+    adopter = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     await _load(client, master.id)
+    _seat(daemon, member.id, master.id, "team-lead")
+    daemon.registry.mark_dead(master.id)
+    with daemon.store.write_unit() as unit:  # adopted elsewhere once its play ended
+        daemon.store.reparent_in_connection(
+            member.id, new_parent_id=adopter.id, connection=unit.connection
+        )
 
-    with daemon.store.write_unit() as unit:
-        _delete_participant_dependents(unit.connection, master.id)
+    assert _delete_participant_row(daemon.store, master.id, now()) == 1
+    assert _play_rows(daemon, member.id) == 1, "a master's GC leaves its members' rows alone"
+    await client.call("hello", id=master.id, harness="vibe", cwd="/tmp")
+    assert (await _load(client, master.id))["state"] == "started"
+    assert daemon.plays.membership(member.id) is None, "a re-created master id revives no one"
 
-    for table, column in ((play_instances, "master_id"), (play_members, "master_id")):
-        rows = daemon.store.conn.execute(select(table).where(table.c[column] == master.id))
-        assert rows.first() is None
+    daemon.registry.mark_dead(member.id)
+    assert _delete_participant_row(daemon.store, member.id, now()) == 1
+    assert _play_rows(daemon, member.id) == 0, "a member's own GC removes its rows"

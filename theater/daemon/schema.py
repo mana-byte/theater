@@ -458,36 +458,38 @@ turn_fences = Table(
     Column("created_at", REAL, nullable=False),
 )
 
-# One started play, keyed by its master, with the rules pinned at start; live while the master is.
+# One started play with its rules pinned at start; live while its master is. A fresh instance id
+# per start means a master id the registry re-creates after GC never revives old members.
 play_instances = Table(
     "play_instances",
     metadata,
-    Column("master_id", Text, primary_key=True),
+    Column("instance_id", Text, primary_key=True),
+    Column("master_id", Text, nullable=False),
     Column("play", Text, nullable=False),
     Column("rules", Text, nullable=False),
     Column("rules_sha256", Text, nullable=False),
     Column("created_at", REAL, nullable=False),
 )
 
-# Positions held in a play; a row is active only while its master is not dead.
+Index("idx_play_instances_master", play_instances.c.master_id)
+
+# Positions held in a play instance; a row is active only while that instance's master lives.
 play_members = Table(
     "play_members",
     metadata,
     Column("participant_id", Text, primary_key=True),
-    Column("master_id", Text, primary_key=True),
+    Column("instance_id", Text, primary_key=True),
     Column("position", Text, nullable=False),
     Column("created_at", REAL, nullable=False),
 )
 
-Index("idx_play_members_master", play_members.c.master_id)
-
-# A parent's send that gives a child its position once delivery is accepted.
+# A send bound to its target's position, which it gives the target once delivery is accepted.
 play_assignments = Table(
     "play_assignments",
     metadata,
     Column("job_handle", Text, primary_key=True),
     Column("participant_id", Text, nullable=False),
-    Column("master_id", Text, nullable=False),
+    Column("instance_id", Text, nullable=False),
     Column("position", Text, nullable=False),
     Column("assigned_by", Text, nullable=False),
     Column("created_at", REAL, nullable=False),

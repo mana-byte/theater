@@ -278,7 +278,10 @@ in its subtree; reads that name no caller (CLI, frontend) start nothing.
 A spawn attaching a master skill seats its child as master in the accepting
 transaction. A membership is active only while its master is not `dead`, so the
 master's death ends the play for everyone without a write, and an agent holds at
-most one active membership. While a play is live, every spawn below its master —
+most one active membership. Rows are keyed by a fresh instance id per start, so
+GC stays bounded: it deletes a participant's own play rows and the one instance
+it mastered, never its members' rows in bulk, and an id the registry re-creates
+after GC can never revive an ended instance. While a play is live, every spawn below its master —
 MCP, CLI, frontend, deferred, resumed — is checked in
 `_prepare_spawn_operation`, inside the transaction that accepts it: the spawner's
 own position must allow exactly one attached position, at most one fitting role

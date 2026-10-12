@@ -116,14 +116,14 @@ class PlayService:
         if len(positions) != 1 or positions[0] not in rules.children(governing.position):
             raise PlayRefused(_position_required(parent_id, governing, positions))
         _require_role_fit(rules, roles, positions[0])
-        return SpawnSeat(master_id=governing.master_id, position=positions[0])
+        return SpawnSeat(instance_id=governing.instance_id, position=positions[0])
 
     def record_spawn(self, seat: SpawnSeat, child_id: str, *, connection) -> None:
         if seat.start is not None:
             self.store.plays.start(child_id, seat.start, created_at=now(), connection=connection)
-        elif seat.master_id is not None and seat.position is not None:
+        elif seat.instance_id is not None and seat.position is not None:
             self.store.plays.add_member(
-                child_id, seat.master_id, seat.position, created_at=now(), connection=connection
+                child_id, seat.instance_id, seat.position, created_at=now(), connection=connection
             )
 
     def check_adoption(self, adopter_id: str, target_id: str, *, connection=None) -> None:
@@ -133,7 +133,7 @@ class PlayService:
         if governing is None:
             return
         for held in self._memberships_in(target_id, connection=connection):
-            if held.master_id != governing.master_id:
+            if held.instance_id != governing.instance_id:
                 raise PlayRefused(
                     f"cannot adopt {target_id!r}: {held.participant_id} holds "
                     f"{held.rules.qualified(held.position)} in the live {held.play} play under "
@@ -203,7 +203,7 @@ class PlayService:
         return PlayAssignment(
             job_handle="",
             participant_id=target_id,
-            master_id=governing.master_id,
+            instance_id=governing.instance_id,
             position=position,
             assigned_by=sender_id,
         )
@@ -220,7 +220,7 @@ class PlayService:
                 f"position in the live {rules.play} play"
             )
         sender = self.membership(sender_id)
-        if sender is None or sender.master_id != governing.master_id:
+        if sender is None or sender.instance_id != governing.instance_id:
             raise PlayRefused(_unpositioned(sender_id, governing))
         allowed = rules.children(sender.position)
         if position not in allowed:
@@ -300,7 +300,7 @@ class PlayService:
         if self.membership(pending.participant_id, connection=connection) is None:
             self.store.plays.add_member(
                 pending.participant_id,
-                pending.master_id,
+                pending.instance_id,
                 pending.position,
                 created_at=now(),
                 connection=connection,
@@ -309,18 +309,18 @@ class PlayService:
 
     def _invalid(self, pending: PlayAssignment, *, connection=None) -> str | None:
         """Why a binding no longer holds, or None: its play lives and its position still fits."""
-        if self.membership(pending.master_id, connection=connection) is None:
-            return f"the play under master {pending.master_id} has ended"
+        if self.store.plays.live_master(pending.instance_id, connection=connection) is None:
+            return "the play it was sent in has ended"
         held = self.membership(pending.participant_id, connection=connection)
         if held is not None:
-            if (held.master_id, held.position) == (pending.master_id, pending.position):
+            if (held.instance_id, held.position) == (pending.instance_id, pending.position):
                 return None
             return f"{pending.participant_id} now holds {held.rules.qualified(held.position)}"
         sender = self.membership(pending.assigned_by, connection=connection)
         target = self.store.get_participant(pending.participant_id, connection=connection)
         if (
             sender is None
-            or sender.master_id != pending.master_id
+            or sender.instance_id != pending.instance_id
             or pending.position not in sender.rules.children(sender.position)
             or target is None
             or target.parent_id != pending.assigned_by
@@ -388,7 +388,7 @@ def _resumed_seat(
     rules = kept.rules
     if (
         governing is None
-        or governing.master_id != kept.master_id
+        or governing.instance_id != kept.instance_id
         or governing.participant_id != parent_id
         or kept.position not in rules.children(governing.position)
     ):
@@ -405,7 +405,7 @@ def _resumed_seat(
             f"{kept.master_id} lives; attach no other position, play or master skill"
         )
     _require_role_fit(rules, roles, kept.position)
-    return SpawnSeat(master_id=kept.master_id, position=kept.position)
+    return SpawnSeat(instance_id=kept.instance_id, position=kept.position)
 
 
 def _qualified(rules: PlayRules, members: Sequence[str]) -> str:

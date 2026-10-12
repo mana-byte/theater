@@ -496,29 +496,16 @@ def _delete_participant_dependents(connection, participant_id: str) -> None:
         job_repairs,
         job_contract_audit,
         turn_fences,
+        play_members,
+        play_assignments,
     ):
         connection.execute(delete(table).where(table.c.participant_id == participant_id))
     connection.execute(
         delete(response_contracts).where(response_contracts.c.creator_id == participant_id)
     )
-    # A deleted master was dead, so its play had already ended; its rows are only history.
+    # One row per play it started. Its members' rows go with their own GC, never in bulk here; a
+    # gone instance can never be live again, even if the registry re-creates this id.
     connection.execute(delete(play_instances).where(play_instances.c.master_id == participant_id))
-    connection.execute(
-        delete(play_members).where(
-            or_(
-                play_members.c.participant_id == participant_id,
-                play_members.c.master_id == participant_id,
-            )
-        )
-    )
-    connection.execute(
-        delete(play_assignments).where(
-            or_(
-                play_assignments.c.participant_id == participant_id,
-                play_assignments.c.assigned_by == participant_id,
-            )
-        )
-    )
 
 
 async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:

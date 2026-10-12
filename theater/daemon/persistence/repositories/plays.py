@@ -1,4 +1,4 @@
-"""Play instances, held positions, and pending position assignments."""
+"""Play instances, held positions, and pending position bindings."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import participants, play_assignments, play_instances, play_members
-from theater.models import Status
+from theater.models import Status, new_id
 from theater.skills import PlayRules
 
 
@@ -18,6 +18,7 @@ class PlayMembership:
     """One position a participant holds in a live play, with the play's pinned rules."""
 
     participant_id: str
+    instance_id: str
     master_id: str
     position: str
     rules: PlayRules
@@ -33,16 +34,18 @@ class PlayMembership:
 
 @dataclass(frozen=True, slots=True)
 class PlayAssignment:
-    """A delivered-only position grant from a direct parent to an existing child."""
+    """A message bound to the position its target holds, or is given once it is delivered."""
 
     job_handle: str
     participant_id: str
-    master_id: str
+    instance_id: str
     position: str
     assigned_by: str
 
 
 class PlayRepository:
+    """Rows are keyed by play instance, so a reused master id never revives an ended play."""
+
     def __init__(self, db: Database):
         self._db = db
 
@@ -58,12 +61,13 @@ class PlayRepository:
             .execute(
                 select(
                     play_members.c.participant_id,
-                    play_members.c.master_id,
+                    play_members.c.instance_id,
+                    play_instances.c.master_id,
                     play_members.c.position,
                     play_instances.c.rules,
                 )
-                .join(play_instances, play_instances.c.master_id == play_members.c.master_id)
-                .join(participants, participants.c.id == play_members.c.master_id)
+                .join(play_instances, play_instances.c.instance_id == play_members.c.instance_id)
+                .join(participants, participants.c.id == play_instances.c.master_id)
                 .where(play_members.c.participant_id == participant_id)
                 .where(participants.c.status != Status.DEAD.value)
                 .order_by(play_members.c.created_at.desc())
@@ -74,10 +78,25 @@ class PlayRepository:
             return None
         return PlayMembership(
             participant_id=row.participant_id,
+            instance_id=row.instance_id,
             master_id=row.master_id,
             position=row.position,
             rules=PlayRules.from_json(row.rules),
         )
+
+    def live_master(self, instance_id: str, *, connection: Connection | None = None) -> str | None:
+        """The master of a play instance that is still live, else None."""
+        row = (
+            self._conn(connection)
+            .execute(
+                select(play_instances.c.master_id)
+                .join(participants, participants.c.id == play_instances.c.master_id)
+                .where(play_instances.c.instance_id == instance_id)
+                .where(participants.c.status != Status.DEAD.value)
+            )
+            .first()
+        )
+        return None if row is None else str(row.master_id)
 
     def start(
         self,
@@ -86,10 +105,12 @@ class PlayRepository:
         *,
         created_at: float,
         connection: Connection,
-    ) -> None:
-        """Pin the rules and seat the master in one transaction."""
+    ) -> str:
+        """Pin the rules and seat the master in one transaction; returns the instance id."""
+        instance_id = new_id()
         connection.execute(
             insert(play_instances).values(
+                instance_id=instance_id,
                 master_id=master_id,
                 play=rules.play,
                 rules=rules.to_json(),
@@ -98,13 +119,14 @@ class PlayRepository:
             )
         )
         self.add_member(
-            master_id, master_id, rules.master, created_at=created_at, connection=connection
+            master_id, instance_id, rules.master, created_at=created_at, connection=connection
         )
+        return instance_id
 
     def add_member(
         self,
         participant_id: str,
-        master_id: str,
+        instance_id: str,
         position: str,
         *,
         created_at: float,
@@ -114,7 +136,7 @@ class PlayRepository:
             sqlite_insert(play_members)
             .values(
                 participant_id=participant_id,
-                master_id=master_id,
+                instance_id=instance_id,
                 position=position,
                 created_at=created_at,
             )
@@ -129,7 +151,7 @@ class PlayRepository:
             .values(
                 job_handle=assignment.job_handle,
                 participant_id=assignment.participant_id,
-                master_id=assignment.master_id,
+                instance_id=assignment.instance_id,
                 position=assignment.position,
                 assigned_by=assignment.assigned_by,
                 created_at=created_at,
@@ -150,7 +172,7 @@ class PlayRepository:
         return PlayAssignment(
             job_handle=row.job_handle,
             participant_id=row.participant_id,
-            master_id=row.master_id,
+            instance_id=row.instance_id,
             position=row.position,
             assigned_by=row.assigned_by,
         )
