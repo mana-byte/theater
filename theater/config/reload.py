@@ -48,8 +48,9 @@ class ConfigChanges:
 
 def effective_values(config: Config) -> dict[tuple[str, ...], object]:
     """Every setting by key path, maps expanded down to their leaves; a list is one value.
-
-    Provenance is not a setting. An empty map inside a table stays a value, so it still counts.
+    The loader folds an absent and an empty section table into one default, so those never differ;
+    below them an empty map is kept as a value, since a plugin is compiled with ``None`` for an
+    absent table but ``{}`` for an empty one. Provenance is not a setting.
     """
     values: dict[tuple[str, ...], object] = {}
     for item in fields(config):

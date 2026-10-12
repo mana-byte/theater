@@ -91,6 +91,32 @@ def test_a_changed_plugin_option_is_named_down_to_its_leaf():
     assert changes.outside_daemon == ()
 
 
+def test_a_table_that_empties_or_vanishes_still_counts_as_a_change():
+    """An empty map is a value below the section tables, which the loader folds to one default."""
+    defaults = cfg.load()
+    write("[models]\n[mcp]\n[mcp.plugins]\n")
+    assert not compare(defaults, cfg.load()).any
+    write(
+        "[mcp.plugins.alerts]\n"
+        'token = { env = "ALERTS" }\n'
+        "unused = {}\n"
+        "[mcp.plugins.solo]\n"
+        "x = 1\n"
+        "[mcp.plugins.quiet]\n"
+    )
+    before = cfg.load()
+    write("[mcp.plugins.alerts]\ntoken = {}\n[mcp.plugins.solo]\n[mcp.plugins.fresh]\n")
+    assert compare(before, cfg.load()).restart == (
+        "mcp.plugins.alerts.token",
+        "mcp.plugins.alerts.token.env",
+        "mcp.plugins.alerts.unused",
+        "mcp.plugins.fresh",
+        "mcp.plugins.quiet",
+        "mcp.plugins.solo",
+        "mcp.plugins.solo.x",
+    )
+
+
 async def test_a_hot_reload_moves_the_next_policy_check_on_the_same_socket(
     daemon, client, available_harness_binaries
 ):
