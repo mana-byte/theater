@@ -231,7 +231,7 @@ async def _send(daemon, params: dict) -> dict:
 
     refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
     try:
-        assignment = daemon.plays.check_assignment(caller_id, target_id, attachment.plan.names)
+        assignment = daemon.plays.check_send(caller_id, target_id, attachment.plan)
     except TheaterError as exc:
         refuse(exc, reason=exc.refusal_reason or exc.code)
     # Held from reservation, before delivery, so the accepting settlement always finds it.

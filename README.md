@@ -197,10 +197,12 @@ skill per member, named `<play>/<member>` (`teams/team-lead`). An agent that
 loads the master skill (`teams/master-lead`) becomes the play's master, and a
 spawn that attaches it starts a new master. While the master lives, every spawn
 below it attaches exactly one position its spawner may give, plus at most one
-task role (`teams/worker`, `teams/reviewer`, `teams/debater`). A parent gives an
-existing child its position with `send(skills=["teams/team-lead"])`; it takes
-effect once the child receives the message. When the master dies the play ends
-and its rules lift. `list_skills` shows each play's positions and roles.
+task role (`teams/worker`, `teams/reviewer`, `teams/debater`); outside a live
+play, positions and roles cannot be attached. A parent gives an existing child
+its position with `send(skills=["teams/team-lead"])`; it takes effect once the
+child receives the message, and a queued one fails unsent if the play ends
+first. When the master dies the play ends and its rules lift. `list_skills`
+shows each play's positions and roles.
 
 **Make Theater yours.** Turn any workflow you repeat into a custom skill—your
 preferred harnesses, models, roles, worktrees, checks, and handoffs. Add it at

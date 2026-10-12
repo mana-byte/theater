@@ -18,16 +18,19 @@ class PlayRefused(BadRequest):
 class PlayPlan:
     """The play facts of one request's attached skills, resolved when it is admitted.
 
-    ``start`` holds the rules of an attached master skill, pinned if the spawn starts a play.
+    ``start`` holds the rules of an attached master skill, pinned if the spawn starts a play;
+    ``masters`` names the master skill of each attached member's play, for refusals.
     """
 
     names: tuple[str, ...] = ()
     start: PlayRules | None = None
+    masters: tuple[str, ...] = ()
 
     def to_wire(self) -> dict[str, object]:
         return {
             "names": list(self.names),
             "start": None if self.start is None else self.start.to_json(),
+            "masters": list(self.masters),
         }
 
     @classmethod
@@ -38,6 +41,7 @@ class PlayPlan:
         return cls(
             names=tuple(str(name) for name in value.get("names") or ()),
             start=PlayRules.from_json(start) if isinstance(start, str) else None,
+            masters=tuple(str(name) for name in value.get("masters") or ()),
         )
 
 

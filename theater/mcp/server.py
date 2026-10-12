@@ -237,10 +237,11 @@ skills:   optional list of skill names from list_skills. Theater appends each on
           Omitted or empty means none: a child never inherits your skills. Needs a
           prompt; at most 16 KiB combined; refused for an unknown or disabled skill
           and with resume where the harness cannot carry a prompt. A play's master
-          skill makes the child the master of a new play. Inside a live play, attach
-          exactly one position your own position may give (list_skills shows them),
-          at most one task role that fits it, and any standalone skills; a resumed
-          member keeps its position. The refusal lists what you may attach.
+          skill makes the child the master of a new play; other play skills need a
+          live play. Inside one, attach exactly one position your own position may
+          give (list_skills shows them), at most one task role that fits it, and any
+          standalone skills; a resumed member keeps its position, resumed by an agent
+          that may give it. The refusal lists what you may attach.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately. A "manual" child may stop
@@ -856,9 +857,12 @@ def build(
                    needs its own worktree: use spawn_session(task_kind="independent_review").
         skills:    optional skill names from list_skills, attached after this message's
                    task as for spawn_session; they apply to this message only. Refused
-                   with if_busy="amend" while a turn is active. A play position sent by
-                   a direct parent to a child without one becomes the child's position
-                   once the child receives this message.
+                   with if_busy="amend" while a turn is active. Play skills need the
+                   target's live play: a position sent by a direct parent to a child
+                   without one becomes its position once the child receives this
+                   message, and a role must fit the target's position. If the play ends
+                   or the position no longer fits first, the queued message fails
+                   unsent with `play_refused`.
         Fails with `busy` for if_busy="refuse", a target whose queue (or your share of
         it) is full, or a send to yourself while you are working; with
         `transcript_untrusted` or `transcript_identity_lost` (transcript needs

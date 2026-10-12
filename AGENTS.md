@@ -323,7 +323,9 @@ position and role, referenced as `<play>/<member>`. Plays are user or built-in
 only (not MCP-plugin). Membership lives in `daemon/plays/`: loading the master
 skill starts a play with pinned rules, and every spawn below a live master is
 checked inside the spawn's accepting transaction — keep new spawn entry points
-on `ParticipantLaunchService` so none bypass it.
+on `ParticipantLaunchService` so none bypass it. A queued send carrying play
+skills is rechecked in the dispatcher's `_check_gate` and fails unsent once its
+binding no longer holds; sends without play skills never touch that gate.
 
 ## Further reading
 

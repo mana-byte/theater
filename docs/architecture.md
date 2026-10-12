@@ -283,12 +283,17 @@ MCP, CLI, frontend, deferred, resumed — is checked in
 `_prepare_spawn_operation`, inside the transaction that accepts it: the spawner's
 own position must allow exactly one attached position, at most one fitting role
 rides along, and anything else is refused with `play_refused` and what is
-allowed. A deferred spawn is checked when admitted and again when it launches;
-a resumed member keeps its position while its master lives. A direct parent's
-`send` of a position to a child without one records a pending assignment that
-only an accepted delivery settlement (or a finished turn after an uncertain one)
-applies, revalidated against the live play; a cancelled, rejected or killed
-message, or a dead master, assigns nothing. Adoption never moves a live play's
+allowed. Outside a live play only a master skill can be attached; positions and
+roles are refused, since nothing could seat them (loading any skill stays free).
+A deferred spawn is checked when admitted and again when it launches; a resumed
+member keeps its position while its master lives, resumed only by an agent whose
+position may parent it. A `send` carrying play skills is bound, in
+`play_assignments`, to the position its target holds or, from a direct parent,
+is given; the binding is held from reservation, so only an accepted delivery
+settlement (or a finished turn after an uncertain one) applies an assignment.
+Queued dispatch rechecks the binding: if the play ended or the position no
+longer fits, the message fails unsent with `play_refused` rather than delivering
+obsolete instructions; ordinary sends are untouched. Adoption never moves a live play's
 member inside another live play, and inside one a positioned target needs an
 adopter whose position may parent it; an unpositioned target is assigned later.
 

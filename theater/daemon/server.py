@@ -261,6 +261,7 @@ class Daemon:
             native_capabilities=self._native_capabilities_for_control,
             native_admission=self._native_admission_for_control,
             gate_opener=self.handoff,
+            play_gate=self.plays,
         )
         self.runtime_manager.set_route_change_callback(self._native_route_changed)
         self.registry.configure_addressability(

@@ -306,7 +306,7 @@ async def _queue_followup(daemon, params: dict) -> dict:
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     response_format = _serialized_response_format(daemon, params, creator_id=caller_id)
     attachment = attach_skills(daemon, params, task=prompt, sender=caller_id)
-    assignment = daemon.plays.check_assignment(caller_id, target.id, attachment.plan.names)
+    assignment = daemon.plays.check_send(caller_id, target.id, attachment.plan)
     job = await daemon.controls.queue_followup(
         target.id,
         caller_id=caller_id,

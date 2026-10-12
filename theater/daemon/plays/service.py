@@ -101,7 +101,7 @@ class PlayService:
         if kept is not None and not kept.is_master:
             return _resumed_seat(parent_id, governing, kept, plan)
         if governing is None:
-            return NO_SEAT if plan.start is None else SpawnSeat(start=plan.start)
+            return _seat_outside_a_play(parent_id, plan)
         rules = governing.rules
         if plan.start is not None or any(rules.member(name) == rules.master for name in plan.names):
             raise PlayRefused(_inside(governing, parent_id))
@@ -157,30 +157,61 @@ class PlayService:
                 f"{_qualified(rules, allowed) or 'no position'} in the live {rules.play} play"
             )
 
-    # ---- assignment by send ---------------------------------------------------------------
+    # ---- sends carrying play skills -------------------------------------------------------
 
-    def check_assignment(
-        self, sender_id: str, target_id: str, names: Sequence[str]
-    ) -> PlayAssignment | None:
-        """The position a send would give the target once delivered, else None (plain text)."""
-        governing = self.governing(target_id) if names else None
-        if governing is None:
+    def check_send(self, sender_id: str, target_id: str, plan: PlayPlan) -> PlayAssignment | None:
+        """Bind a message carrying play skills to the position its target holds or is given.
+
+        Only a live play can seat them; a missing position is assigned once delivered. A message
+        without play skills is untouched and returns None.
+        """
+        if not plan.names:
             return None
+        if plan.start is not None:
+            master = plan.start.qualified(plan.start.master)
+            raise PlayRefused(
+                f"a send never starts a play: ask {target_id} to load {master} itself, or attach "
+                "it on spawn_session to start a new master"
+            )
+        governing = self.governing(target_id)
+        if governing is None:
+            raise PlayRefused(_unseated(f"{target_id} is in no live play", plan))
         rules = governing.rules
-        positions, roles, _foreign = _members(names, rules)
-        held = governing.position if governing.participant_id == target_id else None
+        positions, roles, foreign = _members(plan.names, rules)
+        if foreign:
+            raise PlayRefused(
+                f"{target_id} is in the live {rules.play} play, which cannot seat "
+                f"{', '.join(foreign)}; attach only its positions and roles"
+            )
         if len(positions) > 1:
             raise PlayRefused("attach at most one position: an agent holds one position")
+        held = governing.position if governing.participant_id == target_id else None
         position = positions[0] if positions else held
-        if position is not None:
-            _require_role_fit(rules, roles, position)
-        if not positions or positions[0] == held:
-            return None
-        if held is not None:
+        if position is None:
+            raise PlayRefused(
+                f"{target_id} holds no position in the live {rules.play} play, so a task role "
+                "has nothing to fit; its direct parent sends a position with it"
+            )
+        _require_role_fit(rules, roles, position)
+        if held is not None and position != held:
             raise PlayRefused(
                 f"{target_id} already holds {rules.qualified(held)} in the live {rules.play} "
                 f"play; a position stays fixed while master {governing.master_id} lives"
             )
+        if held is None:
+            self._require_assigner(sender_id, target_id, governing, position)
+        return PlayAssignment(
+            job_handle="",
+            participant_id=target_id,
+            master_id=governing.master_id,
+            position=position,
+            assigned_by=sender_id,
+        )
+
+    def _require_assigner(
+        self, sender_id: str, target_id: str, governing: PlayMembership, position: str
+    ) -> None:
+        rules = governing.rules
         target = self.store.get_participant(target_id)
         parent_id = None if target is None else target.parent_id
         if parent_id != sender_id:
@@ -192,21 +223,14 @@ class PlayService:
         if sender is None or sender.master_id != governing.master_id:
             raise PlayRefused(_unpositioned(sender_id, governing))
         allowed = rules.children(sender.position)
-        if positions[0] not in allowed:
+        if position not in allowed:
             raise PlayRefused(
                 f"a {rules.qualified(sender.position)} can give its children only: "
                 f"{_qualified(rules, allowed) or 'no position'}"
             )
-        return PlayAssignment(
-            job_handle="",
-            participant_id=target_id,
-            master_id=governing.master_id,
-            position=positions[0],
-            assigned_by=sender_id,
-        )
 
     def holder(self, assignment: PlayAssignment | None) -> Callable[[str, str | None], None] | None:
-        """The control ``on_reserved`` callback: hold the assignment before delivery starts."""
+        """The control ``on_reserved`` callback: hold the binding before delivery starts."""
         if assignment is None:
             return None
 
@@ -217,12 +241,10 @@ class PlayService:
         return hold
 
     def track_assignment(self, assignment: PlayAssignment, job_handle: str) -> None:
-        """Hold the assignment until its message is delivered; apply it now if it already was.
+        """Hold the binding until its message is delivered; apply it now if it already was.
 
         Idempotent: a send records it at reservation and again once routed.
         """
-        if self.membership(assignment.participant_id) is not None:
-            return
         pending = replace(assignment, job_handle=job_handle)
         delivered = any(
             operation.delivery_result == DeliveryResult.ACCEPTED
@@ -237,8 +259,16 @@ class PlayService:
                     pending, created_at=now(), connection=unit.connection
                 )
 
+    def dispatch_refusal(self, job_handle: str) -> PlayRefused | None:
+        """A queued message bound to a play is delivered only while that binding still holds."""
+        pending = self.store.plays.assignment(job_handle)
+        reason = None if pending is None else self._invalid(pending)
+        if reason is None:
+            return None
+        return PlayRefused(f"{reason}; nothing was delivered, so send again if it still applies")
+
     def _on_settled(self, operation_id: str, result, connection) -> None:
-        # A rejection may be requeued under the same job; only the job's end drops the grant.
+        # A rejection may be requeued under the same job; only the job's end drops the binding.
         if result != DeliveryResult.ACCEPTED:
             return
         operation = self.store.get_control_operation(operation_id, connection=connection)
@@ -249,7 +279,7 @@ class PlayService:
             self._apply(pending, connection)
 
     def _on_job_terminal(self, handle: str) -> None:
-        """A finished turn proves an uncertain delivery; any other end drops the grant."""
+        """A finished turn proves an uncertain delivery; any other end drops the binding."""
         pending = self.store.plays.assignment(handle)
         if pending is None:
             return
@@ -263,6 +293,29 @@ class PlayService:
     def _apply(self, pending: PlayAssignment, connection) -> bool:
         """Revalidate against the live play at delivery; a dead master assigns nothing."""
         self.store.plays.delete_assignment(pending.job_handle, connection=connection)
+        reason = self._invalid(pending, connection=connection)
+        if reason is not None:
+            logger.info("play binding of %s not applied: %s", pending.job_handle, reason)
+            return False
+        if self.membership(pending.participant_id, connection=connection) is None:
+            self.store.plays.add_member(
+                pending.participant_id,
+                pending.master_id,
+                pending.position,
+                created_at=now(),
+                connection=connection,
+            )
+        return True
+
+    def _invalid(self, pending: PlayAssignment, *, connection=None) -> str | None:
+        """Why a binding no longer holds, or None: its play lives and its position still fits."""
+        if self.membership(pending.master_id, connection=connection) is None:
+            return f"the play under master {pending.master_id} has ended"
+        held = self.membership(pending.participant_id, connection=connection)
+        if held is not None:
+            if (held.master_id, held.position) == (pending.master_id, pending.position):
+                return None
+            return f"{pending.participant_id} now holds {held.rules.qualified(held.position)}"
         sender = self.membership(pending.assigned_by, connection=connection)
         target = self.store.get_participant(pending.participant_id, connection=connection)
         if (
@@ -271,18 +324,9 @@ class PlayService:
             or pending.position not in sender.rules.children(sender.position)
             or target is None
             or target.parent_id != pending.assigned_by
-            or self.membership(pending.participant_id, connection=connection) is not None
         ):
-            logger.info("play position for %s not assigned: no longer valid", pending.job_handle)
-            return False
-        self.store.plays.add_member(
-            pending.participant_id,
-            pending.master_id,
-            pending.position,
-            created_at=now(),
-            connection=connection,
-        )
-        return True
+            return f"{pending.assigned_by} can no longer give {pending.participant_id} a position"
+        return None
 
 
 def _outcome(play: Play, state: str, *, reason: str | None = None) -> dict[str, str]:
@@ -319,29 +363,46 @@ def _require_role_fit(rules: PlayRules, roles: Sequence[str], position: str) -> 
         )
 
 
+def _seat_outside_a_play(parent_id: str | None, plan: PlayPlan) -> SpawnSeat:
+    """Outside a live play only a master skill seats anyone: it starts the child's own play."""
+    if plan.start is None:
+        if plan.names:
+            raise PlayRefused(_unseated(f"{parent_id or 'the operator'} is in no live play", plan))
+        return NO_SEAT
+    master = plan.start.qualified(plan.start.master)
+    if extra := [name for name in plan.names if name != master]:
+        raise PlayRefused(
+            f"a new master holds only {master}; attach {', '.join(extra)} to the agents it spawns"
+        )
+    return SpawnSeat(start=plan.start)
+
+
 def _resumed_seat(
     parent_id: str | None,
     governing: PlayMembership | None,
     kept: PlayMembership,
     plan: PlayPlan,
 ) -> SpawnSeat:
-    """A resumed member keeps its position while its master lives; nothing re-seats it."""
+    """A resumed member keeps its position while its master lives, under a parent whose position
+    may parent it, so its lineage stays inside the play."""
     rules = kept.rules
-    if governing is not None and (
-        governing.master_id != kept.master_id
+    if (
+        governing is None
+        or governing.master_id != kept.master_id
         or governing.participant_id != parent_id
         or kept.position not in rules.children(governing.position)
     ):
+        parents = [position for position, kids in rules.positions.items() if kept.position in kids]
         raise PlayRefused(
             f"the resumed session holds {rules.qualified(kept.position)} in the live "
-            f"{rules.play} play under master {kept.master_id}; inside a live play only an "
-            f"agent that may give that position can resume it"
+            f"{rules.play} play under master {kept.master_id}; only an agent holding "
+            f"{_qualified(rules, parents)} in that play can resume it while the master lives"
         )
-    positions, roles, _foreign = _members(plan.names, rules)
-    if plan.start is not None or any(position != kept.position for position in positions):
+    positions, roles, foreign = _members(plan.names, rules)
+    if plan.start is not None or foreign or any(p != kept.position for p in positions):
         raise PlayRefused(
             f"a resumed member keeps {rules.qualified(kept.position)} while master "
-            f"{kept.master_id} lives; attach no other position or master skill"
+            f"{kept.master_id} lives; attach no other position, play or master skill"
         )
     _require_role_fit(rules, roles, kept.position)
     return SpawnSeat(master_id=kept.master_id, position=kept.position)
@@ -360,6 +421,15 @@ def _inside(governing: PlayMembership, participant_id: str | None) -> str:
     return (
         f"{where} in the live {governing.play} play; no play can start inside a live play, "
         "and an agent belongs to one live play at a time"
+    )
+
+
+def _unseated(why: str, plan: PlayPlan) -> str:
+    masters = " or ".join(plan.masters) or "its master skill"
+    return (
+        f"{why}, so no play can seat {', '.join(plan.names)}. Start one first: load {masters} "
+        "yourself, or attach it to a spawn to start a new master; positions then come from "
+        "the spawns and sends of its members"
     )
 
 

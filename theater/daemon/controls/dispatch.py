@@ -139,15 +139,19 @@ class DispatchControls(ControlHost):
 
         It keeps its lane head, so nothing the same sender queued later overtakes it, while other
         senders' lanes go on. Opening the gate renders the source card into the job's prompt.
+        A message bound to a play whose binding no longer holds fails here, never delivered.
         """
-        if self._gate_opener is None:
-            return job, None
-        readiness = self._gate_opener.ready_for_dispatch(job)
-        if readiness.waiting:
-            return job, QueueDispatchOutcome(skip=True)
-        if readiness.error is not None:
-            return job, self._fail_queued_item(head, job, readiness.error)
-        return self._store.get_job(job.handle) or job, None
+        if self._gate_opener is not None:
+            readiness = self._gate_opener.ready_for_dispatch(job)
+            if readiness.waiting:
+                return job, QueueDispatchOutcome(skip=True)
+            if readiness.error is not None:
+                return job, self._fail_queued_item(head, job, readiness.error)
+            job = self._store.get_job(job.handle) or job
+        refusal = None if self._play_gate is None else self._play_gate.dispatch_refusal(job.handle)
+        if refusal is not None:
+            return job, self._fail_queued_item(head, job, refusal)
+        return job, None
 
     def _lane_heads(self, participant_id: str) -> list[ControlOperation]:
         """Each requester's oldest queued row, in send order: one sender never overtakes itself.

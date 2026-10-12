@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         _jobs: JobManager
         _gates: ControlGates
         _gate_opener: Any
+        _play_gate: Any
         _projection: ControlActionProjector
         _native_identity_fencing: bool
         _routes: ControlRouteResolver

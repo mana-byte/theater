@@ -143,6 +143,12 @@ async def test_a_play_cannot_start_above_a_live_master(client, daemon):
 async def test_spawns_in_a_live_play_attach_one_position_the_spawner_may_give(
     client, daemon, terminal_provider
 ):
+    for skills, needle in [
+        ((LEAD,), f"the operator is in no live play, so no play can seat {LEAD}. Start one"),
+        ((MASTER, "teams/worker"), f"a new master holds only {MASTER}"),
+    ]:
+        with pytest.raises(RemoteError, match=needle):
+            await _spawn(client, None, *skills)
     master = await _spawn(client, None, MASTER)
     assert daemon.plays.membership(master["id"]).is_master, "a spawn can start a child master"
     for skills, needle in [
@@ -166,6 +172,8 @@ async def test_spawns_in_a_live_play_attach_one_position_the_spawner_may_give(
     resumable.session_id, resumable.session_correlation = "sess-lead", "operator"
     daemon.store.upsert_participant(resumable)
     daemon.registry.mark_dead(lead["id"])
+    with pytest.raises(RemoteError, match=f"only an agent holding {MASTER} in that play"):
+        await _spawn(client, None, resume=lead["id"])
     resumed = await _spawn(client, master, resume=lead["id"])
     assert daemon.plays.membership(resumed["id"]).position == "team-lead"
 
@@ -193,17 +201,32 @@ async def test_a_deferred_spawn_is_checked_again_when_it_launches(
     assert daemon.store.get_job(waiting["handle"]).state == JobState.CRASHED
 
 
-async def test_a_parents_send_assigns_a_position_only_once_delivered(
-    client, daemon, absent, monkeypatch
-):
-    master, child, state = await _native_pair(daemon)
-    assert (await _load(client, master.id))["state"] == "started"
-    _, source = _source(daemon)
-
+def _sender(client, master):
     async def send(target, *skills, caller=master, **extra):
         return await client.call(
             "send", target=target.id, caller_id=caller.id, prompt="lead", skills=[*skills], **extra
         )
+
+    return send
+
+
+async def test_a_parents_send_assigns_a_position_only_once_delivered(
+    client, daemon, absent, monkeypatch
+):
+    master, child, state = await _native_pair(daemon)
+    _, source = _source(daemon)
+    send = _sender(client, master)
+
+    with pytest.raises(RemoteError, match=f"is in no live play, so no play can seat {LEAD}"):
+        await send(child, LEAD)
+    assert (await _load(client, master.id))["state"] == "started"
+    for skills, needle in [
+        (("teams/reviewer",), "a task role has nothing to fit"),
+        ((MASTER,), "a send never starts a play"),
+    ]:
+        with pytest.raises(RemoteError, match=needle):
+            await send(child, *skills)
+    assert state.sent == [], "a refused send queues nothing"
 
     reply = await send(child, LEAD, after="Writer")
     assert reply["delivery"] == "queued" and daemon.plays.membership(child.id) is None
@@ -242,15 +265,29 @@ async def test_a_parents_send_assigns_a_position_only_once_delivered(
     assert seated == [False, True], "held at reservation, applied by the accepting settlement"
     assert daemon.plays.membership(others[1].id).position == "team-lead"
 
+
+async def test_queued_play_messages_fail_unsent_once_their_play_ends(client, daemon, absent):
+    master, child, state = await _native_pair(daemon)
+    send = _sender(client, master)
+    assert (await _load(client, master.id))["state"] == "started"
+    await send(child, LEAD)
     late = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
     late_state = await _install_runtime(daemon, late.id)
-    _, late_source = _source(daemon, name="Writer3")
-    await send(late, LEAD, after="Writer3")
+    _, source = _source(daemon)
+    queued = [await send(late, LEAD, after="Writer")]
+    queued.append(await send(child, "teams/reviewer", after="Writer"))
+
     daemon.registry.mark_dead(master.id)
-    daemon.jobs.finish(late_source.handle, state=JobState.DONE, result="ready")
+    daemon.jobs.finish(source.handle, state=JobState.DONE, result="ready")
     await _pump(daemon, late, late_state)
-    assert late_state.sent, "the text is still delivered"
-    assert daemon.plays.membership(late.id) is None, "a dead master assigns nothing"
+    await _pump(daemon, child, state)
+
+    for message in queued:
+        job = daemon.store.get_job(message["handle"])
+        assert (job.state, job.error_code) == (JobState.CRASHED, "play_refused"), job.result
+        assert "has ended; nothing was delivered" in job.result
+    assert late_state.sent == [] and len(state.sent) == 1, "an ended play's messages stay unsent"
+    assert daemon.plays.membership(late.id) is None
 
 
 async def test_adoption_keeps_one_live_play_and_its_position_hierarchy(client, daemon):
