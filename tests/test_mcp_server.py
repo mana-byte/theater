@@ -787,7 +787,7 @@ async def test_unknown_arguments_are_reported_not_dropped(daemon):
     assert payload["id"] == "me"
     assert payload["ignored_arguments"] == [{"tail": "removed; page with next_cursor"}, "x"]
     rows = await mcp.call_tool("list_harnesses", {"harness": "vibe"})
-    assert "ignored_arguments" not in rows.content[0].text
+    assert "ignored_arguments" not in rows.model_dump_json()
 
 
 # ---- list_participants: resume_state pinned to spawner --------------------
