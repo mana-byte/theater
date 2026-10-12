@@ -6,6 +6,9 @@ imported, or would retarget admitted work, so it stays restart-only — new fiel
 
 from __future__ import annotations
 
+import json
+import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from types import MappingProxyType
@@ -15,15 +18,18 @@ from theater.config.models import MODELS_SECTION, REASONING_SECTION, Config
 HOT_KEYS = frozenset({"rails.depth_cap", "rails.budget", "skills.disabled"})
 HOT_TABLES = frozenset({MODELS_SECTION, REASONING_SECTION})
 
-#: Settings the daemon never reads, each with the process that reads it from the file.
+#: Settings the daemon never reads, each with what does read it from the file.
 OUTSIDE_DAEMON: Mapping[str, str] = MappingProxyType(
     {
-        "theater.favourite": "each `theater` command reads it",
-        "observability.mcp_timing": "each new Theater MCP process reads it",
+        "theater.favourite": (
+            "read by `theater spawn` when no harness is named, and by Régie at launch"
+        ),
+        "observability.mcp_timing": "read by each new Theater MCP process",
     }
 )
 
 _PROVENANCE = frozenset({"sources", "path", "exists"})
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 _ABSENT = object()
 
 
@@ -40,24 +46,49 @@ class ConfigChanges:
         return bool(self.hot or self.restart or self.outside_daemon)
 
 
-def effective_values(config: Config) -> dict[str, object]:
-    """Every setting by dotted key, tables expanded one level; provenance is not a setting."""
-    values: dict[str, object] = {}
+def effective_values(config: Config) -> dict[tuple[str, ...], object]:
+    """Every setting by key path, maps expanded down to their leaves; a list is one value.
+
+    Provenance is not a setting. An empty map inside a table stays a value, so it still counts.
+    """
+    values: dict[tuple[str, ...], object] = {}
     for item in fields(config):
         if item.name not in _PROVENANCE:
-            _flatten(item.name, getattr(config, item.name), values)
+            _flatten((item.name,), getattr(config, item.name), values, nested=False)
     return values
 
 
-def _flatten(prefix: str, value: object, values: dict[str, object]) -> None:
+def _flatten(
+    path: tuple[str, ...], value: object, values: dict[tuple[str, ...], object], *, nested: bool
+) -> None:
     if is_dataclass(value) and not isinstance(value, type):
         for member in fields(value):
-            _flatten(f"{prefix}.{member.name}", getattr(value, member.name), values)
+            _flatten((*path, member.name), getattr(value, member.name), values, nested=False)
     elif isinstance(value, Mapping):
+        if nested and not value:
+            values[path] = {}
         for key, entry in value.items():
-            values[f"{prefix}.{key}"] = entry
+            _flatten((*path, str(key)), entry, values, nested=True)
     else:
-        values[prefix] = value
+        values[path] = value
+
+
+def _same(left: object, right: object) -> bool:
+    """Equality that keeps TOML types apart: ``1``, ``1.0`` and ``true`` are three values."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list | tuple) and isinstance(right, list | tuple):
+        return len(left) == len(right) and all(map(_same, left, right))
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return left.keys() == right.keys() and all(_same(left[key], right[key]) for key in left)
+    if isinstance(left, float) and isinstance(right, float):
+        return left == right or (math.isnan(left) and math.isnan(right))
+    return left == right
+
+
+def _dotted(path: tuple[str, ...]) -> str:
+    """The TOML spelling of a key path: a segment that is not a bare key is quoted."""
+    return ".".join(part if _BARE_KEY.fullmatch(part) else json.dumps(part) for part in path)
 
 
 def compare(active: Config, candidate: Config) -> ConfigChanges:
@@ -66,12 +97,13 @@ def compare(active: Config, candidate: Config) -> ConfigChanges:
     hot: list[str] = []
     restart: list[str] = []
     outside: list[str] = []
-    for key in sorted(before.keys() | after.keys()):
-        if before.get(key, _ABSENT) == after.get(key, _ABSENT):
+    for path in sorted(before.keys() | after.keys()):
+        if _same(before.get(path, _ABSENT), after.get(path, _ABSENT)):
             continue
+        key = _dotted(path)
         if key in OUTSIDE_DAEMON:
             outside.append(key)
-        elif key in HOT_KEYS or key.split(".", 1)[0] in HOT_TABLES:
+        elif key in HOT_KEYS or (len(path) == 2 and path[0] in HOT_TABLES):
             hot.append(key)
         else:
             restart.append(key)

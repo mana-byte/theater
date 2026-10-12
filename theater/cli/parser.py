@@ -431,8 +431,10 @@ def _add_lifecycle_commands(sub) -> None:
         help="Apply rails, models, reasoning and skills.disabled edits without a restart.",
         description=(
             "Ask the running daemon to re-read its config file. Only [rails], [models], "
-            "[reasoning] and [skills] disabled change in place; any other edit refuses the "
-            "whole reload and needs `theater restart`. Never starts a daemon."
+            "[reasoning] and [skills] disabled change in place. Any other edit refuses the "
+            "whole reload, applying nothing, and needs `theater restart` — except "
+            "theater.favourite and observability.mcp_timing, which the daemon never reads. "
+            "Never starts a daemon."
         ),
     )
     reload.add_argument(

@@ -60,6 +60,37 @@ def test_compare_names_each_difference_by_what_applying_it_needs():
     assert changes.outside_daemon == ("observability.mcp_timing", "theater.favourite")
 
 
+def test_a_changed_plugin_option_is_named_down_to_its_leaf():
+    """Lists stay one value, TOML types stay apart, and a quoted dotted key never collides."""
+    write(
+        "[mcp.plugins.alerts]\n"
+        'channels = ["ops", "dev"]\n'
+        "retries = 1\n"
+        '"x.y" = 1\n'
+        'token = { env = "ALERTS_A" }\n'
+        "[mcp.plugins.quiet]\n"
+    )
+    before = cfg.load()
+    write(
+        "[mcp.plugins.alerts]\n"
+        'channels = ["ops", "eng"]\n'
+        "retries = true\n"
+        "x = { y = 1 }\n"
+        'token = { env = "ALERTS_B" }\n'
+    )
+    changes = compare(before, cfg.load())
+    assert changes.restart == (
+        "mcp.plugins.alerts.channels",
+        "mcp.plugins.alerts.retries",
+        "mcp.plugins.alerts.token.env",
+        "mcp.plugins.alerts.x.y",
+        'mcp.plugins.alerts."x.y"',
+        "mcp.plugins.quiet",
+    )
+    assert changes.hot == ()
+    assert changes.outside_daemon == ()
+
+
 async def test_a_hot_reload_moves_the_next_policy_check_on_the_same_socket(
     daemon, client, available_harness_binaries
 ):
@@ -144,7 +175,7 @@ async def test_settings_the_daemon_never_reads_do_not_block_a_reload(daemon, cli
             ["reload"],
             answer(applied=True, outside_daemon=["theater.favourite"]),
             0,
-            "theater.favourite (each `theater` command reads it)",
+            "theater.favourite (read by `theater spawn` when no harness is named",
         ),
         (["reload"], RemoteError("bad_request", "not valid TOML — kept"), 1, "not valid TOML"),
         (["reload"], RemoteError("unknown_method", "no config.reload"), 1, "theater restart"),

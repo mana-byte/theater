@@ -81,7 +81,7 @@ def _outside_line(keys: list[str]) -> str:
     named = ", ".join(
         f"{key} ({OUTSIDE_DAEMON.get(key, 'read outside the daemon')})" for key in keys
     )
-    return f"not daemon settings, already read from the file: {named}"
+    return f"not daemon settings, nothing to reload: {named}"
 
 
 def _render(result: dict) -> list[str]:

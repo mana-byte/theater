@@ -385,10 +385,11 @@ theater restart     # any other setting; agents keep running
 regie bridge start
 ```
 
-`theater reload` never starts a daemon, and it refuses the whole file (applying
-nothing) when any setting outside those four changed. `theater.favourite` and
-`observability.mcp_timing` are read where they are used, by each `theater`
-command and each new Theater MCP process, so they need neither.
+`theater reload` never starts a daemon. It refuses the whole file, applying
+nothing, when any setting outside those four changed — except the two the daemon
+never reads, which need neither command: `theater.favourite` (read by
+`theater spawn` when no harness is named, and by Régie at launch) and
+`observability.mcp_timing` (read by each new Theater MCP process).
 
 Or ask a managed agent: **“Use `theater-configure` to set up Theater with me.”**
 
