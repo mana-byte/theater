@@ -28,12 +28,13 @@ def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishR
     """Write PR and issue body files and append the GitHub step outputs."""
     rows = [*summary["reused_results"], *summary["results"]]
     watch = summary.get("watch")
-    if watch and watch["verdict"] in ("red", "tooling"):
-        rows.append(watch)
+    distinct_watch = watch if watch is not None and not summary.get("watch_reused", False) else None
+    if distinct_watch is not None and distinct_watch["verdict"] in ("red", "tooling"):
+        rows.append(distinct_watch)
     results = tuple(_result(row) for row in rows)
     route_rows = [*rows]
-    if watch and watch["verdict"] not in ("red", "tooling"):
-        route_rows.append(watch)
+    if distinct_watch is not None and distinct_watch["verdict"] not in ("red", "tooling"):
+        route_rows.append(distinct_watch)
     routes: list[Route] = [
         (route["method"], route["path"]) for row in route_rows for route in row.get("routes", [])
     ]
