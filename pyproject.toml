@@ -99,7 +99,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-files = ["theater", "packages/regie/src/regie"]
+files = ["theater", "packages/regie/src/regie", "scripts/harness_compat"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
