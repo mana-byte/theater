@@ -9,14 +9,11 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
 
 from scripts.harness_compat.contract import MOCK_REPLY
-from scripts.harness_compat.mock import MockServer
 from theater.harness.base import EventKind
 from theater.harness.builtin.plugins.claude.hooks import (
     NATIVE_HOOK_CHANNEL,
@@ -176,82 +173,9 @@ def test_claude_observer_seals_tui_turn(tui_transcript: Path) -> None:
     assert MOCK_REPLY in (finals[0].raw_text or "")
 
 
-@contextmanager
-def _local_tool_mock(config: Path) -> Iterator[MockServer]:
-    """Temporary tool reply until the shared mock implements queued tool calls."""
-    server = MockServer(config / "local-tool-requests.jsonl")
-    original_respond = server._respond
-    sent = False
-
-    def respond(route, body):
-        nonlocal sent
-        title_request = "Write the title" in json.dumps(body.get("messages", []))
-        if route == ("POST", "/v1/messages") and not title_request and not sent:
-            sent = True
-            start = {
-                "id": "msg_mock_tool",
-                "type": "message",
-                "role": "assistant",
-                "model": "mock-model",
-                "content": [],
-                "stop_reason": None,
-                "stop_sequence": None,
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-            }
-            events = [
-                {"type": "message_start", "message": start},
-                {
-                    "type": "content_block_start",
-                    "index": 0,
-                    "content_block": {
-                        "type": "tool_use",
-                        "id": "toolu_mock_compat",
-                        "name": "Read",
-                        "input": {},
-                    },
-                },
-                {
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {
-                        "type": "input_json_delta",
-                        "partial_json": json.dumps(
-                            {
-                                "file_path": str(
-                                    Path(os.environ["HARNESS_COMPAT_WORKDIR"]) / "hook-proof.txt"
-                                )
-                            }
-                        ),
-                    },
-                },
-                {"type": "content_block_stop", "index": 0},
-                {
-                    "type": "message_delta",
-                    "delta": {"stop_reason": "tool_use", "stop_sequence": None},
-                    "usage": {"output_tokens": 4},
-                },
-                {"type": "message_stop"},
-            ]
-            payload = "".join(
-                f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
-            )
-            return 200, "text/event-stream", payload
-        return original_respond(route, body)
-
-    server._respond = respond  # type: ignore[method-assign]
-    server.start()
-    previous = os.environ["ANTHROPIC_BASE_URL"]
-    os.environ["ANTHROPIC_BASE_URL"] = server.base_urls["anthropic"]
-    try:
-        yield server
-    finally:
-        os.environ["ANTHROPIC_BASE_URL"] = previous
-        server.stop()
-
-
 def test_claude_tool_hook_decodes_live_payload() -> None:
-    if os.environ.get("HARNESS_COMPAT_TOOL_REPLY") != "1":
-        pytest.skip("mock tool-call replies require the framework stream")
+    if "HARNESS_COMPAT_BINARY" not in os.environ:
+        pytest.skip("real Claude qualification requires a sandbox binary")
     config = Path(os.environ["CLAUDE_CONFIG_DIR"])
     settings_path = config / "compat-hooks.json"
     capture = config / "hook-payloads.jsonl"
@@ -282,13 +206,7 @@ def test_claude_tool_hook_decodes_live_payload() -> None:
                 hook["command"] = command
                 hook["async"] = False
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
-    local = os.environ.get("HARNESS_COMPAT_LOCAL_TOOL_REPLY") == "1"
-    with _local_tool_mock(config) if local else nullcontext() as mock:
-        _run_turn(settings=settings_path, prompt="Read hook-proof.txt, then reply done")
-        if mock is not None:
-            assert mock.requests and all(
-                request.handled and request.authorized for request in mock.requests
-            )
+    _run_turn(settings=settings_path, prompt="Read hook-proof.txt, then reply done")
 
     def payloads() -> list[dict] | None:
         if not capture.exists():

@@ -108,6 +108,6 @@ def test_claude_qualify_calls_framework(
             with pytest.raises(urllib.error.HTTPError):
                 urllib.request.urlopen(sb.mock_base_urls["anthropic"] + "/unexpected")
         result = ADAPTER.qualify(tmp_path, "2.1.296", sb, Path("/fake/claude"))
-    assert calls == [ADAPTER.green_tests[:2], ADAPTER.consistency_tests]
+    assert calls == [ADAPTER.green_tests[:2], ADAPTER.green_tests[2:], ADAPTER.consistency_tests]
     assert result.verdict == verdict
-    assert result.checks[2].status == "skip"
+    assert result.checks[2].status == "fail"

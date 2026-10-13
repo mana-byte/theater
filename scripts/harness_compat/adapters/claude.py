@@ -6,9 +6,9 @@ import ast
 import json
 import re
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from typing import ClassVar
+from types import MappingProxyType
 
 from .. import framework, github
 from ..contract import (
@@ -32,7 +32,6 @@ _GREEN_TESTS = (
     "tests/test_harness_compat_claude_run.py::test_claude_observer_seals_tui_turn",
     "tests/test_harness_compat_claude_run.py::test_claude_tool_hook_decodes_live_payload",
 )
-_TOOL_SKIP = "mock tool-call replies require the framework stream"
 
 
 def seed_config(config_dir: Path, cwd: Path, version: str) -> None:
@@ -91,7 +90,7 @@ class ClaudeAdapter:
     stub_help = ""
     green_tests = _GREEN_TESTS
     consistency_tests = ("tests/test_hook_compatibility.py::test_claude_hook_version_range",)
-    expected_skips: ClassVar[Mapping[str, str]] = {_GREEN_TESTS[2]: _TOOL_SKIP}
+    expected_skips = MappingProxyType({})
     expected_routes = frozenset(
         {("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens"), ("GET", "/v1/models")}
     )
@@ -194,25 +193,18 @@ class ClaudeAdapter:
                 root, self.green_tests[:2], env=env, expected_skips=self.expected_skips
             )
         )
-        try:
-            sb.mock.queue(
-                "anthropic",
-                MockReply(
-                    text="",
-                    tool_calls=(MockToolCall("Read", {"file_path": str(cwd / "hook-proof.txt")}),),
-                ),
+        sb.mock.queue(
+            "anthropic",
+            MockReply(
+                text="",
+                tool_calls=(MockToolCall("Read", {"file_path": str(cwd / "hook-proof.txt")}),),
+            ),
+        )
+        checks.extend(
+            framework.run_pytest(
+                root, self.green_tests[2:], env=env, expected_skips=self.expected_skips
             )
-        except NotImplementedError:
-            checks.append(Check(self.green_tests[2], "skip", _TOOL_SKIP))
-        else:
-            checks.extend(
-                framework.run_pytest(
-                    root,
-                    self.green_tests[2:],
-                    env={**env, "HARNESS_COMPAT_TOOL_REPLY": "1"},
-                    expected_skips=self.expected_skips,
-                )
-            )
+        )
         green_checks = list(checks)
         consistency = framework.run_pytest(root, self.consistency_tests, env=env, expected_skips={})
         checks.extend(consistency)
