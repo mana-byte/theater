@@ -205,8 +205,7 @@ class CodexAdapter:
             "--provider",
             "mock",
         ]
-        env = {
-            **sb.offline_env,
+        common_env = {
             "CODEX_HOME": str(sb.home / ".codex"),
             "THEATER_CODEX_QUALIFY_VERSION": version,
             "THEATER_CODEX_NATIVE_PROOF": "1",
@@ -214,11 +213,14 @@ class CodexAdapter:
             "THEATER_CODEX_NATIVE_BIN": str(binary),
             "THEATER_CODEX_NATIVE_SMOKE": "1",
         }
+        capture_env = {**sb.offline_env, **common_env}
+        # The UI's update-dialog control needs update-check networking; model calls use local mocks.
+        proof_env = {**sb.env, **common_env}
         try:
             done = subprocess.run(
                 command,
                 cwd=root,
-                env=env,
+                env=capture_env,
                 capture_output=True,
                 text=True,
                 timeout=900,
@@ -241,12 +243,12 @@ class CodexAdapter:
         self.apply_bump(root, [version])
 
         consistency = framework.run_pytest(
-            root, self.consistency_tests, env=env, expected_skips={}, timeout=900
+            root, self.consistency_tests, env=capture_env, expected_skips={}, timeout=900
         )
         if not consistency or any(check.status != "pass" for check in consistency):
             return Result(self.name, version, "tooling", consistency, sb.evidence_dir)
         green = framework.run_pytest(
-            root, self.green_tests, env=env, expected_skips=self.expected_skips, timeout=900
+            root, self.green_tests, env=proof_env, expected_skips=self.expected_skips, timeout=900
         )
         if not green or any(check.status == "error" for check in green):
             verdict: Verdict = "inconclusive"

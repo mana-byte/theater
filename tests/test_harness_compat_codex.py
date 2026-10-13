@@ -117,10 +117,10 @@ def test_qualify_uses_real_proofs_and_rejects_skip(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(codex.subprocess, "run", collect)
-    calls: list[tuple[str, ...]] = []
+    calls: list[tuple[tuple[str, ...], bool]] = []
 
     def run_pytest(root, nodeids, *, env, expected_skips, timeout=900):
-        calls.append(tuple(nodeids))
+        calls.append((tuple(nodeids), "HTTPS_PROXY" in env))
         status = "skip" if nodeids == adapter.green_tests else "pass"
         return (Check(nodeids[0], status),)
 
@@ -129,5 +129,5 @@ def test_qualify_uses_real_proofs_and_rejects_skip(
         result = adapter.qualify(root, "0.162.1", sb, sb.bin_dir / "codex")
         assert result.evidence_dir == sb.evidence_dir
         assert (sb.evidence_dir / "0.162.1" / "approval.json").is_file()
-    assert calls == [adapter.consistency_tests, adapter.green_tests]
+    assert calls == [(adapter.consistency_tests, True), (adapter.green_tests, False)]
     assert result.verdict == "inconclusive"
