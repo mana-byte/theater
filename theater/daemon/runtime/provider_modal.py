@@ -21,7 +21,8 @@ def provider_modal_gate(daemon):
             raise Busy(
                 f"participant {participant_id!r} uses harness {target.harness!r}, which is "
                 "not loaded, so its terminal screen cannot be classified; not delivering "
-                "text — install or enable the harness plugin, then retry"
+                "text — install or enable the harness plugin, then retry",
+                details={"next": "install or enable the harness plugin, then retry"},
             )
         binding_before = daemon.store.terminal_bindings.get(participant_id)
         capture_screen = getattr(daemon.presence, "capture_screen", None)
@@ -30,7 +31,8 @@ def provider_modal_gate(daemon):
                 f"the presence source of {participant_id!r} supplies no screen "
                 "evidence, so prompt readiness cannot be proven; not delivering text "
                 "that could press a dialog answer — retry once the provider reports "
-                "the screen"
+                "the screen",
+                details={"next": "retry once the provider reports the terminal screen"},
             )
         try:
             capture = await capture_screen(participant_id, max_bytes=SCREEN_CAPTURE_MAX_BYTES)
@@ -39,7 +41,8 @@ def provider_modal_gate(daemon):
             raise Busy(
                 f"reading the terminal screen of {participant_id!r} failed "
                 f"({type(exc).__name__}); not delivering text that could press a dialog "
-                "answer — retry once the provider reports the screen again"
+                "answer — retry once the provider reports the screen again",
+                details={"next": "retry once the provider reports the terminal screen again"},
             ) from exc
         binding_after = daemon.store.terminal_bindings.get(participant_id)
         if _binding_identity(binding_before) != _binding_identity(binding_after):
@@ -52,7 +55,8 @@ def provider_modal_gate(daemon):
             raise Busy(
                 f"the terminal of {participant_id!r} returned no screen evidence, so "
                 "prompt readiness cannot be proven; not delivering text that could "
-                "press a dialog answer — retry once the provider supplies the screen"
+                "press a dialog answer — retry once the provider supplies the screen",
+                details={"next": "retry once the provider supplies the terminal screen"},
             )
         if reading.kind in (ScreenKind.APPROVAL, ScreenKind.TRUST):
             raise AwaitingDecision(
@@ -76,7 +80,8 @@ def provider_modal_gate(daemon):
             raise Busy(
                 f"the terminal of {participant_id!r} shows {kind} at {confidence} "
                 "confidence, not a ready prompt composer; not delivering text that "
-                f"could press a dialog answer — {recovery}"
+                f"could press a dialog answer — {recovery}",
+                details={"next": recovery},
             )
 
     return check

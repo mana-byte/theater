@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from typing import NoReturn
 
 from theater import protocol
-from theater.constants.refusals import NEXT_NOT_YOUR_CHILD
+from theater.constants.refusals import NEXT_NOT_YOUR_CHILD, NEXT_SEND_BUSY
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.service import ACTION_SEND
 from theater.daemon.operations import OperationNotFound
@@ -222,7 +222,10 @@ def _legacy_busy_check(daemon):
 
         target = daemon.registry.get(participant_id)
         if target.status is Status.WORKING:
-            raise Busy(f"participant {participant_id!r} is working; not delivering now")
+            raise Busy(
+                f"participant {participant_id!r} is working; not delivering now",
+                details={"next": NEXT_SEND_BUSY},
+            )
         stale = sending_mod.now() - sending_mod._send_claim_ttl()
         running_prompt_jobs = [
             job for job in daemon.store.active_running_jobs_for_target(participant_id) if job.prompt
@@ -238,7 +241,10 @@ def _legacy_busy_check(daemon):
                 error_code=SEND_SUPERSEDED_ERROR_CODE,
             )
         if any(job.created_at > stale for job in running_prompt_jobs):
-            raise Busy(f"participant {participant_id!r} has a running send job")
+            raise Busy(
+                f"participant {participant_id!r} has a running send job",
+                details={"next": NEXT_SEND_BUSY},
+            )
 
     return legacy_busy_check
 
