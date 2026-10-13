@@ -3,9 +3,8 @@
 Collect the exact binary facts, the vendor-generated JSON schema, and the
 stock behaviour observations for one codex-cli release into a fresh bundle
 directory, redacted and deterministically normalized, then print a recursive
-diff against an explicit prior bundle. It never edits the verified-version
-allowlist: admitting a release is a separate human-reviewed commit made
-last, after evidence and tests.
+diff against the newest qualified bundle unless --baseline is set. It never
+edits the verified-version allowlist.
 
     uv run python tests/native/codex_qualify_runtime.py \\
         --out /tmp/codex-qualify-0.155.0 --capture-behavior
@@ -29,7 +28,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tests.native.codex_mock_provider import MockSession, standard_rules
+from tests.native.codex_mock_provider import MAX_RECORDED_REQUESTS, MockSession, standard_rules
 from tests.native.codex_native_client import (
     AppServerProcess,
     NativeWebSocketClient,
@@ -75,6 +74,9 @@ DIFF_LINE_LIMIT = 400
 VALUE_PREVIEW_CHARS = 160
 BINARY_PATH_PLACEHOLDER = "<binary on PATH; resolved per run>"
 _UUID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+_ROLLOUT_DATE = re.compile(
+    r"sessions/\d{4}/\d{2}/\d{2}/rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}"
+)
 _VERSION_TOKEN = re.compile(r"codex-cli[ \t]+(\S+)")
 _SEMVER_TOKEN = re.compile(r"(\d+\.\d+\.\d+)")
 
@@ -144,11 +146,12 @@ def resolve_release_facts(codex_binary: str = "codex") -> ReleaseFacts:
     match = _VERSION_TOKEN.search(output)
     if match is None:
         raise QualificationError(f"--version output names no codex-cli release: {output!r}")
+    version_line = match.group(0)
     return ReleaseFacts(
         binary=codex_binary,
         resolved_path=str(real),
         digest=digest,
-        version_output=output,
+        version_output=version_line,
         version=match.group(1),
         platform_os=platform.system().lower(),
         platform_arch=platform.machine(),
@@ -172,7 +175,12 @@ def redact(value: object, roots: dict[str, str]) -> object:
     UUIDs collapse to ``<uuid>`` so per-run identities never leak.
     """
     if isinstance(value, dict):
-        return {key: redact(item, roots) for key, item in value.items()}
+        return {
+            key: "<websocket-accept>"
+            if key.lower() == "sec-websocket-accept"
+            else redact(item, roots)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [redact(item, roots) for item in value]
     if not isinstance(value, str):
@@ -180,7 +188,7 @@ def redact(value: object, roots: dict[str, str]) -> object:
     text = value
     for actual in sorted(roots, key=len, reverse=True):
         text = text.replace(actual, roots[actual])
-    return _UUID.sub("<uuid>", text)
+    return _UUID.sub("<uuid>", _ROLLOUT_DATE.sub("sessions/<date>/rollout-<time>", text))
 
 
 def _preview(value: object) -> str:
@@ -218,10 +226,14 @@ def _bundle_files(directory: Path) -> set[str]:
     }
 
 
-def diff_bundle(baseline: Path, candidate: Path) -> list[str]:
+def diff_bundle(baseline: Path, candidate: Path, *, committed_only: bool = False) -> list[str]:
     """Deterministic recursive diff of two evidence bundles, bounded."""
     baseline_files = _bundle_files(baseline)
     candidate_files = _bundle_files(candidate)
+    if committed_only:
+        allowed = set(BEHAVIOR_FILES) | {f"protocol_schema/{name}" for name in SCHEMA_FILES}
+        baseline_files &= allowed
+        candidate_files &= allowed
     lines: list[str] = []
     for name in sorted(baseline_files - candidate_files):
         lines.append(f"{name}: present in baseline, missing from candidate")
@@ -319,14 +331,19 @@ def generate_schema(codex_binary: str, out_dir: Path) -> None:
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()[-400:]
         raise QualificationError(f"schema generation failed ({completed.returncode}): {detail}")
-    generated = sorted(out_dir.glob("*.json"))
+    generated = sorted(out_dir.rglob("*.json"))
     if not generated:
         raise QualificationError("the schema generator emitted no JSON files")
-    for path in generated:
-        path.write_text(normalize_json_file(path))
     missing = [name for name in SCHEMA_FILES if not (out_dir / name).is_file()]
     if missing:
         raise QualificationError(f"schema generator omitted required files: {missing}")
+    for path in out_dir.iterdir():
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.name in SCHEMA_FILES:
+            path.write_text(normalize_json_file(path))
+        else:
+            path.unlink()
 
 
 BUNDLE_STATUSES = frozenset({"qualified", "candidate"})
@@ -399,8 +416,8 @@ def validate_bundle_index(
             )
 
 
-def default_baseline() -> Path:
-    """The single qualified committed bundle, or refuse for an explicit choice.
+def default_baseline(*, newest: bool = False) -> Path:
+    """Select a qualified committed bundle after validating the index.
 
     Structural and completeness rules only: the allowlist cross-check
     belongs to the proof gate, which knows the production allowlist.
@@ -413,13 +430,16 @@ def default_baseline() -> Path:
             f"the committed index is malformed ({error}); pass --baseline explicitly"
         ) from error
     qualified = [
-        entry["directory"] for entry in index["bundles"].values() if entry["status"] == "qualified"
+        version for version, entry in index["bundles"].items() if entry["status"] == "qualified"
     ]
-    if len(qualified) != 1:
+    if not qualified:
+        raise QualificationError("no qualified committed bundle; pass --baseline explicitly")
+    if not newest and len(qualified) != 1:
         raise QualificationError(
             "multiple (or zero) qualified committed bundles; pass --baseline explicitly"
         )
-    return FIXTURE_ROOT / qualified[0]
+    newest = max(qualified, key=lambda version: tuple(map(int, version.split("."))))
+    return FIXTURE_ROOT / index["bundles"][newest]["directory"]
 
 
 # ---------------------------------------------------------------------------
@@ -1089,6 +1109,23 @@ def _capture_version(session: CaptureSession) -> str:
     return match.group(1)
 
 
+def _audit_mock_routes(session: CaptureSession) -> None:
+    if session.mock is None:
+        return
+    requests = session.mock.provider.requests
+    if len(requests) >= MAX_RECORDED_REQUESTS:
+        raise QualificationError("mock request log filled before route accounting")
+    routes = {request.path.split("?", 1)[0] for request in requests}
+    unexpected = routes - {
+        "/v1/responses",
+        "/v1/analytics/codex/turn-costs",
+        "/v1/models",
+    }
+    if unexpected:
+        raise QualificationError(f"mock provider saw unexpected routes: {sorted(unexpected)}")
+    print(f"mock routes  : {sorted(routes)}")
+
+
 def collect_evidence(
     out: Path,
     *,
@@ -1138,6 +1175,7 @@ def collect_evidence(
             for name, document in documents.items():
                 (out / name).write_text(normalize_json(redact(document, session.roots)))
             print(f"behaviour    : {sorted(documents)} (redacted)")
+            _audit_mock_routes(session)
         finally:
             session.close()
     else:
@@ -1151,9 +1189,9 @@ def collect_evidence(
             file=sys.stderr,
         )
 
-    prior = baseline if baseline is not None else default_baseline()
+    prior = baseline if baseline is not None else default_baseline(newest=True)
     print(f"baseline     : {prior}")
-    lines = diff_bundle(prior, out)
+    lines = diff_bundle(prior, out, committed_only=True)
     if not lines:
         print("diff         : no differences against the prior bundle")
     else:
@@ -1162,8 +1200,7 @@ def collect_evidence(
             print(f"  {line}")
     print(
         "next steps   : classify every difference against the phase-2 gate table, "
-        "run the stock proof with this exact binary, then commit the bundle; "
-        "the allowlist change is a separate human-reviewed commit"
+        "run the stock proof with this exact binary, then review the bundle and allowlist"
     )
     return 0
 
@@ -1183,7 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--capture-behavior",
         action="store_true",
-        help="run the stock topology/behaviour probe (uses model quota; needs tmux)",
+        help="run the stock topology/behaviour probe (mock uses no quota; needs tmux)",
     )
     parser.add_argument(
         "--provider",
