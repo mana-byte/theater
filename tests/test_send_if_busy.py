@@ -46,6 +46,13 @@ async def test_queue_and_amend_route_a_busy_native_child(client, daemon):
     with pytest.raises(RemoteError) as busy:
         await _send(client, child, parent, "refuse")
     assert busy.value.code == "busy" and "if_busy" in busy.value.details["next"]
+    assert "omit if_busy to queue" in busy.value.details["next"]
+
+    peer = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    with pytest.raises(RemoteError) as peer_busy:
+        await _send(client, child, peer, "refuse")
+    assert "omit if_busy to queue" in peer_busy.value.details["next"]
+    assert 'if_busy="queue"' not in peer_busy.value.details["next"]
 
     queued = await _send(client, child, parent, "queue")
     assert queued["route"] == "queued" and queued["handle"] != active["handle"]

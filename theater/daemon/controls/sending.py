@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from theater.constants.refusals import NEXT_BUSY, NEXT_SEND_BUSY
 from theater.daemon.controls._common import (
     ACTION_SEND,
     CONTROL_DELIVERY_ACCEPTED,
@@ -26,7 +27,16 @@ from theater.harness.contracts.runtime import (
     RuntimeCapability,
     RuntimeSnapshot,
 )
-from theater.models import BadRequest, Busy, Job, JobState, NotAddressable, StaleTarget, Status
+from theater.models import (
+    BadRequest,
+    Busy,
+    ControlOwnerKind,
+    Job,
+    JobState,
+    NotAddressable,
+    StaleTarget,
+    Status,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,22 +76,33 @@ class SendControls(ControlHost):
     ) -> Job:
         """Ordinary send — or the native initial dispatch of one spawn job."""
         with self._control_latency(ControlKind.SEND, participant_id) as latency:
-            job, delivery, transport = await self._send(
-                _SendRequest(
-                    participant_id,
-                    caller_id,
-                    prompt,
-                    response_format,
-                    job_handle,
-                    operation_id,
-                    callback_operation_id,
-                    on_reserved,
-                    actor_client_id,
-                    actor_participant_id,
-                    pre_reserved,
-                    defer_provider_presence,
+            try:
+                job, delivery, transport = await self._send(
+                    _SendRequest(
+                        participant_id,
+                        caller_id,
+                        prompt,
+                        response_format,
+                        job_handle,
+                        operation_id,
+                        callback_operation_id,
+                        on_reserved,
+                        actor_client_id,
+                        actor_participant_id,
+                        pre_reserved,
+                        defer_provider_presence,
+                    )
                 )
-            )
+            except Busy as exc:
+                if caller_id == participant_id:
+                    raise Busy(
+                        f"participant {participant_id!r} is busy; a self-send cannot be queued",
+                        details={
+                            "next": "do the work in your current turn and return its answer; "
+                            "you cannot queue to or await yourself"
+                        },
+                    ) from exc
+                raise
             latency.delivery = delivery
             latency.transport = transport
             return job
@@ -134,7 +155,8 @@ class SendControls(ControlHost):
             if self._store.repair_fence_active(participant_id):
                 raise Busy(
                     f"participant {participant_id!r} has an unresolved internal delivery; it "
-                    "clears when that turn's evidence arrives or its backend restarts"
+                    "clears when that turn's evidence arrives or its backend restarts",
+                    details={"next": "wait for the internal delivery to settle, then retry send"},
                 )
             await self._require_absent(participant_id, route)
         self._gates.check_prompt(request.prompt)
@@ -328,20 +350,28 @@ class SendControls(ControlHost):
         if self._store.has_execution_barrier(participant_id):
             raise Busy(
                 f"participant {participant_id!r} has an unresolved delivery; "
-                "reconcile it before sending another prompt"
+                "reconcile it before sending another prompt",
+                details={"next": "wait for the unresolved delivery to settle, then retry send"},
             )
         queued = self._store.queued_control_operation_count(participant_id)
         if queued:
             raise Busy(
                 f"participant {participant_id!r} has {queued} queued followup(s); "
-                "an ordinary send cannot jump ahead of them"
+                "an ordinary send cannot jump ahead of them",
+                details={"next": NEXT_SEND_BUSY},
             )
         participant = self._store.get_participant(participant_id)
         if participant is not None and participant.status is Status.WORKING:
-            raise Busy(f"participant {participant_id!r} is working; not delivering now")
+            raise Busy(
+                f"participant {participant_id!r} is working; not delivering now",
+                details={"next": NEXT_SEND_BUSY},
+            )
         running = self._store.active_running_jobs_for_target(participant_id)
         if any(job.handle != exclude and job.prompt for job in running):
-            raise Busy(f"participant {participant_id!r} has a running send job")
+            raise Busy(
+                f"participant {participant_id!r} has a running send job",
+                details={"next": NEXT_SEND_BUSY},
+            )
 
     async def _snapshot_for_control(
         self,
@@ -419,24 +449,23 @@ class SendControls(ControlHost):
             raise Busy(
                 f"participant {participant_id!r} has {queued} queued followup(s); "
                 "an ordinary send cannot jump ahead of them — await the queued "
-                "handles or queue another followup instead"
+                "handles or send again with if_busy omitted to queue behind them",
+                details={"next": NEXT_SEND_BUSY},
             )
         # The busy/claim check mutates claim rows; it runs after all awaited
         # prep, its synchronous body adjacent to reservation and delivery.
         participant = self._store.get_participant(participant_id)
         if participant is not None and participant.status is Status.WORKING:
             message = f"participant {participant_id!r} is working; not injecting a new prompt."
-            if participant.parent_id == caller_id:
-                message += (
-                    f" Call interrupt_session(target={participant_id!r}), wait until "
-                    "list_participants reports status='idle', then retry send."
-                )
+            if (
+                participant.parent_id == caller_id
+                and participant.control_owner_kind in (None, ControlOwnerKind.PARTICIPANT)
+                and participant.control_owner_id in (None, caller_id)
+            ):
+                next_step = f"{NEXT_SEND_BUSY}; or {NEXT_BUSY}"
             else:
-                message += (
-                    " Wait until list_participants reports status='idle', then retry send; "
-                    "only the participant's direct parent may interrupt it."
-                )
-            raise Busy(message)
+                next_step = NEXT_SEND_BUSY
+            raise Busy(f"{message} {next_step}", details={"next": next_step})
         await self._gates.legacy_busy_check(participant_id)
         job = self._create_send_job(
             participant_id,

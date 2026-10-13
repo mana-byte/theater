@@ -328,8 +328,9 @@ async def test_adoption_refuses_in_the_termination_acceptance_gap(
     )
     assert isinstance(accepted, dict)
     assert accepted["state"] == "accepted"  # the side effect has not started yet
-    with pytest.raises(Busy, match="still unsettled"):
+    with pytest.raises(Busy, match="still unsettled") as raised:
         await _adopt(daemon, target.id, adopter.id)
+    assert raised.value.details["next"] == "retry adoption once the termination settles"
 
     await _settle(daemon)  # let the refused kill finish
     operation = daemon.operation_service.get(accepted["operation_id"])

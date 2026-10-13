@@ -126,7 +126,8 @@ class AdoptionService:
                     f"cannot adopt {target.id!r}: a termination for {pid!r} is accepted "
                     "and still unsettled, and adoption must not reown a participant "
                     "mid-kill; wait for the termination to settle, then adopt from whoever "
-                    "owns the target"
+                    "owns the target",
+                    details={"next": "retry adoption once the termination settles"},
                 )
         route = self._daemon.controls.route_for(
             target.id, RuntimeCapability.SEND, connection=connection

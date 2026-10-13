@@ -364,6 +364,10 @@ async def test_private_spawn_reports_unconfirmed_launch_without_replaying(
     assert result["operation_timed_out"] is True
     assert result["operation_error"] == error
     assert "Do not spawn a replacement" in result["operation_warning"]
+    assert "await_sessions([handle])" in result["operation_warning"]
+    assert "job ends crashed if the launch fails" in result["operation_warning"]
+    assert "list_participants(ids=[id])" in result["operation_warning"]
+    assert result["handle"] == result["id"]
     assert result["addressable"] is False
     assert await _spawn(daemon, request) == result
     assert calls == 1

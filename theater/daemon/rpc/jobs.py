@@ -72,6 +72,14 @@ def _await_announce_after() -> float:
 
 
 _JOB_ERROR_MESSAGES = {
+    "tmux_restarted": (
+        "The terminal server restarted and this child is gone; resume it with "
+        "spawn_session(resume=<id>); the theater-recover-tmux skill explains."
+    ),
+    "prompt_never_seen": (
+        "Two turns ended without this prompt being seen; read_transcript before re-sending, "
+        "since it may never have arrived."
+    ),
     SEND_SUPERSEDED_ERROR_CODE: (
         "A newer prompt was accepted after this send's delivery claim expired. This handle was "
         "closed so it cannot consume the newer prompt's completion; await the newer send handle "
@@ -116,8 +124,7 @@ _JOB_ERROR_MESSAGES = {
         "The deferred task never launched: the launch was refused once its source ended. "
         "The handoff entry says why."
     ),
-    # One code, several writers (requester cancel, gate close): the detail stays in result or
-    # in the handoff entry's error.
+    # Several writers share this code; MCP preserves result for their cancellation detail.
     ERROR_CANCELLED: (
         "Cancelled before delivery or launch; nothing reached the target. Request it again if "
         "needed."

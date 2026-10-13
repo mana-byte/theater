@@ -197,8 +197,9 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
         result["operation_timed_out"] = True
         result["operation_error"] = operation.error
         result["operation_warning"] = (
-            "Terminal launch has not been confirmed. Do not spawn a replacement while this "
-            "operation is unresolved; inspect the operation and provider before retrying."
+            "Terminal launch has not been confirmed. await_sessions([handle]) settles it "
+            "(the job ends crashed if the launch fails) and list_participants(ids=[id]) "
+            "shows the child once addressable. Do not spawn a replacement meanwhile."
         )
     return result
 

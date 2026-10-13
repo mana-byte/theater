@@ -110,8 +110,9 @@ async def test_sender_bound_leaves_room_for_others_and_lanes_keep_send_order(rig
         (await rig.service.send_when_safe("p1", caller_id="a", prompt=f"a{i}"))[0].handle
         for i in range(CONTROL_QUEUE_SENDER_MAX_PENDING)
     ]
-    with pytest.raises(Busy, match="cancel_job"):
+    with pytest.raises(Busy, match="cancel_job") as raised:
         await rig.service.send_when_safe("p1", caller_id="a", prompt="one too many")
+    assert "cancel_job one of your queued handles" in raised.value.details["next"]
     other = (await rig.service.send_when_safe("p1", caller_id="b", prompt="b0"))[0].handle
 
     heads = [operation.job_handle for operation in rig.service._lane_heads("p1")]
@@ -466,8 +467,10 @@ async def test_peers_cannot_take_the_parents_share_of_the_queue(rig):
 async def test_a_participant_never_queues_a_message_to_itself(rig):
     await _busy(rig)
 
-    with pytest.raises(Busy):
+    with pytest.raises(Busy) as raised:
         await rig.service.send_when_safe("p1", caller_id="p1", prompt="note to self")
+    assert "do the work in your current turn" in raised.value.details["next"]
+    assert "cannot queue to or await yourself" in raised.value.details["next"]
     with pytest.raises(NotYourChild):
         await rig.service.queue_followup("p1", caller_id="p1", prompt="x", origin="send")
     assert _operation_rows(rig.store, "p1") == [] and _job_handles(rig.store, "p1") == []

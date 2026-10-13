@@ -5,6 +5,13 @@ from __future__ import annotations
 from typing import Final
 
 NEXT_BUSY: Final = 'send again with if_busy="queue", "amend", or "replace"'
+NEXT_SEND_BUSY: Final = (
+    'send again without if_busy="refuse": omit if_busy to queue behind the current work'
+)
+NEXT_QUEUE_FULL: Final = (
+    "await or cancel_job one of your queued handles, then send again; "
+    "if you have none, retry after the queue drains"
+)
 NEXT_STEER_STALE: Final = 'send with if_busy="queue", or if_busy="replace"'
 NEXT_REPLACE_TIMEOUT: Final = (
     "nothing was sent and the interrupt stays applied; await the interrupted handle, then send"

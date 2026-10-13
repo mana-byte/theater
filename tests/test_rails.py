@@ -50,8 +50,10 @@ def test_depth_exceeding_cap_is_rejected(store):
     d2 = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=d1.id)
     d3 = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=d2.id)
     # d3 is depth 3; spawning from d3 would be depth 4, exceeding the cap of 3
-    with pytest.raises(DepthExceeded):
+    with pytest.raises(DepthExceeded) as raised:
         check_depth(store, d3.id)
+    assert "past depth 3" in raised.value.details["next"]
+    assert "do the work yourself" in raised.value.details["next"]
 
 
 def test_custom_cap_is_respected(store):
@@ -60,8 +62,9 @@ def test_custom_cap_is_respected(store):
     # With cap=1, spawning a child (depth 1) is allowed, but a grandchild (depth 2) is not
     check_depth(store, root.id, cap=1)  # does not raise
     child = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
-    with pytest.raises(DepthExceeded):
+    with pytest.raises(DepthExceeded) as raised:
         check_depth(store, child.id, cap=1)
+    assert "past depth 1" in raised.value.details["next"]
 
 
 # ---- cycle detection ----------------------------------------------------
@@ -155,8 +158,11 @@ def test_budget_exceeded_rejected(store):
     for _i in range(3):
         reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
     # 4 participants, budget 3 → exceeded
-    with pytest.raises(BudgetExceeded):
+    with pytest.raises(BudgetExceeded) as raised:
         check_budget(store, root.id, limit=3)
+    assert "whole tree holds the budget of 3 live participants" in raised.value.details["next"]
+    assert "ask the user to retire children whose work is merged" in raised.value.details["next"]
+    assert "dead participants free their slot" in raised.value.details["next"]
 
 
 def test_budget_counts_entire_subtree(store):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from theater.constants.handoff import ERROR_CANCELLED
 from theater.constants.harness import HARNESS_EVENT_TEXT_MAX_CHARS
 from theater.constants.observation import TURN_FAILED_CODE
 from theater.harness.contracts.events import clip
@@ -54,6 +55,10 @@ def job_entry(job: Mapping[str, object]) -> dict:
     answer = _final_answer(job)
     if answer:
         entry["result"] = answer
+    if job.get("state") in ("crashed", "killed") and not entry.get("error"):
+        result = job.get("result")
+        if isinstance(result, str) and result:
+            entry["error"] = result
     presence = entry.get("human_presence")
     if isinstance(presence, Mapping):
         if presence.get("state") == "absent" and not presence.get("protected"):
@@ -64,10 +69,12 @@ def job_entry(job: Mapping[str, object]) -> dict:
 
 
 def _final_answer(job: Mapping[str, object]) -> str:
-    """A done job's final message unless a parsed structured result already carries it."""
+    """Keep final answers and the failure details that mapped errors cannot explain."""
     result = job.get("result")
-    # A failed turn's result is its failure text, which the turn_failed error points at.
-    answers = job.get("state") == "done" or job.get("error_code") == TURN_FAILED_CODE
+    answers = job.get("state") == "done" or job.get("error_code") in (
+        TURN_FAILED_CODE,
+        ERROR_CANCELLED,
+    )
     if not answers or job.get("structured_status") == "parsed":
         return ""
     return _bounded(result) if isinstance(result, str) else ""

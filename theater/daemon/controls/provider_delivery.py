@@ -117,7 +117,8 @@ class ProviderControlDelivery:
             raise Busy(
                 f"provider terminal route for participant {participant_id!r} is "
                 f"{current.provider_health or current.terminal.health}; wait for exact "
-                "generation reconciliation before retrying"
+                "generation reconciliation before retrying",
+                details={"next": "retry once the provider route finishes reconciling"},
             )
         occupant = current.terminal.occupant_evidence.get("occupant_id")
         if not isinstance(occupant, str) or not occupant:

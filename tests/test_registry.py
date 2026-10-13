@@ -266,8 +266,13 @@ def test_old_name_of_dead_participant_not_found(registry):
     p = registry.register(harness="vibe", pane=None, cwd="/tmp")
     old_name = p.name
     registry.mark_dead(p.id)
-    with pytest.raises(NotFound):
+    with pytest.raises(NotFound) as raised:
         registry.resolve(old_name)
+    assert "names resolve only while a participant lives" in raised.value.details["next"]
+    assert "spawn result id" in raised.value.details["next"]
+    assert "before '#'" in raised.value.details["next"]
+    assert "list_participants(include_dead=true)" in raised.value.details["next"]
+    assert registry.resolve(p.id).status is Status.DEAD
 
 
 def test_include_dead_does_not_name_dead_participants(registry):

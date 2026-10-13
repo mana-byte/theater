@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from theater.constants.refusals import NEXT_SEND_BUSY
 from theater.models import Busy
 
 __all__ = ["BusyAction", "BusyOperation", "BusyRefusal", "busy_refusal"]
@@ -56,33 +57,41 @@ def busy_refusal(
         return Busy(
             f"participant {participant_id!r} has no live native connection whose "
             f"state can prove idle; {doing} — restore the runtime "
-            "(resume or respawn the participant), then retry"
+            "(resume or respawn the participant), then retry",
+            details={"next": "restore the runtime (resume or respawn the participant), then retry"},
         )
     if action is BusyAction.RESTORE_IDENTITY:
         doing = "not injecting a new prompt" if sending else "not delivering a settings update"
         return Busy(
             f"participant {participant_id!r} has no exact native session identity; "
             f"not treating that missing identity as idle; {doing} — "
-            "re-establish the exact session identity, then retry"
+            "re-establish the exact session identity, then retry",
+            details={"next": "re-establish the exact native session identity, then retry"},
         )
     if action is BusyAction.RESOLVE_UNKNOWN_STATE:
         doing = "not injecting a new prompt" if sending else "not delivering a settings update"
         return Busy(
             f"participant {participant_id!r} has unknown native execution state; "
             f"UNKNOWN is not proof of idle, so {doing} — wait for the "
-            "state to settle, then retry"
+            "state to settle, then retry",
+            details={"next": "wait for the native execution state to settle, then retry"},
         )
     if action is BusyAction.AWAIT_QUEUE:
         if sending:
             return Busy(
                 f"participant {participant_id!r} has {refusal.queued} queued followup(s); "
                 "an ordinary send cannot jump ahead of them — await the queued "
-                "handles or queue another followup instead"
+                "handles or send again with if_busy omitted to queue behind them",
+                details={"next": NEXT_SEND_BUSY},
             )
         return Busy(
             f"participant {participant_id!r} has {refusal.queued} queued followup(s); "
             "a settings update cannot jump ahead of them — wait for the queue "
-            "to drain, then retry once idle"
+            "to drain, then retry once idle",
+            details={
+                "next": "await the child's queued handles until the queue drains, "
+                "then retry update_session_settings once idle"
+            },
         )
     if action is BusyAction.AWAIT_TURN_END:
         described = (
@@ -93,29 +102,43 @@ def busy_refusal(
         if sending:
             return Busy(
                 f"participant {participant_id!r} has{described}; not injecting a new prompt"
-                ". Call interrupt, wait for idle, or queue a followup"
+                "; send again with if_busy omitted to queue behind the current work",
+                details={"next": NEXT_SEND_BUSY},
             )
         return Busy(
             f"participant {participant_id!r} has{described}; not delivering a settings "
             "update — settings require an idle participant, so wait for the "
-            "turn to end, then retry"
+            "turn to end, then retry",
+            details={
+                "next": "await the child's running handle, "
+                "then retry update_session_settings once idle"
+            },
         )
     if action is BusyAction.AWAIT_BARRIER:
         doing = "not injecting a new prompt" if sending else "not delivering a settings update"
         return Busy(
             f"participant {participant_id!r} has an unresolved native prompt delivery; "
             f"{doing} until its generation/session-bound barrier clears on exact "
-            "terminal evidence or an authoritative idle state — retry once it clears"
+            "terminal evidence or an authoritative idle state — retry once it clears",
+            details={
+                "next": "wait for the unresolved delivery to settle, then retry "
+                + ("send" if sending else "update_session_settings")
+            },
         )
     assert action is BusyAction.AWAIT_JOBS
     if sending:
         return Busy(
             f"participant {participant_id!r} has a running send job "
             f"({refusal.running_handle}); not injecting a new prompt — await "
-            "that handle, then retry"
+            "that handle, then retry",
+            details={"next": NEXT_SEND_BUSY},
         )
     return Busy(
         f"participant {participant_id!r} has a running send job "
         f"({refusal.running_handle}); not delivering a settings update — wait "
-        "for it to finish, then retry"
+        "for it to finish, then retry",
+        details={
+            "next": f"await_sessions([{refusal.running_handle!r}]), "
+            "then retry update_session_settings once idle"
+        },
     )

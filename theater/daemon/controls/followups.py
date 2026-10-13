@@ -12,6 +12,7 @@ from theater.constants.daemon import (
     CONTROL_QUEUE_PEER_MAX_PENDING,
     CONTROL_QUEUE_SENDER_MAX_PENDING,
 )
+from theater.constants.refusals import NEXT_QUEUE_FULL
 from theater.daemon.controls._common import (
     ACTION_QUEUE_FOLLOWUP,
     ACTION_SEND,
@@ -168,7 +169,8 @@ class FollowupControls(ControlHost):
                 raise Busy(
                     f"you already have {held} messages waiting for participant "
                     f"{participant_id!r} (bound {CONTROL_QUEUE_SENDER_MAX_PENDING}); await one "
-                    "of them or cancel_job a message you no longer need before sending another"
+                    "of them or cancel_job a message you no longer need before sending another",
+                    details={"next": NEXT_QUEUE_FULL},
                 )
             peers = self._peer_rows_held(participant_id)
             if peers >= CONTROL_QUEUE_PEER_MAX_PENDING and not self._is_owner(
@@ -177,7 +179,8 @@ class FollowupControls(ControlHost):
                 raise Busy(
                     f"participant {participant_id!r} already holds {peers} queued messages from "
                     f"peers (bound {CONTROL_QUEUE_PEER_MAX_PENDING}); the rest is reserved for "
-                    "its parent — await a pending handle or retry later"
+                    "its parent — await a pending handle or retry later",
+                    details={"next": NEXT_QUEUE_FULL},
                 )
         pending = self._store.queued_control_operation_count(participant_id)
         queue_full = (
@@ -189,7 +192,8 @@ class FollowupControls(ControlHost):
             raise Busy(
                 f"participant {participant_id!r} already holds {pending} queued "
                 f"followups (bound {CONTROL_QUEUE_MAX_PENDING}); await or "
-                "interrupt the pending handles before queueing another"
+                "cancel_job one of your pending handles before queueing another",
+                details={"next": NEXT_QUEUE_FULL},
             )
 
     def _is_owner(self, participant_id: str, sender_id: str) -> bool:

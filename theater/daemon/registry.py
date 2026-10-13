@@ -526,7 +526,14 @@ class Registry:
                 continue
             return self._named(owner)
 
-        raise NotFound(f"no participant {token!r}")
+        raise NotFound(
+            f"no participant {token!r}",
+            details={
+                "next": "names resolve only while a participant lives; if it died, use its id "
+                "(the spawn result id, or the part of a job handle before '#'); "
+                "list_participants(include_dead=true) lists it"
+            },
+        )
 
     def set_status(self, pid: str, status: Status) -> None:
         if status is Status.DEAD:

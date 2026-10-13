@@ -9,7 +9,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 
-from theater.constants.refusals import NEXT_BUSY
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 
@@ -462,7 +461,6 @@ class AwaitingDecision(TheaterError):
 
 class Busy(TheaterError):
     code = "busy"
-    details = {"next": NEXT_BUSY}  # noqa: RUF012 - read-only default; never mutated
 
 
 class StaleTarget(TheaterError):

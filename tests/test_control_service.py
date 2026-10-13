@@ -415,8 +415,8 @@ async def test_send_rejects_known_busy_targets(store: Store) -> None:
     try:
         await service.send("p1", caller_id="caller", prompt="nope")
         raise AssertionError("an active native turn must refuse the send")
-    except Busy:
-        pass
+    except Busy as exc:
+        assert "omit if_busy to queue" in exc.details["next"]
 
     # An ordinary send cannot jump ahead of a queued followup.
     state.native_turn_id = None
@@ -577,7 +577,7 @@ async def test_settings_refusal_on_a_running_job_names_wait_and_retry(store: Sto
 
 
 async def test_send_refusal_on_an_active_turn_names_the_send_remedy(store: Store) -> None:
-    """The send remedy is interrupt, idle, or a queued followup."""
+    """Any sender can omit if_busy to queue behind the active turn."""
     harness = await open_harness(store, "p1")
     state = state_of(harness, "p1")
     state.native_turn_id = "turn-live"
@@ -587,7 +587,8 @@ async def test_send_refusal_on_an_active_turn_names_the_send_remedy(store: Store
     except Busy as exc:
         text = str(exc)
         assert "not injecting a new prompt" in text
-        assert "Call interrupt, wait for idle, or queue a followup" in text
+        assert "send again with if_busy omitted" in text
+        assert "omit if_busy to queue" in exc.details["next"]
     finally:
         state.native_turn_id = None
     assert state.sent == []
@@ -611,6 +612,7 @@ def test_every_refusal_names_the_operation_and_a_remedy():
         assert "participant 'p1'" in text
         assert phrase in text
         assert remedy in text
+        assert error.details["next"]
 
     run_rows(
         (
@@ -648,7 +650,7 @@ def test_every_refusal_names_the_operation_and_a_remedy():
                 BusyAction.AWAIT_QUEUE,
                 BusyOperation.SEND,
                 "an ordinary send cannot jump ahead",
-                "queue another followup instead",
+                "send again with if_busy omitted",
             ),
             (
                 BusyAction.AWAIT_QUEUE,
@@ -660,7 +662,7 @@ def test_every_refusal_names_the_operation_and_a_remedy():
                 BusyAction.AWAIT_TURN_END,
                 BusyOperation.SEND,
                 SENDING,
-                "Call interrupt, wait for idle, or queue a followup",
+                "send again with if_busy omitted",
             ),
             (
                 BusyAction.AWAIT_TURN_END,
@@ -2047,8 +2049,9 @@ async def test_settings_rejects_busy_capability_and_empty_requests(store: Store)
     try:
         await service.update_settings("p1", caller_id="caller", model="m2")
         raise AssertionError("a busy target must refuse settings updates")
-    except Busy:
-        pass
+    except Busy as exc:
+        assert "await the child's running handle" in exc.details["next"]
+        assert "update_session_settings" in exc.details["next"]
     state.native_turn_id = None
 
 

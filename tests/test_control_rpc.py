@@ -530,7 +530,8 @@ async def test_settings_update_requires_idle_and_authorization(client, daemon):
             reasoning_effort="high",
         )
     assert busy.value.code == "busy"
-    assert "if_busy" in busy.value.details["next"]
+    assert "await the child's running handle" in busy.value.details["next"]
+    assert "update_session_settings" in busy.value.details["next"]
 
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     with pytest.raises(RemoteError) as unauthorized:

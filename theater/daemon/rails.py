@@ -102,7 +102,13 @@ def check_depth(
         return  # parent vanished; the spawner will fail anyway
     depth = lineage.depth_of(store, parent_id)
     if depth + 1 > cap:
-        raise DepthExceeded(f"spawn would be at depth {depth + 1}, cap is {cap}")
+        raise DepthExceeded(
+            f"spawn would be at depth {depth + 1}, cap is {cap}",
+            details={
+                "next": f"spawning past depth {cap} is refused; do the work yourself "
+                "instead of delegating deeper"
+            },
+        )
 
 
 def check_cycle(
@@ -170,5 +176,10 @@ def check_budget(
     )
     if count >= limit:
         raise BudgetExceeded(
-            f"tree rooted at {root_id} has {count} live participants, budget is {limit}"
+            f"tree rooted at {root_id} has {count} live participants, budget is {limit}",
+            details={
+                "next": f"your whole tree holds the budget of {limit} live participants; "
+                "do the work yourself, or ask the user to retire children whose work is "
+                "merged (dead participants free their slot), then retry"
+            },
         )
