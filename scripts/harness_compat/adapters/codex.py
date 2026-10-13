@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.error
 from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar
@@ -21,6 +24,7 @@ from ..contract import (
     Sandbox,
     Verdict,
     VerifiedSet,
+    is_stable,
     load_evidenced,
     version_key,
 )
@@ -35,6 +39,10 @@ _CONSISTENCY = (
     "tests/test_codex_native_runtime_proof.py::TestBundleIndexAndAllowlist",
     "tests/test_codex_native_runtime_proof.py::TestIndexValidation",
 )
+_UI_CONTROL = (
+    "tests/test_codex_native_ui_bootstrap_proof.py::"
+    "test_codex_native_ui_starts_a_thread_unattended[update-available-control-False]"
+)
 _GREEN = (
     "tests/test_codex_native_runtime_proof.py::TestNativeSmokeHandshakeAndFraming",
     "tests/test_codex_native_runtime_proof.py::TestNativeSmokeSharedUiSession",
@@ -42,7 +50,11 @@ _GREEN = (
     "tests/test_codex_native_runtime_proof.py::TestNativeSmokeForkReconnectSurvival",
     "tests/test_codex_native_runtime_proof.py::TestNativeSmokeRemoteNecessity",
     "tests/test_codex_native_ui_bootstrap_proof.py::test_codex_native_ui_bootstrap_proof",
-    "tests/test_codex_native_ui_bootstrap_proof.py::test_codex_native_ui_starts_a_thread_unattended",
+    "tests/test_codex_native_ui_bootstrap_proof.py::"
+    "test_codex_native_ui_starts_a_thread_unattended[update-available-True]",
+    _UI_CONTROL,
+    "tests/test_codex_native_ui_bootstrap_proof.py::"
+    "test_codex_native_ui_starts_a_thread_unattended[worktree-of-trusted-repo-True]",
 )
 
 
@@ -89,6 +101,46 @@ def _complete_bundle(path: Path) -> bool:
     return actual == expected
 
 
+def _public_git_tags() -> list[str]:
+    with tempfile.TemporaryDirectory(prefix="codex-release-tags-") as home:
+        env = {
+            "HOME": home,
+            "PATH": os.environ.get("PATH", ""),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": os.devnull,
+        }
+        done = subprocess.run(
+            [
+                "git",
+                "-c",
+                "credential.helper=",
+                "ls-remote",
+                "--tags",
+                "https://github.com/openai/codex.git",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    if done.returncode:
+        raise RuntimeError(f"Codex public tags unavailable: {done.stderr[-400:]}")
+    prefix = "refs/tags/rust-v"
+    versions: set[str] = set()
+    for line in done.stdout.splitlines():
+        _, separator, ref = line.partition("\t")
+        if separator and ref.startswith(prefix):
+            version = ref.removeprefix(prefix)
+            if is_stable(version):
+                versions.add(version)
+    if not versions:
+        raise RuntimeError("Codex public tags response has no stable rust-v releases")
+    return sorted(versions, key=version_key)
+
+
 class CodexAdapter:
     name = "codex"
     kind = "exact"
@@ -97,14 +149,19 @@ class CodexAdapter:
     stub_help = ""
     green_tests = _GREEN
     consistency_tests = _CONSISTENCY
-    expected_skips: ClassVar[dict[str, str]] = {}
+    expected_skips: ClassVar[dict[str, str]] = {
+        _UI_CONTROL: "downloaded binaries may not show Codex's update dialog"
+    }
     # The shared mock sees no Codex traffic; the collector audits its private mock routes.
     # Both proof mocks log calls; bootstrap asserts the exact scripted request count.
     expected_routes: frozenset[tuple[str, str]] = frozenset()
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
 
     def discover(self) -> list[str]:
-        return github.github_release_versions("openai/codex", tag_prefix="rust-v")
+        try:
+            return github.github_release_versions("openai/codex", tag_prefix="rust-v")
+        except urllib.error.URLError:
+            return _public_git_tags()
 
     def verified(self, root: Path) -> VerifiedSet:
         return VerifiedSet(
@@ -205,8 +262,7 @@ class CodexAdapter:
             "--provider",
             "mock",
         ]
-        env = {
-            **sb.offline_env,
+        common_env = {
             "CODEX_HOME": str(sb.home / ".codex"),
             "THEATER_CODEX_QUALIFY_VERSION": version,
             "THEATER_CODEX_NATIVE_PROOF": "1",
@@ -214,11 +270,14 @@ class CodexAdapter:
             "THEATER_CODEX_NATIVE_BIN": str(binary),
             "THEATER_CODEX_NATIVE_SMOKE": "1",
         }
+        capture_env = {**sb.offline_env, **common_env}
+        # The UI's update check may need network; model calls stay on local mocks.
+        proof_env = {**sb.env, **common_env}
         try:
             done = subprocess.run(
                 command,
                 cwd=root,
-                env=env,
+                env=capture_env,
                 capture_output=True,
                 text=True,
                 timeout=900,
@@ -241,18 +300,20 @@ class CodexAdapter:
         self.apply_bump(root, [version])
 
         consistency = framework.run_pytest(
-            root, self.consistency_tests, env=env, expected_skips={}, timeout=900
+            root, self.consistency_tests, env=capture_env, expected_skips={}, timeout=900
         )
         if not consistency or any(check.status != "pass" for check in consistency):
             return Result(self.name, version, "tooling", consistency, sb.evidence_dir)
         green = framework.run_pytest(
-            root, self.green_tests, env=env, expected_skips=self.expected_skips, timeout=900
+            root, self.green_tests, env=proof_env, expected_skips=self.expected_skips, timeout=900
         )
         if not green or any(check.status == "error" for check in green):
             verdict: Verdict = "inconclusive"
         elif any(check.status == "fail" for check in green):
             verdict = "red"
-        elif any(check.status == "skip" for check in green):
+        elif any(
+            check.status == "skip" and check.name not in self.expected_skips for check in green
+        ) or not any(check.status == "pass" for check in green):
             verdict = "inconclusive"
         else:
             verdict = "green"
