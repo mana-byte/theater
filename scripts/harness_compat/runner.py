@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .artifacts import CandidateArtifacts, stage_composed, tracked_patch
 from .contract import (
     Adapter,
     Check,
@@ -129,7 +130,9 @@ def _qualify(
             relevant = tuple(
                 check for check in observed.checks if check.name in adapter.green_tests
             )
-            if any(
+            if observed.verdict in ("tooling", "inconclusive"):
+                verdict = observed.verdict
+            elif any(
                 check.status == "error"
                 or (check.status == "skip" and check.name not in adapter.expected_skips)
                 for check in relevant
@@ -152,34 +155,59 @@ def _qualify(
         return classify_routes(adapter, result, requests), _routes(adapter, requests)
 
 
-def _compose(adapter: Adapter, root: Path, greens: list[str]) -> tuple[list[str], bool]:
+def _compose(
+    adapter: Adapter,
+    root: Path,
+    greens: list[str],
+    artifacts: CandidateArtifacts,
+    *,
+    publish: bool,
+    evidence_results: list[Result],
+    run_url: str,
+) -> tuple[list[str], bool, bool]:
     try:
         with _worktree(root) as tree, make_sandbox(adapter.name) as sandbox:
-            adapter.apply_bump(tree, greens)
+            artifacts.copy_into(tree)
+            changed = adapter.apply_bump(tree, greens)
+            if stray := artifacts.stray_files(tree, changed):
+                return stray, False, False
             problems = check_bump(adapter, tree, greens)
             if problems:
-                return problems, any("timed out" in problem.lower() for problem in problems)
+                return problems, any("timed out" in problem.lower() for problem in problems), False
+            patch_before_tests = tracked_patch(tree)
             checks = run_pytest(
                 tree,
                 adapter.consistency_tests,
                 env=sandbox.env,
                 expected_skips=adapter.expected_skips,
             )
-            return (
-                [
-                    f"{check.name}: {check.status}: {check.detail}"
-                    for check in checks
-                    if check.status not in ("pass", "skip")
-                ],
-                any(check.status == "error" for check in checks),
-            )
+            problems = [
+                f"{check.name}: {check.status}: {check.detail}"
+                for check in checks
+                if check.status not in ("pass", "skip")
+            ]
+            if tracked_patch(tree) != patch_before_tests:
+                problems.append("consistency tests changed tracked files")
+            problems.extend(artifacts.stray_files(tree, changed))
+            if problems:
+                return problems, any(check.status == "error" for check in checks), False
+            if publish:
+                for result in evidence_results:
+                    write_evidence(tree, result, run_url)
+                try:
+                    stage_composed(tree, root)
+                except Exception as exc:
+                    return [f"staging failed: {exc}"], True, False
+                return [], False, True
+            return [], False, False
     except Exception as exc:
-        return [f"composed bump failed: {exc}"], False
+        return [f"composed bump failed: {exc}"], False, False
 
 
-def run_harness(
+def _run_with_artifacts(
     adapter: Adapter,
     root: Path,
+    artifacts: CandidateArtifacts,
     *,
     version: str | None = None,
     max_candidates: int = 5,
@@ -196,9 +224,12 @@ def run_harness(
     )
     rows: list[dict[str, Any]] = []
     results: list[Result] = []
+    artifact_conflicts: list[str] = []
     for candidate in candidates:
         with _worktree(root) as tree:
             result, routes = _qualify(adapter, tree, candidate, bump=True)
+            if result.verdict == "green":
+                artifact_conflicts.extend(artifacts.capture(tree, candidate))
         result = replace(result, adapter_digest=digest)
         results.append(result)
         rows.append({**result.to_evidence(), "routes": routes, "run_url": run_url})
@@ -224,8 +255,27 @@ def run_harness(
         for item, document in reused.items()
         if not gate.admits(item) and item not in candidates
     ]
+    if reused_results and evidence_branch:
+        artifacts.add_branch_files(root, evidence_branch)
     greens = plan_bump(gate, [*reused_results, *results])
-    problems, compose_inconclusive = _compose(adapter, root, greens) if greens else ([], False)
+    pre_inconclusive = any(result.verdict == "inconclusive" for result in results)
+    pre_inconclusive |= bool(watch and watch["verdict"] == "inconclusive")
+    if artifact_conflicts:
+        problems, compose_inconclusive, published = artifact_conflicts, False, False
+    elif greens:
+        problems, compose_inconclusive, published = _compose(
+            adapter,
+            root,
+            greens,
+            artifacts,
+            publish=publish and not pre_inconclusive,
+            evidence_results=[
+                result for result in [*reused_results, *results] if result.version in greens
+            ],
+            run_url=run_url,
+        )
+    else:
+        problems, compose_inconclusive, published = [], False, False
     if problems:
         rows.append(
             {
@@ -249,12 +299,6 @@ def run_harness(
     issues = [row for row in rows if row["verdict"] in ("red", "tooling")]
     if watch and watch["verdict"] in ("red", "tooling"):
         issues.append({**watch, "admitted_regression": watch["verdict"] == "red"})
-    can_publish = publish and not inconclusive and not problems
-    if can_publish and greens:
-        adapter.apply_bump(root, greens)
-        for result in [*reused_results, *results]:
-            if result.version in greens:
-                write_evidence(root, result, run_url)
     return {
         "harness": adapter.name,
         "adapter_digest": digest,
@@ -268,6 +312,30 @@ def run_harness(
         "greens": greens,
         "issues": issues if not inconclusive else [],
         "inconclusive": inconclusive,
-        "published": bool(can_publish and greens),
+        "published": published,
         "run_url": run_url,
     }
+
+
+def run_harness(
+    adapter: Adapter,
+    root: Path,
+    *,
+    version: str | None = None,
+    max_candidates: int = 5,
+    publish: bool = False,
+    run_url: str = "local",
+    evidence_branch: str | None = None,
+) -> dict[str, Any]:
+    """Qualify one harness; publish only after the composed tree passes."""
+    with tempfile.TemporaryDirectory(prefix="compat-artifacts-") as temporary:
+        return _run_with_artifacts(
+            adapter,
+            root,
+            CandidateArtifacts(Path(temporary)),
+            version=version,
+            max_candidates=max_candidates,
+            publish=publish,
+            run_url=run_url,
+            evidence_branch=evidence_branch,
+        )
