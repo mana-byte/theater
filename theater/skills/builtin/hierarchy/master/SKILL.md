@@ -1,6 +1,6 @@
 ---
 name: master
-description: Lead mid to large work: interview the user, then run a light track (up to 3 independent units built by members) or a heavy track (contracts, leads), debating open design questions and always reviewing across models. Loading it starts the play for the whole session; for a single change do not load it: do it yourself, commit only your own paths, then spawn one reviewer on another model (worktree=true, base_branch=<your SHA>, yolo, review format) with a read-only brief naming the original base, your head SHA, the ACs and the checks. Push only after approve.
+description: Lead mid to large work by interviewing the user, then running a light track (up to 3 independent units built by members) or a heavy track (contracts, leads), debating open design questions and always reviewing across models. Loading it starts the play for the whole session; for a single change do not load it; do it yourself, commit only your own paths, then spawn one reviewer on another model (worktree=true, base_branch=<your SHA>, yolo, review format) with a read-only brief naming the original base, your head SHA, the ACs and the checks. Push only after approve.
 ---
 
 # Master
