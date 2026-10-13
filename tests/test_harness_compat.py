@@ -25,6 +25,7 @@ from scripts.harness_compat.evidence import adapter_digest, reusable_evidence
 from scripts.harness_compat.framework import check_bump, run_pytest
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.runner import classify_routes
+from scripts.harness_compat.sandbox import make_sandbox
 from scripts.harness_compat.select import newest_in_range, plan_bump, select_candidates
 
 
@@ -220,6 +221,36 @@ def test_framework_replaces_placeholder_evidence_and_reports_ceiling(tmp_path: P
     assert "Compatibility ceiling was NOT raised" in report.pr_body
 
 
+def test_forced_in_range_candidate_reuses_its_watch_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _evidence_only_repo(tmp_path)
+    calls: list[str] = []
+
+    class InRangeAdapter(EvidenceOnlyAdapter):
+        def verified(self, root: Path) -> VerifiedSet:
+            return VerifiedSet("range", floor="2.0.0", ceiling="4.0.0")
+
+        def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
+            return []
+
+        def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+            calls.append(version)
+            return super().qualify(root, version, sb, binary)
+
+    monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
+    summary = runner.run_harness(InRangeAdapter(), tmp_path, version="3.0.0")
+    assert calls == ["3.0.0"]
+    assert summary["watch"] == summary["results"][0]
+    assert summary["watch_reused"] is True
+    assert summary["watch"]["verdict"] == "green"
+    route = {"method": "POST", "path": "/v1/chat/completions"}
+    summary["results"][0]["routes"] = [route]
+    summary["watch"]["routes"] = [route]
+    report = prepare_publication(summary, tmp_path / "summary.json")
+    assert "`POST /v1/chat/completions` ×1" in report.pr_body
+
+
 def test_green_candidate_artifact_is_composed_and_staged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -300,3 +331,96 @@ def test_run_pytest_maps_skips_and_failures(tmp_path: Path) -> None:
     )
     assert [check.status for check in checks] == ["pass", "fail", "skip", "error"]
     assert all(isinstance(check, Check) for check in checks)
+
+
+def test_run_pytest_aggregates_file_directory_class_and_parameter_selectors(tmp_path: Path) -> None:
+    proofs = tmp_path / "proofs"
+    proofs.mkdir()
+    (proofs / "test_selectors.py").write_text(
+        "import pytest\n"
+        "def test_top(): assert True\n"
+        "class TestBundleIndexAndAllowlist:\n"
+        "    def test_first(self): assert True\n"
+        "    def test_second(self): assert True\n"
+        "@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_param(value): assert value > 0\n"
+    )
+    (tmp_path / "test_skip.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_skip(value): pytest.skip('unavailable')\n"
+    )
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    }
+    file = "proofs/test_selectors.py"
+    selectors = (
+        "proofs",
+        file,
+        f"{file}::TestBundleIndexAndAllowlist",
+        f"{file}::test_param",
+        f"{file}::test_param[1]",
+    )
+    checks = run_pytest(tmp_path, selectors, env=env, expected_skips={}, timeout=30)
+    assert [check.status for check in checks] == ["pass"] * len(selectors)
+    assert [check.detail for check in checks] == [
+        "5 passed",
+        "5 passed",
+        "2 passed",
+        "2 passed",
+        "1 passed",
+    ]
+    unknown = run_pytest(
+        tmp_path, (f"{file}::test_missing",), env=env, expected_skips={}, timeout=30
+    )
+    assert unknown[0].status == "error"
+    unexpected = run_pytest(tmp_path, ("test_skip.py",), env=env, expected_skips={}, timeout=30)
+    assert unexpected[0].status == "error"
+    assert "2 skipped" in unexpected[0].detail
+    expected = run_pytest(
+        tmp_path,
+        ("test_skip.py::test_skip",),
+        env=env,
+        expected_skips={"test_skip.py::test_skip": "known"},
+        timeout=30,
+    )
+    assert expected[0].status == "skip"
+    assert expected[0].detail == "2 skipped"
+
+
+def test_sandbox_keeps_unix_socket_paths_short(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with make_sandbox("codex") as sb:
+        if Path("/tmp").is_dir():
+            assert sb.root.is_relative_to(Path("/tmp").resolve())
+        assert sb.root == sb.root.resolve()
+        assert sb.env["TMPDIR"] == str(sb.root / "t")
+        socket = (
+            sb.evidence_dir
+            / "0.162.100"
+            / sb.home.name
+            / ".codex/sockets"
+            / f"app-server-{'0' * 32}.sock"
+        )
+        assert len(os.fsencode(socket)) < 100
+        assert len(os.fsencode(sb.tmux_socket)) < 100
+        for env in (sb.env, sb.offline_env):
+            assert "ANTHROPIC_API_KEY" not in env
+            assert "OPENAI_API_KEY" not in env
+
+    long_root = tmp_path / ("x" * 120)
+
+    def long_temp(*args: object, **kwargs: object) -> str:
+        long_root.mkdir()
+        return str(long_root)
+
+    monkeypatch.setattr("scripts.harness_compat.sandbox.tempfile.mkdtemp", long_temp)
+    with (
+        pytest.raises(RuntimeError, match="tmux AF_UNIX socket path is too long"),
+        make_sandbox("codex"),
+    ):
+        pass
+    assert not long_root.exists()
