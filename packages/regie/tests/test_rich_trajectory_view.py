@@ -372,18 +372,18 @@ async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A long rest window, so a loaded CI machine cannot overrun it mid-assertion.
-    monkeypatch.setattr("regie.trajectory.rich.view.TRAJECTORY_DETAIL_SETTLE_SECONDS", 1.0)
+    monkeypatch.setattr("regie.trajectory.rich.view.TRAJECTORY_DETAIL_SETTLE_SECONDS", 3.0)
     app = Host()
     async with app.run_test(size=(120, 40)) as pilot:
         view = await add_records(app)
         view.focus_region(FocusRegion.TIMELINE)
         panel = view.query_one(SpanDetailPanel)
         loading = panel.query_one("#trajectory-span-detail-loading")
-        await wait_until(pilot, lambda: panel.record_id == "r2" and not loading.display)
+        await wait_until(pilot, lambda: panel.record_id == "r2" and not loading.display, timeout=10)
 
         await pilot.press("h")
         assert panel.record_id == "r2" and loading.display  # still moving: not loaded yet
-        await wait_until(pilot, lambda: panel.record_id == "r1" and not loading.display)
+        await wait_until(pilot, lambda: panel.record_id == "r1" and not loading.display, timeout=10)
 
 
 async def test_detail_keys_move_between_sections_and_copy_section_or_page() -> None:

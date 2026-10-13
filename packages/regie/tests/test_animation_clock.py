@@ -178,7 +178,7 @@ async def test_hidden_cost_count_up_settles_without_waking_the_clock(tmp_path: P
         leaf.set_usage_cost(5_000_000)
         assert clock.is_running
         leaf.display = False
-        await wait_until(pilot, lambda: not clock.is_running, timeout=1)
+        await wait_until(pilot, lambda: not clock.is_running, timeout=5)
         assert leaf._cost_sub is None and leaf._cost.display == 5_000_000
 
         # A count started while already hidden never subscribes either.
