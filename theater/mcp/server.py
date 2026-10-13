@@ -193,6 +193,9 @@ def _includes_tool(toolset: str, name: str) -> bool:
 SPAWN_DOC = """Start a new child agent through Theater's selected terminal provider.
 For a debate, delegation, review or other named workflow, check list_skills first: a skill
 usually encodes the safe way to spawn it.
+If you will act on the answer, pass response_format ({{"$theater": "review"}}, "delegate" or
+"debate"): await_sessions then returns validated JSON. Without it you get only a ~2,000-char
+free-text preview of the child's final message.
 
 harness:  which CLI to run. This machine has: {harnesses}. Call
           list_harnesses for the daemon's own answer, which is the one that
@@ -255,12 +258,14 @@ skills:   optional list of skill names from list_skills. Theater appends each on
           that may give it. The refusal lists what you may attach.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
-          filesystem, so choose it deliberately. A "manual" child may stop
-          at its first permission prompt and need a human to answer.
-          await_sessions reports detected prompts as awaiting_input once
-          the admission-time presence gate is clear. Which of the
-          three each harness honours is in list_harnesses; a null
-          `approvals` there means the daemon predates the field —
+          filesystem, so choose it deliberately. Unattended, only "yolo"
+          runs without stopping: "manual" and "edits" halt at every
+          permission prompt they do not auto-approve, and only a human can
+          answer it (await_sessions then shows awaiting_input). Use them
+          when a human watches the child's terminal. For a read-only task
+          (review, research, debate) the built-in skills give "yolo" a
+          read-only brief. list_harnesses shows which modes each harness
+          offers; a null `approvals` means the daemon predates the field —
           restart it rather than guess.
 cwd:      where the child works. Defaults to your own directory.
           worktree=true requires cwd inside a git repo.

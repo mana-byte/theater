@@ -167,6 +167,8 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
     assert '{"evidence":"none"}' in descriptions["await_sessions"]
     assert "successful terminal binding" in descriptions["spawn_session"]
     assert "does not guarantee launch success" in descriptions["spawn_session"]
+    assert "validated JSON" in descriptions["spawn_session"]
+    assert "only a human can answer it" in descriptions["spawn_session"]
     assert "human_present" in descriptions["terminate_session"]
     assert "already_dead" in descriptions["terminate_session"]
     assert "nullable" in descriptions["scratchpad_get"]
