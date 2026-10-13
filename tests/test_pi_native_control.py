@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 
 def test_pi_core_correlation_proof_holds_on_stock_pi() -> None:
     # pytest.skip is NoReturn-typed, so the ``or`` keeps the command list str-only.

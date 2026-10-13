@@ -100,6 +100,8 @@ import pytest
 
 from theater.harness.builtin.plugins.codex.runtime_plan import CODEX_RUNTIME_VERIFIED_VERSIONS
 
+pytestmark = pytest.mark.integration
+
 TESTS_DIR = Path(__file__).parent
 _FIXTURES = TESTS_DIR / "fixtures" / "codex_native_ui_bootstrap"
 

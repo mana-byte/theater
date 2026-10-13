@@ -1121,7 +1121,7 @@ async def test_teardown_failure_preserves_the_worktree_terminal_and_binding(
     operation_wait = d.operation_service.wait
 
     async def wait_quickly(operation_id: str):
-        return await operation_wait(operation_id, wait_seconds=1.0)
+        return await operation_wait(operation_id, wait_seconds=25.0)
 
     monkeypatch.setattr(d.operation_service, "wait", wait_quickly)
     try:

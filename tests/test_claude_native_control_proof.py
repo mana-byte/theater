@@ -25,6 +25,8 @@ from tests.native import claude_messaging_client as harness
 from theater.harness.builtin.plugins.claude.manifest import MANIFEST, manifest_for_root
 from theater.harness.contracts.manifest import InterruptPlan
 
+pytestmark = pytest.mark.integration
+
 FIXTURES = Path(__file__).parent / "fixtures" / "claude_native_control"
 RECORD = FIXTURES / "messaging_conformance.json"
 PROOF_ENV = harness.PROOF_ENV

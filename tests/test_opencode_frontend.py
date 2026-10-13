@@ -46,6 +46,8 @@ from theater.harness.contracts.runtime import (
 )
 from theater.models import BadRequest, Participant, Status
 
+pytestmark = pytest.mark.integration
+
 
 class _IO(RuntimeIO):
     async def connect(self, endpoint: str, *, timeout: float):

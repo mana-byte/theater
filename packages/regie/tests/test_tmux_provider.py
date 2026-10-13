@@ -26,7 +26,7 @@ from regie.tmux.terminals import (
     terminate_terminal,
 )
 
-pytestmark = pytest.mark.tmux
+pytestmark = [pytest.mark.tmux, pytest.mark.integration]
 
 
 async def test_provider_launch_prefers_regie_pinned_session(monkeypatch) -> None:

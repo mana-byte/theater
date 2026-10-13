@@ -48,7 +48,7 @@ from theater.harness.contracts.runtime import (
 from theater.harness.contracts.source import Batch
 from theater.models import Participant, Status
 
-pytestmark = pytest.mark.tmux
+pytestmark = [pytest.mark.tmux, pytest.mark.integration]
 
 
 class _StockIO(RuntimeIO):

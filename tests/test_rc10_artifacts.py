@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION = "1.0.0rc11"
 UV = shutil.which("uv")
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.mark.skipif(UV is None, reason="artifact smoke tests require uv")
 def test_built_artifacts_install_as_independent_candidates(tmp_path: Path) -> None:
