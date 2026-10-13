@@ -29,9 +29,9 @@ from theater.protocol import RemoteError
 from theater.skills import SkillValidationError, UnknownSkill, discover
 from theater.skills.plays import parse_play_manifest
 
-MASTER = "teams/master-lead"
-LEAD = "teams/team-lead"
-MEMBER = "teams/team-member"
+MASTER = "hierarchy/master"
+LEAD = "hierarchy/lead"
+MEMBER = "hierarchy/member"
 
 SQUAD = """
 description = "A squad."
@@ -136,9 +136,9 @@ async def test_loading_the_master_skill_starts_one_play_for_that_agent_only(clie
     assert (await _load(client, master.id))["state"] == "started"
     assert (await _load(client, master.id))["state"] == "already_master"
     refused = await _load(client, child.id)
-    assert refused["state"] == "not_started" and "live teams play" in refused["reason"]
+    assert refused["state"] == "not_started" and "live hierarchy play" in refused["reason"]
     row = await client.call("participants.get", id=master.id)
-    assert row["play"] == {"play": "teams", "position": MASTER, "master": master.id}
+    assert row["play"] == {"play": "hierarchy", "position": MASTER, "master": master.id}
     assert "play" not in await client.call("participants.get", id=child.id)
 
 
@@ -162,18 +162,21 @@ async def test_whoami_lists_each_child_position_with_the_roles_that_fit_it(clien
     member = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=lead.id)
     loose = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=lead.id)
     await _load(client, master.id)
-    _seat(daemon, lead.id, master.id, "team-lead")
-    _seat(daemon, member.id, master.id, "team-member")
-    roles = ["teams/debater", "teams/reviewer", "teams/worker"]
+    _seat(daemon, lead.id, master.id, "lead")
+    _seat(daemon, member.id, master.id, "member")
+    roles = ["hierarchy/debater", "hierarchy/reviewer", "hierarchy/worker"]
 
     async def whoami(participant) -> dict:
         return _payload(await build(participant.id, "vibe").call_tool("whoami", {}))["play"]
 
-    play = {"play": "teams", "master": master.id}
+    play = {"play": "hierarchy", "master": master.id}
     assert await whoami(master) == {
         **play,
         "position": MASTER,
-        "spawn_options": [{"position": LEAD, "roles": roles}],
+        "spawn_options": [
+            {"position": LEAD, "roles": ["hierarchy/worker"]},
+            {"position": MEMBER, "roles": roles},
+        ],
     }
     assert await whoami(lead) == {
         **play,
@@ -212,16 +215,16 @@ async def test_spawns_in_a_live_play_attach_one_position_the_spawner_may_give(
 ):
     for skills, needle in [
         ((LEAD,), f"the operator is in no live play, so no play can seat {LEAD}. Start one"),
-        ((MASTER, "teams/worker"), f"a new master holds only {MASTER}"),
+        ((MASTER, "hierarchy/worker"), f"a new master holds only {MASTER}"),
     ]:
         with pytest.raises(RemoteError, match=needle):
             await _spawn(client, None, *skills)
     master = await _spawn(client, None, MASTER)
     assert daemon.plays.membership(master["id"]).is_master, "a spawn can start a child master"
     for skills, needle in [
-        ((), "attaches exactly one position: teams/team-lead; got none"),
-        ((MEMBER,), "got teams/team-member"),
-        ((LEAD, "teams/worker", "teams/reviewer"), "at most one task role"),
+        ((), "attaches exactly one position: hierarchy/lead, hierarchy/member; got none"),
+        ((LEAD, "hierarchy/reviewer"), "hierarchy/reviewer does not fit hierarchy/lead"),
+        ((LEAD, "hierarchy/worker", "hierarchy/reviewer"), "at most one task role"),
         ((MASTER,), "no play can start inside a live play"),
     ]:
         with pytest.raises(RemoteError) as refused:
@@ -229,10 +232,10 @@ async def test_spawns_in_a_live_play_attach_one_position_the_spawner_may_give(
         assert refused.value.code == "play_refused", skills
         assert needle in refused.value.message, refused.value.message
 
-    lead = await _spawn(client, master, LEAD, "teams/worker", "theater-debate")
-    member = await _spawn(client, lead, MEMBER, "teams/reviewer")
-    assert daemon.plays.membership(member["id"]).position == "team-member"
-    with pytest.raises(RemoteError, match="team-member cannot spawn"):
+    lead = await _spawn(client, master, LEAD, "hierarchy/worker", "theater-debate")
+    member = await _spawn(client, lead, MEMBER, "hierarchy/reviewer")
+    assert daemon.plays.membership(member["id"]).position == "member"
+    with pytest.raises(RemoteError, match="member cannot spawn"):
         await _spawn(client, member, MEMBER)
 
     resumable = daemon.registry.get(lead["id"])
@@ -242,7 +245,7 @@ async def test_spawns_in_a_live_play_attach_one_position_the_spawner_may_give(
     with pytest.raises(RemoteError, match=f"only an agent holding {MASTER} in that play"):
         await _spawn(client, None, resume=lead["id"])
     resumed = await _spawn(client, master, resume=lead["id"])
-    assert daemon.plays.membership(resumed["id"]).position == "team-lead"
+    assert daemon.plays.membership(resumed["id"]).position == "lead"
 
     daemon.registry.mark_dead(master["id"])
     assert daemon.plays.membership(member["id"]) is None, "the master's death ends the play"
@@ -264,7 +267,7 @@ async def test_a_deferred_spawn_is_checked_again_when_it_launches(
     await daemon.handoff.settle()
 
     gate = daemon.store.get_handoff_gate(waiting["handle"])
-    assert gate.state == "failed" and "teams/team-lead" in (gate.error or "")
+    assert gate.state == "failed" and "hierarchy/lead" in (gate.error or "")
     assert daemon.store.get_job(waiting["handle"]).state == JobState.CRASHED
 
 
@@ -296,7 +299,7 @@ async def test_a_parents_send_assigns_a_position_only_once_delivered(
         await send(child, LEAD)
     assert (await _load(client, master.id))["state"] == "started"
     for skills, needle in [
-        (("teams/reviewer",), "a task role has nothing to fit"),
+        (("hierarchy/reviewer",), "a task role has nothing to fit"),
         ((MASTER,), "a send never starts a play"),
     ]:
         with pytest.raises(RemoteError, match=needle):
@@ -309,17 +312,19 @@ async def test_a_parents_send_assigns_a_position_only_once_delivered(
         daemon.plays.check_spawn(child.id, PlayPlan(names=(MEMBER,)))
     daemon.jobs.finish(source.handle, state=JobState.DONE, result="ready")
     await _pump(daemon, child, state)
-    assert len(state.sent) == 1 and daemon.plays.membership(child.id).position == "team-lead"
-    assert daemon.plays.check_spawn(child.id, PlayPlan(names=(MEMBER,))).position == "team-member"
-    with pytest.raises(RemoteError, match="already holds teams/team-lead"):
+    assert len(state.sent) == 1 and daemon.plays.membership(child.id).position == "lead"
+    assert daemon.plays.check_spawn(child.id, PlayPlan(names=(MEMBER,))).position == "member"
+    with pytest.raises(RemoteError, match="already holds hierarchy/lead"):
         await send(child, MEMBER)
 
     others = [daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)]
     others.append(daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id))
     for other in others:
         await _install_runtime(daemon, other.id)
-    with pytest.raises(RemoteError, match="can give its children only: teams/team-lead"):
-        await send(others[0], MEMBER)
+    grandchild = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=child.id)
+    await _install_runtime(daemon, grandchild.id)
+    with pytest.raises(RemoteError, match="can give its children only: hierarchy/member"):
+        await send(grandchild, LEAD, caller=child)
     with pytest.raises(RemoteError, match="direct parent"):
         await send(others[0], LEAD, caller=child)
     _source(daemon, name="Writer2")
@@ -338,7 +343,7 @@ async def test_a_parents_send_assigns_a_position_only_once_delivered(
     monkeypatch.setattr(daemon.plays, "track_assignment", spy)
     await send(others[1], LEAD)
     assert seated == [False, True], "held at reservation, applied by the accepting settlement"
-    assert daemon.plays.membership(others[1].id).position == "team-lead"
+    assert daemon.plays.membership(others[1].id).position == "lead"
 
 
 async def test_queued_play_messages_fail_unsent_once_their_play_ends(client, daemon, absent):
@@ -350,7 +355,7 @@ async def test_queued_play_messages_fail_unsent_once_their_play_ends(client, dae
     late_state = await _install_runtime(daemon, late.id)
     _, source = _source(daemon)
     queued = [await send(late, LEAD, after="Writer")]
-    queued.append(await send(child, "teams/reviewer", after="Writer"))
+    queued.append(await send(child, "hierarchy/worker", after="Writer"))
 
     daemon.registry.mark_dead(master.id)
     daemon.jobs.finish(source.handle, state=JobState.DONE, result="ready")
@@ -414,7 +419,7 @@ async def test_an_unknown_native_delivery_is_proven_by_its_exact_turn_evidence(
     )
 
     assert daemon.store.get_job(sent["handle"]).state == JobState.DONE
-    assert daemon.plays.membership(child.id).position == "team-lead"
+    assert daemon.plays.membership(child.id).position == "lead"
 
 
 async def test_adoption_keeps_one_live_play_and_its_position_hierarchy(client, daemon):
@@ -425,7 +430,7 @@ async def test_adoption_keeps_one_live_play_and_its_position_hierarchy(client, d
         for _ in range(3)
     )
     for lead in (lead_a, lead_b):
-        _seat(daemon, lead.id, master.id, "team-lead")
+        _seat(daemon, lead.id, master.id, "lead")
     outsider = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     inner = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=outsider.id)
     await _load(client, inner.id)
@@ -435,7 +440,7 @@ async def test_adoption_keeps_one_live_play_and_its_position_hierarchy(client, d
     async def adopt(target, caller):
         return await client.call("participant.adopt", id=target.id, caller_id=caller.id)
 
-    with pytest.raises(RemoteError, match="may parent only teams/team-member"):
+    with pytest.raises(RemoteError, match="may parent only hierarchy/member"):
         await adopt(lead_b, lead_a)
     with pytest.raises(RemoteError, match="you hold no position there"):
         await adopt(lead_b, loose)
@@ -451,7 +456,7 @@ async def test_gc_deletes_only_each_participants_own_play_rows(client, daemon):
     member = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
     adopter = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     await _load(client, master.id)
-    _seat(daemon, member.id, master.id, "team-lead")
+    _seat(daemon, member.id, master.id, "lead")
     daemon.registry.mark_dead(master.id)
     with daemon.store.write_unit() as unit:  # adopted elsewhere once its play ended
         daemon.store.reparent_in_connection(

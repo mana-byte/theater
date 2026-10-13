@@ -29,10 +29,10 @@ from theater.skills import (
 )
 from theater.skills import loader as skills_loader
 
-STANDALONE = ["theater-configure", "theater-debate", "theater-orchestrate", "theater-recover-tmux"]
-TEAMS = [
-    f"teams/{member}"
-    for member in ("debater", "master-lead", "reviewer", "team-lead", "team-member", "worker")
+STANDALONE = ["theater-configure", "theater-debate", "theater-recover-tmux"]
+HIERARCHY = [
+    f"hierarchy/{member}"
+    for member in ("debater", "lead", "master", "member", "reviewer", "worker")
 ]
 
 
@@ -58,29 +58,28 @@ def write_raw(root: Path, name: str, content: str | bytes) -> Path:
 def test_shipped_skills_are_discovered_with_their_exact_content(tmp_path):
     registry = discover(user_dir=tmp_path)
 
-    assert [skill.name for skill in registry.skills] == [*TEAMS, *STANDALONE]
-    skill = registry.load("theater-orchestrate")
+    assert [skill.name for skill in registry.skills] == [*HIERARCHY, *STANDALONE]
+    skill = registry.load("theater-debate")
     assert skill.source is SkillSource.BUILTIN
     assert skill.content == skill.source_path.read_text(encoding="utf-8")
 
 
 def test_disabled_builtin_is_absent_from_the_registry(tmp_path):
-    registry = discover(user_dir=tmp_path, disabled=("theater-orchestrate",))
+    registry = discover(user_dir=tmp_path, disabled=("theater-debate",))
 
     assert [skill.name for skill in registry.skills] == [
-        *TEAMS,
+        *HIERARCHY,
         "theater-configure",
-        "theater-debate",
         "theater-recover-tmux",
     ]
     with pytest.raises(UnknownSkill):
-        registry.load("theater-orchestrate")
+        registry.load("theater-debate")
 
 
 def test_unknown_disabled_builtin_name_is_tolerated(tmp_path):
     registry = discover(user_dir=tmp_path, disabled=("not-a-bundled-skill",))
 
-    assert [skill.name for skill in registry.skills] == [*TEAMS, *STANDALONE]
+    assert [skill.name for skill in registry.skills] == [*HIERARCHY, *STANDALONE]
 
 
 def test_shipped_tmux_recovery_skill_has_exact_data_only_package(tmp_path):
@@ -100,7 +99,7 @@ def test_valid_user_skill_is_loadable_in_deterministic_name_order(tmp_path):
 
     registry = discover(user_dir=tmp_path)
 
-    assert [skill.name for skill in registry.skills] == ["alpha", *TEAMS, *STANDALONE, "zebra"]
+    assert [skill.name for skill in registry.skills] == ["alpha", *HIERARCHY, *STANDALONE, "zebra"]
     skill = registry.load("alpha")
     assert skill.source is SkillSource.USER
     assert skill.content == "---\nname: alpha\ndescription: A useful skill.\n---\n\n# alpha\n"
@@ -368,7 +367,7 @@ def test_invalid_user_skill_is_diagnostic_but_invalid_builtin_is_fatal(tmp_path)
 def test_empty_user_root_is_allowed(tmp_path):
     registry = discover(user_dir=tmp_path / "missing")
 
-    assert [skill.name for skill in registry.skills] == [*TEAMS, *STANDALONE]
+    assert [skill.name for skill in registry.skills] == [*HIERARCHY, *STANDALONE]
     assert registry.rejections == ()
 
 
@@ -517,7 +516,7 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
     discoveries = []
     daemon = SimpleNamespace(
         config=SimpleNamespace(
-            skills=SimpleNamespace(disabled=("theater-orchestrate",)),
+            skills=SimpleNamespace(disabled=("theater-debate",)),
         )
     )
 
@@ -558,7 +557,7 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
         "source": "user",
         "content": skill.content,
     }
-    assert discoveries == [("theater-orchestrate",), ("theater-orchestrate",)]
+    assert discoveries == [("theater-debate",), ("theater-debate",)]
 
     with pytest.raises(BadRequest, match=r"skills\.list"):
         await skills_rpc._skills_load(daemon, {"name": "not/a/skill"})
@@ -568,14 +567,13 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
         await skills_rpc._skills_load(daemon, {"name": "missing"})
 
 
-def test_orchestration_skills_teach_after_review_cancel_and_presets_without_transcript_habits(
+def test_debate_skill_teaches_after_review_cancel_and_presets_without_transcript_habits(
     tmp_path,
 ):
     registry = discover(user_dir=tmp_path)
-    orchestrate = registry.load("theater-orchestrate").content
     debate = registry.load("theater-debate").content
 
-    for text in (orchestrate, debate):
+    for text in (debate,):
         assert "after=" in text and "independent_review" in text and "cancel_job" in text
         assert "structured_result" in text
         # A transcript is a diagnostic: every paragraph that mentions one says why to open it.
@@ -585,7 +583,5 @@ def test_orchestration_skills_teach_after_review_cancel_and_presets_without_tran
                     word in paragraph
                     for word in ("diagnose", "stuck", "failed", "silent", "narrow", "stalls")
                 ), paragraph
-    assert '{"$theater": "delegate"}' in orchestrate and '{"$theater": "review"}' in orchestrate
     assert '{"$theater": "debate"}' in debate
-    assert "exactly the commit" in orchestrate.replace("\n", " ")
     assert "never wait for idle" in debate.replace("\n", " ")

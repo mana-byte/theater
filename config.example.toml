@@ -216,7 +216,7 @@ disabled = []
 [skills]
 
 # Bundled skills to leave out of the registry, by name; a bundled play (such as
-# "teams") is left out whole by its name. User-installed skills and skills
+# "hierarchy") is left out whole by its name. User-installed skills and skills
 # supplied by enabled MCP plugins are unaffected.
 #
 # Disabled bundled skills are still validated when the registry is built, so a

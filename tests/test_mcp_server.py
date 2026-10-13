@@ -318,23 +318,24 @@ async def test_skill_tools_round_trip_through_the_daemon(daemon):
     assert [skill["name"] for skill in listed["skills"]] == [
         "theater-configure",
         "theater-debate",
-        "theater-orchestrate",
         "theater-recover-tmux",
     ]
     assert all("content" not in skill for skill in listed["skills"])
-    [teams] = listed["plays"]
-    assert teams["master"] == "teams/master-lead"
-    assert [position["name"] for position in teams["positions"]] == [
-        "teams/master-lead",
-        "teams/team-lead",
-        "teams/team-member",
+    [hierarchy] = listed["plays"]
+    assert hierarchy["master"] == "hierarchy/master"
+    assert [position["name"] for position in hierarchy["positions"]] == [
+        "hierarchy/master",
+        "hierarchy/lead",
+        "hierarchy/member",
     ]
-    assert _payload(await mcp.call_tool("list_skills", {"play": "teams"}))["plays"] == [teams]
+    assert _payload(await mcp.call_tool("list_skills", {"play": "hierarchy"}))["plays"] == [
+        hierarchy
+    ]
 
-    loaded = _payload(await mcp.call_tool("load_skill", {"name": "theater-orchestrate"}))
-    assert loaded["name"] == "theater-orchestrate"
+    loaded = _payload(await mcp.call_tool("load_skill", {"name": "theater-debate"}))
+    assert loaded["name"] == "theater-debate"
     assert loaded["source"] == "builtin"
-    assert loaded["content"].startswith("---\nname: theater-orchestrate\n")
+    assert loaded["content"].startswith("---\nname: theater-debate\n")
 
 
 async def test_a_disabled_skill_is_hidden_from_list_and_refused_on_load(theater_home):
@@ -348,7 +349,6 @@ async def test_a_disabled_skill_is_hidden_from_list_and_refused_on_load(theater_
         listed = _payload(await mcp.call_tool("list_skills", {}))
         assert [skill["name"] for skill in listed["skills"]] == [
             "theater-debate",
-            "theater-orchestrate",
             "theater-recover-tmux",
         ]
 

@@ -64,9 +64,8 @@ def _assert_theater_contents(artifacts: Iterable[Path]) -> None:
             "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts",
             "theater/harness/builtin/plugins/pi/pi_startup_filter.cjs",
             "theater/pricing/model_prices.json",
-            "theater/skills/builtin/theater-orchestrate/SKILL.md",
-            "theater/skills/builtin/teams/PLAY.toml",
-            "theater/skills/builtin/teams/master-lead/SKILL.md",
+            "theater/skills/builtin/hierarchy/PLAY.toml",
+            "theater/skills/builtin/hierarchy/master/SKILL.md",
             "theater/daemon/migrations/script.py.mako",
         ):
             assert any(name.endswith(required) for name in names), (artifact.name, required)

@@ -149,11 +149,11 @@ def test_favourite_is_a_plain_string():
 
 
 def test_skills_disabled_parses_as_an_immutable_permissive_denylist():
-    write('[skills]\ndisabled = ["theater-orchestrate", "not-installed"]\n')
+    write('[skills]\ndisabled = ["theater-debate", "not-installed"]\n')
 
     loaded = cfg.load()
 
-    assert loaded.skills.disabled == ("theater-orchestrate", "not-installed")
+    assert loaded.skills.disabled == ("theater-debate", "not-installed")
     assert loaded.source("skills.disabled") == "config.toml"
 
 

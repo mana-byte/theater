@@ -135,7 +135,7 @@ what was granted before the file takes effect.
      `[mcp.plugins.<name>]` table by hand.
 6. `[skills] disabled` — "Theater ships a few built-in helpers your agents can load —
    any of them switched off?" Options: the built-in skill names, multi-select,
-   recommend none; a bundled play counts as one option under its play name (`teams`),
+   recommend none; a bundled play counts as one option under its play name (`hierarchy`),
    since its `<play>/<member>` skills are switched off together. Say in the question
    that this configure helper switches itself off
    at the end of the session by design, so "none" still ends with it disabled — the

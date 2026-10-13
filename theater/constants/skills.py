@@ -17,7 +17,7 @@ SKILL_ATTACH_MAX_BYTES = 16 * 1024
 #: A play directory holds this manifest beside its member skill packages.
 PLAY_MANIFEST_FILENAME = "PLAY.toml"
 PLAY_MANIFEST_MAX_BYTES = 16 * 1024
-#: Separates a play from its member in a qualified skill name: ``teams/worker``.
+#: Separates a play from its member in a qualified skill name: ``hierarchy/worker``.
 PLAY_SEPARATOR = "/"
 
 __all__ = [

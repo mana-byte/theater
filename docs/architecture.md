@@ -1295,7 +1295,7 @@ theater/
 │   ├── base.py · observation.py · source.py   compatibility facades
 │   └── plugins.py      generic loader compatibility facade
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
-│   └── builtin/        theater-configure · theater-debate · theater-orchestrate · theater-recover-tmux
+│   └── builtin/        theater-configure · theater-debate · theater-recover-tmux
 ├── mcp/                theater + theater_wait server composition, session, toolsets
 ├── frontend/           public SDK, schemas, DTOs, state synchronizer and provider client
 └── tmux/               legacy compatibility/client facts; terminal execution belongs to a provider

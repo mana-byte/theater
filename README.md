@@ -181,11 +181,10 @@ Claude Code Opus 5 xhigh as reviewer.
 Every harness connected to Theater can discover and use the same built-in and
 custom skills, so a workflow written once works from any of your agents.
 
-- `theater-orchestrate` — coordinate workers and reviewers.
 - `theater-debate` — challenge a decision with a second model.
 - `theater-configure` — set up or personalize Theater.
 - `theater-recover-tmux` — recover sessions after a tmux restart.
-- `teams` — a play: a master-lead directs team-leads, who direct team-members.
+- `hierarchy` — a play: a master runs a light track (members) or a heavy track (contracts, leads), with a debate on either when a design question is open.
 
 **Hand a skill to another agent.** Name it in `skills=[...]` on `spawn_session`
 or `send`: Theater appends its instructions after your task, so the receiver
@@ -193,13 +192,13 @@ needs no `load_skill` call. A child gets only the skills you name, never yours,
 and attached skills stay under 16 KiB combined.
 
 **Run a play.** A play is a team structure: `skills/<play>/PLAY.toml` plus one
-skill per member, named `<play>/<member>` (`teams/team-lead`). An agent that
-loads the master skill (`teams/master-lead`) becomes the play's master, and a
+skill per member, named `<play>/<member>` (`hierarchy/lead`). An agent that
+loads the master skill (`hierarchy/master`) becomes the play's master, and a
 spawn that attaches it starts a new master. While the master lives, every spawn
 below it attaches exactly one position its spawner may give, plus at most one
-task role (`teams/worker`, `teams/reviewer`, `teams/debater`); outside a live
+task role (`hierarchy/worker`, `hierarchy/reviewer`, `hierarchy/debater`); outside a live
 play, positions and roles cannot be attached. A parent gives an existing child
-its position with `send(skills=["teams/team-lead"])`; it takes effect once
+its position with `send(skills=["hierarchy/lead"])`; it takes effect once
 Theater confirms delivery (if the child still shows no `play` position after the
 job ends, send it again), and a queued one fails unsent if the play ends first.
 When the master dies the play ends and its rules lift. `list_skills` shows each

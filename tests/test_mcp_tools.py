@@ -192,10 +192,10 @@ async def test_skill_tools_group_listing_and_identify_the_loader():
     loaded = {"name": "alpha", "content": "# Alpha\n"}
     s = session(**{"skills.list": listed, "skills.load": loaded})
 
-    assert await tools.list_skills(s, play="teams") == listed
+    assert await tools.list_skills(s, play="hierarchy") == listed
     assert await tools.load_skill(s, name="alpha") == loaded
     assert s.client.methods == ["skills.list", "hello", "skills.load"]
-    assert s.client.params("skills.list") == {"grouped": True, "play": "teams"}
+    assert s.client.params("skills.list") == {"grouped": True, "play": "hierarchy"}
     assert s.client.params("skills.load") == {"name": "alpha", "caller_id": "p-me"}
 
 
