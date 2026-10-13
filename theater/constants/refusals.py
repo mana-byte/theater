@@ -19,8 +19,14 @@ NEXT_REPLACE_TIMEOUT: Final = (
 NEXT_NAME_TAKEN: Final = "omit name to get a free one"
 NEXT_HUMAN_PRESENT: Final = "ask the user to leave the pane, then retry"
 NEXT_AWAITING_DECISION: Final = (
-    "ask the user to answer the dialog in the child's terminal, then re-send; "
+    "ask the user to answer the dialog in the target's terminal, then re-send; "
     "omit if_busy to queue the message until it closes"
+)
+NEXT_AWAITING_DECISION_SETTINGS: Final = (
+    "ask the user to answer the dialog in the target's terminal, then retry the settings update"
+)
+NEXT_SELF_SEND: Final = (
+    "do the work in your current turn and return its answer; you cannot queue to or await yourself"
 )
 NEXT_NO_TERMINAL: Final = "no terminal exists for this participant; do not retry this control"
 NEXT_FOCUS_EVENTS_OFF: Final = (

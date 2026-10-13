@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from theater.constants.refusals import NEXT_BUSY, NEXT_SEND_BUSY
+from theater.constants.refusals import NEXT_BUSY, NEXT_SELF_SEND, NEXT_SEND_BUSY
 from theater.daemon.controls._common import (
     ACTION_SEND,
     CONTROL_DELIVERY_ACCEPTED,
@@ -97,10 +97,7 @@ class SendControls(ControlHost):
                 if caller_id == participant_id:
                     raise Busy(
                         f"participant {participant_id!r} is busy; a self-send cannot be queued",
-                        details={
-                            "next": "do the work in your current turn and return its answer; "
-                            "you cannot queue to or await yourself"
-                        },
+                        details={"next": NEXT_SELF_SEND},
                     ) from exc
                 raise
             latency.delivery = delivery
