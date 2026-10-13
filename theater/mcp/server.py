@@ -50,9 +50,12 @@ retry; cancel_job withdraws work that has not started.
 
 To pass one agent's result to the next, name it: after="Writer" on spawn_session or send.
 Theater waits for that work, then adds the facts (outcome, pinned commit, the answer) to the
-task you wrote, so you copy no path, hash or handle. For a review that must not inherit the
-author's conclusions, spawn_session(task_kind="independent_review", worktree=true, after=...)
-gives the reviewer the facts, not the verdict, in a worktree at the exact commit.
+task you wrote, so you copy no path, hash or handle. A name means the work that agent has
+already started (its running job, else its latest), never a message still queued for it: if
+your send returned delivery="queued", pass that send's handle instead. For a review that must
+not inherit the author's conclusions, spawn_session(task_kind="independent_review",
+worktree=true, after=...) gives the reviewer the facts, not the verdict, in a worktree at the
+exact commit.
 
 Ask for a structured answer with response_format when you will act on it; await_sessions
 returns validated JSON in structured_result. A child's "done" is the end of its turn, not a
@@ -67,18 +70,20 @@ Address participants by name. Every `target` accepts a live name, and names are
 unique among live participants, so you never need to look up or memorize an id
 to talk to a live agent. Keep ids only for dead participants and resume.
 
-Participant summaries omit null, empty-list, and empty-object fields. Await,
-send, and queue job entries also omit prompt/schema echoes and routing ids.
-Omission rules are tool-specific.
+If Theater gave you a task, your final message ends that job and is the answer your
+requester's await returns (about 2,000 chars unless it set response_format). Put the result
+there; do not send it to your parent, which only queues a new prompt in its terminal.
 
 Wait with await_sessions, never a shell sleep or poll loop. A refused call
 returns a code, and `next` when known: follow it instead of retrying unchanged.
 Only ask the user to kill a child once its work is merged or abandoned. Children in a
 position your play lists as disposable need no ask.
 
-Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
-To give another agent a skill, name it in skills=[...] on spawn_session or send; Theater
-attaches it after your task, and a child never inherits skills it was not given.
+When the user's request names a workflow (a debate, a delegation, a review, Theater setup
+or recovery), call list_skills before building it from raw tools: a skill usually encodes
+the safe choreography, and its description says when it applies. Then load_skill that exact
+skill. To give another agent a skill, name it in skills=[...] on spawn_session or send;
+Theater attaches it after your task, and a child never inherits skills it was not given.
 A play is a team structure named in list_skills; loading its master skill starts it. While
 its master lives, every spawn below it attaches one position the spawner may give.
 """
@@ -93,17 +98,17 @@ max_wait: one overall deadline including human holds; default 150 seconds, cap {
 Keep it shorter than your MCP client's timeout. Timeout grants no permission to send.
 
 Returns when ANY target qualifies, preserving input order and returning all entries.
-Presence gating is decided once, at admission. A target protected at admission
-(present or unknown) is gated: it requires an observed departure plus either
-a terminal job state (done, crashed, or killed) or current awaiting_input status — departure
-clears the gate permanently
-and re-entry does not restore it. A target unprotected at admission is never
-gated: later human presence is irrelevant; terminal state or a running job whose
-participant is currently awaiting_input qualifies it. Input requests are re-evaluated
-on every status change, never latched. Departure alone cannot release a running job.
-Ids with no job wait only for presence and return immediately if unprotected at admission.
-An existing job handle wins over the participant-id interpretation. A protected target can
-still return timeout or pending under UNKNOWN presence even when its job is terminal.
+Presence is gated once, at admission. A target with a human present or unknown at admission
+needs an observed departure (permanent: re-entry does not restore the gate) plus a terminal
+job (done, crashed, killed) or a current awaiting_input status; departure alone never releases
+a running job. A target with no human at admission is never gated: a terminal job, or a running
+job whose participant is awaiting_input, qualifies it. Input requests are rechecked on every
+status change. Ids with no job wait only for presence and return at once if unprotected. A
+protected target can still return timeout or pending under unknown presence even when its job
+is terminal.
+A spawned child's id is also its spawn job's handle, and a job handle wins over the
+participant-id reading: awaiting the child's id returns that first task, not later sends.
+Await each send's own handle.
 
 Each entry carries handle, state (running/done/crashed/killed), participant_status
 (observed independently, possibly working after departure) and await_reason; error_code
@@ -112,13 +117,13 @@ human_presence (state, protected, reason) appears only while it is not a plain a
 await_reason is one of: job_terminal, presence_released,
 awaiting_input (a running job needs input; terminal state takes precedence), already_absent,
 timeout, or pending (another target released wait-any). For gated terminal jobs, job_terminal
-and presence_released name the condition observed last — completion or departure;
-job_terminal wins same-evaluation ties.
-An awaiting_input entry also includes pending_interaction when an exact cached native
-snapshot supplies it (kind, optional native_turn_id and details). Inspect the child's
-native UI to answer the request; this result grants no permission to mutate it.
-awaiting_input without pending_interaction: the child's screen shows a prompt; answer it with
-send or ask the user; never sleep-poll it. No-job entries omit state.
+and presence_released name the condition observed last — completion or departure.
+awaiting_input means the child is blocked on an approval, trust or other dialog that only a
+human can answer. send cannot answer it: it is refused as awaiting_decision, or by default
+queued until the dialog closes. Ask the user to answer it in the child's terminal, then
+re-await; never sleep-poll it. The entry includes pending_interaction (kind, optional
+native_turn_id and details) when an exact cached native snapshot supplies it; this result
+grants no permission to mutate the child. No-job entries omit state.
 Re-await a pending or timed-out entry only while its job or presence can still change.
 max_wait=0 returns current state without blocking (running entries read await_reason=timeout):
 use it for status sweeps.
@@ -164,9 +169,8 @@ def _instructions(toolset: str) -> str:
     if toolset == "control":
         return (
             f"{INSTRUCTIONS}\n\n"
-            "await_sessions is intentionally on the separate "
-            "theater_wait MCP server. Use await_sessions from theater_wait so a "
-            "cancelled long wait cannot delay control calls such as interrupt_session."
+            "await_sessions lives on the separate theater_wait MCP server, so a "
+            "cancelled long wait never delays control calls such as interrupt_session."
         )
     if toolset == "wait":
         return (
@@ -186,6 +190,8 @@ def _includes_tool(toolset: str, name: str) -> bool:
 
 
 SPAWN_DOC = """Start a new child agent through Theater's selected terminal provider.
+For a debate, delegation, review or other named workflow, check list_skills first: a skill
+usually encodes the safe way to spawn it.
 
 harness:  which CLI to run. This machine has: {harnesses}. Call
           list_harnesses for the daemon's own answer, which is the one that
@@ -196,7 +202,10 @@ prompt:   the task, delivered on the child's command line at startup.
           may change, what it must leave alone, how to check its own work, and
           what to report back. With `after`, Theater adds the source's context;
           you still write the task.
-after:    a live participant name or an exact job handle. The child is reserved
+after:    a live participant name or an exact job handle. A name means the work
+          that agent has already started (its running job, else its latest),
+          never a message still queued for it: if your send returned
+          delivery="queued", pass that send's handle. The child is reserved
           now and launches, with the task you wrote plus a labelled card about
           that work, only when it ends: no worktree, argv or terminal exists
           before. The same handle follows the whole life: await_sessions waits
@@ -261,7 +270,7 @@ model:    which model the child runs, spelled the way its own CLI spells it
           (opencode wants provider/model). Omitting it bypasses the model
           allowlist and leaves selection to the CLI; it does not guarantee
           launch success. Naming one only works if the config allows it for
-          that harness — call list_models for the set,
+          that harness — call list_harnesses(include_models=true) for the set,
           which is usually empty until a human writes it. Theater checks
           membership and nothing else: it cannot confirm the CLI honoured the
           name, so a typo someone allowed surfaces as a child on the wrong
@@ -270,35 +279,19 @@ reasoning_effort: reasoning/thinking effort for the child (e.g. "low",
           "medium", "high"). Optional; omit it and the harness uses its
           default. Mirrors `model`: the config must list the effort for that
           harness under [reasoning], and the adapter must accept it. Not all
-          harnesses support it — call list_models for `reasoning_supported`.
+          harnesses support it — list_harnesses(include_models=true) shows
+          `reasoning_supported`.
           Theater checks membership and nothing else.
-worktree: if True, create a git worktree for the child with its own
-          isolated index and HEAD. The unique branch name is in the
-          result so you can merge it explicitly. The child's
-          repo must be a git repo for this to work.
-          What is isolated is the index, not the merge. Two children
-          editing the same file are not working in parallel, they are
-          writing a conflict you will resolve by hand later. Give each
-          one files no sibling touches, and put whatever they share —
-          a function signature, a schema — in both prompts, unchanged,
-          so the branches still compose when they come back.
-          If a non-empty string, create or join a named shared linked
-          worktree. Multiple live children spawned with the same name
-          in the same canonical main repository run in the same
-          directory and on the same branch. This is an expert-mode
-          collaboration primitive, not filesystem or Git isolation:
-          the index and HEAD are shared, concurrent git add/commit
-          operations can interfere, and the KV store does not make
-          file claims atomic or enforce ownership. The branch name
-          theater/named/<name> is in the result. base_branch applies
-          only when the named worktree is first created; a later join
-          may omit it or repeat the exact same value, and a conflicting
-          value is refused. The shared directory and branch survive the
-          last participant's teardown and may be joined again. Remove
-          them explicitly with `theater workspaces cleanup <workspace_id>
-          --delete-branch` once no participant uses them. Dirty worktrees
-          and unmerged branches are retained unless separately forced.
-          Cannot be combined with resume.
+worktree: true creates an isolated worktree and branch for the child (the branch
+          is in the result; merge it explicitly). What is isolated is the index,
+          not the merge: give siblings files no sibling touches. A non-empty
+          string creates or joins a named shared worktree (branch
+          theater/named/<name>): live children with that name share one
+          directory, index and HEAD, so concurrent git add/commit can
+          interfere and file claims are not enforced. base_branch applies only
+          at creation; a join omits it or repeats it exactly. A named worktree
+          survives teardown until `theater workspaces cleanup <workspace_id>
+          --delete-branch`. Needs cwd inside a git repo; not with resume.
 name:      optional alias: 1-24 chars, letter first, then letters/digits/_/-
            (e.g. Scapin-2); omit it to get a free one. Unique while the child
            lives (case-insensitive), released at death, not inherited on resume.
@@ -306,24 +299,21 @@ description: highly recommended for user clarity: a short, plain, specific,
            non-verbose summary of the child's purpose (maximum 160 Unicode
            codepoints). It is durable and is inherited by resume unless an
            explicit replacement or empty string is supplied.
-base_branch: the branch to base the worktree on. Defaults to current HEAD. Not with
-           task_kind="independent_review", whose base is the source's pinned commit.
-resume:    a session id, from `recall`, to resume instead of starting cold.
-           Also accepts a Theater participant id: if the value matches a
-           retained participant, the daemon resolves it to that
-           participant's harness session id internally. Participant-id
-           matches take precedence over native session ids. The harness
-           must support it (call list_harnesses; a harness that
-           cannot is listed but will refuse the spawn with a message naming
-           itself). Some harnesses accept resume but cannot carry a prompt
-           through it: opencode's `-s` routes to the session view and drops
-           `--prompt`, so resuming opencode with a prompt is refused. Resume
-           without a prompt and use send to deliver the task. Resume with
-           response_format is refused for harnesses whose resume cannot carry
-           a prompt, because the JSON guidance is delivered through the same
-           prompt channel. Resume is also refused for live trusted owners and
-           for `transcript_identity_lost`; recover by inspecting
-           `theater candidates <id>` and rebinding with
+base_branch: the branch to base the worktree on. Defaults to current HEAD: committed
+           state only, so commit first if the child needs your uncommitted edits. Not
+           with task_kind="independent_review", whose base is the source's pinned commit.
+resume:    a Theater participant id, or a harness session id from `recall`, to resume
+           instead of starting cold. This is the way back for a dead participant,
+           killed, crashed or gone: it starts a NEW child (new id; the name is not
+           inherited) carrying the old session's context. A participant id wins over
+           a native session id; it must be dead with a recorded session_id, and a
+           live one is refused (use send). list_participants `resume_state` says
+           whether a retained row can resume. Some harnesses accept resume but cannot
+           carry a prompt through it: opencode's `-s` drops `--prompt`, so resume it
+           without a prompt and use send to deliver the task; response_format is
+           refused for them too, as it travels the same channel. Resume is also
+           refused for live trusted owners and for `transcript_identity_lost`;
+           recover by inspecting `theater candidates <id>` and rebinding with
            `theater bind <id> <candidate> --confirm-id <id>`.
 wiring:   "auto" | "native" | "legacy" — how the child's controls are wired.
            "auto" follows the daemon's compatibility checks and rollout
@@ -338,9 +328,15 @@ resume identifier, only after the observer discovers it; a new spawn normally
 omits the field. With neither prompt nor response_format, the launch job becomes
 done only after successful terminal binding. Otherwise terminal creation is not
 task completion, and an unmatched turn may leave the job running. Check
-`operation_state`: only `succeeded` confirms terminal creation. If the operation
-is still running or uncertain, its ID and diagnostic fields are returned; do not
-spawn a replacement while that launch remains unresolved.
+`operation_state`: only `succeeded` confirms terminal creation. Otherwise
+await_sessions([handle]) settles it (the job ends crashed if the launch fails) and
+list_participants(ids=[id]) shows the child once it is addressable; spawn no
+replacement meanwhile.
+
+Refused with depth_exceeded past the depth cap (default 3 below the root) and with
+budget_exceeded once your whole tree holds the budget of live participants (default
+20; dead ones free their slot). Then do the work yourself, or ask the user to retire
+children whose work is merged.
 """
 
 
@@ -374,6 +370,11 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         Returns {"handle", "cancelled"}; when it is too late, `reason` is "delivered",
         "delivery_uncertain" (it may have reached the target or be launching; never assume
         it did not), "finished" (with `state`), or "not_cancellable".
+
+        Too late? Work a direct child already received stops with interrupt_session (or
+        send(if_busy="replace")); a launched spawn stops only with terminate_session, after
+        asking the user. A message a peer already received cannot be withdrawn: send it a
+        correction.
         """
         return await tools.cancel_job(session, handle=handle)
 
@@ -387,7 +388,7 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         pending native interaction — call get_session_controls to see the
         active turn first. Supply at least one of `model` and
         `reasoning_effort`; both follow the same allowlists spawn_session
-        enforces (list_models reports them). Approval and sandbox policy are
+        enforces (list_harnesses(include_models=true) reports them). Approval and sandbox policy are
         never changed here. Effective values are reported only after the
         native backend confirms; an uncertain delivery stays visibly
         uncertain in the reply.
@@ -418,7 +419,11 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         send(if_busy=...) or update_session_settings to learn whether the
         harness supports the operation at all; when it does not, the reason
         is the daemon's, and it is the thing to tell the user rather than
-        retrying.
+        retrying. Empty fields are omitted, and a transport or runtime_host shared by
+        several capabilities is lifted into `capability_route`. `active_turn` and
+        `settings` are reported only for natively wired sessions; elsewhere they are
+        absent even mid-turn, so read status from list_participants. Steering
+        (if_busy="amend") and settings updates need native wiring, chosen at spawn.
 
         target: the participant's stable id or current live name.
         """
@@ -433,21 +438,12 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         """Permanently kill one direct child session.
 
         **Before killing any child, ask the user for permission and wait for an
-        explicit yes.** In that request, you — not the user — must name every
-        direct child you intend to kill. When your harness exposes a native
-        ask-user or confirmation tool, using it for this request is highly
-        recommended; otherwise ask in a normal assistant response. A bare
-        `yes` or `confirm`, returned through that native tool or in the user's
-        next message, authorizes every child you named. Never ask the user to
-        repeat or paste those names or ids. Once confirmation arrives, make all
-        authorized calls before sending another assistant response, without
-        asking again between calls.
-
-        Example: ask "May I permanently kill `Alice` and `Bob`?" If the user
-        replies "yes" through the native question tool or normally, call this
-        tool for Alice and then Bob immediately. An earlier approval, approval
-        to spawn, or a vague request to clean up is not enough. Do not bypass
-        this rule by invoking `theater kill` through a shell.
+        explicit yes.** You, not the user, must name every direct child you intend
+        to kill in that request (use your native ask-user tool if you have one). A
+        bare `yes` or `confirm` authorizes every child you named; never ask the user
+        to repeat the names. After confirmation, make all authorized calls before
+        replying. An earlier approval, approval to spawn, or a vague request to clean
+        up is not enough. Do not bypass this by invoking `theater kill` in a shell.
 
         Exception: a child holding a position your play lists as disposable (`whoami`
         `play.disposable`) may be retired without asking once its result is collected and
@@ -476,7 +472,10 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         removes a clean, unused worktree and its merged branch. Cleanup without
         `--delete-branch` retains the branch; force flags are separate choices.
         A child without a worktree has no worktree or branch to delete.
-        The session kill itself cannot be undone.
+
+        The kill cannot be undone, but the child's session context survives:
+        spawn_session(resume=<its id>) starts a new child from it, while its row is
+        dead and trusted.
         """
         return await tools.terminate_session(session, target=target, forget=forget)
 
@@ -485,21 +484,14 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         """Adopt one sibling participant as your own direct child.
 
         **Before adopting any participant, ask the user for permission and
-        wait for an explicit yes, exactly like terminate_session.** In that request,
-        you — not the user — must name every participant you intend to adopt.
-        When your harness exposes a native ask-user or confirmation tool, using
-        it for this request is highly recommended; otherwise ask in a normal
-        assistant response. A bare `yes` or `confirm`, returned through that
-        native tool or in the user's next reply, authorizes every participant you
-        named. Never ask the user to repeat or paste those names or ids. Once
-        confirmation arrives, make all authorized calls before sending another
-        assistant response, without asking again between calls.
-
-        Example: ask "May I adopt `Alice` and `Bob` as my children?" If the user
-        replies "yes" through the native question tool or normally, call this
-        tool for Alice and then Bob immediately. An earlier approval, approval
-        to spawn, or a vague request to reorganize the team is not enough. Do
-        not bypass this rule by invoking a shell, a CLI, or any other client.
+        wait for an explicit yes, exactly like terminate_session.** You, not the
+        user, must name every participant you intend to adopt in that request (use
+        your native ask-user tool if you have one). A bare `yes` or `confirm`
+        authorizes every participant you named; never ask the user to repeat the
+        names. After confirmation, make all authorized calls before replying. An
+        earlier approval, approval to spawn, or a vague request to reorganize the
+        team is not enough. Do not bypass this through a shell, a CLI, or any other
+        client.
 
         Only a sibling qualifies: a participant under the same parent as you —
         two roots count as sharing a parent. The target must be live,
@@ -588,7 +580,9 @@ def build(
             if _includes_tool(toolset, fn.__name__):
                 tool_names.add(fn.__name__)
                 mcp.tool_parameters[fn.__name__] = frozenset(inspect.signature(fn).parameters)
-                return mcp.tool(description=description)(fn)
+                # cleandoc: indented docstrings would otherwise ship their margin on every line.
+                doc = description if description is not None else fn.__doc__
+                return mcp.tool(description=inspect.cleandoc(doc) if doc else None)(fn)
             return fn
 
         return decorator
@@ -639,7 +633,8 @@ def build(
         name (the field is omitted) and a name may be recycled after a death,
         so use the id for dead rows, resume, and any reference you keep across a
         death. Ids stay valid until retention GC.
-        Empty fields are omitted from every row.
+        Empty fields are omitted from every row; so are `is_self` (present, true, only on
+        your own row), `resume_state` when it is "live", and `addressable` on dead rows.
 
         Historical rows may retain `tmux_server_identity`, but it is not a live
         route. A dead row may carry `termination_reason`, `termination_incident`,
@@ -658,16 +653,17 @@ def build(
         you. It excludes deeper descendants and composes with both `ids` and
         `include_dead`.
 
-        `include_dead=True` lists newest first, 100-row cap. Pass `limit`
+        `include_dead=True` lists newest first, 20 rows by default. Pass `limit`
         (1 through 200) to choose a page size; a full page's last row carries
         `next_after_id`, which you pass as `after_id` for the next page.
         Live-only lists are oldest first. If a cursor was deleted by retention
         GC, restart from the first page. `limit` caps an `ids` query;
         `after_id` cannot be used with `ids`.
 
-        Each row includes `resume_state`, the verdict `spawn_session(resume=...)`
-        checks; `resumable` means every current gate passed. The
-        theater-recover-tmux skill explains the other values.
+        Dead rows carry `resume_state`, the verdict `spawn_session(resume=...)` checks:
+        `resumable` (every gate passed), `owned_by_live` (a live participant already
+        continues that session: address it), `no_session_id`, `harness_cannot_resume`,
+        `untrusted` (needs operator binding) or `harness_resume_rejected`.
         """
         return await tools.list_participants(
             session,
@@ -679,33 +675,26 @@ def build(
         )
 
     @mcp_tool()
-    async def list_harnesses() -> list[dict]:
+    async def list_harnesses(
+        harness: str | None = None, include_models: bool = False
+    ) -> list[dict]:
         """The CLIs you can pass to spawn_session as `harness`, on this machine.
-        The daemon answers — the set is configuration, not a fixed list. A row's
-        `approvals: null` means the daemon predates the field: restart it.
+
+        The daemon answers; the set is configuration, not a fixed list. Rows carry
+        `name` and `approvals` (null means the daemon predates the field: restart
+        it), plus `binary` only when it differs from the name.
+        harness: list only this one.
+        include_models: add, per harness, the model allowlist spawn_session
+        enforces: `models`, `supported`, `reasoning` and `reasoning_supported`.
+        The allowlist is written by a human in Theater's config, not everything the
+        CLI could run, and it starts empty: `models: []` refuses every model you
+        name, and `supported: false` means the adapter cannot select a model at
+        all, so no config edit helps; suggest the edit rather than retrying with
+        another name. Omitting `model` bypasses the allowlist. `reasoning` is the
+        allowlist of efforts, with the same semantics; `reasoning_supported: false`
+        means the adapter cannot select one.
         """
-        return await tools.harnesses(session)
-
-    @mcp_tool()
-    async def list_models() -> list[dict]:
-        """The models spawn_session will accept for each harness, on this machine.
-
-        An allowlist a human writes in Theater's config, not everything the CLI
-        could run, and it starts empty: a harness with `models: []` refuses
-        every model you name. Omitting `model` bypasses the allowlist and leaves
-        selection to the CLI; it does not guarantee launch success. Suggest the
-        config edit rather than retrying with another name.
-
-        `supported: false` means the adapter cannot select a model at all, so
-        no config edit helps.
-
-        `reasoning_supported: false` means the adapter cannot select a
-        reasoning effort. `reasoning` is the allowlist of efforts the config
-        permits for that harness; same semantics as `models`.
-
-        Answered by the daemon, which is the process that enforces the list.
-        """
-        return await tools.models(session)
+        return await tools.harnesses(session, harness=harness, include_models=include_models)
 
     @mcp_tool()
     async def list_skills(play: str | None = None) -> dict:
@@ -716,6 +705,8 @@ def build(
         (with the positions each may spawn) and its task roles (with the positions
         they fit). No instruction content; rejected packages are reported. Pass
         play to list one play only. Choose an exact name before calling load_skill.
+        Check it whenever the user's request names a workflow, before building that
+        workflow from raw tools.
         """
         return await tools.list_skills(session, play=play)
 
@@ -726,8 +717,11 @@ def build(
         Loading returns the complete validated SKILL.md content and consumes
         context, so list metadata first and load only the selected exact skill.
         Loading a play's master skill starts that play with you as master
-        (play_start reports it); do so only when the user chooses you. Inside a
-        live play, or above one, it returns the text without starting anything.
+        (play_start reports it) and commits you to it: it lasts as long as you
+        live, and every spawn you make attaches one position your own position
+        may give (whoami: play.spawn_options). Do so only when the user chooses
+        you. Inside a live play, or above one, it returns the text without
+        starting anything.
         """
         return await tools.load_skill(session, name=name)
 
@@ -818,7 +812,6 @@ def build(
         job_handle: str | None = None,
         response_format: dict | None = None,
         after: str | None = None,
-        task_kind: Literal["work"] | None = None,
         skills: list[str] | None = None,
     ) -> dict:
         """Send a prompt to an already-running agent mid-session.
@@ -846,25 +839,20 @@ def build(
                    its queue, interrupts, waits up to 30 s for idle, sends (route
                    "replace"). A participant cannot queue a message to itself.
         job_handle: amend/replace act only while this job is the active turn.
-        response_format: optional JSON object, as for spawn_session. A bare JSON Schema is a
-                   prompt hint. Strict presets: {"$theater": "review"} (verdict, reviewed,
-                   summary, findings), {"$theater": "debate"} (verdict, position,
-                   strongest_evidence, weakest_assumption, position_change,
-                   remaining_blocker), {"$theater": "delegate"} (status, summary, blockers);
-                   or {"$theater": "custom", "name": "x", "schema": {...}}. Theater validates
-                   and, where it can, repairs the answer; await_sessions returns a valid one
-                   in structured_result, else structured_status "unable_to_parse".
-        after:     a live participant name or an exact job handle. If that work is running,
-                   the message is queued (delivery="queued", handoff.state="waiting") until
-                   it ends. If already done, the message may deliver immediately. Theater adds
+        response_format: optional JSON object, with the same contract as spawn_session
+                   (presets, custom schemas, structured_result in await_sessions).
+        after:     a live participant name or an exact job handle. A name means the work
+                   that agent has already started, never a message still queued for it:
+                   if your send returned delivery="queued", pass that send's handle. If
+                   that work is running, the message is queued (delivery="queued",
+                   handoff.state="waiting") until it ends. If already done, the message
+                   may deliver immediately. Theater adds
                    a labelled card: its outcome, pinned Git commit and
                    dirty state, and its answer marked unverified (a failed source gives a
                    labelled failure). You write the task; copy no path or handle. The same
                    handle covers the wait and the reply; cancel_job withdraws it while it
                    waits; an await on it from the source's own work is a cycle, refused.
                    Presence is still checked when it is delivered. Omit if_busy with it.
-        task_kind: "work" (default). A review that must not see the author's conclusions
-                   needs its own worktree: use spawn_session(task_kind="independent_review").
         skills:    optional skill names from list_skills, attached after this message's
                    task as for spawn_session; they apply to this message only. Refused
                    with if_busy="amend" while a turn is active. Play skills need the
@@ -877,7 +865,9 @@ def build(
         Fails with `busy` for if_busy="refuse", a target whose queue (or your share of
         it) is full, or a send to yourself while you are working; with
         `transcript_untrusted` or `transcript_identity_lost` (transcript needs
-        binding); and with `human_present` for if_busy="refuse" or a send to yourself.
+        binding); with `human_present` for if_busy="refuse" or a send to yourself; and
+        with `awaiting_decision` for if_busy="refuse" while the target has an open
+        approval or trust dialog that only a human can answer.
         """
         return await tools.send_prompt(
             session,
@@ -887,7 +877,6 @@ def build(
             if_busy=if_busy,
             job_handle=job_handle,
             after=after,
-            task_kind=task_kind,
             skills=skills,
         )
 
@@ -959,19 +948,20 @@ def build(
         namespace: str,
         keys: list[str] | None = None,
         after_key: str | None = None,
-        keys_only: bool = False,
+        keys_only: bool | None = None,
     ) -> dict:
         """Read non-expired entries from the machine-wide TTL scratchpad.
 
-        Returns {"namespace": str, "entries": {key: value, ...}, "keys":
-        [key, ...], "truncated": bool, "after_key": str | None}. Entries are
-        ordered by key. Pass keys to fetch specific entries (at most 128);
-        omit to read the namespace. One page returns at most ~4 MiB encoded;
-        when truncated is true and after_key is non-null, pass that after_key to
-        continue after the last returned key. A legacy entry too large to return
-        reports oversized_digest, oversized_bytes and a nullable oversized_key:
-        skip it with after_key only when non-null, else stop and report it;
-        delete by digest or clear only when cleanup is intended.
+        Without `keys` it lists metadata: {"namespace", "keys": [...], "entries": [{key,
+        bytes, updated_at, expires_at, actor}, ...], "truncated"}, so a scan never pulls
+        values you did not ask for. With `keys` (at most 128) it returns
+        {"entries": {key: value, ...}, "truncated"}; keys_only=false forces values
+        for a scan, keys_only=true forces metadata for specific keys. Entries are ordered
+        by key. One page returns at most ~4 MiB encoded; when truncated is true, an
+        `after_key` is present: pass it to continue after the last returned key. A
+        legacy entry too large to return reports oversized_digest, oversized_bytes and a
+        nullable oversized_key: skip it with after_key only when non-null, else stop and
+        report it; delete by digest or clear only when cleanup is intended.
         Entries are shared by namespace across this Theater machine; expired
         entries are omitted and reads never refresh their expiry.
 
@@ -979,7 +969,8 @@ def build(
         keys:      optional list of at most 128 entry ids, each at most 128
                    characters; None means all.
         after_key: optional cursor with no length limit; return keys after it.
-        keys_only: list [{key, bytes, updated_at, expires_at, actor}] as entries, no values.
+        keys_only: true lists metadata only; false returns values. Default: metadata when
+                   `keys` is omitted, values when it is given.
         """
         return await tools.scratchpad_get(
             session, namespace=namespace, keys=keys, after_key=after_key, keys_only=keys_only
@@ -1026,14 +1017,16 @@ def build(
         roles: any of assistant, user, tool_call, tool_result;
         ["assistant"] reads the last answer.
 
-        Returns id, path, events (chronological; entries may be partial text
-        chunks), next_cursor, and truncated. truncated means the response budget
-        cut this source page before all eligible events were returned. Each event
-        retains index, role, tool_name, and turn_end plus UTF-8 byte offsets;
-        reaches_text_start is true when a suffix-first chunk includes byte zero.
-        Events over 64 KiB return head text, tail, elided_bytes, middle_cursor
-        (pages the elided middle). The newest page adds first_prompt (earliest
-        retained job prompt), later_prompts, resumed_from when known.
+        Returns id, path, events (chronological), next_cursor, and truncated.
+        truncated means the response budget cut this source page before all eligible
+        events were returned. An event carries role, plus text, tool_name, turn_end and
+        turn_terminal when set; empty values are omitted, and a finished answer that
+        Theater also recorded as its seal appears once. A partial text chunk also
+        carries index and UTF-8 byte offsets (text_start_byte, text_end_byte,
+        text_total_bytes). Events over 64 KiB return head text, tail, elided_bytes,
+        middle_cursor (pages the elided middle). The newest unfiltered page adds
+        first_prompt (earliest retained job prompt, omitted when already in the
+        events), later_prompts, resumed_from when known; filtering by roles omits them.
         Which job edited a file: recall(paths), then git diff in the child's branch.
 
         Refuses if the transcript needs binding or its identity is lost.
@@ -1054,11 +1047,13 @@ def build(
         agent that made each change.
 
         One timeline per path, newest first. Each point carries clipped
-        task/result, outcome, one `sha` string (`before → after`, with `-` for
-        missing and `?` for unavailable), and a ``segment`` that ``recall_read``
-        expands. Beside the timeline: ``current`` (the
-        file's sha now) and ``dirty`` (differs from HEAD). Compare
-        ``current`` with the newest point's ending SHA to detect
+        task/result (the task is your original prompt, without Theater's
+        response_format guidance), outcome, one `sha` string (`before → after`, with
+        `-` for missing and `?` for unavailable), a ``segment`` that ``recall_read``
+        expands, and, for job points, `participant_id` and its live `name` (null once
+        it died): send to the name while it lives, or spawn_session(resume=<id>).
+        Beside the timeline: ``current`` (the file's sha now) and ``dirty`` (differs
+        from HEAD). Compare ``current`` with the newest point's ending SHA to detect
         post-job changes.
 
         A gap point is a sha transition no job claims — something
