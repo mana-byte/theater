@@ -1,10 +1,4 @@
-"""The runtime-control tool bodies: thin forwarders with the caller named.
-
-Every control tool reaches the daemon on its frozen RPC name
-(``participant.settings.update``, ``participant.controls``), forwards the
-calling participant so the daemon can authorize, and returns the daemon's reply
-verbatim; the tests assert the exact params that cross the socket.
-"""
+"""Control tools preserve daemon decisions while trimming repetitive diagnostics."""
 
 from __future__ import annotations
 
@@ -61,27 +55,74 @@ async def test_update_session_settings_identifies_first():
     assert s.client.methods == ["hello", "participant.settings.update"]
 
 
-async def test_get_session_controls_forwards_the_frozen_rpc_with_the_caller_named():
+@pytest.mark.parametrize("native_session", ["session", "different", None])
+async def test_get_session_controls_forwards_the_frozen_rpc_with_the_caller_named(native_session):
     controls = {
         "capabilities": {
-            "send": {"available": True, "transport": "native_runtime"},
+            "send": {"available": True, "transport": "native_runtime", "runtime_host": "frontend"},
+            "steer": {
+                "available": False,
+                "transport": "native_runtime",
+                "runtime_host": "frontend",
+                "reason": "unsupported",
+                "detail": "",
+            },
             "settings_update": {
                 "available": True,
                 "transport": "native_runtime",
                 "runtime_host": "frontend",
                 "supported_fields": ["reasoning_effort"],
             },
+            "interrupt": {
+                "available": True,
+                "transport": "legacy_keys",
+                "runtime_host": "detached_backend",
+            },
         },
-        "health": "healthy",
-        "settings": {"model": "opus-5"},
-        "active_turn": "h#2",
-        "queued_handles": ["p-child#4"],
+        "backend_generation": 4,
+        "native_session_id": native_session,
+        "transcript_identity": {"session_id": "session", "detail": None},
+        "health": {"connection": "connected", "diagnostics": []},
+        "settings": {"model": "opus-5", "reasoning_effort": None},
+        "active_turn": {"native_turn_id": "h#2", "job_handle": None},
+        "queued": ["p-child#4"],
+        "human_presence": {
+            "state": "unknown",
+            "protected": True,
+            "revision": 0,
+            "observed_at": 123.0,
+        },
+        "empty": {},
+        "zero": 0,
     }
     s = resolved(**{"participant.controls": controls})
 
     record = await tools.get_session_controls(s, target="p-child")
 
-    assert record == controls
+    expected = {
+        "capability_route": {"transport": "native_runtime", "runtime_host": "frontend"},
+        "capabilities": {
+            "send": {"available": True},
+            "steer": {"available": False, "reason": "unsupported"},
+            "settings_update": {"available": True, "supported_fields": ["reasoning_effort"]},
+            "interrupt": {
+                "available": True,
+                "transport": "legacy_keys",
+                "runtime_host": "detached_backend",
+            },
+        },
+        "transcript_identity": {"session_id": "session"},
+        "health": {"connection": "connected"},
+        "settings": {"model": "opus-5"},
+        "active_turn": {"native_turn_id": "h#2"},
+        "queued": ["p-child#4"],
+        "human_presence": {"state": "unknown", "protected": True},
+        "zero": 0,
+    }
+    if native_session == "different":
+        expected["native_session_id"] = "different"
+    assert record == expected
+    assert controls["capabilities"]["send"]["transport"] == "native_runtime"
     assert s.client.methods == ["participant.controls"]
     assert s.client.params("participant.controls") == {
         "target": "p-child",

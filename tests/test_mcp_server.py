@@ -776,8 +776,8 @@ async def test_list_participants_marks_the_caller(daemon):
         )
 
     rows = _payload(await mine.call_tool("list_participants", {}))
-    flags = {r["id"]: r["is_self"] for r in rows}
-    assert flags == {"me": True, "them": False}
+    flags = {r["id"]: r["is_self"] for r in rows if "is_self" in r}
+    assert flags == {"me": True}
     session_ids = {r["id"]: r.get("session_id") for r in rows}
     assert session_ids == {"me": None, "them": "ses-them"}
 

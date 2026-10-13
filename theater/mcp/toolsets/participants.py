@@ -93,9 +93,16 @@ async def list_participants(
     rows = await session.client.call("participants.list", **params)
     assert isinstance(rows, list)
     me = session.participant_id
-    out = [
-        {**_summarise(p), "is_self": p["id"] == me, "resume_state": p["resume_state"]} for p in rows
-    ]
+    out = []
+    for p in rows:
+        row = _summarise(p)
+        if p["id"] == me:
+            row["is_self"] = True
+        if p["resume_state"] != "live":
+            row["resume_state"] = p["resume_state"]
+        if p["status"] == "dead" and row.get("addressable") is False:
+            del row["addressable"]
+        out.append(row)
     page = params.get("limit")
     if out and ids is None and isinstance(page, int) and len(out) >= page:
         # A full page may hide more rows; the cursor makes that visible without an error.

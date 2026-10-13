@@ -145,7 +145,8 @@ async def test_list_participants_marks_which_row_is_the_caller():
         {**RECORD, "id": "p-other", "session_id": None},
     ]
     got = await tools.list_participants(resolved(**{"participants.list": rows}))
-    assert [r["is_self"] for r in got] == [True, False]
+    assert got[0]["is_self"] is True
+    assert "is_self" not in got[1]
     assert [r.get("session_id") for r in got] == ["ses-me", None]
 
 
@@ -723,7 +724,9 @@ async def test_list_participants_marks_a_full_page_with_its_cursor():
 async def test_list_participants_caps_unfiltered_dead_history_for_mcp():
     s = resolved(**{"participants.list": []})
     await tools.list_participants(s, include_dead=True)
-    assert s.client.params("participants.list")["limit"] == PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
+    assert (
+        s.client.params("participants.list")["limit"] == PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT == 20
+    )
 
 
 async def test_list_participants_keeps_mcp_dead_cap_on_cursor_pages():
@@ -758,14 +761,22 @@ async def test_list_participants_default_has_no_parent_scope():
 
 
 async def test_list_participants_resume_state_in_projection():
-    """resume_state appears in each returned row."""
+    """Live rows need no resume verdict; dead rows need no false route flag."""
     rows = [
-        {**_RECORD_WITH_RESUME, "id": "p-me", "resume_state": "live"},
-        {**_RECORD_WITH_RESUME, "id": "p-other", "resume_state": "resumable"},
+        {**_RECORD_WITH_RESUME, "id": "p-me", "addressable": False},
+        {
+            **_RECORD_WITH_RESUME,
+            "id": "p-other",
+            "status": "dead",
+            "addressable": False,
+            "resume_state": "resumable",
+        },
     ]
     s = resolved(**{"participants.list": rows})
     got = await tools.list_participants(s)
-    assert got[0]["resume_state"] == "live"
+    assert "resume_state" not in got[0]
+    assert got[0]["addressable"] is False
+    assert "addressable" not in got[1]
     assert got[1]["resume_state"] == "resumable"
 
 

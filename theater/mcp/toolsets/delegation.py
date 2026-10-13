@@ -327,16 +327,7 @@ async def update_session_settings(
 
 
 async def get_session_controls(session: Session, *, target: str) -> dict:
-    """Report one session's effective control state, answered by the daemon.
-
-    Read-only: nothing is delivered or changed. The daemon returns the
-    effective capabilities (send, steer, queue_followup, settings_update,
-    interrupt) with its own reason for each unavailable one, the control
-    connection's health, the effective settings, the active turn, and the
-    handles of queued followups. No capability or availability judgement is
-    made here — the daemon's reasons are the only ones worth reporting, so its
-    reply is returned verbatim.
-    """
+    """Compact diagnostics without changing the daemon's availability decisions."""
     if not session._resolved:
         await session.identify()
     record = await session.client.call(
@@ -345,7 +336,52 @@ async def get_session_controls(session: Session, *, target: str) -> dict:
         caller_id=session.participant_id,
     )
     assert isinstance(record, dict)
-    return record
+    record = dict(record)
+    record.pop("backend_generation", None)
+    identity = record.get("transcript_identity")
+    if isinstance(identity, dict) and record.get("native_session_id") == identity.get("session_id"):
+        record.pop("native_session_id", None)
+    presence = record.get("human_presence")
+    if isinstance(presence, dict):
+        record["human_presence"] = {
+            key: value for key, value in presence.items() if key not in ("revision", "observed_at")
+        }
+    capabilities = record.get("capabilities")
+    if isinstance(capabilities, dict):
+        capabilities = {
+            key: dict(value) if isinstance(value, dict) else value
+            for key, value in capabilities.items()
+        }
+        record["capabilities"] = capabilities
+        entries = [entry for entry in capabilities.values() if isinstance(entry, dict)]
+        route = {}
+        for field in ("transport", "runtime_host"):
+            values = [entry.get(field) for entry in entries]
+            # Missing routes must not inherit another capability's native host or transport.
+            if not values or not all(values):
+                continue
+            shared = max(values, key=values.count)
+            if values.count(shared) < 2:
+                continue
+            route[field] = shared
+            for entry in entries:
+                if entry.get(field) == shared:
+                    del entry[field]
+        if route:
+            record["capability_route"] = route
+
+    def without_empty(value):
+        if isinstance(value, dict):
+            return {
+                key: kept
+                for key, item in value.items()
+                if (kept := without_empty(item)) not in (None, "", [], {})
+            }
+        if isinstance(value, list):
+            return [without_empty(item) for item in value]
+        return value
+
+    return without_empty(record)
 
 
 async def scratchpad_write(

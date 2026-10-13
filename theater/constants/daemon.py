@@ -93,7 +93,7 @@ BUS_KIND_SEND_REFUSED = "send.refused"
 BUS_PARTICIPANT_PAGE_MAX_LIMIT = 200
 
 #: Safe default for unfiltered participant history pages.
-PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT = 100
+PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT = 20
 
 #: Hard ceiling for one explicitly requested participant-list page.
 PARTICIPANTS_LIST_MAX_LIMIT = 200

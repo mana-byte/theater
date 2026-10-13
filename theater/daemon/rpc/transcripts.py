@@ -623,6 +623,7 @@ async def read_transcript_page(
     event_projection: EventProjection | None = None,
     roles: tuple[str, ...] | None = None,
     collapse_over: int | None = None,
+    include_answer_seals: bool = False,
 ) -> dict:
     """Read one bounded, reverse-paginated transcript page.
 
@@ -706,7 +707,9 @@ async def read_transcript_page(
             "live participant of the same harness shares that transcript root and cwd "
             "(transcript_correlation_ambiguous)"
         )
-    return page.to_wire(target=pid, event_projection=event_projection)
+    return page.to_wire(
+        target=pid, event_projection=event_projection, include_answer_seals=include_answer_seals
+    )
 
 
 @method("read_transcript")
@@ -724,6 +727,7 @@ async def _read_transcript(daemon, params: dict) -> dict:
         cursor=cursor,
         roles=roles,
         collapse_over=TRANSCRIPT_COLLAPSE_MIN_BYTES,
+        include_answer_seals=True,
     )
     if cursor is None:
         page.update(newest_page_context(daemon.registry.store, target))

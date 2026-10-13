@@ -91,12 +91,45 @@ class TranscriptReadPage:
     def has_more(self) -> bool:
         return self.next_cursor is not None
 
+    def answer_seals(self) -> dict[int, int]:
+        """Only adjacent complete copies with positive turn identity can share a presentation."""
+        seals = {}
+        for answer, seal in zip(self.events, self.events[1:], strict=False):
+            if (
+                answer.position + 1 == seal.position
+                and answer.event.kind.value == seal.event.kind.value == "assistant"
+                and answer.event.turn_id
+                and answer.event.turn_id == seal.event.turn_id
+                and answer.event.raw_index != seal.event.raw_index
+                and not answer.event.turn_end
+                and seal.event.turn_end
+                and answer.text
+                and answer.text == seal.text
+                and answer.start == seal.start == 0
+                and answer.end == answer.total
+                and seal.end == seal.total
+                and answer.tail is None
+                and seal.tail is None
+            ):
+                seals[seal.position] = answer.position
+        return seals
+
     def to_wire(
-        self, *, target: str, event_projection: EventProjection | None = None
+        self,
+        *,
+        target: str,
+        event_projection: EventProjection | None = None,
+        include_answer_seals: bool = False,
     ) -> dict[str, object]:
         events = [event.to_wire() for event in self.events]
         if event_projection is not None:
             events = [event_projection(event) for event in events]
+        if include_answer_seals:
+            seals = self.answer_seals()
+            for event in events:
+                position = event["event_position"]
+                if position in seals:
+                    event["repeats_event_position"] = seals[position]
         return {
             "id": target,
             "events": events,
