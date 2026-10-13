@@ -271,9 +271,8 @@ non-master positions. Disposable is a declaration, not a gate: `terminate_sessio
 consent stays prose, and the list only tells agents (through `whoami` and
 `list_skills`) which positions they may retire without asking the user. The rules
 JSON omits an empty list, so rules pinned before it keep their digest. A play is
-disabled by its name. The MCP
-`list_skills` asks for `grouped` output and an optional `play`; the CLI and
-frontend keep the flat list.
+disabled by its name. The MCP `list_skills` asks for `grouped` output and an
+optional `play`; the CLI and frontend keep the flat list.
 
 Membership is daemon state (`daemon/plays/`, tables `play_instances`,
 `play_members`, `play_assignments`). An agent's own `skills.load` of a master

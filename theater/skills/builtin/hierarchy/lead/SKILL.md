@@ -34,6 +34,7 @@ children. Anything missing is a blocker. Never edit outside your paths or send w
 End your turn only with an empty `git status --porcelain`. Report in the `delegate` format:
 status, branch, the final commit SHA, changed paths, each check with its result, and every
 unresolved interface or limitation, within 400 words. A check you did not run is `not_run`.
+Before you end your turn, retire the members whose commits you merged or dropped (see Cleanup).
 
 ## Repair
 

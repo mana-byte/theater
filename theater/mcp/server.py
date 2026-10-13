@@ -73,7 +73,8 @@ Omission rules are tool-specific.
 
 Wait with await_sessions, never a shell sleep or poll loop. A refused call
 returns a code, and `next` when known: follow it instead of retrying unchanged.
-Only ask the user to kill a child once its work is merged or abandoned.
+Only ask the user to kill a child once its work is merged or abandoned. Children in a
+position your play lists as disposable need no ask.
 
 Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
 To give another agent a skill, name it in skills=[...] on spawn_session or send; Theater
@@ -449,8 +450,8 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         this rule by invoking `theater kill` through a shell.
 
         Exception: a child holding a position your play lists as disposable (`whoami`
-        `play.disposable`) may be retired without asking once its result is collected;
-        check its `play.position` first (`list_participants`) and use its id.
+        `play.disposable`) may be retired without asking once its result is collected and
+        its commit merged or dropped; check its `play.position` (`list_participants`) first.
 
         target: live name (unique) or id. A name you just saw is safe; after
         a death it may be recycled, so use the id for a child you have not
