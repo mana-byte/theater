@@ -448,6 +448,10 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         to spawn, or a vague request to clean up is not enough. Do not bypass
         this rule by invoking `theater kill` through a shell.
 
+        Exception: a child holding a position your play lists as disposable (`whoami`
+        `play.disposable`) may be retired without asking once its result is collected;
+        check its `play.position` first (`list_participants`) and use its id.
+
         target: live name (unique) or id. A name you just saw is safe; after
         a death it may be recycled, so use the id for a child you have not
         seen alive since. Only your direct children are eligible. If the requested
@@ -594,7 +598,8 @@ def build(
         harness, tier, status, cwd, branch, session_id, parent_id, addressable,
         and play inside a live play; unset fields are omitted. play holds play,
         position, master and spawn_options: each child position you may give,
-        with the task roles that fit it ([] when you may spawn none). Under a
+        with the task roles that fit it ([] when you may spawn none), and
+        disposable: the positions you may retire without asking the user. Under a
         live play without a position of your own, position is null, unpositioned
         is true and spawn_options is []: you cannot spawn until your direct
         parent sends you a position. Includes live direct children

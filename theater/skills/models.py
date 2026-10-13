@@ -51,6 +51,8 @@ class PlayRules:
     positions: Mapping[str, tuple[str, ...]]
     #: task role -> the positions it fits
     roles: Mapping[str, tuple[str, ...]]
+    #: positions an agent may retire without asking the user
+    disposable: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "positions", _frozen(self.positions))
@@ -71,13 +73,17 @@ class PlayRules:
         return tuple(role for role, fits in self.roles.items() if position in fits)
 
     def to_json(self) -> str:
+        data: dict[str, object] = {
+            "play": self.play,
+            "master": self.master,
+            "positions": {key: sorted(value) for key, value in self.positions.items()},
+            "roles": {key: sorted(value) for key, value in self.roles.items()},
+        }
+        if self.disposable:
+            # Absent when empty, so rules pinned before the key existed keep their sha256.
+            data["disposable"] = sorted(self.disposable)
         return json.dumps(
-            {
-                "play": self.play,
-                "master": self.master,
-                "positions": {key: sorted(value) for key, value in self.positions.items()},
-                "roles": {key: sorted(value) for key, value in self.roles.items()},
-            },
+            data,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -94,6 +100,7 @@ class PlayRules:
             master=data["master"],
             positions={key: tuple(value) for key, value in data["positions"].items()},
             roles={key: tuple(value) for key, value in data["roles"].items()},
+            disposable=tuple(data.get("disposable", [])),
         )
 
 

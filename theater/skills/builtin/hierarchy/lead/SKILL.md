@@ -43,7 +43,7 @@ report the new SHA.
 
 ## Cleanup
 
-When the master sends the user's verbatim yes with the exact names of your children, take any
-results already finished (never wait for a running child), kill exactly those children with
-`terminate_session`, and report any survivor. Without the quote and the names, kill
-nothing.
+Retire your own finished members yourself with `terminate_session`, under the master's
+preconditions: result collected, commit merged or dropped, the child's `play.position` checked in
+`list_participants` and its id used; to abandon a running one, `interrupt_session` it and await its
+original job handle first. Never terminate anything else. You cannot ask the user.

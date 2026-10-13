@@ -15,7 +15,7 @@ from theater.constants.skills import (
 from theater.skills.models import PlayRules, SkillValidationError
 
 _REQUIRED = frozenset({"description", "master", "positions"})
-_ALLOWED = _REQUIRED | {"roles"}
+_ALLOWED = _REQUIRED | {"roles", "disposable"}
 
 
 def parse_play_manifest(text: str, *, play: str) -> tuple[str, PlayRules]:
@@ -26,7 +26,9 @@ def parse_play_manifest(text: str, *, play: str) -> tuple[str, PlayRules]:
         raise _invalid(f"is not valid TOML: {exc}") from exc
     keys = set(data)
     if not keys >= _REQUIRED or not keys <= _ALLOWED:
-        raise _invalid("must contain description, master, positions, and optionally roles")
+        raise _invalid(
+            "must contain description, master, positions, and optionally roles and disposable"
+        )
     description = data["description"]
     if (
         not isinstance(description, str)
@@ -57,7 +59,26 @@ def parse_play_manifest(text: str, *, play: str) -> tuple[str, PlayRules]:
         if unknown := sorted(set(fits) - (set(positions) - {master})):
             raise _invalid(f"role {role!r} fits unknown or master positions: {', '.join(unknown)}")
     _require_tree(master, positions)
-    return description, PlayRules(play=play, master=master, positions=positions, roles=roles)
+    disposable = _disposable(data.get("disposable", []), master, positions)
+    return description, PlayRules(
+        play=play, master=master, positions=positions, roles=roles, disposable=disposable
+    )
+
+
+def _disposable(
+    value: object, master: str, positions: Mapping[str, tuple[str, ...]]
+) -> tuple[str, ...]:
+    """Positions an agent may retire without asking the user: declared, never the master."""
+    if not isinstance(value, list):
+        raise _invalid("disposable must be a list of position names")
+    names = tuple(_name(item, "disposable") for item in value)
+    if len(set(names)) != len(names):
+        raise _invalid("disposable repeats a name")
+    if unknown := sorted(set(names) - set(positions)):
+        raise _invalid(f"disposable names undeclared positions: {', '.join(unknown)}")
+    if master in names:
+        raise _invalid(f"disposable cannot include the master {master!r}")
+    return names
 
 
 def _require_tree(master: str, positions: Mapping[str, tuple[str, ...]]) -> None:

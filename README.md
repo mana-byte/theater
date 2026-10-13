@@ -203,7 +203,10 @@ Theater confirms delivery (if the child still shows no `play` position after the
 job ends, send it again), and a queued one fails unsent if the play ends first.
 When the master dies the play ends and its rules lift. `list_skills` shows each
 play's positions and roles; `whoami` shows the positions you may give a child
-now, each with the task roles that fit it.
+now, each with the task roles that fit it. A play may list positions as
+`disposable` (`hierarchy/member`): an agent may retire a finished child holding
+one without asking the user, while terminating any other child still needs the
+user's explicit yes.
 
 **Make Theater yours.** Turn any workflow you repeat into a custom skill—your
 preferred harnesses, models, roles, worktrees, checks, and handoffs. Add it at

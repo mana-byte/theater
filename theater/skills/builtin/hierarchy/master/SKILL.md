@@ -85,10 +85,9 @@ After a debate, a report of at most 400 words: goal; scope in and out; ACs; at m
 the brief (at most 150 words), the track facts, what light omits (leads, contracts) and the
 decisions taken without debate (choice, rejected option, why not viable) or none, so the user can
 ask for a debate. Either way it carries the execution line (track, approval mode, base commit and
-excluded work, model availability, integration branch) and asks the user to validate; with debaters
-alive, ask in the same message "May I permanently kill `D1` and `D2`?" and kill only on an explicit
-yes. Units in the track facts are preliminary; recompute them after a debate. Nothing proceeds
-without a validation.
+excluded work, model availability, integration branch) and asks the user to validate. Units in
+the track facts are preliminary; recompute them after a debate. Nothing proceeds without a
+validation.
 
 ## 5. Build (after validation)
 
@@ -110,9 +109,9 @@ consume at the same time); a producer scheduled before its consumer may change w
 waits for. Its reviewer gets the same lists.
 
 Size the tree for either track: live tree now (debaters included) + leads + workers + reviewers + 1
-final reviewer must be at most `B-1`. Finished agents keep their slot until they die. Reuse idle
-members by `send` (never turn a debater or reviewer into a builder); otherwise cut the unit count or
-ask the user to retire named finished participants. Record each stream-base. Leads and workers
+final reviewer must be at most `B-1`. An agent keeps its slot until it dies; retiring a member frees
+it. Reuse idle members by `send` (never turn a debater or reviewer into a builder); otherwise retire
+finished members or cut the unit count. Record each stream-base. Leads and workers
 escalate by ending their turn `blocked`.
 
 ## 6. Review
@@ -146,8 +145,7 @@ rerun the suite and spawn a fresh final review; escalate after 2 rounds.
 
 Then send one closing message: each AC as met, partial or unmet, suite counts, deviations, risks,
 and these as separate requests, each needing its own yes: merge into the user's branch, push, remove
-the integration worktree and its branch, and kill the remaining participants (named, grouped by
-direct parent, with ids).
+the integration worktree and its branch, and terminate the remaining leads (named, with ids).
 
 ## Upshift
 
@@ -158,10 +156,18 @@ design question opened, debate with the debate base set to the integration branc
 write the contracts; add leads and debaters for the remaining work only. Existing members stay
 members. Recount the slots.
 
+## Retirement
+
+`whoami` `play.disposable` lists the positions you may retire with `terminate_session` without
+asking the user: here, members. Retire one once its result is collected and its commit is recorded,
+merged or dropped: debaters after validation, a reviewer once its parsed `approve` covers the exact
+SHA and no re-review is due, a worker after its merge. Before each retirement, check the child's
+`play.position` in `list_participants` and pass its id, not a name. To abandon a running member,
+`interrupt_session` it, await its original job handle, then retire it. Any position not in
+`play.disposable` (leads, unpositioned children) still needs the user's named yes.
+
 ## Cleanup
 
-On the user's yes to the kills, in the same turn: send each lead the user's verbatim quote and the
-exact names of its children; give it a bounded time to answer so it kills those first, then kill
-your own children last (`terminate_session`). If a lead refuses or stays silent after you
-diagnose it, give the user those names to kill with `theater kill`. Report survivors. The play ends
-when you do.
+Retire your remaining finished members. On the user's yes, terminate exactly the named leads. Leads
+retire their own members; give the user the id of any survivor below a lead to kill with `theater
+kill`. Report survivors. The play ends when you do.

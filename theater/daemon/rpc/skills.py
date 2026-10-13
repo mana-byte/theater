@@ -65,6 +65,7 @@ def _play_view(play: Play, snapshot) -> dict[str, object]:
             {**described(role), "fits": [rules.qualified(fit) for fit in rules.roles[role]]}
             for role in rules.roles
         ],
+        "disposable": [rules.qualified(position) for position in rules.disposable],
     }
 
 

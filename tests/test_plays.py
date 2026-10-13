@@ -26,7 +26,7 @@ from theater.harness.contracts.runtime import ControlReceipt, DeliveryResult
 from theater.mcp.server import build
 from theater.models import JobState, now
 from theater.protocol import RemoteError
-from theater.skills import SkillValidationError, UnknownSkill, discover
+from theater.skills import PlayRules, SkillValidationError, UnknownSkill, discover
 from theater.skills.plays import parse_play_manifest
 
 MASTER = "hierarchy/master"
@@ -108,6 +108,33 @@ def test_a_play_manifest_is_validated_as_data(manifest, error):
         parse_play_manifest(manifest, play="squad")
 
 
+@pytest.mark.parametrize(
+    ("disposable", "error"),
+    [
+        ('["lead"]', None),
+        ('["ghost"]', "undeclared positions: ghost"),
+        ('["boss"]', "cannot include the master"),
+        ('["lead", "lead"]', "repeats a name"),
+        ('"lead"', "must be a list of position names"),
+    ],
+)
+def test_a_play_may_mark_declared_positions_disposable(disposable, error):
+    manifest = SQUAD.replace('master = "boss"', f'master = "boss"\ndisposable = {disposable}')
+    if error is None:
+        assert parse_play_manifest(manifest, play="squad")[1].disposable == ("lead",)
+        return
+    with pytest.raises(SkillValidationError, match=error):
+        parse_play_manifest(manifest, play="squad")
+
+
+def test_rules_pinned_without_disposable_keep_their_json_and_sha256():
+    rules = parse_play_manifest(SQUAD, play="squad")[1]
+    pinned = rules.to_json()
+    loaded = PlayRules.from_json(pinned)
+    assert "disposable" not in pinned and loaded.disposable == ()
+    assert loaded.to_json() == pinned and loaded.sha256 == rules.sha256
+
+
 def test_play_members_load_by_qualified_name_and_the_bare_play_is_no_skill(tmp_path):
     _write_play(tmp_path, "squad", ("boss", "lead", "scout"))
     _write_play(tmp_path, "broken", ("boss", "lead"))
@@ -169,7 +196,7 @@ async def test_whoami_lists_each_child_position_with_the_roles_that_fit_it(clien
     async def whoami(participant) -> dict:
         return _payload(await build(participant.id, "vibe").call_tool("whoami", {}))["play"]
 
-    play = {"play": "hierarchy", "master": master.id}
+    play = {"play": "hierarchy", "master": master.id, "disposable": [MEMBER]}
     assert await whoami(master) == {
         **play,
         "position": MASTER,
@@ -186,6 +213,7 @@ async def test_whoami_lists_each_child_position_with_the_roles_that_fit_it(clien
     assert await whoami(member) == {**play, "position": MEMBER, "spawn_options": []}
     assert await whoami(loose) == {
         **play,
+        "disposable": [],
         "position": None,
         "unpositioned": True,
         "spawn_options": [],

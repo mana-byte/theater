@@ -266,7 +266,12 @@ A play is a skill directory holding `PLAY.toml` beside one member package per
 position and task role; members are named `<play>/<member>` and a bare play
 name is never a skill. `PLAY.toml` is data only (`theater/skills/plays.py`): a
 description, the master position, which positions each position may give, and
-which positions each task role fits. A play is disabled by its name. The MCP
+which positions each task role fits, plus an optional `disposable` list of
+non-master positions. Disposable is a declaration, not a gate: `terminate_session`
+consent stays prose, and the list only tells agents (through `whoami` and
+`list_skills`) which positions they may retire without asking the user. The rules
+JSON omits an empty list, so rules pinned before it keep their digest. A play is
+disabled by its name. The MCP
 `list_skills` asks for `grouped` output and an optional `play`; the CLI and
 frontend keep the flat list.
 

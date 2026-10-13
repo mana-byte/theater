@@ -323,6 +323,7 @@ async def test_skill_tools_round_trip_through_the_daemon(daemon):
     assert all("content" not in skill for skill in listed["skills"])
     [hierarchy] = listed["plays"]
     assert hierarchy["master"] == "hierarchy/master"
+    assert hierarchy["disposable"] == ["hierarchy/member"]
     assert [position["name"] for position in hierarchy["positions"]] == [
         "hierarchy/master",
         "hierarchy/lead",

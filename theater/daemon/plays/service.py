@@ -83,6 +83,7 @@ class PlayService:
                 "master": governing.master_id,
                 "unpositioned": True,
                 "spawn_options": [],
+                "disposable": [],
             }
         return {
             "play": rules.play,
@@ -95,6 +96,7 @@ class PlayService:
                 }
                 for child in rules.children(governing.position)
             ],
+            "disposable": [rules.qualified(position) for position in rules.disposable],
         }
 
     # ---- start by load --------------------------------------------------------------------
