@@ -103,8 +103,11 @@ class VibeAdapter:
     def apply_bump(self, root: Path, greens: Sequence[str]) -> list[Path]:
         return bump(root, greens)
 
+    def pre_bump_check(self, root: Path, version: str) -> Check:
+        return store_check(root, version)
+
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
-        static = store_check(root, version)
+        static = self.pre_bump_check(root, version)
         if static.status != "pass":
             verdict: Verdict = "red" if static.status == "fail" else "inconclusive"
             return Result(self.name, version, verdict, (static,), sb.evidence_dir)
