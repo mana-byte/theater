@@ -22,11 +22,17 @@ from theater.harness.builtin.plugins.claude.hooks import (
     NATIVE_HOOK_CHANNEL,
     correlate_tool_hook,
     decode_tool_hook,
-    native_hook_settings,
+    install_native_hooks,
+    native_hook_token_path,
 )
-from theater.harness.builtin.plugins.claude.launch import _claude_receipt_settings
+from theater.harness.builtin.plugins.claude.launch import plan_launch
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
-from theater.harness.contracts.callbacks import HookCorrelationContext, HookDecodeContext
+from theater.harness.contracts.callbacks import (
+    HookCorrelationContext,
+    HookDecodeContext,
+    HookInstallContext,
+    LaunchContext,
+)
 from theater.trajectory.enums import TrajectoryStatus
 
 
@@ -254,8 +260,21 @@ def test_claude_tool_hook_decodes_live_payload() -> None:
         "p.open('a').write(sys.stdin.read().strip()+'\\n')"
     )
     command = shlex.join([sys.executable, "-c", capture_script, str(capture)])
-    settings = _claude_receipt_settings("compat", config / "receipt-token")
-    settings["hooks"].update(native_hook_settings("compat")["hooks"])
+    plan = plan_launch(
+        LaunchContext(
+            participant_id="compat", prompt="", config_path=config / "mcp.json", approval="manual"
+        )
+    )
+    overlay = install_native_hooks(
+        HookInstallContext(
+            participant_id="compat",
+            channel_id=NATIVE_HOOK_CHANNEL,
+            token_file=native_hook_token_path("compat"),
+            theater_executable="theater",
+            public_files=plan.files,
+        )
+    )
+    settings = json.loads(next(iter(overlay.replacements.values())))
     assert {"SessionStart", "PreCompact", "PreToolUse", "PostToolUse"} <= settings["hooks"].keys()
     for entries in settings["hooks"].values():
         for entry in entries:
