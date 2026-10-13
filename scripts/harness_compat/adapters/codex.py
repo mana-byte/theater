@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.error
 from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar
@@ -21,6 +24,7 @@ from ..contract import (
     Sandbox,
     Verdict,
     VerifiedSet,
+    is_stable,
     load_evidenced,
     version_key,
 )
@@ -97,6 +101,46 @@ def _complete_bundle(path: Path) -> bool:
     return actual == expected
 
 
+def _public_git_tags() -> list[str]:
+    with tempfile.TemporaryDirectory(prefix="codex-release-tags-") as home:
+        env = {
+            "HOME": home,
+            "PATH": os.environ.get("PATH", ""),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": os.devnull,
+        }
+        done = subprocess.run(
+            [
+                "git",
+                "-c",
+                "credential.helper=",
+                "ls-remote",
+                "--tags",
+                "https://github.com/openai/codex.git",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    if done.returncode:
+        raise RuntimeError(f"Codex public tags unavailable: {done.stderr[-400:]}")
+    prefix = "refs/tags/rust-v"
+    versions: set[str] = set()
+    for line in done.stdout.splitlines():
+        _, separator, ref = line.partition("\t")
+        if separator and ref.startswith(prefix):
+            version = ref.removeprefix(prefix)
+            if is_stable(version):
+                versions.add(version)
+    if not versions:
+        raise RuntimeError("Codex public tags response has no stable rust-v releases")
+    return sorted(versions, key=version_key)
+
+
 class CodexAdapter:
     name = "codex"
     kind = "exact"
@@ -114,7 +158,10 @@ class CodexAdapter:
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
 
     def discover(self) -> list[str]:
-        return github.github_release_versions("openai/codex", tag_prefix="rust-v")
+        try:
+            return github.github_release_versions("openai/codex", tag_prefix="rust-v")
+        except urllib.error.URLError:
+            return _public_git_tags()
 
     def verified(self, root: Path) -> VerifiedSet:
         return VerifiedSet(

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -58,6 +60,29 @@ def test_allowlist_bump_stages_complete_bundles_once(tmp_path: Path) -> None:
     assert codex._INDEX in second
     assert all("0.162.1" in (root / doc).read_text() for doc in codex._DOCS)
     assert adapter.apply_bump(root, ["0.160.0", "0.162.1"]) == []
+
+
+def test_discovery_falls_back_to_public_tags_when_api_is_limited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def limited(*args, **kwargs):
+        raise urllib.error.HTTPError("https://api.github.com", 403, "rate limit", None, None)
+
+    def tags(command, **kwargs):
+        assert command[:3] == ["git", "-c", "credential.helper="]
+        assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "a\trefs/tags/rust-v0.162.1\n"
+            "b\trefs/tags/rust-v0.160.0\n"
+            "c\trefs/tags/rust-v0.163.0-alpha.1\n",
+            "",
+        )
+
+    monkeypatch.setattr(codex.github, "github_release_versions", limited)
+    monkeypatch.setattr(codex.subprocess, "run", tags)
+    assert codex.ADAPTER.discover() == ["0.160.0", "0.162.1"]
 
 
 def test_collector_picks_newest_and_masks_run_values(
