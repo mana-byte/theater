@@ -18,7 +18,7 @@ NATIVE_OBJECT_TOOLS = frozenset(
         "update_session_settings",
         "scratchpad_write",
         "scratchpad_delete",
-        "put_child_back_in_the_wound",
+        "terminate_session",
         "adopt_session",
     }
 )

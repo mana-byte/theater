@@ -45,5 +45,5 @@ report the new SHA.
 
 When the master sends the user's verbatim yes with the exact names of your children, take any
 results already finished (never wait for a running child), kill exactly those children with
-`put_child_back_in_the_wound`, and report any survivor. Without the quote and the names, kill
+`terminate_session`, and report any survivor. Without the quote and the names, kill
 nothing.

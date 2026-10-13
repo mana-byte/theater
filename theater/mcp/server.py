@@ -425,10 +425,10 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
 
 
 def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
-    """Register kill and adopt: one explicit-approval rule, two ends of a child's life."""
+    """Register terminate and adopt: one explicit-approval rule, two ends of a child's life."""
 
     @mcp_tool()
-    async def put_child_back_in_the_wound(target: str, forget: bool = False) -> dict:
+    async def terminate_session(target: str, forget: bool = False) -> dict:
         """Permanently kill one direct child session.
 
         **Before killing any child, ask the user for permission and wait for an
@@ -473,14 +473,14 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         A child without a worktree has no worktree or branch to delete.
         The session kill itself cannot be undone.
         """
-        return await tools.put_child_back_in_the_wound(session, target=target, forget=forget)
+        return await tools.terminate_session(session, target=target, forget=forget)
 
     @mcp_tool()
     async def adopt_session(target: str) -> dict:
         """Adopt one sibling participant as your own direct child.
 
         **Before adopting any participant, ask the user for permission and
-        wait for an explicit yes, exactly like the kill tool.** In that request,
+        wait for an explicit yes, exactly like terminate_session.** In that request,
         you — not the user — must name every participant you intend to adopt.
         When your harness exposes a native ask-user or confirmation tool, using
         it for this request is highly recommended; otherwise ask in a normal

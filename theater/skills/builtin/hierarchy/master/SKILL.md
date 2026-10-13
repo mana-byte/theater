@@ -162,6 +162,6 @@ members. Recount the slots.
 
 On the user's yes to the kills, in the same turn: send each lead the user's verbatim quote and the
 exact names of its children; give it a bounded time to answer so it kills those first, then kill
-your own children last (`put_child_back_in_the_wound`). If a lead refuses or stays silent after you
+your own children last (`terminate_session`). If a lead refuses or stays silent after you
 diagnose it, give the user those names to kill with `theater kill`. Report survivors. The play ends
 when you do.

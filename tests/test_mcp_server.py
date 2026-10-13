@@ -74,7 +74,7 @@ async def test_tools_are_registered(daemon):
         "scratchpad_get",
         "scratchpad_delete",
         "read_transcript",
-        "put_child_back_in_the_wound",
+        "terminate_session",
         "adopt_session",
         "recall",
         "recall_read",
@@ -168,8 +168,8 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
     assert '{"evidence":"none"}' in descriptions["await_sessions"]
     assert "successful terminal binding" in descriptions["spawn_session"]
     assert "does not guarantee launch success" in descriptions["spawn_session"]
-    assert "human_present" in descriptions["put_child_back_in_the_wound"]
-    assert "already_dead" in descriptions["put_child_back_in_the_wound"]
+    assert "human_present" in descriptions["terminate_session"]
+    assert "already_dead" in descriptions["terminate_session"]
     assert "nullable" in descriptions["scratchpad_get"]
     assert "else stop and report it" in descriptions["scratchpad_get"]
     assert "may be combined" in descriptions["scratchpad_delete"]
@@ -414,7 +414,7 @@ async def test_skills_are_optional_name_lists_on_spawn_and_send(daemon):
 
 async def test_kill_schema_uses_target_not_target_id(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
-    kill = schema["put_child_back_in_the_wound"]
+    kill = schema["terminate_session"]
     assert set(kill["properties"]) == {"target", "forget"}
     assert kill["required"] == ["target"]
 

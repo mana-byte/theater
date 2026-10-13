@@ -590,24 +590,24 @@ async def test_read_transcript_forwards_only_the_returned_cursor():
     assert page == {"id": "p-you", "events": [], "next_cursor": None}
 
 
-async def test_put_child_back_in_the_wound_names_the_caller_so_the_daemon_can_authorize():
+async def test_terminate_session_names_the_caller_so_the_daemon_can_authorize():
     """The daemon checks parentage against caller_id, so it must reach the daemon."""
     s = resolved(**{"participant.kill": {"id": "p-child", "killed": True}})
-    await tools.put_child_back_in_the_wound(s, target="p-child")
+    await tools.terminate_session(s, target="p-child")
     p = s.client.params("participant.kill")
     assert p["id"] == "p-child"
     assert p["caller_id"] == "p-me"
     assert "forget" not in p
-    await tools.put_child_back_in_the_wound(s, target="p-child", forget=True)
+    await tools.terminate_session(s, target="p-child", forget=True)
     assert s.client.calls[-1] == (
         "participant.kill",
         {"id": "p-child", "caller_id": "p-me", "forget": True},
     )
 
 
-async def test_put_child_back_in_the_wound_identifies_first_or_the_daemon_cannot_authorize():
+async def test_terminate_session_identifies_first_or_the_daemon_cannot_authorize():
     s = session(**{"participant.kill": {"id": "p-child", "killed": True}})
-    await tools.put_child_back_in_the_wound(s, target="p-child")
+    await tools.terminate_session(s, target="p-child")
     assert s.client.methods == ["hello", "participant.kill"]
 
 

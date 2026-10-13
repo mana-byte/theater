@@ -408,9 +408,7 @@ async def scratchpad_delete(
     return result
 
 
-async def put_child_back_in_the_wound(
-    session: Session, *, target: str, forget: bool = False
-) -> dict:
+async def terminate_session(session: Session, *, target: str, forget: bool = False) -> dict:
     """Forward a direct-child kill to the daemon with the caller identity."""
     if not session._resolved:
         await session.identify()
