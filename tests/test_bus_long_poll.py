@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 from sqlalchemy import insert
@@ -25,10 +24,8 @@ async def test_blocks_then_wakes_on_append(daemon, waiter):
     while waiter.waiter_count == 0:
         await asyncio.sleep(0)
     assert not task.done()
-    started = time.perf_counter()
     new_id = daemon.store.bus_append("t.new")
-    tail = await asyncio.wait_for(task, 1)
-    assert time.perf_counter() - started < 0.05
+    tail = await asyncio.wait_for(task, 1)  # woken by the append, not by the 10s deadline
     assert [row["id"] for row in tail.rows] == [new_id]
     assert tail.next_after_id == new_id
 

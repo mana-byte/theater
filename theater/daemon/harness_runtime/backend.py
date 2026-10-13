@@ -317,6 +317,18 @@ def _require_strong_identity(
         )
 
 
+async def _raise_if_exited(process: asyncio.subprocess.Process, participant_id: str) -> None:
+    """A backend that already died cannot be identified: report its exit, not the identity."""
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(process.wait(), RUNTIME_BACKEND_POLL_INTERVAL_SECONDS)
+    if process.returncode is not None:
+        raise BackendLaunchError(
+            f"the detached backend for participant {participant_id} exited with "
+            f"code {process.returncode} before it could be identified — inspect its "
+            "stdout and stderr logs before retrying"
+        )
+
+
 async def _reap_just_launched_child(process: asyncio.subprocess.Process) -> None:
     """Terminate and reap a child we are about to abandon, bounded in time.
 
@@ -636,7 +648,13 @@ async def launch_detached_backend(
         os.close(stderr_fd)
     try:
         identity = await asyncio.to_thread(capture_process_identity, process.pid)
-        await asyncio.to_thread(_require_strong_identity, identity, participant_id=participant_id)
+        try:
+            await asyncio.to_thread(
+                _require_strong_identity, identity, participant_id=participant_id
+            )
+        except BackendLaunchError:
+            await _raise_if_exited(process, participant_id)
+            raise
         endpoint = plan.endpoint
         if plan.endpoint_discovery is not None:
             endpoint = await _discover_stdout_endpoint(

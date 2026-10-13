@@ -233,6 +233,23 @@ async def test_discovery_reaps_child_when_backend_exits_silently(workdir: Path) 
     assert not harness_backend.pid_alive(_log_pid(participant)), "child must be reaped"
 
 
+async def test_a_backend_that_died_before_identification_reports_its_exit(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant = "d00000000010"
+    snippet = "import os, sys\nprint('pid', os.getpid(), flush=True)\nsys.exit(3)\n"
+    monkeypatch.setattr(
+        harness_backend,
+        "capture_process_identity",
+        lambda pid: harness_backend.BackendProcessIdentity(pid=pid, started_at=None),
+    )
+    with pytest.raises(
+        BackendLaunchError, match="exited with code 3 before it could be identified"
+    ):
+        await _launch(_plan([sys.executable, "-c", snippet]), participant, workdir)
+    assert not harness_backend.pid_alive(_log_pid(participant)), "child must be reaped"
+
+
 async def test_post_launch_identity_failure_reaps_child(
     workdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

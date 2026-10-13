@@ -230,6 +230,9 @@ async def test_a_tick_serves_the_band_from_cache_and_never_queries_the_dom(
         timer = app._ambience_timer
         assert timer is not None
         timer.stop()  # from here on, ticks happen only where the test calls them
+        await (
+            pilot.pause()
+        )  # a sync queued earlier lands now, not between the snapshot and the removal
         row = next(child for child in tree.children if child.display)
         rows, row_height = len(tree.children), row.outer_size.height
         before = measures[-1]
