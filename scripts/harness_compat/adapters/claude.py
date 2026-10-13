@@ -89,7 +89,12 @@ class ClaudeAdapter:
     probe = "theater.harness.builtin.plugins.claude.compatibility:probe_claude_hooks"
     stub_help = ""
     green_tests = _GREEN_TESTS
-    consistency_tests = ("tests/test_hook_compatibility.py::test_claude_hook_version_range",)
+    consistency_tests = (
+        "tests/test_hook_compatibility.py::test_claude_hook_version_range"
+        "[2.1.119 (Claude Code)-True]",
+        "tests/test_hook_compatibility.py::test_claude_hook_version_range"
+        "[3.0.0 (Claude Code)-False]",
+    )
     expected_skips = MappingProxyType({})
     expected_routes = frozenset(
         {("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens"), ("GET", "/v1/models")}
