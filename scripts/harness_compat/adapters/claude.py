@@ -8,6 +8,7 @@ import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import ClassVar
 
 from .. import framework, github
@@ -32,7 +33,6 @@ _GREEN_TESTS = (
     "tests/test_harness_compat_claude_run.py::test_claude_observer_seals_tui_turn",
     "tests/test_harness_compat_claude_run.py::test_claude_tool_hook_decodes_live_payload",
 )
-_TOOL_SKIP = "mock tool-call replies require the framework stream"
 
 
 def seed_config(config_dir: Path, cwd: Path, version: str) -> None:
@@ -90,8 +90,13 @@ class ClaudeAdapter:
     probe = "theater.harness.builtin.plugins.claude.compatibility:probe_claude_hooks"
     stub_help = ""
     green_tests = _GREEN_TESTS
-    consistency_tests = ("tests/test_hook_compatibility.py::test_claude_hook_version_range",)
-    expected_skips: ClassVar[Mapping[str, str]] = {_GREEN_TESTS[2]: _TOOL_SKIP}
+    consistency_tests = (
+        "tests/test_hook_compatibility.py::test_claude_hook_version_range"
+        "[2.1.119 (Claude Code)-True]",
+        "tests/test_hook_compatibility.py::test_claude_hook_version_range"
+        "[3.0.0 (Claude Code)-False]",
+    )
+    expected_skips: ClassVar[Mapping[str, str]] = MappingProxyType({})
     expected_routes = frozenset(
         {("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens"), ("GET", "/v1/models")}
     )
@@ -183,6 +188,8 @@ class ClaudeAdapter:
             "HARNESS_COMPAT_TMUX_SOCKET": str(sb.tmux_socket),
             "HARNESS_COMPAT_EVIDENCE_DIR": str(sb.evidence_dir),
         }
+        # Claude asks for confirmation when ANTHROPIC_API_KEY is set, even if it is a dummy.
+        env.pop("ANTHROPIC_API_KEY", None)
         try:
             notes = changelog_hints(
                 version, github.raw_file("anthropics/claude-code", "main", "CHANGELOG.md")
@@ -194,25 +201,18 @@ class ClaudeAdapter:
                 root, self.green_tests[:2], env=env, expected_skips=self.expected_skips
             )
         )
-        try:
-            sb.mock.queue(
-                "anthropic",
-                MockReply(
-                    text="",
-                    tool_calls=(MockToolCall("Read", {"file_path": str(cwd / "hook-proof.txt")}),),
-                ),
+        sb.mock.queue(
+            "anthropic",
+            MockReply(
+                text="",
+                tool_calls=(MockToolCall("Read", {"file_path": str(cwd / "hook-proof.txt")}),),
+            ),
+        )
+        checks.extend(
+            framework.run_pytest(
+                root, self.green_tests[2:], env=env, expected_skips=self.expected_skips
             )
-        except NotImplementedError:
-            checks.append(Check(self.green_tests[2], "skip", _TOOL_SKIP))
-        else:
-            checks.extend(
-                framework.run_pytest(
-                    root,
-                    self.green_tests[2:],
-                    env={**env, "HARNESS_COMPAT_TOOL_REPLY": "1"},
-                    expected_skips=self.expected_skips,
-                )
-            )
+        )
         green_checks = list(checks)
         consistency = framework.run_pytest(root, self.consistency_tests, env=env, expected_skips={})
         checks.extend(consistency)
