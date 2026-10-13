@@ -839,9 +839,9 @@ async def test_await_announces_once_it_has_really_blocked(client, terminal_provi
     await client.call("jobs.await", **call)
     assert await _await_events(client) == []
 
-    # Same call, threshold under the wait.
+    # Same call, threshold under the wait; generous so load can't beat the blocked signal.
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    await client.call("jobs.await", **call)
+    await client.call("jobs.await", **{**call, "max_wait": 1.0})
     assert [e["kind"] for e in await _await_events(client)] == [
         "job.await.start",
         "job.await.end",
