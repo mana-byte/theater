@@ -1,0 +1,175 @@
+name: Harness compatibility
+
+on:
+  schedule:
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+    inputs:
+      harness:
+        description: Harness to qualify
+        required: true
+        default: all
+        type: choice
+        options: [all, claude, codex, opencode, pi, vibe]
+      version:
+        description: Exact stable version; empty discovers new releases
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/harness-compat.yml"
+      - "scripts/harness_compat/**"
+      - "tests/test_harness_compat*.py"
+      - "theater/harness/builtin/plugins/**/compat*.py"
+      - "theater/harness/builtin/plugins/**/runtime_plan.py"
+      - "theater/harness/builtin/plugins/**/runtime_probe.py"
+      - "theater/harness/builtin/plugins/**/server_plan.py"
+      - "theater/harness/builtin/plugins/**/version.py"
+      - "theater/harness/builtin/plugins/**/unified_store_types.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-compat
+  cancel-in-progress: false
+
+jobs:
+  cheap-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked --all-packages --group dev
+      - run: uv run ruff check scripts/harness_compat
+      - run: uv run ruff format --check scripts/harness_compat
+      - run: uv run mypy
+      - run: uv run pytest tests/test_harness_compat*.py -q
+      - run: uv run python -m scripts.harness_compat check
+
+  qualify:
+    if: github.event_name != 'pull_request'
+    needs: cheap-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [claude, codex, opencode, pi, vibe]
+    env:
+      HARNESS: ${{ matrix.harness }}
+      REQUESTED_HARNESS: ${{ inputs.harness || 'all' }}
+      REQUESTED_VERSION: ${{ inputs.version || '' }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Select harness
+        id: select
+        run: |
+          if [[ "$REQUESTED_HARNESS" == "all" || "$REQUESTED_HARNESS" == "$HARNESS" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.select.outputs.run == 'true'
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch rolling branch
+        if: steps.select.outputs.run == 'true'
+        run: |
+          branch="chore/compat-$HARNESS"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch --no-tags origin "$branch:refs/remotes/origin/$branch"
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then exit "$status"; fi
+          fi
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        if: steps.select.outputs.run == 'true'
+        with:
+          enable-cache: true
+      - name: Install tmux and Node.js
+        if: steps.select.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y tmux nodejs npm
+      - name: Sync project
+        if: steps.select.outputs.run == 'true'
+        run: uv sync --locked --all-packages --group dev
+      - name: Qualify and prepare publication
+        id: compat
+        if: steps.select.outputs.run == 'true'
+        continue-on-error: true
+        run: |
+          args=(run --harness "$HARNESS" --publish --run-url "$RUN_URL" \
+            --summary-json "$RUNNER_TEMP/compat-summary.json")
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            args+=(--version "$REQUESTED_VERSION")
+          fi
+          uv run python -m scripts.harness_compat "${args[@]}"
+      - uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        if: >-
+          steps.select.outputs.run == 'true' &&
+          steps.compat.outputs.pr_needed == 'true'
+        with:
+          token: ${{ secrets.PR_AUTOMATION_TOKEN }}
+          base: main
+          branch: chore/compat-${{ matrix.harness }}
+          commit-message: "chore(compat): update ${{ matrix.harness }} compatibility evidence"
+          title: ${{ steps.compat.outputs.pr_title }}
+          body: ${{ steps.compat.outputs.pr_body }}
+          delete-branch: true
+      - name: Upsert failure issue
+        if: >-
+          steps.select.outputs.run == 'true' &&
+          steps.compat.outputs.issue_action == 'upsert'
+        env:
+          GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN }}
+          ISSUE_BODY: ${{ steps.compat.outputs.issue_body }}
+          ISSUE_LABELS: ${{ steps.compat.outputs.issue_labels }}
+          ISSUE_TITLE: ${{ steps.compat.outputs.issue_title }}
+        run: |
+          gh label create "compat:$HARNESS" --color 5319e7 --force
+          gh label create tooling --color d93f0b --force
+          gh label create admitted-regression --color b60205 --force
+          number="$(gh issue list --state open --label "compat:$HARNESS" \
+            --limit 1 --json number --jq '.[0].number // empty')"
+          IFS=',' read -ra labels <<< "$ISSUE_LABELS"
+          if [[ -n "$number" ]]; then
+            for stale in tooling admitted-regression; do
+              if gh issue view "$number" --json labels --jq '.labels[].name' | grep -Fxq "$stale"; then
+                gh issue edit "$number" --remove-label "$stale"
+              fi
+            done
+            args=(--title "$ISSUE_TITLE" --body "$ISSUE_BODY")
+            for label in "${labels[@]}"; do args+=(--add-label "$label"); done
+            gh issue edit "$number" "${args[@]}"
+          else
+            args=(--title "$ISSUE_TITLE" --body "$ISSUE_BODY")
+            for label in "${labels[@]}"; do args+=(--label "$label"); done
+            gh issue create "${args[@]}"
+          fi
+      - name: Close recovered issue
+        if: >-
+          steps.select.outputs.run == 'true' &&
+          steps.compat.outputs.issue_action == 'close'
+        env:
+          GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN }}
+        run: |
+          number="$(gh issue list --state open --label "compat:$HARNESS" \
+            --limit 1 --json number --jq '.[0].number // empty')"
+          if [[ -n "$number" ]]; then
+            gh issue close "$number" --comment "The latest conclusive qualification is green."
+          fi
+      - name: Preserve qualification result
+        if: steps.select.outputs.run == 'true' && steps.compat.outcome == 'failure'
+        run: exit 1
