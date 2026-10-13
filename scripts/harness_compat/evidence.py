@@ -45,6 +45,17 @@ def _branch_evidence(root: Path, branch: str, harness: str, version: str) -> str
     return result.stdout if result.returncode == 0 else None
 
 
+def _valid(document: Any, harness: str, version: str, digest: str) -> bool:
+    return (
+        isinstance(document, dict)
+        and document.get("harness") == harness
+        and document.get("version") == version
+        and document.get("adapter_digest") == digest
+        and document.get("verdict") == "green"
+        and isinstance(document.get("checks"), list)
+    )
+
+
 def reusable_evidence(
     root: Path, harness: str, digest: str, *, branch: str | None = None
 ) -> dict[str, dict[str, Any]]:
@@ -58,7 +69,7 @@ def reusable_evidence(
                     document = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if document.get("adapter_digest") == digest and document.get("verdict") == "green":
+                if _valid(document, harness, path.stem, digest):
                     versions[path.stem] = document
     if branch:
         listing = subprocess.run(
@@ -81,7 +92,7 @@ def reusable_evidence(
                     document = json.loads(raw)
                 except ValueError:
                     continue
-                if document.get("adapter_digest") == digest and document.get("verdict") == "green":
+                if _valid(document, harness, version, digest):
                     versions[version] = document
     return versions
 

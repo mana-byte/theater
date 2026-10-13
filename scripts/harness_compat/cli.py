@@ -6,10 +6,12 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from .adapters import ADAPTER_NAMES, load_adapter
+from .publication import prepare_publication
 from .runner import run_harness
 
 
@@ -24,6 +26,7 @@ def _parser() -> argparse.ArgumentParser:
             action.add_argument("--max-candidates", type=int, default=5)
             action.add_argument("--publish", action="store_true")
             action.add_argument("--summary-json", type=Path)
+            action.add_argument("--run-url")
     return parser
 
 
@@ -36,8 +39,6 @@ def _adapters(name: str | None) -> list[Any]:
             loaded.append(load_adapter(candidate))
         except ImportError:
             continue
-    if not loaded:
-        raise RuntimeError("no harness adapters import successfully")
     return loaded
 
 
@@ -48,6 +49,8 @@ def _validate_run(args: argparse.Namespace) -> None:
         raise ValueError("--max-candidates must be positive")
     if args.publish and os.environ.get("GITHUB_ACTIONS") != "true":
         raise ValueError("--publish is reserved for GitHub Actions")
+    if args.publish and not args.harness:
+        raise ValueError("--publish requires --harness")
 
 
 def _run_url() -> str:
@@ -72,6 +75,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             print(json.dumps({adapter.name: adapter.verified(root).kind for adapter in adapters}))
             return 0
+        if not adapters:
+            print("harness-compat: no harness adapters import successfully", file=sys.stderr)
+            return 2
         _validate_run(args)
         summaries = []
         for adapter in adapters:
@@ -83,18 +89,27 @@ def main(argv: list[str] | None = None) -> int:
                     version=args.version,
                     max_candidates=args.max_candidates,
                     publish=args.publish,
-                    run_url=_run_url(),
+                    run_url=args.run_url or _run_url(),
                     evidence_branch=branch,
                 )
             )
         document = {"harnesses": summaries}
-        if args.summary_json:
-            args.summary_json.parent.mkdir(parents=True, exist_ok=True)
-            args.summary_json.write_text(
+        summary_path = args.summary_json
+        if args.publish and summary_path is None:
+            summary_path = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / (
+                f"harness-compat-{adapters[0].name}.json"
+            )
+        if summary_path:
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(
                 json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
+        if args.publish and summary_path:
+            prepare_publication(summaries[0], summary_path)
         print(json.dumps(document, sort_keys=True))
+        if any(summary["inconclusive"] for summary in summaries):
+            return 2
         return int(any(summary["issues"] for summary in summaries))
-    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+    except Exception as exc:
         print(f"harness-compat: {exc}", file=sys.stderr)
         return 2

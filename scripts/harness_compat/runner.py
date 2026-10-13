@@ -94,6 +94,7 @@ def _qualify(
     adapter: Adapter, root: Path, version: str, *, bump: bool
 ) -> tuple[Result, list[dict[str, Any]]]:
     with make_sandbox(adapter.name) as sandbox:
+        verdict: Verdict
         try:
             if bump:
                 try:
@@ -102,12 +103,24 @@ def _qualify(
                 except Exception as exc:
                     problems = [f"bump failed: {exc}"]
                 if problems:
+                    verdict = (
+                        "inconclusive"
+                        if any("timed out" in problem.lower() for problem in problems)
+                        else "tooling"
+                    )
                     return (
                         Result(
                             adapter.name,
                             version,
-                            "tooling",
-                            tuple(Check("check_bump", "fail", problem) for problem in problems),
+                            verdict,
+                            tuple(
+                                Check(
+                                    "check_bump",
+                                    "error" if verdict == "inconclusive" else "fail",
+                                    problem,
+                                )
+                                for problem in problems
+                            ),
                         ),
                         [],
                     )
@@ -116,7 +129,6 @@ def _qualify(
             relevant = tuple(
                 check for check in observed.checks if check.name in adapter.green_tests
             )
-            verdict: Verdict
             if any(
                 check.status == "error"
                 or (check.status == "skip" and check.name not in adapter.expected_skips)
@@ -140,26 +152,29 @@ def _qualify(
         return classify_routes(adapter, result, requests), _routes(adapter, requests)
 
 
-def _compose(adapter: Adapter, root: Path, greens: list[str]) -> list[str]:
+def _compose(adapter: Adapter, root: Path, greens: list[str]) -> tuple[list[str], bool]:
     try:
         with _worktree(root) as tree, make_sandbox(adapter.name) as sandbox:
             adapter.apply_bump(tree, greens)
             problems = check_bump(adapter, tree, greens)
             if problems:
-                return problems
+                return problems, any("timed out" in problem.lower() for problem in problems)
             checks = run_pytest(
                 tree,
                 adapter.consistency_tests,
                 env=sandbox.env,
                 expected_skips=adapter.expected_skips,
             )
-            return [
-                f"{check.name}: {check.status}: {check.detail}"
-                for check in checks
-                if check.status != "pass"
-            ]
+            return (
+                [
+                    f"{check.name}: {check.status}: {check.detail}"
+                    for check in checks
+                    if check.status not in ("pass", "skip")
+                ],
+                any(check.status == "error" for check in checks),
+            )
     except Exception as exc:
-        return [f"composed bump failed: {exc}"]
+        return [f"composed bump failed: {exc}"], False
 
 
 def run_harness(
@@ -207,18 +222,23 @@ def run_harness(
             adapter_digest=digest,
         )
         for item, document in reused.items()
-        if not gate.admits(item)
+        if not gate.admits(item) and item not in candidates
     ]
     greens = plan_bump(gate, [*reused_results, *results])
-    problems = _compose(adapter, root, greens) if greens else []
+    problems, compose_inconclusive = _compose(adapter, root, greens) if greens else ([], False)
     if problems:
         rows.append(
             {
                 "harness": adapter.name,
-                "version": ",".join(greens),
-                "verdict": "tooling",
+                "version": greens[-1],
+                "verdict": "inconclusive" if compose_inconclusive else "tooling",
                 "checks": [
-                    {"name": "consistency", "status": "fail", "detail": item} for item in problems
+                    {
+                        "name": "consistency",
+                        "status": "error" if compose_inconclusive else "fail",
+                        "detail": item,
+                    }
+                    for item in problems
                 ],
                 "routes": [],
                 "run_url": run_url,
@@ -240,6 +260,9 @@ def run_harness(
         "adapter_digest": digest,
         "candidates": candidates,
         "reused": sorted(reused),
+        "reused_results": [
+            {**result.to_evidence(), "routes": [], "run_url": run_url} for result in reused_results
+        ],
         "results": rows,
         "watch": watch,
         "greens": greens,

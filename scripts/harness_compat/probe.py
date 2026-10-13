@@ -88,6 +88,9 @@ def _old_limit_problems(adapter: Adapter, root: Path, new_ceiling: str | None) -
             if old.kind != "range" or not old.ceiling or old.ceiling == new_ceiling:
                 return []
             paths = _git(root, "diff", "--name-only", "HEAD", "--").stdout.splitlines()
+            paths.extend(
+                _git(root, "ls-files", "--others", "--exclude-standard").stdout.splitlines()
+            )
             return [
                 f"old limit {old.ceiling} remains in {name}"
                 for name in paths

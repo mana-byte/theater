@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,10 +49,11 @@ def build_report(
         raise ValueError("every result must match the report harness")
 
     ordered = tuple(sorted(results, key=lambda result: version_key(result.version)))
-    ordered_routes = tuple(sorted({(method.upper(), path) for method, path in routes}))
+    ordered_routes = tuple(sorted((method.upper(), path) for method, path in routes))
     green = tuple(result for result in ordered if result.verdict == "green")
     failing = tuple(result for result in ordered if result.verdict in {"red", "tooling"})
     admitted = frozenset(admitted_versions)
+    inconclusive = any(result.verdict == "inconclusive" for result in ordered)
     labels = [f"compat:{harness}"]
     if any(result.verdict == "tooling" for result in failing):
         labels.append("tooling")
@@ -60,12 +62,14 @@ def build_report(
 
     return PublishReport(
         harness=harness,
-        pr_needed=bool(green),
+        pr_needed=bool(green) and not inconclusive,
         pr_title=f"chore(compat): update {harness} compatibility evidence",
         pr_body=_body(
             f"Qualified {harness} releases", green, run_url=run_url, routes=ordered_routes
         ),
-        issue_action="upsert" if failing else "close" if green else "none",
+        issue_action=(
+            "none" if inconclusive else "upsert" if failing else "close" if green else "none"
+        ),
         issue_title=f"Harness compatibility failures: {harness}",
         issue_body=_body(
             f"Failing {harness} releases", failing, run_url=run_url, routes=ordered_routes
@@ -91,27 +95,27 @@ def _body(
     run_url: str,
     routes: Iterable[Route],
 ) -> str:
-    rows = ["| Version | Verdict | Checks |", "| --- | --- | --- |"]
+    run = f"[workflow run]({_markdown_url(run_url)})" if run_url else "not available"
+    rows = ["| Version | Verdict | Checks | Run |", "| --- | --- | --- | --- |"]
     rows.extend(
-        f"| {_cell(result.version)} | {result.verdict} | {_checks(result)} |" for result in results
+        f"| {_cell(result.version)} | {result.verdict} | {_checks(result)} | {run} |"
+        for result in results
     )
     if not results:
-        rows.append("| — | — | — |")
+        rows.append(f"| — | — | — | {run} |")
 
+    counts = Counter(routes)
     route_lines = [
-        f"- `{method.upper()} {_markdown_text(path)}`"
-        for method, path in sorted(set(routes), key=lambda route: (route[0].upper(), route[1]))
+        f"- `{method.upper()} {_markdown_text(path)}` ×{count}"
+        for (method, path), count in sorted(counts.items())
     ]
     if not route_lines:
         route_lines.append("- None recorded")
-    run = f"[workflow run]({_markdown_url(run_url)})" if run_url else "not available"
     return "\n".join(
         [
             f"## {heading}",
             "",
             *rows,
-            "",
-            f"Run: {run}",
             "",
             "Routes:",
             *route_lines,

@@ -84,7 +84,7 @@ def _anthropic_tool_events(index: int, call: MockToolCall) -> list[dict[str, Any
 
 def _anthropic_stream(reply: MockReply) -> str:
     start = {**_anthropic_message(MockReply("")), "content": [], "stop_reason": None}
-    events = [
+    events: list[dict[str, Any]] = [
         {"type": "message_start", "message": start},
         {
             "type": "content_block_start",

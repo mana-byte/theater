@@ -15,13 +15,17 @@ Select one harness or release with `make compat HARNESS=codex` or
 workflow dispatch form to publish. CI alone passes `--publish`; its publishing steps authenticate
 only with `PR_AUTOMATION_TOKEN`.
 
-The command exits `0` when every conclusive result is green (including no new release), `1` for
-a red compatibility result, and `2` for inconclusive or tooling failure. Evidence JSON is the
-stable `Result.to_evidence()` object: harness, version, verdict, adapter digest, then ordered
-checks with name, status, and detail.
+The command exits `0` for green or no work, `1` for red or tooling, and `2` for usage or
+infrastructure errors, including an inconclusive qualification. `--summary-json PATH` writes
+the detailed results. A local run never edits the repo or publishes anything.
 
-Publishing calls `build_report(harness, results, run_url=..., routes=...,
-admitted_versions=...)` from `scripts.harness_compat.report`, then
-`write_github_outputs(report, Path(os.environ["GITHUB_OUTPUT"]))`. The workflow consumes
-`pr_needed`, `pr_title`, `pr_body`, `issue_action`, `issue_title`, `issue_body`, and
-`issue_labels`.
+Each green release adds one JSON file under `tests/fixtures/harness_compat/<harness>/`.
+The rolling PR shows release verdicts, checks, mock route counts, and the workflow run.
+Review its code bump and evidence before merging. A red issue carries `compat:<harness>`;
+`tooling` marks an automation or mock failure, and `admitted-regression` marks an in-range
+release that failed the daily watch. The issue closes after a conclusive green run.
+
+To add a harness, implement the frozen `Adapter` in
+`scripts/harness_compat/adapters/<name>.py`, export `ADAPTER`, and register its name in
+`adapters/__init__.py`. Add its real-binary tests, expected model routes, and gate files,
+then add it to the workflow matrix. Keep installs and CLI invocations inside `make_sandbox`.

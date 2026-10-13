@@ -47,13 +47,18 @@ def test_range_policy_evidence_reuse_routes_and_watch(tmp_path: Path) -> None:
     _git(tmp_path, "checkout", "-b", "rolling")
     evidence = tmp_path / "tests/fixtures/harness_compat/vibe/1.2.0.json"
     evidence.parent.mkdir(parents=True)
-    evidence.write_text(json.dumps({"adapter_digest": digest, "verdict": "green"}))
+    document = {
+        "harness": "vibe",
+        "version": "1.2.0",
+        "adapter_digest": digest,
+        "verdict": "green",
+        "checks": [],
+    }
+    evidence.write_text(json.dumps(document))
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-m", "evidence")
     _git(tmp_path, "checkout", "main")
-    assert reusable_evidence(tmp_path, "vibe", digest, branch="rolling") == {
-        "1.2.0": {"adapter_digest": digest, "verdict": "green"}
-    }
+    assert reusable_evidence(tmp_path, "vibe", digest, branch="rolling") == {"1.2.0": document}
     gate = VerifiedSet("range", floor="1.0.0", ceiling="1.2.0", known_bad=frozenset({"1.4.0"}))
     adapter = FakeAdapter()
     assert select_candidates(adapter, gate, {"1.2.0"}) == ["1.3.0", "1.5.0"]
