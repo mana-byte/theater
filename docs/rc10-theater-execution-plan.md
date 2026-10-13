@@ -1013,7 +1013,7 @@ report that limitation instead of declaring acceptance.
 The coordinator uses the running **control** daemon's tools:
 
 1. `whoami` to confirm coordinator identity and registered cwd.
-2. `list_harnesses` and `list_models` to verify both exact profiles/efforts.
+2. `list_harnesses(include_models=true)` to verify both exact profiles/efforts.
 3. `list_participants(children_only=true)` to reconcile already running workers.
 4. Read Git state and ledger to find the last accepted checkpoint and outstanding
    commits before spawning or reusing anyone.

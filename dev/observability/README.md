@@ -32,7 +32,7 @@ uv run theater providers list
 uv run python dev/observability/smoke.py
 ```
 
-The smoke check makes four read-only `list_models` MCP calls through a fresh
+The smoke check makes four read-only `list_harnesses(include_models=true)` MCP calls through a fresh
 stdio server. It verifies that process's histogram and logs plus the actual
 MCP → RPC client → daemon parent/child trace. It neither registers a participant
 nor sends input to an agent. It is a connectivity check, not a latency benchmark.

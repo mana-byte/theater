@@ -326,11 +326,8 @@ async def test_root_caller_can_write_and_get(client, tmp_path):
         namespace="plan",
     )
     assert got == {
-        "namespace": "plan",
         "entries": {wrote["key"]: "ship it"},
-        "keys": [wrote["key"]],
         "truncated": False,
-        "after_key": None,
     }
 
 
@@ -357,11 +354,8 @@ async def test_descendants_and_siblings_share_scratchpad(client, daemon, tmp_pat
         namespace="handoff",
     )
     assert got == {
-        "namespace": "handoff",
         "entries": {wrote["key"]: "ready"},
-        "keys": [wrote["key"]],
         "truncated": False,
-        "after_key": None,
     }
 
 
@@ -383,11 +377,8 @@ async def test_scratchpad_is_shared_between_trees(client, daemon, tmp_path):
         namespace="handoff",
     )
     assert got == {
-        "namespace": "handoff",
         "entries": {wrote["key"]: "first tree"},
-        "keys": [wrote["key"]],
         "truncated": False,
-        "after_key": None,
     }
 
 
@@ -412,11 +403,8 @@ async def test_scratchpad_is_shared_between_repo_roots(client, daemon, tmp_path)
         namespace="handoff",
     )
     assert got == {
-        "namespace": "handoff",
         "entries": {wrote["key"]: "repo a"},
-        "keys": [wrote["key"]],
         "truncated": False,
-        "after_key": None,
     }
 
 
@@ -445,11 +433,8 @@ async def test_scratchpad_write_with_key_updates_existing(client, tmp_path):
         namespace="notes",
     )
     assert got == {
-        "namespace": "notes",
         "entries": {first["key"]: "second"},
-        "keys": [first["key"]],
         "truncated": False,
-        "after_key": None,
     }
 
 
@@ -472,11 +457,8 @@ async def test_scratchpad_write_with_nonexistent_key_inserts(client, tmp_path):
         namespace="notes",
     )
     assert got == {
-        "namespace": "notes",
         "entries": {"custom-key": "inserted"},
-        "keys": ["custom-key"],
         "truncated": False,
-        "after_key": None,
     }
 
 
@@ -519,11 +501,8 @@ async def test_scratchpad_get_with_keys_filters(client, tmp_path):
         keys=[a["key"]],
     )
     assert got == {
-        "namespace": "notes",
         "entries": {a["key"]: "a"},
-        "keys": [a["key"]],
         "truncated": False,
-        "after_key": None,
     }
 
     all_got = await client.call(
@@ -545,11 +524,8 @@ async def test_scratchpad_get_missing_keys_returns_empty(client, tmp_path):
         keys=["nonexistent"],
     )
     assert got == {
-        "namespace": "notes",
         "entries": {},
-        "keys": [],
         "truncated": False,
-        "after_key": None,
     }
 
 
@@ -737,11 +713,8 @@ async def test_scratchpad_get_accepts_an_overlong_after_key_cursor(client, tmp_p
         after_key="k" * 129,
     )
     assert got == {
-        "namespace": "notes",
         "entries": {},
-        "keys": [],
         "truncated": False,
-        "after_key": None,
     }
 
 
@@ -777,11 +750,8 @@ async def test_scratchpad_get_names_an_oversized_legacy_entry(client, tmp_path, 
     assert deleted == {"namespace": "notes", "deleted": ["a"]}
     got = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
     assert got == {
-        "namespace": "notes",
         "entries": {},
-        "keys": [],
         "truncated": False,
-        "after_key": None,
     }
 
 
@@ -1156,7 +1126,7 @@ async def test_scratchpad_delete_accepts_a_legacy_overlong_key(client, tmp_path,
         )
     assert exc.value.code == "bad_request"
     full = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
-    assert full["keys"] == [legacy]
+    assert full["entries"] == {legacy: "legacy"}
     deleted = await client.call(
         "scratchpad.delete",
         caller_id=caller["id"],
@@ -1165,7 +1135,7 @@ async def test_scratchpad_delete_accepts_a_legacy_overlong_key(client, tmp_path,
     )
     assert deleted == {"namespace": "notes", "deleted": [legacy]}
     rest = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
-    assert rest["keys"] == []
+    assert rest["entries"] == {}
 
 
 async def test_scratchpad_legacy_overlong_namespace_stays_readable_and_deletable(

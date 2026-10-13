@@ -13,8 +13,8 @@ step 6.
 You alone talk to the user. Positions you give: `hierarchy/lead`, `hierarchy/member`. Roles:
 `hierarchy/worker` (lead or member), `hierarchy/reviewer` and `hierarchy/debater` (member only).
 `whoami` lists the same choices. Children inherit nothing, so every brief is complete. Never
-hardcode a model: use `list_models`. Debaters differ from you and each other as far as models allow
-(another harness is the fallback; report any shortfall). A reviewer must run a different model than
+hardcode a model: use `list_harnesses(include_models=true)`. Debaters differ from you and each other
+as far as models allow (another harness is the fallback; report any shortfall). A reviewer must run a different model than
 every author, including whoever assembled the work (a lead, or you for the final review); if none
 exists, report it as a blocker. Read-only roles run `yolo`; builders run the
 approval mode the user chose at validation.
@@ -26,8 +26,8 @@ handles before ending the turn. A child's `done` is not a verdict: check the rep
 
 ## 0. Setup
 
-- `whoami`, `list_models`, and the participant budget `B` from `theater config --json`
-  (`rails.budget`, checked against its daemon line; if they differ `B` is provisional, and a
+- `whoami`, `list_harnesses(include_models=true)`, and the participant budget `B` from
+  `theater config --json` (`rails.budget`, checked against its daemon line; if they differ `B` is provisional, and a
   `budget_exceeded` refusal's number wins).
 - `base = git rev-parse HEAD`. The user's uncommitted work is excluded from every stream; if it
   matters, ask the user to commit first.

@@ -20,50 +20,41 @@ from theater.mcp.toolsets.participants import _summarise
 from theater.mcp.toolsets.projection import compact, job_entry
 
 
-async def harnesses(session: Session) -> list[dict]:
-    """What `spawn_session` will accept, asked of the daemon that honours it.
-    Rows an agent cannot act on (missing binary, failed plugin) are left to
-    `theater harnesses`; `approvals` null means a pre-field daemon — restart it.
-    """
+async def harnesses(
+    session: Session, harness: str | None = None, include_models: bool = False
+) -> list[dict]:
+    """Report spawnable harnesses using the daemon's active approvals and optional allowlists."""
     rows = await session.client.call("harnesses")
     assert isinstance(rows, list)
-    return [
-        {
-            "name": r["name"],
-            "binary": r["binary"],
-            "approvals": r.get("approvals"),
-        }
-        for r in rows
-        if r["installed"] and not r["error"]
+    available = [
+        row
+        for row in rows
+        if row["installed"] and not row["error"] and (harness is None or row["name"] == harness)
     ]
-
-
-async def models(session: Session) -> list[dict]:
-    """What `spawn_session` will accept as `model`, per harness.
-
-    Asked of the daemon for the reason `harnesses` is: the allowlist is enforced
-    from the config the daemon read at start-up, so after an edit the file and
-    the running process disagree, and the one that refuses the spawn is the one
-    worth reporting. `theater models` answers the same question from the file,
-    which is the right answer for the human editing it and the wrong one here.
-
-    Filtered like `harnesses`, and to the same end: every row left is a harness
-    a `spawn_session` call could name, so nothing here invites a call that
-    cannot work.
-    """
-    rows = await session.client.call("models")
-    assert isinstance(rows, list)
-    return [
-        {
-            "harness": r["harness"],
-            "models": r["models"],
-            "supported": r["supported"],
-            "reasoning": r.get("reasoning", []),
-            "reasoning_supported": r.get("reasoning_supported", False),
+    model_rows = {}
+    if include_models:
+        models = await session.client.call("models")
+        assert isinstance(models, list)
+        model_rows = {
+            row["harness"]: row for row in models if row["installed"] and not row["error"]
         }
-        for r in rows
-        if r["installed"] and not r["error"]
-    ]
+    result = []
+    for row in available:
+        item = {"name": row["name"], "approvals": row.get("approvals")}
+        if row["binary"] != row["name"]:
+            item["binary"] = row["binary"]
+        if include_models:
+            model = model_rows.get(row["name"])
+            if model is None:
+                continue
+            item.update(
+                models=model["models"],
+                supported=model["supported"],
+                reasoning=model.get("reasoning", []),
+                reasoning_supported=model.get("reasoning_supported", False),
+            )
+        result.append(item)
+    return result
 
 
 async def spawn_session(
@@ -107,8 +98,9 @@ async def spawn_session(
 
     `model` is passed to the harness unchanged, but not unchecked: it must be
     one the config lists for that harness, and the harness must be able to
-    select a model at all. Both are refused before anything is created; `models`
-    reports them. Membership is the whole of the check — Theater cannot confirm
+    select a model at all. Both are refused before anything is created;
+    `list_harnesses(include_models=true)` reports them. Membership is the whole
+    of the check — Theater cannot confirm
     the name is real or that the CLI honoured it, so a typo the user vouched for
     surfaces as a child on the wrong model, not as an error here.
 
@@ -227,7 +219,6 @@ async def send_prompt(
     if_busy: str = "auto",
     job_handle: str | None = None,
     after: str | None = None,
-    task_kind: str | None = None,
     skills: list[str] | None = None,
 ) -> dict:
     """Send a prompt to an already-running agent on its selected transport.
@@ -270,7 +261,6 @@ async def send_prompt(
         if_busy=if_busy,
         job_handle=job_handle,
         after=after,
-        task_kind=task_kind,
         skills=skills,
     )
     assert isinstance(record, dict)
@@ -308,7 +298,7 @@ async def update_session_settings(
 
     Idle-only: the daemon refuses while the child has an active turn or a
     pending native interaction. The values must be on the existing
-    model/reasoning allowlists — ``list_models`` reports them — and approval
+    model/reasoning allowlists — ``list_harnesses(include_models=true)`` reports them — and approval
     and sandbox policy are never changed here. Effective values are reported
     only after the native backend confirms; an uncertain delivery stays
     visibly uncertain in the daemon's reply, which is returned verbatim.
@@ -406,7 +396,7 @@ async def scratchpad_get(
     namespace: str,
     keys: list[str] | None = None,
     after_key: str | None = None,
-    keys_only: bool = False,
+    keys_only: bool | None = None,
 ) -> dict:
     if not session._resolved:
         await session.identify()
@@ -415,7 +405,7 @@ async def scratchpad_get(
         namespace=namespace,
         keys=keys,
         after_key=after_key,
-        keys_only=keys_only,
+        keys_only=keys is None if keys_only is None else keys_only,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)

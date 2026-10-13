@@ -14,6 +14,8 @@ from sqlalchemy import or_, select
 
 from theater.constants.daemon import RECALL_HASH_MAX_QUERY_BYTES, TOUCH_HASH_MAX_FILE_BYTES
 from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
+from theater.daemon.response_contracts.contract import parse_stored
+from theater.daemon.response_contracts.prompts import response_guidance
 from theater.daemon.schema import jobs, participants, touch
 from theater.daemon.store import Store
 from theater.daemon.touch_paths import normalize_touch_path
@@ -27,6 +29,18 @@ CLIP = 300
 
 #: Default and maximum points per path timeline; counted after gaps are interleaved.
 DEFAULT_DEPTH = 5
+
+
+def task_without_guidance(prompt: str | None, response_format: str | None) -> str | None:
+    """Undo only the stored contract's exact wrapper, preserving user-authored instructions."""
+    if prompt is None or response_format is None:
+        return prompt
+    guidance = response_guidance(response_format)
+    if parse_stored(response_format) is None:
+        return prompt.removeprefix(f"{guidance}\n\n")
+    if prompt == guidance:
+        return ""
+    return prompt.removesuffix(f"\n\n{guidance}")
 
 
 def _clip(text: str | None) -> str | None:
@@ -156,6 +170,8 @@ def _build_timeline(
                 touch.c.sha_after_error,
                 jobs.c.state.label("outcome"),
                 jobs.c.prompt,
+                jobs.c.response_format,
+                jobs.c.target_id,
                 jobs.c.result,
                 jobs.c.finished_at,
                 participants.c.harness,
@@ -236,9 +252,10 @@ def _build_timeline(
                 "branch": row.branch,
                 # Lineage (parent) and provenance (caller) differ; bare ids keep parents private.
                 "parent_id": row.parent_id,
+                "participant_id": row.target_id,
                 "caller_id": row.caller_id,
                 "outcome": row.outcome,
-                "task": _clip(row.prompt),
+                "task": _clip(task_without_guidance(row.prompt, row.response_format)),
                 "result": _clip(row.result),
             }
             if resume_note is not None:

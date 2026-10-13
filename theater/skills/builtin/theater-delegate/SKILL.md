@@ -33,7 +33,7 @@ namespace="delegate/<run>", key=...)`. The pair infers nothing, so every key is 
   why, failed attempts.
 - `checks`: exact commands (lint, types, focused tests, full suite) and what green means.
 - `done` and `settings`: the definition of done; approval mode (default `yolo`); the builder's
-  harness and model, different from the reviewer's (`list_models`); round cap 8.
+  harness and model, different from the reviewer's (`list_harnesses(include_models=true)`); round cap 8.
 
 Entries expire (about 7 days) and are not a record; the pair's transcript is.
 
@@ -43,9 +43,10 @@ Entries expire (about 7 days) and are not a record; the pair's transcript is.
 skills=["pair/reviewer"], worktree="pair-<run>", base_branch=<base>, name="Reviewer-<run>",
 description=<the task>, response_format={"$theater": "delegate"}, prompt=<pointer>)`. The prompt
 names the namespace `delegate/<run>` and the worktree name `pair-<run>`, states the goal in one
-line, and says to read every key. Choose the reviewer's harness and model with `list_models`. The
-reviewer alone asks the user, so its harness needs a native ask tool (Claude and opencode have one);
-the builder needs none. If none is available, tell the user. A pair holds 2 slots; on
+line, and says to read every value with
+`scratchpad_get(namespace="delegate/<run>", keys_only=false)`. Choose the reviewer's harness and
+model with `list_harnesses(include_models=true)`. The reviewer alone asks the user, so its harness
+needs a native ask tool (Claude and opencode have one); the builder needs none. If none is available, tell the user. A pair holds 2 slots; on
 `budget_exceeded` tell the user and do not retry.
 
 ## Tell the user, then stop

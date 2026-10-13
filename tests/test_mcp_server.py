@@ -59,7 +59,6 @@ async def test_tools_are_registered(daemon):
         "whoami",
         "list_participants",
         "list_harnesses",
-        "list_models",
         "list_skills",
         "load_skill",
         "spawn_session",
@@ -521,7 +520,6 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
                 "job_handle": "h#2",
                 "response_format": response_format,
                 "after": "Writer",
-                "task_kind": "work",
                 "skills": ["theater-debate"],
             },
         )
@@ -541,7 +539,6 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         "job_handle": "h#2",
         "response_format": response_format,
         "after": "Writer",
-        "task_kind": "work",
         "skills": ["theater-debate"],
     }
     assert calls["settings"][1] == {
@@ -700,10 +697,10 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         namespace: str,
         keys: list[str] | None = None,
         after_key: str | None = None,
-        keys_only: bool = False,
+        keys_only: bool | None = None,
     ) -> dict:
         calls.append(("scratchpad_get", session, namespace, keys, after_key, keys_only))
-        return {"namespace": namespace, "entries": {"k1": "v1"}}
+        return {"namespace": namespace, "entries": [], "keys": [], "truncated": False}
 
     async def fake_scratchpad_delete(
         session,
@@ -729,7 +726,9 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     ) == {"namespace": "plan", "key": "abc123"}
     assert _payload(await mcp.call_tool("scratchpad_get", {"namespace": "plan"})) == {
         "namespace": "plan",
-        "entries": {"k1": "v1"},
+        "entries": [],
+        "keys": [],
+        "truncated": False,
     }
     assert _payload(
         await mcp.call_tool("scratchpad_delete", {"namespace": "plan", "keys": ["abc123"]})
@@ -737,7 +736,7 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
 
     assert [(call[0], *call[2:]) for call in calls] == [
         ("scratchpad_write", "plan", "p-you", None),
-        ("scratchpad_get", "plan", None, None, False),
+        ("scratchpad_get", "plan", None, None, None),
         ("scratchpad_delete", "plan", ["abc123"], None, False),
     ]
     assert all(isinstance(call[1], mcp_tools.Session) for call in calls)
@@ -1219,7 +1218,8 @@ async def test_handoff_arguments_reach_the_tools_and_are_taught_once(daemon):
     descriptions = {name: " ".join(t.description.split()) for name, t in tools.items()}
 
     spawn, send = tools["spawn_session"].input_schema, tools["send"].input_schema
-    assert {"after", "task_kind"} <= set(spawn["properties"]) & set(send["properties"])
+    assert {"after", "task_kind"} <= set(spawn["properties"])
+    assert "after" in send["properties"] and "task_kind" not in send["properties"]
     assert "independent_review" in json.dumps(spawn["properties"]["task_kind"])
     assert "source_not_reviewable" in descriptions["spawn_session"]
     assert "pinned commit" in descriptions["spawn_session"]
@@ -1272,6 +1272,7 @@ async def test_after_and_task_kind_are_forwarded_unchanged_to_the_daemon():
 
     (_, spawn_params), (_, send_params) = client.calls
     assert (spawn_params["after"], spawn_params["task_kind"]) == ("Writer", "independent_review")
-    assert (send_params["after"], send_params["task_kind"]) == ("Writer", None)
+    assert send_params["after"] == "Writer"
+    assert "task_kind" not in send_params
     assert (spawn_params["skills"], send_params["skills"]) == (["theater-debate"], None)
     assert spawned["handoff"] == {"state": "waiting"}

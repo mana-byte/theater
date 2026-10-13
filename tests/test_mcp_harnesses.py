@@ -1,15 +1,4 @@
-"""What an agent is told it can spawn.
-
-The registry, the spawner and the `spawn` RPC were all generic long before this
-file existed; the harness set was pinned in exactly one place, the sentence in
-`spawn_session`'s description that read `"vibe" or "claude"`. That sentence is
-the whole of what a model knows about the choice, so codex and opencode were
-unspawnable by agents while being spawnable by every other caller — with no
-error anywhere, because nothing was ever asked for them.
-
-So the tests here are about the two surfaces that carry the set: the generated
-description, and the `list_harnesses` tool that asks the daemon.
-"""
+"""Harness discovery and optional model policy must match what the daemon accepts."""
 
 from __future__ import annotations
 
@@ -18,7 +7,10 @@ import json
 import pytest
 
 from tests.test_harness_plugins import install, write_plugin
+from theater.client import DaemonClient
+from theater.config import Config
 from theater.daemon.server import Daemon
+from theater.mcp import tools
 from theater.mcp.server import build
 
 #: The adapters Theater ships. Every one must reach an agent.
@@ -27,7 +19,9 @@ SHIPPED = {"claude", "codex", "opencode", "pi", "vibe"}
 
 @pytest.fixture
 async def daemon(theater_home):
-    d = Daemon()
+    d = Daemon(
+        config=Config(models={"vibe": ["opus-5", "medium-3"]}, reasoning={"claude": ["high"]})
+    )
     await d.start()
     yield d
     await d.aclose()
@@ -91,8 +85,7 @@ async def test_spawn_names_a_harness_the_user_added(daemon, local_dir):
 async def test_list_harnesses_returns_the_shipped_set(daemon, all_installed):
     rows = _payload(await build("p1", "vibe").call_tool("list_harnesses", {}))
     assert {r["name"] for r in rows} >= SHIPPED
-    assert all(r["binary"] for r in rows)
-    assert all(set(row) == {"name", "binary", "approvals"} for row in rows)
+    assert all(set(row) == {"name", "approvals"} for row in rows)
 
 
 async def test_list_harnesses_omits_what_is_not_installed(daemon, monkeypatch):
@@ -123,6 +116,45 @@ async def test_list_harnesses_omits_a_broken_plugin(daemon, local_dir, all_insta
     assert names >= SHIPPED
 
 
+async def test_optional_models_come_from_daemon_and_filter_by_name(
+    daemon, local_dir, all_installed, theater_home, monkeypatch
+):
+    from theater import harness
+
+    write_plugin(local_dir, binary="acme-cli")
+    (local_dir / "broken.py").write_text("raise RuntimeError('boom')\n")
+    install(local_dir)
+    (theater_home / "config.toml").write_text('[models]\nvibe = ["after-boot"]\n')
+    monkeypatch.setattr(
+        harness.shutil, "which", lambda binary: None if binary == "codex" else f"/bin/{binary}"
+    )
+    session = tools.Session(participant_id="p1", harness="vibe", client=DaemonClient())
+    plain = await tools.harnesses(session)
+    detailed = await tools.harnesses(session, include_models=True)
+    rows = {row["name"]: row for row in detailed}
+
+    assert set(rows) == {row["name"] for row in plain}
+    assert "codex" not in rows and "broken" not in rows
+    assert rows["vibe"]["models"] == ["opus-5", "medium-3"]
+    assert rows["vibe"]["supported"] is True
+    assert rows["claude"]["models"] == []
+    assert rows["claude"]["reasoning"] == ["high"]
+    assert rows["claude"]["reasoning_supported"] is True
+    assert rows["acme"]["binary"] == "acme-cli"
+    assert rows["acme"]["supported"] is False
+    assert rows["acme"]["models"] == []
+    assert all(
+        set(row) == {"name", "approvals", "models", "supported", "reasoning", "reasoning_supported"}
+        for name, row in rows.items()
+        if name != "acme"
+    )
+    assert await tools.harnesses(session, harness="vibe", include_models=True) == [rows["vibe"]]
+    assert await tools.harnesses(session, harness="vibe") == [
+        row for row in plain if row["name"] == "vibe"
+    ]
+    assert await tools.harnesses(session, harness="missing", include_models=True) == []
+
+
 async def test_spawning_a_listed_harness_is_accepted(daemon, terminal_provider, all_installed):
     """The end of the chain: what list_harnesses offers, spawn_session takes.
 
@@ -132,6 +164,8 @@ async def test_spawning_a_listed_harness_is_accepted(daemon, terminal_provider, 
     terminal_provider.install(daemon)
     mcp = build("parent", "vibe")
     await mcp.call_tool("whoami", {})
+    session = tools.Session(participant_id="parent", harness="vibe", client=DaemonClient())
+    vibe = (await tools.harnesses(session, harness="vibe", include_models=True))[0]
 
     for name in sorted(SHIPPED):
         child = _payload(
@@ -139,6 +173,7 @@ async def test_spawning_a_listed_harness_is_accepted(daemon, terminal_provider, 
                 "spawn_session",
                 {
                     "harness": name,
+                    "model": vibe["models"][0] if name == "vibe" else None,
                     "prompt": "",
                     "approval": "yolo" if name in ("pi", "opencode") else "manual",
                     # Catalog acceptance only: prove the name is spawnable on
@@ -152,3 +187,10 @@ async def test_spawning_a_listed_harness_is_accepted(daemon, terminal_provider, 
         )
         assert child["harness"] == name
         assert child["parent_id"] == "parent"
+
+    refused = await mcp.call_tool(
+        "spawn_session",
+        {"harness": "vibe", "approval": "manual", "model": "not-on-the-list"},
+    )
+    message = refused.structured_content["error"]["message"]
+    assert "not-on-the-list" in message and "opus-5" in message

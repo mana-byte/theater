@@ -106,12 +106,13 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
         keys_only=keys_only,
     )
     response: dict = {
-        "namespace": namespace,
         "entries": list(page.metadata) if keys_only else page.entries,
-        "keys": list(page.keys),
         "truncated": page.truncated,
-        "after_key": page.after_key,
     }
+    if keys_only:
+        response.update(namespace=namespace, keys=list(page.keys))
+    if page.after_key is not None:
+        response["after_key"] = page.after_key
     if page.oversized_bytes:
         response["oversized_key"] = page.oversized_key
         response["oversized_digest"] = page.oversized_digest

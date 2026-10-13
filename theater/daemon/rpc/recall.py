@@ -52,19 +52,17 @@ async def _recall(daemon, params: dict) -> dict:
 
 
 def _attach_parent_names(daemon, result: dict) -> None:
-    """Decorate timeline points with the parent's runtime name.
-
-    Names are Registry state that ``recall.py`` cannot see; an unresolvable parent is ``None``.
-    """
+    """Names come from the live registry; historical identities keep their stable ids."""
     for entry in result.values():
         for point in entry.get("timeline", []):
-            parent_id = point.get("parent_id")
-            if parent_id is None:
-                continue
-            try:
-                point["parent_name"] = daemon.registry.get(parent_id).name
-            except Exception:
-                point["parent_name"] = None
+            for id_key, name_key in (("parent_id", "parent_name"), ("participant_id", "name")):
+                participant_id = point.get(id_key)
+                if participant_id is None:
+                    continue
+                try:
+                    point[name_key] = daemon.registry.get(participant_id).name
+                except Exception:
+                    point[name_key] = None
 
 
 @method("recall_read")

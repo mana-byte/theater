@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
 from theater.harness.contracts.events import clip
 from theater.mcp import tools
@@ -533,16 +535,26 @@ async def test_scratchpad_write_identifies_and_forwards_exact_rpc_arguments():
     }
 
 
-async def test_scratchpad_get_identifies_and_forwards_exact_rpc_arguments():
-    s = session(**{"scratchpad.get": {"namespace": "plan", "entries": {"k1": "v1"}}})
-    got = await tools.scratchpad_get(s, namespace="plan")
-    assert got == {"namespace": "plan", "entries": {"k1": "v1"}}
+@pytest.mark.parametrize(
+    ("keys", "keys_only", "expected"),
+    [
+        (None, None, True),
+        (["k1"], None, False),
+        ([], None, False),
+        (None, False, False),
+        (["k1"], True, True),
+    ],
+)
+async def test_scratchpad_get_resolves_defaults_and_forwards(keys, keys_only, expected):
+    s = session(**{"scratchpad.get": {"entries": {}, "truncated": False}})
+    got = await tools.scratchpad_get(s, namespace="plan", keys=keys, keys_only=keys_only)
+    assert got == {"entries": {}, "truncated": False}
     assert s.client.methods == ["hello", "scratchpad.get"]
     assert s.client.params("scratchpad.get") == {
         "namespace": "plan",
-        "keys": None,
+        "keys": keys,
         "after_key": None,
-        "keys_only": False,
+        "keys_only": expected,
         "caller_id": "p-me",
     }
 
@@ -645,12 +657,25 @@ async def test_recall_identifies_first_so_the_daemon_knows_the_caller():
 
 
 async def test_recall_omits_handle_when_segment_already_identifies_the_point():
-    point = {"handle": "p-you#4", "segment": "p-you#4", "outcome": "done"}
+    point = {
+        "handle": "p-you#4",
+        "segment": "p-you#4",
+        "outcome": "done",
+        "participant_id": "p-you",
+        "name": "Builder",
+    }
     s = resolved(recall={"x.py": {"timeline": [point]}})
 
     result = await tools.recall(s, paths=["x.py"])
 
-    assert result["x.py"]["timeline"] == [{"segment": "p-you#4", "outcome": "done"}]
+    assert result["x.py"]["timeline"] == [
+        {
+            "segment": "p-you#4",
+            "outcome": "done",
+            "participant_id": "p-you",
+            "name": "Builder",
+        }
+    ]
 
 
 async def test_recall_read_forwards_the_segment_id_verbatim():

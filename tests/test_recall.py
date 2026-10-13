@@ -12,6 +12,7 @@ refactor from reintroducing the per-path fork that was measured at
 
 from __future__ import annotations
 
+import json
 import subprocess
 from unittest.mock import patch
 
@@ -24,7 +25,11 @@ from theater.daemon.recall import (
     _git_root,
     hash_current_files,
     recall,
+    task_without_guidance,
 )
+from theater.daemon.recall_read import read_segment
+from theater.daemon.response_contracts.contract import StrictContract
+from theater.daemon.response_contracts.prompts import prompt_with_guidance, response_guidance
 from theater.daemon.schema import touch
 from theater.models import Job, JobState, Participant, Tier, now
 
@@ -64,6 +69,7 @@ def _job(
     result: str | None = "done",
     finished_at: float | None = None,
     caller_id: str = "cli",
+    response_format: str | None = None,
 ) -> None:
     store.create_job(
         Job(
@@ -72,6 +78,7 @@ def _job(
             target_id=target_id,
             kind="spawn",
             prompt=prompt,
+            response_format=response_format,
             state=state,
             result=result,
             error_code=None,
@@ -699,9 +706,16 @@ def test_reads_are_counted_not_rendered(store, tmp_path):
 # ---- task and result clip to ~300 characters --------------------------------
 
 
-def test_task_and_result_are_clipped(store, tmp_path):
-    """``task`` and ``result`` clip to ~300 characters. Full text lives
-    behind the sibling's tool."""
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        None,
+        json.dumps({"type": "string", "description": "x" * 400}),
+        StrictContract("custom", '{"type":"string"}', "answer").envelope(),
+    ],
+)
+async def test_task_and_result_are_clipped(store, registry, tmp_path, response_format):
+    """Both recall surfaces recover the task before the timeline clips it."""
     root = _setup_repo(tmp_path)
     p = _participant(store, cwd=root)
     long_task = "x" * 500
@@ -710,7 +724,10 @@ def test_task_and_result_are_clipped(store, tmp_path):
         store,
         handle="h1",
         target_id=p.id,
-        prompt=long_task,
+        prompt=long_task
+        if response_format is None
+        else prompt_with_guidance(long_task, response_format),
+        response_format=response_format,
         result=long_result,
     )
     _touch(
@@ -725,6 +742,24 @@ def test_task_and_result_are_clipped(store, tmp_path):
     point = result["f.py"]["timeline"][0]
     assert point["task"] == long_task[:CLIP] + f"… (+{len(long_task) - CLIP} chars)"
     assert point["result"] == long_result[:CLIP] + f"… (+{len(long_result) - CLIP} chars)"
+    brief = await read_segment("h1", store=store, registry=registry, cwd=root)
+    assert brief["task"] == long_task
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_guidance_removal_preserves_user_text(strict):
+    schema = '{"type":"string"}'
+    response_format = StrictContract("custom", schema, "answer").envelope() if strict else schema
+    guidance = response_guidance(response_format)
+    task = f"Keep these words verbatim:\n\n{guidance}\n\nmore user text"
+    assert (
+        task_without_guidance(prompt_with_guidance(task, response_format), response_format) == task
+    )
+    assert task_without_guidance(task, response_format) == task
+    assert task_without_guidance(guidance, None) == guidance
+    changed = prompt_with_guidance(task, response_format).replace("single bare", "one bare")
+    assert task_without_guidance(changed, response_format) == changed
+    assert task_without_guidance(prompt_with_guidance("", response_format), response_format) == ""
 
 
 # ---- depth caps the timeline -----------------------------------------------
@@ -1054,7 +1089,8 @@ def test_git_root_returns_none_outside_repo(tmp_path):
 # ---- lineage on a timeline point -------------------------------------------
 
 
-def test_point_reports_the_parent_of_the_editing_session(store, tmp_path):
+@pytest.mark.parametrize("handle", ["kid", "kid#4", "unrelated#9"])
+def test_point_reports_the_parent_of_the_editing_session(store, tmp_path, handle):
     """A child's edit names the agent that spawned it.
 
     The question recall answers is "who touched this file"; the follow-up
@@ -1064,11 +1100,13 @@ def test_point_reports_the_parent_of_the_editing_session(store, tmp_path):
     root = _setup_repo(tmp_path)
     _participant(store, pid="boss", cwd=root)
     child = _participant(store, pid="kid", cwd=root, parent_id="boss")
-    _job(store, handle="h1", target_id=child.id)
-    _touch(store, job_handle="h1", path="f.py", sha_before="aaa", sha_after="bbb")
+    _job(store, handle=handle, target_id=child.id)
+    _touch(store, job_handle=handle, path="f.py", sha_before="aaa", sha_after="bbb")
 
     point = recall(store, paths=["f.py"], caller_cwd=root)["f.py"]["timeline"][0]
     assert point["parent_id"] == "boss"
+    assert point["participant_id"] == child.id
+    assert point["segment"] == handle
 
 
 def test_root_authored_point_reports_no_parent(store, tmp_path):
@@ -1122,29 +1160,28 @@ def test_gap_point_carries_no_lineage(store, tmp_path):
     assert gap["gap"] is True
     assert "parent_id" not in gap
     assert "caller_id" not in gap
+    assert "participant_id" not in gap
 
 
 # ---- the RPC layer decorates lineage with runtime names --------------------
 
 
 def test_attach_parent_names_resolves_known_parents(registry):
-    """``parent_name`` is attached above recall, where the Registry lives.
-
-    ``recall.py`` takes only a Store; names are Registry state. A parent
-    the Registry cannot resolve degrades to None rather than raising,
-    because the id alone still answers the question.
-    """
+    """Runtime names are absent for gaps and null after an identity stops being live."""
     import types
 
     from theater.daemon.methods import _attach_parent_names
 
     boss = registry.register(harness="vibe", pane=None, cwd="/tmp/repo")
+    retired = registry.register(harness="vibe", pane=None, cwd="/tmp/retired")
+    registry.mark_dead(retired.id)
     result = {
         "f.py": {
             "timeline": [
-                {"parent_id": boss.id},
-                {"parent_id": "ghost"},
-                {"parent_id": None},
+                {"parent_id": boss.id, "participant_id": boss.id},
+                {"parent_id": "ghost", "participant_id": "ghost"},
+                {"parent_id": None, "participant_id": retired.id},
+                {"parent_id": None, "participant_id": boss.id},
                 {"gap": True},
             ]
         }
@@ -1153,11 +1190,13 @@ def test_attach_parent_names_resolves_known_parents(registry):
 
     points = result["f.py"]["timeline"]
     expected = registry.get(boss.id).name
-    assert expected  # the Registry names lazily; a None here proves nothing
-    assert points[0]["parent_name"] == expected
-    assert points[1]["parent_name"] is None
+    assert expected
+    assert points[0]["parent_name"] == points[0]["name"] == expected
+    assert points[1]["parent_name"] is points[1]["name"] is None
+    assert points[2]["name"] is None
     assert "parent_name" not in points[2]
-    assert "parent_name" not in points[3]
+    assert points[3]["name"] == expected
+    assert points[4] == {"gap": True}
 
 
 def test_precomputed_root_none_does_not_recall_git_root(monkeypatch, tmp_path, store):

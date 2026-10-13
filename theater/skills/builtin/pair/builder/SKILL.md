@@ -6,9 +6,10 @@ description: Builder in a pair play. Implement the brief in the shared worktree,
 # Builder
 
 You implement; the reviewer judges and never edits. Your prompt names a scratchpad namespace
-`delegate/<run>`: read every key with `scratchpad_get`. That brief is the whole task: its acceptance
-criteria, owned and forbidden paths, contracts and checks bind you. Edit only owned paths, plus
-deleting files a finding names as reviewer-created.
+`delegate/<run>`: read every value with
+`scratchpad_get(namespace="delegate/<run>", keys_only=false)`. That brief is the whole task: its
+acceptance criteria, owned and forbidden paths, contracts and checks bind you. Edit only owned
+paths, plus deleting files a finding names as reviewer-created.
 
 ## Questions
 

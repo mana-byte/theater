@@ -38,9 +38,9 @@ async def exercise() -> None:
         await session.initialize()
         for _ in range(4):
             started = time.perf_counter()
-            result = await session.call_tool("list_models", {})
+            result = await session.call_tool("list_harnesses", {"include_models": True})
             if result.is_error:
-                raise RuntimeError("The read-only list_models probe failed")
+                raise RuntimeError("The read-only list_harnesses probe failed")
             durations.append((time.perf_counter() - started) * 1000)
             await asyncio.sleep(2)
     print(f"Warm MCP round-trip median: {statistics.median(durations[1:]):.2f} ms")
@@ -51,7 +51,7 @@ def verify(started_ns: int, service_name: str) -> str | None:
     logs = query(
         "loki",
         "loki/api/v1/query_range",
-        query=f'{{{selector}}} | theater_process_role="mcp" |= "mcp.tool list_models"',
+        query=f'{{{selector}}} | theater_process_role="mcp" |= "mcp.tool list_harnesses"',
         start=str(started_ns),
         limit="1",
     )["data"]["result"]
@@ -67,7 +67,7 @@ def verify(started_ns: int, service_name: str) -> str | None:
         for scope in batch.get("scopeSpans", [])
         for span in scope.get("spans", [])
     }
-    root = spans.get("tools/call list_models")
+    root = spans.get("tools/call list_harnesses")
     client = spans.get("rpc.client models")
     pool = spans.get("rpc.pool_wait models")
     daemon = spans.get("rpc.server models")
@@ -96,7 +96,7 @@ def verify(started_ns: int, service_name: str) -> str | None:
         "api/v1/query",
         query=(
             "histogram_count(theater_mcp_tool_duration_milliseconds{"
-            f'{selector},service_instance_id={json.dumps(instance)},tool="list_models"'
+            f'{selector},service_instance_id={json.dumps(instance)},tool="list_harnesses"'
             "})"
         ),
     )["data"]["result"]

@@ -20,6 +20,7 @@ from theater.constants.daemon import (
 from theater.daemon import workers
 from theater.daemon.observation.process import observation_process_id
 from theater.daemon.observer import history_correlation_is_ambiguous
+from theater.daemon.recall import task_without_guidance
 from theater.daemon.recall_history import read_history_page
 from theater.daemon.schema import jobs, touch
 from theater.daemon.touch_paths import is_canonical_touch_path
@@ -217,7 +218,7 @@ async def _read_job(
         "segment": handle,
         "kind": "job",
         "handle": handle,
-        "task": j["prompt"],
+        "task": task_without_guidance(j["prompt"], j["response_format"]),
         "result": j["result"],
         "outcome": j["state"],
         "error_code": j["error_code"],
