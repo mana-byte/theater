@@ -24,6 +24,8 @@ The rolling PR shows release verdicts, checks, mock route counts, and the workfl
 Review its code bump and evidence before merging. A red issue carries `compat:<harness>`;
 `tooling` marks an automation or mock failure, and `admitted-regression` marks an in-range
 release that failed the daily watch. The issue closes after a conclusive green run.
+Some releases produce an evidence-only PR: the probe ceiling stays unchanged, and the PR body
+says so. A human decides whether to raise that ceiling after reviewing the proof.
 
 To add a harness, implement the frozen `Adapter` in
 `scripts/harness_compat/adapters/<name>.py`, export `ADAPTER`, and register its name in

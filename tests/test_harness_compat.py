@@ -19,9 +19,11 @@ from scripts.harness_compat.contract import (
     Result,
     Sandbox,
     VerifiedSet,
+    evidence_file,
 )
 from scripts.harness_compat.evidence import adapter_digest, reusable_evidence
-from scripts.harness_compat.framework import run_pytest
+from scripts.harness_compat.framework import check_bump, run_pytest
+from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.runner import classify_routes
 from scripts.harness_compat.select import newest_in_range, plan_bump, select_candidates
 
@@ -124,6 +126,98 @@ class ArtifactAdapter:
         staged.parent.mkdir(parents=True, exist_ok=True)
         staged.write_text('{"proved": true}\n')
         return Result(self.name, version, "green", (Check("proof", "pass"),))
+
+
+class EvidenceOnlyAdapter:
+    name = "claude"
+    probe = "unavailable:probe"
+    stub_help = ""
+    green_tests = ("proof",)
+    consistency_tests: tuple[str, ...] = ()
+    expected_skips: ClassVar[dict[str, str]] = {}
+    expected_routes: frozenset[tuple[str, str]] = frozenset()
+    ignorable_routes: frozenset[tuple[str, str]] = frozenset()
+
+    def discover(self) -> list[str]:
+        return ["3.0.0"]
+
+    def verified(self, root: Path) -> VerifiedSet:
+        return VerifiedSet("range", floor="2.0.0", ceiling="3.0.0")
+
+    def install(self, sb: Sandbox, version: str) -> Path:
+        return sb.bin_dir / version
+
+    def version_line(self, version: str) -> str:
+        return version
+
+    def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
+        changed = []
+        for version in greens:
+            path = evidence_file(root, self.name, version)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"placeholder": true}\n')
+            changed.append(path.relative_to(root))
+        return changed
+
+    def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+        return Result(self.name, version, "green", (Check("proof", "pass"),))
+
+
+def _evidence_only_repo(root: Path) -> None:
+    source = root / "scripts/harness_compat"
+    adapters = source / "adapters"
+    adapters.mkdir(parents=True)
+    (source / "contract.py").write_text("contract\n")
+    (adapters / "claude.py").write_text("adapter\n")
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "compat@example.invalid")
+    _git(root, "config", "user.name", "Compat")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "source")
+
+
+def test_evidence_only_bump_skips_probe_and_rejects_other_changes(tmp_path: Path) -> None:
+    _evidence_only_repo(tmp_path)
+    adapter = EvidenceOnlyAdapter()
+    assert adapter.apply_bump(tmp_path, ["3.0.0"]) == [
+        Path("tests/fixtures/harness_compat/claude/3.0.0.json")
+    ]
+    assert not adapter.verified(tmp_path).admits("3.0.0")
+    assert check_bump(adapter, tmp_path, ["3.0.0"]) == []
+    (tmp_path / "extra.txt").write_text("unexpected\n")
+    assert "evidence-only bump changed unrelated files" in " ".join(
+        check_bump(adapter, tmp_path, ["3.0.0"])
+    )
+
+
+def test_framework_replaces_placeholder_evidence_and_reports_ceiling(tmp_path: Path) -> None:
+    _evidence_only_repo(tmp_path)
+    summary = runner.run_harness(
+        EvidenceOnlyAdapter(), tmp_path, publish=True, run_url="https://example.invalid/run/1"
+    )
+    assert summary["published"] is True
+    assert summary["evidence_only"] is True
+    assert summary["greens"] == ["3.0.0"]
+    document = json.loads(evidence_file(tmp_path, "claude", "3.0.0").read_text())
+    result = Result(
+        "claude",
+        "3.0.0",
+        "green",
+        (Check("proof", "pass"),),
+        adapter_digest=summary["adapter_digest"],
+    )
+    assert document == {**result.to_evidence(), "run_url": "https://example.invalid/run/1"}
+    assert "placeholder" not in document
+    assert subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines() == ["tests/fixtures/harness_compat/claude/3.0.0.json"]
+    report = prepare_publication(summary, tmp_path / "summary.json")
+    assert report.pr_needed is True
+    assert "Compatibility ceiling was NOT raised" in report.pr_body
 
 
 def test_green_candidate_artifact_is_composed_and_staged(

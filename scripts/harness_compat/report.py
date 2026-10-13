@@ -43,6 +43,7 @@ def build_report(
     run_url: str,
     routes: Iterable[Route] = (),
     admitted_versions: Iterable[str] = (),
+    evidence_only: bool = False,
 ) -> PublishReport:
     """Build one rolling PR/issue report; inconclusive results cause neither."""
     if any(result.harness != harness for result in results):
@@ -60,13 +61,17 @@ def build_report(
     if any(result.verdict == "red" and result.version in admitted for result in failing):
         labels.append("admitted-regression")
 
+    pr_body = _body(f"Qualified {harness} releases", green, run_url=run_url, routes=ordered_routes)
+    if evidence_only:
+        pr_body += (
+            "\n\nCompatibility ceiling was NOT raised. This PR records evidence only; "
+            "a human decides whether to raise the ceiling."
+        )
     return PublishReport(
         harness=harness,
         pr_needed=bool(green) and not inconclusive,
         pr_title=f"chore(compat): update {harness} compatibility evidence",
-        pr_body=_body(
-            f"Qualified {harness} releases", green, run_url=run_url, routes=ordered_routes
-        ),
+        pr_body=pr_body,
         issue_action=(
             "none" if inconclusive else "upsert" if failing else "close" if green else "none"
         ),

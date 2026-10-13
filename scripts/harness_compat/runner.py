@@ -22,6 +22,7 @@ from .contract import (
 )
 from .evidence import adapter_digest, reusable_evidence, write_evidence
 from .framework import check_bump, run_pytest
+from .probe import evidence_only_bump
 from .sandbox import make_sandbox
 from .select import newest_in_range, plan_bump, select_candidates
 
@@ -99,8 +100,10 @@ def _qualify(
         try:
             if bump:
                 try:
-                    adapter.apply_bump(root, [version])
-                    problems = check_bump(adapter, root, [version])
+                    changed = adapter.apply_bump(root, [version])
+                    _, problems = evidence_only_bump(adapter, root, [version], changed)
+                    if not problems:
+                        problems = check_bump(adapter, root, [version])
                 except Exception as exc:
                     problems = [f"bump failed: {exc}"]
                 if problems:
@@ -164,16 +167,28 @@ def _compose(
     publish: bool,
     evidence_results: list[Result],
     run_url: str,
-) -> tuple[list[str], bool, bool]:
+) -> tuple[list[str], bool, bool, bool]:
     try:
         with _worktree(root) as tree, make_sandbox(adapter.name) as sandbox:
             artifacts.copy_into(tree)
             changed = adapter.apply_bump(tree, greens)
             if stray := artifacts.stray_files(tree, changed):
-                return stray, False, False
+                return stray, False, False, False
+            evidence_only, problems = evidence_only_bump(adapter, tree, greens, changed)
+            if problems:
+                return problems, False, False, False
             problems = check_bump(adapter, tree, greens)
             if problems:
-                return problems, any("timed out" in problem.lower() for problem in problems), False
+                return (
+                    problems,
+                    any("timed out" in problem.lower() for problem in problems),
+                    False,
+                    False,
+                )
+            evidence_paths = [
+                write_evidence(tree, result, run_url).relative_to(tree)
+                for result in evidence_results
+            ]
             patch_before_tests = tracked_patch(tree)
             checks = run_pytest(
                 tree,
@@ -188,20 +203,18 @@ def _compose(
             ]
             if tracked_patch(tree) != patch_before_tests:
                 problems.append("consistency tests changed tracked files")
-            problems.extend(artifacts.stray_files(tree, changed))
+            problems.extend(artifacts.stray_files(tree, [*changed, *evidence_paths]))
             if problems:
-                return problems, any(check.status == "error" for check in checks), False
+                return problems, any(check.status == "error" for check in checks), False, False
             if publish:
-                for result in evidence_results:
-                    write_evidence(tree, result, run_url)
                 try:
                     stage_composed(tree, root)
                 except Exception as exc:
-                    return [f"staging failed: {exc}"], True, False
-                return [], False, True
-            return [], False, False
+                    return [f"staging failed: {exc}"], True, False, False
+                return [], False, True, evidence_only
+            return [], False, False, evidence_only
     except Exception as exc:
-        return [f"composed bump failed: {exc}"], False, False
+        return [f"composed bump failed: {exc}"], False, False, False
 
 
 def _run_with_artifacts(
@@ -261,9 +274,14 @@ def _run_with_artifacts(
     pre_inconclusive = any(result.verdict == "inconclusive" for result in results)
     pre_inconclusive |= bool(watch and watch["verdict"] == "inconclusive")
     if artifact_conflicts:
-        problems, compose_inconclusive, published = artifact_conflicts, False, False
+        problems, compose_inconclusive, published, evidence_only = (
+            artifact_conflicts,
+            False,
+            False,
+            False,
+        )
     elif greens:
-        problems, compose_inconclusive, published = _compose(
+        problems, compose_inconclusive, published, evidence_only = _compose(
             adapter,
             root,
             greens,
@@ -275,7 +293,7 @@ def _run_with_artifacts(
             run_url=run_url,
         )
     else:
-        problems, compose_inconclusive, published = [], False, False
+        problems, compose_inconclusive, published, evidence_only = [], False, False, False
     if problems:
         rows.append(
             {
@@ -313,6 +331,7 @@ def _run_with_artifacts(
         "issues": issues if not inconclusive else [],
         "inconclusive": inconclusive,
         "published": published,
+        "evidence_only": evidence_only,
         "run_url": run_url,
     }
 

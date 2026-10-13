@@ -44,6 +44,7 @@ def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishR
         run_url=summary["run_url"],
         routes=routes,
         admitted_versions=admitted,
+        evidence_only=bool(summary.get("evidence_only")),
     )
     recovered = bool(watch and watch["verdict"] == "green")
     if summary["inconclusive"]:
