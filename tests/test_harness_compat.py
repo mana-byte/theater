@@ -25,6 +25,7 @@ from scripts.harness_compat.evidence import adapter_digest, reusable_evidence
 from scripts.harness_compat.framework import check_bump, run_pytest
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.runner import classify_routes
+from scripts.harness_compat.sandbox import make_sandbox
 from scripts.harness_compat.select import newest_in_range, plan_bump, select_candidates
 
 
@@ -357,3 +358,36 @@ def test_run_pytest_aggregates_file_directory_class_and_parameter_selectors(tmp_
     )
     assert expected[0].status == "skip"
     assert expected[0].detail == "2 skipped"
+
+
+def test_sandbox_keeps_unix_socket_paths_short(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with make_sandbox("codex") as sb:
+        if Path("/tmp").is_dir():
+            assert sb.root.is_relative_to(Path("/tmp").resolve())
+        assert sb.root == sb.root.resolve()
+        assert sb.env["TMPDIR"] == str(sb.root / "t")
+        socket = (
+            sb.evidence_dir
+            / "0.162.100"
+            / sb.home.name
+            / ".codex/sockets"
+            / f"app-server-{'0' * 32}.sock"
+        )
+        assert len(os.fsencode(socket)) < 100
+        assert len(os.fsencode(sb.tmux_socket)) < 100
+
+    long_root = tmp_path / ("x" * 120)
+
+    def long_temp(*args: object, **kwargs: object) -> str:
+        long_root.mkdir()
+        return str(long_root)
+
+    monkeypatch.setattr("scripts.harness_compat.sandbox.tempfile.mkdtemp", long_temp)
+    with (
+        pytest.raises(RuntimeError, match="tmux AF_UNIX socket path is too long"),
+        make_sandbox("codex"),
+    ):
+        pass
+    assert not long_root.exists()
