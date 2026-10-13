@@ -97,6 +97,7 @@ def test_claude_qualify_calls_framework(
     calls: list[tuple[str, ...]] = []
 
     def fake_run(root, nodeids, **kwargs):
+        assert "ANTHROPIC_API_KEY" not in kwargs["env"]
         calls.append(tuple(nodeids))
         status = "pass" if tuple(nodeids) == ADAPTER.consistency_tests else "fail"
         return tuple(Check(nodeid, status, "proof failed") for nodeid in nodeids)

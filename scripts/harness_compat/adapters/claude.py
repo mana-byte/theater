@@ -182,6 +182,8 @@ class ClaudeAdapter:
             "HARNESS_COMPAT_TMUX_SOCKET": str(sb.tmux_socket),
             "HARNESS_COMPAT_EVIDENCE_DIR": str(sb.evidence_dir),
         }
+        # Claude asks for confirmation when ANTHROPIC_API_KEY is set, even if it is a dummy.
+        env.pop("ANTHROPIC_API_KEY", None)
         try:
             notes = changelog_hints(
                 version, github.raw_file("anthropics/claude-code", "main", "CHANGELOG.md")
