@@ -75,7 +75,11 @@ def _gate(root: Path) -> tuple[str, str | None]:
         for node in ast.walk(probe)
         if isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
     )
-    values = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
+    values = {
+        keyword.arg: ast.literal_eval(keyword.value)
+        for keyword in call.keywords
+        if keyword.arg in {"floor", "upper"}
+    }
     floor = ".".join(map(str, values["floor"]))
     ceiling = values.get("upper")
     return floor, ".".join(map(str, ceiling)) if ceiling is not None else None

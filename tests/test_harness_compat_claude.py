@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -14,22 +15,35 @@ from scripts.harness_compat.contract import Check, InstallFailed
 from scripts.harness_compat.sandbox import make_sandbox
 
 
-def test_claude_evidence_only_bump_is_idempotent(tmp_path: Path) -> None:
+def test_claude_name_policy_and_optional_upper(tmp_path: Path) -> None:
     source = tmp_path / "theater/harness/builtin/plugins/claude/compatibility.py"
     source.parent.mkdir(parents=True)
     source.write_text(
         "def probe_claude_hooks(context):\n"
-        "    return _probe_claude(context, floor=(2, 1, 119), policy='p', upper=(3, 0, 0))\n"
+        "    return _probe_claude(context, floor=(2, 1, 119), policy=_POLICY)\n"
     )
     assert ADAPTER.verified(tmp_path).floor == "2.1.119"
-    assert ADAPTER.verified(tmp_path).ceiling == "3.0.0"
+    assert ADAPTER.verified(tmp_path).ceiling is None
+
+
+def test_claude_real_gate_and_evidence_only_bump(tmp_path: Path) -> None:
+    real_source = (
+        Path(__file__).resolve().parents[1]
+        / "theater/harness/builtin/plugins/claude/compatibility.py"
+    )
+    source = tmp_path / "theater/harness/builtin/plugins/claude/compatibility.py"
+    source.parent.mkdir(parents=True)
+    shutil.copy2(real_source, source)
+    gate = ADAPTER.verified(tmp_path)
+    assert gate.floor == "2.1.119" and gate.ceiling == "3.0.0"
+    assert ADAPTER.version_line("2.1.296") == "2.1.296 (Claude Code)"
     changed = ADAPTER.apply_bump(tmp_path, ["3.0.0"])
     assert changed == [Path("tests/fixtures/harness_compat/claude/3.0.0.json")]
     assert ADAPTER.apply_bump(tmp_path, ["3.0.0"]) == []
     evidence = json.loads((tmp_path / changed[0]).read_text())
     assert evidence["harness"] == "claude" and evidence["version"] == "3.0.0"
     assert ADAPTER.verified(tmp_path).evidenced == frozenset({"3.0.0"})
-    assert source.read_text().count("upper=(3, 0, 0)") == 1
+    assert source.read_bytes() == real_source.read_bytes()
 
 
 def test_claude_seed_config_uses_realpath(tmp_path: Path) -> None:
