@@ -6,9 +6,10 @@ import ast
 import json
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
+from typing import ClassVar
 
 from .. import framework, github
 from ..contract import (
@@ -95,7 +96,7 @@ class ClaudeAdapter:
         "tests/test_hook_compatibility.py::test_claude_hook_version_range"
         "[3.0.0 (Claude Code)-False]",
     )
-    expected_skips = MappingProxyType({})
+    expected_skips: ClassVar[Mapping[str, str]] = MappingProxyType({})
     expected_routes = frozenset(
         {("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens"), ("GET", "/v1/models")}
     )
