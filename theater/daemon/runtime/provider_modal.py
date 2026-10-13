@@ -9,6 +9,7 @@ from __future__ import annotations
 def provider_modal_gate(daemon):
     """Compose the gate for one daemon; provider routes only, never native."""
     from theater.constants.observation import SCREEN_CAPTURE_MAX_BYTES
+    from theater.constants.refusals import NEXT_AWAITING_DECISION
 
     async def check(participant_id: str) -> None:
         from theater.harness import HARNESSES, normalize
@@ -63,7 +64,8 @@ def provider_modal_gate(daemon):
                 f"the terminal of {participant_id!r} is showing a {reading.kind.value} "
                 "dialog; submitting text would press its selected answer — not "
                 "delivering; answer or dismiss the dialog in the provider terminal, "
-                "then retry"
+                "then retry",
+                details={"next": NEXT_AWAITING_DECISION},
             )
         if reading.kind is not ScreenKind.PROMPT or (
             reading.confidence is not ScreenConfidence.HIGH

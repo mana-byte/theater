@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from theater.constants.refusals import NEXT_HUMAN_PRESENT
 from theater.daemon.controls._common import QUEUE_ORIGIN_SEND
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.dispatch import TEMPORARY_REFUSALS
@@ -61,7 +62,10 @@ class MessageControls(ControlHost):
             and job.state == JobState.CRASHED
             and job.error_code == "human_present"
         ):
-            raise HumanPresent(job.result or "human present at provider delivery")
+            raise HumanPresent(
+                job.result or "human present at provider delivery",
+                details={"next": NEXT_HUMAN_PRESENT},
+            )
         queued = any(
             operation.delivery_phase is ControlDeliveryPhase.QUEUED
             for operation in self._store.control_operations_for_job(job.handle)

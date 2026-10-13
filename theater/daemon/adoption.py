@@ -196,7 +196,10 @@ class AdoptionService:
             raise DepthExceeded(
                 f"adoption would place the deepest node of {target.id!r}'s subtree at "
                 f"depth {deepest}, over the cap of {rails.depth_cap}; adopt a shallower "
-                "sibling, or raise [rails] depth_cap in the config"
+                "sibling, or raise [rails] depth_cap in the config",
+                details={
+                    "next": "adopt a shallower sibling, or ask the operator to raise depth_cap"
+                },
             )
         if caller.parent_id is None:
             merged = _live_subtree_count(self._daemon.store, caller.id) + _live_subtree_count(
@@ -206,7 +209,11 @@ class AdoptionService:
                 raise BudgetExceeded(
                     f"adoption would merge the two trees into {merged} live participants, "
                     f"over the budget of {rails.budget}; retire participants first or raise "
-                    "[rails] budget in the config"
+                    "[rails] budget in the config",
+                    details={
+                        "next": "ask the user to retire participants, or the operator to raise "
+                        "[rails] budget"
+                    },
                 )
 
 

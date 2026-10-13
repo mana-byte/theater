@@ -58,7 +58,7 @@ def job_entry(job: Mapping[str, object]) -> dict:
     if job.get("state") in ("crashed", "killed") and not entry.get("error"):
         result = job.get("result")
         if isinstance(result, str) and result:
-            entry["error"] = result
+            entry["error"] = _bounded(result)
     presence = entry.get("human_presence")
     if isinstance(presence, Mapping):
         if presence.get("state") == "absent" and not presence.get("protected"):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from theater.constants.refusals import NEXT_AWAITING_DECISION
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.busy import BusyAction, BusyOperation, BusyRefusal, busy_refusal
 from theater.daemon.controls.routing import ControlRoute
@@ -166,7 +167,8 @@ class ActivityControls(ControlHost):
             raise AwaitingDecision(
                 f"participant {participant_id!r} is waiting for a human to answer "
                 f"a native {snapshot.pending_interaction.kind.value}; only the "
-                "native UI may answer it — not Theater, not the caller"
+                "native UI may answer it — not Theater, not the caller",
+                details={"next": NEXT_AWAITING_DECISION},
             )
         refusal = self._busy_action(participant_id, snapshot, exclude=exclude)
         if refusal is None:

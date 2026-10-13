@@ -10,6 +10,7 @@ from theater.constants.daemon import (
     BUS_KIND_JOB_AWAIT_END,
     BUS_KIND_JOB_AWAIT_START,
     SEND_SUPERSEDED_ERROR_CODE,
+    TMUX_RESTART_JOB_ERROR_CODE,
 )
 
 # Definitions re-exported by the methods facade; runtime reads the facade for legacy patches.
@@ -32,6 +33,7 @@ from theater.constants.observation import (
     COMPLETION_UNVERIFIED_CODE,
     RESCUE_CODE,
     TURN_FAILED_CODE,
+    UNDELIVERED_CODE,
 )
 from theater.constants.response_contract import STRUCTURED_UNABLE_TO_PARSE
 from theater.daemon.awaiting import (
@@ -72,11 +74,12 @@ def _await_announce_after() -> float:
 
 
 _JOB_ERROR_MESSAGES = {
-    "tmux_restarted": (
+    TMUX_RESTART_JOB_ERROR_CODE: (
         "The terminal server restarted and this child is gone; resume it with "
-        "spawn_session(resume=<id>); the theater-recover-tmux skill explains."
+        'spawn_session(resume=<id>), where <id> is the handle up to "#"; the '
+        "theater-recover-tmux skill explains."
     ),
-    "prompt_never_seen": (
+    UNDELIVERED_CODE: (
         "Two turns ended without this prompt being seen; read_transcript before re-sending, "
         "since it may never have arrived."
     ),

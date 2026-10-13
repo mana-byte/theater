@@ -111,8 +111,9 @@ participant-id reading: awaiting the child's id returns that first task, not lat
 Await each send's own handle.
 
 Each entry carries handle, state (running/done/crashed/killed), participant_status
-(observed independently, possibly working after departure) and await_reason; error_code
-and finished_at appear once set; running entries carry quiet_s, seconds of output silence.
+(observed independently, possibly working after departure) and await_reason; error_code,
+error (what happened and what to do) and finished_at appear once set; running entries
+carry quiet_s, seconds of output silence.
 human_presence (state, protected, reason) appears only while it is not a plain absence.
 await_reason is one of: job_terminal, presence_released,
 awaiting_input (a running job needs input; terminal state takes precedence), already_absent,
@@ -371,10 +372,10 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         "delivery_uncertain" (it may have reached the target or be launching; never assume
         it did not), "finished" (with `state`), or "not_cancellable".
 
-        Too late? Work a direct child already received stops with interrupt_session (or
-        send(if_busy="replace")); a launched spawn stops only with terminate_session, after
-        asking the user. A message a peer already received cannot be withdrawn: send it a
-        correction.
+        Too late? A direct child's work, including a launched spawn's task, stops with
+        interrupt_session (or send(if_busy="replace")); removing the child itself takes
+        terminate_session, after asking the user. A message a peer already received cannot
+        be withdrawn: send it a correction.
         """
         return await tools.cancel_job(session, handle=handle)
 
@@ -421,9 +422,10 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         is the daemon's, and it is the thing to tell the user rather than
         retrying. Empty fields are omitted, and a transport or runtime_host shared by
         several capabilities is lifted into `capability_route`. `active_turn` and
-        `settings` are reported only for natively wired sessions; elsewhere they are
-        absent even mid-turn, so read status from list_participants. Steering
-        (if_busy="amend") and settings updates need native wiring, chosen at spawn.
+        `settings` are reported only while a natively wired session's runtime is
+        connected; elsewhere they are absent even mid-turn, so read status from
+        list_participants. Steering (if_busy="amend") and settings updates need native
+        wiring, chosen at spawn.
 
         target: the participant's stable id or current live name.
         """
@@ -474,8 +476,8 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         A child without a worktree has no worktree or branch to delete.
 
         The kill cannot be undone, but the child's session context survives:
-        spawn_session(resume=<its id>) starts a new child from it, while its row is
-        dead and trusted.
+        spawn_session(resume=<its id>) starts a new child from it while
+        list_participants(include_dead=true) shows its resume_state as resumable.
         """
         return await tools.terminate_session(session, target=target, forget=forget)
 
@@ -719,8 +721,8 @@ def build(
         Loading a play's master skill starts that play with you as master
         (play_start reports it) and commits you to it: it lasts as long as you
         live, and every spawn you make attaches one position your own position
-        may give (whoami: play.spawn_options). Do so only when the user chooses
-        you. Inside a live play, or above one, it returns the text without
+        may give (whoami: play.spawn_options). Load a master skill only when the
+        user asked for that play. Inside a live play, or above one, it returns the text without
         starting anything.
         """
         return await tools.load_skill(session, name=name)
@@ -866,8 +868,8 @@ def build(
         it) is full, or a send to yourself while you are working; with
         `transcript_untrusted` or `transcript_identity_lost` (transcript needs
         binding); with `human_present` for if_busy="refuse" or a send to yourself; and
-        with `awaiting_decision` for if_busy="refuse" while the target has an open
-        approval or trust dialog that only a human can answer.
+        with `awaiting_decision` for if_busy="refuse" or "amend" while the target has an
+        open approval, trust or question dialog that only a human can answer.
         """
         return await tools.send_prompt(
             session,
@@ -957,8 +959,8 @@ def build(
         values you did not ask for. With `keys` (at most 128) it returns
         {"entries": {key: value, ...}, "truncated"}; keys_only=false forces values
         for a scan, keys_only=true forces metadata for specific keys. Entries are ordered
-        by key. One page returns at most ~4 MiB encoded; when truncated is true, an
-        `after_key` is present: pass it to continue after the last returned key. A
+        by key. One page returns at most ~4 MiB encoded; when truncated is true and entries
+        were returned, an `after_key` is present: pass it to continue after the last key. A
         legacy entry too large to return reports oversized_digest, oversized_bytes and a
         nullable oversized_key: skip it with after_key only when non-null, else stop and
         report it; delete by digest or clear only when cleanup is intended.
@@ -1047,8 +1049,8 @@ def build(
         agent that made each change.
 
         One timeline per path, newest first. Each point carries clipped
-        task/result (the task is your original prompt, without Theater's
-        response_format guidance), outcome, one `sha` string (`before → after`, with
+        task/result (the requester's task, without Theater's response_format
+        guidance), outcome, one `sha` string (`before → after`, with
         `-` for missing and `?` for unavailable), a ``segment`` that ``recall_read``
         expands, and, for job points, `participant_id` and its live `name` (null once
         it died): send to the name while it lives, or spawn_session(resume=<id>).

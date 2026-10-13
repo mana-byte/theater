@@ -11,6 +11,7 @@ from theater.constants.daemon import BUS_KIND_SEND_REFUSED
 
 # Definition re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
+from theater.constants.refusals import NEXT_HUMAN_PRESENT
 from theater.daemon.rpc.params import (
     _require,
     _serialized_response_format,
@@ -252,7 +253,10 @@ async def _send(daemon, params: dict) -> dict:
             and job.state == JobState.CRASHED
             and job.error_code == "human_present"
         ):
-            raise HumanPresent(job.result or "human present at provider delivery")
+            raise HumanPresent(
+                job.result or "human present at provider delivery",
+                details={"next": NEXT_HUMAN_PRESENT},
+            )
         if any(
             operation.delivery_phase is ControlDeliveryPhase.QUEUED
             for operation in daemon.store.control_operations_for_job(job.handle)

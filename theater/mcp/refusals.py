@@ -23,6 +23,7 @@ _CAUSES = (RemoteError, TheaterError, ConnectionError, TimeoutError, EOFError)
 _RETRYABLE: dict[str, bool | str] = {
     "busy": "when idle",
     "human_present": "after the human leaves",
+    "awaiting_decision": "after a human answers the dialog",
     DAEMON_UNAVAILABLE: "after checking",
 }
 
