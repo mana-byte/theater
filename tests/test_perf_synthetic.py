@@ -47,20 +47,38 @@ def _write(writer, path: Path, rate: float, count: int):
     return writer.write_records(path, rate, stop=threading.Event(), count=count)
 
 
+class _FakeStop:
+    """A stop event whose wait advances a fake clock, so the schedule is exact under any load."""
+
+    def __init__(self, now: list[float]) -> None:
+        self.now = now
+
+    def is_set(self) -> bool:
+        return False
+
+    def wait(self, timeout: float) -> bool:
+        self.now[0] += timeout
+        return False
+
+
 def test_records_are_stamped_at_write_and_rate_is_honored(writer, tmp_path: Path) -> None:
     path = tmp_path / ".synth" / "p1.jsonl"
-    before = time.time()
-    stats = _write(writer, path, rate=40.0, count=21)
-    after = time.time()
+    now = [0.0]
+    stats = writer.write_records(
+        path,
+        40.0,
+        stop=_FakeStop(now),
+        count=21,
+        clock=lambda: 1_000.0 + now[0],
+        monotonic=lambda: now[0],
+    )
     records = [json.loads(line) for line in path.read_text().splitlines()]
     assert [r["seq"] for r in records] == list(range(21))
     assert all(r["type"] == "assistant" and r["text"] for r in records)
-    stamps = [r["ts"] for r in records]
-    assert before <= stamps[0] and stamps[-1] <= after and stamps == sorted(stamps)
     # Stamped at write, not precomputed: gaps follow the 25 ms schedule.
-    assert 0.8 * 0.5 <= stamps[-1] - stamps[0] <= 1.3 * 0.5
+    assert [r["ts"] for r in records] == pytest.approx([1_000.0 + i * 0.025 for i in range(21)])
     assert stats.written == 21 and stats.skipped == 0
-    assert 0.8 * 40 <= stats.achieved_rate <= 1.2 * 40
+    assert stats.achieved_rate == pytest.approx(40.0)
 
 
 def test_zero_rate_creates_an_empty_stream_and_idles(writer, tmp_path: Path) -> None:

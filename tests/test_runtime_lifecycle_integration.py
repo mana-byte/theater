@@ -750,11 +750,10 @@ async def test_fork_opens_the_exact_parent_session_then_attaches_the_ui_to_its_r
         runtime = d.runtime_manager.get(fork.id)
         assert runtime.state.sent == ["fork work"]
         assert fork_binding.lifecycle is RuntimeLifecyclePhase.ACTIVE
-        # The parent's identity is untouched by the fork.
-        assert (
-            d.store.get_runtime_binding(parent.id).native_session_id
-            == parent_binding.native_session_id
-        )
+        # The parent's identity is untouched by the fork; a dead parent's binding may already be
+        # torn down by the daemon, so only a surviving one is compared.
+        survivor = d.store.get_runtime_binding(parent.id)
+        assert survivor is None or survivor.native_session_id == parent_binding.native_session_id
     finally:
         for pid_owner in (parent, fork):
             if pid_owner is not None:
