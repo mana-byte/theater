@@ -39,10 +39,12 @@ know that they are load-bearing *because* of this constraint.
 
 ## Dev commands
 
-Run from the repo root. This project uses `uv`.
+Run from the repo root. This project uses `uv`. The full test suite is run via
+the Makefile only — never bare `pytest`:
 
 ```sh
-uv run pytest                 # full suite (asyncio_mode = auto)
+make test                     # full suite, parallel across cores (pytest-xdist)
+make test-serial              # full suite in one process (flake debugging)
 uv run pytest tests/test_x.py # one file
 uv run pytest --cov           # coverage gate (fail_under = 80); NOT in addopts
 uv run ruff check             # lint
