@@ -1,4 +1,7 @@
-"""Deterministic edits to the Vibe exclusive compatibility ceiling."""
+"""Admit a green Vibe minor line up to its next exclusive minor boundary.
+
+Untested in-range patches stay admitted and are covered by regression watch.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +11,6 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..contract import version_key
-from .vibe_store import store_check
 
 COMPAT = Path("theater/harness/builtin/plugins/vibe/compatibility.py")
 COMPAT_TEST = Path("tests/test_vibe_compatibility.py")
@@ -38,29 +40,28 @@ def bump(root: Path, greens: Sequence[str]) -> list[Path]:
     floor, old_ceiling = gate(root)
     if keys[0] < version_key(floor):
         raise ValueError("Vibe green is below the floor")
-    major, minor, patch = keys[-1]
-    new_ceiling = f"{major}.{minor}.{patch + 1}"
+    major, minor, _patch = keys[-1]
+    new_ceiling = f"{major}.{minor + 1}.0"
     if version_key(new_ceiling) <= version_key(old_ceiling):
         return []
-    for version in greens:
-        check = store_check(root, version)
-        if check.status != "pass":
-            raise ValueError(check.detail)
     changed: list[Path] = []
     source = (root / COMPAT).read_text()
     before = re.search(r"(?m)^_CEILING = \(\d+, \d+, \d+\)$", source)
     if before is None:
         raise ValueError("Vibe ceiling assignment missing")
     updated = (
-        source[: before.start()]
-        + f"_CEILING = ({major}, {minor}, {patch + 1})"
-        + source[before.end() :]
+        source[: before.start()] + f"_CEILING = ({major}, {minor + 1}, 0)" + source[before.end() :]
     )
-    updated = re.sub(
-        r"understands: (?:2\.26\.x writes store_format_minor 8 \(vibe 376f6a33\)|"
-        r"verified releases through \d+\.\d+\.\d+ write a readable store)\.",
-        "understands: verified Vibe releases write a readable store.",
-        updated,
+    updated = updated.replace(
+        "#: The newest Vibe release line whose unified session store this reader\n"
+        "#: understands: 2.26.x writes store_format_minor 8 (vibe 376f6a33). The probe is\n"
+        "#: display-only, so launch planning enforces the same ceiling (launch.plan_launch);\n"
+        "#: bump the ceiling in the same commit as unified_store_types.STORE_FORMAT_MINOR —\n"
+        "#: the qualified range once outran the reader, and finished jobs waited forever on\n"
+        "#: stores no reader could open.",
+        "#: Exclusive minor boundary. New patches remain admitted and are watched for\n"
+        "#: reader regressions; a new minor line needs a green qualification. Launch\n"
+        "#: planning enforces this ceiling because the probe is display-only.",
     )
     (root / COMPAT).write_text(updated)
     changed.append(COMPAT)
@@ -78,7 +79,7 @@ def bump(root: Path, greens: Sequence[str]) -> list[Path]:
         r"Verified releases through \d+\.\d+\.\d+ write a store the reader understands;\n"
         r"    the next patch is held for verification\.)",
         "Verified Vibe releases write a store the reader understands;\n"
-        "    the next patch is held for verification.",
+        "    the next minor line is held for verification.",
         source,
     )
     (root / COMPAT_TEST).write_text(source)

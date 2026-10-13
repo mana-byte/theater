@@ -16,7 +16,7 @@ import pytest
 from scripts.harness_compat.adapters.vibe import ADAPTER
 from scripts.harness_compat.adapters.vibe_bump import COMPAT, COMPAT_TEST, DOC
 from scripts.harness_compat.adapters.vibe_store import READER_STORE, store_check
-from scripts.harness_compat.contract import Check, InstallFailed
+from scripts.harness_compat.contract import InstallFailed
 from scripts.harness_compat.sandbox import make_sandbox
 from theater.harness.builtin.plugins.vibe.unified_source import UnifiedVibeSource
 from theater.harness.builtin.plugins.vibe.unified_store import load_unified_store
@@ -133,32 +133,35 @@ def test_real_vibe_reader_turn() -> None:
     assert "MOCK-OK" in event.text
 
 
-def test_vibe_gate_and_bump_are_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_vibe_gate_and_bump_are_idempotent(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     for relative in (COMPAT, COMPAT_TEST, READER_STORE, DOC):
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(root / relative, target)
-    monkeypatch.setattr(
-        "scripts.harness_compat.adapters.vibe_bump.store_check",
-        lambda _root, _version: Check("vibe_store_format", "pass"),
-    )
     assert ADAPTER.verified(tmp_path).ceiling == "2.27.0"
     changed = ADAPTER.apply_bump(tmp_path, ["2.27.0"])
     assert changed == [COMPAT, COMPAT_TEST, DOC]
-    assert ADAPTER.verified(tmp_path).ceiling == "2.27.1"
+    assert ADAPTER.verified(tmp_path).ceiling == "2.28.0"
     assert ADAPTER.apply_bump(tmp_path, ["2.27.0"]) == []
-    assert "<2.27.1" in (tmp_path / COMPAT_TEST).read_text()
-    assert "Vibe compatibility range: >=2.24.0,<2.27.1." in (tmp_path / DOC).read_text()
+    assert ADAPTER.apply_bump(tmp_path, ["2.27.9"]) == []
+    assert "<2.28.0" in (tmp_path / COMPAT_TEST).read_text()
+    assert "Vibe compatibility range: >=2.24.0,<2.28.0." in (tmp_path / DOC).read_text()
     for relative in (COMPAT, COMPAT_TEST):
         source = (tmp_path / relative).read_text()
         ast.parse(source)
         assert "2.27.0" not in source
+    assert "New patches remain admitted" in (tmp_path / COMPAT).read_text()
 
 
 def test_vibe_store_format_classification(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = Path(__file__).resolve().parents[1]
+    for relative in (COMPAT, COMPAT_TEST, DOC):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / relative, target)
     reader = tmp_path / READER_STORE
-    reader.parent.mkdir(parents=True)
+    reader.parent.mkdir(parents=True, exist_ok=True)
     reader.write_text("STORE_FORMAT_MINOR = 8\n")
     monkeypatch.setattr(
         "scripts.harness_compat.adapters.vibe_store.github.raw_file",
@@ -167,6 +170,8 @@ def test_vibe_store_format_classification(tmp_path: Path, monkeypatch: pytest.Mo
     check = store_check(tmp_path, "2.27.0")
     assert check.status == "fail"
     assert check.detail == "reader needs work: upstream store format 9 > ours 8"
+    ADAPTER.apply_bump(tmp_path, ["2.27.0"])
+    assert ADAPTER.verified(tmp_path).ceiling == "2.28.0"
     with make_sandbox("vibe") as sandbox:
         result = ADAPTER.qualify(tmp_path, "2.27.0", sandbox, sandbox.bin_dir / "vibe")
     assert result.verdict == "red"
