@@ -318,10 +318,11 @@ async def test_skill_tools_round_trip_through_the_daemon(daemon):
     assert [skill["name"] for skill in listed["skills"]] == [
         "theater-configure",
         "theater-debate",
+        "theater-delegate",
         "theater-recover-tmux",
     ]
     assert all("content" not in skill for skill in listed["skills"])
-    [hierarchy] = listed["plays"]
+    hierarchy, pair = listed["plays"]
     assert hierarchy["master"] == "hierarchy/master"
     assert hierarchy["disposable"] == ["hierarchy/member"]
     assert [position["name"] for position in hierarchy["positions"]] == [
@@ -329,6 +330,8 @@ async def test_skill_tools_round_trip_through_the_daemon(daemon):
         "hierarchy/lead",
         "hierarchy/member",
     ]
+    assert pair["master"] == "pair/reviewer"
+    assert pair["disposable"] == ["pair/builder"]
     assert _payload(await mcp.call_tool("list_skills", {"play": "hierarchy"}))["plays"] == [
         hierarchy
     ]
@@ -350,6 +353,7 @@ async def test_a_disabled_skill_is_hidden_from_list_and_refused_on_load(theater_
         listed = _payload(await mcp.call_tool("list_skills", {}))
         assert [skill["name"] for skill in listed["skills"]] == [
             "theater-debate",
+            "theater-delegate",
             "theater-recover-tmux",
         ]
 

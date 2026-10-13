@@ -184,7 +184,9 @@ custom skills, so a workflow written once works from any of your agents.
 - `theater-debate` — challenge a decision with a second model.
 - `theater-configure` — set up or personalize Theater.
 - `theater-recover-tmux` — recover sessions after a tmux restart.
+- `theater-delegate` — hand a task to a builder and reviewer pair and keep chatting.
 - `hierarchy` — a play: a master runs a light track (members) or a heavy track (contracts, leads), with a debate on either when a design question is open.
+- `pair` — a play: a builder and an independent reviewer debate to agreement in a shared worktree.
 
 **Hand a skill to another agent.** Name it in `skills=[...]` on `spawn_session`
 or `send`: Theater appends its instructions after your task, so the receiver

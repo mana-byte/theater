@@ -1,0 +1,7 @@
+description = "Build one unit of work with a builder and an independent reviewer who debate to agreement in a shared worktree. The reviewer is the play master: attach its card when spawning it and never load it in your own chat. Start it through the theater-delegate skill."
+master = "reviewer"
+disposable = ["builder"]
+
+[positions]
+reviewer = ["builder"]
+builder = []

@@ -144,7 +144,7 @@ theater/
 │   └── plugins.py      generic loader compatibility facade
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
 │   ├── plays.py        PLAY.toml parsing into immutable play rules
-│   └── builtin/        theater-configure · theater-debate · theater-recover-tmux · hierarchy (play)
+│   └── builtin/        theater-configure · theater-debate · theater-delegate · theater-recover-tmux · hierarchy · pair (plays)
 └── mcp/                server.py (21 agent tools) · session.py · toolsets/
 │   ├── toolsets/       delegation, participants, recall, transcripts, skills
 │   ├── server.py       composition surface — registers @mcp.tool entries
