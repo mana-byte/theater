@@ -161,7 +161,7 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
         tool.name: " ".join(tool.description.split()) for tool in await mcp.list_tools()
     }
 
-    assert "Omission rules are tool-specific" in mcp.instructions
+    assert "final message ends that job" in " ".join(mcp.instructions.split())
     assert "done, crashed, or killed" in descriptions["await_sessions"]
     assert "native JSON value" in descriptions["await_sessions"]
     assert '{"evidence":"none"}' in descriptions["await_sessions"]
@@ -172,16 +172,16 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
     assert "nullable" in descriptions["scratchpad_get"]
     assert "else stop and report it" in descriptions["scratchpad_get"]
     assert "may be combined" in descriptions["scratchpad_delete"]
-    assert "partial text chunks" in descriptions["read_transcript"]
+    assert "partial text chunk" in descriptions["read_transcript"]
     assert "middle_cursor" in descriptions["read_transcript"]
     assert "does not prove the edit was never committed" in descriptions["recall_read"]
     assert "unable_to_parse" in descriptions["await_sessions"]
-    for tool in ("spawn_session", "send"):
-        for preset in CONTRACT_PRESET_NAMES:
-            assert f'{{"$theater": "{preset}"}}' in descriptions[tool], (tool, preset)
-            for field in PRESET_SCHEMAS[preset]["required"]:
-                assert field in descriptions[tool], (tool, preset, field)
-        assert '"custom"' in descriptions[tool]
+    for preset in CONTRACT_PRESET_NAMES:
+        assert f'{{"$theater": "{preset}"}}' in descriptions["spawn_session"], preset
+        for field in PRESET_SCHEMAS[preset]["required"]:
+            assert field in descriptions["spawn_session"], (preset, field)
+    assert '"custom"' in descriptions["spawn_session"]
+    assert "same contract as spawn_session" in descriptions["send"]
 
 
 @pytest.mark.parametrize(
@@ -385,7 +385,6 @@ async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
         "job_handle",
         "response_format",
         "after",
-        "task_kind",
         "skills",
     }
     assert send["properties"]["if_busy"]["default"] == "auto"

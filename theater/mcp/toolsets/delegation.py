@@ -400,15 +400,21 @@ async def scratchpad_get(
 ) -> dict:
     if not session._resolved:
         await session.identify()
+    metadata = keys is None if keys_only is None else keys_only
     result = await session.client.call(
         "scratchpad.get",
         namespace=namespace,
         keys=keys,
         after_key=after_key,
-        keys_only=keys is None if keys_only is None else keys_only,
+        keys_only=metadata,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)
+    # Plugin sidecars read the daemon reply as is; only the agent's copy drops what it echoed.
+    result = {k: v for k, v in result.items() if k != "after_key" or v is not None}
+    if not metadata:
+        result.pop("namespace", None)
+        result.pop("keys", None)
     return result
 
 

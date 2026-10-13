@@ -559,6 +559,17 @@ async def test_scratchpad_get_resolves_defaults_and_forwards(keys, keys_only, ex
     }
 
 
+async def test_scratchpad_get_drops_what_the_daemon_echoes():
+    reply = {"namespace": "plan", "entries": {"k": "v"}, "keys": ["k"], "truncated": False}
+    s = session(**{"scratchpad.get": {**reply, "after_key": None}})
+    got = await tools.scratchpad_get(s, namespace="plan", keys=["k"])
+    assert got == {"entries": {"k": "v"}, "truncated": False}
+
+    s = session(**{"scratchpad.get": {**reply, "entries": [{"key": "k"}], "after_key": "k"}})
+    got = await tools.scratchpad_get(s, namespace="plan")
+    assert got == {**reply, "entries": [{"key": "k"}], "after_key": "k"}
+
+
 async def test_scratchpad_delete_identifies_and_forwards_exact_rpc_arguments():
     s = session(**{"scratchpad.delete": {"namespace": "plan", "deleted": ["abc123"]}})
     got = await tools.scratchpad_delete(

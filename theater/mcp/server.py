@@ -100,7 +100,7 @@ Keep it shorter than your MCP client's timeout. Timeout grants no permission to 
 Returns when ANY target qualifies, preserving input order and returning all entries.
 Presence is gated once, at admission. A target with a human present or unknown at admission
 needs an observed departure (permanent: re-entry does not restore the gate) plus a terminal
-job (done, crashed, killed) or a current awaiting_input status; departure alone never releases
+job (done, crashed, or killed) or a current awaiting_input status; departure alone never releases
 a running job. A target with no human at admission is never gated: a terminal job, or a running
 job whose participant is awaiting_input, qualifies it. Input requests are rechecked on every
 status change. Ids with no job wait only for presence and return at once if unprotected. A

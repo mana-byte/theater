@@ -284,7 +284,6 @@ async def test_a_full_namespace_names_its_oldest_keys_and_lists_without_values(s
 
     listed = await _scratchpad_get(daemon, {"namespace": "full", "keys_only": True})
     assert listed["keys"] == [f"k{i}" for i in range(7)]
-    assert "after_key" not in listed
     assert listed["entries"][0] == {
         "key": "k0",
         "bytes": 3,
@@ -292,5 +291,3 @@ async def test_a_full_namespace_names_its_oldest_keys_and_lists_without_values(s
         "expires_at": 106.0 + 7 * 86_400,
         "actor": None,
     }
-    values = await _scratchpad_get(daemon, {"namespace": "full", "keys": ["k0"]})
-    assert values == {"entries": {"k0": "v"}, "truncated": False}
