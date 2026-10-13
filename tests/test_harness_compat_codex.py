@@ -104,8 +104,12 @@ def test_collector_picks_newest_and_masks_run_values(
         collector._audit_mock_routes(session)
 
 
-def test_qualify_uses_real_proofs_and_rejects_skip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("expected_skip", "verdict"),
+    [(False, "inconclusive"), (True, "green")],
+)
+def test_qualify_accepts_only_the_named_optional_control_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, expected_skip: bool, verdict: str
 ) -> None:
     root = _tree(tmp_path / "tree")
     adapter = codex.ADAPTER
@@ -118,11 +122,16 @@ def test_qualify_uses_real_proofs_and_rejects_skip(
 
     monkeypatch.setattr(codex.subprocess, "run", collect)
     calls: list[tuple[tuple[str, ...], bool]] = []
+    skipped = codex._UI_CONTROL if expected_skip else adapter.green_tests[0]
 
     def run_pytest(root, nodeids, *, env, expected_skips, timeout=900):
         calls.append((tuple(nodeids), "HTTPS_PROXY" in env))
-        status = "skip" if nodeids == adapter.green_tests else "pass"
-        return (Check(nodeids[0], status),)
+        if nodeids == adapter.green_tests:
+            assert expected_skips == adapter.expected_skips
+            return tuple(
+                Check(nodeid, "skip" if nodeid == skipped else "pass") for nodeid in nodeids
+            )
+        return tuple(Check(nodeid, "pass") for nodeid in nodeids)
 
     monkeypatch.setattr(codex.framework, "run_pytest", run_pytest)
     with make_sandbox("codex", root=tmp_path / "sandbox") as sb:
@@ -130,4 +139,4 @@ def test_qualify_uses_real_proofs_and_rejects_skip(
         assert result.evidence_dir == sb.evidence_dir
         assert (sb.evidence_dir / "0.162.1" / "approval.json").is_file()
     assert calls == [(adapter.consistency_tests, True), (adapter.green_tests, False)]
-    assert result.verdict == "inconclusive"
+    assert result.verdict == verdict

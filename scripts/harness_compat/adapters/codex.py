@@ -35,6 +35,10 @@ _CONSISTENCY = (
     "tests/test_codex_native_runtime_proof.py::TestBundleIndexAndAllowlist",
     "tests/test_codex_native_runtime_proof.py::TestIndexValidation",
 )
+_UI_CONTROL = (
+    "tests/test_codex_native_ui_bootstrap_proof.py::"
+    "test_codex_native_ui_starts_a_thread_unattended[update-available-control-False]"
+)
 _GREEN = (
     "tests/test_codex_native_runtime_proof.py::TestNativeSmokeHandshakeAndFraming",
     "tests/test_codex_native_runtime_proof.py::TestNativeSmokeSharedUiSession",
@@ -42,7 +46,11 @@ _GREEN = (
     "tests/test_codex_native_runtime_proof.py::TestNativeSmokeForkReconnectSurvival",
     "tests/test_codex_native_runtime_proof.py::TestNativeSmokeRemoteNecessity",
     "tests/test_codex_native_ui_bootstrap_proof.py::test_codex_native_ui_bootstrap_proof",
-    "tests/test_codex_native_ui_bootstrap_proof.py::test_codex_native_ui_starts_a_thread_unattended",
+    "tests/test_codex_native_ui_bootstrap_proof.py::"
+    "test_codex_native_ui_starts_a_thread_unattended[update-available-True]",
+    _UI_CONTROL,
+    "tests/test_codex_native_ui_bootstrap_proof.py::"
+    "test_codex_native_ui_starts_a_thread_unattended[worktree-of-trusted-repo-True]",
 )
 
 
@@ -97,7 +105,9 @@ class CodexAdapter:
     stub_help = ""
     green_tests = _GREEN
     consistency_tests = _CONSISTENCY
-    expected_skips: ClassVar[dict[str, str]] = {}
+    expected_skips: ClassVar[dict[str, str]] = {
+        _UI_CONTROL: "downloaded binaries may not show Codex's update dialog"
+    }
     # The shared mock sees no Codex traffic; the collector audits its private mock routes.
     # Both proof mocks log calls; bootstrap asserts the exact scripted request count.
     expected_routes: frozenset[tuple[str, str]] = frozenset()
@@ -214,7 +224,7 @@ class CodexAdapter:
             "THEATER_CODEX_NATIVE_SMOKE": "1",
         }
         capture_env = {**sb.offline_env, **common_env}
-        # The UI's update-dialog control needs update-check networking; model calls use local mocks.
+        # The UI's update check may need network; model calls stay on local mocks.
         proof_env = {**sb.env, **common_env}
         try:
             done = subprocess.run(
@@ -254,7 +264,9 @@ class CodexAdapter:
             verdict: Verdict = "inconclusive"
         elif any(check.status == "fail" for check in green):
             verdict = "red"
-        elif any(check.status == "skip" for check in green):
+        elif any(
+            check.status == "skip" and check.name not in self.expected_skips for check in green
+        ) or not any(check.status == "pass" for check in green):
             verdict = "inconclusive"
         else:
             verdict = "green"
