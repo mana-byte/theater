@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -22,6 +23,56 @@ def _nodeid(case: ET.Element) -> str:
     return "::".join([path, *parts[index + 1 :], case.get("name", "")])
 
 
+def _selects(selector: str, nodeid: str) -> bool:
+    return nodeid == selector or any(
+        nodeid.startswith(selector + boundary) for boundary in ("/", "::", "[")
+    )
+
+
+def _case_status(case: ET.Element) -> str:
+    if case.find("failure") is not None:
+        return "failed"
+    if case.find("error") is not None:
+        return "errored"
+    if case.find("skipped") is not None:
+        return "skipped"
+    return "passed"
+
+
+def _check_selector(
+    selector: str, cases: Mapping[str, ET.Element], expected_skips: Mapping[str, str]
+) -> Check:
+    selected = [(nodeid, case) for nodeid, case in cases.items() if _selects(selector, nodeid)]
+    if not selected:
+        return Check(selector, "error", "0 matched; pytest did not report this selector")
+    counts: Counter[str] = Counter()
+    unexpected_skips: list[str] = []
+    for nodeid, case in selected:
+        kind = _case_status(case)
+        counts[kind] += 1
+        if kind == "skipped" and not any(_selects(key, nodeid) for key in expected_skips):
+            unexpected_skips.append(nodeid)
+    detail = ", ".join(
+        f"{counts[label]} {label}"
+        for label in ("passed", "failed", "errored", "skipped")
+        if counts[label]
+    )
+    if counts["failed"]:
+        status: CheckStatus = "fail"
+    elif counts["errored"] or unexpected_skips:
+        status = "error"
+        if unexpected_skips:
+            detail += f"; unexpected skip: {', '.join(unexpected_skips[:3])}"
+    elif counts["passed"] == len(selected):
+        status = "pass"
+    elif counts["skipped"] == len(selected) and selector in expected_skips:
+        status = "skip"
+    else:
+        status = "error"
+        detail += "; selector did not fully pass or skip"
+    return Check(selector, status, detail[:500])
+
+
 def run_pytest(
     root: Path,
     nodeids: Sequence[str],
@@ -30,11 +81,9 @@ def run_pytest(
     expected_skips: Mapping[str, str],
     timeout: float = 900.0,
 ) -> tuple[Check, ...]:
-    """Run ``nodeids`` with pytest inside the tree at ``root``; one Check per node id.
-
-    pass: it passed; fail: it failed; skip: it skipped and ``expected_skips`` names it;
-    error: timeout, collection error, or a skip that ``expected_skips`` does not name.
-    A skip or exit code 77 is never a pass.
+    """Aggregate pytest cases under each file, directory, class, or test selector.
+    Failures win; missing cases, errors, and unexpected skips are errors; all pass is pass.
+    All skip is skip only when the selector is expected; exit 77 is never green.
     """
     if not nodeids:
         return ()
@@ -63,24 +112,7 @@ def run_pytest(
             cases = {_nodeid(case): case for case in ET.parse(xml).iter("testcase")}
         except ET.ParseError as exc:
             return tuple(Check(nodeid, "error", f"invalid junit XML: {exc}") for nodeid in nodeids)
-        checks = []
-        for nodeid in nodeids:
-            case = cases.get(nodeid)
-            if case is None:
-                matches = [value for key, value in cases.items() if key.endswith(nodeid)]
-                case = matches[0] if len(matches) == 1 else None
-            if case is None:
-                checks.append(Check(nodeid, "error", "pytest did not report this node id"))
-            elif (failure := case.find("failure")) is not None:
-                checks.append(Check(nodeid, "fail", (failure.get("message") or "failed")[:500]))
-            elif (error := case.find("error")) is not None:
-                checks.append(Check(nodeid, "error", (error.get("message") or "error")[:500]))
-            elif (skip := case.find("skipped")) is not None:
-                status: CheckStatus = "skip" if nodeid in expected_skips else "error"
-                checks.append(Check(nodeid, status, (skip.get("message") or "skipped")[:500]))
-            else:
-                checks.append(Check(nodeid, "pass"))
-        return tuple(checks)
+        return tuple(_check_selector(selector, cases, expected_skips) for selector in nodeids)
 
 
 def check_bump(adapter: Adapter, root: Path, bumped: Sequence[str]) -> list[str]:

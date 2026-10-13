@@ -300,3 +300,60 @@ def test_run_pytest_maps_skips_and_failures(tmp_path: Path) -> None:
     )
     assert [check.status for check in checks] == ["pass", "fail", "skip", "error"]
     assert all(isinstance(check, Check) for check in checks)
+
+
+def test_run_pytest_aggregates_file_directory_class_and_parameter_selectors(tmp_path: Path) -> None:
+    proofs = tmp_path / "proofs"
+    proofs.mkdir()
+    (proofs / "test_selectors.py").write_text(
+        "import pytest\n"
+        "def test_top(): assert True\n"
+        "class TestBundleIndexAndAllowlist:\n"
+        "    def test_first(self): assert True\n"
+        "    def test_second(self): assert True\n"
+        "@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_param(value): assert value > 0\n"
+    )
+    (tmp_path / "test_skip.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_skip(value): pytest.skip('unavailable')\n"
+    )
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    }
+    file = "proofs/test_selectors.py"
+    selectors = (
+        "proofs",
+        file,
+        f"{file}::TestBundleIndexAndAllowlist",
+        f"{file}::test_param",
+        f"{file}::test_param[1]",
+    )
+    checks = run_pytest(tmp_path, selectors, env=env, expected_skips={}, timeout=30)
+    assert [check.status for check in checks] == ["pass"] * len(selectors)
+    assert [check.detail for check in checks] == [
+        "5 passed",
+        "5 passed",
+        "2 passed",
+        "2 passed",
+        "1 passed",
+    ]
+    unknown = run_pytest(
+        tmp_path, (f"{file}::test_missing",), env=env, expected_skips={}, timeout=30
+    )
+    assert unknown[0].status == "error"
+    unexpected = run_pytest(tmp_path, ("test_skip.py",), env=env, expected_skips={}, timeout=30)
+    assert unexpected[0].status == "error"
+    assert "2 skipped" in unexpected[0].detail
+    expected = run_pytest(
+        tmp_path,
+        ("test_skip.py::test_skip",),
+        env=env,
+        expected_skips={"test_skip.py::test_skip": "known"},
+        timeout=30,
+    )
+    assert expected[0].status == "skip"
+    assert expected[0].detail == "2 skipped"
