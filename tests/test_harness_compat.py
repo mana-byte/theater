@@ -221,6 +221,36 @@ def test_framework_replaces_placeholder_evidence_and_reports_ceiling(tmp_path: P
     assert "Compatibility ceiling was NOT raised" in report.pr_body
 
 
+def test_forced_in_range_candidate_reuses_its_watch_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _evidence_only_repo(tmp_path)
+    calls: list[str] = []
+
+    class InRangeAdapter(EvidenceOnlyAdapter):
+        def verified(self, root: Path) -> VerifiedSet:
+            return VerifiedSet("range", floor="2.0.0", ceiling="4.0.0")
+
+        def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
+            return []
+
+        def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+            calls.append(version)
+            return super().qualify(root, version, sb, binary)
+
+    monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
+    summary = runner.run_harness(InRangeAdapter(), tmp_path, version="3.0.0")
+    assert calls == ["3.0.0"]
+    assert summary["watch"] == summary["results"][0]
+    assert summary["watch_reused"] is True
+    assert summary["watch"]["verdict"] == "green"
+    route = {"method": "POST", "path": "/v1/chat/completions"}
+    summary["results"][0]["routes"] = [route]
+    summary["watch"]["routes"] = [route]
+    report = prepare_publication(summary, tmp_path / "summary.json")
+    assert "`POST /v1/chat/completions` ×1" in report.pr_body
+
+
 def test_green_candidate_artifact_is_composed_and_staged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -377,6 +407,9 @@ def test_sandbox_keeps_unix_socket_paths_short(
         )
         assert len(os.fsencode(socket)) < 100
         assert len(os.fsencode(sb.tmux_socket)) < 100
+        for env in (sb.env, sb.offline_env):
+            assert "ANTHROPIC_API_KEY" not in env
+            assert "OPENAI_API_KEY" not in env
 
     long_root = tmp_path / ("x" * 120)
 

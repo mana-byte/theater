@@ -87,8 +87,6 @@ def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
         "GIT_CONFIG_GLOBAL": os.devnull,
         "PIP_CONFIG_FILE": os.devnull,
         "NPM_CONFIG_CACHE": str(cache_dir / "npm"),
-        "ANTHROPIC_API_KEY": "theater-dummy",
-        "OPENAI_API_KEY": "theater-dummy",
         "NO_PROXY": _LOOPBACK,
         "no_proxy": _LOOPBACK,
     }

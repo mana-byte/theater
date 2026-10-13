@@ -97,6 +97,7 @@ def test_claude_qualify_calls_framework(
     calls: list[tuple[str, ...]] = []
 
     def fake_run(root, nodeids, **kwargs):
+        assert "ANTHROPIC_API_KEY" not in kwargs["env"]
         calls.append(tuple(nodeids))
         status = "pass" if tuple(nodeids) == ADAPTER.consistency_tests else "fail"
         return tuple(Check(nodeid, status, "proof failed") for nodeid in nodeids)
@@ -108,6 +109,6 @@ def test_claude_qualify_calls_framework(
             with pytest.raises(urllib.error.HTTPError):
                 urllib.request.urlopen(sb.mock_base_urls["anthropic"] + "/unexpected")
         result = ADAPTER.qualify(tmp_path, "2.1.296", sb, Path("/fake/claude"))
-    assert calls == [ADAPTER.green_tests[:2], ADAPTER.consistency_tests]
+    assert calls == [ADAPTER.green_tests[:2], ADAPTER.green_tests[2:], ADAPTER.consistency_tests]
     assert result.verdict == verdict
-    assert result.checks[2].status == "skip"
+    assert result.checks[2].status == "fail"

@@ -250,10 +250,14 @@ def _run_with_artifacts(
             break
     watch_version = newest_in_range(adapter, gate)
     watch: dict[str, Any] | None = None
+    watch_reused = False
     if watch_version is not None:
-        with _worktree(root) as tree:
-            watched, routes = _qualify(adapter, tree, watch_version, bump=False)
-        watch = {**watched.to_evidence(), "routes": routes, "run_url": run_url}
+        watch = next((dict(row) for row in rows if row["version"] == watch_version), None)
+        watch_reused = watch is not None
+        if watch is None:
+            with _worktree(root) as tree:
+                watched, routes = _qualify(adapter, tree, watch_version, bump=False)
+            watch = {**watched.to_evidence(), "routes": routes, "run_url": run_url}
     reused_results = [
         Result(
             adapter.name,
@@ -315,7 +319,7 @@ def _run_with_artifacts(
     inconclusive = any(row["verdict"] == "inconclusive" for row in rows)
     inconclusive |= bool(watch and watch["verdict"] == "inconclusive")
     issues = [row for row in rows if row["verdict"] in ("red", "tooling")]
-    if watch and watch["verdict"] in ("red", "tooling"):
+    if watch and not watch_reused and watch["verdict"] in ("red", "tooling"):
         issues.append({**watch, "admitted_regression": watch["verdict"] == "red"})
     return {
         "harness": adapter.name,
@@ -327,6 +331,7 @@ def _run_with_artifacts(
         ],
         "results": rows,
         "watch": watch,
+        "watch_reused": watch_reused,
         "greens": greens,
         "issues": issues if not inconclusive else [],
         "inconclusive": inconclusive,
