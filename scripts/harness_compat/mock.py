@@ -12,7 +12,7 @@ from types import TracebackType
 from typing import Any
 from urllib.parse import urlsplit
 
-from .contract import MOCK_REPLY, MockProtocol, MockReply, RecordedRequest, Route
+from .contract import MOCK_REPLY, MockProtocol, MockReply, MockToolCall, RecordedRequest, Route
 
 #: Routes the mock answers; anything else gets UNHANDLED_STATUS and is recorded as unhandled.
 HANDLED_ROUTES: frozenset[Route] = frozenset(
@@ -31,64 +31,150 @@ def _sse(events: list[dict[str, Any]]) -> str:
     return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events)
 
 
-def _anthropic_message(text: str) -> dict[str, Any]:
+def _anthropic_content(reply: MockReply) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": reply.text}]
+    content.extend(
+        {
+            "type": "tool_use",
+            "id": f"toolu_mock_{index}",
+            "name": call.name,
+            "input": dict(call.arguments),
+        }
+        for index, call in enumerate(reply.tool_calls)
+    )
+    return content
+
+
+def _anthropic_message(reply: MockReply) -> dict[str, Any]:
     return {
         "id": "msg_mock",
         "type": "message",
         "role": "assistant",
         "model": _MODEL,
-        "content": [{"type": "text", "text": text}],
-        "stop_reason": "end_turn",
+        "content": _anthropic_content(reply),
+        "stop_reason": "tool_use" if reply.tool_calls else "end_turn",
         "stop_sequence": None,
         "usage": {"input_tokens": 1, "output_tokens": 1},
     }
 
 
-def _anthropic_stream(text: str) -> str:
-    start = {**_anthropic_message(""), "content": [], "stop_reason": None}
-    return _sse(
+def _anthropic_tool_events(index: int, call: MockToolCall) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {
+                "type": "tool_use",
+                "id": f"toolu_mock_{index - 1}",
+                "name": call.name,
+                "input": {},
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": json.dumps(dict(call.arguments)),
+            },
+        },
+        {"type": "content_block_stop", "index": index},
+    ]
+
+
+def _anthropic_stream(reply: MockReply) -> str:
+    start = {**_anthropic_message(MockReply("")), "content": [], "stop_reason": None}
+    events = [
+        {"type": "message_start", "message": start},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": reply.text},
+        },
+        {"type": "content_block_stop", "index": 0},
+    ]
+    for index, call in enumerate(reply.tool_calls, start=1):
+        events.extend(_anthropic_tool_events(index, call))
+    stop_reason = "tool_use" if reply.tool_calls else "end_turn"
+    events.extend(
         [
-            {"type": "message_start", "message": start},
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            },
-            {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "text_delta", "text": text},
-            },
-            {"type": "content_block_stop", "index": 0},
             {
                 "type": "message_delta",
-                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
                 "usage": {"output_tokens": 2},
             },
             {"type": "message_stop"},
         ]
     )
+    return _sse(events)
 
 
-def _openai_completion(text: str) -> dict[str, Any]:
+def _openai_tool_call(index: int, call: MockToolCall) -> dict[str, Any]:
+    return {
+        "id": f"call_mock_{index}",
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": json.dumps(dict(call.arguments)),
+        },
+    }
+
+
+def _openai_tool_calls(reply: MockReply) -> list[dict[str, Any]]:
+    return [_openai_tool_call(index, call) for index, call in enumerate(reply.tool_calls)]
+
+
+def _openai_completion(reply: MockReply) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": reply.text}
+    if reply.tool_calls:
+        message["tool_calls"] = _openai_tool_calls(reply)
     return {
         "id": "chatcmpl-mock",
         "object": "chat.completion",
         "created": 1,
         "model": _MODEL,
         "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": "tool_calls" if reply.tool_calls else "stop",
+            }
         ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     }
 
 
-def _openai_stream(text: str) -> str:
+def _openai_stream(reply: MockReply) -> str:
     base = {"id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 1, "model": _MODEL}
-    delta = {"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}
-    stop = {"index": 0, "delta": {}, "finish_reason": "stop"}
+    delta = {
+        "index": 0,
+        "delta": {"role": "assistant", "content": reply.text},
+        "finish_reason": None,
+    }
+    chunks = [{**base, "choices": [delta]}]
+    for index, call in enumerate(reply.tool_calls):
+        tool_delta = {
+            "index": 0,
+            "delta": {
+                "tool_calls": [
+                    {
+                        "index": index,
+                        **_openai_tool_call(index, call),
+                    }
+                ]
+            },
+            "finish_reason": None,
+        }
+        chunks.append({**base, "choices": [tool_delta]})
+    finish_reason = "tool_calls" if reply.tool_calls else "stop"
+    stop = {"index": 0, "delta": {}, "finish_reason": finish_reason}
     usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-    chunks = [{**base, "choices": [delta]}, {**base, "choices": [stop], "usage": usage}]
+    chunks.append({**base, "choices": [stop], "usage": usage})
     return "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
 
 
@@ -139,8 +225,6 @@ class MockServer:
         return {"anthropic": root, "openai": f"{root}/v1"}
 
     def queue(self, protocol: MockProtocol, reply: MockReply) -> None:
-        if reply.tool_calls:
-            raise NotImplementedError("tool-call replies are implemented by the framework stream")
         with self._lock:
             self._replies[protocol].append(reply)
 
@@ -153,10 +237,10 @@ class MockServer:
     def unhandled(self) -> tuple[RecordedRequest, ...]:
         return tuple(request for request in self.requests if not request.handled)
 
-    def _next_text(self, protocol: MockProtocol) -> str:
+    def _next_reply(self, protocol: MockProtocol) -> MockReply:
         with self._lock:
             queue = self._replies[protocol]
-            return queue.popleft().text if queue else MOCK_REPLY
+            return queue.popleft() if queue else MockReply(MOCK_REPLY)
 
     def _record(self, request: RecordedRequest) -> None:
         with self._lock:
@@ -174,14 +258,14 @@ class MockServer:
         if path == "/v1/messages/count_tokens":
             return 200, "application/json", json.dumps({"input_tokens": 1})
         if path == "/v1/messages":
-            text = self._next_text("anthropic")
+            reply = self._next_reply("anthropic")
             if stream:
-                return 200, "text/event-stream", _anthropic_stream(text)
-            return 200, "application/json", json.dumps(_anthropic_message(text))
-        text = self._next_text("openai")
+                return 200, "text/event-stream", _anthropic_stream(reply)
+            return 200, "application/json", json.dumps(_anthropic_message(reply))
+        reply = self._next_reply("openai")
         if stream:
-            return 200, "text/event-stream", _openai_stream(text)
-        return 200, "application/json", json.dumps(_openai_completion(text))
+            return 200, "text/event-stream", _openai_stream(reply)
+        return 200, "application/json", json.dumps(_openai_completion(reply))
 
 
 def _make_handler(server: MockServer) -> type[BaseHTTPRequestHandler]:
