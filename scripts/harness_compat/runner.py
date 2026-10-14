@@ -367,6 +367,7 @@ def _run_with_artifacts(
         issues.append({**watch, "admitted_regression": watch["verdict"] == "red"})
     return {
         "harness": adapter.name,
+        "gate_kind": gate.kind,
         "adapter_digest": digest,
         "candidates": candidates,
         "reused": sorted(reused),

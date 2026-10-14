@@ -21,7 +21,7 @@ def select_candidates(
     releases: Iterable[str] | None = None,
 ) -> list[str]:
     """Choose stable unproved releases; explicit versions override evidence.
-    Automatic exact selection ignores releases no newer than the oldest admission.
+    Exact gates choose one newest release above the oldest admission.
     """
     if version is not None:
         if not is_stable(version):
@@ -36,11 +36,12 @@ def select_candidates(
     )
     if gate.kind == "exact":
         floor = _exact_floor(gate)
-        return [
+        eligible = [
             item
             for item in pending
             if not gate.admits(item) and (floor is None or version_key(item) > version_key(floor))
-        ][-max_candidates:]
+        ]
+        return eligible[-1:]
     if gate.ceiling is None:
         return []
     return [item for item in pending if version_key(item) >= version_key(gate.ceiling)][
@@ -60,20 +61,19 @@ def newest_in_range(
 
 
 def plan_bump(gate: VerifiedSet, results: Sequence[Result], releases: Iterable[str]) -> list[str]:
-    """Promote greens above an exact gate's floor, or a range's unbroken run of discovered releases.
+    """Promote the newest exact green, or a range's unbroken run of releases.
     A range never skips a release without a green result, whatever the candidate cap or forcing.
     """
     greens = {result.version for result in results if result.verdict == "green"}
     if gate.kind == "exact":
         floor = _exact_floor(gate)
-        return sorted(
-            {
-                version
-                for version in greens - gate.known_bad
-                if floor is None or version_key(version) > version_key(floor)
-            },
-            key=version_key,
-        )
+        eligible = {
+            version
+            for version in greens - gate.known_bad
+            if not gate.admits(version)
+            and (floor is None or version_key(version) > version_key(floor))
+        }
+        return [max(eligible, key=version_key)] if eligible else []
     if gate.ceiling is None:  # nothing to move: greens are evidence only
         planned: list[str] = []
         for result in sorted(results, key=lambda item: version_key(item.version)):

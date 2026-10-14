@@ -45,6 +45,7 @@ def build_report(
     results: Sequence[Result],
     *,
     run_url: str,
+    pr_versions: Iterable[str] | None = None,
     release_runs: Mapping[str, str] | None = None,
     routes: Iterable[Route] = (),
     admitted_versions: Iterable[str] = (),
@@ -57,6 +58,8 @@ def build_report(
     ordered = tuple(sorted(results, key=lambda result: version_key(result.version)))
     ordered_routes = tuple(sorted((method.upper(), path) for method, path in routes))
     green = tuple(result for result in ordered if result.verdict == "green")
+    promoted = frozenset(pr_versions) if pr_versions is not None else None
+    pr_green = tuple(result for result in green if promoted is None or result.version in promoted)
     failing = tuple(result for result in ordered if result.verdict in {"red", "tooling"})
     admitted = frozenset(admitted_versions)
     inconclusive = any(result.verdict == "inconclusive" for result in ordered)
@@ -66,7 +69,7 @@ def build_report(
     if any(result.verdict == "red" and result.version in admitted for result in failing):
         labels.append("admitted-regression")
 
-    pr_body = _pr_body(harness, green, release_runs or {}, run_url)
+    pr_body = _pr_body(harness, pr_green, release_runs or {}, run_url)
     warnings = sorted(set(stale_warnings))
     if warnings:
         limit = 4 if len(warnings) > 5 else 5
@@ -78,7 +81,7 @@ def build_report(
         )
     return PublishReport(
         harness=harness,
-        pr_needed=bool(green) and not inconclusive,
+        pr_needed=bool(pr_green) and not inconclusive,
         pr_title=f"chore(compat): advance {harness} version gate",
         pr_body=pr_body,
         issue_action=(

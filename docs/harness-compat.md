@@ -33,13 +33,15 @@ remain cache-only and never produce a PR.
 
 ## How releases are chosen
 
-- A candidate is a stable upstream release with no reusable cached evidence that is not on the harness's
-  `known_bad` list. `--max-candidates N` (default 5) caps a run; `--version X` forces one release.
-- Exact gates (Codex): the newest unadmitted releases that are newer than the oldest admitted one.
+- A candidate is a stable upstream release without reusable cached evidence and outside the
+  harness's `known_bad` list. `--version X` forces one release.
+- Exact gates (Codex): qualify only the newest unadmitted release above the oldest admission.
+  The PR promotes only the newest green release, including cached greens.
 - Range gates (Claude, OpenCode, Pi, Vibe): the oldest releases at or above the current ceiling,
-  tested in ascending order. The first red stops the run, and the bump goes only to the last
-  contiguous green. A range gate also qualifies its newest admitted release every day: a red
-  result there opens an `admitted-regression` issue, a green one stays silent.
+  tested in ascending order. `--max-candidates N` (default 5) caps the run. The first red stops
+  the run, and the bump goes only to the last contiguous green. A range gate also qualifies its
+  newest admitted release every day: a red result there opens an `admitted-regression` issue,
+  while a green one stays silent.
   A forced `--version` is promoted only when every discovered release below it is proved too.
 - An adapter that changes no gate value produces no PR, including Claude.
 - Cached evidence is reused only while the framework, the adapter, the proof tests

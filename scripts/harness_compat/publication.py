@@ -43,6 +43,7 @@ def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishR
         summary["harness"],
         results,
         run_url=summary["run_url"],
+        pr_versions=summary["greens"] if summary["gate_kind"] == "exact" else None,
         release_runs={row["version"]: row.get("run_url", "") for row in rows},
         routes=routes,
         admitted_versions=admitted,

@@ -132,12 +132,13 @@ def test_exact_candidates_stay_above_oldest_admission() -> None:
         versions=frozenset({"1.5.0", "1.7.0"}),
         known_bad=frozenset({"1.9.0"}),
     )
-    assert select_candidates(adapter, gate, max_candidates=2) == ["1.8.0", "2.0.0"]
-    assert select_candidates(adapter, gate, {"2.0.0"}, max_candidates=2) == ["1.6.0", "1.8.0"]
+    assert select_candidates(adapter, gate, max_candidates=2) == ["2.0.0"]
+    assert select_candidates(adapter, gate, {"2.0.0"}, max_candidates=2) == ["1.8.0"]
+    assert select_candidates(adapter, gate, {"2.0.0"}, version="1.9.0") == ["1.9.0"]
     assert newest_in_range(adapter, gate) is None
     assert select_candidates(
         adapter, VerifiedSet("exact", versions=frozenset()), max_candidates=2
-    ) == ["1.9.0", "2.0.0"]
+    ) == ["2.0.0"]
 
 
 def test_exact_candidates_exhaust_new_releases_then_holes() -> None:
@@ -156,7 +157,46 @@ def test_exact_candidates_exhaust_new_releases_then_holes() -> None:
         Result("codex", "1.6.0", "green"),
         Result("codex", "2.0.0", "green"),
     ]
-    assert plan_bump(gate, results, adapter.discover()) == ["1.6.0", "2.0.0"]
+    assert plan_bump(gate, results, adapter.discover()) == ["2.0.0"]
+    results[-1] = Result("codex", "2.0.0", "red")
+    assert plan_bump(gate, results, adapter.discover()) == ["1.6.0"]
+    assert plan_bump(gate, [results[-1]], adapter.discover()) == []
+
+
+@pytest.mark.parametrize(
+    ("candidate_verdict", "promoted", "issue_action"),
+    [("green", "2.0.0", "close"), ("red", "1.6.0", "upsert")],
+)
+def test_exact_pr_lists_only_promoted_green_and_keeps_red_issue(
+    tmp_path: Path, candidate_verdict: str, promoted: str, issue_action: str
+) -> None:
+    cached = Result("codex", "1.6.0", "green", (Check("proof", "pass"),))
+    latest = Result(
+        "codex",
+        "2.0.0",
+        candidate_verdict,
+        (Check("proof", "fail" if candidate_verdict == "red" else "pass"),),
+    )
+    summary = {
+        "harness": "codex",
+        "gate_kind": "exact",
+        "reused_results": [{**cached.to_evidence(), "run_url": "https://example.invalid/old"}],
+        "results": [{**latest.to_evidence(), "run_url": "https://example.invalid/new"}],
+        "watch": None,
+        "watch_reused": False,
+        "greens": [promoted],
+        "inconclusive": False,
+        "published": True,
+        "run_url": "https://example.invalid/new",
+    }
+    report = prepare_publication(summary, tmp_path / "summary.json")
+    assert report.pr_needed is True
+    expected_run = "new" if promoted == "2.0.0" else "old"
+    assert [line for line in report.pr_body.splitlines() if line.startswith("- ✅")] == [
+        f"- ✅ `{promoted}` — green · [run](https://example.invalid/{expected_run})"
+    ]
+    assert report.issue_action == issue_action
+    assert ("| 2.0.0 | red |" in report.issue_body) is (candidate_verdict == "red")
 
 
 def test_range_promotion_never_skips_an_unproved_release() -> None:
