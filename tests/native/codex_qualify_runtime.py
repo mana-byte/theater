@@ -18,6 +18,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import os
 import platform
 import re
 import shlex
@@ -1126,6 +1127,20 @@ def _audit_mock_routes(session: CaptureSession) -> None:
     print(f"mock routes  : {sorted(routes)}")
 
 
+def _keep_diagnostics(session: CaptureSession) -> None:
+    """On failure, copy the app-server log and every tmux pane where CI can upload them."""
+    target = os.environ.get("THEATER_COMPAT_DIAGNOSTICS")
+    if not target:
+        return
+    directory = Path(target)
+    directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(Exception):
+        shutil.copy(session.app_server.log_path, directory / "app-server.log")
+    for ui in session.tmux_uis:
+        with contextlib.suppress(Exception):
+            (directory / f"{ui.socket_path.name}.pane.txt").write_text(ui.pane())
+
+
 def collect_evidence(
     out: Path,
     *,
@@ -1177,6 +1192,8 @@ def collect_evidence(
             print(f"behaviour    : {sorted(documents)} (redacted)")
             _audit_mock_routes(session)
         finally:
+            if sys.exc_info()[0] is not None:  # the capture failed: keep what explains it
+                _keep_diagnostics(session)
             session.close()
     else:
         print("behaviour    : not captured (pass --capture-behavior to run the stock probe)")

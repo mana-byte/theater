@@ -238,3 +238,20 @@ def test_qualify_accepts_only_the_named_optional_control_skip(
         (adapter.green_tests, False, True),
     ]
     assert result.verdict == verdict
+
+
+def test_collector_keeps_failure_diagnostics_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "server.log"
+    log.write_text("boom")
+    pane = SimpleNamespace(socket_path=tmp_path / "ui.sock", pane=lambda: "dialog")
+    session = SimpleNamespace(app_server=SimpleNamespace(log_path=log), tmux_uis=[pane])
+    monkeypatch.delenv("THEATER_COMPAT_DIAGNOSTICS", raising=False)
+    collector._keep_diagnostics(cast(collector.CaptureSession, session))
+    kept = tmp_path / "kept"
+    assert not kept.exists()
+    monkeypatch.setenv("THEATER_COMPAT_DIAGNOSTICS", str(kept))
+    collector._keep_diagnostics(cast(collector.CaptureSession, session))
+    assert (kept / "app-server.log").read_text() == "boom"
+    assert (kept / "ui.sock.pane.txt").read_text() == "dialog"

@@ -295,6 +295,7 @@ class CodexAdapter:
             "THEATER_CODEX_NATIVE_BIN": str(binary),
             "THEATER_CODEX_NATIVE_SMOKE": "1",
             "THEATER_COMPAT_MOCK_LOG": str(mock_log),
+            **{k: v for k, v in os.environ.items() if k == "THEATER_COMPAT_DIAGNOSTICS"},
         }
         capture_env = {**sb.offline_env, **common_env}
         # The UI's update check may need network; model calls stay on local mocks.

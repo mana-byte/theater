@@ -103,6 +103,9 @@ jobs:
       - name: Install tmux
         if: steps.select.outputs.run == 'true'
         run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Allow unprivileged user namespaces
+        if: steps.select.outputs.run == 'true'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Sync project
         if: steps.select.outputs.run == 'true'
         run: uv sync --locked --all-packages --group dev
@@ -110,6 +113,8 @@ jobs:
         id: compat
         if: steps.select.outputs.run == 'true'
         continue-on-error: true
+        env:
+          THEATER_COMPAT_DIAGNOSTICS: ${{ runner.temp }}/compat-diagnostics
         run: |
           args=(run --harness "$HARNESS" --publish --run-url "$RUN_URL" \
             --summary-json "$RUNNER_TEMP/compat-summary.json")
@@ -174,6 +179,13 @@ jobs:
           if [[ -n "$number" ]]; then
             gh issue close "$number" --comment "The latest conclusive qualification is green."
           fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && steps.select.outputs.run == 'true'
+        with:
+          name: compat-diagnostics-${{ matrix.harness }}
+          path: ${{ runner.temp }}/compat-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Preserve qualification result
         if: steps.select.outputs.run == 'true' && steps.compat.outcome == 'failure'
         run: exit 1
