@@ -13,6 +13,7 @@ from pathlib import Path
 from .contract import Adapter, Check, CheckStatus
 from .diagnostics import clean_diagnostic, clip_diagnostic
 from .probe import check_bump_problems
+from .process import run_group
 
 _DETAIL_LIMIT = 600
 
@@ -136,15 +137,7 @@ def run_pytest(
             *nodeids,
         ]
         try:
-            run = subprocess.run(
-                argv,
-                cwd=root,
-                env={**env, "PYTHONPATH": str(root)},
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
+            run = run_group(argv, cwd=root, env={**env, "PYTHONPATH": str(root)}, timeout=timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             detail = clip_diagnostic(str(exc), _DETAIL_LIMIT, tail=True)
             return tuple(Check(nodeid, "error", detail) for nodeid in nodeids)

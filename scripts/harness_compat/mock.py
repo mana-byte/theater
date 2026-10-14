@@ -309,12 +309,28 @@ def _make_handler(server: MockServer) -> type[BaseHTTPRequestHandler]:
             self.send_header("content-type", content_type)
             self.send_header("content-length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            if method != "HEAD":
+                self.wfile.write(data)
 
         def do_GET(self) -> None:
             self._handle("GET")
 
         def do_POST(self) -> None:
             self._handle("POST")
+
+        def do_PUT(self) -> None:
+            self._handle("PUT")
+
+        def do_PATCH(self) -> None:
+            self._handle("PATCH")
+
+        def do_DELETE(self) -> None:
+            self._handle("DELETE")
+
+        def do_HEAD(self) -> None:
+            self._handle("HEAD")
+
+        def do_OPTIONS(self) -> None:
+            self._handle("OPTIONS")
 
     return Handler

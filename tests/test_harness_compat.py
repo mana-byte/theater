@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import ClassVar
@@ -23,7 +24,7 @@ from scripts.harness_compat.contract import (
     evidence_file,
 )
 from scripts.harness_compat.diagnostics import clip_diagnostic
-from scripts.harness_compat.evidence import adapter_digest, reusable_evidence
+from scripts.harness_compat.evidence import _proved, adapter_digest, reusable_evidence
 from scripts.harness_compat.framework import _check_selector, check_bump, run_pytest
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.report import _checks, build_report
@@ -80,13 +81,16 @@ def test_range_policy_evidence_reuse_routes_and_watch(tmp_path: Path) -> None:
         "version": "1.2.0",
         "adapter_digest": digest,
         "verdict": "green",
-        "checks": [],
+        "checks": [{"name": "tests/proof.py::test_real", "status": "pass", "detail": ""}],
     }
     evidence.write_text(json.dumps(document))
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-m", "evidence")
     _git(tmp_path, "checkout", "main")
-    assert reusable_evidence(tmp_path, "vibe", digest, branch="rolling") == {"1.2.0": document}
+    required = ("tests/proof.py::test_real",)
+    reused = reusable_evidence(tmp_path, "vibe", digest, branch="rolling", required=required)
+    assert reused == {"1.2.0": document}
+    assert reusable_evidence(tmp_path, "vibe", digest, branch="rolling") == {}
     gate = VerifiedSet("range", floor="1.0.0", ceiling="1.2.0", known_bad=frozenset({"1.4.0"}))
     adapter = FakeAdapter()
     assert select_candidates(adapter, gate, {"1.2.0"}) == ["1.3.0", "1.5.0"]
@@ -686,3 +690,114 @@ def test_adapter_tooling_verdict_survives_missing_green_checks(tmp_path: Path) -
     result, _ = _qualify(ConsistencyFails(), tmp_path, "1.0.0", bump=False)  # type: ignore[arg-type]
     assert result.verdict == "tooling"
     assert result.checks[0].detail == "table"
+
+
+def test_evidence_reuse_requires_every_declared_proof_to_have_passed() -> None:
+    proof = ("tests/p.py::a", "tests/p.py::b[x]")
+
+    def document(*checks: tuple[str, str]) -> dict[str, object]:
+        return {"checks": [{"name": name, "status": status} for name, status in checks]}
+
+    good = document(("tests/p.py::a", "pass"), ("tests/p.py::b[x]", "pass"), ("extra", "pass"))
+    assert _proved(good, proof, ())
+    assert not _proved(document(), proof, ())  # empty evidence proves nothing
+    assert not _proved(document(("tests/p.py::a", "pass")), proof, ())  # a proof is missing
+    failing = document(("tests/p.py::a", "pass"), ("tests/p.py::b[x]", "pass"), ("c", "fail"))
+    assert not _proved(failing, proof, ())
+    skipped = document(("tests/p.py::a", "pass"), ("tests/p.py::b[x]", "skip"))
+    assert not _proved(skipped, proof, ())  # an undeclared skip is not a proof
+    assert _proved(skipped, proof, {"tests/p.py::b[x]"})  # a declared skip is allowed
+    twice = document(
+        ("tests/p.py::a", "pass"), ("tests/p.py::a", "pass"), ("tests/p.py::b[x]", "pass")
+    )
+    assert not _proved(twice, proof, ())
+    assert not _proved(good, (), ())  # an adapter without proofs cannot vouch for anything
+
+
+def test_adapter_digest_covers_helpers_framework_proof_files_and_fixtures(tmp_path: Path) -> None:
+    class Proof:
+        name = "vibe"
+        green_tests = ("tests/test_proof.py::test_real",)
+        consistency_tests = ("tests/test_table.py",)
+
+    files = {
+        "scripts/harness_compat/contract.py": "c",
+        "scripts/harness_compat/mock.py": "m",
+        "scripts/harness_compat/adapters/vibe.py": "a",
+        "scripts/harness_compat/adapters/vibe_store.py": "h",
+        "tests/test_proof.py": "p",
+        "tests/test_table.py": "t",
+        "tests/native/helper.py": "n",
+        "tests/fixtures/vibe_store/doc.json": "f",
+        "tests/fixtures/harness_compat/vibe/1.0.0.json": "e",
+    }
+    for name, text in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    base = adapter_digest(tmp_path, "vibe", Proof())  # type: ignore[arg-type]
+    for name, original in files.items():
+        (tmp_path / name).write_text("changed")
+        changed = adapter_digest(tmp_path, "vibe", Proof()) != base  # type: ignore[arg-type]
+        # evidence files are outputs, never inputs
+        assert changed is (not name.startswith("tests/fixtures/harness_compat")), name
+        (tmp_path / name).write_text(original)
+    assert adapter_digest(tmp_path, "vibe", Proof()) == base  # type: ignore[arg-type]
+
+
+def test_early_conclusive_adapter_red_is_not_demoted_to_inconclusive(tmp_path: Path) -> None:
+    class StaticFails(FakeAdapter):
+        green_tests = ("tests/proof.py",)
+        expected_skips: ClassVar[dict[str, str]] = {}
+
+        def install(self, sb: Sandbox, version: str) -> Path:
+            return tmp_path / "binary"
+
+        def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+            check = Check("vibe_store_format", "fail", "upstream 9 > ours 8")
+            return Result("vibe", version, "red", (check,))
+
+    result, _ = _qualify(StaticFails(), tmp_path, "2.27.0", bump=False)  # type: ignore[arg-type]
+    assert result.verdict == "red"
+    assert result.checks[0].detail == "upstream 9 > ours 8"
+
+
+def test_run_pytest_timeout_reaps_the_children_it_started(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    (tmp_path / "test_hang.py").write_text(
+        "import os, subprocess, time\n\n\n"
+        "def test_hang():\n"
+        "    child = subprocess.Popen(['sleep', '60'])\n"
+        "    open(os.environ['CHILD_PIDFILE'], 'w').write(str(child.pid))\n"
+        "    time.sleep(60)\n"
+    )
+    env = {**os.environ, "CHILD_PIDFILE": str(pidfile)}
+    (check,) = run_pytest(tmp_path, ["test_hang.py"], env=env, expected_skips={}, timeout=3)
+    assert check.status == "error"
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    os.kill(pid, 9)
+    raise AssertionError("the sleeping child outlived the timed-out pytest run")
+
+
+def _tmux_alive(socket: Path) -> bool:
+    done = subprocess.run(["tmux", "-S", str(socket), "ls"], capture_output=True, check=False)
+    return done.returncode == 0
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
+def test_sandbox_teardown_stops_its_private_tmux_server() -> None:
+    with make_sandbox("vibe") as sb:
+        subprocess.run(
+            ["tmux", "-S", str(sb.tmux_socket), "new-session", "-d", "sleep 60"],
+            capture_output=True,
+            check=True,
+        )
+        socket = sb.tmux_socket
+        assert _tmux_alive(socket)
+    assert not _tmux_alive(socket)

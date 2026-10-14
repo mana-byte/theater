@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
+import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -114,4 +116,17 @@ def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
             offline_env=offline_env,
         )
     finally:
+        _kill_tmux(tmux_socket)
         mock.stop()
+
+
+def _kill_tmux(socket: Path) -> None:
+    """Stop the sandbox's private tmux server so no pane process outlives the run."""
+    if socket.exists():
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["tmux", "-S", str(socket), "kill-server"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )

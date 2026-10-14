@@ -57,10 +57,6 @@ jobs:
     needs: cheap-checks
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
     strategy:
       fail-fast: false
       matrix:

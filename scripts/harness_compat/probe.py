@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .artifacts import tracked_changes, untracked_files
 from .contract import EVIDENCE_ROOT, Adapter, VerifiedSet, is_stable, version_key
+from .process import run_group
 from .stale import stale_references
 
 
@@ -38,14 +39,11 @@ def _probe(adapter: Adapter, root: Path, version: str, stub: Path) -> tuple[bool
     )
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(root), "HOME": str(stub.parent)}
     try:
-        result = subprocess.run(
+        result = run_group(
             [sys.executable, "-c", code, module, function, str(stub)],
             cwd=root,
             env=env,
-            capture_output=True,
-            text=True,
             timeout=30,
-            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, str(exc)

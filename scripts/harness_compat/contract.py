@@ -45,11 +45,10 @@ def version_key(version: str) -> tuple[int, int, int]:
 
 @dataclass(frozen=True, slots=True)
 class VerifiedSet:
-    """What a plugin admits, read from the source tree at a given root.
+    """What a plugin admits: ``exact`` takes ``versions``, ``range`` takes [floor, ceiling).
 
-    ``exact`` admits ``versions``; ``range`` admits ``[floor, ceiling)`` minus ``known_bad``
-    (``ceiling`` is the first release NOT admitted, None = open). ``evidenced`` holds the
-    releases that already have a committed evidence file, whether or not they are admitted.
+    ``ceiling`` is the first release NOT admitted (None = open); ``known_bad`` is never admitted;
+    ``evidenced`` holds releases with a committed evidence file, admitted or not.
     """
 
     kind: Kind
@@ -164,10 +163,10 @@ class MockControl(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Sandbox:
-    """Everything one run may touch; the framework creates it and removes it afterwards.
+    """Everything one run may touch; the framework creates and removes it.
 
-    ``env`` is hermetic but network-capable (installs, ``uv``); ``offline_env`` adds a dead
-    proxy so the CLI under test cannot reach the internet. Neither holds any credential.
+    ``env`` is hermetic but network-capable (installs, ``uv``); ``offline_env`` adds a dead proxy
+    so the CLI under test cannot reach the internet. Neither holds any credential.
     """
 
     root: Path

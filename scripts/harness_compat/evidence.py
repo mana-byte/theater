@@ -5,31 +5,62 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
-from .contract import EVIDENCE_ROOT, Result, evidence_file, is_stable
+from .contract import EVIDENCE_ROOT, Adapter, Result, evidence_file, is_stable
+
+#: Framework modules whose behaviour decides a verdict; any change invalidates reused evidence.
+_CORE = (
+    "contract",
+    "framework",
+    "probe",
+    "process",
+    "runner",
+    "sandbox",
+    "mock",
+    "select",
+    "stale",
+)
 
 
-def adapter_digest(root: Path, harness: str) -> str:
-    """Hash only the frozen contract and this harness's adapter source files."""
-    adapters = root / "scripts/harness_compat/adapters"
-    module = adapters / f"{harness}.py"
-    package = adapters / harness
-    paths = [root / "scripts/harness_compat/contract.py"]
-    if module.is_file():
-        paths.append(module)
+def adapter_digest(root: Path, harness: str, adapter: Adapter | None = None) -> str:
+    """Hash what decides a verdict: framework core, every adapter, proof tests and fixtures."""
+    base = root / "scripts/harness_compat"
+    adapters = sorted((base / "adapters").glob("*.py"))
+    package = base / "adapters" / harness
     if package.is_dir():
-        paths.extend(sorted(package.rglob("*.py")))
-    if len(paths) == 1:
+        adapters.extend(sorted(package.rglob("*.py")))
+    if not any(path.stem == harness or path.stem.startswith(f"{harness}_") for path in adapters):
         raise FileNotFoundError(f"adapter source absent: {harness}")
+    paths = {base / f"{name}.py" for name in _CORE} | set(adapters)
+    paths |= set((root / "tests/native").glob("*.py"))
+    if adapter is not None:
+        paths |= _proof_files(root, adapter)
     digest = hashlib.sha256()
-    for path in sorted(paths):
+    for path in sorted(item for item in paths if item.is_file()):
         digest.update(path.relative_to(root).as_posix().encode())
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _proof_files(root: Path, adapter: Adapter) -> set[Path]:
+    """The test files behind the adapter's selectors plus fixtures named after the harness."""
+    files: set[Path] = set()
+    for selector in (*adapter.green_tests, *adapter.consistency_tests):
+        path = root / selector.split("::", 1)[0].split("[", 1)[0]
+        if path.is_file():
+            files.add(path)
+        elif path.is_dir():
+            files.update(path.rglob("*.py"))
+    fixtures = root / "tests/fixtures"
+    if fixtures.is_dir():
+        for entry in fixtures.glob(f"*{adapter.name}*"):
+            files.update(item for item in ([entry] if entry.is_file() else entry.rglob("*")))
+    return files
 
 
 def _branch_evidence(root: Path, branch: str, harness: str, version: str) -> str | None:
@@ -45,21 +76,54 @@ def _branch_evidence(root: Path, branch: str, harness: str, version: str) -> str
     return result.stdout if result.returncode == 0 else None
 
 
-def _valid(document: Any, harness: str, version: str, digest: str) -> bool:
+def _proved(document: dict[str, Any], required: Sequence[str], skips: Collection[str]) -> bool:
+    """Every required proof is recorded once as a pass (or a declared skip); nothing failed."""
+    checks = document.get("checks")
+    if not isinstance(checks, list) or not required:
+        return False
+    status: dict[str, object] = {}
+    for check in checks:
+        if not isinstance(check, dict) or not isinstance(check.get("name"), str):
+            return False
+        if check["name"] in status:
+            return False
+        status[check["name"]] = check.get("status")
+    if any(value in ("fail", "error") for value in status.values()):
+        return False
+    return all(
+        status.get(selector) == "pass" or (status.get(selector) == "skip" and selector in skips)
+        for selector in required
+    )
+
+
+def _valid(
+    document: Any,
+    harness: str,
+    version: str,
+    digest: str,
+    required: Sequence[str],
+    skips: Collection[str],
+) -> bool:
     return (
         isinstance(document, dict)
         and document.get("harness") == harness
         and document.get("version") == version
         and document.get("adapter_digest") == digest
         and document.get("verdict") == "green"
-        and isinstance(document.get("checks"), list)
+        and _proved(document, required, skips)
     )
 
 
 def reusable_evidence(
-    root: Path, harness: str, digest: str, *, branch: str | None = None
+    root: Path,
+    harness: str,
+    digest: str,
+    *,
+    branch: str | None = None,
+    required: Sequence[str] = (),
+    skips: Collection[str] = (),
 ) -> dict[str, dict[str, Any]]:
-    """Read green evidence on main and a fetched rolling branch with this digest."""
+    """Green evidence on main or a fetched rolling branch that proves every required test."""
     versions: dict[str, dict[str, Any]] = {}
     directory = root / EVIDENCE_ROOT / harness
     if directory.is_dir():
@@ -69,7 +133,7 @@ def reusable_evidence(
                     document = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if _valid(document, harness, path.stem, digest):
+                if _valid(document, harness, path.stem, digest, required, skips):
                     versions[path.stem] = document
     if branch:
         listing = subprocess.run(
@@ -92,7 +156,7 @@ def reusable_evidence(
                     document = json.loads(raw)
                 except ValueError:
                     continue
-                if _valid(document, harness, version, digest):
+                if _valid(document, harness, version, digest, required, skips):
                     versions[version] = document
     return versions
 

@@ -136,6 +136,8 @@ def _qualify(
             )
             if observed.verdict in ("tooling", "inconclusive"):
                 verdict = observed.verdict
+            elif observed.verdict == "red" and any(c.status == "fail" for c in observed.checks):
+                verdict = "red"  # an early conclusive failure needs no further proofs
             elif len(relevant) != len(adapter.green_tests) or any(
                 check.status == "error"
                 or (check.status == "skip" and check.name not in adapter.expected_skips)
@@ -237,8 +239,15 @@ def _run_with_artifacts(
 ) -> dict[str, Any]:
     """Qualify one harness; publish only after the composed tree passes."""
     gate = adapter.verified(root)
-    digest = adapter_digest(root, adapter.name)
-    reused = reusable_evidence(root, adapter.name, digest, branch=evidence_branch)
+    digest = adapter_digest(root, adapter.name, adapter)
+    reused = reusable_evidence(
+        root,
+        adapter.name,
+        digest,
+        branch=evidence_branch,
+        required=adapter.green_tests,
+        skips=adapter.expected_skips,
+    )
     candidates = select_candidates(
         adapter, gate, reused, max_candidates=max_candidates, version=version
     )

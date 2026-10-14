@@ -94,3 +94,19 @@ def test_queued_tool_calls_cover_protocol_shapes_and_unknown_accounting(tmp_path
     lines = requests_path.read_text().splitlines()
     assert len(lines) == 5
     assert json.loads(lines[-1])["handled"] is False
+
+
+def test_every_http_method_is_accounted_for_and_unhandled_ones_get_599(tmp_path: Path) -> None:
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        parsed = urlsplit(server.base_urls["anthropic"])
+        for method in ("PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+            connection = HTTPConnection(parsed.hostname, parsed.port)
+            connection.request(method, "/v1/new-route", b"{}", {"content-type": "application/json"})
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            assert response.status == 599, method
+        seen = {(request.method, request.path) for request in server.unhandled}
+        assert seen == {
+            (method, "/v1/new-route") for method in ("PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+        }
