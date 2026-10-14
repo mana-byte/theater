@@ -96,6 +96,11 @@ def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path)
         assert "const major = Number(versionMatch[1]);" in source
         assert "major === 0 && minor === 85 && patch === 0" in source
         assert "major === 1 && minor === 0 && patch > 0" in source
+        if "function versionAtLeast(" in source:
+            assert "const major = Number(match[1]);" in source
+            assert "const actualMinor = Number(match[2]);" in source
+            assert "const actualPatch = Number(match[3]);" in source
+            assert "return major > 0 || actualMinor > minor" in source
 
 
 def test_qualify_uses_offline_environment_and_maps_errors_to_inconclusive(
