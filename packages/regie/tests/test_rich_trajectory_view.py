@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 
 import pytest
@@ -371,8 +372,9 @@ async def test_tool_operations_are_one_span_so_every_step_is_visible() -> None:
 async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A long rest window, so a loaded CI machine cannot overrun it mid-assertion.
-    monkeypatch.setattr("regie.trajectory.rich.view.TRAJECTORY_DETAIL_SETTLE_SECONDS", 3.0)
+    # An infinite settle window holds the move open, so loading is asserted at a
+    # controlled point, not raced against a real clock; the test then releases it.
+    monkeypatch.setattr("regie.trajectory.rich.view.TRAJECTORY_DETAIL_SETTLE_SECONDS", math.inf)
     app = Host()
     async with app.run_test(size=(120, 40)) as pilot:
         view = await add_records(app)
@@ -381,8 +383,11 @@ async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile(
         loading = panel.query_one("#trajectory-span-detail-loading")
         await wait_until(pilot, lambda: panel.record_id == "r2" and not loading.display, timeout=10)
 
-        await pilot.press("h")
-        assert panel.record_id == "r2" and loading.display  # still moving: not loaded yet
+        view.action_move_span(-1)  # move synchronously: no await to pump the inf settle
+        assert panel.record_id == "r2" and loading.display  # still moving: never settles yet
+
+        monkeypatch.setattr("regie.trajectory.rich.view.TRAJECTORY_DETAIL_SETTLE_SECONDS", 0.01)
+        view._schedule_detail_sync()  # release: let the now-rested cursor settle
         await wait_until(pilot, lambda: panel.record_id == "r1" and not loading.display, timeout=10)
 
 
