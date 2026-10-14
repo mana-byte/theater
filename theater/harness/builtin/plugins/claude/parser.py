@@ -22,6 +22,8 @@ logger = logging.getLogger("theater.harness.claude")
 
 class ClaudeParser:
     _seal: FinalAnswerSeal
+    #: Whether the last parsed record emitted a seal boundary, so its text is not re-projected.
+    _last_seal_emitted: bool = False
 
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         record = self._decode(line)
@@ -49,8 +51,8 @@ class ClaudeParser:
         return ParsedRecord(
             events=events,
             trajectory=tuple(self._trajectory_facts(record, index)),  # type: ignore[attr-defined]
-            # The marker's boundary repeats text its assistant record already projected.
-            trajectory_events=() if events and _is_turn_marker(record) else None,
+            # A seal boundary repeats text its assistant record already projected.
+            trajectory_events=() if self._last_seal_emitted else None,
         )
 
     def _parse_decoded(self, record: dict, index: int, *, clip_text: bool = True) -> list[Event]:
@@ -58,19 +60,25 @@ class ClaudeParser:
         kind = record.get("type")
         message = record.get("message")
         message = message if isinstance(message, dict) else {}
+        self._last_seal_emitted = False
         if (expired := self._seal.observe(record)) is not None and clip_text:
             _report_seal("unavailable", expired)
+        deferred = self._emit_deferred(record, clip_text=clip_text)
+        self._last_seal_emitted = bool(deferred)
 
         if _is_turn_marker(record):
-            return self._seal_boundary(record, ts, index, clip_text=clip_text)
+            boundary = self._seal_boundary(record, ts, index, clip_text=clip_text)
+            self._last_seal_emitted = self._last_seal_emitted or bool(boundary)
+            return deferred + boundary
         if kind == "assistant":
-            return self._assistant(record, message, ts, index, clip_text=clip_text)
+            return deferred + self._assistant(record, message, ts, index, clip_text=clip_text)
         if kind == "user":
-            return self._user(message, ts, index, clip_text=clip_text)
+            return deferred + self._user(message, ts, index, clip_text=clip_text)
         if kind == "system" and record.get("level") == "error":
             err = record.get("error")
             text = err if isinstance(err, str) else json.dumps(err, default=str)
             return [
+                *deferred,
                 Event(
                     kind=EventKind.ERROR,
                     text=clipper(clip_text)(text),
@@ -78,9 +86,20 @@ class ClaudeParser:
                     ts=ts,
                     raw_index=index,
                     turn_end=True,
-                )
+                ),
             ]
-        return []
+        return deferred
+
+    def _emit_deferred(self, record: dict, *, clip_text: bool) -> list[Event]:
+        """Seal a held marker when a later record supplies its chain; drop it on a new turn."""
+        if record.get("type") == "user":
+            self._seal.drop_deferred()
+            return []
+        outcome = self._seal.retry_deferred()
+        if outcome is None:
+            return []
+        sealed, ts, index = outcome
+        return self._boundary_event(sealed, ts, index, clip_text=clip_text)
 
     def _assistant(
         self,
@@ -155,24 +174,29 @@ class ClaudeParser:
     def _seal_boundary(
         self, record: dict, ts: float | None, index: int, *, clip_text: bool
     ) -> list[Event]:
-        """One terminal event, only when the marker's parent chain proves which message ended."""
+        """One terminal event when the chain proves the message, else hold the marker for later."""
         if record.get("isSidechain") is True or not seal_supported(record):
             return []
-        outcome = self._seal.resolve(record)
-        if not isinstance(outcome, Sealed):
-            if clip_text:
-                _report_seal("unavailable", outcome.reason)
-            return []
+        outcome = self._seal.resolve_or_defer(record, ts, index)
+        if isinstance(outcome, Sealed):
+            return self._boundary_event(outcome, ts, index, clip_text=clip_text)
+        if clip_text and outcome.reason != "deferred":
+            _report_seal("unavailable", outcome.reason)
+        return []
+
+    def _boundary_event(
+        self, sealed: Sealed, ts: float | None, index: int, *, clip_text: bool
+    ) -> list[Event]:
         if clip_text:
-            _report_seal("sealed", "empty" if not outcome.raw_text else "text")
+            _report_seal("sealed", "empty" if not sealed.raw_text else "text")
         return [
             Event(
                 kind=EventKind.ASSISTANT,
-                text=clipper(clip_text)(outcome.raw_text),
-                raw_text=outcome.raw_text,
+                text=clipper(clip_text)(sealed.raw_text),
+                raw_text=sealed.raw_text,
                 ts=ts,
                 turn_end=True,
-                turn_id=outcome.message_id,
+                turn_id=sealed.message_id,
                 raw_index=index,
             )
         ]

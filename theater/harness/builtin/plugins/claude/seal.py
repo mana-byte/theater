@@ -10,6 +10,9 @@ from .constants import SEAL_MAX_HOPS, SEAL_MESSAGE_LIMIT, SEAL_MIN_VERSION, SEAL
 
 _VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
+#: Unsealed reasons caused by a record the chain needs not being read yet: retry as more arrive.
+_RETRYABLE = frozenset({"unknown_parent", "incomplete_message"})
+
 
 def seal_supported(record: dict) -> bool:
     """Whether this record's CLI version is verified to write the marker; unknown fails closed."""
@@ -35,6 +38,15 @@ class _Node:
     message_id: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _Deferred:
+    """A marker whose parent chain is not fully read yet; ``ts``/``index`` build its event later."""
+
+    marker: dict
+    ts: float | None
+    index: int
+
+
 class FinalAnswerSeal:
     """Remembers recent records so a marker in a later read can prove which message ended a turn."""
 
@@ -43,11 +55,14 @@ class FinalAnswerSeal:
         #: message id -> {record uuid -> text}; a key means every fragment seen was recorded.
         self._texts: OrderedDict[str, dict[str, str]] = OrderedDict()
         self._awaiting: str | None = None
+        #: At most one marker awaits its late parent records; superseded or dropped, never grown.
+        self._deferred: _Deferred | None = None
 
     def reset(self) -> None:
         self._nodes.clear()
         self._texts.clear()
         self._awaiting = None
+        self._deferred = None
 
     def observe(self, record: dict) -> str | None:
         """Remember one record; returns a reason when a sealed-mode final never got its marker."""
@@ -96,6 +111,31 @@ class FinalAnswerSeal:
             return Unsealed("incomplete_message")
         self._awaiting = None
         return Sealed(message_id, "\n\n".join(self._texts[message_id].values()))
+
+    def resolve_or_defer(self, marker: dict, ts: float | None, index: int) -> Sealed | Unsealed:
+        """Seal now, or hold the marker when its chain needs records not read yet."""
+        outcome = self.resolve(marker)
+        if isinstance(outcome, Unsealed) and outcome.reason in _RETRYABLE:
+            self._deferred = _Deferred(marker, ts, index)
+            return Unsealed("deferred")
+        return outcome
+
+    def retry_deferred(self) -> tuple[Sealed, float | None, int] | None:
+        """Re-resolve a held marker; seal it once its parent records arrive, drop it if lost."""
+        pending = self._deferred
+        if pending is None:
+            return None
+        outcome = self.resolve(pending.marker)
+        if isinstance(outcome, Sealed):
+            self._deferred = None
+            return outcome, pending.ts, pending.index
+        if outcome.reason not in _RETRYABLE:
+            self._deferred = None
+        return None
+
+    def drop_deferred(self) -> None:
+        """Fail closed: a new user turn means the held marker never got its records."""
+        self._deferred = None
 
     def _message_is_whole(self, uuid: str, message_id: str) -> bool:
         """Fragments of one message chain by parentUuid; a seen predecessor outside it bounds it."""

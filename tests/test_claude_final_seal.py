@@ -103,6 +103,27 @@ def test_a_proven_empty_final_is_one_empty_boundary_and_an_unproven_one_is_none(
     assert _boundaries(ClaudeCodeObserver(), [text, _marker("u6", "u5")]) == []
 
 
+def test_a_marker_seals_once_its_out_of_order_parent_records_arrive_later():
+    # Claude sometimes flushes an assistant record whose parentUuid is an attachment written
+    # after the turn_duration marker; the seal must hold the marker and resolve on the later read.
+    asst = _fragment("a1", "late", {"type": "text", "text": "done"})
+    ordered = [
+        _record("u0", None, "user"),
+        asst,
+        _record("att1", "a1", "attachment"),
+        _marker("mk", "att1"),
+        _record("late", "u0", "attachment"),  # supplies a1's parent after the marker
+    ]
+    (end,) = _boundaries(ClaudeCodeObserver(), ordered)
+    assert (end.text, end.turn_id) == ("done", "msg_1")
+
+    # Parent never arrives: fail closed, nothing sealed.
+    assert _boundaries(ClaudeCodeObserver(), ordered[:-1]) == []
+    # A new user turn before the parent arrives drops the held marker (fail closed).
+    superseded = [*ordered[:-1], _record("u9", "att1", "user"), ordered[-1]]
+    assert _boundaries(ClaudeCodeObserver(), superseded) == []
+
+
 def test_unsupported_versions_and_sidechains_never_seal():
     thinking = {"type": "thinking", "thinking": "hm"}
     text = {"type": "text", "text": "answer"}
