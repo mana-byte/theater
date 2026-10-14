@@ -73,8 +73,17 @@ class VibeAdapter:
             "UV_CACHE_DIR": str(sb.root / "uv-cache"),
         }
         try:
+            # Pinned: a runner without Python makes uv fetch the newest one, which has no wheels.
             result = subprocess.run(
-                [uv, "tool", "install", "--no-config", f"mistral-vibe=={version}"],
+                [
+                    uv,
+                    "tool",
+                    "install",
+                    "--no-config",
+                    "--python",
+                    "3.12",
+                    f"mistral-vibe=={version}",
+                ],
                 env=env,
                 capture_output=True,
                 text=True,
