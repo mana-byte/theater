@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -714,7 +715,7 @@ def test_evidence_reuse_requires_every_declared_proof_to_have_passed() -> None:
     assert not _proved(good, (), ())  # an adapter without proofs cannot vouch for anything
 
 
-def test_adapter_digest_covers_helpers_framework_proof_files_and_fixtures(tmp_path: Path) -> None:
+def test_adapter_digest_covers_every_input_the_proofs_run_through(tmp_path: Path) -> None:
     class Proof:
         name = "vibe"
         green_tests = ("tests/test_proof.py::test_real",)
@@ -725,11 +726,15 @@ def test_adapter_digest_covers_helpers_framework_proof_files_and_fixtures(tmp_pa
         "scripts/harness_compat/mock.py": "m",
         "scripts/harness_compat/adapters/vibe.py": "a",
         "scripts/harness_compat/adapters/vibe_store.py": "h",
-        "tests/test_proof.py": "p",
+        "tests/test_proof.py": "from tests.rig import tables\n",
         "tests/test_table.py": "t",
+        "tests/rig/tables.py": "x = 1\n",
+        "tests/conftest.py": "k",
+        "tests/test_other.py": "o",
         "tests/native/helper.py": "n",
         "tests/fixtures/vibe_store/doc.json": "f",
         "tests/fixtures/harness_compat/vibe/1.0.0.json": "e",
+        "theater/harness/builtin/plugins/vibe/unified_store.py": "u",
     }
     for name, text in files.items():
         path = tmp_path / name
@@ -739,8 +744,9 @@ def test_adapter_digest_covers_helpers_framework_proof_files_and_fixtures(tmp_pa
     for name, original in files.items():
         (tmp_path / name).write_text("changed")
         changed = adapter_digest(tmp_path, "vibe", Proof()) != base  # type: ignore[arg-type]
-        # evidence files are outputs, never inputs
-        assert changed is (not name.startswith("tests/fixtures/harness_compat")), name
+        # evidence files are outputs and an unimported test is no input
+        outputs = name.startswith("tests/fixtures/harness_compat") or name == "tests/test_other.py"
+        assert changed is (not outputs), name
         (tmp_path / name).write_text(original)
     assert adapter_digest(tmp_path, "vibe", Proof()) == base  # type: ignore[arg-type]
 
@@ -762,12 +768,12 @@ def test_early_conclusive_adapter_red_is_not_demoted_to_inconclusive(tmp_path: P
     assert result.checks[0].detail == "upstream 9 > ours 8"
 
 
-def test_run_pytest_timeout_reaps_the_children_it_started(tmp_path: Path) -> None:
+def test_run_pytest_timeout_reaps_detached_children_it_started(tmp_path: Path) -> None:
     pidfile = tmp_path / "child.pid"
     (tmp_path / "test_hang.py").write_text(
         "import os, subprocess, time\n\n\n"
         "def test_hang():\n"
-        "    child = subprocess.Popen(['sleep', '60'])\n"
+        "    child = subprocess.Popen(['sleep', '60'], start_new_session=True)\n"
         "    open(os.environ['CHILD_PIDFILE'], 'w').write(str(child.pid))\n"
         "    time.sleep(60)\n"
     )
@@ -791,13 +797,19 @@ def _tmux_alive(socket: Path) -> bool:
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
-def test_sandbox_teardown_stops_its_private_tmux_server() -> None:
+def test_sandbox_teardown_stops_every_tmux_server_and_process_run_from_it() -> None:
     with make_sandbox("vibe") as sb:
-        subprocess.run(
-            ["tmux", "-S", str(sb.tmux_socket), "new-session", "-d", "sleep 60"],
-            capture_output=True,
-            check=True,
+        sockets = [sb.tmux_socket, sb.root / "second.sock"]
+        for socket in sockets:
+            subprocess.run(
+                ["tmux", "-S", str(socket), "new-session", "-d", "sleep 60"],
+                capture_output=True,
+                check=True,
+            )
+            assert _tmux_alive(socket)
+        stray = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", str(sb.root / "marker")],
+            start_new_session=True,
         )
-        socket = sb.tmux_socket
-        assert _tmux_alive(socket)
-    assert not _tmux_alive(socket)
+    assert not any(_tmux_alive(socket) for socket in sockets)
+    assert stray.wait(timeout=10) != 0

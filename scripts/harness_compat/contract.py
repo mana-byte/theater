@@ -47,8 +47,7 @@ def version_key(version: str) -> tuple[int, int, int]:
 class VerifiedSet:
     """What a plugin admits: ``exact`` takes ``versions``, ``range`` takes [floor, ceiling).
 
-    ``ceiling`` is the first release NOT admitted (None = open); ``known_bad`` is never admitted;
-    ``evidenced`` holds releases with a committed evidence file, admitted or not.
+    ``ceiling`` is the first release NOT admitted (None = open); ``known_bad`` is never admitted.
     """
 
     kind: Kind
@@ -56,7 +55,7 @@ class VerifiedSet:
     floor: str | None = None
     ceiling: str | None = None
     known_bad: frozenset[str] = frozenset()
-    evidenced: frozenset[str] = frozenset()
+    evidenced: frozenset[str] = frozenset()  # releases with a committed evidence file
 
     def admits(self, version: str) -> bool:
         if version in self.known_bad:
@@ -163,10 +162,9 @@ class MockControl(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Sandbox:
-    """Everything one run may touch; the framework creates and removes it.
+    """What one run may touch; ``env`` is hermetic but network-capable (installs, ``uv``).
 
-    ``env`` is hermetic but network-capable (installs, ``uv``); ``offline_env`` adds a dead proxy
-    so the CLI under test cannot reach the internet. Neither holds any credential.
+    ``offline_env`` adds a dead proxy so the CLI under test cannot reach the internet.
     """
 
     root: Path

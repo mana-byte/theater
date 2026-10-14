@@ -2,65 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
-from .contract import EVIDENCE_ROOT, Adapter, Result, evidence_file, is_stable
+from .contract import EVIDENCE_ROOT, Result, evidence_file, is_stable
+from .inputs import adapter_digest
 
-#: Framework modules whose behaviour decides a verdict; any change invalidates reused evidence.
-_CORE = (
-    "contract",
-    "framework",
-    "probe",
-    "process",
-    "runner",
-    "sandbox",
-    "mock",
-    "select",
-    "stale",
-)
-
-
-def adapter_digest(root: Path, harness: str, adapter: Adapter | None = None) -> str:
-    """Hash what decides a verdict: framework core, every adapter, proof tests and fixtures."""
-    base = root / "scripts/harness_compat"
-    adapters = sorted((base / "adapters").glob("*.py"))
-    package = base / "adapters" / harness
-    if package.is_dir():
-        adapters.extend(sorted(package.rglob("*.py")))
-    if not any(path.stem == harness or path.stem.startswith(f"{harness}_") for path in adapters):
-        raise FileNotFoundError(f"adapter source absent: {harness}")
-    paths = {base / f"{name}.py" for name in _CORE} | set(adapters)
-    paths |= set((root / "tests/native").glob("*.py"))
-    if adapter is not None:
-        paths |= _proof_files(root, adapter)
-    digest = hashlib.sha256()
-    for path in sorted(item for item in paths if item.is_file()):
-        digest.update(path.relative_to(root).as_posix().encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def _proof_files(root: Path, adapter: Adapter) -> set[Path]:
-    """The test files behind the adapter's selectors plus fixtures named after the harness."""
-    files: set[Path] = set()
-    for selector in (*adapter.green_tests, *adapter.consistency_tests):
-        path = root / selector.split("::", 1)[0].split("[", 1)[0]
-        if path.is_file():
-            files.add(path)
-        elif path.is_dir():
-            files.update(path.rglob("*.py"))
-    fixtures = root / "tests/fixtures"
-    if fixtures.is_dir():
-        for entry in fixtures.glob(f"*{adapter.name}*"):
-            files.update(item for item in ([entry] if entry.is_file() else entry.rglob("*")))
-    return files
+__all__ = ["adapter_digest", "reusable_evidence", "write_evidence"]
 
 
 def _branch_evidence(root: Path, branch: str, harness: str, version: str) -> str | None:
