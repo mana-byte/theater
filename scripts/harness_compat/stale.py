@@ -31,7 +31,7 @@ def _limit_tokens(gate: VerifiedSet) -> set[str]:
 
 
 def _version_match(version: str, line: str) -> re.Match[str] | None:
-    return re.search(rf"(?<![\d.]){re.escape(version)}(?![\d.])", line)
+    return re.search(rf"(?<![\d.]){re.escape(version)}(?!\.?\d)", line)
 
 
 def _code_without_comment(line: str) -> str:

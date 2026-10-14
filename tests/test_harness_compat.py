@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import ClassVar
 
@@ -22,8 +23,9 @@ from scripts.harness_compat.contract import (
     evidence_file,
 )
 from scripts.harness_compat.evidence import adapter_digest, reusable_evidence
-from scripts.harness_compat.framework import check_bump, run_pytest
+from scripts.harness_compat.framework import _check_selector, check_bump, run_pytest
 from scripts.harness_compat.publication import prepare_publication
+from scripts.harness_compat.report import _checks, build_report
 from scripts.harness_compat.runner import classify_routes
 from scripts.harness_compat.sandbox import make_sandbox
 from scripts.harness_compat.select import newest_in_range, plan_bump, select_candidates
@@ -175,12 +177,26 @@ def test_old_limit_scan_finds_only_whole_stale_versions(tmp_path: Path) -> None:
     _limit_repo(tmp_path, "0.99.2", "0.99.1")
     (tmp_path / "gate.txt").write_text("0.99.3\n")
     docs = tmp_path / "docs.txt"
-    docs.write_text("<= 0.99.2; unrelated 10.99.1 and 0.99.10\n")
+    docs.write_text("<= 0.99.2; unrelated 10.99.1 and 0.99.10 and 0.99.1.5\n")
     adapter = LimitAdapter()
     assert stale_references(adapter, tmp_path) == ([], [])
     docs.write_text(docs.read_text() + "stale <= 0.99.1\n")
     assert stale_references(adapter, tmp_path) == (
         ["old limit 0.99.1 remains in docs.txt:2"],
+        [],
+    )
+
+
+def test_old_limit_scan_handles_sentence_final_periods(tmp_path: Path) -> None:
+    _limit_repo(tmp_path, "0.99.2", "0.99.1")
+    (tmp_path / "gate.txt").write_text("0.99.3\n")
+    (tmp_path / "docs.txt").write_text(
+        "qualified releases are 0.85.1-0.99.1.\n"
+        "requires >=0.85.1,<=0.99.1.\n"
+        "historical neighbors 10.99.1, 0.99.10, 0.99.1.5.\n"
+    )
+    assert stale_references(LimitAdapter(), tmp_path) == (
+        ["old limit 0.99.1 remains in docs.txt:1", "old limit 0.99.1 remains in docs.txt:2"],
         [],
     )
 
@@ -494,6 +510,59 @@ def test_run_pytest_maps_skips_and_failures(tmp_path: Path) -> None:
     )
     assert [check.status for check in checks] == ["pass", "fail", "skip", "error"]
     assert all(isinstance(check, Check) for check in checks)
+
+
+def test_failed_pytest_diagnostics_and_report_rows_are_bounded(tmp_path: Path) -> None:
+    (tmp_path / "test_diagnostics.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture\n"
+        "def broken(): raise RuntimeError('setup crash')\n"
+        "def test_fail():\n"
+        "    print('captured output')\n"
+        "    assert False, '\\x1b[31m' + 'X' * 1200 + '\\x1b[0m'\n"
+        "def test_setup(broken): pass\n"
+    )
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    }
+    failed, errored = run_pytest(
+        tmp_path,
+        ("test_diagnostics.py", "test_diagnostics.py::test_setup"),
+        env=env,
+        expected_skips={},
+        timeout=30,
+    )
+    assert failed.status == "fail"
+    assert failed.detail.startswith("1 failed, 1 errored; test_diagnostics.py::test_fail:")
+    assert len(failed.detail) <= 600
+    assert "[31m" not in failed.detail and "#x1B" not in failed.detail
+    assert errored.status == "error"
+    assert "test_diagnostics.py::test_setup:" in errored.detail
+    assert "RuntimeError: setup crash" in errored.detail
+    captured = ET.Element("testcase")
+    ET.SubElement(captured, "failure", message="")
+    ET.SubElement(captured, "system-out").text = "ignored " * 200 + "capture tail"
+    fallback = _check_selector(
+        "test_diagnostics.py::test_capture", {"test_diagnostics.py::test_capture": captured}, {}
+    )
+    assert fallback.status == "fail"
+    assert "test_diagnostics.py::test_capture" in fallback.detail
+    assert "capture tail" in fallback.detail
+
+    rows = (
+        Result("pi", "0.99.2", "red", (failed,)),
+        Result("pi", "0.99.3", "tooling", (Check("mock route", "fail", "Y" * 4000),)),
+    )
+    report = build_report("pi", rows, run_url="local")
+    issue_rows = [line for line in report.issue_body.splitlines() if line.startswith("| 0.99.")]
+    assert len(issue_rows) == 2
+    assert all(len(line) <= 1700 for line in issue_rows)
+    assert "test_diagnostics.py::test_fail" in issue_rows[0]
+    assert "[31m" not in report.issue_body
+    inconclusive = Result("pi", "0.99.4", "inconclusive", (Check("infra", "error", "Z" * 4000),))
+    assert len(_checks(inconclusive)) <= 1600
 
 
 def test_run_pytest_aggregates_file_directory_class_and_parameter_selectors(tmp_path: Path) -> None:

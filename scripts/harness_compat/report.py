@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .contract import Result, Route, version_key
+from .diagnostics import clip_diagnostic
+
+_CHECK_LIMIT = 750
+_ROW_LIMIT = 1600
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,10 +144,22 @@ def _body(
 def _checks(result: Result) -> str:
     if not result.checks:
         return "—"
-    return "<br>".join(
-        _cell(f"{check.name}: {check.status}" + (f" — {check.detail}" if check.detail else ""))
-        for check in result.checks
-    )
+    ordered = sorted(result.checks, key=lambda check: check.status not in ("fail", "error"))
+    rendered = []
+    for check in ordered:
+        prefix = clip_diagnostic(f"{check.name}: {check.status}", 200)
+        detail = (
+            " — "
+            + clip_diagnostic(
+                check.detail,
+                _CHECK_LIMIT - len(prefix) - 3,
+                tail=check.status in ("fail", "error"),
+            )
+            if check.detail
+            else ""
+        )
+        rendered.append(_cell(prefix + detail))
+    return clip_diagnostic("<br>".join(rendered), _ROW_LIMIT)
 
 
 def _cell(value: str) -> str:

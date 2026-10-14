@@ -11,7 +11,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .contract import Adapter, Check, CheckStatus
+from .diagnostics import clean_diagnostic, clip_diagnostic
 from .probe import check_bump_problems
+
+_DETAIL_LIMIT = 600
 
 
 def _nodeid(case: ET.Element) -> str:
@@ -39,6 +42,27 @@ def _case_status(case: ET.Element) -> str:
     return "passed"
 
 
+def _failure_reason(case: ET.Element) -> str:
+    event = case.find("failure")
+    if event is None:
+        event = case.find("error")
+    if event is None:
+        return "no failure element"
+    if message := clean_diagnostic(event.get("message", "")):
+        return message
+    captured = "\n".join(
+        element.text or ""
+        for tag in ("system-out", "system-err")
+        if (element := case.find(tag)) is not None
+    )
+    return captured or event.text or "no captured failure output"
+
+
+def _failure_detail(counts: str, nodeid: str, case: ET.Element) -> str:
+    prefix = f"{counts}; {clip_diagnostic(nodeid, 200)}: "
+    return prefix + clip_diagnostic(_failure_reason(case), _DETAIL_LIMIT - len(prefix), tail=True)
+
+
 def _check_selector(
     selector: str, cases: Mapping[str, ET.Element], expected_skips: Mapping[str, str]
 ) -> Check:
@@ -61,8 +85,6 @@ def _check_selector(
         status: CheckStatus = "fail"
     elif counts["errored"] or unexpected_skips:
         status = "error"
-        if unexpected_skips:
-            detail += f"; unexpected skip: {', '.join(unexpected_skips[:3])}"
     elif counts["passed"] == len(selected):
         status = "pass"
     elif counts["skipped"] == len(selected) and selector in expected_skips:
@@ -70,7 +92,21 @@ def _check_selector(
     else:
         status = "error"
         detail += "; selector did not fully pass or skip"
-    return Check(selector, status, detail[:500])
+    if status in ("fail", "error"):
+        first = next(
+            ((nodeid, case) for nodeid, case in selected if _case_status(case) == "failed"),
+            None,
+        )
+        if first is None:
+            first = next(
+                ((nodeid, case) for nodeid, case in selected if _case_status(case) == "errored"),
+                None,
+            )
+        if first is not None:
+            detail = _failure_detail(detail, *first)
+        elif unexpected_skips:
+            detail += f"; unexpected skip: {unexpected_skips[0]}"
+    return Check(selector, status, clip_diagnostic(detail, _DETAIL_LIMIT))
 
 
 def run_pytest(
@@ -89,7 +125,16 @@ def run_pytest(
         return ()
     with tempfile.TemporaryDirectory(prefix="compat-pytest-") as temporary:
         xml = Path(temporary) / "junit.xml"
-        argv = [sys.executable, "-m", "pytest", "-q", f"--junitxml={xml}", *nodeids]
+        argv = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-o",
+            "junit_logging=out-err",
+            f"--junitxml={xml}",
+            *nodeids,
+        ]
         try:
             run = subprocess.run(
                 argv,
@@ -101,9 +146,10 @@ def run_pytest(
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return tuple(Check(nodeid, "error", str(exc)) for nodeid in nodeids)
+            detail = clip_diagnostic(str(exc), _DETAIL_LIMIT, tail=True)
+            return tuple(Check(nodeid, "error", detail) for nodeid in nodeids)
         if run.returncode not in (0, 1) or not xml.exists():
-            detail = (run.stdout + "\n" + run.stderr)[-1000:].strip()
+            detail = clip_diagnostic(run.stdout + "\n" + run.stderr, _DETAIL_LIMIT - 20, tail=True)
             return tuple(
                 Check(nodeid, "error", f"pytest exit {run.returncode}: {detail}")
                 for nodeid in nodeids
