@@ -5,7 +5,7 @@ import re
 PI_FRONTEND_QUALIFIED_FLOOR = (0, 80, 8)
 PI_FRONTEND_QUALIFIED_HOLE = (0, 85, 0)
 PI_FRONTEND_QUALIFIED_RESUME = (0, 85, 1)
-PI_FRONTEND_QUALIFIED_MAX = (0, 99, 1)
+PI_FRONTEND_QUALIFIED_MAX = (1, 0, 0)
 
 
 def pi_version_text(version: tuple[int, int, int]) -> str:
