@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
+import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from .cleanup import stop_sandbox_processes
 from .contract import Sandbox
 from .mock import MockServer
+from .process import SANDBOX_ENV, new_token
 
 #: Nothing listens here, so a CLI that honours the proxy variables cannot leave the machine.
 _DEAD_PROXY = "http://127.0.0.1:9"
@@ -32,6 +36,24 @@ def _new_temp_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="")).resolve()
 
 
+def _remove_tree(path: Path) -> None:
+    """Delete ``path`` even when a tool left read-only directories; report what stays behind."""
+    stuck: list[str] = []
+
+    def unlock(function: Callable[[str], Any], target: str, error: BaseException) -> None:
+        with contextlib.suppress(OSError):
+            Path(target).parent.chmod(0o700)
+            Path(target).chmod(0o700)
+        try:
+            function(target)
+        except OSError:
+            stuck.append(target)
+
+    shutil.rmtree(path, onexc=unlock)
+    if stuck or path.exists():
+        sys.stderr.write(f"harness-compat: sandbox cleanup left {path} ({len(stuck)} paths)\n")
+
+
 @contextmanager
 def make_sandbox(harness: str, *, root: Path | None = None) -> Iterator[Sandbox]:
     """Create a sandbox under ``root`` (a fresh temp dir by default) and remove it on exit."""
@@ -48,9 +70,9 @@ def make_sandbox(harness: str, *, root: Path | None = None) -> Iterator[Sandbox]
         yield from _sandbox(base, tmux_socket)
     finally:
         if socket_root is not None:
-            shutil.rmtree(socket_root, ignore_errors=True)
+            _remove_tree(socket_root)
         if owned:
-            shutil.rmtree(base, ignore_errors=True)
+            _remove_tree(base)
 
 
 def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
@@ -76,7 +98,9 @@ def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
     mock_requests = evidence_dir / "mock_requests.jsonl"
     mock = MockServer(mock_requests)
     mock.start()
+    token = new_token()
     env = {
+        SANDBOX_ENV: token,
         "HOME": str(home),
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         "TERM": "xterm-256color",
@@ -116,5 +140,5 @@ def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
             offline_env=offline_env,
         )
     finally:
-        stop_sandbox_processes(base, tmux_socket)
+        stop_sandbox_processes(base, token, tmux_socket)
         mock.stop()

@@ -27,6 +27,7 @@ from scripts.harness_compat.contract import (
 from scripts.harness_compat.diagnostics import clip_diagnostic
 from scripts.harness_compat.evidence import _proved, adapter_digest, reusable_evidence
 from scripts.harness_compat.framework import _check_selector, check_bump, run_pytest
+from scripts.harness_compat.process import run_group
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.report import _checks, build_report
 from scripts.harness_compat.runner import _qualify, classify_routes
@@ -101,7 +102,7 @@ def test_range_policy_evidence_reuse_routes_and_watch(tmp_path: Path) -> None:
         Result("vibe", "1.3.0", "green"),
         Result("vibe", "1.5.0", "red"),
     ]
-    assert plan_bump(gate, results) == ["1.2.0", "1.3.0"]
+    assert plan_bump(gate, results, adapter.discover()) == ["1.2.0", "1.3.0"]
     route = RecordedRequest("POST", "/unknown", False, ("messages", "model"), True)
     classified = classify_routes(adapter, results[-1], (route,))
     assert classified.verdict == "tooling"
@@ -140,7 +141,17 @@ def test_exact_candidates_exhaust_new_releases_then_holes() -> None:
         Result("codex", "1.6.0", "green"),
         Result("codex", "2.0.0", "green"),
     ]
-    assert plan_bump(gate, results) == ["1.6.0", "2.0.0"]
+    assert plan_bump(gate, results, adapter.discover()) == ["1.6.0", "2.0.0"]
+
+
+def test_range_promotion_never_skips_an_unproved_release() -> None:
+    gate = VerifiedSet("range", floor="1.0.0", ceiling="1.1.0")
+    releases = ["1.0.0", "1.1.0", "1.1.1", "1.2.0"]
+    assert plan_bump(gate, [Result("x", "1.2.0", "green")], releases) == []  # forced above a gap
+    capped = [Result("x", "1.1.0", "green"), Result("x", "1.2.0", "green")]  # 1.1.1 over the cap
+    assert plan_bump(gate, capped, releases) == ["1.1.0"]
+    full = [*capped, Result("x", "1.1.1", "green")]
+    assert plan_bump(gate, full, releases) == ["1.1.0", "1.1.1", "1.2.0"]
 
 
 class LimitAdapter:
@@ -726,10 +737,13 @@ def test_adapter_digest_covers_every_input_the_proofs_run_through(tmp_path: Path
         "scripts/harness_compat/mock.py": "m",
         "scripts/harness_compat/adapters/vibe.py": "a",
         "scripts/harness_compat/adapters/vibe_store.py": "h",
+        "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["tests"]\n',
         "tests/test_proof.py": "from tests.rig import tables\n",
         "tests/test_table.py": "t",
         "tests/rig/tables.py": "x = 1\n",
-        "tests/conftest.py": "k",
+        "tests/conftest.py": "from tests.rig import fixture_helper\nfrom shipped import pin\n",
+        "tests/rig/fixture_helper.py": "ok = True\n",
+        "tests/shipped.py": "pin = 1\n",
         "tests/test_other.py": "o",
         "tests/native/helper.py": "n",
         "tests/fixtures/vibe_store/doc.json": "f",
@@ -742,6 +756,8 @@ def test_adapter_digest_covers_every_input_the_proofs_run_through(tmp_path: Path
         path.write_text(text)
     base = adapter_digest(tmp_path, "vibe", Proof())  # type: ignore[arg-type]
     for name, original in files.items():
+        if name == "pyproject.toml":  # it only tells the closure where bare imports resolve
+            continue
         (tmp_path / name).write_text("changed")
         changed = adapter_digest(tmp_path, "vibe", Proof()) != base  # type: ignore[arg-type]
         # evidence files are outputs and an unimported test is no input
@@ -768,6 +784,17 @@ def test_early_conclusive_adapter_red_is_not_demoted_to_inconclusive(tmp_path: P
     assert result.checks[0].detail == "upstream 9 > ours 8"
 
 
+def _gone(pid: int) -> bool:
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    os.kill(pid, 9)
+    return False
+
+
 def test_run_pytest_timeout_reaps_detached_children_it_started(tmp_path: Path) -> None:
     pidfile = tmp_path / "child.pid"
     (tmp_path / "test_hang.py").write_text(
@@ -780,15 +807,30 @@ def test_run_pytest_timeout_reaps_detached_children_it_started(tmp_path: Path) -
     env = {**os.environ, "CHILD_PIDFILE": str(pidfile)}
     (check,) = run_pytest(tmp_path, ["test_hang.py"], env=env, expected_skips={}, timeout=3)
     assert check.status == "error"
-    pid = int(pidfile.read_text())
-    for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.1)
-    os.kill(pid, 9)
-    raise AssertionError("the sleeping child outlived the timed-out pytest run")
+    assert _gone(int(pidfile.read_text())), "the sleeping child outlived the timed-out pytest run"
+
+
+def test_run_group_reaps_a_detached_child_after_the_leader_exited(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys\n"
+        "child = subprocess.Popen(['sleep', '60'], start_new_session=True)\n"
+        "open(sys.argv[1], 'w').write(str(child.pid))\n"
+    )
+    argv = [sys.executable, "-c", script, str(pidfile)]
+    assert run_group(argv, cwd=tmp_path, env=os.environ, timeout=30).returncode == 0
+    assert _gone(int(pidfile.read_text())), "the detached child outlived its finished leader"
+
+
+def test_sandbox_removes_read_only_trees() -> None:
+    with make_sandbox("vibe") as sb:
+        locked = sb.config_dir / "plugins" / "pkg"
+        locked.mkdir(parents=True)
+        (locked / "file.txt").write_text("x")
+        (locked / "file.txt").chmod(0o400)
+        locked.chmod(0o500)
+        root = sb.root
+    assert not root.exists()
 
 
 def _tmux_alive(socket: Path) -> bool:
@@ -797,7 +839,8 @@ def _tmux_alive(socket: Path) -> bool:
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
-def test_sandbox_teardown_stops_every_tmux_server_and_process_run_from_it() -> None:
+def test_sandbox_teardown_stops_what_it_owns_and_nothing_else() -> None:
+    sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
     with make_sandbox("vibe") as sb:
         sockets = [sb.tmux_socket, sb.root / "second.sock"]
         for socket in sockets:
@@ -807,9 +850,12 @@ def test_sandbox_teardown_stops_every_tmux_server_and_process_run_from_it() -> N
                 check=True,
             )
             assert _tmux_alive(socket)
-        stray = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)", str(sb.root / "marker")],
-            start_new_session=True,
-        )
-    assert not any(_tmux_alive(socket) for socket in sockets)
-    assert stray.wait(timeout=10) != 0
+        owned = subprocess.Popen(sleeper, env=sb.env, start_new_session=True)
+        bystander = subprocess.Popen([*sleeper, str(sb.root)], start_new_session=True)
+    try:
+        assert not any(_tmux_alive(socket) for socket in sockets)
+        assert owned.wait(timeout=10) != 0  # detached, but it carries the sandbox token
+        assert bystander.poll() is None  # naming the sandbox path is not ownership
+    finally:
+        bystander.kill()
+        bystander.wait()

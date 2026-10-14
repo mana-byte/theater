@@ -312,25 +312,10 @@ def _make_handler(server: MockServer) -> type[BaseHTTPRequestHandler]:
             if method != "HEAD":
                 self.wfile.write(data)
 
-        def do_GET(self) -> None:
-            self._handle("GET")
-
-        def do_POST(self) -> None:
-            self._handle("POST")
-
-        def do_PUT(self) -> None:
-            self._handle("PUT")
-
-        def do_PATCH(self) -> None:
-            self._handle("PATCH")
-
-        def do_DELETE(self) -> None:
-            self._handle("DELETE")
-
-        def do_HEAD(self) -> None:
-            self._handle("HEAD")
-
-        def do_OPTIONS(self) -> None:
-            self._handle("OPTIONS")
+        def __getattr__(self, name: str) -> Any:
+            # Any HTTP method is accounted for, even one the stdlib server has no handler for.
+            if name.startswith("do_"):
+                return lambda: self._handle(name[3:])
+            raise AttributeError(name)
 
     return Handler

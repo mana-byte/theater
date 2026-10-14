@@ -1,16 +1,15 @@
-"""Stop whatever a qualification left running from its sandbox: tmux servers and stray processes."""
+"""Stop what a qualification left running from its sandbox: its tmux servers and owned processes."""
 
 from __future__ import annotations
 
 import contextlib
 import os
-import re
 import stat
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
-from .process import ancestry, descendants, kill_all, process_table
+from .process import SANDBOX_ENV, stop_owned
 
 _SKIPPED_DIRS = frozenset({"node_modules", ".git", "uv-cache", "uv-tools", "npm"})
 
@@ -36,17 +35,8 @@ def stop_tmux_server(socket: Path) -> None:
         )
 
 
-def stop_sandbox_processes(root: Path, *sockets: Path) -> None:
-    """Kill tmux servers on ``sockets`` or any socket under ``root``, then processes run from it."""
+def stop_sandbox_processes(root: Path, token: str, *sockets: Path) -> None:
+    """Kill tmux servers on ``sockets`` or any socket under ``root``, then every owned process."""
     for socket in dict.fromkeys([*(s for s in sockets if s.exists()), *_sockets(root)]):
         stop_tmux_server(socket)
-    if len(root.parts) < 3:  # never match processes by a path as broad as /tmp
-        return
-    table = process_table()
-    needle = re.compile(re.escape(str(root)) + r"(?=/|\s|$)")
-    protected = ancestry(os.getpid(), table)
-    matched = {pid for pid, (_, command) in table.items() if needle.search(command)}
-    victims = set(matched)
-    for pid in matched:
-        victims |= descendants(pid, table)
-    kill_all(victims - protected)
+    stop_owned(SANDBOX_ENV, token)

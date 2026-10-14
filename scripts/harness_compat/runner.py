@@ -18,6 +18,7 @@ from .contract import (
     RecordedRequest,
     Result,
     Verdict,
+    VerifiedSet,
     verdict_from_checks,
 )
 from .evidence import adapter_digest, reusable_evidence, write_evidence
@@ -226,6 +227,25 @@ def _compose(
         return [f"composed bump failed: {exc}"], False, False, False, []
 
 
+def _watch(
+    adapter: Adapter,
+    root: Path,
+    gate: VerifiedSet,
+    releases: list[str],
+    rows: list[dict[str, Any]],
+    run_url: str,
+) -> tuple[dict[str, Any] | None, bool]:
+    """The daily regression watch: reuse a candidate row for the newest admitted release."""
+    version = newest_in_range(adapter, gate, releases)
+    if version is None:
+        return None, False
+    if row := next((dict(item) for item in rows if item["version"] == version), None):
+        return row, True
+    with _worktree(root) as tree:
+        watched, routes = _qualify(adapter, tree, version, bump=False)
+    return {**watched.to_evidence(), "routes": routes, "run_url": run_url}, False
+
+
 def _run_with_artifacts(
     adapter: Adapter,
     root: Path,
@@ -248,8 +268,9 @@ def _run_with_artifacts(
         required=adapter.green_tests,
         skips=adapter.expected_skips,
     )
+    releases = adapter.discover()
     candidates = select_candidates(
-        adapter, gate, reused, max_candidates=max_candidates, version=version
+        adapter, gate, reused, max_candidates=max_candidates, version=version, releases=releases
     )
     rows: list[dict[str, Any]] = []
     results: list[Result] = []
@@ -270,16 +291,7 @@ def _run_with_artifacts(
         rows.append({**result.to_evidence(), "routes": routes, "run_url": run_url})
         if gate.kind == "range" and result.verdict != "green":
             break
-    watch_version = newest_in_range(adapter, gate)
-    watch: dict[str, Any] | None = None
-    watch_reused = False
-    if watch_version is not None:
-        watch = next((dict(row) for row in rows if row["version"] == watch_version), None)
-        watch_reused = watch is not None
-        if watch is None:
-            with _worktree(root) as tree:
-                watched, routes = _qualify(adapter, tree, watch_version, bump=False)
-            watch = {**watched.to_evidence(), "routes": routes, "run_url": run_url}
+    watch, watch_reused = _watch(adapter, root, gate, releases, rows, run_url)
     reused_results = [
         Result(
             adapter.name,
@@ -296,7 +308,7 @@ def _run_with_artifacts(
     ]
     if reused_results and evidence_branch:
         artifacts.add_branch_files(root, evidence_branch)
-    greens = plan_bump(gate, [*reused_results, *results])
+    greens = plan_bump(gate, [*reused_results, *results], releases)
     pre_inconclusive = any(result.verdict == "inconclusive" for result in results)
     pre_inconclusive |= bool(watch and watch["verdict"] == "inconclusive")
     warnings: list[str]
