@@ -35,6 +35,24 @@ _GATE_RE = re.compile(
     re.DOTALL,
 )
 _REFUSED_RE = re.compile(r'@pytest\.mark\.parametrize\("version", \[(?P<versions>[^]]+)\]\)')
+_VERSION_AT_LEAST_RE = re.compile(
+    r"function versionAtLeast\(version: string, minor: number, patch: number\): boolean \{\n"
+    r".*?\n\}",
+    re.DOTALL,
+)
+_VERSION_AT_LEAST = "\n".join(
+    (
+        "function versionAtLeast(version: string, minor: number, patch: number): boolean {",
+        "\tconst match = /^(\\d+)\\.(\\d+)\\.(\\d+)$/.exec(version);",
+        "\tif (match === null) return false;",
+        "\tconst major = Number(match[1]);",
+        "\tconst actualMinor = Number(match[2]);",
+        "\tconst actualPatch = Number(match[3]);",
+        "\treturn major > 0 || actualMinor > minor || "
+        "(actualMinor === minor && actualPatch >= patch);",
+        "}",
+    )
+)
 
 
 def _next_patch(version: str) -> str:
@@ -131,6 +149,10 @@ def _bump_fixture_gate(text: str, old: str, new: str, path: Path) -> str:
         path,
     )
     text = text.replace(r"/^0\.(\d+)\.(\d+)$/", r"/^(\d+)\.(\d+)\.(\d+)$/")
+    if "function versionAtLeast(" in text:
+        text, count = _VERSION_AT_LEAST_RE.subn(lambda _match: _VERSION_AT_LEAST, text, count=1)
+        if count != 1:
+            raise ValueError(f"could not update versionAtLeast in {path}")
     text = text.replace(
         "const minor = Number(versionMatch[1]);\n\tconst patch = Number(versionMatch[2]);",
         "const major = Number(versionMatch[1]);\n"
