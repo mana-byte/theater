@@ -51,6 +51,7 @@ uv run pytest --cov           # coverage gate (fail_under = 80); NOT in addopts
 uv run ruff check             # lint
 uv run ruff format            # format (line-length = 100)
 uv run mypy                   # type check (theater/ only, lenient — no --strict)
+make compat HARNESS=vibe       # dry-run: qualify new upstream CLI releases (docs/harness-compat.md)
 ```
 
 Schema changes (see architecture §5):
@@ -334,5 +335,6 @@ binding no longer holds; sends without play skills never touch that gate.
 
 - [`docs/architecture.md`](docs/architecture.md) — why every piece is shaped this way (the authoritative doc)
 - [`docs/harness-plugins.md`](docs/harness-plugins.md) — writing an adapter
+- [`docs/harness-compat.md`](docs/harness-compat.md) — the daily pipeline that qualifies new upstream harness CLI releases (`scripts/harness_compat/`)
 - [`config.example.toml`](config.example.toml) — every setting at its default
 - `docs/v2_*.md` — where the project is heading (recall, régie)
