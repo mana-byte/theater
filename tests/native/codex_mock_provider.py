@@ -480,6 +480,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _unsupported(self) -> None:
+        # Logging must not turn a mock gap into a different upstream response.
         self.provider.log_compat_request(self.command, self.path, False)
         self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
 
