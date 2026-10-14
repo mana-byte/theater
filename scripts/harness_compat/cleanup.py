@@ -40,6 +40,8 @@ def stop_sandbox_processes(root: Path, *sockets: Path) -> None:
     """Kill tmux servers on ``sockets`` or any socket under ``root``, then processes run from it."""
     for socket in dict.fromkeys([*sockets, *_sockets(root)]):
         stop_tmux_server(socket)
+    if len(root.parts) < 3:  # never match processes by a path as broad as /tmp
+        return
     table = process_table()
     needle = re.compile(re.escape(str(root)) + r"(?=/|\s|$)")
     protected = ancestry(os.getpid(), table)

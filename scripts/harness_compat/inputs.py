@@ -99,7 +99,9 @@ def _tree(directory: Path) -> set[Path]:
     if not directory.is_dir():
         return set()
     return {
-        item for item in directory.rglob("*") if item.is_file() and "__pycache__" not in item.parts
+        item
+        for item in directory.rglob("*")
+        if item.is_file() and "__pycache__" not in item.parts and not item.name.startswith(".")
     }
 
 

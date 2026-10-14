@@ -37,6 +37,9 @@ says so. A human decides whether to raise that ceiling after reviewing the proof
   contiguous green. A range gate also qualifies its newest admitted release every day: a red
   result there opens an `admitted-regression` issue, a green one stays silent.
 - Claude's gate has no ceiling to move, so its green releases produce evidence only.
+- Evidence on the rolling branch is reused only while the framework, the adapter, the proof tests
+  with their imported helpers and conftests, and the harness plugin are unchanged; otherwise the
+  release is qualified again.
 
 ## Reading a PR or an issue
 
@@ -56,6 +59,8 @@ says so. A human decides whether to raise that ceiling after reviewing the proof
   Discovery calls GitHub's API without a token, which is rate limited; Codex falls back to public
   Git tags. No model API key is ever needed: every CLI talks to a local mock with a dummy
   credential inside a throwaway home.
+- Every run kills the processes and tmux servers it started from its sandbox, detached ones
+  included, on success, failure and timeout.
 - `uv run python -m scripts.harness_compat check` only confirms that every adapter reads its gate.
 
 To add a harness, implement the frozen `Adapter` in
