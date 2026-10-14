@@ -61,7 +61,8 @@ says so. A human decides whether to raise that ceiling after reviewing the proof
   Git tags. No model API key is ever needed: every CLI talks to a local mock with a dummy
   credential inside a throwaway home.
 - Every run kills the processes and tmux servers it started from its sandbox, detached ones
-  included, on success, failure and timeout.
+  included, on success, failure and timeout. Ownership is an environment token, so a process
+  that clears its environment escapes the sweep (tmux servers are stopped by socket instead).
 - `uv run python -m scripts.harness_compat check` only confirms that every adapter reads its gate.
 
 To add a harness, implement the frozen `Adapter` in
