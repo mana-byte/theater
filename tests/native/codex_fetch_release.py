@@ -73,8 +73,19 @@ def _run(command: list[str], *, timeout: float) -> subprocess.CompletedProcess:
 
 
 def download_asset(tag: str, asset: str, dest: Path) -> Path:
-    """Download via gh when available, else curl the release URL directly."""
+    """Fetch the release URL with curl (no API quota), falling back to gh."""
     archive = dest / asset
+    url = f"https://github.com/{REPO}/releases/download/{tag}/{asset}"
+    failures: list[str] = []
+    if shutil.which("curl") is not None:
+        completed = _run(
+            ["curl", "-fSL", "--retry", "2", "-o", str(archive), url],
+            timeout=DOWNLOAD_TIMEOUT_SECONDS,
+        )
+        if completed.returncode == 0 and archive.is_file():
+            return archive
+        detail = (completed.stderr or completed.stdout or "").strip()[-300:]
+        failures.append(f"curl download of {url} failed ({completed.returncode}): {detail}")
     if shutil.which("gh") is not None:
         completed = _run(
             ["gh", "release", "download", tag, "--repo", REPO, "-p", asset, "-D", str(dest)],
@@ -82,19 +93,11 @@ def download_asset(tag: str, asset: str, dest: Path) -> Path:
         )
         if completed.returncode == 0 and archive.is_file():
             return archive
-        detail = (completed.stderr or completed.stdout or "").strip()[-400:]
-        raise FetchError(f"gh release download failed ({completed.returncode}): {detail}")
-    if shutil.which("curl") is None:
-        raise FetchError("neither gh nor curl is available to download the release asset")
-    url = f"https://github.com/{REPO}/releases/download/{tag}/{asset}"
-    completed = _run(
-        ["curl", "-fSL", "--retry", "2", "-o", str(archive), url],
-        timeout=DOWNLOAD_TIMEOUT_SECONDS,
-    )
-    if completed.returncode != 0 or not archive.is_file():
-        detail = (completed.stderr or completed.stdout or "").strip()[-400:]
-        raise FetchError(f"curl download of {url} failed ({completed.returncode}): {detail}")
-    return archive
+        detail = (completed.stderr or completed.stdout or "").strip()[-300:]
+        failures.append(f"gh release download failed ({completed.returncode}): {detail}")
+    if not failures:
+        raise FetchError("neither curl nor gh is available to download the release asset")
+    raise FetchError("; ".join(failures))
 
 
 def sigstore_assets(tag: str) -> list[str]:
