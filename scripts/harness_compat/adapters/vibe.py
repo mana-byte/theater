@@ -35,7 +35,16 @@ class VibeAdapter:
     probe = "theater.harness.builtin.plugins.vibe.compatibility:probe_vibe_compatibility"
     stub_help = ""
     green_tests = _GREEN_TESTS
-    consistency_tests = ("tests/test_vibe_compatibility.py",)
+    consistency_tests = (
+        "tests/test_vibe_compatibility.py",
+        "tests/test_vibe_launch_safety.py",
+        "tests/test_harness_compat_vibe.py::test_vibe_gate_and_bump_are_idempotent",
+        "tests/test_harness_compat_vibe.py::test_vibe_bump_stops_before_discovered_patch",
+        "tests/test_harness_compat_vibe.py::test_vibe_bump_is_conservative_when_discovery_fails",
+        "tests/test_harness_compat_vibe.py::test_vibe_bump_requires_launch_safety_anchor",
+        "tests/test_harness_compat_vibe.py::test_vibe_store_format_classification",
+        "tests/test_harness_compat_vibe.py::test_vibe_install_failure_is_inconclusive",
+    )
     expected_skips: Mapping[str, str] = {}
     expected_routes = frozenset({("POST", "/v1/chat/completions")})
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
@@ -101,7 +110,11 @@ class VibeAdapter:
         return f"vibe {version}"
 
     def apply_bump(self, root: Path, greens: Sequence[str]) -> list[Path]:
-        return bump(root, greens)
+        try:
+            discovered = self.discover()
+        except Exception:
+            discovered = None
+        return bump(root, greens, discovered)
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
         static = store_check(root, version)

@@ -14,9 +14,9 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.harness_compat.adapters.vibe import ADAPTER
-from scripts.harness_compat.adapters.vibe_bump import COMPAT, COMPAT_TEST, DOC
+from scripts.harness_compat.adapters.vibe_bump import COMPAT, COMPAT_TEST, DOC, LAUNCH_TEST
 from scripts.harness_compat.adapters.vibe_store import READER_STORE, store_check
-from scripts.harness_compat.contract import InstallFailed
+from scripts.harness_compat.contract import InstallFailed, version_key
 from scripts.harness_compat.sandbox import make_sandbox
 from theater.harness.builtin.plugins.vibe.unified_source import UnifiedVibeSource
 from theater.harness.builtin.plugins.vibe.unified_store import load_unified_store
@@ -133,52 +133,123 @@ def test_real_vibe_reader_turn() -> None:
     assert "MOCK-OK" in event.text
 
 
-def test_vibe_gate_and_bump_are_idempotent(tmp_path: Path) -> None:
-    root = Path(__file__).resolve().parents[1]
-    for relative in (COMPAT, COMPAT_TEST, READER_STORE, DOC):
-        target = tmp_path / relative
+def _tree(root: Path) -> Path:
+    source = Path(__file__).resolve().parents[1]
+    for relative in (COMPAT, COMPAT_TEST, READER_STORE, DOC, LAUNCH_TEST):
+        target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(root / relative, target)
-    assert ADAPTER.verified(tmp_path).ceiling == "2.27.0"
-    changed = ADAPTER.apply_bump(tmp_path, ["2.27.0"])
-    assert changed == [COMPAT, COMPAT_TEST, DOC]
-    assert ADAPTER.verified(tmp_path).ceiling == "2.28.0"
-    assert ADAPTER.apply_bump(tmp_path, ["2.27.0"]) == []
-    assert ADAPTER.apply_bump(tmp_path, ["2.27.9"]) == []
-    assert "<2.28.0" in (tmp_path / COMPAT_TEST).read_text()
-    assert "Vibe compatibility range: >=2.24.0,<2.28.0." in (tmp_path / DOC).read_text()
-    for relative in (COMPAT, COMPAT_TEST):
-        source = (tmp_path / relative).read_text()
-        ast.parse(source)
-        assert "2.27.0" not in source
-    assert "New patches remain admitted" in (tmp_path / COMPAT).read_text()
+        shutil.copyfile(source / relative, target)
+    return root
+
+
+def _next_patch(version: str) -> str:
+    major, minor, patch = version_key(version)
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def _next_minor(version: str) -> str:
+    major, minor, _ = version_key(version)
+    return f"{major}.{minor + 1}.0"
+
+
+def test_vibe_gate_and_bump_are_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _tree(tmp_path)
+    candidate = ADAPTER.verified(root).ceiling
+    assert candidate is not None
+    latest = _next_patch(candidate)
+    monkeypatch.setattr(ADAPTER, "discover", lambda: [candidate, latest])
+    new_ceiling = _next_minor(latest)
+
+    changed = ADAPTER.apply_bump(root, [candidate, latest])
+    assert changed == [COMPAT, COMPAT_TEST, LAUNCH_TEST, DOC]
+    assert ADAPTER.verified(root).ceiling == new_ceiling
+    assert ADAPTER.apply_bump(root, [candidate, latest]) == []
+    assert f"<{new_ceiling}" in (root / COMPAT_TEST).read_text()
+    floor = ADAPTER.verified(root).floor
+    assert f"Vibe compatibility range: >={floor},<{new_ceiling}." in (root / DOC).read_text()
+    for relative in (COMPAT, COMPAT_TEST, LAUNCH_TEST):
+        ast.parse((root / relative).read_text())
+    assert "Exclusive qualified boundary" in (root / COMPAT).read_text()
+
+
+def test_vibe_bump_stops_before_discovered_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree(tmp_path)
+    green = ADAPTER.verified(root).ceiling
+    assert green is not None
+    red = _next_patch(green)
+    monkeypatch.setattr(ADAPTER, "discover", lambda: [green, red])
+
+    ADAPTER.apply_bump(root, [green])
+    assert ADAPTER.verified(root).ceiling == red
+    assert ADAPTER.verified(root).admits(red) is False
+    assert ADAPTER.apply_bump(root, [green]) == []
+
+
+def test_vibe_bump_is_conservative_when_discovery_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree(tmp_path)
+    green = ADAPTER.verified(root).ceiling
+    assert green is not None
+
+    def fail() -> list[str]:
+        raise OSError("offline")
+
+    monkeypatch.setattr(ADAPTER, "discover", fail)
+    ADAPTER.apply_bump(root, [green])
+    assert ADAPTER.verified(root).ceiling == _next_patch(green)
+    assert ADAPTER.apply_bump(root, [green]) == []
+
+
+def test_vibe_bump_requires_launch_safety_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree(tmp_path)
+    green = ADAPTER.verified(root).ceiling
+    assert green is not None
+    monkeypatch.setattr(ADAPTER, "discover", lambda: [green])
+    launch = root / LAUNCH_TEST
+    launch.write_text(
+        launch.read_text().replace('@pytest.mark.parametrize("version",', "# missing")
+    )
+    before = (root / COMPAT).read_text()
+
+    with pytest.raises(ValueError, match="launch-safety ceiling parameter anchor missing"):
+        ADAPTER.apply_bump(root, [green])
+    assert (root / COMPAT).read_text() == before
 
 
 def test_vibe_store_format_classification(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = Path(__file__).resolve().parents[1]
-    for relative in (COMPAT, COMPAT_TEST, DOC):
-        target = tmp_path / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(root / relative, target)
-    reader = tmp_path / READER_STORE
-    reader.parent.mkdir(parents=True, exist_ok=True)
+    root = _tree(tmp_path)
+    candidate = ADAPTER.verified(root).ceiling
+    assert candidate is not None
+    monkeypatch.setattr(ADAPTER, "discover", lambda: [candidate])
+    reader = root / READER_STORE
     reader.write_text("STORE_FORMAT_MINOR = 8\n")
     monkeypatch.setattr(
         "scripts.harness_compat.adapters.vibe_store.github.raw_file",
         lambda *_args: "STORE_FORMAT_MINOR = 9\n",
     )
-    check = store_check(tmp_path, "2.27.0")
+    binary = tmp_path / "vibe"
+    monkeypatch.setattr(ADAPTER, "install", lambda *_args: binary)
+    check = store_check(root, candidate)
+    assert check.name == "vibe_store_format"
     assert check.status == "fail"
     assert check.detail == "reader needs work: upstream store format 9 > ours 8"
-    ADAPTER.apply_bump(tmp_path, ["2.27.0"])
-    assert ADAPTER.verified(tmp_path).ceiling == "2.28.0"
+    ADAPTER.apply_bump(root, [candidate])
     with make_sandbox("vibe") as sandbox:
-        result = ADAPTER.qualify(tmp_path, "2.27.0", sandbox, sandbox.bin_dir / "vibe")
+        installed = ADAPTER.install(sandbox, candidate)
+        result = ADAPTER.qualify(root, candidate, sandbox, installed)
     assert result.verdict == "red"
     assert result.checks == (check,)
 
 
 def test_vibe_install_failure_is_inconclusive(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = Path(__file__).resolve().parents[1]
+    candidate = ADAPTER.verified(root).ceiling
+    assert candidate is not None
     with make_sandbox("vibe") as sandbox:
         monkeypatch.setattr(
             "scripts.harness_compat.adapters.vibe.shutil.which", lambda *_args, **_kw: "/fake/uv"
@@ -188,4 +259,4 @@ def test_vibe_install_failure_is_inconclusive(monkeypatch: pytest.MonkeyPatch) -
             lambda *_args, **_kw: SimpleNamespace(returncode=1, stderr="wheel unavailable"),
         )
         with pytest.raises(InstallFailed, match="wheel unavailable"):
-            ADAPTER.install(sandbox, "2.27.0")
+            ADAPTER.install(sandbox, candidate)
