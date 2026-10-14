@@ -16,7 +16,7 @@ from .constants import MODELS_TIMEOUT
 # The v1 ceiling is the sole release bump value. Historical model-free probes
 # and byte-stable consumed surfaces support this range; approval needs a model.
 OPENCODE_TUI_MIN_VERSION = (1, 17, 15)
-OPENCODE_TUI_MAX_VERSION = (1, 18, 35)
+OPENCODE_TUI_MAX_VERSION = (1, 19, 1)
 OPENCODE_SERVER_MIN_VERSION = OPENCODE_TUI_MIN_VERSION
 OPENCODE_SERVER_MAX_VERSION = OPENCODE_TUI_MAX_VERSION
 
