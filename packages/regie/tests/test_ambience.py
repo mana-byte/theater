@@ -146,6 +146,7 @@ async def test_the_band_plays_under_the_tree_when_its_setting_says(
         await wait_until(pilot, lambda: app._ambience is not None)
         await _set_app_focus(pilot, on_tree)  # start where the band plays
         await wait_until(pilot, lambda: bool(band.display))
+        await wait_until(pilot, lambda: band.region.height > 0)  # displayed, then laid out
         tree_bottom = max(leaf.region.bottom for leaf in app.query("AgentLeaf"))
         assert band.region.y >= tree_bottom  # below the last row, never over it
 

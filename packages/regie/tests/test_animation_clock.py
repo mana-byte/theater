@@ -177,6 +177,8 @@ async def test_hidden_cost_count_up_settles_without_waking_the_clock(tmp_path: P
         clock = animation_clock(app)
         leaf.set_usage_cost(5_000_000)
         assert clock.is_running
+        # Hide only settles a leaf the compositor already showed; wait for its layout.
+        await wait_until(pilot, lambda: leaf.region.height > 0)
         leaf.display = False
         await wait_until(pilot, lambda: not clock.is_running, timeout=5)
         assert leaf._cost_sub is None and leaf._cost.display == 5_000_000
