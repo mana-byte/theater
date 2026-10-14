@@ -103,12 +103,33 @@ def test_claude_qualify_calls_framework(
         return tuple(Check(nodeid, status, "proof failed") for nodeid in nodeids)
 
     monkeypatch.setattr("scripts.harness_compat.adapters.claude.framework.run_pytest", fake_run)
-    monkeypatch.setattr("scripts.harness_compat.adapters.claude.github.raw_file", lambda *_: "")
+    monkeypatch.setattr(
+        "scripts.harness_compat.adapters.claude.github.raw_file",
+        lambda *_: "## 2.1.296\n- Fixed transcript recovery",
+    )
     with make_sandbox("claude", root=tmp_path / "sandbox") as sb:
         if unexpected_route:
             with pytest.raises(urllib.error.HTTPError):
                 urllib.request.urlopen(sb.mock_base_urls["anthropic"] + "/unexpected")
         result = ADAPTER.qualify(tmp_path, "2.1.296", sb, Path("/fake/claude"))
-    assert calls == [ADAPTER.green_tests[:2], ADAPTER.green_tests[2:], ADAPTER.consistency_tests]
+    assert calls == [ADAPTER.consistency_tests, ADAPTER.green_tests[:2], ADAPTER.green_tests[2:]]
     assert result.verdict == verdict
     assert result.checks[2].status == "fail"
+    assert result.checks[2].detail.endswith("- Fixed transcript recovery")
+
+
+def test_claude_qualify_stops_after_consistency_failure(tmp_path: Path, monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(root, nodeids, **kwargs):
+        del root, kwargs
+        calls.append(tuple(nodeids))
+        assert tuple(nodeids) == ADAPTER.consistency_tests
+        return (Check(nodeids[0], "fail", "broken bump"),)
+
+    monkeypatch.setattr("scripts.harness_compat.adapters.claude.framework.run_pytest", fake_run)
+    with make_sandbox("claude", root=tmp_path / "sandbox") as sb:
+        result = ADAPTER.qualify(tmp_path, "2.1.296", sb, Path("/fake/claude"))
+    assert calls == [ADAPTER.consistency_tests]
+    assert result.verdict == "tooling"
+    assert result.checks == (Check(ADAPTER.consistency_tests[0], "fail", "broken bump"),)
