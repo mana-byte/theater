@@ -55,7 +55,7 @@ says so. A human decides whether to raise that ceiling after reviewing the proof
 
 ## Requirements and limits
 
-- A run needs network (npm, PyPI, GitHub release downloads), `tmux`, Node.js with npm, and `uv`.
+- A run needs network (npm, PyPI, GitHub release downloads), `tmux`, Node.js 22 with npm, and `uv`.
   Discovery calls GitHub's API without a token, which is rate limited; Codex falls back to public
   Git tags. No model API key is ever needed: every CLI talks to a local mock with a dummy
   credential inside a throwaway home.

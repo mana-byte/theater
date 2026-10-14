@@ -31,8 +31,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: harness-compat
-  cancel-in-progress: false
+  # Qualification runs share one queue (they write the rolling branches); PR checks do not.
+  group: ${{ github.event_name == 'pull_request' && format('harness-compat-pr-{0}', github.ref) || 'harness-compat' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   cheap-checks:
@@ -95,9 +96,13 @@ jobs:
         if: steps.select.outputs.run == 'true'
         with:
           enable-cache: true
-      - name: Install tmux and Node.js
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: steps.select.outputs.run == 'true'
-        run: sudo apt-get update && sudo apt-get install -y tmux nodejs npm
+        with:
+          node-version: "22"
+      - name: Install tmux
+        if: steps.select.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Sync project
         if: steps.select.outputs.run == 'true'
         run: uv sync --locked --all-packages --group dev
