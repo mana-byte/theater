@@ -62,8 +62,6 @@ class OpenCodeAdapter:
         "tests/test_opencode_server_plan.py::test_probe_qualifies_exactly_the_1x_window",
         "tests/test_opencode_server_runtime.py::test_server_handshake_rejects_version_drift",
         "tests/test_opencode_frontend.py::test_probe_rejects_releases_outside_the_tested_window",
-        "packages/regie/tests/test_dashboard_rich.py::"
-        "test_pretty_qualifier_range_compacts_only_recognisable_pairs",
     )
     #: The routed mistral provider talks to the mock's OpenAI chat surface.
     expected_routes: frozenset[Route] = frozenset({("POST", "/v1/chat/completions")})
