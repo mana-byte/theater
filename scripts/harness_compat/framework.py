@@ -116,11 +116,8 @@ def run_pytest(
 
 
 def check_bump(adapter: Adapter, root: Path, bumped: Sequence[str]) -> list[str]:
-    """Problems with a bump under ``root``; an empty list means it is coherent.
-
-    Writes a stub binary printing ``adapter.version_line(v)`` (and ``adapter.stub_help``),
-    runs the real ``adapter.probe`` against the edited tree in a subprocess, and requires
-    support for every version in ``bumped``, none for the next release above, and no leftover
-    string of the old limit anywhere in the changed files.
+    """Probe edited tree in a subprocess with version_line and stub_help.
+    Bumped versions must be supported; the next release must be refused.
+    Active old bounds fail; historical references become review warnings.
     """
     return check_bump_problems(adapter, root, bumped)

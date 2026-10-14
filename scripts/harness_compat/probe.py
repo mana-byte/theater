@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -14,12 +13,7 @@ from pathlib import Path
 
 from .artifacts import tracked_changes, untracked_files
 from .contract import EVIDENCE_ROOT, Adapter, VerifiedSet, is_stable, version_key
-
-
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, timeout=30, check=False
-    )
+from .stale import stale_references
 
 
 def _probe(adapter: Adapter, root: Path, version: str, stub: Path) -> tuple[bool | None, str]:
@@ -79,48 +73,6 @@ def _next_release(adapter: Adapter, bumped: Sequence[str], gate: VerifiedSet) ->
     return f"{major}.{minor}.{patch + 1}"
 
 
-def _limit_tokens(gate: VerifiedSet) -> set[str]:
-    if gate.kind != "range" or gate.ceiling is None:
-        return set()
-    major, minor, patch = version_key(gate.ceiling)
-    tokens = {gate.ceiling}
-    if patch > 0:
-        tokens.add(f"{major}.{minor}.{patch - 1}")
-    return tokens
-
-
-def _version_in_text(version: str, value: str) -> bool:
-    return re.search(rf"(?<![\d.]){re.escape(version)}(?![\d.])", value) is not None
-
-
-def _old_limit_problems(adapter: Adapter, root: Path, new_gate: VerifiedSet) -> list[str]:
-    with tempfile.TemporaryDirectory(prefix="compat-old-gate-") as temporary:
-        old_root = Path(temporary) / "tree"
-        added = _git(root, "worktree", "add", "--detach", str(old_root), "HEAD")
-        if added.returncode:
-            return [f"cannot read old gate: {added.stderr.strip()}"]
-        try:
-            old = adapter.verified(old_root)
-            stale = _limit_tokens(old) - _limit_tokens(new_gate)
-            if not stale:
-                return []
-            paths = _git(root, "diff", "--name-only", "HEAD", "--").stdout.splitlines()
-            paths.extend(
-                _git(root, "ls-files", "--others", "--exclude-standard").stdout.splitlines()
-            )
-            return [
-                f"old limit {token} remains in {name}"
-                for name in sorted(set(paths))
-                if (root / name).is_file()
-                for token in sorted(stale, key=version_key)
-                if _version_in_text(
-                    token, (root / name).read_text(encoding="utf-8", errors="replace")
-                )
-            ]
-        finally:
-            _git(root, "worktree", "remove", "--force", str(old_root))
-
-
 def evidence_only_bump(
     adapter: Adapter,
     root: Path,
@@ -176,7 +128,7 @@ def check_bump_problems(adapter: Adapter, root: Path, bumped: Sequence[str]) -> 
                     problems.append(
                         f"probe {version}: supported={supported}, expected={expected}: {detail}"
                     )
-        problems.extend(_old_limit_problems(adapter, root, gate))
+        problems.extend(stale_references(adapter, root)[0])
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         problems.append(f"bump check errored: {exc}")
     return problems

@@ -23,11 +23,11 @@ from scripts.harness_compat.contract import (
 )
 from scripts.harness_compat.evidence import adapter_digest, reusable_evidence
 from scripts.harness_compat.framework import check_bump, run_pytest
-from scripts.harness_compat.probe import _old_limit_problems
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.runner import classify_routes
 from scripts.harness_compat.sandbox import make_sandbox
 from scripts.harness_compat.select import newest_in_range, plan_bump, select_candidates
+from scripts.harness_compat.stale import stale_references, stale_warnings
 
 
 class FakeAdapter:
@@ -168,7 +168,7 @@ def test_old_limit_scan_allows_new_inclusive_bound(
     (tmp_path / "gate.txt").write_text(f"{new_ceiling}\n")
     (tmp_path / "docs.txt").write_text(f"< {new_ceiling} and <= {new_inclusive}\n")
     adapter = LimitAdapter()
-    assert _old_limit_problems(adapter, tmp_path, adapter.verified(tmp_path)) == []
+    assert stale_references(adapter, tmp_path) == ([], [])
 
 
 def test_old_limit_scan_finds_only_whole_stale_versions(tmp_path: Path) -> None:
@@ -177,10 +177,70 @@ def test_old_limit_scan_finds_only_whole_stale_versions(tmp_path: Path) -> None:
     docs = tmp_path / "docs.txt"
     docs.write_text("<= 0.99.2; unrelated 10.99.1 and 0.99.10\n")
     adapter = LimitAdapter()
-    assert _old_limit_problems(adapter, tmp_path, adapter.verified(tmp_path)) == []
+    assert stale_references(adapter, tmp_path) == ([], [])
     docs.write_text(docs.read_text() + "stale <= 0.99.1\n")
-    assert _old_limit_problems(adapter, tmp_path, adapter.verified(tmp_path)) == [
-        "old limit 0.99.1 remains in docs.txt"
+    assert stale_references(adapter, tmp_path) == (
+        ["old limit 0.99.1 remains in docs.txt:2"],
+        [],
+    )
+
+
+def test_pi_historical_proofs_are_soft_but_bounds_are_hard(tmp_path: Path) -> None:
+    _limit_repo(tmp_path, "0.99.2", "0.99.1")
+    (tmp_path / "gate.txt").write_text("0.99.3\n")
+    docs = tmp_path / "docs.txt"
+    docs.write_text(">=0.85.1,<=0.99.2\n0.99.0, 0.99.1: all three proofs\n")
+    source = tmp_path / "plugin.py"
+    source.write_text("# 0.99.1 was proven on stock Pi\n")
+    adapter = LimitAdapter()
+    assert stale_references(adapter, tmp_path) == (
+        [],
+        ["docs.txt:2 (0.99.1)", "plugin.py:1 (0.99.1)"],
+    )
+    assert stale_warnings(adapter, tmp_path, ["0.99.2"]) == [
+        "docs.txt:2 (0.99.1)",
+        "plugin.py:1 (0.99.1)",
+    ]
+    source.write_text(
+        "# 0.99.1 was proven on stock Pi\n"
+        "in_qualified = (0, 85, 1) <= parsed <= (0, 99, 1)\n"
+        'range_text = "<= 0.99.1"\n'
+    )
+    assert stale_references(adapter, tmp_path)[0] == [
+        "old limit 0.99.1 remains in plugin.py:2",
+        "old limit 0.99.1 remains in plugin.py:3",
+    ]
+
+
+def test_opencode_historical_header_is_soft_but_range_string_and_tuple_are_hard(
+    tmp_path: Path,
+) -> None:
+    _limit_repo(tmp_path, "1.18.35", "1.18.34")
+    (tmp_path / "gate.txt").write_text("1.18.36\n")
+    (tmp_path / "docs.txt").write_text("Qualified: 1.17.15–1.18.35\n")
+    source = tmp_path / "runtime_plan.py"
+    source.write_text(
+        "# 1.17.15-1.18.34 qualified by byte-stable Theater-consumed surfaces\n"
+        "# model-free live probes on stock 1.17.15/1.18.34\n"
+        "# the paid suite is pinned to stock 1.18.34 (previously 1.18.29)\n"
+    )
+    adapter = LimitAdapter()
+    assert stale_references(adapter, tmp_path) == (
+        [],
+        [
+            "runtime_plan.py:1 (1.18.34)",
+            "runtime_plan.py:2 (1.18.34)",
+            "runtime_plan.py:3 (1.18.34)",
+        ],
+    )
+    source.write_text(
+        source.read_text()
+        + 'reason = "(qualified releases are 1.17.15-1.18.34)"\n'
+        + "OPENCODE_TUI_MAX_VERSION = (1, 18, 35)\n"
+    )
+    assert stale_references(adapter, tmp_path)[0] == [
+        "old limit 1.18.34 remains in runtime_plan.py:4",
+        "old limit 1.18.35 remains in runtime_plan.py:5",
     ]
 
 
@@ -314,9 +374,14 @@ def test_framework_replaces_placeholder_evidence_and_reports_ceiling(tmp_path: P
         text=True,
         check=True,
     ).stdout.splitlines() == ["tests/fixtures/harness_compat/claude/3.0.0.json"]
+    summary["stale_warnings"] = [f"docs/old.md:{line:02} (2.9.9)" for line in range(1, 23)]
     report = prepare_publication(summary, tmp_path / "summary.json")
     assert report.pr_needed is True
     assert "Compatibility ceiling was NOT raised" in report.pr_body
+    assert "Historical references to the previous limit remain (review):" in report.pr_body
+    assert "docs/old.md:20 (2.9.9)" in report.pr_body
+    assert "docs/old.md:21 (2.9.9)" not in report.pr_body
+    assert "and 2 more" in report.pr_body
 
 
 def test_forced_in_range_candidate_reuses_its_watch_result(

@@ -25,6 +25,7 @@ from .framework import check_bump, run_pytest
 from .probe import evidence_only_bump
 from .sandbox import make_sandbox
 from .select import newest_in_range, plan_bump, select_candidates
+from .stale import stale_warnings
 
 
 @contextmanager
@@ -167,16 +168,16 @@ def _compose(
     publish: bool,
     evidence_results: list[Result],
     run_url: str,
-) -> tuple[list[str], bool, bool, bool]:
+) -> tuple[list[str], bool, bool, bool, list[str]]:
     try:
         with _worktree(root) as tree, make_sandbox(adapter.name) as sandbox:
             artifacts.copy_into(tree)
             changed = adapter.apply_bump(tree, greens)
             if stray := artifacts.stray_files(tree, changed):
-                return stray, False, False, False
+                return stray, False, False, False, []
             evidence_only, problems = evidence_only_bump(adapter, tree, greens, changed)
             if problems:
-                return problems, False, False, False
+                return problems, False, False, False, []
             problems = check_bump(adapter, tree, greens)
             if problems:
                 return (
@@ -184,7 +185,9 @@ def _compose(
                     any("timed out" in problem.lower() for problem in problems),
                     False,
                     False,
+                    [],
                 )
+            warnings = [] if evidence_only else stale_warnings(adapter, tree, greens)
             evidence_paths = [
                 write_evidence(tree, result, run_url).relative_to(tree)
                 for result in evidence_results
@@ -205,16 +208,22 @@ def _compose(
                 problems.append("consistency tests changed tracked files")
             problems.extend(artifacts.stray_files(tree, [*changed, *evidence_paths]))
             if problems:
-                return problems, any(check.status == "error" for check in checks), False, False
+                return (
+                    problems,
+                    any(check.status == "error" for check in checks),
+                    False,
+                    False,
+                    warnings,
+                )
             if publish:
                 try:
                     stage_composed(tree, root)
                 except Exception as exc:
-                    return [f"staging failed: {exc}"], True, False, False
-                return [], False, True, evidence_only
-            return [], False, False, evidence_only
+                    return [f"staging failed: {exc}"], True, False, False, warnings
+                return [], False, True, evidence_only, warnings
+            return [], False, False, evidence_only, warnings
     except Exception as exc:
-        return [f"composed bump failed: {exc}"], False, False, False
+        return [f"composed bump failed: {exc}"], False, False, False, []
 
 
 def _run_with_artifacts(
@@ -238,9 +247,15 @@ def _run_with_artifacts(
     rows: list[dict[str, Any]] = []
     results: list[Result] = []
     artifact_conflicts: list[str] = []
+    candidate_warnings: list[str] = []
     for candidate in candidates:
         with _worktree(root) as tree:
             result, routes = _qualify(adapter, tree, candidate, bump=True)
+            candidate_warnings.extend(
+                stale_warnings(adapter, tree, [candidate])
+                if result.verdict in ("green", "red")
+                else []
+            )
             if result.verdict == "green":
                 artifact_conflicts.extend(artifacts.capture(tree, candidate))
         result = replace(result, adapter_digest=digest)
@@ -277,15 +292,17 @@ def _run_with_artifacts(
     greens = plan_bump(gate, [*reused_results, *results])
     pre_inconclusive = any(result.verdict == "inconclusive" for result in results)
     pre_inconclusive |= bool(watch and watch["verdict"] == "inconclusive")
+    warnings: list[str]
     if artifact_conflicts:
-        problems, compose_inconclusive, published, evidence_only = (
+        problems, compose_inconclusive, published, evidence_only, warnings = (
             artifact_conflicts,
             False,
             False,
             False,
+            [],
         )
     elif greens:
-        problems, compose_inconclusive, published, evidence_only = _compose(
+        problems, compose_inconclusive, published, evidence_only, warnings = _compose(
             adapter,
             root,
             greens,
@@ -297,7 +314,13 @@ def _run_with_artifacts(
             run_url=run_url,
         )
     else:
-        problems, compose_inconclusive, published, evidence_only = [], False, False, False
+        problems, compose_inconclusive, published, evidence_only, warnings = (
+            [],
+            False,
+            False,
+            False,
+            [],
+        )
     if problems:
         rows.append(
             {
@@ -316,6 +339,7 @@ def _run_with_artifacts(
                 "run_url": run_url,
             }
         )
+    warnings = sorted(set(candidate_warnings) | set(warnings))
     inconclusive = any(row["verdict"] == "inconclusive" for row in rows)
     inconclusive |= bool(watch and watch["verdict"] == "inconclusive")
     issues = [row for row in rows if row["verdict"] in ("red", "tooling")]
@@ -337,6 +361,7 @@ def _run_with_artifacts(
         "inconclusive": inconclusive,
         "published": published,
         "evidence_only": evidence_only,
+        "stale_warnings": warnings,
         "run_url": run_url,
     }
 
