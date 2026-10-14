@@ -23,6 +23,7 @@ from scripts.harness_compat.contract import (
 )
 from scripts.harness_compat.evidence import adapter_digest, reusable_evidence
 from scripts.harness_compat.framework import check_bump, run_pytest
+from scripts.harness_compat.probe import _old_limit_problems
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.runner import classify_routes
 from scripts.harness_compat.sandbox import make_sandbox
@@ -132,6 +133,55 @@ def test_exact_candidates_exhaust_new_releases_then_holes() -> None:
         Result("codex", "2.0.0", "green"),
     ]
     assert plan_bump(gate, results) == ["1.6.0", "2.0.0"]
+
+
+class LimitAdapter:
+    def verified(self, root: Path) -> VerifiedSet:
+        return VerifiedSet("range", floor="0.1.0", ceiling=(root / "gate.txt").read_text().strip())
+
+
+def _limit_repo(root: Path, old_ceiling: str, old_inclusive: str) -> None:
+    (root / "gate.txt").write_text(f"{old_ceiling}\n")
+    (root / "docs.txt").write_text(f"<= {old_inclusive}\n")
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "compat@example.invalid")
+    _git(root, "config", "user.name", "Compat")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "old limit")
+
+
+@pytest.mark.parametrize(
+    ("old_ceiling", "old_inclusive", "new_ceiling", "new_inclusive"),
+    [
+        ("0.99.2", "0.99.1", "0.99.3", "0.99.2"),
+        ("1.18.35", "1.18.34", "1.18.36", "1.18.35"),
+    ],
+)
+def test_old_limit_scan_allows_new_inclusive_bound(
+    tmp_path: Path,
+    old_ceiling: str,
+    old_inclusive: str,
+    new_ceiling: str,
+    new_inclusive: str,
+) -> None:
+    _limit_repo(tmp_path, old_ceiling, old_inclusive)
+    (tmp_path / "gate.txt").write_text(f"{new_ceiling}\n")
+    (tmp_path / "docs.txt").write_text(f"< {new_ceiling} and <= {new_inclusive}\n")
+    adapter = LimitAdapter()
+    assert _old_limit_problems(adapter, tmp_path, adapter.verified(tmp_path)) == []
+
+
+def test_old_limit_scan_finds_only_whole_stale_versions(tmp_path: Path) -> None:
+    _limit_repo(tmp_path, "0.99.2", "0.99.1")
+    (tmp_path / "gate.txt").write_text("0.99.3\n")
+    docs = tmp_path / "docs.txt"
+    docs.write_text("<= 0.99.2; unrelated 10.99.1 and 0.99.10\n")
+    adapter = LimitAdapter()
+    assert _old_limit_problems(adapter, tmp_path, adapter.verified(tmp_path)) == []
+    docs.write_text(docs.read_text() + "stale <= 0.99.1\n")
+    assert _old_limit_problems(adapter, tmp_path, adapter.verified(tmp_path)) == [
+        "old limit 0.99.1 remains in docs.txt"
+    ]
 
 
 class ArtifactAdapter:
