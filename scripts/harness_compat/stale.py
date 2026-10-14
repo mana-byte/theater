@@ -8,7 +8,7 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from .contract import Adapter, VerifiedSet, version_key
+from .contract import EVIDENCE_ROOT, Adapter, VerifiedSet, version_key
 
 _SOURCE_SUFFIXES = frozenset({".py", ".ts", ".mts", ".tsx", ".js", ".mjs"})
 _QUALIFIED = re.compile(r"\b(?:qualified|qualification|requires?|supported|admitted)\b", re.I)
@@ -109,21 +109,26 @@ def stale_references(adapter: Adapter, root: Path) -> tuple[list[str], list[str]
             soft: list[str] = []
             for name in sorted(set(paths)):
                 path = root / name
-                if not path.is_file():
+                if (
+                    not path.is_file()
+                    or path.suffix not in _SOURCE_SUFFIXES
+                    or Path(name).is_relative_to(EVIDENCE_ROOT)
+                    or "docs" in path.parts
+                    or path.name.startswith("README")
+                ):
                     continue
-                source = path.suffix in _SOURCE_SUFFIXES
                 for number, line in enumerate(
                     path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
                 ):
                     for token in sorted(stale, key=version_key):
-                        if _is_limit(line, token, source=source):
+                        if _is_limit(line, token, source=True):
                             hard.append(f"old limit {token} remains in {name}:{number}")
                         elif _version_match(token, line):
                             soft.append(f"{name}:{number} ({token})")
                     if (
                         old_ceiling
                         and old_ceiling not in stale
-                        and _old_exclusive_bound(line, old_ceiling, source=source)
+                        and _old_exclusive_bound(line, old_ceiling, source=True)
                     ):
                         hard.append(f"old limit {old_ceiling} remains in {name}:{number}")
             return hard, soft

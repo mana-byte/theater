@@ -43,9 +43,9 @@ def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishR
         summary["harness"],
         results,
         run_url=summary["run_url"],
+        release_runs={row["version"]: row.get("run_url", "") for row in rows},
         routes=routes,
         admitted_versions=admitted,
-        evidence_only=bool(summary.get("evidence_only")),
         stale_warnings=summary.get("stale_warnings", ()),
     )
     recovered = bool(watch and watch["verdict"] == "green")

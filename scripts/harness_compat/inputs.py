@@ -7,11 +7,13 @@ import hashlib
 import tomllib
 from pathlib import Path
 
-from .contract import EVIDENCE_ROOT, Adapter
+from .contract import Adapter
 
 #: Framework modules whose behaviour decides a verdict.
 CORE = (
+    "artifacts",
     "contract",
+    "evidence",
     "framework",
     "probe",
     "process",
@@ -140,12 +142,11 @@ def qualification_inputs(root: Path, harness: str, adapter: Adapter | None = Non
         if fixtures.is_dir():
             for entry in fixtures.glob(f"*{adapter.name}*"):
                 paths |= {entry} if entry.is_file() else _tree(entry)
-    evidence = root / EVIDENCE_ROOT
-    return {item for item in paths if item.is_file() and not item.is_relative_to(evidence)}
+    return {item for item in paths if item.is_file()}
 
 
 def adapter_digest(root: Path, harness: str, adapter: Adapter | None = None) -> str:
-    """Hash every qualification input by path and content; evidence files are outputs."""
+    """Hash every qualification input by path and content."""
     digest = hashlib.sha256()
     for path in sorted(qualification_inputs(root, harness, adapter)):
         digest.update(path.relative_to(root).as_posix().encode())

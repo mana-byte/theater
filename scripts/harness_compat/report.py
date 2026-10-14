@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,9 +45,9 @@ def build_report(
     results: Sequence[Result],
     *,
     run_url: str,
+    release_runs: Mapping[str, str] | None = None,
     routes: Iterable[Route] = (),
     admitted_versions: Iterable[str] = (),
-    evidence_only: bool = False,
     stale_warnings: Iterable[str] = (),
 ) -> PublishReport:
     """Build one rolling PR/issue report; inconclusive results cause neither."""
@@ -66,24 +66,20 @@ def build_report(
     if any(result.verdict == "red" and result.version in admitted for result in failing):
         labels.append("admitted-regression")
 
-    pr_body = _body(f"Qualified {harness} releases", green, run_url=run_url, routes=ordered_routes)
+    pr_body = _pr_body(harness, green, release_runs or {}, run_url)
     warnings = sorted(set(stale_warnings))
     if warnings:
-        lines = [f"- {_markdown_text(item)}" for item in warnings[:20]]
-        if len(warnings) > 20:
-            lines.append(f"- … and {len(warnings) - 20} more")
+        limit = 4 if len(warnings) > 5 else 5
+        lines = [f"- {_markdown_text(item)}" for item in warnings[:limit]]
+        if len(warnings) > limit:
+            lines.append(f"- … and {len(warnings) - limit} more")
         pr_body += "\n\nHistorical references to the previous limit remain (review):\n" + "\n".join(
             lines
-        )
-    if evidence_only:
-        pr_body += (
-            "\n\nCompatibility ceiling was NOT raised. This PR records evidence only; "
-            "a human decides whether to raise the ceiling."
         )
     return PublishReport(
         harness=harness,
         pr_needed=bool(green) and not inconclusive,
-        pr_title=f"chore(compat): update {harness} compatibility evidence",
+        pr_title=f"chore(compat): advance {harness} version gate",
         pr_body=pr_body,
         issue_action=(
             "none" if inconclusive else "upsert" if failing else "close" if green else "none"
@@ -94,6 +90,22 @@ def build_report(
         ),
         issue_labels=tuple(labels),
     )
+
+
+def _pr_body(
+    harness: str, results: Sequence[Result], release_runs: Mapping[str, str], run_url: str
+) -> str:
+    lines = [f"## Qualified {harness} releases", ""]
+    for result in results:
+        link = release_runs.get(result.version, run_url)
+        run = f"[run]({_markdown_url(link)})" if link else "run unavailable"
+        lines.append(f"- ✅ `{_cell(result.version)}` — {result.verdict} · {run}")
+    skipped = sorted(
+        {check.name for result in results for check in result.checks if check.status == "skip"}
+    )
+    if skipped:
+        lines.extend(("", "Declared skips: " + ", ".join(f"`{_cell(name)}`" for name in skipped)))
+    return "\n".join(lines)
 
 
 def write_github_outputs(report: PublishReport, path: Path) -> None:

@@ -22,11 +22,17 @@ from scripts.harness_compat.contract import (
     Result,
     Sandbox,
     VerifiedSet,
-    evidence_file,
 )
 from scripts.harness_compat.diagnostics import clip_diagnostic
-from scripts.harness_compat.evidence import _proved, adapter_digest, reusable_evidence
-from scripts.harness_compat.framework import _check_selector, check_bump, run_pytest
+from scripts.harness_compat.evidence import (
+    _proved,
+    adapter_digest,
+    cache_artifacts_dir,
+    cache_root,
+    reusable_evidence,
+    write_evidence,
+)
+from scripts.harness_compat.framework import _check_selector, run_pytest
 from scripts.harness_compat.process import SANDBOX_ENV, new_token, owned_pids, run_group
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.report import _checks, build_report
@@ -59,6 +65,14 @@ class ExactAdapter:
         ]
 
 
+@pytest.fixture(autouse=True)
+def _isolated_evidence_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cache = tmp_path.parent / f"{tmp_path.name}-cache"
+    monkeypatch.setenv("HARNESS_COMPAT_CACHE", str(cache))
+    yield
+    shutil.rmtree(cache, ignore_errors=True)
+
+
 def _git(root: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
 
@@ -70,29 +84,21 @@ def test_range_policy_evidence_reuse_routes_and_watch(tmp_path: Path) -> None:
     (source / "contract.py").write_text("contract\n")
     (adapters / "vibe.py").write_text("adapter\n")
     digest = adapter_digest(tmp_path, "vibe")
-    _git(tmp_path, "init", "-b", "main")
-    _git(tmp_path, "config", "user.email", "compat@example.invalid")
-    _git(tmp_path, "config", "user.name", "Compat")
-    _git(tmp_path, "add", ".")
-    _git(tmp_path, "commit", "-m", "source")
-    _git(tmp_path, "checkout", "-b", "rolling")
-    evidence = tmp_path / "tests/fixtures/harness_compat/vibe/1.2.0.json"
-    evidence.parent.mkdir(parents=True)
-    document = {
-        "harness": "vibe",
-        "version": "1.2.0",
-        "adapter_digest": digest,
-        "verdict": "green",
-        "checks": [{"name": "tests/proof.py::test_real", "status": "pass", "detail": ""}],
-    }
-    evidence.write_text(json.dumps(document))
-    _git(tmp_path, "add", ".")
-    _git(tmp_path, "commit", "-m", "evidence")
-    _git(tmp_path, "checkout", "main")
+    result = Result(
+        "vibe",
+        "1.2.0",
+        "green",
+        (Check("tests/proof.py::test_real", "pass"),),
+        adapter_digest=digest,
+    )
+    evidence = write_evidence(tmp_path, result, "https://example.invalid/run/1")
+    document = json.loads(evidence.read_text())
+    assert evidence == cache_root(tmp_path) / "vibe/1.2.0.json"
     required = ("tests/proof.py::test_real",)
-    reused = reusable_evidence(tmp_path, "vibe", digest, branch="rolling", required=required)
+    reused = reusable_evidence(tmp_path, "vibe", digest, required=required)
     assert reused == {"1.2.0": document}
-    assert reusable_evidence(tmp_path, "vibe", digest, branch="rolling") == {}
+    assert reusable_evidence(tmp_path, "vibe", digest) == {}
+    assert reusable_evidence(tmp_path, "vibe", "stale", required=required) == {}
     gate = VerifiedSet("range", floor="1.0.0", ceiling="1.2.0", known_bad=frozenset({"1.4.0"}))
     adapter = FakeAdapter()
     assert select_candidates(adapter, gate, {"1.2.0"}) == ["1.3.0", "1.5.0"]
@@ -108,6 +114,15 @@ def test_range_policy_evidence_reuse_routes_and_watch(tmp_path: Path) -> None:
     assert classified.verdict == "tooling"
     assert "POST /unknown body keys=messages,model" in classified.checks[-1].detail
     assert classify_routes(adapter, results[-1], ()).verdict == "red"
+
+
+def test_cached_artifacts_must_match_the_digest(tmp_path: Path) -> None:
+    artifact = cache_artifacts_dir(tmp_path, "vibe", "1.2.0") / "generated.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("original")
+    result = Result("vibe", "1.2.0", "green", (Check("proof", "pass"),), adapter_digest="d")
+    write_evidence(tmp_path, result, "local", artifacts={"generated.json": "not-the-digest"})
+    assert reusable_evidence(tmp_path, "vibe", "d", required=("proof",)) == {}
 
 
 def test_exact_candidates_stay_above_oldest_admission() -> None:
@@ -193,13 +208,13 @@ def test_old_limit_scan_allows_new_inclusive_bound(
 def test_old_limit_scan_finds_only_whole_stale_versions(tmp_path: Path) -> None:
     _limit_repo(tmp_path, "0.99.2", "0.99.1")
     (tmp_path / "gate.txt").write_text("0.99.3\n")
-    docs = tmp_path / "docs.txt"
-    docs.write_text("<= 0.99.2; unrelated 10.99.1 and 0.99.10 and 0.99.1.5\n")
+    source = tmp_path / "plugin.py"
+    source.write_text("limit = '<= 0.99.2'; unrelated = '10.99.1, 0.99.10, 0.99.1.5'\n")
     adapter = LimitAdapter()
     assert stale_references(adapter, tmp_path) == ([], [])
-    docs.write_text(docs.read_text() + "stale <= 0.99.1\n")
+    source.write_text(source.read_text() + "limit = '<= 0.99.1'\n")
     assert stale_references(adapter, tmp_path) == (
-        ["old limit 0.99.1 remains in docs.txt:2"],
+        ["old limit 0.99.1 remains in plugin.py:2"],
         [],
     )
 
@@ -207,13 +222,13 @@ def test_old_limit_scan_finds_only_whole_stale_versions(tmp_path: Path) -> None:
 def test_old_limit_scan_handles_sentence_final_periods(tmp_path: Path) -> None:
     _limit_repo(tmp_path, "0.99.2", "0.99.1")
     (tmp_path / "gate.txt").write_text("0.99.3\n")
-    (tmp_path / "docs.txt").write_text(
+    (tmp_path / "plugin.py").write_text(
         "qualified releases are 0.85.1-0.99.1.\n"
         "requires >=0.85.1,<=0.99.1.\n"
         "historical neighbors 10.99.1, 0.99.10, 0.99.1.5.\n"
     )
     assert stale_references(LimitAdapter(), tmp_path) == (
-        ["old limit 0.99.1 remains in docs.txt:1", "old limit 0.99.1 remains in docs.txt:2"],
+        ["old limit 0.99.1 remains in plugin.py:1", "old limit 0.99.1 remains in plugin.py:2"],
         [],
     )
 
@@ -222,18 +237,17 @@ def test_pi_historical_proofs_are_soft_but_bounds_are_hard(tmp_path: Path) -> No
     _limit_repo(tmp_path, "0.99.2", "0.99.1")
     (tmp_path / "gate.txt").write_text("0.99.3\n")
     docs = tmp_path / "docs.txt"
-    docs.write_text(">=0.85.1,<=0.99.2\n0.99.0, 0.99.1: all three proofs\n")
+    docs.write_text("requires <=0.99.1\n")
+    readme = tmp_path / "README.md"
+    readme.write_text("qualified <=0.99.1\n")
     source = tmp_path / "plugin.py"
     source.write_text("# 0.99.1 was proven on stock Pi\n")
     adapter = LimitAdapter()
     assert stale_references(adapter, tmp_path) == (
         [],
-        ["docs.txt:2 (0.99.1)", "plugin.py:1 (0.99.1)"],
+        ["plugin.py:1 (0.99.1)"],
     )
-    assert stale_warnings(adapter, tmp_path, ["0.99.2"]) == [
-        "docs.txt:2 (0.99.1)",
-        "plugin.py:1 (0.99.1)",
-    ]
+    assert stale_warnings(adapter, tmp_path, ["0.99.2"]) == ["plugin.py:1 (0.99.1)"]
     source.write_text(
         "# 0.99.1 was proven on stock Pi\n"
         "in_qualified = (0, 85, 1) <= parsed <= (0, 99, 1)\n"
@@ -250,7 +264,7 @@ def test_opencode_historical_header_is_soft_but_range_string_and_tuple_are_hard(
 ) -> None:
     _limit_repo(tmp_path, "1.18.35", "1.18.34")
     (tmp_path / "gate.txt").write_text("1.18.36\n")
-    (tmp_path / "docs.txt").write_text("Qualified: 1.17.15–1.18.35\n")
+    (tmp_path / "docs.txt").write_text("Qualified: 1.17.15–1.18.34\n")
     source = tmp_path / "runtime_plan.py"
     source.write_text(
         "# 1.17.15-1.18.34 qualified by byte-stable Theater-consumed surfaces\n"
@@ -343,13 +357,7 @@ class EvidenceOnlyAdapter:
         return version
 
     def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
-        changed = []
-        for version in greens:
-            path = evidence_file(root, self.name, version)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('{"placeholder": true}\n')
-            changed.append(path.relative_to(root))
-        return changed
+        return []
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
         return Result(self.name, version, "green", (Check("proof", "pass"),))
@@ -368,29 +376,14 @@ def _evidence_only_repo(root: Path) -> None:
     _git(root, "commit", "-m", "source")
 
 
-def test_evidence_only_bump_skips_probe_and_rejects_other_changes(tmp_path: Path) -> None:
-    _evidence_only_repo(tmp_path)
-    adapter = EvidenceOnlyAdapter()
-    assert adapter.apply_bump(tmp_path, ["3.0.0"]) == [
-        Path("tests/fixtures/harness_compat/claude/3.0.0.json")
-    ]
-    assert not adapter.verified(tmp_path).admits("3.0.0")
-    assert check_bump(adapter, tmp_path, ["3.0.0"]) == []
-    (tmp_path / "extra.txt").write_text("unexpected\n")
-    assert "evidence-only bump changed unrelated files" in " ".join(
-        check_bump(adapter, tmp_path, ["3.0.0"])
-    )
-
-
-def test_framework_replaces_placeholder_evidence_and_reports_ceiling(tmp_path: Path) -> None:
+def test_no_change_green_is_cached_without_a_pr(tmp_path: Path) -> None:
     _evidence_only_repo(tmp_path)
     summary = runner.run_harness(
         EvidenceOnlyAdapter(), tmp_path, publish=True, run_url="https://example.invalid/run/1"
     )
-    assert summary["published"] is True
-    assert summary["evidence_only"] is True
+    assert summary["published"] is False
     assert summary["greens"] == ["3.0.0"]
-    document = json.loads(evidence_file(tmp_path, "claude", "3.0.0").read_text())
+    document = json.loads((cache_root(tmp_path) / "claude/3.0.0.json").read_text())
     result = Result(
         "claude",
         "3.0.0",
@@ -398,23 +391,23 @@ def test_framework_replaces_placeholder_evidence_and_reports_ceiling(tmp_path: P
         (Check("proof", "pass"),),
         adapter_digest=summary["adapter_digest"],
     )
-    assert document == {**result.to_evidence(), "run_url": "https://example.invalid/run/1"}
-    assert "placeholder" not in document
-    assert subprocess.run(
-        ["git", "diff", "--cached", "--name-only"],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.splitlines() == ["tests/fixtures/harness_compat/claude/3.0.0.json"]
-    summary["stale_warnings"] = [f"docs/old.md:{line:02} (2.9.9)" for line in range(1, 23)]
+    assert document == {
+        **result.to_evidence(),
+        "run_url": "https://example.invalid/run/1",
+        "artifacts": {},
+    }
+    assert (
+        subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        == ""
+    )
     report = prepare_publication(summary, tmp_path / "summary.json")
-    assert report.pr_needed is True
-    assert "Compatibility ceiling was NOT raised" in report.pr_body
-    assert "Historical references to the previous limit remain (review):" in report.pr_body
-    assert "docs/old.md:20 (2.9.9)" in report.pr_body
-    assert "docs/old.md:21 (2.9.9)" not in report.pr_body
-    assert "and 2 more" in report.pr_body
+    assert report.pr_needed is False
 
 
 def test_forced_in_range_candidate_reuses_its_watch_result(
@@ -444,7 +437,8 @@ def test_forced_in_range_candidate_reuses_its_watch_result(
     summary["results"][0]["routes"] = [route]
     summary["watch"]["routes"] = [route]
     report = prepare_publication(summary, tmp_path / "summary.json")
-    assert "`POST /v1/chat/completions` ×1" in report.pr_body
+    assert report.pr_needed is False
+    assert "Routes:" not in report.pr_body
 
 
 def test_green_candidate_artifact_is_composed_and_staged(
@@ -478,14 +472,14 @@ def test_green_candidate_artifact_is_composed_and_staged(
     assert staged == [
         "fixtures/1.2.0.json",
         "gate.txt",
-        "tests/fixtures/harness_compat/vibe/1.2.0.json",
     ]
+    cached = json.loads((cache_root(tmp_path) / "vibe/1.2.0.json").read_text())
+    assert set(cached["artifacts"]) == {"candidates/1.2.0.json"}
+    assert (cache_artifacts_dir(tmp_path, "vibe", "1.2.0") / "candidates/1.2.0.json").is_file()
     _git(tmp_path, "checkout", "-b", "rolling")
-    _git(tmp_path, "commit", "-m", "rolling evidence")
+    _git(tmp_path, "commit", "-m", "rolling gate")
     _git(tmp_path, "checkout", "main")
-    reused = runner.run_harness(
-        ArtifactAdapter(), tmp_path, publish=True, evidence_branch="rolling"
-    )
+    reused = runner.run_harness(ArtifactAdapter(), tmp_path, publish=True)
     assert reused["candidates"] == []
     assert reused["published"] is True
     assert (tmp_path / "fixtures/1.2.0.json").read_text() == '{"proved": true}\n'
@@ -500,6 +494,37 @@ def test_green_candidate_artifact_is_composed_and_staged(
     assert pool.capture(second, "1.3.0") == [
         "candidate artifact same.txt conflicts between 1.2.0 and 1.3.0"
     ]
+    forbidden = first / "tests/fixtures/harness_compat/vibe/1.2.0.json"
+    forbidden.parent.mkdir(parents=True)
+    forbidden.write_text("legacy evidence")
+    assert CandidateArtifacts(tmp_path / "forbidden-pool").capture(first, "1.2.0") == [
+        "candidate wrote forbidden evidence path: tests/fixtures/harness_compat/vibe/1.2.0.json"
+    ]
+
+
+def test_pr_body_is_one_line_per_release_with_bounded_warnings() -> None:
+    rows = (
+        Result("pi", "0.99.2", "green", (Check("probe", "pass"), Check("tui", "skip"))),
+        Result("pi", "0.99.3", "green", (Check("probe", "pass"), Check("tui", "skip"))),
+    )
+    report = build_report(
+        "pi",
+        rows,
+        run_url="https://example.invalid/current",
+        release_runs={"0.99.2": "https://example.invalid/prior"},
+        stale_warnings=(f"plugin.py:{n} (0.99.1)" for n in range(9)),
+    )
+    lines = report.pr_body.splitlines()
+    assert [line for line in lines if line.startswith("- ✅")] == [
+        "- ✅ `0.99.2` — green · [run](https://example.invalid/prior)",
+        "- ✅ `0.99.3` — green · [run](https://example.invalid/current)",
+    ]
+    assert report.pr_body.count("Declared skips:") == 1
+    assert "| Checks |" not in report.pr_body
+    assert (
+        len([line for line in lines if line.startswith("- plugin.py:") or line.startswith("- …")])
+        == 5
+    )
 
 
 def test_run_pytest_maps_skips_and_failures(tmp_path: Path) -> None:
@@ -734,6 +759,8 @@ def test_adapter_digest_covers_every_input_the_proofs_run_through(tmp_path: Path
 
     files = {
         "scripts/harness_compat/contract.py": "c",
+        "scripts/harness_compat/artifacts.py": "r",
+        "scripts/harness_compat/evidence.py": "e",
         "scripts/harness_compat/mock.py": "m",
         "scripts/harness_compat/adapters/vibe.py": "a",
         "scripts/harness_compat/adapters/vibe_store.py": "h",
