@@ -1,10 +1,6 @@
 """Credential-free wiring for the model-backed OpenCode server proof.
 
-OpenCode 1.x blocks session create on a models.dev catalog fetch, and the proof's
-hardcoded ``mistral/mistral-large-latest`` wants a real API key. The provider
-override points mistral at the sandbox mock; one online serve pre-warms the
-catalog cache and the plugin fixture's first-ever load into the sandbox HOME, so
-the offline proof never needs the network.
+One online serve primes caches so the proof can run offline.
 """
 
 from __future__ import annotations
@@ -50,11 +46,7 @@ def write_provider_override(sb: Sandbox) -> None:
 
 
 def prewarm_catalog(sb: Sandbox, *, plugin: Path | None = None, timeout: float = 90.0) -> bool:
-    """Serve once online, create one session, stop. True once the caches exist.
-
-    The plugin fixture's first-ever load also needs the network; loading it here
-    keeps the offline proof's first POST /session from blocking on a retry loop.
-    """
+    """Prime the catalog and first plugin load before offline proofs."""
     work = sb.root / "opencode-prewarm"
     work.mkdir(parents=True, exist_ok=True)
     config: dict[str, object] = {
