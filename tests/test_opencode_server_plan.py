@@ -21,7 +21,12 @@ from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
 from theater.harness.builtin.plugins.opencode.mcp import plugin_path
 from theater.harness.builtin.plugins.opencode.observer import database_path
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
+    OPENCODE_SERVER_COMPATIBILITY_POLICY,
+    OPENCODE_SERVER_MAX_VERSION,
+    OPENCODE_SERVER_MIN_VERSION,
     OPENCODE_SERVER_V2_COMPATIBILITY_POLICY,
+    OPENCODE_V1_QUALIFIED_RANGE,
+    release_text,
 )
 from theater.harness.builtin.plugins.opencode.server_discovery import parse_server_stdout_endpoint
 from theater.harness.builtin.plugins.opencode.server_plan import (
@@ -167,9 +172,23 @@ def test_probe_requires_both_successful_checks(
         assert compatibility.native_version == "1.18.29"
 
 
+def _patch_offset(version: tuple[int, int, int], offset: int) -> str:
+    return release_text((*version[:2], version[2] + offset))
+
+
 @pytest.mark.parametrize(
     ("version", "supported"),
-    [("1.17.14", False), ("1.17.15", True), ("1.18.34", True), ("1.18.35", False)],
+    [
+        (_patch_offset(OPENCODE_SERVER_MIN_VERSION, -1), False),
+        (release_text(OPENCODE_SERVER_MIN_VERSION), True),
+        (_patch_offset(OPENCODE_SERVER_MAX_VERSION, -1), True),
+        (release_text(OPENCODE_SERVER_MAX_VERSION), False),
+        (_patch_offset(OPENCODE_SERVER_MAX_VERSION, 1), False),
+        (
+            release_text((OPENCODE_SERVER_MAX_VERSION[0], OPENCODE_SERVER_MAX_VERSION[1] + 1, 0)),
+            False,
+        ),
+    ],
 )
 def test_probe_qualifies_exactly_the_1x_window(
     monkeypatch: pytest.MonkeyPatch, version: str, supported: bool
@@ -177,8 +196,12 @@ def test_probe_qualifies_exactly_the_1x_window(
     _patch_probe(monkeypatch, version, "--port --hostname")
     compatibility = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
     assert compatibility.supported is supported
+    assert compatibility.policy == OPENCODE_SERVER_COMPATIBILITY_POLICY
     if not supported:
-        assert "compatibility range" in (compatibility.reason or "")
+        assert compatibility.reason == (
+            "OpenCode release is outside the server-topology compatibility "
+            f"range; qualified releases are {OPENCODE_V1_QUALIFIED_RANGE}"
+        )
 
 
 def test_probe_requires_the_serve_flags(monkeypatch: pytest.MonkeyPatch) -> None:

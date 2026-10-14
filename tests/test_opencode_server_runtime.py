@@ -28,6 +28,10 @@ from theater.harness.builtin.plugins.opencode.plugin_receipt import (
     PluginNotLoaded,
     load_receipt_path,
 )
+from theater.harness.builtin.plugins.opencode.runtime_plan import (
+    OPENCODE_SERVER_MAX_VERSION,
+    release_text,
+)
 from theater.harness.builtin.plugins.opencode.server_live import OpenCodeServerLiveSource
 from theater.harness.builtin.plugins.opencode.server_plan import (
     OPENCODE_SERVER_COMPATIBILITY_POLICY,
@@ -559,7 +563,7 @@ async def test_new_session_readback_mismatch_fails_closed(
 
 
 async def test_server_handshake_rejects_version_drift(server: ServerFake, token_file: Path) -> None:
-    server.behaviors["health-version"] = "1.18.35"
+    server.behaviors["health-version"] = release_text(OPENCODE_SERVER_MAX_VERSION)
     runtime = OpenCodeServerRuntime(_context(server, token_file))
     with pytest.raises(RuntimeError, match="outside the qualified range"):
         await runtime.open_session(mode=SessionOpenMode.NEW)

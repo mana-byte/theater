@@ -13,14 +13,30 @@ from theater.harness.contracts.runtime import (
 
 from .constants import MODELS_TIMEOUT
 
-# 1.17.15-1.18.34 qualified by byte-stable Theater-consumed surfaces plus
-# model-free live probes on stock 1.17.15/1.17.20/1.18.0/1.18.10/1.18.28/1.18.34;
-# the paid model-backed conformance suite is pinned to stock 1.18.34 (previously
-# 1.18.29, upstream c470c79513f78aabb2ff88a8c8f7a3a22c4e97af), and 1.x approval
-# enforcement (the plugin's chat.message hook) is not model-free verifiable.
-OPENCODE_TUI_COMPATIBILITY_POLICY = "opencode-tui-native-controls-1.17.15-1.18.34"
+# The v1 ceiling is the sole release bump value. Historical model-free probes
+# and byte-stable consumed surfaces support this range; approval needs a model.
 OPENCODE_TUI_MIN_VERSION = (1, 17, 15)
 OPENCODE_TUI_MAX_VERSION = (1, 18, 35)
+OPENCODE_SERVER_MIN_VERSION = OPENCODE_TUI_MIN_VERSION
+OPENCODE_SERVER_MAX_VERSION = OPENCODE_TUI_MAX_VERSION
+
+
+def release_text(version: tuple[int, int, int]) -> str:
+    return ".".join(str(part) for part in version)
+
+
+_LAST_V1_RELEASE = (
+    OPENCODE_TUI_MAX_VERSION[0],
+    OPENCODE_TUI_MAX_VERSION[1],
+    OPENCODE_TUI_MAX_VERSION[2] - 1,
+)
+OPENCODE_V1_QUALIFIED_RANGE = (
+    f"{release_text(OPENCODE_TUI_MIN_VERSION)}-{release_text(_LAST_V1_RELEASE)}"
+)
+OPENCODE_TUI_COMPATIBILITY_POLICY = f"opencode-tui-native-controls-{OPENCODE_V1_QUALIFIED_RANGE}"
+OPENCODE_SERVER_COMPATIBILITY_POLICY = (
+    f"opencode-server-native-controls-{OPENCODE_V1_QUALIFIED_RANGE}"
+)
 
 # 1.x prints a bare release; 2.x prints `opencode v2.0.18`, so a leading `v` is allowed.
 _VERSION = re.compile(
@@ -61,14 +77,14 @@ def probe_opencode_compatibility(context: RuntimeProbeContext) -> RuntimeCompati
     version = parse_opencode_version(output)
     if version_run.returncode != 0 or version is None:
         return _unsupported("opencode --version did not report a usable release")
-    rendered = ".".join(str(part) for part in version)
+    rendered = release_text(version)
     if not OPENCODE_TUI_MIN_VERSION <= version < OPENCODE_TUI_MAX_VERSION:
         return RuntimeCompatibility(
             supported=False,
             policy=OPENCODE_TUI_COMPATIBILITY_POLICY,
             native_version=rendered,
             reason="OpenCode release is outside the native control compatibility range "
-            "(qualified releases are 1.17.15-1.18.34)",
+            f"(qualified releases are {OPENCODE_V1_QUALIFIED_RANGE})",
         )
     help_text = f"{help_run.stdout}\n{help_run.stderr}"
     if help_run.returncode != 0 or not {"--model", "--auto", "--fork"}.issubset(help_text.split()):
@@ -95,9 +111,6 @@ def _unsupported(reason: str) -> RuntimeCompatibility:
 
 # Detached-server topology policy, deliberately NOT yet in MANIFEST: cutover needs
 # send/abort/lineage parity with the TUI host. Pins the release and session-first ordering.
-OPENCODE_SERVER_COMPATIBILITY_POLICY = "opencode-server-native-controls-1.17.15-1.18.34"
-OPENCODE_SERVER_MIN_VERSION = (1, 17, 15)
-OPENCODE_SERVER_MAX_VERSION = (1, 18, 35)
 SERVER_SESSION_ORDER = RuntimeSessionOrder.SESSION_FIRST
 #: 2.x server topology, verified end to end on 2.0.18 and model-free on stock
 #: 2.0.6/2.0.12/2.0.17/2.0.20 (banner, Basic auth, /api/info, POST/GET /api/session

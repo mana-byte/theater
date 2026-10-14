@@ -51,7 +51,7 @@ _TUI_SKIP_DETAIL = (
 _REGIE_SKIP = Check(
     "packages/regie/tests/test_dashboard_rich.py",
     "skip",
-    "regie dashboard assertion edited but not executed: isolated pytest cannot import regie",
+    "regie dashboard formatting is tested separately; isolated pytest cannot import regie",
 )
 
 
@@ -129,7 +129,7 @@ class OpenCodeAdapter:
         return version
 
     def apply_bump(self, root: Path, greens: Sequence[str]) -> list[Path]:
-        """Admit the greens by raising the exclusive ceiling and the textual bounds."""
+        """Admit the greens by raising the plugin's exclusive ceiling."""
         return opencode_bump.apply_bump(root, list(greens))
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:

@@ -1,62 +1,27 @@
-"""Pure-text OpenCode 1.x gate reading and deterministic ceiling bumps.
-
-Every coupled upper bound follows the last green release.
-"""
+"""Read the OpenCode source gate and bump its single v1 ceiling literal."""
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
+from typing import cast
 
 from ..contract import VerifiedSet, load_evidenced, version_key
 
 RUNTIME_PLAN = Path("theater/harness/builtin/plugins/opencode/runtime_plan.py")
-SERVER_PLAN = Path("theater/harness/builtin/plugins/opencode/server_plan.py")
-MANIFEST = Path("theater/harness/builtin/plugins/opencode/manifest.py")
-STOCK_UI_TEST = Path("tests/test_opencode_stock_ui.py")
-FRONTEND_TEST = Path("tests/test_opencode_frontend.py")
-SERVER_RUNTIME_TEST = Path("tests/test_opencode_server_runtime.py")
-SERVER_PLAN_TEST = Path("tests/test_opencode_server_plan.py")
-SERVER_PROOF_TEST = Path("tests/test_opencode_server_proof.py")
-DASHBOARD_TEST = Path("packages/regie/tests/test_dashboard_rich.py")
-OPCODE_DOC = Path("docs/native-interaction/opencode.md")
-
-#: Every file a ceiling bump touches; historical prose inside them is left alone.
-COUPLED_FILES: tuple[Path, ...] = (
-    RUNTIME_PLAN,
-    SERVER_PLAN,
-    MANIFEST,
-    STOCK_UI_TEST,
-    FRONTEND_TEST,
-    SERVER_RUNTIME_TEST,
-    SERVER_PLAN_TEST,
-    SERVER_PROOF_TEST,
-    DASHBOARD_TEST,
-    OPCODE_DOC,
-)
-
-_GATE_NAMES = (
-    "OPENCODE_TUI_MIN_VERSION",
-    "OPENCODE_TUI_MAX_VERSION",
-    "OPENCODE_SERVER_MIN_VERSION",
-    "OPENCODE_SERVER_MAX_VERSION",
-)
-_WINDOW_TABLE = re.compile(r'\[\("1\.17\.14", False\), \("1\.17\.15", True\), (?P<rows>[^]]*)\],')
-#: Per coupled file, the literal (old, new) pairs; the window table is rebuilt separately.
-Substitutions = tuple[dict[Path, list[tuple[str, str]]], str]
+COUPLED_FILES: tuple[Path, ...] = (RUNTIME_PLAN,)
+_FLOOR = "OPENCODE_TUI_MIN_VERSION"
+_CEILING = "OPENCODE_TUI_MAX_VERSION"
+_GATE_LINE = re.compile(r"^OPENCODE_TUI_MAX_VERSION = \(\d+, \d+, \d+\)$", re.M)
 
 
 def _render(version: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in version)
 
 
-def _tuple_text(version: str) -> str:
-    major, minor, patch = version_key(version)
-    return f"({major}, {minor}, {patch})"
-
-
 def previous_patch(version: str) -> str:
-    """The release just below ``version``; the textual bound of an exclusive ceiling."""
+    """The last admitted release below an exclusive ceiling."""
     major, minor, patch = version_key(version)
     if patch == 0:
         raise ValueError(f"no previous patch release for {version!r}")
@@ -64,40 +29,45 @@ def previous_patch(version: str) -> str:
 
 
 def next_minor(version: str) -> str:
-    """The first release of the next minor line: a sample that must stay outside the window."""
+    """The first release of the next minor line."""
     major, minor, _ = version_key(version)
     return f"{major}.{minor + 1}.0"
 
 
 def next_patch(version: str) -> str:
-    """The exclusive ceiling that admits ``version`` as the last green release."""
+    """The exclusive ceiling after admitting a release."""
     major, minor, patch = version_key(version)
     return f"{major}.{minor}.{patch + 1}"
 
 
 def read_gate(root: Path) -> tuple[str, str]:
-    """(floor, exclusive ceiling) parsed from the tree at ``root``; never imports theater."""
-    text = (root / RUNTIME_PLAN).read_text(encoding="utf-8")
+    """Read AST tuple literals from plugin source without importing theater."""
+    source = (root / RUNTIME_PLAN).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(RUNTIME_PLAN))
     gate: dict[str, tuple[int, int, int]] = {}
-    for name in _GATE_NAMES:
-        match = re.search(rf"^{name} = \((\d+), (\d+), (\d+)\)$", text, re.M)
-        if match is None:
-            raise ValueError(f"the OpenCode gate is unreadable: {name} missing from {RUNTIME_PLAN}")
-        gate[name] = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    if gate["OPENCODE_TUI_MIN_VERSION"] != gate["OPENCODE_SERVER_MIN_VERSION"] or (
-        gate["OPENCODE_TUI_MAX_VERSION"] != gate["OPENCODE_SERVER_MAX_VERSION"]
-    ):
-        raise ValueError("the OpenCode TUI and server gates disagree in runtime_plan.py")
-    tui_min, tui_max = gate["OPENCODE_TUI_MIN_VERSION"], gate["OPENCODE_TUI_MAX_VERSION"]
-    floor, ceiling = _render(tui_min), _render(tui_max)
-    manifest = (root / MANIFEST).read_text(encoding="utf-8")
-    if f">={floor},<{ceiling} || " not in manifest:
-        raise ValueError(f"manifest.py does not declare the gate range >= {floor},< {ceiling}")
-    return floor, ceiling
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id not in {_FLOOR, _CEILING}:
+            continue
+        if target.id in gate or not isinstance(node.value, ast.Tuple):
+            raise ValueError(f"the OpenCode gate is unreadable: {target.id} in {RUNTIME_PLAN}")
+        values = node.value.elts
+        if len(values) != 3 or any(
+            not isinstance(value, ast.Constant) or type(value.value) is not int for value in values
+        ):
+            raise ValueError(f"the OpenCode gate is unreadable: {target.id} in {RUNTIME_PLAN}")
+        gate[target.id] = cast(tuple[int, int, int], ast.literal_eval(node.value))
+    if set(gate) != {_FLOOR, _CEILING}:
+        raise ValueError(f"the OpenCode gate is unreadable: missing tuple in {RUNTIME_PLAN}")
+    if gate[_CEILING] <= gate[_FLOOR] or gate[_CEILING][2] == 0:
+        raise ValueError("the OpenCode v1 gate has an invalid exclusive ceiling")
+    return _render(gate[_FLOOR]), _render(gate[_CEILING])
 
 
 def verified_set(root: Path) -> VerifiedSet:
-    """The gate under ``root``: an inclusive floor, an exclusive ceiling, no known-bad."""
+    """The source gate's inclusive floor and exclusive ceiling."""
     floor, ceiling = read_gate(root)
     return VerifiedSet(
         kind="range",
@@ -108,104 +78,32 @@ def verified_set(root: Path) -> VerifiedSet:
     )
 
 
-def _substitutions(floor: str, ceiling: str, greens: list[str]) -> Substitutions:
-    """Literal old→new pairs per file plus the rebuilt window-table rows.
-
-    Every anchor must exist in the tree or the bump fails closed.
-    """
-    old_bound, last_green = previous_patch(ceiling), greens[-1]
-    new_ceiling = next_patch(last_green)
-    plain_range = (f"{floor}-{old_bound}", f"{floor}-{last_green}")
-    backticked_range = (f"`{floor}`–`{old_bound}`", f"`{floor}`–`{last_green}`")
-    window_rows = (
-        ", ".join(f'("{green}", True)' for green in greens) + f', ("{new_ceiling}", False)'
-    )
-    pairs: dict[Path, list[tuple[str, str]]] = {
-        RUNTIME_PLAN: [
-            plain_range,
-            (
-                f"OPENCODE_TUI_MAX_VERSION = {_tuple_text(ceiling)}",
-                f"OPENCODE_TUI_MAX_VERSION = {_tuple_text(new_ceiling)}",
-            ),
-            (
-                f"OPENCODE_SERVER_MAX_VERSION = {_tuple_text(ceiling)}",
-                f"OPENCODE_SERVER_MAX_VERSION = {_tuple_text(new_ceiling)}",
-            ),
-            (f"pinned to stock {old_bound}", f"pinned to stock {last_green}"),
-        ],
-        SERVER_PLAN: [plain_range],
-        MANIFEST: [(f",<{ceiling} || ", f",<{new_ceiling} || ")],
-        STOCK_UI_TEST: [plain_range],
-        # The probe test feeds a release just beyond the window and expects a refusal.
-        FRONTEND_TEST: [
-            (f'_Result("{next_minor(ceiling)}")', f'_Result("{next_minor(new_ceiling)}")')
-        ],
-        SERVER_RUNTIME_TEST: [
-            (f'"health-version"] = "{ceiling}"', f'"health-version"] = "{new_ceiling}"')
-        ],
-        SERVER_PLAN_TEST: [],  # the 1.x window table is rebuilt, not paired
-        SERVER_PROOF_TEST: [
-            (f'_PINNED_VERSION = "{old_bound}"', f'_PINNED_VERSION = "{last_green}"')
-        ],
-        OPCODE_DOC: [
-            backticked_range,
-            (f"pinned to stock `{old_bound}`", f"pinned to stock `{last_green}`"),
-        ],
-        DASHBOARD_TEST: [
-            (
-                f'">={floor},<{ceiling} || >=2.0.6,<2.1.0"',
-                f'">={floor},<{new_ceiling} || >=2.0.6,<2.1.0"',
-            ),
-            (f'"{floor}–{old_bound} · 2.0.6–2.0.x"', f'"{floor}–{last_green} · 2.0.6–2.0.x"'),
-        ],
-    }
-    return pairs, window_rows
-
-
-def _apply_window_table(text: str, window_rows: str) -> str:
-    match = _WINDOW_TABLE.search(text)
-    if match is None:
-        raise ValueError("cannot find the 1.x window table in test_opencode_server_plan.py")
-    return _WINDOW_TABLE.sub(
-        f'[("1.17.14", False), ("1.17.15", True), {window_rows}],', text, count=1
-    )
-
-
 def apply_bump(root: Path, greens: list[str]) -> list[Path]:
-    """Admit ascending greens; repeated admitted greens are a no-op.
-
-    Returns changed paths relative to ``root``.
-    """
+    """Raise only the source ceiling; repeated admitted greens are a no-op."""
     if not greens:
         return []
     keys = [version_key(green) for green in greens]
     if any(key[0] != 1 for key in keys):
         raise ValueError(f"the OpenCode v1 adapter only admits 1.x releases: {greens}")
-    if keys != sorted(keys) or len(set(greens)) != len(greens):
+    if keys != sorted(keys) or len(set(keys)) != len(keys):
         raise ValueError(f"greens must be unique and ascending: {greens}")
     floor, ceiling = read_gate(root)
     floor_key, ceiling_key = version_key(floor), version_key(ceiling)
     if all(floor_key <= key < ceiling_key for key in keys):
-        return []  # every green is already admitted: idempotent no-op
+        return []
     if keys[0] < ceiling_key:
         raise ValueError(
             f"green releases must start at or above the current ceiling {ceiling!r}; "
             f"got {greens[0]!r}"
         )
 
-    rules, window_rows = _substitutions(floor, ceiling, greens)
-    changed: list[Path] = []
-    for relative, pairs in rules.items():
-        path = root / relative
-        original = path.read_text(encoding="utf-8")
-        text = original
-        for old, new in pairs:
-            if old not in text:
-                raise ValueError(f"bump anchor missing in {relative}: {old!r}")
-            text = text.replace(old, new)
-        if relative == SERVER_PLAN_TEST:
-            text = _apply_window_table(text, window_rows)
-        if text != original:
-            path.write_text(text, encoding="utf-8")
-            changed.append(relative)
-    return sorted(changed)
+    path = root / RUNTIME_PLAN
+    original = path.read_text(encoding="utf-8")
+    match = _GATE_LINE.search(original)
+    if match is None:
+        raise ValueError(f"bump anchor missing in {RUNTIME_PLAN}: {_CEILING}")
+    major, minor, patch = version_key(next_patch(greens[-1]))
+    replacement = f"{_CEILING} = ({major}, {minor}, {patch})"
+    bumped = original[: match.start()] + replacement + original[match.end() :]
+    path.write_text(bumped, encoding="utf-8")
+    return [RUNTIME_PLAN]

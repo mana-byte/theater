@@ -25,7 +25,10 @@ from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
 from theater.harness.builtin.plugins.opencode.runtime import OpenCodeFrontendRuntime
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
     OPENCODE_TUI_COMPATIBILITY_POLICY,
+    OPENCODE_TUI_MAX_VERSION,
+    OPENCODE_V1_QUALIFIED_RANGE,
     probe_opencode_compatibility,
+    release_text,
 )
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.runtime import (
@@ -1042,7 +1045,8 @@ def test_probe_rejects_releases_outside_the_tested_window(monkeypatch) -> None:
 
     def run(argv, **kwargs):
         del kwargs
-        return _Result("1.19.0") if argv[-1] == "--version" else _Result("--model --auto --fork")
+        version = release_text(OPENCODE_TUI_MAX_VERSION)
+        return _Result(version) if argv[-1] == "--version" else _Result("--model --auto --fork")
 
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.opencode.runtime_plan.subprocess.run",
@@ -1052,7 +1056,7 @@ def test_probe_rejects_releases_outside_the_tested_window(monkeypatch) -> None:
     compatibility = probe_opencode_compatibility(RuntimeProbeContext(binary="opencode"))
     assert compatibility.supported is False
     assert compatibility.policy == OPENCODE_TUI_COMPATIBILITY_POLICY
-    assert "1.17.15" in (compatibility.reason or "")
+    assert OPENCODE_V1_QUALIFIED_RANGE in (compatibility.reason or "")
 
 
 def test_opencode_extension_executable_conformance(monkeypatch, tmp_path) -> None:
