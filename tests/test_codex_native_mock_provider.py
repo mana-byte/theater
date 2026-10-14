@@ -11,10 +11,13 @@ tests/test_codex_native_runtime_proof.py.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import socket
+import sys
 import time
 from pathlib import Path
+from types import ModuleType
 from urllib.parse import urlparse
 
 import pytest
@@ -35,6 +38,16 @@ from tests.native.codex_mock_provider import (
 
 STEER_TEXT = "Stop writing the essay immediately. Reply with exactly: steered"
 RIVERS = "Write a long, detailed 1200 word essay about rivers."
+
+
+def _bootstrap_mock_module() -> ModuleType:
+    path = Path(__file__).parent / "fixtures/codex_native_ui_bootstrap/mock_responses.py"
+    spec = importlib.util.spec_from_file_location("codex_bootstrap_mock_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _events_of(script) -> list[dict]:
@@ -139,6 +152,9 @@ def test_compat_log_records_all_methods_without_changing_statuses(
         ("DELETE", "/v1/unknown", 501, False),
         ("HEAD", "/v1/unknown", 501, False),
         ("OPTIONS", "/v1/unknown", 501, False),
+        ("TRACE", "/v1/unknown", 501, False),
+        ("CONNECT", "/v1/unknown", 501, False),
+        ("BREW", "/v1/unknown", 501, False),
     ]
     try:
         parsed = urlparse(provider.base_url)
@@ -164,6 +180,64 @@ def test_compat_log_records_all_methods_without_changing_statuses(
             "path": path.split("?", 1)[0],
             "scripted": scripted,
         }
+        for method, path, _status, scripted in requests
+    ]
+
+
+@pytest.mark.parametrize("logging", [False, True])
+def test_bootstrap_compat_log_records_every_method_without_changing_responses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logging: bool
+) -> None:
+    import http.client
+
+    mock = _bootstrap_mock_module()
+    log = tmp_path / "bootstrap.jsonl"
+    if logging:
+        monkeypatch.setenv("THEATER_COMPAT_MOCK_LOG", str(log))
+    else:
+        monkeypatch.delenv("THEATER_COMPAT_MOCK_LOG", raising=False)
+    server = mock.MockResponsesServer([mock.final_assistant_message_response("ok")])
+    server.start()
+    requests = [
+        ("POST", "/v1/responses", 200, True),
+        ("POST", "/v1/new-required-endpoint?x=1", 404, False),
+        ("GET", "/v1/models", 200, True),
+        ("GET", "/v1/unknown?q=1", 404, False),
+        ("OPTIONS", "/v1/unknown", 204, False),
+        ("PUT", "/v1/unknown", 501, False),
+        ("PATCH", "/v1/unknown", 501, False),
+        ("DELETE", "/v1/unknown", 501, False),
+        ("HEAD", "/v1/unknown", 501, False),
+        ("TRACE", "/v1/unknown", 501, False),
+        ("CONNECT", "/v1/unknown", 501, False),
+        ("BREW", "/v1/unknown", 501, False),
+    ]
+    try:
+        parsed = urlparse(server.base_url)
+        responses = []
+        for method, path, _status, _scripted in requests:
+            connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+            body = "{}" if method == "POST" else None
+            connection.request(method, path, body=body)
+            response = connection.getresponse()
+            responses.append((response.status, response.read()))
+            connection.close()
+    finally:
+        server.stop()
+    assert [status for status, _body in responses] == [
+        status for _method, _path, status, _scripted in requests
+    ]
+    for (method, _path, status, _scripted), (_actual, body) in zip(
+        requests, responses, strict=True
+    ):
+        if status == 501 and method != "HEAD":
+            assert f"Unsupported method ('{method}')".encode() in body
+    if not logging:
+        assert not log.exists()
+        return
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert records == [
+        {"method": method, "path": path.split("?", 1)[0], "scripted": scripted}
         for method, path, _status, scripted in requests
     ]
 

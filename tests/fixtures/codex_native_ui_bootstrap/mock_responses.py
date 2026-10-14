@@ -31,9 +31,12 @@ alive and working.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass, field
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 SSE_CONTENT_TYPE = "text/event-stream"
@@ -162,6 +165,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
 
     def do_OPTIONS(self) -> None:  # pragma: no cover - codex does not preflight
+        self.mock.log_compat_request("OPTIONS", self.path, False)
         self.send_response(204)
         self._cors_headers()
         self.end_headers()
@@ -187,6 +191,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.mock.requests.append(
             RecordedRequest(path=self.path, body=parsed, matched=matched, structured=structured)
         )
+        self.mock.log_compat_request("POST", self.path, self.path.endswith("/responses"))
         if self.path.endswith("/responses"):
             stream = self.mock.next_stream(self.path, body_text, structured=structured)
             if stream is None:
@@ -199,7 +204,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.mock.requests.append(RecordedRequest(path=self.path))
-        if self.path.endswith("/models"):
+        scripted = self.path.endswith("/models")
+        self.mock.log_compat_request("GET", self.path, scripted)
+        if scripted:
             encoded = json.dumps(
                 {"data": [{"id": "mock-model", "object": "model", "owned_by": "theater"}]}
             ).encode("utf-8")
@@ -211,6 +218,16 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self.send_response(404)
         self.end_headers()
+
+    def _unsupported(self) -> None:
+        # Logging must preserve the stdlib's status, message, and response body.
+        self.mock.log_compat_request(self.command, self.path, False)
+        self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("do_"):
+            return self._unsupported
+        raise AttributeError(name)
 
     def log_message(self, *_args: Any) -> None:  # keep pytest output clean
         return
@@ -239,6 +256,8 @@ class MockResponsesServer:
             else final_assistant_message_response('{"title": "Theater bootstrap proof"}')
         )
         self.requests: list[RecordedRequest] = []
+        log = os.environ.get("THEATER_COMPAT_MOCK_LOG")
+        self._compat_log = Path(log) if log else None
         self._lock = threading.Lock()
         self._gate = threading.Event()
         self._hold_second_response = False
@@ -257,6 +276,13 @@ class MockResponsesServer:
         if structured:
             return False
         return body_text is not None and self.marker in body_text
+
+    def log_compat_request(self, method: str, path: str, scripted: bool) -> None:
+        if self._compat_log is None:
+            return
+        entry = {"method": method, "path": path.split("?", 1)[0], "scripted": scripted}
+        with self._lock, self._compat_log.open("a") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
 
     def hold_second_response(self) -> None:
         with self._lock:
