@@ -936,11 +936,11 @@ class TestNativeSmokeSharedUiSession:
         assert observer_request["params"]["turnId"]
 
         wait_until(
-            lambda: "Allow creating" in ui.pane() or str(target) in ui.pane(),
+            lambda: f"$ touch {target}" in ui.pane(),
             timeout=240,
             what="approval dialog in the native UI",
         )
-        ui.send_keys("y")
+        ui.send_keys("Enter")
 
         wait_until(target.exists, timeout=240, what="approved command to execute")
         # The observer never sent any approval response: it only received the
