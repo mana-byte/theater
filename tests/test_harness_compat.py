@@ -22,11 +22,12 @@ from scripts.harness_compat.contract import (
     VerifiedSet,
     evidence_file,
 )
+from scripts.harness_compat.diagnostics import clip_diagnostic
 from scripts.harness_compat.evidence import adapter_digest, reusable_evidence
 from scripts.harness_compat.framework import _check_selector, check_bump, run_pytest
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.report import _checks, build_report
-from scripts.harness_compat.runner import classify_routes
+from scripts.harness_compat.runner import _qualify, classify_routes
 from scripts.harness_compat.sandbox import make_sandbox
 from scripts.harness_compat.select import newest_in_range, plan_bump, select_candidates
 from scripts.harness_compat.stale import stale_references, stale_warnings
@@ -656,3 +657,32 @@ def test_sandbox_keeps_unix_socket_paths_short(
     ):
         pass
     assert not long_root.exists()
+
+
+def test_clip_keeps_the_named_cause_ahead_of_a_long_stack_tail() -> None:
+    stack = " at frame (file.js:1:1)" * 40
+    text = (
+        "AssertionError: stderr: import { A } from 'pkg'; ^^^ SyntaxError: The requested "
+        f"module 'pkg' does not provide an export named 'A' at ModuleJob.run{stack}"
+    )
+    clipped = clip_diagnostic(text, 300, tail=True)
+    assert len(clipped) <= 300
+    assert clipped.startswith("SyntaxError: The requested module 'pkg' does not provide")
+    assert clipped.endswith("(file.js:1:1)")
+    assert clip_diagnostic("plain failure " * 80, 100, tail=True).startswith("…")
+
+
+def test_adapter_tooling_verdict_survives_missing_green_checks(tmp_path: Path) -> None:
+    class ConsistencyFails(FakeAdapter):
+        green_tests = ("tests/proof.py",)
+        expected_skips: ClassVar[dict[str, str]] = {}
+
+        def install(self, sb: Sandbox, version: str) -> Path:
+            return tmp_path / "binary"
+
+        def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+            return Result("vibe", version, "tooling", (Check("tests/unit.py", "fail", "table"),))
+
+    result, _ = _qualify(ConsistencyFails(), tmp_path, "1.0.0", bump=False)  # type: ignore[arg-type]
+    assert result.verdict == "tooling"
+    assert result.checks[0].detail == "table"

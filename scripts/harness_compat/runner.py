@@ -136,7 +136,7 @@ def _qualify(
             )
             if observed.verdict in ("tooling", "inconclusive"):
                 verdict = observed.verdict
-            elif any(
+            elif len(relevant) != len(adapter.green_tests) or any(
                 check.status == "error"
                 or (check.status == "skip" and check.name not in adapter.expected_skips)
                 for check in relevant
@@ -144,8 +144,6 @@ def _qualify(
                 verdict = "inconclusive"
             else:
                 verdict = verdict_from_checks(relevant)
-            if len(relevant) != len(adapter.green_tests):
-                verdict = "inconclusive"
             result = replace(observed, verdict=verdict)
         except InstallFailed as exc:
             result = Result(

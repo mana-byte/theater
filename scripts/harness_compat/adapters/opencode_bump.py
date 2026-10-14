@@ -16,6 +16,7 @@ RUNTIME_PLAN = Path("theater/harness/builtin/plugins/opencode/runtime_plan.py")
 SERVER_PLAN = Path("theater/harness/builtin/plugins/opencode/server_plan.py")
 MANIFEST = Path("theater/harness/builtin/plugins/opencode/manifest.py")
 STOCK_UI_TEST = Path("tests/test_opencode_stock_ui.py")
+FRONTEND_TEST = Path("tests/test_opencode_frontend.py")
 SERVER_RUNTIME_TEST = Path("tests/test_opencode_server_runtime.py")
 SERVER_PLAN_TEST = Path("tests/test_opencode_server_plan.py")
 SERVER_PROOF_TEST = Path("tests/test_opencode_server_proof.py")
@@ -28,6 +29,7 @@ COUPLED_FILES: tuple[Path, ...] = (
     SERVER_PLAN,
     MANIFEST,
     STOCK_UI_TEST,
+    FRONTEND_TEST,
     SERVER_RUNTIME_TEST,
     SERVER_PLAN_TEST,
     SERVER_PROOF_TEST,
@@ -61,6 +63,12 @@ def previous_patch(version: str) -> str:
     if patch == 0:
         raise ValueError(f"no previous patch release for {version!r}")
     return f"{major}.{minor}.{patch - 1}"
+
+
+def next_minor(version: str) -> str:
+    """The first release of the next minor line: a sample that must stay outside the window."""
+    major, minor, _ = version_key(version)
+    return f"{major}.{minor + 1}.0"
 
 
 def next_patch(version: str) -> str:
@@ -130,6 +138,10 @@ def _substitutions(floor: str, ceiling: str, greens: list[str]) -> Substitutions
         SERVER_PLAN: [plain_range],
         MANIFEST: [(f",<{ceiling} || ", f",<{new_ceiling} || ")],
         STOCK_UI_TEST: [plain_range],
+        # The probe test feeds a release just beyond the window and expects a refusal.
+        FRONTEND_TEST: [
+            (f'_Result("{next_minor(ceiling)}")', f'_Result("{next_minor(new_ceiling)}")')
+        ],
         SERVER_RUNTIME_TEST: [
             (f'"health-version"] = "{ceiling}"', f'"health-version"] = "{new_ceiling}"')
         ],

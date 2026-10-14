@@ -52,8 +52,11 @@ def test_apply_bump_raises_the_ceiling_and_moves_every_bound(coupled_tree: Path)
     floor, ceiling = _gate(coupled_tree)
     last_green = ceiling  # the oldest unadmitted candidate
     changed = opencode.ADAPTER.apply_bump(coupled_tree, [last_green])
-    assert {str(path) for path in changed} == {
-        str(relative) for relative in opencode_bump.COUPLED_FILES
+    # The probe-refusal sample only moves when the ceiling crosses a minor line.
+    assert {str(path) for path in changed} >= {
+        str(relative)
+        for relative in opencode_bump.COUPLED_FILES
+        if relative != opencode_bump.FRONTEND_TEST
     }
     new_ceiling = opencode_bump.next_patch(last_green)
     assert _gate(coupled_tree) == (floor, new_ceiling)
@@ -90,7 +93,7 @@ def test_apply_bump_is_idempotent_and_deterministic(coupled_tree: Path, tmp_path
     for version in ladder:
         floor, old_ceiling = _gate(coupled_tree)
         changed = opencode.ADAPTER.apply_bump(coupled_tree, [version])
-        assert set(changed) == set(opencode_bump.COUPLED_FILES)
+        assert set(changed) >= set(opencode_bump.COUPLED_FILES) - {opencode_bump.FRONTEND_TEST}
         assert _gate(coupled_tree) == (floor, opencode_bump.next_patch(version))
         active = (coupled_tree / opencode_bump.RUNTIME_PLAN).read_text(encoding="utf-8")
         assert f"{floor}-{opencode_bump.previous_patch(old_ceiling)}" not in active
@@ -110,6 +113,8 @@ def test_apply_bump_is_idempotent_and_deterministic(coupled_tree: Path, tmp_path
         assert supported is False, reason
         assert opencode.ADAPTER.apply_bump(coupled_tree, [version]) == []
 
+    frontend = (coupled_tree / opencode_bump.FRONTEND_TEST).read_text(encoding="utf-8")
+    assert '_Result("1.20.0")' in frontend and '_Result("1.19.0")' not in frontend
     snapshot = {
         relative: (coupled_tree / relative).read_bytes() for relative in opencode_bump.COUPLED_FILES
     }
