@@ -816,7 +816,7 @@ def test_pi_frontend_probe_refuses_unqualified_versions(version, monkeypatch) ->
     assert refused.supported is False
     assert refused.policy == PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY
     assert refused.reason is not None
-    if version.split(".", 1)[0] == str(PI_FRONTEND_QUALIFIED_MAX[0]):
+    if int(version.split(".", 1)[0]) <= PI_FRONTEND_QUALIFIED_MAX[0]:
         assert refused.native_version == version
         assert PI_FRONTEND_QUALIFIED_RANGE in refused.reason
     else:
