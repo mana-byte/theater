@@ -69,6 +69,8 @@ ENDPOINT = "/private/theater/var/runtime/codex-p1.sock"
 PARTICIPANT = "codex-p1"
 CWD = "/repo"
 GENERATION = 7
+# Captured stock release used by the scripted protocol examples.
+CAPTURED_CODEX_RELEASE = "0.154.0"
 QUEUE_METHODS = (
     "thread/queue/add",
     "thread/queue/list",
@@ -135,7 +137,9 @@ class ScriptedCodexServer:
     def default_response(self, method: str) -> object:
         if method == "initialize":
             return {
-                "userAgent": "theater/0.154.0 (macos; arm64) xterm (theater; 1.0)",
+                "userAgent": (
+                    f"theater/{CAPTURED_CODEX_RELEASE} (macos; arm64) xterm (theater; 1.0)"
+                ),
                 "codexHome": "/isolated/codex-home",
                 "platformFamily": "unix",
                 "platformOs": "macos",
@@ -272,7 +276,7 @@ def thread_started(
                 "id": thread_id,
                 "cwd": cwd,
                 "ephemeral": ephemeral,
-                "cliVersion": "0.154.0",
+                "cliVersion": CAPTURED_CODEX_RELEASE,
                 "status": {"type": status},
             }
         },
@@ -318,29 +322,48 @@ def test_installed_release_fixture_version_is_verified_policy() -> None:
         assert parse_codex_version(release["installed_version_output"]) == version
 
 
-def test_probe_supports_verified_release(monkeypatch) -> None:
-    _patch_version(monkeypatch, "codex-cli 0.154.0\n")
-    compatibility = probe_codex_compatibility(RuntimeProbeContext(binary="codex"))
-    assert compatibility == RuntimeCompatibility(
-        supported=True,
-        policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
-        native_version="0.154.0",
-        reason=None,
+def _gate_cases() -> list[tuple[str, bool]]:
+    ordered = sorted(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
+    major, minor, patch = map(int, ordered[0].split("."))
+    below = f"{major}.{minor - 1}.{patch}"
+    between = next(
+        f"{a}.{b}.{c + 1}"
+        for version in ordered
+        for a, b, c in [tuple(map(int, version.split(".")))]
+        if f"{a}.{b}.{c + 1}" not in CODEX_RUNTIME_VERIFIED_VERSIONS
+        and f"{a}.{b}.{c + 1}" < ordered[-1]
     )
+    a, b, c = map(int, ordered[-1].split("."))
+    above = f"{a}.{b}.{c + 1}"
+    prerelease = f"{ordered[-1]}-alpha.1"
+    return [(version, True) for version in ordered] + [
+        (version, False) for version in (below, between, above, prerelease)
+    ]
 
 
-def test_probe_rejects_unknown_version_with_legacy_guidance(monkeypatch) -> None:
-    _patch_version(monkeypatch, "codex-cli 0.99.0\n")
-    compatibility = probe_codex_compatibility(RuntimeProbeContext(binary="codex"))
-    assert compatibility.supported is False
-    assert compatibility.native_version == "0.99.0"
-    assert compatibility.policy == CODEX_RUNTIME_COMPATIBILITY_POLICY
-    # The daemon treats native as a preference: unsupported versions select
-    # legacy for auto and explicit native alike, recording this reason.
-    assert "wiring=auto" in compatibility.reason
-    assert "explicit native preference" in compatibility.reason
-    assert "selects legacy" in compatibility.reason
-    assert "explicit native fails" not in compatibility.reason
+@pytest.mark.parametrize(("version", "supported"), _gate_cases())
+def test_probe_exact_gate_and_manifest_range(monkeypatch, version: str, supported: bool) -> None:
+    _patch_version(monkeypatch, f"codex-cli {version}\n")
+    reason = None
+    if not supported:
+        ordered = sorted(
+            CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split(".")))
+        )
+        reason = (
+            f"codex-cli {version} is not Theater-verified by compatibility policy "
+            f"{CODEX_RUNTIME_COMPATIBILITY_POLICY} (verified: {', '.join(ordered)}); "
+            "wiring=auto selects legacy, and explicit native preference selects legacy "
+            "with this reason"
+        )
+    assert probe_codex_compatibility(RuntimeProbeContext(binary="codex")) == RuntimeCompatibility(
+        supported=supported,
+        policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
+        native_version=version,
+        reason=reason,
+    )
+    low = min(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
+    high = max(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
+    assert MANIFEST.native_compatibility.qualified_range == f">={low},<={high}"
 
 
 def test_probe_rejects_unparseable_output(monkeypatch) -> None:
@@ -540,7 +563,7 @@ async def test_open_new_discovers_exact_ui_thread_and_handshake_dialect() -> Non
     assert binding.lifecycle.value == "bound"
     assert binding.protocol == "codex-app-server"
     assert binding.compatibility_policy == CODEX_RUNTIME_COMPATIBILITY_POLICY
-    assert binding.native_version == "0.154.0"
+    assert binding.native_version == CAPTURED_CODEX_RELEASE
     # Handshake dialect: initialize then exactly one initialized notification.
     initialize = server.requested("initialize")
     assert len(initialize) == 1
@@ -2606,7 +2629,7 @@ def summary_turn_completed(
     items: list[dict[str, object]] | None = None,
     error: object = None,
 ) -> RuntimeNotification:
-    """One turn/completed with an explicit item view, stock 0.154.0 shape."""
+    """One turn/completed with the captured stock release's item view."""
     turn: dict[str, object] = {
         "id": turn_id,
         "status": status,

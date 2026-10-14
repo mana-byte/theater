@@ -292,71 +292,71 @@ class TestDefaultBaselineValidation:
     def _write_index(root: Path, bundles: dict) -> None:
         (root / "index.json").write_text(json.dumps({"bundles": bundles}))
 
-    def _qualified_entry(self, directory: str = "0.154.0") -> dict:
+    def _qualified_entry(self, directory: str = "0.1.0") -> dict:
         return {"directory": directory, "status": "qualified", "compatibility_policy": "any"}
 
     def test_selects_the_unique_qualified_bundle(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.154.0")
-        self._write_index(fixtures, {"0.154.0": self._qualified_entry()})
-        assert collector.default_baseline() == fixtures / "0.154.0"
+        self._write_mini_bundle(fixtures, "0.1.0")
+        self._write_index(fixtures, {"0.1.0": self._qualified_entry()})
+        assert collector.default_baseline() == fixtures / "0.1.0"
 
-    @pytest.mark.parametrize("directory", ["../secrets", "/tmp/escape", "0.154.0/.."])
+    @pytest.mark.parametrize("directory", ["../secrets", "/tmp/escape", "0.1.0/.."])
     def test_refuses_escaping_or_absolute_directories(self, fixtures: Path, directory: str) -> None:
-        self._write_mini_bundle(fixtures, "0.154.0")
+        self._write_mini_bundle(fixtures, "0.1.0")
         entry = self._qualified_entry(directory=directory)
-        self._write_index(fixtures, {"0.154.0": entry})
+        self._write_index(fixtures, {"0.1.0": entry})
         with pytest.raises(collector.QualificationError, match="malformed"):
             collector.default_baseline()
 
     def test_refuses_duplicate_directories(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.154.0")
+        self._write_mini_bundle(fixtures, "0.1.0")
         self._write_index(
             fixtures,
-            {"0.154.0": self._qualified_entry(), "0.154.1": self._qualified_entry()},
+            {"0.1.0": self._qualified_entry(), "0.1.1": self._qualified_entry()},
         )
         with pytest.raises(collector.QualificationError, match="claimed by both"):
             collector.default_baseline()
 
     def test_refuses_an_invalid_status(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.154.0")
+        self._write_mini_bundle(fixtures, "0.1.0")
         entry = self._qualified_entry() | {"status": "provisional"}
-        self._write_index(fixtures, {"0.154.0": entry})
+        self._write_index(fixtures, {"0.1.0": entry})
         with pytest.raises(collector.QualificationError, match="invalid status"):
             collector.default_baseline()
 
     def test_refuses_an_incomplete_qualified_bundle(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.154.0", complete=False)
-        self._write_index(fixtures, {"0.154.0": self._qualified_entry()})
+        self._write_mini_bundle(fixtures, "0.1.0", complete=False)
+        self._write_index(fixtures, {"0.1.0": self._qualified_entry()})
         with pytest.raises(collector.QualificationError, match="incomplete"):
             collector.default_baseline()
 
     def test_refuses_a_qualified_bundle_under_candidates(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "candidates/0.154.0")
-        entry = self._qualified_entry(directory="candidates/0.154.0")
-        self._write_index(fixtures, {"0.154.0": entry})
+        self._write_mini_bundle(fixtures, "candidates/0.1.0")
+        entry = self._qualified_entry(directory="candidates/0.1.0")
+        self._write_index(fixtures, {"0.1.0": entry})
         with pytest.raises(collector.QualificationError, match="fixture root"):
             collector.default_baseline()
 
     def test_refuses_a_version_directory_mismatch(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.154.0")
-        entry = self._qualified_entry(directory="0.154.0")
+        self._write_mini_bundle(fixtures, "0.1.0")
+        entry = self._qualified_entry(directory="0.1.0")
         self._write_index(fixtures, {"0.9.9": entry})
         with pytest.raises(collector.QualificationError, match="fixture root"):
             collector.default_baseline()
 
     def test_refuses_a_candidate_at_release_root(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.155.0")
-        entry = {"directory": "0.155.0", "status": "candidate"}
-        self._write_index(fixtures, {"0.155.0": entry})
+        self._write_mini_bundle(fixtures, "0.2.0")
+        entry = {"directory": "0.2.0", "status": "candidate"}
+        self._write_index(fixtures, {"0.2.0": entry})
         with pytest.raises(collector.QualificationError, match="candidates/"):
             collector.default_baseline()
 
     def test_refuses_zero_or_multiple_qualified_bundles(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.154.0")
-        self._write_mini_bundle(fixtures, "0.155.0")
+        self._write_mini_bundle(fixtures, "0.1.0")
+        self._write_mini_bundle(fixtures, "0.2.0")
         self._write_index(
             fixtures,
-            {"0.154.0": self._qualified_entry(), "0.155.0": self._qualified_entry("0.155.0")},
+            {"0.1.0": self._qualified_entry(), "0.2.0": self._qualified_entry("0.2.0")},
         )
         with pytest.raises(collector.QualificationError, match=r"multiple \(or zero\) qualified"):
             collector.default_baseline()
@@ -421,8 +421,8 @@ class TestBackendVersionCheck:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeInitializeClient.calls = 0
-        session = self._session(monkeypatch, "codex-cli codex_ai 0.154.0 (homebrew) on macOS")
-        assert collector._capture_version(session) == "0.154.0"
+        session = self._session(monkeypatch, "codex-cli codex_ai 0.1.0 (homebrew) on macOS")
+        assert collector._capture_version(session) == "0.1.0"
         assert FakeInitializeClient.calls == 1
         assert session.initialize_results[-1]["userAgent"].startswith("codex-cli")
 
@@ -444,6 +444,7 @@ class TestEvidenceThreadingAndExitCodes:
 
         monkeypatch.setattr(collector, "generate_schema", fake_generate_schema)
         out = tmp_path / "out"
+        # Historical captured bundle supplies the collector's baseline schema.
         exit_code = collector.collect_evidence(
             out, codex_binary=str(binary), baseline=collector.FIXTURE_ROOT / "0.154.0"
         )

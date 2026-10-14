@@ -87,6 +87,12 @@ def verified_versions_text() -> str:
     return ", ".join(ordered)
 
 
+def qualified_versions_range_text() -> str:
+    """Display bounds for the exact verified set."""
+    ordered = sorted(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
+    return f">={ordered[0]},<={ordered[-1]}"
+
+
 def codex_endpoint_url(endpoint: str) -> str:
     """The app-server listen/remote URL for one private local endpoint (bare path or schemed)."""
     if "://" in endpoint:

@@ -40,7 +40,11 @@ from .launch import plan_launch, resume_launch_overlay
 from .mcp import render_mcp_servers
 from .observer import CodexObserver
 from .runtime import codex_runtime_factory
-from .runtime_plan import plan_codex_runtime_backend, probe_codex_compatibility
+from .runtime_plan import (
+    plan_codex_runtime_backend,
+    probe_codex_compatibility,
+    qualified_versions_range_text,
+)
 from .screen import screen_reading
 from .source import source_for
 
@@ -115,7 +119,7 @@ MANIFEST = HarnessManifest(
     controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",)), steer=SteerPlan()),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
     native_compatibility=NativeCompatibilityManifest(
-        qualified_range=">=0.148.0,<=0.159.1",
+        qualified_range=qualified_versions_range_text(),
         probe=probe_codex_compatibility,
     ),
     runtime=RuntimeManifest(

@@ -24,14 +24,9 @@ def _tree(root: Path) -> Path:
     plan = root / codex._PLAN
     plan.parent.mkdir(parents=True)
     shutil.copyfile(source / codex._PLAN, plan)
-    newest = max(codex._versions(plan.read_text()), key=codex.version_key)
-    for relative in codex._DOCS:
-        path = root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"verified through {newest}\n")
     index = root / codex._INDEX
     index.parent.mkdir(parents=True, exist_ok=True)
-    index.write_text('{"bundles": {}}\n')
+    index.write_text(json.dumps({"bundles": {}}, indent=2) + "\n")
     return root
 
 
@@ -54,19 +49,41 @@ def test_allowlist_bump_stages_complete_bundles_once(tmp_path: Path) -> None:
     old_top = max(adapter.verified(root).versions, key=codex.version_key)
     first_version, second_version = _next_patches(old_top)
     first = adapter.apply_bump(root, [second_version, first_version])
-    assert codex._PLAN in first
+    assert first == [codex._PLAN]
     assert adapter.verified(root).admits(second_version)
     assert second_version not in json.loads((root / codex._INDEX).read_text())["bundles"]
 
     for version in (second_version, first_version):
         _bundle(root / codex._FIXTURES / "candidates" / version)
-    second = adapter.apply_bump(root, [second_version, first_version])
+    changed = adapter.apply_bump(root, [second_version, first_version])
     index = json.loads((root / codex._INDEX).read_text())["bundles"]
     assert list(index) == [first_version, second_version]
     assert all(entry["status"] == "qualified" for entry in index.values())
-    assert codex._INDEX in second
-    assert all(second_version in (root / doc).read_text() for doc in codex._DOCS)
+    assert codex._INDEX in changed
+    bundles = {
+        path.relative_to(root)
+        for version in (first_version, second_version)
+        for path in (root / codex._FIXTURES / version).rglob("*")
+        if path.is_file()
+    }
+    assert set(changed) == {codex._INDEX} | bundles
+    assert adapter.verified(root).admits(second_version)
     assert adapter.apply_bump(root, [first_version, second_version]) == []
+
+
+def test_bump_rejects_missing_anchor_and_lower_version(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    plan = root / codex._PLAN
+    source = plan.read_text()
+    plan.write_text(source.replace("CODEX_RUNTIME_VERIFIED_VERSIONS =", "MISSING ="))
+    with pytest.raises(ValueError, match="assignment is missing"):
+        codex.ADAPTER.apply_bump(root, [])
+    plan.write_text(source)
+    lower = "0.0.0"
+    _bundle(root / codex._FIXTURES / "candidates" / lower)
+    with pytest.raises(ValueError, match="cannot move below"):
+        codex.ADAPTER.apply_bump(root, [lower])
+    assert plan.read_text() == source
 
 
 def test_discovery_falls_back_to_public_tags_when_api_is_limited(
@@ -207,6 +224,7 @@ def test_qualify_accepts_only_the_named_optional_control_skip(
     adapter = codex.ADAPTER
     old_top = max(adapter.verified(root).versions, key=codex.version_key)
     (candidate,) = _next_patches(old_top, count=1)
+    _bundle(root / codex._FIXTURES / "candidates" / candidate)
     adapter.apply_bump(root, [candidate])
 
     def collect(command, **kwargs):
