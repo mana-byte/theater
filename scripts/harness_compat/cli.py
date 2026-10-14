@@ -81,7 +81,6 @@ def main(argv: list[str] | None = None) -> int:
         _validate_run(args)
         summaries = []
         for adapter in adapters:
-            branch = f"refs/remotes/origin/chore/compat-{adapter.name}" if args.publish else None
             summaries.append(
                 run_harness(
                     adapter,
@@ -90,7 +89,6 @@ def main(argv: list[str] | None = None) -> int:
                     max_candidates=args.max_candidates,
                     publish=args.publish,
                     run_url=args.run_url or _run_url(),
-                    evidence_branch=branch,
                 )
             )
         document = {"harnesses": summaries}

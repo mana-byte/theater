@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
 from pathlib import Path
+
+from .contract import EVIDENCE_ROOT
+
+
+def valid_artifact_path(name: str) -> bool:
+    relative = Path(name)
+    return (
+        bool(name)
+        and not relative.is_absolute()
+        and ".." not in relative.parts
+        and not relative.is_relative_to(EVIDENCE_ROOT)
+    )
 
 
 def _git(root: Path, *args: str) -> bytes:
@@ -62,6 +75,9 @@ class CandidateArtifacts:
     def capture(self, tree: Path, version: str) -> list[str]:
         problems: list[str] = []
         for relative in sorted(untracked_files(tree)):
+            if not valid_artifact_path(relative.as_posix()):
+                problems.append(f"candidate wrote forbidden evidence path: {relative}")
+                continue
             if owner := self.owners.get(relative):
                 problems.append(
                     f"candidate artifact {relative} conflicts between {owner} and {version}"
@@ -71,23 +87,33 @@ class CandidateArtifacts:
             _copy(tree / relative, self.storage / relative)
         return problems
 
-    def add_branch_files(self, root: Path, branch: str) -> None:
-        """Carry added files from a fetched rolling PR when reusing its green evidence."""
-        if subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", branch],
-            cwd=root,
-            capture_output=True,
-            timeout=30,
-            check=False,
-        ).returncode:
-            return
-        names = _paths(_git(root, "diff", "--diff-filter=A", "--name-only", "-z", "HEAD", branch))
-        for relative in sorted(names - self.owners.keys()):
-            data = _git(root, "show", f"{branch}:{relative.as_posix()}")
-            target = self.storage / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            self.owners[relative] = branch
+    def cache_version(self, version: str, directory: Path) -> dict[str, str]:
+        """Persist one green candidate's generated files outside the checkout."""
+        manifest: dict[str, str] = {}
+        for relative, owner in sorted(self.owners.items()):
+            if owner != version:
+                continue
+            source = self.storage / relative
+            target = directory / relative
+            _copy(source, target)
+            manifest[relative.as_posix()] = hashlib.sha256(source.read_bytes()).hexdigest()
+        return manifest
+
+    def add_cached(self, version: str, directory: Path, manifest: dict[str, str]) -> None:
+        """Restore validated generated files for a reused release."""
+        for name, digest in sorted(manifest.items()):
+            relative = Path(name)
+            if not valid_artifact_path(name):
+                raise ValueError(f"invalid cached artifact path: {name!r}")
+            if relative in self.owners:
+                raise ValueError(f"cached artifact conflicts with {self.owners[relative]}: {name}")
+            source = directory / relative
+            if not source.resolve().is_relative_to(directory.resolve()):
+                raise ValueError(f"cached artifact escapes cache: {name}")
+            if hashlib.sha256(source.read_bytes()).hexdigest() != digest:
+                raise ValueError(f"cached artifact changed: {name}")
+            _copy(source, self.storage / relative)
+            self.owners[relative] = version
 
     def copy_into(self, tree: Path) -> None:
         for relative in sorted(self.owners):
@@ -117,6 +143,8 @@ def stage_composed(tree: Path, root: Path) -> list[Path]:
     if _git(root, "status", "--porcelain=v1", "-z"):
         raise RuntimeError("publishing checkout is dirty before staging the composed tree")
     changed = tracked_changes(tree) | status_untracked(tree)
+    if forbidden := [path for path in changed if not valid_artifact_path(path.as_posix())]:
+        raise RuntimeError(f"composed tree contains forbidden evidence paths: {sorted(forbidden)}")
     for relative in sorted(changed):
         source, target = tree / relative, root / relative
         if source.exists() or source.is_symlink():
