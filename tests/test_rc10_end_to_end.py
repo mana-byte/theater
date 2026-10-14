@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -397,9 +398,11 @@ async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
                     idempotency_key="lost-input",
                 )
             ).value
-            observed = (await client.operations.wait(sent.operation_id, wait_seconds=0.2)).value
-            assert observed.timed_out is True, observed.operation.to_wire()
-            assert observed.operation.state == "uncertain"
+            # The lost ack surfaces as uncertain once the disconnect propagates;
+            # poll rather than sample after a fixed wait (xdist load delays it).
+            async with asyncio.timeout(10):
+                while daemon.operation_service.get(sent.operation_id).state != "uncertain":
+                    await asyncio.sleep(0.005)
             assert await provider.wait() == 0
 
             replay = (

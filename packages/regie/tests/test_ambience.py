@@ -231,23 +231,25 @@ async def test_a_tick_serves_the_band_from_cache_and_never_queries_the_dom(
         timer = app._ambience_timer
         assert timer is not None
         timer.stop()  # from here on, ticks happen only where the test calls them
-        await (
-            pilot.pause()
-        )  # a sync queued earlier lands now, not between the snapshot and the removal
+        for _ in range(50):  # drain syncs queued earlier so none lands mid-removal under load
+            count = len(measures)
+            await pilot.pause()
+            if len(measures) == count:
+                break
         row = next(child for child in tree.children if child.display)
         rows, row_height = len(tree.children), row.outer_size.height
-        before = measures[-1]
+        before, stable = measures[-1], len(measures)
         await row.remove()  # a finished retirement removes a row without any sync
         await wait_until(pilot, lambda: len(tree.children) == rows - 1)
-        assert measures == [before]  # the departure alone re-measured nothing
+        assert len(measures) == stable  # the departure alone re-measured nothing
         queries.clear()  # removal machinery may query; the tick may not
         app._tick_ambience()
         assert queries == []  # the tick caught the departed row with no DOM query
         assert measures[-1] == (before[0], before[1] + row_height)
 
         await pilot.resize_terminal(80, 20)
-        await wait_until(pilot, lambda: len(measures) >= 3)  # so does a resize
-        assert measures[-1][1] < before[1]  # the tree lost rows of free space
+        # Wait for the resize measure to settle, not a transient mid-resize value.
+        await wait_until(pilot, lambda: measures[-1][1] < before[1])  # the tree lost free space
 
 
 def test_tree_ambience_is_validated_and_defaults_to_the_footer_while_away(tmp_path) -> None:
