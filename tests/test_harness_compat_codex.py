@@ -24,10 +24,11 @@ def _tree(root: Path) -> Path:
     plan = root / codex._PLAN
     plan.parent.mkdir(parents=True)
     shutil.copyfile(source / codex._PLAN, plan)
+    newest = max(codex._versions(plan.read_text()), key=codex.version_key)
     for relative in codex._DOCS:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("verified through 0.159.1\n")
+        path.write_text(f"verified through {newest}\n")
     index = root / codex._INDEX
     index.parent.mkdir(parents=True, exist_ok=True)
     index.write_text('{"bundles": {}}\n')
@@ -42,24 +43,30 @@ def _bundle(path: Path) -> None:
         (path / "protocol_schema" / name).write_text("{}\n")
 
 
+def _next_patches(version: str, count: int = 2) -> tuple[str, ...]:
+    major, minor, patch = codex.version_key(version)
+    return tuple(f"{major}.{minor}.{patch + offset}" for offset in range(1, count + 1))
+
+
 def test_allowlist_bump_stages_complete_bundles_once(tmp_path: Path) -> None:
     root = _tree(tmp_path)
     adapter = codex.ADAPTER
-    assert "0.159.1" in adapter.verified(root).versions
-    first = adapter.apply_bump(root, ["0.162.1", "0.160.0"])
+    old_top = max(adapter.verified(root).versions, key=codex.version_key)
+    first_version, second_version = _next_patches(old_top)
+    first = adapter.apply_bump(root, [second_version, first_version])
     assert codex._PLAN in first
-    assert adapter.verified(root).admits("0.162.1")
-    assert "0.162.1" not in json.loads((root / codex._INDEX).read_text())["bundles"]
+    assert adapter.verified(root).admits(second_version)
+    assert second_version not in json.loads((root / codex._INDEX).read_text())["bundles"]
 
-    for version in ("0.162.1", "0.160.0"):
+    for version in (second_version, first_version):
         _bundle(root / codex._FIXTURES / "candidates" / version)
-    second = adapter.apply_bump(root, ["0.162.1", "0.160.0"])
+    second = adapter.apply_bump(root, [second_version, first_version])
     index = json.loads((root / codex._INDEX).read_text())["bundles"]
-    assert list(index) == ["0.160.0", "0.162.1"]
+    assert list(index) == [first_version, second_version]
     assert all(entry["status"] == "qualified" for entry in index.values())
     assert codex._INDEX in second
-    assert all("0.162.1" in (root / doc).read_text() for doc in codex._DOCS)
-    assert adapter.apply_bump(root, ["0.160.0", "0.162.1"]) == []
+    assert all(second_version in (root / doc).read_text() for doc in codex._DOCS)
+    assert adapter.apply_bump(root, [first_version, second_version]) == []
 
 
 def test_discovery_falls_back_to_public_tags_when_api_is_limited(
@@ -138,7 +145,9 @@ def test_qualify_accepts_only_the_named_optional_control_skip(
 ) -> None:
     root = _tree(tmp_path / "tree")
     adapter = codex.ADAPTER
-    adapter.apply_bump(root, ["0.162.1"])
+    old_top = max(adapter.verified(root).versions, key=codex.version_key)
+    (candidate,) = _next_patches(old_top, count=1)
+    adapter.apply_bump(root, [candidate])
 
     def collect(command, **kwargs):
         out = Path(command[command.index("--out") + 1])
@@ -160,8 +169,8 @@ def test_qualify_accepts_only_the_named_optional_control_skip(
 
     monkeypatch.setattr(codex.framework, "run_pytest", run_pytest)
     with make_sandbox("codex", root=tmp_path / "sandbox") as sb:
-        result = adapter.qualify(root, "0.162.1", sb, sb.bin_dir / "codex")
+        result = adapter.qualify(root, candidate, sb, sb.bin_dir / "codex")
         assert result.evidence_dir == sb.evidence_dir
-        assert (sb.evidence_dir / "0.162.1" / "approval.json").is_file()
+        assert (sb.evidence_dir / candidate / "approval.json").is_file()
     assert calls == [(adapter.consistency_tests, True), (adapter.green_tests, False)]
     assert result.verdict == verdict

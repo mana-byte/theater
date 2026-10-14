@@ -35,6 +35,7 @@ _INDEX = _FIXTURES / "index.json"
 _DOCS = (Path("docs/harness-plugins.md"), Path("docs/native-interaction/codex.md"))
 _POLICY = "codex-appserver-verified"
 _CONSISTENCY = (
+    "tests/test_harness_compat_codex.py",
     "tests/test_codex_native_runtime_proof.py::TestOfflineConformanceBundle",
     "tests/test_codex_native_runtime_proof.py::TestBundleIndexAndAllowlist",
     "tests/test_codex_native_runtime_proof.py::TestIndexValidation",
