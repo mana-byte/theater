@@ -9,7 +9,7 @@ own zero-turn thread, while a Theater-like observer discovers that exact
 thread from native evidence, waits for event-based readiness, submits exactly
 one turn/start, and keeps approval answers exclusively in the UI?
 
-Verified answers against the unmodified installed release (codex-cli 0.154.0):
+Historical answers against the unmodified installed release (codex-cli 0.154.0):
 
 - YES, promptless bootstrap works. With no prompt and no resume id the stock
   TUI takes the `StartFresh` startup path and eagerly issues `thread/start`
@@ -120,7 +120,7 @@ FIRST_TURN_PROMPT = "Run the proof command now."
 FINAL_ASSISTANT_MESSAGE = "Theater bootstrap proof turn completed."
 
 #: Exact stock error a zero-turn `thread/resume` answers with, on the
-#: unmodified 0.154.0 app-server (the rollout is only materialised once the
+#: historical unmodified 0.154.0 app-server (the rollout is only materialised once the
 #: first turn starts).
 NO_ROLLOUT_ERROR_PREFIX = "no rollout found for thread id "
 

@@ -11,6 +11,7 @@ import logging
 import pytest
 
 from theater import harness as harness_registry
+from theater.harness.builtin.plugins.codex.runtime_plan import qualified_versions_range_text
 from theater.harness.contracts.runtime import RuntimeCompatibility
 
 _LEGACY_ROUTES = {
@@ -44,7 +45,7 @@ _SUPPORTED = RuntimeCompatibility(
 _OUT_OF_RANGE = RuntimeCompatibility(
     supported=False,
     policy="qualified-test",
-    native_version="0.158.0",
+    native_version="1.0.0",
     reason="wiring=auto selects legacy below the qualified range",
 )
 
@@ -116,7 +117,7 @@ def test_a_probe_without_a_version_is_unknown_not_outside_range():
     )
     assert record["status"] == "unknown"
     assert record["reason"] == "version command failed"
-    assert record["qualified_range"] == ">=0.148.0,<=0.159.1"
+    assert record["qualified_range"] == qualified_versions_range_text()
 
 
 def test_a_probe_exception_reason_is_bounded():

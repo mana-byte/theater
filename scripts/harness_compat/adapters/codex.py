@@ -33,7 +33,6 @@ from ..contract import (
 _PLAN = Path("theater/harness/builtin/plugins/codex/runtime_plan.py")
 _FIXTURES = Path("tests/fixtures/codex_native_runtime")
 _INDEX = _FIXTURES / "index.json"
-_DOCS = (Path("docs/harness-plugins.md"), Path("docs/native-interaction/codex.md"))
 _POLICY = "codex-appserver-verified"
 _MOCK_LOG = "codex_mock_requests.jsonl"
 # These endpoints are telemetry side channels; their existing responses remain unchanged.
@@ -228,7 +227,11 @@ class CodexAdapter:
     def apply_bump(self, root: Path, greens: Sequence[str]) -> list[Path]:
         source = (root / _PLAN).read_text()
         old = _versions(source)
-        wanted = frozenset(old | set(greens))
+        new = set(greens) - old
+        if old and any(version_key(v) < min(map(version_key, old)) for v in new):
+            raise ValueError("Codex verified range cannot move below its existing minimum")
+        index = json.loads((root / _INDEX).read_text())
+        wanted = frozenset(old | new)
         ordered = sorted(wanted, key=version_key)
         node = _allowlist_node(source)
         lines = source.splitlines(keepends=True)
@@ -241,15 +244,6 @@ class CodexAdapter:
         lines[start:end] = [replacement + "\n"]
         changed = _write_if_changed(root, _PLAN, "".join(lines))
 
-        if old and wanted:
-            old_top = max(old, key=version_key)
-            new_top = max(wanted, key=version_key)
-            if old_top != new_top:
-                for doc in _DOCS:
-                    text = (root / doc).read_text()
-                    changed.extend(_write_if_changed(root, doc, text.replace(old_top, new_top)))
-
-        index = json.loads((root / _INDEX).read_text())
         for version in sorted(set(greens), key=version_key):
             target = root / _FIXTURES / version
             staged = root / _FIXTURES / "candidates" / version

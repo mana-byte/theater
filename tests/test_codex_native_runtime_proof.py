@@ -379,7 +379,7 @@ class TestOfflineConformanceBundle:
             fixture = bundle("capabilities.json")
             settings = fixture["thread_settings_update"]
             gate = settings["without_experimental_api"]
-            # The curated 0.154.0 bundle nests the error; collector-captured bundles do not.
+            # The historical curated 0.154.0 bundle nests the error; newer captures do not.
             assert gate.get("error", gate) == {
                 "code": -32600,
                 "message": "thread/settings/update requires experimentalApi capability",
@@ -512,13 +512,13 @@ class TestIndexValidation:
         root = tmp_path / "fixtures"
         root.mkdir()
         monkeypatch.setattr(proof, "FIXTURES", root)
-        monkeypatch.setattr(proof, "CODEX_RUNTIME_VERIFIED_VERSIONS", frozenset({"0.154.0"}))
+        monkeypatch.setattr(proof, "CODEX_RUNTIME_VERIFIED_VERSIONS", frozenset({"0.1.0"}))
         return root
 
     def _write_index(self, root: Path, bundles: dict) -> None:
         (root / "index.json").write_text(json.dumps({"bundles": bundles}))
 
-    def _qualified_entry(self, directory: str = "0.154.0") -> dict:
+    def _qualified_entry(self, directory: str = "0.1.0") -> dict:
         return {
             "directory": directory,
             "status": "qualified",
@@ -526,30 +526,30 @@ class TestIndexValidation:
         }
 
     def test_accepts_a_valid_qualified_index(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.154.0")
-        self._write_index(mini_fixtures, {"0.154.0": self._qualified_entry()})
-        assert load_index()["bundles"]["0.154.0"]["status"] == "qualified"
+        self._write_mini_bundle(mini_fixtures, "0.1.0")
+        self._write_index(mini_fixtures, {"0.1.0": self._qualified_entry()})
+        assert load_index()["bundles"]["0.1.0"]["status"] == "qualified"
 
     def test_rejects_unknown_status(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.154.0")
+        self._write_mini_bundle(mini_fixtures, "0.1.0")
         entry = self._qualified_entry() | {"status": "provisional"}
-        self._write_index(mini_fixtures, {"0.154.0": entry})
+        self._write_index(mini_fixtures, {"0.1.0": entry})
         with pytest.raises(AssertionError, match="invalid status"):
             load_index()
 
     @pytest.mark.parametrize("directory", ["/tmp/escape", "../outside", "a/../../b"])
     def test_rejects_escaping_directories(self, mini_fixtures: Path, directory: str) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.154.0")
+        self._write_mini_bundle(mini_fixtures, "0.1.0")
         entry = self._qualified_entry(directory=directory)
-        self._write_index(mini_fixtures, {"0.154.0": entry})
+        self._write_index(mini_fixtures, {"0.1.0": entry})
         with pytest.raises(AssertionError, match=r"clean relative path|not be absolute"):
             load_index()
 
     def test_rejects_duplicate_directories(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.154.0")
+        self._write_mini_bundle(mini_fixtures, "0.1.0")
         self._write_index(
             mini_fixtures,
-            {"0.154.0": self._qualified_entry(), "0.154.1": self._qualified_entry()},
+            {"0.1.0": self._qualified_entry(), "0.1.1": self._qualified_entry()},
         )
         with pytest.raises(AssertionError, match="claimed by both"):
             load_index()
@@ -557,8 +557,8 @@ class TestIndexValidation:
     def test_rejects_qualified_incomplete_bundle(self, mini_fixtures: Path) -> None:
         # An incomplete capture can never be read as qualified: selection
         # fails even though the directory itself exists.
-        self._write_mini_bundle(mini_fixtures, "0.154.0", complete=False)
-        self._write_index(mini_fixtures, {"0.154.0": self._qualified_entry()})
+        self._write_mini_bundle(mini_fixtures, "0.1.0", complete=False)
+        self._write_index(mini_fixtures, {"0.1.0": self._qualified_entry()})
         with pytest.raises(AssertionError, match="incomplete"):
             load_index()
 
@@ -569,31 +569,31 @@ class TestIndexValidation:
             load_index()
 
     def test_rejects_candidate_at_release_root(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "candidates/0.155.0")
-        self._write_mini_bundle(mini_fixtures, "0.155.0")
-        entry = {"directory": "0.155.0", "status": "candidate"}
-        self._write_index(mini_fixtures, {"0.155.0": entry})
+        self._write_mini_bundle(mini_fixtures, "candidates/0.2.0")
+        self._write_mini_bundle(mini_fixtures, "0.2.0")
+        entry = {"directory": "0.2.0", "status": "candidate"}
+        self._write_index(mini_fixtures, {"0.2.0": entry})
         with pytest.raises(AssertionError, match="candidates/"):
             load_index()
 
     def test_rejects_qualified_version_directory_mismatch(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.154.0")
-        entry = self._qualified_entry(directory="0.154.0")
+        self._write_mini_bundle(mini_fixtures, "0.1.0")
+        entry = self._qualified_entry(directory="0.1.0")
         self._write_index(mini_fixtures, {"0.9.9": entry})
         with pytest.raises(AssertionError, match="at the fixture root"):
             load_index()
 
     def test_rejects_candidate_for_another_version(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "candidates/0.155.0")
-        entry = {"directory": "candidates/0.155.0", "status": "candidate"}
-        self._write_index(mini_fixtures, {"0.156.0": entry})
-        with pytest.raises(AssertionError, match=r"must live at candidates/0\.156\.0"):
+        self._write_mini_bundle(mini_fixtures, "candidates/0.2.0")
+        entry = {"directory": "candidates/0.2.0", "status": "candidate"}
+        self._write_index(mini_fixtures, {"0.3.0": entry})
+        with pytest.raises(AssertionError, match=r"must live at candidates/0\.3\.0"):
             load_index()
 
     def test_rejects_allowed_version_without_a_qualified_bundle(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "candidates/0.155.0")
-        entry = {"directory": "candidates/0.155.0", "status": "candidate"}
-        self._write_index(mini_fixtures, {"0.155.0": entry})
+        self._write_mini_bundle(mini_fixtures, "candidates/0.2.0")
+        entry = {"directory": "candidates/0.2.0", "status": "candidate"}
+        self._write_index(mini_fixtures, {"0.2.0": entry})
         with pytest.raises(AssertionError, match="must have a qualified bundle"):
             load_index()
 
@@ -1069,7 +1069,7 @@ class TestNativeSmokeTurnControls:
         thread = readback["result"]["thread"]
         release = tuple(int(part) for part in require_installed_allowed_version().split("."))
         if release >= (0, 153, 0):
-            # 0.153.0+ dialect: the readback must reflect the applied effort, so a
+            # Historical 0.153.0+ dialect: readback must reflect the applied effort, so a
             # release that drops it cannot qualify through the broadcast branch.
             assert thread.get("reasoningEffort") == "medium"
         else:
