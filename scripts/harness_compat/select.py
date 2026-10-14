@@ -7,6 +7,10 @@ from collections.abc import Iterable, Sequence
 from .contract import Adapter, Result, VerifiedSet, is_stable, version_key
 
 
+def _exact_floor(gate: VerifiedSet) -> str | None:
+    return min(gate.versions, key=version_key) if gate.versions else None
+
+
 def select_candidates(
     adapter: Adapter,
     gate: VerifiedSet,
@@ -15,7 +19,9 @@ def select_candidates(
     max_candidates: int = 5,
     version: str | None = None,
 ) -> list[str]:
-    """Choose stable unproved releases, with an explicit version overriding evidence."""
+    """Choose stable unproved releases; explicit versions override evidence.
+    Automatic exact selection ignores releases no newer than the oldest admission.
+    """
     if version is not None:
         if not is_stable(version):
             raise ValueError(f"not a stable release: {version}")
@@ -28,7 +34,12 @@ def select_candidates(
         key=version_key,
     )
     if gate.kind == "exact":
-        return [item for item in releases if not gate.admits(item)][-max_candidates:]
+        floor = _exact_floor(gate)
+        return [
+            item
+            for item in releases
+            if not gate.admits(item) and (floor is None or version_key(item) > version_key(floor))
+        ][-max_candidates:]
     if gate.ceiling is None:
         return []
     return [item for item in releases if version_key(item) >= version_key(gate.ceiling)][
@@ -45,13 +56,16 @@ def newest_in_range(adapter: Adapter, gate: VerifiedSet) -> str | None:
 
 
 def plan_bump(gate: VerifiedSet, results: Sequence[Result]) -> list[str]:
-    """Promote greens, stopping at the first non-green result for a range gate."""
+    """Promote greens above an exact gate's floor or through a range's green prefix."""
     if gate.kind == "exact":
+        floor = _exact_floor(gate)
         return sorted(
             {
                 result.version
                 for result in results
-                if result.verdict == "green" and result.version not in gate.known_bad
+                if result.verdict == "green"
+                and result.version not in gate.known_bad
+                and (floor is None or version_key(result.version) > version_key(floor))
             },
             key=version_key,
         )

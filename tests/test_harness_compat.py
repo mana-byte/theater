@@ -38,6 +38,20 @@ class FakeAdapter:
         return ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"]
 
 
+class ExactAdapter:
+    def discover(self) -> list[str]:
+        return [
+            "0.1.0",
+            "1.4.0",
+            "1.5.0",
+            "1.6.0",
+            "1.7.0",
+            "1.8.0",
+            "1.9.0",
+            "2.0.0",
+        ]
+
+
 def _git(root: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
 
@@ -84,6 +98,40 @@ def test_range_policy_evidence_reuse_routes_and_watch(tmp_path: Path) -> None:
     assert classified.verdict == "tooling"
     assert "POST /unknown body keys=messages,model" in classified.checks[-1].detail
     assert classify_routes(adapter, results[-1], ()).verdict == "red"
+
+
+def test_exact_candidates_stay_above_oldest_admission() -> None:
+    adapter = ExactAdapter()
+    gate = VerifiedSet(
+        "exact",
+        versions=frozenset({"1.5.0", "1.7.0"}),
+        known_bad=frozenset({"1.9.0"}),
+    )
+    assert select_candidates(adapter, gate, max_candidates=2) == ["1.8.0", "2.0.0"]
+    assert select_candidates(adapter, gate, {"2.0.0"}, max_candidates=2) == ["1.6.0", "1.8.0"]
+    assert newest_in_range(adapter, gate) is None
+    assert select_candidates(
+        adapter, VerifiedSet("exact", versions=frozenset()), max_candidates=2
+    ) == ["1.9.0", "2.0.0"]
+
+
+def test_exact_candidates_exhaust_new_releases_then_holes() -> None:
+    adapter = ExactAdapter()
+    gate = VerifiedSet(
+        "exact",
+        versions=frozenset({"1.5.0", "1.7.0"}),
+        known_bad=frozenset({"1.9.0"}),
+    )
+    evidenced = {"1.8.0", "2.0.0"}
+    assert select_candidates(adapter, gate, evidenced) == ["1.6.0"]
+    evidenced.add("1.6.0")
+    assert select_candidates(adapter, gate, evidenced) == []
+    results = [
+        Result("codex", "1.4.0", "green"),
+        Result("codex", "1.6.0", "green"),
+        Result("codex", "2.0.0", "green"),
+    ]
+    assert plan_bump(gate, results) == ["1.6.0", "2.0.0"]
 
 
 class ArtifactAdapter:
