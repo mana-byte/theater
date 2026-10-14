@@ -1054,6 +1054,16 @@ async def test_a_stream_discontinuity_resets_the_held_claude_seal(root, workdir)
     await s.read()
     assert calls, "the attach path must call the stream-reset hook"
 
+    # Exact relocation onto an EMPTY file (last_line is None, no detach) still resets the seal.
+    observer = ClaudeCodeObserver(root=root)
+    for i, line in enumerate(_held_marker_lines()):
+        observer.parse(line, i)
+    assert observer._seal._deferred is not None
+    empty = root / "-work" / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    await TranscriptSource(observer, cwd=workdir, allow_refresh=True)._attach(path=empty)
+    assert observer._seal._deferred is None
+
     # An observer without the optional hook is untouched (no-op, no error).
     bare = source(root, workdir)
     bare._observer = object()

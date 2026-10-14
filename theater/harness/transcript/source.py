@@ -836,8 +836,8 @@ class TranscriptSource(Source):
         session_id = self._observer.session_id(path)
         last_event: Event | None = None
         status: Status | None = None
+        self._reset_stream()  # every staged attachment starts without a prior stream's state
         if last_line is not None:
-            self._reset_stream()  # fresh attachment: parse the end without a prior stream's state
             parsed = self._parse_record(last_line, lines - 1, clip_text=True)
             semantic = [event for event in parsed.events if not event.usage_only]
             last_event = semantic[-1] if semantic else None
