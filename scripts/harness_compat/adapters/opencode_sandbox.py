@@ -22,7 +22,7 @@ from ..contract import Sandbox
 
 _BANNER_PREFIX = "opencode server listening on "
 _PREWARM_PASSWORD = "harness-compat-prewarm"
-_CATALOG = Path(".cache/opencode/models.json")
+_CATALOG = Path("opencode/models.json")
 _CATALOG_SECONDS = 30.0
 _SETTLE_SECONDS = 1.0
 
@@ -98,7 +98,7 @@ def _await_catalog(sb: Sandbox, *, timeout: float) -> bool:
     """The catalog lands on disk a beat after the session response; poll for it."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if (sb.home / _CATALOG).is_file():
+        if (Path(sb.env["XDG_CACHE_HOME"]) / _CATALOG).is_file():
             return True
         time.sleep(0.2)
     return False
