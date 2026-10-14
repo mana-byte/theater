@@ -1,9 +1,7 @@
-"""OpenCode 1.x adapter: npm ``opencode-ai`` below 2.0.0, the stock-binary proofs.
+"""OpenCode 1.x adapter; the server proof uses the sandbox model mock.
 
-The server proof is model-backed, so qualify points its mistral provider at the
-sandbox mock and pre-warms the models.dev catalog once online; the proof itself
-then runs fully offline. The stock TUI proof self-skips: it is broken at this
-base (the manifest's detached server runtime has no frontend installer).
+Stock TUI proofs do not run because detached runtime lacks a frontend installer.
+Its gate rests on server proofs, probe and --help flags; human review is required.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ from ..contract import (
     verdict_from_checks,
     version_key,
 )
-from . import opencode_bump, opencode_sandbox
+from . import opencode_bump, opencode_pi_process, opencode_sandbox
 
 NPM_PACKAGE = "opencode-ai"
 
@@ -45,6 +43,16 @@ _SERVER_PROOF_TESTS = (
 _STOCK_PROOF_TESTS = (
     "test_stock_tui_loads_passive_extension_and_reconnects",
     "test_stock_tui_accepts_native_send_with_exact_lineage",
+)
+_TUI_SKIP_DETAIL = (
+    "stock-TUI proof NOT run: detached runtime lacks a frontend installer "
+    "(theater/daemon/spawning/planning.py:325-327); TUI gate bump rests on server proofs, "
+    "probe and --help flags only; human review required"
+)
+_REGIE_SKIP = Check(
+    "packages/regie/tests/test_dashboard_rich.py",
+    "skip",
+    "regie dashboard assertion edited but not executed: isolated pytest cannot import regie",
 )
 
 
@@ -87,15 +95,12 @@ class OpenCodeAdapter:
         """npm-install exactly ``version`` and expose its bin under ``sb.bin_dir``."""
         prefix = sb.root / "npm-opencode"
         try:
-            run = subprocess.run(
+            run = opencode_pi_process.run_group(
                 ["npm", "install", "--prefix", str(prefix), f"{NPM_PACKAGE}@{version}"],
-                capture_output=True,
-                text=True,
                 env=dict(sb.env),
                 timeout=600,
-                check=False,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             raise InstallFailed(f"npm install {NPM_PACKAGE}@{version} did not run: {exc}") from exc
         if run.returncode != 0:
             raise InstallFailed(
@@ -108,14 +113,12 @@ class OpenCodeAdapter:
         exposed = sb.bin_dir / "opencode"
         exposed.unlink(missing_ok=True)
         exposed.symlink_to(packaged)
-        check = subprocess.run(
-            [str(exposed), "--version"],
-            capture_output=True,
-            text=True,
-            env=dict(sb.offline_env),
-            timeout=60,
-            check=False,
-        )
+        try:
+            check = opencode_pi_process.run_group(
+                [str(exposed), "--version"], env=sb.offline_env, timeout=60
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            raise InstallFailed(f"installed opencode version check failed: {exc}") from exc
         output = f"{check.stdout}{check.stderr}".strip()
         if check.returncode != 0 or version not in output:
             raise InstallFailed(f"installed opencode did not report {version!r}: {output!r}")
@@ -167,7 +170,13 @@ class OpenCodeAdapter:
             env=env,
             expected_skips=self.expected_skips,
         )
-        checks = consistency + proving
+        proving = tuple(
+            Check(check.name, check.status, f"{check.detail}; {_TUI_SKIP_DETAIL}".strip("; "))
+            if check.name in self.expected_skips and check.status == "skip"
+            else check
+            for check in proving
+        )
+        checks = consistency + proving + (_REGIE_SKIP,)
         verdict: Verdict = verdict_from_checks(proving)
         if verdict == "green" and any(
             check.status == "skip" for check in proving if check.name.startswith(_SERVER_PROOF)

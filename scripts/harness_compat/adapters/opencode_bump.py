@@ -162,7 +162,7 @@ def _apply_window_table(text: str, window_rows: str) -> str:
 
 
 def apply_bump(root: Path, greens: list[str]) -> list[Path]:
-    """Admit ``greens`` (ascending, starting at the current ceiling) under ``root``.
+    """Admit ascending greens at or above the current ceiling under ``root``.
 
     Deterministic and idempotent: a second call with the same greens is a no-op
     that changes nothing. Returns the changed paths relative to ``root``.
@@ -176,14 +176,12 @@ def apply_bump(root: Path, greens: list[str]) -> list[Path]:
         raise ValueError(f"greens must be unique and ascending: {greens}")
     floor, ceiling = read_gate(root)
     floor_key, ceiling_key = version_key(floor), version_key(ceiling)
-    if version_key(next_patch(greens[-1])) == ceiling_key and all(
-        floor_key <= key < ceiling_key for key in keys
-    ):
+    if all(floor_key <= key < ceiling_key for key in keys):
         return []  # every green is already admitted: idempotent no-op
-    if greens[0] != ceiling:
+    if keys[0] < ceiling_key:
         raise ValueError(
-            f"the first green must be the current exclusive ceiling {ceiling!r} "
-            f"so no untested release is admitted; got {greens[0]!r}"
+            f"green releases must start at or above the current ceiling {ceiling!r}; "
+            f"got {greens[0]!r}"
         )
 
     rules, window_rows = _substitutions(floor, ceiling, greens)

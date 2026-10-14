@@ -19,12 +19,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..contract import Sandbox
+from .opencode_pi_process import terminate_group
 
 _BANNER_PREFIX = "opencode server listening on "
 _PREWARM_PASSWORD = "harness-compat-prewarm"
 _CATALOG = Path("opencode/models.json")
 _CATALOG_SECONDS = 30.0
-_SETTLE_SECONDS = 1.0
 
 
 def write_provider_override(sb: Sandbox) -> None:
@@ -76,6 +76,7 @@ def prewarm_catalog(sb: Sandbox, *, plugin: Path | None = None, timeout: float =
             "OPENCODE_CONFIG": str(config_path),
         },
         cwd=str(work),
+        start_new_session=True,
     )
     try:
         endpoint = _await_banner(process, timeout)
@@ -85,13 +86,9 @@ def prewarm_catalog(sb: Sandbox, *, plugin: Path | None = None, timeout: float =
             return False
         return _await_catalog(sb, timeout=_CATALOG_SECONDS)
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-        # Let the previous instance's lock heartbeat go stale before the proof serves.
-        time.sleep(_SETTLE_SECONDS)
+        terminate_group(process)
+        if process.stdout is not None:
+            process.stdout.close()
 
 
 def _await_catalog(sb: Sandbox, *, timeout: float) -> bool:

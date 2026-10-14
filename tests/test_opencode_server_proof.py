@@ -11,6 +11,7 @@ import os
 import secrets
 import selectors
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -78,9 +79,15 @@ class StockServer:
         self.plugin_log = workdir / "plugin-events.txt"
 
     def stop(self) -> None:
-        self.process.terminate()
-        with contextlib.suppress(subprocess.SubprocessError):
+        # serve forks workers: signal the whole group so none is orphaned.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(self.process.pid, signal.SIGTERM)
+        try:
             self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.process.pid, signal.SIGKILL)
+            self.process.wait()
         shutil.rmtree(self.workdir, ignore_errors=True)
 
     def password(self) -> str:
@@ -153,6 +160,7 @@ def _start_stock_server() -> StockServer:
         ["opencode", "serve", "--port", "0", "--hostname", "127.0.0.1"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
         env={
             **os.environ,
             "OPENCODE_SERVER_PASSWORD": password,
