@@ -36,15 +36,26 @@ class Unsealed:
 class _Node:
     parent: str | None
     message_id: str | None
+    sidechain: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class _Deferred:
-    """A marker whose parent chain is not fully read yet; ``ts``/``index`` build its event later."""
+    """A held marker bound to its origin; only its parent, session, ts and line index are kept."""
 
-    marker: dict
+    parent: str | None
+    session_id: str | None
     ts: float | None
     index: int
+
+
+def _completes_safely(record: dict) -> bool:
+    """Only an attachment-like record may finish a held marker; a fragment-capable one must not."""
+    return (
+        record.get("type") not in ("assistant", "user")
+        and record.get("isSidechain") is not True
+        and FinalAnswerSeal._message_id(record) is None
+    )
 
 
 class FinalAnswerSeal:
@@ -56,13 +67,17 @@ class FinalAnswerSeal:
         self._texts: OrderedDict[str, dict[str, str]] = OrderedDict()
         self._awaiting: str | None = None
         #: At most one marker awaits its late parent records; superseded or dropped, never grown.
+        #: It lives in this observer, so history paging (a fresh observer per page) fails closed.
         self._deferred: _Deferred | None = None
+        #: Message ids already sealed, so a repeated marker never emits a second boundary.
+        self._sealed_ids: OrderedDict[str, None] = OrderedDict()
 
     def reset(self) -> None:
         self._nodes.clear()
         self._texts.clear()
         self._awaiting = None
         self._deferred = None
+        self._sealed_ids.clear()
 
     def observe(self, record: dict) -> str | None:
         """Remember one record; returns a reason when a sealed-mode final never got its marker."""
@@ -72,7 +87,11 @@ class FinalAnswerSeal:
         parent = record.get("parentUuid")
         message_id = self._message_id(record)
         self._nodes.pop(uuid, None)
-        self._nodes[uuid] = _Node(parent if isinstance(parent, str) else None, message_id)
+        self._nodes[uuid] = _Node(
+            parent if isinstance(parent, str) else None,
+            message_id,
+            record.get("isSidechain") is True,
+        )
         while len(self._nodes) > SEAL_NODE_LIMIT:
             self._nodes.popitem(last=False)
         if message_id is not None:
@@ -99,33 +118,69 @@ class FinalAnswerSeal:
             node = self._nodes.get(current) if current is not None else None
             if node is None:
                 return Unsealed("unknown_parent")
+            if node.sidechain:
+                return Unsealed("sidechain")
             if node.message_id is not None and current is not None:
                 break
             current = node.parent
         else:
             return Unsealed("no_assistant_record")
         message_id = node.message_id
+        if message_id in self._sealed_ids:
+            return Unsealed("already_sealed")
         if message_id not in self._texts:
             return Unsealed("message_evicted")
         if not self._message_is_whole(current, message_id):
             return Unsealed("incomplete_message")
         self._awaiting = None
+        self._sealed_ids[message_id] = None
+        while len(self._sealed_ids) > SEAL_MESSAGE_LIMIT:
+            self._sealed_ids.popitem(last=False)
         return Sealed(message_id, "\n\n".join(self._texts[message_id].values()))
 
     def resolve_or_defer(self, marker: dict, ts: float | None, index: int) -> Sealed | Unsealed:
-        """Seal now, or hold the marker when its chain needs records not read yet."""
+        """Seal now, or hold the marker when its chain needs records not read yet.
+
+        A supported main-thread marker always supersedes any older held one, resolved or not.
+        """
+        self._deferred = None
         outcome = self.resolve(marker)
         if isinstance(outcome, Unsealed) and outcome.reason in _RETRYABLE:
-            self._deferred = _Deferred(marker, ts, index)
+            parent = marker.get("parentUuid")
+            session = marker.get("sessionId")
+            self._deferred = _Deferred(
+                parent if isinstance(parent, str) else None,
+                session if isinstance(session, str) else None,
+                ts,
+                index,
+            )
             return Unsealed("deferred")
         return outcome
 
-    def retry_deferred(self) -> tuple[Sealed, float | None, int] | None:
-        """Re-resolve a held marker; seal it once its parent records arrive, drop it if lost."""
+    def retry_deferred(self, record: dict, index: int) -> tuple[Sealed, float | None, int] | None:
+        """Seal a held marker only when an attachment-like later record completes its chain.
+
+        Fail closed on any discontinuity: a non-increasing index (rewrite/rewind), a changed
+        session, or a record that could itself be a fragment of the answer.
+        """
         pending = self._deferred
         if pending is None:
             return None
-        outcome = self.resolve(pending.marker)
+        session = record.get("sessionId")
+        if (
+            index <= pending.index
+            or (
+                pending.session_id is not None
+                and isinstance(session, str)
+                and session != pending.session_id
+            )
+            or not _completes_safely(record)
+        ):
+            self._deferred = None
+            return None
+        if not isinstance(record.get("uuid"), str):
+            return None  # No uuid: cannot be a chain node, so skip the resolve walk entirely.
+        outcome = self.resolve({"parentUuid": pending.parent})
         if isinstance(outcome, Sealed):
             self._deferred = None
             return outcome, pending.ts, pending.index
@@ -148,6 +203,8 @@ class FinalAnswerSeal:
                 return False
             if node.message_id != message_id:
                 return True
+            if node.sidechain:
+                return False
             uuid = parent
         return False
 

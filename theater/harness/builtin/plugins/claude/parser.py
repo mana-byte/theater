@@ -51,7 +51,8 @@ class ClaudeParser:
         return ParsedRecord(
             events=events,
             trajectory=tuple(self._trajectory_facts(record, index)),  # type: ignore[attr-defined]
-            # A seal boundary repeats text its assistant record already projected.
+            # Suppress only the synthesized seal boundary (its text is already projected); the
+            # records that trigger it are attachment-like and carry no baseline events of their own.
             trajectory_events=() if self._last_seal_emitted else None,
         )
 
@@ -63,7 +64,7 @@ class ClaudeParser:
         self._last_seal_emitted = False
         if (expired := self._seal.observe(record)) is not None and clip_text:
             _report_seal("unavailable", expired)
-        deferred = self._emit_deferred(record, clip_text=clip_text)
+        deferred = self._emit_deferred(record, index, clip_text=clip_text)
         self._last_seal_emitted = bool(deferred)
 
         if _is_turn_marker(record):
@@ -90,16 +91,19 @@ class ClaudeParser:
             ]
         return deferred
 
-    def _emit_deferred(self, record: dict, *, clip_text: bool) -> list[Event]:
-        """Seal a held marker when a later record supplies its chain; drop it on a new turn."""
+    def _emit_deferred(self, record: dict, index: int, *, clip_text: bool) -> list[Event]:
+        """Seal a held marker when a later record completes it; a marker or user turn is left
+        to the caller's supersede/drop. retry_deferred owns the discontinuity guards."""
+        if _is_turn_marker(record):
+            return []
         if record.get("type") == "user":
             self._seal.drop_deferred()
             return []
-        outcome = self._seal.retry_deferred()
+        outcome = self._seal.retry_deferred(record, index)
         if outcome is None:
             return []
-        sealed, ts, index = outcome
-        return self._boundary_event(sealed, ts, index, clip_text=clip_text)
+        sealed, ts, resolved_index = outcome
+        return self._boundary_event(sealed, ts, resolved_index, clip_text=clip_text)
 
     def _assistant(
         self,
@@ -180,7 +184,7 @@ class ClaudeParser:
         outcome = self._seal.resolve_or_defer(record, ts, index)
         if isinstance(outcome, Sealed):
             return self._boundary_event(outcome, ts, index, clip_text=clip_text)
-        if clip_text and outcome.reason != "deferred":
+        if clip_text and outcome.reason not in ("deferred", "already_sealed"):
             _report_seal("unavailable", outcome.reason)
         return []
 

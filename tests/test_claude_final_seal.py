@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
@@ -103,25 +105,100 @@ def test_a_proven_empty_final_is_one_empty_boundary_and_an_unproven_one_is_none(
     assert _boundaries(ClaudeCodeObserver(), [text, _marker("u6", "u5")]) == []
 
 
-def test_a_marker_seals_once_its_out_of_order_parent_records_arrive_later():
-    # Claude sometimes flushes an assistant record whose parentUuid is an attachment written
-    # after the turn_duration marker; the seal must hold the marker and resolve on the later read.
-    asst = _fragment("a1", "late", {"type": "text", "text": "done"})
-    ordered = [
-        _record("u0", None, "user"),
-        asst,
-        _record("att1", "a1", "attachment"),
-        _marker("mk", "att1"),
-        _record("late", "u0", "attachment"),  # supplies a1's parent after the marker
-    ]
-    (end,) = _boundaries(ClaudeCodeObserver(), ordered)
-    assert (end.text, end.turn_id) == ("done", "msg_1")
+def _boundaries_at(observer: ClaudeCodeObserver, indexed: list[tuple[str, int]]) -> list:
+    events = [e for line, i in indexed for e in observer.parse(line, i)]
+    return [e for e in events if e.turn_end]
 
-    # Parent never arrives: fail closed, nothing sealed.
-    assert _boundaries(ClaudeCodeObserver(), ordered[:-1]) == []
-    # A new user turn before the parent arrives drops the held marker (fail closed).
-    superseded = [*ordered[:-1], _record("u9", "att1", "user"), ordered[-1]]
-    assert _boundaries(ClaudeCodeObserver(), superseded) == []
+
+# Shared out-of-order shape: a1's parentUuid ("late") is an attachment flushed after the marker.
+_USER = _record("u0", None, "user")
+_ANSWER = _fragment("a1", "late", {"type": "text", "text": "done"})
+_ATTACH = _record("att1", "a1", "attachment")
+_MARKER = _marker("mk", "att1")
+_LATE = _record("late", "u0", "attachment")
+_SIDE = _record(
+    "side", "u0", message={"id": "sm", "stop_reason": "end_turn", "content": []}, isSidechain=True
+)
+_SEAL_CASES = {
+    # The intended fix: hold the marker, seal once its late parent arrives.
+    "late_attachment_seals_once": ([_USER, _ANSWER, _ATTACH, _MARKER, _LATE], ["done"]),
+    "parent_never_arrives": ([_USER, _ANSWER, _ATTACH, _MARKER], []),
+    "new_user_drops": (
+        [_USER, _ANSWER, _ATTACH, _MARKER, _record("u9", "att1", "user"), _LATE],
+        [],
+    ),
+    # A newer resolvable marker supersedes the held one; only the new answer seals.
+    "newer_marker_supersedes": (
+        [
+            _USER,
+            _ANSWER,
+            _ATTACH,
+            _MARKER,
+            _fragment("a2", "u0", {"type": "text", "text": "new"}, "msg_2"),
+            _marker("mk2", "a2"),
+            _LATE,
+        ],
+        ["new"],
+    ),
+    # A late record that could itself be a fragment (reversed assembly) must drop, not seal.
+    "late_assistant_fragment_drops": (
+        [
+            _USER,
+            _fragment("tail", "head", {"type": "text", "text": "SECOND"}),
+            _marker("mk", "tail"),
+            _fragment("head", "u0", {"type": "text", "text": "FIRST"}),
+        ],
+        [],
+    ),
+    # A main-thread marker whose parent is an unread sidechain assistant must never seal it.
+    "sidechain_parent_drops": ([_USER, _marker("mk", "side"), _SIDE], []),
+}
+
+
+@pytest.mark.parametrize("case", list(_SEAL_CASES))
+def test_held_marker_seals_only_the_genuine_late_attachment(case: str) -> None:
+    lines, expected = _SEAL_CASES[case]
+    assert [e.text for e in _boundaries(ClaudeCodeObserver(), lines)] == expected
+
+
+def test_a_held_marker_drops_on_index_regression_and_session_change() -> None:
+    base = [(_USER, 0), (_ANSWER, 1), (_ATTACH, 2), (_MARKER, 3)]
+    # Rewind/replacement re-reads from index 0: the held marker must not seal the old answer.
+    assert _boundaries_at(ClaudeCodeObserver(), [*base, (_LATE, 0)]) == []
+    # A later record from a different session must not complete the held marker.
+    marker_a = _record("mk", "att1", "system", subtype="turn_duration", sessionId="sid-A")
+    late_b = _record("late", "u0", "attachment", sessionId="sid-B")
+    other = [(_USER, 0), (_ANSWER, 1), (_ATTACH, 2), (marker_a, 3), (late_b, 4)]
+    assert _boundaries_at(ClaudeCodeObserver(), other) == []
+
+
+def test_a_resolving_record_keeps_its_own_baseline_events() -> None:
+    # A late fragment-capable record drops the held marker (fail closed) yet still projects its
+    # own events: suppression touches only a synthesized seal boundary, never the record's own.
+    observer = ClaudeCodeObserver()
+    lines = [_USER, _ANSWER, _ATTACH, _MARKER]
+    for i, line in enumerate(lines):
+        observer.parse_record(line, i)
+    tool = _record(
+        "late",
+        "u0",
+        cwd="/repo",
+        message={
+            "id": "tool-msg",
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "Read",
+                    "input": {"file_path": "/repo/a.txt"},
+                }
+            ],
+        },
+    )
+    parsed = observer.parse_record(tool, len(lines))
+    assert [e.turn_end for e in parsed.events] == [False]  # no seal boundary, only the tool call
+    assert parsed.trajectory_events is None  # the record's own events are not suppressed
 
 
 def test_unsupported_versions_and_sidechains_never_seal():
