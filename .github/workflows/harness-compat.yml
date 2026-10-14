@@ -128,9 +128,11 @@ jobs:
           path: ${{ runner.temp }}/harness-compat-cache
           key: compat-evidence-${{ matrix.harness }}-${{ github.run_id }}
       - uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        id: pr
         if: >-
           steps.select.outputs.run == 'true' &&
           steps.compat.outputs.pr_needed == 'true'
+        continue-on-error: true
         with:
           token: ${{ secrets.PR_AUTOMATION_TOKEN }}
           base: main
@@ -196,5 +198,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Preserve qualification result
-        if: steps.select.outputs.run == 'true' && steps.compat.outcome == 'failure'
+        if: >-
+          steps.select.outputs.run == 'true' &&
+          (steps.compat.outcome == 'failure' || steps.pr.outcome == 'failure')
         run: exit 1
