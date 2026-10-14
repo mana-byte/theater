@@ -21,7 +21,16 @@ from theater.harness.builtin.plugins.pi.frontend import (
 )
 from theater.harness.builtin.plugins.pi.launch import plan_launch
 from theater.harness.builtin.plugins.pi.runtime import PiFrontendPeer, PiFrontendRuntime
-from theater.harness.builtin.plugins.pi.runtime_constants import PI_FRONTEND_SEND_PROMPT_MAX_CHARS
+from theater.harness.builtin.plugins.pi.runtime_constants import (
+    PI_FRONTEND_QUALIFIED_FLOOR,
+    PI_FRONTEND_QUALIFIED_HOLE,
+    PI_FRONTEND_QUALIFIED_MAX,
+    PI_FRONTEND_QUALIFIED_RANGE,
+    PI_FRONTEND_QUALIFIED_RESUME,
+    PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY,
+    PI_FRONTEND_SEND_PROMPT_MAX_CHARS,
+    pi_version_text,
+)
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -740,19 +749,19 @@ class _Completed:
 
 
 _QUALIFIED_PI_VERSIONS = (
-    "0.80.8",
+    pi_version_text(PI_FRONTEND_QUALIFIED_FLOOR),
+    # Historical releases with distinct bridge layouts and protocol behavior.
     "0.80.10",
     "0.83.9",
     "0.84.2",
     "0.84.3",
     "0.84.4",
-    "0.85.1",
+    pi_version_text(PI_FRONTEND_QUALIFIED_RESUME),
     "0.86.0",
     "0.86.1",
     "0.87.0",
     "0.87.1",
-    "0.99.0",
-    "0.99.1",
+    pi_version_text(PI_FRONTEND_QUALIFIED_MAX),
 )
 
 
@@ -773,20 +782,45 @@ def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> N
     )
 
     assert compatibility.supported is True
+    assert compatibility.policy == PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY
     assert compatibility.native_version == version
     assert calls == [("pi", "--version")]
 
 
-@pytest.mark.parametrize("version", ["0.80.3", "0.80.7", "0.85.0", "0.99.2", "1.0.0"])
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.80.3",  # Historical import failure in a specific release.
+        pi_version_text(
+            (
+                PI_FRONTEND_QUALIFIED_FLOOR[0],
+                PI_FRONTEND_QUALIFIED_FLOOR[1],
+                PI_FRONTEND_QUALIFIED_FLOOR[2] - 1,
+            )
+        ),
+        pi_version_text(PI_FRONTEND_QUALIFIED_HOLE),
+        pi_version_text(
+            (
+                PI_FRONTEND_QUALIFIED_MAX[0],
+                PI_FRONTEND_QUALIFIED_MAX[1],
+                PI_FRONTEND_QUALIFIED_MAX[2] + 1,
+            )
+        ),
+        pi_version_text((PI_FRONTEND_QUALIFIED_MAX[0], PI_FRONTEND_QUALIFIED_MAX[1] + 1, 0)),
+        pi_version_text((PI_FRONTEND_QUALIFIED_MAX[0] + 1, 0, 0)),
+    ],
+)
 def test_pi_frontend_probe_refuses_unqualified_versions(version, monkeypatch) -> None:
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: _Completed(f"{version}\n"))
     refused = pi_runtime_module.probe_pi_frontend_compatibility(RuntimeProbeContext(binary="pi"))
     assert refused.supported is False
+    assert refused.policy == PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY
     assert refused.reason is not None
-    # 1.0.0 is not a stable 0.x.y release at all, so no version is reported.
-    if version != "1.0.0":
+    if version.split(".", 1)[0] == str(PI_FRONTEND_QUALIFIED_MAX[0]):
         assert refused.native_version == version
-        assert "outside the qualified range" in refused.reason
+        assert PI_FRONTEND_QUALIFIED_RANGE in refused.reason
+    else:
+        assert refused.native_version is None
 
 
 def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None:

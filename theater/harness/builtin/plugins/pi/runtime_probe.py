@@ -9,15 +9,23 @@ from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbe
 from .constants import PI_BINARY
 from .runtime_constants import (
     _VERSION_TOKEN,
+    PI_FRONTEND_QUALIFIED_FLOOR,
+    PI_FRONTEND_QUALIFIED_HOLE,
+    PI_FRONTEND_QUALIFIED_MAX,
+    PI_FRONTEND_QUALIFIED_RANGE,
+    PI_FRONTEND_QUALIFIED_RESUME,
     PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY,
     PI_FRONTEND_RUNTIME_PROBE_TIMEOUT_SECONDS,
+    pi_version_text,
 )
 
 
 def parse_pi_version(output: str) -> str | None:
-    """Extract a stable ``0.x.y`` Pi release version from ``pi --version``."""
+    """Extract a Pi release version from ``pi --version``."""
     match = _VERSION_TOKEN.search(output)
-    return None if match is None else match.group("version")
+    if match is None or int(match.group("major")) > PI_FRONTEND_QUALIFIED_MAX[0]:
+        return None
+    return match.group("version")
 
 
 def _version_in_supported_range(version: str) -> bool:
@@ -25,15 +33,13 @@ def _version_in_supported_range(version: str) -> bool:
     if match is None:
         return False
     try:
-        parsed = (0, int(match.group("minor")), int(match.group("patch")))
+        parsed = tuple(int(match.group(part)) for part in ("major", "minor", "patch"))
     except ValueError:
         return False
-    # Qualified: (0,80,8) <= v < (0,85,0) or (0,85,1) <= v <= (0,99,1).
-    # 0.85.0 is a broken published artifact (unresolvable pi-server import);
-    # 0.80.3-0.80.7 never qualify: their SDK crashes at import and lacks
-    # ModelRuntime and agent_settled.
-    in_080 = (0, 80, 8) <= parsed < (0, 85, 0)
-    in_qualified = (0, 85, 1) <= parsed <= (0, 99, 1)
+    # The excluded release is a broken published artifact.
+    # Earlier SDKs crash at import and lack ModelRuntime and agent_settled.
+    in_080 = PI_FRONTEND_QUALIFIED_FLOOR <= parsed < PI_FRONTEND_QUALIFIED_HOLE
+    in_qualified = PI_FRONTEND_QUALIFIED_RESUME <= parsed <= PI_FRONTEND_QUALIFIED_MAX
     return in_080 or in_qualified
 
 
@@ -71,12 +77,16 @@ def probe_pi_frontend_compatibility(context: RuntimeProbeContext) -> RuntimeComp
         return _unsupported_probe(f"Pi --version exited with {version_result.returncode}")
     version = parse_pi_version(f"{version_result.stdout}\n{version_result.stderr}")
     if version is None:
-        return _unsupported_probe("Pi --version did not report a stable 0.x.y release")
+        release = (
+            f"{PI_FRONTEND_QUALIFIED_MAX[0]}.x.y release"
+            if PI_FRONTEND_QUALIFIED_MAX[0] == 0
+            else "release"
+        )
+        return _unsupported_probe(f"Pi --version did not report a stable {release}")
     if not _version_in_supported_range(version):
         return _unsupported_probe(
-            f"Pi {version} is outside the qualified range "
-            ">=0.80.8,<0.85.0 || >=0.85.1,<=0.99.1 "
-            "(0.85.0 is a broken published artifact)",
+            f"Pi {version} is outside the qualified range {PI_FRONTEND_QUALIFIED_RANGE} "
+            f"({pi_version_text(PI_FRONTEND_QUALIFIED_HOLE)} is a broken published artifact)",
             version=version,
         )
     return RuntimeCompatibility(
