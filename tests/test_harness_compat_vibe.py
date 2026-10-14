@@ -16,7 +16,7 @@ import pytest
 from scripts.harness_compat.adapters.vibe import ADAPTER
 from scripts.harness_compat.adapters.vibe_bump import COMPAT, COMPAT_TEST, DOC, LAUNCH_TEST
 from scripts.harness_compat.adapters.vibe_store import READER_STORE, store_check
-from scripts.harness_compat.contract import InstallFailed, version_key
+from scripts.harness_compat.contract import Check, InstallFailed, version_key
 from scripts.harness_compat.sandbox import make_sandbox
 from theater.harness.builtin.plugins.vibe.unified_source import UnifiedVibeSource
 from theater.harness.builtin.plugins.vibe.unified_store import load_unified_store
@@ -147,18 +147,12 @@ def _next_patch(version: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
-def _next_minor(version: str) -> str:
-    major, minor, _ = version_key(version)
-    return f"{major}.{minor + 1}.0"
-
-
-def test_vibe_gate_and_bump_are_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_vibe_bump_is_patch_bounded_and_idempotent(tmp_path: Path) -> None:
     root = _tree(tmp_path)
     candidate = ADAPTER.verified(root).ceiling
     assert candidate is not None
     latest = _next_patch(candidate)
-    monkeypatch.setattr(ADAPTER, "discover", lambda: [candidate, latest])
-    new_ceiling = _next_minor(latest)
+    new_ceiling = _next_patch(latest)
 
     changed = ADAPTER.apply_bump(root, [candidate, latest])
     assert changed == [COMPAT, COMPAT_TEST, LAUNCH_TEST, DOC]
@@ -169,47 +163,36 @@ def test_vibe_gate_and_bump_are_idempotent(tmp_path: Path, monkeypatch: pytest.M
     assert f"Vibe compatibility range: >={floor},<{new_ceiling}." in (root / DOC).read_text()
     for relative in (COMPAT, COMPAT_TEST, LAUNCH_TEST):
         ast.parse((root / relative).read_text())
-    assert "Exclusive qualified boundary" in (root / COMPAT).read_text()
+    assert "first stable release not yet proved" in (root / COMPAT).read_text()
 
 
-def test_vibe_bump_stops_before_discovered_patch(
+def test_vibe_bump_ignores_composition_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _tree(tmp_path)
     green = ADAPTER.verified(root).ceiling
     assert green is not None
     red = _next_patch(green)
-    monkeypatch.setattr(ADAPTER, "discover", lambda: [green, red])
+    selection = [green, red]
+    calls = 0
 
-    ADAPTER.apply_bump(root, [green])
+    def composition_discovery() -> list[str]:
+        nonlocal calls
+        calls += 1
+        return [green]
+
+    monkeypatch.setattr(ADAPTER, "discover", composition_discovery)
+    ADAPTER.apply_bump(root, selection[:1])
+    assert calls == 0
     assert ADAPTER.verified(root).ceiling == red
     assert ADAPTER.verified(root).admits(red) is False
     assert ADAPTER.apply_bump(root, [green]) == []
 
 
-def test_vibe_bump_is_conservative_when_discovery_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_vibe_bump_requires_launch_safety_anchor(tmp_path: Path) -> None:
     root = _tree(tmp_path)
     green = ADAPTER.verified(root).ceiling
     assert green is not None
-
-    def fail() -> list[str]:
-        raise OSError("offline")
-
-    monkeypatch.setattr(ADAPTER, "discover", fail)
-    ADAPTER.apply_bump(root, [green])
-    assert ADAPTER.verified(root).ceiling == _next_patch(green)
-    assert ADAPTER.apply_bump(root, [green]) == []
-
-
-def test_vibe_bump_requires_launch_safety_anchor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = _tree(tmp_path)
-    green = ADAPTER.verified(root).ceiling
-    assert green is not None
-    monkeypatch.setattr(ADAPTER, "discover", lambda: [green])
     launch = root / LAUNCH_TEST
     launch.write_text(
         launch.read_text().replace('@pytest.mark.parametrize("version",', "# missing")
@@ -221,16 +204,70 @@ def test_vibe_bump_requires_launch_safety_anchor(
     assert (root / COMPAT).read_text() == before
 
 
+@pytest.mark.parametrize("bumped", [True, False], ids=["candidate", "watch"])
+def test_vibe_qualify_gates_candidate_and_watch_on_consistency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bumped: bool
+) -> None:
+    root = _tree(tmp_path)
+    version = ADAPTER.verified(root).ceiling
+    assert version is not None
+    if bumped:
+        ADAPTER.apply_bump(root, [version])
+    failure = Check(ADAPTER.consistency_tests[0], "fail", "broken selector")
+    calls: list[tuple[str, ...]] = []
+
+    def run_pytest(_root, nodeids, **_kwargs):
+        calls.append(tuple(nodeids))
+        return (failure,)
+
+    monkeypatch.setattr("scripts.harness_compat.adapters.vibe.framework.run_pytest", run_pytest)
+    monkeypatch.setattr(
+        "scripts.harness_compat.adapters.vibe.store_check",
+        lambda *_args: pytest.fail("store check ran before consistency gate"),
+    )
+    with make_sandbox("vibe") as sandbox:
+        result = ADAPTER.qualify(root, version, sandbox, sandbox.bin_dir / "vibe")
+    assert calls == [ADAPTER.consistency_tests]
+    assert result.verdict == "tooling"
+    assert result.checks == (failure,)
+
+
+def test_vibe_qualify_reaches_proofs_after_consistency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree(tmp_path)
+    version = ADAPTER.verified(root).ceiling
+    assert version is not None
+    static = Check("vibe_store_format", "pass", "upstream 8 <= reader 8")
+    calls: list[tuple[str, ...]] = []
+
+    def run_pytest(_root, nodeids, **_kwargs):
+        calls.append(tuple(nodeids))
+        return tuple(Check(nodeid, "pass") for nodeid in nodeids)
+
+    monkeypatch.setattr("scripts.harness_compat.adapters.vibe.framework.run_pytest", run_pytest)
+    monkeypatch.setattr("scripts.harness_compat.adapters.vibe.store_check", lambda *_args: static)
+    monkeypatch.setattr("scripts.harness_compat.adapters.vibe.reader_minor", lambda _root: 8)
+    with make_sandbox("vibe") as sandbox:
+        result = ADAPTER.qualify(root, version, sandbox, sandbox.bin_dir / "vibe")
+    assert calls == [ADAPTER.consistency_tests, ADAPTER.green_tests]
+    assert result.verdict == "green"
+    assert result.checks[len(ADAPTER.consistency_tests)] == static
+
+
 def test_vibe_store_format_classification(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _tree(tmp_path)
     candidate = ADAPTER.verified(root).ceiling
     assert candidate is not None
-    monkeypatch.setattr(ADAPTER, "discover", lambda: [candidate])
     reader = root / READER_STORE
     reader.write_text("STORE_FORMAT_MINOR = 8\n")
     monkeypatch.setattr(
         "scripts.harness_compat.adapters.vibe_store.github.raw_file",
         lambda *_args: "STORE_FORMAT_MINOR = 9\n",
+    )
+    monkeypatch.setattr(
+        "scripts.harness_compat.adapters.vibe.framework.run_pytest",
+        lambda _root, nodeids, **_kwargs: tuple(Check(nodeid, "pass") for nodeid in nodeids),
     )
     binary = tmp_path / "vibe"
     monkeypatch.setattr(ADAPTER, "install", lambda *_args: binary)
@@ -243,7 +280,7 @@ def test_vibe_store_format_classification(tmp_path: Path, monkeypatch: pytest.Mo
         installed = ADAPTER.install(sandbox, candidate)
         result = ADAPTER.qualify(root, candidate, sandbox, installed)
     assert result.verdict == "red"
-    assert result.checks == (check,)
+    assert result.checks[-1] == check
 
 
 def test_vibe_install_failure_is_inconclusive(monkeypatch: pytest.MonkeyPatch) -> None:

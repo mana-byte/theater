@@ -116,6 +116,58 @@ def test_unmatched_requests_get_the_bounded_default():
     assert script.hold_seconds == 0
 
 
+@pytest.mark.parametrize("logging", [False, True])
+def test_compat_log_records_all_methods_without_changing_statuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logging: bool
+) -> None:
+    import http.client
+
+    log = tmp_path / "requests.jsonl"
+    if logging:
+        monkeypatch.setenv("THEATER_COMPAT_MOCK_LOG", str(log))
+    else:
+        monkeypatch.delenv("THEATER_COMPAT_MOCK_LOG", raising=False)
+    provider = MockResponsesProvider()
+    provider.start()
+    requests = [
+        ("POST", "/v1/responses", 200, True),
+        ("POST", "/v1/analytics/codex/turn-costs?x=1", 204, False),
+        ("GET", "/v1/models", 200, True),
+        ("GET", "/v1/unknown?q=1", 404, False),
+        ("PUT", "/v1/unknown", 501, False),
+        ("PATCH", "/v1/unknown", 501, False),
+        ("DELETE", "/v1/unknown", 501, False),
+        ("HEAD", "/v1/unknown", 501, False),
+        ("OPTIONS", "/v1/unknown", 501, False),
+    ]
+    try:
+        parsed = urlparse(provider.base_url)
+        statuses = []
+        for method, path, _status, _scripted in requests:
+            connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+            body = json.dumps({"input": []}) if method == "POST" else None
+            connection.request(method, path, body=body)
+            response = connection.getresponse()
+            statuses.append(response.status)
+            response.read()
+            connection.close()
+    finally:
+        provider.stop()
+    assert statuses == [status for _method, _path, status, _scripted in requests]
+    if not logging:
+        assert not log.exists()
+        return
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert records == [
+        {
+            "method": method,
+            "path": path.split("?", 1)[0],
+            "scripted": scripted,
+        }
+        for method, path, _status, scripted in requests
+    ]
+
+
 def test_held_stream_serves_pre_events_then_completes_and_survives_disconnect():
     """End to end over a real socket: the held stream writes its pre events,
     keeps the connection open on keepalives, completes after the hold, and a

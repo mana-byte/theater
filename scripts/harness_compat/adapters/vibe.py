@@ -38,10 +38,11 @@ class VibeAdapter:
     consistency_tests = (
         "tests/test_vibe_compatibility.py",
         "tests/test_vibe_launch_safety.py",
-        "tests/test_harness_compat_vibe.py::test_vibe_gate_and_bump_are_idempotent",
-        "tests/test_harness_compat_vibe.py::test_vibe_bump_stops_before_discovered_patch",
-        "tests/test_harness_compat_vibe.py::test_vibe_bump_is_conservative_when_discovery_fails",
+        "tests/test_harness_compat_vibe.py::test_vibe_bump_is_patch_bounded_and_idempotent",
+        "tests/test_harness_compat_vibe.py::test_vibe_bump_ignores_composition_discovery",
         "tests/test_harness_compat_vibe.py::test_vibe_bump_requires_launch_safety_anchor",
+        "tests/test_harness_compat_vibe.py::test_vibe_qualify_gates_candidate_and_watch_on_consistency",
+        "tests/test_harness_compat_vibe.py::test_vibe_qualify_reaches_proofs_after_consistency",
         "tests/test_harness_compat_vibe.py::test_vibe_store_format_classification",
         "tests/test_harness_compat_vibe.py::test_vibe_install_failure_is_inconclusive",
     )
@@ -110,17 +111,18 @@ class VibeAdapter:
         return f"vibe {version}"
 
     def apply_bump(self, root: Path, greens: Sequence[str]) -> list[Path]:
-        try:
-            discovered = self.discover()
-        except Exception:
-            discovered = None
-        return bump(root, greens, discovered)
+        return bump(root, greens)
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+        consistency = framework.run_pytest(
+            root, self.consistency_tests, env=sb.env, expected_skips={}
+        )
+        if not consistency or any(check.status != "pass" for check in consistency):
+            return Result(self.name, version, "tooling", consistency, sb.evidence_dir)
         static = store_check(root, version)
         if static.status != "pass":
             verdict: Verdict = "red" if static.status == "fail" else "inconclusive"
-            return Result(self.name, version, verdict, (static,), sb.evidence_dir)
+            return Result(self.name, version, verdict, (*consistency, static), sb.evidence_dir)
         vibe_home = sb.config_dir / "vibe"
         vibe_home.mkdir(parents=True, exist_ok=True)
         config = (
@@ -144,12 +146,13 @@ class VibeAdapter:
             "VIBE_COMPAT_READER_MINOR": str(reader_minor(root)),
         }
         checks = (
+            *consistency,
             static,
             *framework.run_pytest(
                 root, self.green_tests, env=env, expected_skips=self.expected_skips
             ),
         )
-        proof_checks = checks[1:]
+        proof_checks = checks[len(consistency) + 1 :]
         if tuple(check.name for check in proof_checks) != self.green_tests:
             verdict = "tooling"
             checks += (Check("pytest_nodes", "error", "runner did not return the requested nodes"),)

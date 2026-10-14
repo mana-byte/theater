@@ -1,4 +1,4 @@
-"""Compute Vibe's exclusive ceiling from greens and stable upstream releases."""
+"""Advance Vibe's exclusive ceiling to the patch after the last green."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from ..contract import is_stable, version_key
+from ..contract import version_key
 
 COMPAT = Path("theater/harness/builtin/plugins/vibe/compatibility.py")
 COMPAT_TEST = Path("tests/test_vibe_compatibility.py")
@@ -29,25 +29,7 @@ def gate(root: Path) -> tuple[str, str]:
     return tuple(".".join(map(str, assignments[name])) for name in ("_FLOOR", "_CEILING"))  # type: ignore[return-value]
 
 
-def _new_ceiling(greens: Sequence[str], discovered: Sequence[str] | None) -> tuple[int, int, int]:
-    green_keys = {version_key(version) for version in greens}
-    major, minor, patch = version_key(greens[-1])
-    conservative = (major, minor, patch + 1)
-    if discovered is None:
-        return conservative
-    discovered_keys = {version_key(version) for version in discovered if is_stable(version)}
-    last_green = (major, minor, patch)
-    if last_green not in discovered_keys:
-        return conservative
-    if any(
-        key[:2] == last_green[:2] and key > last_green and key not in green_keys
-        for key in discovered_keys
-    ):
-        return conservative
-    return major, minor + 1, 0
-
-
-def bump(root: Path, greens: Sequence[str], discovered: Sequence[str] | None = None) -> list[Path]:
+def bump(root: Path, greens: Sequence[str]) -> list[Path]:
     if not greens:
         return []
     keys = [version_key(version) for version in greens]
@@ -56,7 +38,8 @@ def bump(root: Path, greens: Sequence[str], discovered: Sequence[str] | None = N
     floor, old_ceiling = gate(root)
     if keys[0] < version_key(floor):
         raise ValueError("Vibe green is below the floor")
-    ceiling_key = _new_ceiling(greens, discovered)
+    major, minor, patch = keys[-1]
+    ceiling_key = (major, minor, patch + 1)
     new_ceiling = ".".join(map(str, ceiling_key))
     if version_key(new_ceiling) <= version_key(old_ceiling):
         return []
@@ -77,8 +60,14 @@ def bump(root: Path, greens: Sequence[str], discovered: Sequence[str] | None = N
         "#: bump the ceiling in the same commit as unified_store_types.STORE_FORMAT_MINOR —\n"
         "#: the qualified range once outran the reader, and finished jobs waited forever on\n"
         "#: stores no reader could open.",
+        "#: The ceiling is the first stable release not yet proved compatible.\n"
+        "#: Launch planning enforces it because the probe is display-only.",
+    )
+    compat_updated = compat_updated.replace(
         "#: Exclusive qualified boundary chosen from upstream release discovery.\n"
         "#: Launch planning enforces this ceiling because the probe is display-only.",
+        "#: The ceiling is the first stable release not yet proved compatible.\n"
+        "#: Launch planning enforces it because the probe is display-only.",
     )
 
     compat_test_source = (root / COMPAT_TEST).read_text()

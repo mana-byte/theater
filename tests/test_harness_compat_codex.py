@@ -14,7 +14,7 @@ from typing import cast
 import pytest
 
 from scripts.harness_compat.adapters import codex
-from scripts.harness_compat.contract import Check
+from scripts.harness_compat.contract import Check, Result
 from scripts.harness_compat.sandbox import make_sandbox
 from tests.native import codex_qualify_runtime as collector
 
@@ -137,6 +137,32 @@ def test_collector_picks_newest_and_masks_run_values(
 
 
 @pytest.mark.parametrize(
+    ("verdict", "route", "expected", "classified"),
+    [
+        ("red", ("PUT", "/v1/unknown"), "tooling", True),
+        ("green", ("PUT", "/v1/unknown"), "green", False),
+        ("red", ("POST", "/v1/analytics/codex/turn-costs"), "red", False),
+    ],
+)
+def test_private_mock_route_classification(
+    tmp_path: Path,
+    verdict: str,
+    route: tuple[str, str],
+    expected: str,
+    classified: bool,
+) -> None:
+    log = tmp_path / "mock.jsonl"
+    log.write_text(json.dumps({"method": route[0], "path": route[1], "scripted": False}) + "\n")
+    result = Result("codex", "0.0.0", verdict, (Check("proof", "fail"),))
+    actual = codex._classify_mock_routes(result, log)
+    assert actual.verdict == expected
+    assert (actual.checks[-1].name == "mock_routes") is classified
+    if classified:
+        assert actual.checks[-1].status == "fail"
+        assert actual.checks[-1].detail == "unexpected private mock routes: ['PUT /v1/unknown']"
+
+
+@pytest.mark.parametrize(
     ("expected_skip", "verdict"),
     [(False, "inconclusive"), (True, "green")],
 )
@@ -150,16 +176,17 @@ def test_qualify_accepts_only_the_named_optional_control_skip(
     adapter.apply_bump(root, [candidate])
 
     def collect(command, **kwargs):
+        assert kwargs["env"]["THEATER_COMPAT_MOCK_LOG"].endswith("codex_mock_requests.jsonl")
         out = Path(command[command.index("--out") + 1])
         _bundle(out)
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(codex.subprocess, "run", collect)
-    calls: list[tuple[tuple[str, ...], bool]] = []
+    calls: list[tuple[tuple[str, ...], bool, bool]] = []
     skipped = codex._UI_CONTROL if expected_skip else adapter.green_tests[0]
 
     def run_pytest(root, nodeids, *, env, expected_skips, timeout=900):
-        calls.append((tuple(nodeids), "HTTPS_PROXY" in env))
+        calls.append((tuple(nodeids), "HTTPS_PROXY" in env, "THEATER_COMPAT_MOCK_LOG" in env))
         if nodeids == adapter.green_tests:
             assert expected_skips == adapter.expected_skips
             return tuple(
@@ -172,5 +199,8 @@ def test_qualify_accepts_only_the_named_optional_control_skip(
         result = adapter.qualify(root, candidate, sb, sb.bin_dir / "codex")
         assert result.evidence_dir == sb.evidence_dir
         assert (sb.evidence_dir / candidate / "approval.json").is_file()
-    assert calls == [(adapter.consistency_tests, True), (adapter.green_tests, False)]
+    assert calls == [
+        (adapter.consistency_tests, True, True),
+        (adapter.green_tests, False, True),
+    ]
     assert result.verdict == verdict
