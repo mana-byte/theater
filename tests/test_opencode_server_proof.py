@@ -38,7 +38,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 
-_PINNED_VERSION = "1.18.34"
+_PINNED_VERSION = "1.19.0"
 _PROOF_ENV = "THEATER_OPENCODE_SERVER_CONFORMANCE"
 _PLUGIN_FIXTURE = Path(__file__).parent / "fixtures" / "opencode_probe_plugin.mjs"
 

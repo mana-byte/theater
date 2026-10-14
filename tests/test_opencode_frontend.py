@@ -1042,7 +1042,7 @@ def test_probe_rejects_releases_outside_the_tested_window(monkeypatch) -> None:
 
     def run(argv, **kwargs):
         del kwargs
-        return _Result("1.19.0") if argv[-1] == "--version" else _Result("--model --auto --fork")
+        return _Result("1.20.0") if argv[-1] == "--version" else _Result("--model --auto --fork")
 
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.opencode.runtime_plan.subprocess.run",

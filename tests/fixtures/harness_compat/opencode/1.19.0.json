@@ -1,0 +1,79 @@
+{
+  "adapter_digest": "cd4db900fa7f26515e83e577233510682ff976d7ea664589bdea6cfe3b78a28b",
+  "checks": [
+    {
+      "detail": "17 passed",
+      "name": "tests/test_harness_compat_opencode.py",
+      "status": "pass"
+    },
+    {
+      "detail": "4 passed",
+      "name": "tests/test_opencode_server_plan.py::test_probe_qualifies_exactly_the_1x_window",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_opencode_server_runtime.py::test_server_handshake_rejects_version_drift",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_opencode_frontend.py::test_probe_rejects_releases_outside_the_tested_window",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_opencode_server_proof.py::test_port0_banner_and_basic_auth_reach_every_surface",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_opencode_server_proof.py::test_exact_session_identity_and_idle_absence",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_opencode_server_proof.py::test_prompt_admission_lineage_busy_gate_and_release",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_opencode_server_proof.py::test_sse_reconnect_and_history_readback_never_duplicate",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_opencode_server_proof.py::test_fork_while_parent_is_active",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_opencode_server_proof.py::test_attach_authentication_and_server_survival",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_opencode_server_proof.py::test_server_mode_plugin_bus_parity",
+      "status": "pass"
+    },
+    {
+      "detail": "1 skipped; stock-TUI proof NOT run: detached runtime lacks a frontend installer (theater/daemon/spawning/planning.py:325-327); TUI gate bump rests on server proofs, probe and --help flags only; human review required",
+      "name": "tests/test_opencode_stock_ui.py::test_stock_tui_loads_passive_extension_and_reconnects",
+      "status": "skip"
+    },
+    {
+      "detail": "1 skipped; stock-TUI proof NOT run: detached runtime lacks a frontend installer (theater/daemon/spawning/planning.py:325-327); TUI gate bump rests on server proofs, probe and --help flags only; human review required",
+      "name": "tests/test_opencode_stock_ui.py::test_stock_tui_accepts_native_send_with_exact_lineage",
+      "status": "skip"
+    },
+    {
+      "detail": "regie dashboard assertion edited but not executed: isolated pytest cannot import regie",
+      "name": "packages/regie/tests/test_dashboard_rich.py",
+      "status": "skip"
+    }
+  ],
+  "harness": "opencode",
+  "run_url": "https://github.com/mana-byte/theater/actions/runs/38572272220",
+  "verdict": "green",
+  "version": "1.19.0"
+}
