@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.request
 from collections.abc import Iterable, Mapping
 from urllib.parse import quote
@@ -47,8 +46,6 @@ def pypi_versions(package: str) -> list[str]:
 def github_release_versions(repo: str, *, tag_prefix: str = "v") -> list[str]:
     """Stable releases of ``owner/name`` whose tag starts with ``tag_prefix``, prefix stripped."""
     headers = {"Accept": "application/vnd.github+json"}
-    if token := os.environ.get("GITHUB_TOKEN"):
-        headers["Authorization"] = f"Bearer {token}"
     versions: list[str] = []
     for page in range(1, _GITHUB_PAGES + 1):
         url = f"https://api.github.com/repos/{repo}/releases?per_page=100&page={page}"

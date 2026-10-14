@@ -7,10 +7,9 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 from .cleanup import stop_sandbox_processes
 from .contract import Sandbox
@@ -36,22 +35,22 @@ def _new_temp_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="")).resolve()
 
 
+def _unlock(directory: Path) -> None:
+    """Make every directory below ``directory`` listable and writable so it can be deleted."""
+    with contextlib.suppress(OSError):
+        directory.chmod(0o700)
+        for child in directory.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                _unlock(child)
+
+
 def _remove_tree(path: Path) -> None:
-    """Delete ``path`` even when a tool left read-only directories; report what stays behind."""
+    """Delete ``path`` despite read-only or unreadable directories; report what stays behind."""
     if not path.exists():
         return
+    _unlock(path)
     stuck: list[str] = []
-
-    def unlock(function: Callable[[str], Any], target: str, error: BaseException) -> None:
-        with contextlib.suppress(OSError):
-            Path(target).parent.chmod(0o700)
-            Path(target).chmod(0o700)
-        try:
-            function(target)
-        except OSError:
-            stuck.append(target)
-
-    shutil.rmtree(path, onexc=unlock)
+    shutil.rmtree(path, onexc=lambda _function, target, _error: stuck.append(str(target)))
     if stuck or path.exists():
         sys.stderr.write(f"harness-compat: sandbox cleanup left {path} ({len(stuck)} paths)\n")
 

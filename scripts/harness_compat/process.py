@@ -9,6 +9,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -73,23 +74,53 @@ def ancestry(pid: int, table: Mapping[int, tuple[int, str]]) -> set[int]:
     return chain
 
 
+def _procargs2(pid: int) -> bytes:
+    """The kernel's argc, executable, argv and environment block of ``pid`` (macOS)."""
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    libc.sysctl.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+    size = ctypes.c_size_t(0)
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) or not size.value:
+        return b""
+    buffer = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0):
+        return b""
+    return buffer.raw[: size.value]
+
+
+def _environ_entries(pid: int) -> list[bytes]:
+    """The exact ``NAME=value`` entries of ``pid``'s environment; [] when it cannot be read."""
+    environ = Path("/proc") / str(pid) / "environ"
+    if Path("/proc/self/environ").exists():
+        with contextlib.suppress(OSError):
+            return environ.read_bytes().split(b"\0")
+        return []
+    data = _procargs2(pid)
+    if len(data) < 4:
+        return []
+    argc = int.from_bytes(data[:4], sys.byteorder)
+    rest = data[4:]
+    fields = rest[rest.find(b"\0") + 1 :].lstrip(b"\0").split(b"\0")  # skip executable, padding
+    return [entry for entry in fields[argc:] if entry]
+
+
 def owned_pids(name: str, token: str) -> set[int]:
-    """Processes whose environment holds ``name=token``, wherever they were reparented to."""
-    needle = f"{name}={token}"
-    proc = Path("/proc")
-    if (proc / "self" / "environ").exists():
-        found: set[int] = set()
-        for entry in proc.iterdir():
-            if entry.name.isdigit():
-                with contextlib.suppress(OSError):
-                    if needle.encode() in (entry / "environ").read_bytes():
-                        found.add(int(entry.name))
-        return found
-    return {
-        int(line.split(None, 1)[0])
-        for line in _ps("pid=,command=", "-E").splitlines()
-        if needle in line and line.split(None, 1)[0].isdigit()
-    }
+    """Processes whose environment holds the exact entry ``name=token``, wherever they moved."""
+    needle = f"{name}={token}".encode()
+    if Path("/proc/self/environ").exists():
+        pids = [int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdigit()]
+    else:
+        pids = list(process_table())
+    return {pid for pid in pids if needle in _environ_entries(pid)}
 
 
 def _alive(pid: int) -> bool:

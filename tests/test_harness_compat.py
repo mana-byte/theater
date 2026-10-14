@@ -27,7 +27,7 @@ from scripts.harness_compat.contract import (
 from scripts.harness_compat.diagnostics import clip_diagnostic
 from scripts.harness_compat.evidence import _proved, adapter_digest, reusable_evidence
 from scripts.harness_compat.framework import _check_selector, check_bump, run_pytest
-from scripts.harness_compat.process import run_group
+from scripts.harness_compat.process import SANDBOX_ENV, new_token, owned_pids, run_group
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.report import _checks, build_report
 from scripts.harness_compat.runner import _qualify, classify_routes
@@ -822,6 +822,24 @@ def test_run_group_reaps_a_detached_child_after_the_leader_exited(tmp_path: Path
     assert _gone(int(pidfile.read_text())), "the detached child outlived its finished leader"
 
 
+def test_ownership_needs_an_exact_environment_entry() -> None:
+    token = new_token()
+    entry = f"{SANDBOX_ENV}={token}"
+    sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+    clean = {"PATH": os.environ["PATH"]}
+    owned = subprocess.Popen(sleeper, env={**clean, SANDBOX_ENV: token})
+    argument = subprocess.Popen([*sleeper, entry], env=clean)
+    embedded = subprocess.Popen(sleeper, env={**clean, "NOTE": f"x {entry}"})
+    try:
+        found = owned_pids(SANDBOX_ENV, token)
+        assert owned.pid in found
+        assert argument.pid not in found and embedded.pid not in found
+    finally:
+        for process in (owned, argument, embedded):
+            process.kill()
+            process.wait()
+
+
 def test_sandbox_removes_read_only_trees() -> None:
     with make_sandbox("vibe") as sb:
         locked = sb.config_dir / "plugins" / "pkg"
@@ -829,6 +847,10 @@ def test_sandbox_removes_read_only_trees() -> None:
         (locked / "file.txt").write_text("x")
         (locked / "file.txt").chmod(0o400)
         locked.chmod(0o500)
+        hidden = sb.config_dir / "hidden"
+        hidden.mkdir()
+        (hidden / "file.txt").write_text("x")
+        hidden.chmod(0)
         root = sb.root
     assert not root.exists()
 
