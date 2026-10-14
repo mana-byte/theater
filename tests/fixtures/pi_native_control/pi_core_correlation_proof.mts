@@ -61,6 +61,22 @@ function resolveStockPi(): StockPi | undefined {
 	return { root, distIndex, version };
 }
 
+/**
+ * Resolve a Pi dependency the way Node does: walk up from the stock root
+ * trying each node_modules (nested first, then hoisted ancestors) before
+ * importing the same entry file.
+ */
+function stockDepUrl(root: string, pkg: string, entry: string): string {
+	for (let dir = root; ; dir = dirname(dir)) {
+		const candidate = join(dir, "node_modules", pkg);
+		if (existsSync(join(candidate, "package.json"))) {
+			return pathToFileURL(join(candidate, entry)).href;
+		}
+		if (dirname(dir) === dir) break;
+	}
+	return pathToFileURL(join(root, "node_modules", pkg, entry)).href;
+}
+
 type JsonRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -279,7 +295,7 @@ async function main(): Promise<number> {
 		return 77;
 	}
 	const stockUrl = (pkg: string, entry = "dist/index.js") =>
-		pathToFileURL(join(stock.root, "node_modules", pkg, entry)).href;
+		stockDepUrl(stock.root, pkg, entry);
 	const sdk = (await import(
 		pathToFileURL(stock.distIndex).href
 	)) as typeof import("pi-sdk");
