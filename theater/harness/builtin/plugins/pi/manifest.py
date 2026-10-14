@@ -51,6 +51,7 @@ from .runtime import (
     pi_frontend_runtime_factory,
     probe_pi_frontend_compatibility,
 )
+from .runtime_constants import PI_FRONTEND_QUALIFIED_RANGE
 from .screen import classify_screen
 
 _TRANSCRIPT_CHANNEL = ChannelDeclaration(
@@ -118,7 +119,7 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
         controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",)), steer=SteerPlan()),
         mcp=McpRenderingManifest(renderer=render_mcp_servers_file),
         native_compatibility=NativeCompatibilityManifest(
-            qualified_range=">=0.80.8,<0.85.0 || >=0.85.1,<=0.99.1",
+            qualified_range=PI_FRONTEND_QUALIFIED_RANGE,
             probe=probe_pi_frontend_compatibility,
         ),
         runtime=RuntimeManifest(
@@ -139,8 +140,7 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
             ),
             host=RuntimeHost.FRONTEND,
             frontend_installer=install_pi_frontend,
-            # Stock Pi proofs (0.80.8 through 0.99.1, 0.85.0 refused as a
-            # broken artifact) establish exact active-run identity and
+            # Stock Pi proofs for the qualified range establish exact active-run identity and
             # once-only abort evidence for native interrupt.
             legacy_fallback=frozenset(),
             unavailable_capabilities=frozenset({RuntimeCapability.STEER}),
