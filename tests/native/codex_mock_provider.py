@@ -484,20 +484,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.provider.log_compat_request(self.command, self.path, False)
         self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
 
-    def do_PUT(self) -> None:
-        self._unsupported()
-
-    def do_PATCH(self) -> None:
-        self._unsupported()
-
-    def do_DELETE(self) -> None:
-        self._unsupported()
-
-    def do_HEAD(self) -> None:
-        self._unsupported()
-
-    def do_OPTIONS(self) -> None:
-        self._unsupported()
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("do_"):
+            return self._unsupported
+        raise AttributeError(name)
 
 
 class MockResponsesProvider:

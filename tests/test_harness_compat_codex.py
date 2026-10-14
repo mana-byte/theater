@@ -139,8 +139,10 @@ def test_collector_picks_newest_and_masks_run_values(
 @pytest.mark.parametrize(
     ("verdict", "route", "expected", "classified"),
     [
-        ("red", ("PUT", "/v1/unknown"), "tooling", True),
-        ("green", ("PUT", "/v1/unknown"), "green", False),
+        ("red", ("POST", "/v1/new-required-endpoint"), "tooling", True),
+        ("inconclusive", ("POST", "/v1/new-required-endpoint"), "tooling", True),
+        ("tooling", ("POST", "/v1/new-required-endpoint"), "tooling", True),
+        ("green", ("POST", "/v1/new-required-endpoint"), "green", False),
         ("red", ("POST", "/v1/analytics/codex/turn-costs"), "red", False),
     ],
 )
@@ -159,7 +161,39 @@ def test_private_mock_route_classification(
     assert (actual.checks[-1].name == "mock_routes") is classified
     if classified:
         assert actual.checks[-1].status == "fail"
-        assert actual.checks[-1].detail == "unexpected private mock routes: ['PUT /v1/unknown']"
+        assert actual.checks[-1].detail == (
+            "unexpected private mock routes: ['POST /v1/new-required-endpoint']"
+        )
+
+
+def test_collect_failure_still_classifies_logged_bootstrap_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree(tmp_path / "tree")
+    adapter = codex.ADAPTER
+    old_top = max(adapter.verified(root).versions, key=codex.version_key)
+    (candidate,) = _next_patches(old_top, count=1)
+
+    def fail_collect(command, **kwargs):
+        log = Path(kwargs["env"]["THEATER_COMPAT_MOCK_LOG"])
+        log.write_text(
+            json.dumps(
+                {
+                    "method": "POST",
+                    "path": "/v1/new-required-endpoint",
+                    "scripted": False,
+                }
+            )
+            + "\n"
+        )
+        return subprocess.CompletedProcess(command, 1, "", "proof stopped early")
+
+    monkeypatch.setattr(codex.subprocess, "run", fail_collect)
+    with make_sandbox("codex", root=tmp_path / "sandbox") as sb:
+        result = adapter.qualify(root, candidate, sb, sb.bin_dir / "codex")
+    assert result.verdict == "tooling"
+    assert [check.name for check in result.checks] == ["collect_bundle", "mock_routes"]
+    assert result.checks[-1].status == "fail"
 
 
 @pytest.mark.parametrize(
