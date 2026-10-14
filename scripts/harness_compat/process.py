@@ -19,17 +19,17 @@ _POLL_SECONDS = 0.1
 def process_table() -> dict[int, tuple[int, str]]:
     """pid -> (parent pid, command line) for every process ``ps`` shows; {} if it is missing."""
     try:
-        done = subprocess.run(
+        with subprocess.Popen(
             ["ps", "-A", "-ww", "-o", "pid=,ppid=,command="],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
-            timeout=10,
-            check=False,
-        )
+        ) as ps:
+            listing, _ = ps.communicate(timeout=10)
     except (OSError, subprocess.SubprocessError):
         return {}
     table: dict[int, tuple[int, str]] = {}
-    for line in done.stdout.splitlines():
+    for line in listing.splitlines():
         fields = line.split(None, 2)
         if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit():
             table[int(fields[0])] = (int(fields[1]), fields[2] if len(fields) > 2 else "")
