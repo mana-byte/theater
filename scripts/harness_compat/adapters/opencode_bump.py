@@ -1,8 +1,6 @@
-"""OpenCode 1.x gate reading and the deterministic ceiling bump, pure text only.
+"""Pure-text OpenCode 1.x gate reading and deterministic ceiling bumps.
 
-The gate lives in ``runtime_plan.py`` (MIN/MAX tuples); the bump admits a
-contiguous rung of newly green releases by raising the exclusive ceiling to
-last-green-plus-one-patch and every textual upper bound to the last green.
+Every coupled upper bound follows the last green release.
 """
 
 from __future__ import annotations
@@ -174,10 +172,9 @@ def _apply_window_table(text: str, window_rows: str) -> str:
 
 
 def apply_bump(root: Path, greens: list[str]) -> list[Path]:
-    """Admit ascending greens at or above the current ceiling under ``root``.
+    """Admit ascending greens; repeated admitted greens are a no-op.
 
-    Deterministic and idempotent: a second call with the same greens is a no-op
-    that changes nothing. Returns the changed paths relative to ``root``.
+    Returns changed paths relative to ``root``.
     """
     if not greens:
         return []

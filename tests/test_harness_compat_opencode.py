@@ -36,6 +36,10 @@ def _gate(tree: Path) -> tuple[str, str]:
     return opencode_bump.read_gate(tree)
 
 
+def _candidate() -> str:
+    return _gate(_REPO_ROOT)[1]
+
+
 def test_verified_reads_an_exclusive_range_gate(coupled_tree: Path) -> None:
     floor, ceiling = _gate(coupled_tree)
     gate = opencode.ADAPTER.verified(coupled_tree)
@@ -45,7 +49,7 @@ def test_verified_reads_an_exclusive_range_gate(coupled_tree: Path) -> None:
     assert gate.evidenced == frozenset()
     assert gate.admits(floor) and gate.admits(opencode_bump.previous_patch(ceiling))
     assert not gate.admits(ceiling)
-    assert not gate.admits("1.17.14")
+    assert not gate.admits(opencode_bump.previous_patch(floor))
 
 
 def test_apply_bump_raises_the_ceiling_and_moves_every_bound(coupled_tree: Path) -> None:
@@ -88,7 +92,12 @@ def test_apply_bump_raises_the_ceiling_and_moves_every_bound(coupled_tree: Path)
 
 def test_apply_bump_is_idempotent_and_deterministic(coupled_tree: Path, tmp_path: Path) -> None:
     shutil.copytree(_REPO_ROOT / "theater", coupled_tree / "theater", dirs_exist_ok=True)
-    ladder = ("1.18.35", "1.18.36", "1.19.0")
+    initial_ceiling = _gate(coupled_tree)[1]
+    ladder = (
+        initial_ceiling,
+        opencode_bump.next_patch(initial_ceiling),
+        opencode_bump.next_minor(initial_ceiling),
+    )
     stub = coupled_tree / "opencode-stub"
     for version in ladder:
         floor, old_ceiling = _gate(coupled_tree)
@@ -114,7 +123,10 @@ def test_apply_bump_is_idempotent_and_deterministic(coupled_tree: Path, tmp_path
         assert opencode.ADAPTER.apply_bump(coupled_tree, [version]) == []
 
     frontend = (coupled_tree / opencode_bump.FRONTEND_TEST).read_text(encoding="utf-8")
-    assert '_Result("1.20.0")' in frontend and '_Result("1.19.0")' not in frontend
+    initial_refusal = opencode_bump.next_minor(initial_ceiling)
+    final_refusal = opencode_bump.next_minor(opencode_bump.next_patch(ladder[-1]))
+    assert f'_Result("{final_refusal}")' in frontend
+    assert f'_Result("{initial_refusal}")' not in frontend
     snapshot = {
         relative: (coupled_tree / relative).read_bytes() for relative in opencode_bump.COUPLED_FILES
     }
@@ -225,9 +237,10 @@ def test_qualify_is_green_when_the_server_proofs_pass(
     run, seen_env = _fake_run_pytest(_statuses(**dict.fromkeys(_server_nodeids(), "pass")))
     monkeypatch.setattr(opencode.framework, "run_pytest", run)
     sb = _sandbox(tmp_path)
-    result = opencode.ADAPTER.qualify(tmp_path, "1.18.35", sb, sb.bin_dir / "opencode")
+    candidate = _candidate()
+    result = opencode.ADAPTER.qualify(tmp_path, candidate, sb, sb.bin_dir / "opencode")
     assert result.verdict == "green"
-    assert result.harness == "opencode" and result.version == "1.18.35"
+    assert result.harness == "opencode" and result.version == candidate
     assert result.evidence_dir == sb.evidence_dir
     assert seen_env["THEATER_OPENCODE_SERVER_CONFORMANCE"] == "1"
     assert seen_env["THEATER_OPENCODE_STOCK_CONFORMANCE"] == ""
@@ -282,7 +295,7 @@ def test_qualify_is_tooling_when_the_catalog_pre_warm_fails(
         raise AssertionError("run_pytest must not run after a failed pre-warm")
 
     monkeypatch.setattr(opencode.framework, "run_pytest", _unexpected)
-    result = opencode.ADAPTER.qualify(tmp_path, "1.18.35", _sandbox(tmp_path), tmp_path / "bin")
+    result = opencode.ADAPTER.qualify(tmp_path, _candidate(), _sandbox(tmp_path), tmp_path / "bin")
     assert result.verdict == "tooling"
     assert result.checks[0].name == "opencode prewarm"
 
@@ -293,7 +306,7 @@ def test_qualify_is_inconclusive_when_nothing_proves(
     monkeypatch.setattr(opencode_sandbox, "prewarm_catalog", lambda *args, **kwargs: True)
     run, _ = _fake_run_pytest(_statuses())
     monkeypatch.setattr(opencode.framework, "run_pytest", run)
-    result = opencode.ADAPTER.qualify(tmp_path, "1.18.35", _sandbox(tmp_path), tmp_path / "bin")
+    result = opencode.ADAPTER.qualify(tmp_path, _candidate(), _sandbox(tmp_path), tmp_path / "bin")
     assert result.verdict == "inconclusive"
 
 
@@ -308,14 +321,14 @@ def test_qualify_is_tooling_on_consistency_failure(
     def parametrized_run(*args: Any, **kwargs: Any) -> tuple[contract.Check, ...]:
         checks = run(*args, **kwargs)
         return tuple(
-            contract.Check(f"{check.name}[1.18.35]", check.status)
+            contract.Check(f"{check.name}[{_candidate()}]", check.status)
             if check.name == opencode.ADAPTER.consistency_tests[0]
             else check
             for check in checks
         )
 
     monkeypatch.setattr(opencode.framework, "run_pytest", parametrized_run)
-    result = opencode.ADAPTER.qualify(tmp_path, "1.18.35", _sandbox(tmp_path), tmp_path / "bin")
+    result = opencode.ADAPTER.qualify(tmp_path, _candidate(), _sandbox(tmp_path), tmp_path / "bin")
     assert result.verdict == "tooling"
 
 
@@ -326,7 +339,7 @@ def test_qualify_is_red_on_a_failed_server_proof(
     server = _server_nodeids()
     run, _ = _fake_run_pytest(_statuses(**{server[0]: "fail", **dict.fromkeys(server[1:], "pass")}))
     monkeypatch.setattr(opencode.framework, "run_pytest", run)
-    result = opencode.ADAPTER.qualify(tmp_path, "1.18.35", _sandbox(tmp_path), tmp_path / "bin")
+    result = opencode.ADAPTER.qualify(tmp_path, _candidate(), _sandbox(tmp_path), tmp_path / "bin")
     assert result.verdict == "red"
 
 
@@ -345,7 +358,7 @@ def test_qualify_is_tooling_when_stray_routes_hit_the_mock_on_a_non_green_run(
     run, _ = _fake_run_pytest(statuses)
     monkeypatch.setattr(opencode.framework, "run_pytest", run)
     result = opencode.ADAPTER.qualify(
-        tmp_path, "1.18.35", _sandbox(tmp_path, stray), tmp_path / "bin"
+        tmp_path, _candidate(), _sandbox(tmp_path, stray), tmp_path / "bin"
     )
     assert result.verdict == "tooling"
 
@@ -360,4 +373,4 @@ def test_install_failure_raises_install_failed(
 
     monkeypatch.setattr(opencode_pi_process, "run_group", lambda *args, **kwargs: _Result())
     with pytest.raises(contract.InstallFailed, match="exited 1"):
-        opencode.ADAPTER.install(_sandbox(tmp_path), "1.18.35")
+        opencode.ADAPTER.install(_sandbox(tmp_path), _candidate())

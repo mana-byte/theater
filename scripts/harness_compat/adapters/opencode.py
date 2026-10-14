@@ -67,6 +67,7 @@ class OpenCodeAdapter:
         *(f"{_STOCK_PROOF}::{test}" for test in _STOCK_PROOF_TESTS),
     )
     consistency_tests: tuple[str, ...] = (
+        "tests/test_harness_compat_opencode.py",
         "tests/test_opencode_server_plan.py::test_probe_qualifies_exactly_the_1x_window",
         "tests/test_opencode_server_runtime.py::test_server_handshake_rejects_version_drift",
         "tests/test_opencode_frontend.py::test_probe_rejects_releases_outside_the_tested_window",
@@ -133,13 +134,9 @@ class OpenCodeAdapter:
         return opencode_bump.apply_bump(root, list(greens))
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
-        """Run the model-backed server proof offline against the bumped tree at ``root``.
+        """Run offline proofs after pre-warming OpenCode's catalog.
 
-        The mistral provider is pointed at the sandbox mock and the models.dev
-        catalog is pre-warmed online first; a failed pre-warm is tooling, not
-        upstream. The stock TUI proof self-skips (its env stays unset). A broken
-        consistency check is tooling; stray mock traffic on a non-green run is
-        tooling, not upstream.
+        Pre-warm and consistency failures are tooling failures.
         """
         opencode_sandbox.write_provider_override(sb)
         fixture = root / "tests" / "fixtures" / "opencode_probe_plugin.mjs"

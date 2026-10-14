@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts.harness_compat.adapters import pi, pi_bump
-from scripts.harness_compat.contract import Check, InstallFailed
+from scripts.harness_compat.contract import Check, InstallFailed, version_key
 from scripts.harness_compat.probe import _probe
 from scripts.harness_compat.sandbox import make_sandbox
 
@@ -20,34 +20,60 @@ def _copy_coupled(root: Path, destination: Path) -> None:
         shutil.copy2(root / relative, target)
 
 
+def _previous_patch(version: str) -> str:
+    major, minor, patch = version_key(version)
+    assert patch > 0
+    return f"{major}.{minor}.{patch - 1}"
+
+
+def _next_major(version: str) -> str:
+    major, _, _ = version_key(version)
+    return f"{major + 1}.0.0"
+
+
+def _current_upper(root: Path) -> str:
+    ceiling = pi.ADAPTER.verified(root).ceiling
+    assert ceiling is not None
+    return _previous_patch(ceiling)
+
+
 def test_verified_parses_exclusive_ceiling_and_known_bad(tmp_path: Path) -> None:
     root = Path(__file__).parents[1]
     _copy_coupled(root, tmp_path)
-    evidence = tmp_path / "tests/fixtures/harness_compat/pi/0.99.1.json"
+    expected = pi.ADAPTER.verified(tmp_path)
+    assert expected.ceiling is not None
+    upper = _previous_patch(expected.ceiling)
+    evidence = tmp_path / f"tests/fixtures/harness_compat/pi/{upper}.json"
     evidence.parent.mkdir(parents=True)
     evidence.write_text("{}", encoding="utf-8")
 
     gate = pi.ADAPTER.verified(tmp_path)
 
-    assert gate.floor == "0.80.8"
-    assert gate.ceiling == "0.99.2"
-    assert gate.known_bad == frozenset({"0.85.0"})
-    assert gate.evidenced == frozenset({"0.99.1"})
-    assert gate.admits("0.99.1") and not gate.admits("0.85.0")
+    assert gate.floor == expected.floor
+    assert gate.ceiling == expected.ceiling
+    assert gate.known_bad == expected.known_bad
+    assert gate.evidenced == frozenset({upper})
+    bad = next(iter(gate.known_bad))
+    assert gate.admits(upper) and not gate.admits(bad)
 
     probe = tmp_path / pi_bump._PROBE
     source = probe.read_text(encoding="utf-8")
+    assert gate.floor is not None
+    drifted_floor = pi_bump._next_patch(gate.floor)
+    drifted_bad = pi_bump._next_patch(pi_bump._next_patch(bad))
+    resume = pi_bump._next_patch(bad)
+    drifted_resume = pi_bump._next_patch(drifted_bad)
     source = source.replace(
-        "in_080 = (0, 80, 8) <= parsed < (0, 85, 0)",
-        "in_080 = (0, 80, 9) <= parsed < (0, 85, 2)",
+        f"in_080 = ({pi_bump._tuple(gate.floor)}) <= parsed < ({pi_bump._tuple(bad)})",
+        f"in_080 = ({pi_bump._tuple(drifted_floor)}) <= parsed < ({pi_bump._tuple(drifted_bad)})",
     ).replace(
-        "in_qualified = (0, 85, 1) <= parsed <= (0, 99, 1)",
-        "in_qualified = (0, 85, 3) <= parsed <= (0, 99, 1)",
+        f"in_qualified = ({pi_bump._tuple(resume)}) <= parsed <= ({pi_bump._tuple(upper)})",
+        f"in_qualified = ({pi_bump._tuple(drifted_resume)}) <= parsed <= ({pi_bump._tuple(upper)})",
     )
     probe.write_text(source, encoding="utf-8")
     drifted = pi.ADAPTER.verified(tmp_path)
-    assert drifted.floor == "0.80.9"
-    assert drifted.known_bad == frozenset({"0.85.2"})
+    assert drifted.floor == drifted_floor
+    assert drifted.known_bad == frozenset({drifted_bad})
 
 
 def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path) -> None:
@@ -55,8 +81,14 @@ def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path)
     shutil.copytree(root / "theater", tmp_path / "theater")
     _copy_coupled(root, tmp_path)
     stub = tmp_path / "pi-stub"
-    previous = "0.99.1"
-    greens = ("0.99.2", "0.99.3", "0.99.4", "1.0.0")
+    initial = pi.ADAPTER.verified(tmp_path)
+    assert initial.ceiling is not None and initial.floor is not None
+    previous = _previous_patch(initial.ceiling)
+    bad = next(iter(initial.known_bad))
+    resume = pi_bump._next_patch(bad)
+    first = pi_bump._next_patch(previous)
+    second = pi_bump._next_patch(first)
+    greens = (first, second, _next_major(previous))
     for version in greens:
         before = {path: (tmp_path / path).read_bytes() for path in pi_bump._COUPLED}
         changed = pi.ADAPTER.apply_bump(tmp_path, [version])
@@ -68,7 +100,7 @@ def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path)
         probe = (tmp_path / pi_bump._PROBE).read_text(encoding="utf-8")
         old_gate = f"in_qualified = (0, 85, 1) <= parsed <= ({pi_bump._tuple(previous)})"
         assert old_gate not in probe
-        old_range = f">=0.80.8,<0.85.0 || >=0.85.1,<={previous}"
+        old_range = f">={initial.floor},<{bad} || >={resume},<={previous}"
         for path in (pi_bump._PROBE, pi_bump._MANIFEST, pi_bump._DOC):
             assert old_range not in (tmp_path / path).read_text(encoding="utf-8")
         for fixture in (tmp_path / "tests/fixtures/pi_native_control").glob("*.mts"):
@@ -87,15 +119,16 @@ def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path)
     bridge_test = (tmp_path / "tests/test_pi_native_bridge.py").read_text(encoding="utf-8")
     refused = pi_bump._REFUSED_RE.search(bridge_test)
     assert refused is not None
-    assert '"1.0.0"' not in refused.group("versions")
-    assert '"1.0.1"' in refused.group("versions")
+    assert f'"{greens[-1]}"' not in refused.group("versions")
+    assert f'"{pi_bump._next_patch(greens[-1])}"' in refused.group("versions")
     assert "stable 0.x.y" not in bridge_test
     assert all(f'    "{version}",' in bridge_test for version in greens)
     for fixture in (tmp_path / "tests/fixtures/pi_native_control").glob("*.mts"):
         source = fixture.read_text(encoding="utf-8")
         assert "const major = Number(versionMatch[1]);" in source
-        assert "major === 0 && minor === 85 && patch === 0" in source
-        assert "major === 1 && minor === 0 && patch > 0" in source
+        bad_major, bad_minor, bad_patch = version_key(bad)
+        assert f"major === {bad_major} && minor === {bad_minor} && patch === {bad_patch}" in source
+        assert pi_bump._major_guard(greens[-1]) in source
         if "function versionAtLeast(" in source:
             assert "const major = Number(match[1]);" in source
             assert "const actualMinor = Number(match[2]);" in source
@@ -106,6 +139,7 @@ def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path)
 def test_qualify_uses_offline_environment_and_maps_errors_to_inconclusive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    root = Path(__file__).parents[1]
     calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
 
     def fake_run_pytest(root, nodeids, *, env, expected_skips, timeout=900):
@@ -119,7 +153,7 @@ def test_qualify_uses_offline_environment_and_maps_errors_to_inconclusive(
     with make_sandbox("pi", root=tmp_path / "sandbox") as sandbox:
         binary = sandbox.bin_dir / "pi"
         binary.touch()
-        result = pi.ADAPTER.qualify(tmp_path, "0.99.1", sandbox, binary)
+        result = pi.ADAPTER.qualify(tmp_path, _current_upper(root), sandbox, binary)
 
     assert result.verdict == "inconclusive"
     assert [call[0] for call in calls] == [
@@ -143,4 +177,4 @@ def test_install_failure_raises_install_failed(
         make_sandbox("pi", root=tmp_path / "sandbox") as sandbox,
         pytest.raises(InstallFailed, match="fake npm failure"),
     ):
-        pi.ADAPTER.install(sandbox, "0.99.1")
+        pi.ADAPTER.install(sandbox, _current_upper(Path(__file__).parents[1]))

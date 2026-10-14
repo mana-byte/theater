@@ -28,6 +28,7 @@ class PiAdapter:
         "tests/test_pi_native_control.py::test_pi_steer_admission_proof_holds_on_stock_pi",
     )
     consistency_tests: tuple[str, ...] = (
+        "tests/test_harness_compat_pi.py",
         "tests/test_pi_native_bridge.py::test_pi_frontend_probe_accepts_qualified_versions",
         "tests/test_pi_native_bridge.py::test_pi_frontend_probe_refuses_unqualified_versions",
     )
