@@ -29,7 +29,9 @@ def _events(registry: Registry) -> int:
 def test_names_survive_a_restart_and_dead_participants_release_theirs(registry):
     auto = registry.register(harness="vibe", pane=None, cwd="/tmp")
     renamed = registry.register(harness="vibe", pane=None, cwd="/tmp")
-    registry.rename(renamed.id, "Scapin")
+    # A name outside names.MASKS: register() auto-picks from MASKS at random, so a
+    # mask here collides with an earlier draw ~2% of the time (xdist flake).
+    registry.rename(renamed.id, "Figaro")
     with registry.store.write_unit() as unit:
         reserved = registry.create_spawned(harness="vibe", cwd="/tmp", connection=unit.connection)
     registry.remember_reserved_name(reserved.id, reserved.name)
@@ -48,7 +50,7 @@ def test_names_survive_a_restart_and_dead_participants_release_theirs(registry):
 
     assert [restarted.get(p.id).name for p in (auto, renamed, reserved)] == [
         auto.name,
-        "Scapin",
+        "Figaro",
         reserved.name,
     ]
     assert restarted.projection_name(killed.id) is None

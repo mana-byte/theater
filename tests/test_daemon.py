@@ -842,10 +842,11 @@ async def test_await_announces_once_it_has_really_blocked(client, terminal_provi
     # Same call, threshold under the wait; generous so load can't beat the blocked signal.
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     await client.call("jobs.await", **{**call, "max_wait": 1.0})
-    assert [e["kind"] for e in await _await_events(client)] == [
-        "job.await.start",
-        "job.await.end",
-    ]
+    # Wait for both rows rather than sample once: the bus flush can lag under load.
+    async with asyncio.timeout(5):
+        while len(events := await _await_events(client)) < 2:
+            await asyncio.sleep(0.01)
+    assert [e["kind"] for e in events] == ["job.await.start", "job.await.end"]
 
 
 async def test_await_refused_by_the_rails_records_nothing(client, terminal_provider, monkeypatch):

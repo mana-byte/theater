@@ -827,8 +827,10 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
             lambda: (
                 d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
             ),
+            # 66 sequential mock round trips; a generous bound survives xdist
+            # event-loop starvation without weakening the 66-request proof below.
             what="the old exact Theater turn completing through paged recovery",
-            timeout=20.0,
+            timeout=40.0,
         )
         await _wait_until(
             lambda: len(server.requested("turn/start")) == 2,
