@@ -121,27 +121,31 @@ def test_version_line_is_the_bare_release() -> None:
     assert opencode.ADAPTER.version_line("1.18.34") == "1.18.34"
 
 
-def test_expected_skips_cover_exactly_the_green_tests() -> None:
-    assert set(opencode.ADAPTER.expected_skips) == set(opencode.ADAPTER.green_tests)
+def test_expected_skips_cover_only_the_disabled_stock_tui_proof() -> None:
+    assert all("stock_ui" in nodeid for nodeid in opencode.ADAPTER.expected_skips)
+    assert not any("server_proof" in nodeid for nodeid in opencode.ADAPTER.expected_skips)
     assert not set(opencode.ADAPTER.consistency_tests) & set(opencode.ADAPTER.green_tests)
 
 
 class _FakeMock:
-    def __init__(self, unhandled: tuple[contract.RecordedRequest, ...] = ()) -> None:
-        self._unhandled = unhandled
+    def __init__(self, requests: tuple[contract.RecordedRequest, ...] = ()) -> None:
+        self._requests = requests
 
     @property
     def requests(self) -> tuple[contract.RecordedRequest, ...]:
-        return ()
+        return self._requests
 
     @property
     def unhandled(self) -> tuple[contract.RecordedRequest, ...]:
-        return self._unhandled
+        return tuple(request for request in self._requests if not request.handled)
 
 
 def _sandbox(
-    tmp_path: Path, unhandled: tuple[contract.RecordedRequest, ...] = ()
+    tmp_path: Path, requests: tuple[contract.RecordedRequest, ...] = ()
 ) -> contract.Sandbox:
+    fixture = tmp_path / "tests/fixtures/opencode_probe_plugin.mjs"
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture.write_text("export const Probe = async () => ({})", encoding="utf-8")
     return contract.Sandbox(
         root=tmp_path,
         home=tmp_path / "home",
@@ -149,7 +153,7 @@ def _sandbox(
         bin_dir=tmp_path / "bin",
         evidence_dir=tmp_path / "evidence",
         tmux_socket=tmp_path / "tmux.sock",
-        mock=_FakeMock(unhandled),
+        mock=_FakeMock(requests),
         mock_base_urls={"anthropic": "http://127.0.0.1:1", "openai": "http://127.0.0.1:1/v1"},
         mock_requests=tmp_path / "mock_requests.jsonl",
         env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin"},
@@ -209,7 +213,7 @@ def test_qualify_is_tooling_when_the_catalog_pre_warm_fails(
     monkeypatch.setattr(opencode.framework, "run_pytest", _unexpected)
     result = opencode.ADAPTER.qualify(tmp_path, "1.18.35", _sandbox(tmp_path), tmp_path / "bin")
     assert result.verdict == "tooling"
-    assert result.checks == ()
+    assert result.checks[0].name == "opencode prewarm"
 
 
 def test_qualify_is_inconclusive_when_nothing_proves(
@@ -229,7 +233,17 @@ def test_qualify_is_tooling_on_consistency_failure(
     broken = _statuses(**dict.fromkeys(_server_nodeids(), "pass"))
     broken[opencode.ADAPTER.consistency_tests[0]] = "fail"
     run, _ = _fake_run_pytest(broken)
-    monkeypatch.setattr(opencode.framework, "run_pytest", run)
+
+    def parametrized_run(*args: Any, **kwargs: Any) -> tuple[contract.Check, ...]:
+        checks = run(*args, **kwargs)
+        return tuple(
+            contract.Check(f"{check.name}[1.18.35]", check.status)
+            if check.name == opencode.ADAPTER.consistency_tests[0]
+            else check
+            for check in checks
+        )
+
+    monkeypatch.setattr(opencode.framework, "run_pytest", parametrized_run)
     result = opencode.ADAPTER.qualify(tmp_path, "1.18.35", _sandbox(tmp_path), tmp_path / "bin")
     assert result.verdict == "tooling"
 
@@ -245,13 +259,14 @@ def test_qualify_is_red_on_a_failed_server_proof(
     assert result.verdict == "red"
 
 
+@pytest.mark.parametrize("handled", [False, True])
 def test_qualify_is_tooling_when_stray_routes_hit_the_mock_on_a_non_green_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, handled: bool
 ) -> None:
     monkeypatch.setattr(opencode_sandbox, "prewarm_catalog", lambda *args, **kwargs: True)
     stray = (
         contract.RecordedRequest(
-            method="POST", path="/v1/foo", handled=False, body_keys=(), authorized=False
+            method="POST", path="/v1/foo", handled=handled, body_keys=(), authorized=False
         ),
     )
     server = _server_nodeids()

@@ -16,6 +16,7 @@ from types import MappingProxyType
 from .. import framework, github
 from ..contract import (
     Adapter,
+    Check,
     InstallFailed,
     Result,
     Route,
@@ -69,14 +70,8 @@ class OpenCodeAdapter:
     ignorable_routes: frozenset[Route] = frozenset()
     expected_skips: Mapping[str, str] = MappingProxyType(
         {
-            **{
-                f"{_SERVER_PROOF}::{test}": "set THEATER_OPENCODE_SERVER_CONFORMANCE=1"
-                for test in _SERVER_PROOF_TESTS
-            },
-            **{
-                f"{_STOCK_PROOF}::{test}": "set THEATER_OPENCODE_STOCK_CONFORMANCE=1"
-                for test in _STOCK_PROOF_TESTS
-            },
+            f"{_STOCK_PROOF}::{test}": "set THEATER_OPENCODE_STOCK_CONFORMANCE=1"
+            for test in _STOCK_PROOF_TESTS
         }
     )
 
@@ -119,7 +114,7 @@ class OpenCodeAdapter:
             [str(exposed), "--version"],
             capture_output=True,
             text=True,
-            env=dict(sb.env),
+            env=dict(sb.offline_env),
             timeout=60,
             check=False,
         )
@@ -147,12 +142,12 @@ class OpenCodeAdapter:
         """
         opencode_sandbox.write_provider_override(sb)
         fixture = root / "tests" / "fixtures" / "opencode_probe_plugin.mjs"
-        if not opencode_sandbox.prewarm_catalog(sb, plugin=fixture if fixture.is_file() else None):
+        if not fixture.is_file() or not opencode_sandbox.prewarm_catalog(sb, plugin=fixture):
             return Result(
                 harness=self.name,
                 version=version,
                 verdict="tooling",
-                checks=(),
+                checks=(Check("opencode prewarm", "error", "plugin fixture or cache unavailable"),),
                 evidence_dir=sb.evidence_dir,
             )
         env = {
@@ -160,26 +155,36 @@ class OpenCodeAdapter:
             "THEATER_OPENCODE_SERVER_CONFORMANCE": "1",
             "THEATER_OPENCODE_STOCK_CONFORMANCE": "",
         }
-        checks = framework.run_pytest(
+        consistency = framework.run_pytest(
             root,
-            (*self.green_tests, *self.consistency_tests),
+            self.consistency_tests,
+            env=env,
+            expected_skips={},
+        )
+        if any(check.status != "pass" for check in consistency):
+            return Result(self.name, version, "tooling", consistency, sb.evidence_dir)
+        proving = framework.run_pytest(
+            root,
+            self.green_tests,
             env=env,
             expected_skips=self.expected_skips,
         )
-        greens, coherent = set(self.green_tests), set(self.consistency_tests)
-        proving = tuple(check for check in checks if check.name in greens)
-        consistency = tuple(check for check in checks if check.name in coherent)
+        checks = consistency + proving
         verdict: Verdict = verdict_from_checks(proving)
-        if any(check.status in ("fail", "error") for check in consistency):
-            verdict = "tooling"
-        if verdict not in ("green", "tooling"):
-            stray = [
+        if verdict == "green" and any(
+            check.status == "skip" for check in proving if check.name.startswith(_SERVER_PROOF)
+        ):
+            verdict = "inconclusive"
+        if verdict != "green":
+            stray = {
                 (request.method, request.path)
-                for request in sb.mock.unhandled
-                if (request.method, request.path) not in self.ignorable_routes
-            ]
+                for request in sb.mock.requests
+                if (request.method, request.path)
+                not in self.expected_routes | self.ignorable_routes
+            }
             if stray:
                 verdict = "tooling"
+                checks += (Check("mock routes", "error", f"unexpected={sorted(stray)!r}"),)
         return Result(
             harness=self.name,
             version=version,
