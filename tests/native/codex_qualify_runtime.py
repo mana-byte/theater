@@ -976,11 +976,11 @@ def capture_approval(session: CaptureSession, schema_dir: Path) -> tuple[dict, d
         "item/commandExecution/requestApproval", timeout=240
     )
     wait_until(
-        lambda: "Allow creating" in ui.pane() or str(target) in ui.pane(),
+        lambda: f"$ touch {target}" in ui.pane(),
         timeout=240,
         what="approval dialog in the native UI",
     )
-    ui.send_keys("y")
+    ui.send_keys("Enter")
     wait_until(target.exists, timeout=240, what="approved command to execute")
     observer.wait_notification("serverRequest/resolved", timeout=60)
     observer.wait_notification("turn/completed", timeout=180)
@@ -1002,8 +1002,8 @@ def capture_approval(session: CaptureSession, schema_dir: Path) -> tuple[dict, d
         "observer_rule": OBSERVER_RULE,
         "native_ui_retains_ownership": {
             "evidence": (
-                "the approval request rendered in the TUI; a single 'y' keypress "
-                "approved it; the observer never sent a response"
+                "the approval request rendered in the TUI; Enter confirmed the "
+                "selected 'Yes, proceed' choice; the observer never sent a response"
             )
         },
     }

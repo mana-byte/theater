@@ -151,7 +151,7 @@ jobs:
           number="$(gh issue list --state open --limit 100 --json number,title |
             jq -r --arg title "$ISSUE_TITLE" 'map(select(.title == $title))[0].number // empty')"
           if [[ -n "$number" ]]; then
-            gh issue edit "$number" --body "$ISSUE_BODY"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$number" -f body="$ISSUE_BODY" --silent
           else
             number="$(gh issue create --title "$ISSUE_TITLE" --body "$ISSUE_BODY" | sed 's|.*/||')"
           fi
