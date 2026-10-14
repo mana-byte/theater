@@ -50,9 +50,13 @@ class _Deferred:
 
 
 def _completes_safely(record: dict) -> bool:
-    """Only an attachment-like record may finish a held marker; a fragment-capable one must not."""
+    """Only a bare attachment-like record may finish a held marker.
+
+    Anything that carries its own terminal event or could be a fragment of the answer
+    (assistant, user, system, sidechain, or message-bearing) must drop it instead.
+    """
     return (
-        record.get("type") not in ("assistant", "user")
+        record.get("type") not in ("assistant", "user", "system")
         and record.get("isSidechain") is not True
         and FinalAnswerSeal._message_id(record) is None
     )
@@ -69,15 +73,12 @@ class FinalAnswerSeal:
         #: At most one marker awaits its late parent records; superseded or dropped, never grown.
         #: It lives in this observer, so history paging (a fresh observer per page) fails closed.
         self._deferred: _Deferred | None = None
-        #: Message ids already sealed, so a repeated marker never emits a second boundary.
-        self._sealed_ids: OrderedDict[str, None] = OrderedDict()
 
     def reset(self) -> None:
         self._nodes.clear()
         self._texts.clear()
         self._awaiting = None
         self._deferred = None
-        self._sealed_ids.clear()
 
     def observe(self, record: dict) -> str | None:
         """Remember one record; returns a reason when a sealed-mode final never got its marker."""
@@ -126,16 +127,11 @@ class FinalAnswerSeal:
         else:
             return Unsealed("no_assistant_record")
         message_id = node.message_id
-        if message_id in self._sealed_ids:
-            return Unsealed("already_sealed")
         if message_id not in self._texts:
             return Unsealed("message_evicted")
         if not self._message_is_whole(current, message_id):
             return Unsealed("incomplete_message")
         self._awaiting = None
-        self._sealed_ids[message_id] = None
-        while len(self._sealed_ids) > SEAL_MESSAGE_LIMIT:
-            self._sealed_ids.popitem(last=False)
         return Sealed(message_id, "\n\n".join(self._texts[message_id].values()))
 
     def resolve_or_defer(self, marker: dict, ts: float | None, index: int) -> Sealed | Unsealed:

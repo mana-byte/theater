@@ -995,3 +995,66 @@ async def test_a_cost_state_followed_by_records_is_consumed(root, workdir, monke
     _append(path, [record("resumed")])
     assert await _drain_texts(s) == ["resumed"]
     assert s.offset == path.stat().st_size
+
+
+_SEAL_V = "2.1.284"
+
+
+def _held_marker_lines() -> list[str]:
+    """An out-of-order turn: a1's parentUuid ("late") is an attachment flushed after the marker."""
+
+    def rec(**kw) -> str:
+        return json.dumps({"version": _SEAL_V, **kw})
+
+    return [
+        rec(
+            type="assistant",
+            uuid="a1",
+            parentUuid="late",
+            message={
+                "id": "m1",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "done"}],
+            },
+        ),
+        rec(type="attachment", uuid="att1", parentUuid="a1"),
+        rec(type="system", subtype="turn_duration", uuid="mk", parentUuid="att1"),
+    ]
+
+
+async def _hold_marker(root, workdir, name):
+    path = transcript(root, name, workdir)
+    s = source(root, workdir)
+    await attach(s)
+    _append(path, _held_marker_lines())
+    await s.read()
+    assert s._observer._seal._deferred is not None  # held: parent "late" not read yet
+    return s, path
+
+
+async def test_a_stream_discontinuity_resets_the_held_claude_seal(root, workdir):
+    # Detach (the file vanished) drops the held marker.
+    s, path = await _hold_marker(root, workdir, "aaa")
+    path.unlink()
+    await s.read()
+    assert s._observer._seal._deferred is None
+
+    # Rewrite (the file shrank) drops the held marker.
+    s, path = await _hold_marker(root, workdir, "bbb")
+    path.write_text(json.dumps({"type": "system", "cwd": workdir}) + "\n", encoding="utf-8")
+    await s.read()
+    assert s._observer._seal._deferred is None
+
+    # (Re-)attaching to a file with content resets before its last line is parsed.
+    path = transcript(root, "ccc", workdir, _held_marker_lines()[0])
+    s = source(root, workdir)
+    calls: list[int] = []
+    real = s._observer.reset_stream
+    s._observer.reset_stream = lambda: calls.append(1) or real()
+    await s.read()
+    assert calls, "the attach path must call the stream-reset hook"
+
+    # An observer without the optional hook is untouched (no-op, no error).
+    bare = source(root, workdir)
+    bare._observer = object()
+    bare._reset_stream()

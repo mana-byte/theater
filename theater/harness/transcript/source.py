@@ -590,6 +590,15 @@ class TranscriptSource(Source):
             raise SourceContractError("TranscriptObserver.parse_record must return ParsedRecord")
         return parsed
 
+    def _reset_stream(self) -> None:
+        """Tell an observer that the line stream restarted, so it drops cross-record state.
+
+        Optional, like ``parse_record``; observers without it are unaffected.
+        """
+        reset = getattr(self._observer, "reset_stream", None)
+        if callable(reset):
+            reset()
+
     @staticmethod
     def _decorate_parsed(parsed: ParsedRecord, source_offset: int) -> ParsedRecord:
         return ParsedRecord(
@@ -728,6 +737,7 @@ class TranscriptSource(Source):
         self.offset = self.index = self.mtime = 0
         self._clear_drain_buffer()
         self._watch_gate.release()
+        self._reset_stream()
 
     def _defer_or_detach(self) -> None:
         if self._draining:
@@ -827,6 +837,7 @@ class TranscriptSource(Source):
         last_event: Event | None = None
         status: Status | None = None
         if last_line is not None:
+            self._reset_stream()  # fresh attachment: parse the end without a prior stream's state
             parsed = self._parse_record(last_line, lines - 1, clip_text=True)
             semantic = [event for event in parsed.events if not event.usage_only]
             last_event = semantic[-1] if semantic else None
@@ -894,7 +905,7 @@ class TranscriptSource(Source):
         if end is not None:
             self._held_tail_end, self._caught_up = end, True
 
-    async def _drain(self) -> Batch:
+    async def _drain(self) -> Batch:  # noqa: PLR0915 (one over, from the stream-reset hook)
         """Read and parse one bounded, cancellation-safe batch."""
         assert self.path is not None
         path, offset, index, mtime = self.path, self.offset, self.index, self.mtime
@@ -912,6 +923,7 @@ class TranscriptSource(Source):
             self._log_rewrite(path, size, buffered_end, mtime, st.st_mtime_ns)
             offset = index = 0
             self._clear_drain_buffer()
+            self._reset_stream()
         if self._nothing_new(size, offset, st.st_mtime_ns, mtime):
             return Batch()
 

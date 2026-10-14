@@ -184,7 +184,7 @@ class ClaudeParser:
         outcome = self._seal.resolve_or_defer(record, ts, index)
         if isinstance(outcome, Sealed):
             return self._boundary_event(outcome, ts, index, clip_text=clip_text)
-        if clip_text and outcome.reason not in ("deferred", "already_sealed"):
+        if clip_text and outcome.reason != "deferred":
             _report_seal("unavailable", outcome.reason)
         return []
 

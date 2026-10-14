@@ -152,6 +152,30 @@ _SEAL_CASES = {
     ),
     # A main-thread marker whose parent is an unread sidechain assistant must never seal it.
     "sidechain_parent_drops": ([_USER, _marker("mk", "side"), _SIDE], []),
+    # A late record that carries its own terminal event (a system error) drops the held marker
+    # and emits only its own boundary — never two (its error plus the stale answer).
+    "late_system_error_drops": (
+        [
+            _USER,
+            _ANSWER,
+            _ATTACH,
+            _MARKER,
+            _record("late", "u0", "system", level="error", error="boom"),
+        ],
+        ["boom"],
+    ),
+    # No sealed-id dedup: a message id reused across turns seals each turn, exactly like base.
+    "reused_message_id_seals_each_turn": (
+        [
+            _record("u0", None, "user"),
+            _fragment("a0", "u0", {"type": "text", "text": "FIRST"}, "shared"),
+            _marker("m0", "a0"),
+            _record("u1", None, "user"),
+            _fragment("a1b", "u1", {"type": "text", "text": "SECOND"}, "shared"),
+            _marker("m1", "a1b"),
+        ],
+        ["FIRST", "FIRST\n\nSECOND"],
+    ),
 }
 
 
