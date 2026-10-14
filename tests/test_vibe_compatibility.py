@@ -8,6 +8,8 @@ import pytest
 
 from theater import harness as harness_registry
 from theater.harness.builtin.plugins.vibe.compatibility import (
+    _CEILING,
+    _FLOOR,
     probe_vibe_compatibility,
     vibe_qualified_range_text,
     vibe_store_format_ceiling,
@@ -18,39 +20,56 @@ from theater.harness.contracts.runtime import RuntimeProbeContext
 from theater.harness.manifests.validation import validate_manifest
 
 
+def _version(parts: tuple[int, int, int]) -> str:
+    return ".".join(map(str, parts))
+
+
+_FLOOR_BELOW = (_FLOOR[0], _FLOOR[1] - 1, 99)
+_LAST_ADMITTED = (
+    (_CEILING[0], _CEILING[1], _CEILING[2] - 1)
+    if _CEILING[2]
+    else (_CEILING[0], _CEILING[1] - 1, 99)
+)
+_NEXT_MINOR = (_CEILING[0], _CEILING[1] + 1, 0)
+_REFUSAL = f"Vibe harness support requires {vibe_qualified_range_text()}"
+
+
 @pytest.mark.parametrize(
-    ("stdout", "supported", "version", "reason"),
+    ("sample", "supported", "reason"),
     [
-        ("vibe 2.26.0", True, "2.26.0", None),
-        ("vibe 2.25.8", True, "2.25.8", None),
-        ("vibe 2.24.0", True, "2.24.0", None),
-        ("vibe 2.20.0", False, "2.20.0", "Vibe harness support requires >=2.24.0,<2.27.0"),
-        ("2.24.0", False, None, "Vibe did not report a stable CLI version"),
-        ("vibe 2.27.0", False, "2.27.0", "Vibe harness support requires >=2.24.0,<2.27.0"),
-        ("vibe 3.0.0", False, "3.0.0", "Vibe harness support requires >=2.24.0,<2.27.0"),
+        (_FLOOR_BELOW, False, _REFUSAL),
+        (_FLOOR, True, None),
+        (_LAST_ADMITTED, True, None),
+        (_CEILING, False, _REFUSAL),
+        (_NEXT_MINOR, False, _REFUSAL),
     ],
 )
-def test_vibe_version_parse_table(stdout, supported, version, reason, monkeypatch):
+def test_vibe_version_parse_table(sample, supported, reason, monkeypatch):
+    version = _version(sample)
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=stdout),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=f"vibe {version}"),
     )
     result = probe_vibe_compatibility(RuntimeProbeContext())
     assert result.supported is supported
     assert result.native_version == version
     assert result.reason == reason
-    assert result.policy == "vibe-harness-2.24.0-compatible"
+    assert result.policy == f"vibe-harness-{_version(_FLOOR)}-compatible"
+
+
+def test_malformed_version_is_refused(monkeypatch):
+    monkeypatch.setattr(
+        "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=_version(_FLOOR)),
+    )
+    assert probe_vibe_compatibility(RuntimeProbeContext()).reason == (
+        "Vibe did not report a stable CLI version"
+    )
 
 
 def test_ceiling_tracks_the_reader_store_minor():
-    """The qualified ceiling must not outrun the unified-store reader again.
-
-    2.26.x writes store_format_minor 8 (vibe 376f6a33); the ceiling is the next
-    release line, and the reader understands exactly that minor. The observed
-    incident was this pair drifting apart: the probe admitted a writer whose
-    stores the reader refused, and finished jobs waited forever.
-    """
-    assert vibe_store_format_ceiling() == (2, 27, 0)
+    """The launch ceiling and declared range use the probe's gate."""
+    assert vibe_store_format_ceiling() == _CEILING
     assert STORE_FORMAT_MINOR == 8
     declared = manifest_for_roots().native_compatibility
     assert declared is not None
@@ -60,7 +79,7 @@ def test_ceiling_tracks_the_reader_store_minor():
 def test_nonzero_exit_is_not_a_stable_version(monkeypatch):
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="vibe 2.25.8"),
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=f"vibe {_version(_FLOOR)}"),
     )
     result = probe_vibe_compatibility(RuntimeProbeContext())
     assert result.supported is False
@@ -82,9 +101,10 @@ def test_missing_or_timed_out_binary_fails_closed(monkeypatch):
 
 
 def test_installed_vibe_stays_legacy_only_with_its_version_shown(monkeypatch):
+    version = _version(_LAST_ADMITTED)
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="vibe 2.25.8"),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=f"vibe {version}"),
     )
     validate_manifest("vibe", manifest_for_roots())
     record = harness_registry.native_compatibility_record(
@@ -93,7 +113,7 @@ def test_installed_vibe_stays_legacy_only_with_its_version_shown(monkeypatch):
         result=probe_vibe_compatibility(RuntimeProbeContext()),
     )
     assert record["status"] == "legacy-only"
-    assert record["installed_version"] == "2.25.8"
+    assert record["installed_version"] == version
     assert record["qualified_range"] is None
     assert record["wiring"] == "legacy"
     assert record["reason"] == "no native runtime; controls use the provider terminal"

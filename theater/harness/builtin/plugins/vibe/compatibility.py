@@ -8,19 +8,13 @@ from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbe
 
 from .version import parse_vibe_version
 
-_POLICY = "vibe-harness-2.24.0-compatible"
-# Per-mode facts, all verified against real wheels: the orchestrator config that
-# honours VIBE_SESSION_LOGGING__SAVE_DIR ships in 2.24.0 (2.20.x and older still
-# load the legacy VibeConfig and write outside the isolated domain); manual's
-# ask profile replaces default in 2.24.1; --yolo exists since 2.17.0.
+# _FLOOR is the first release whose config honours VIBE_SESSION_LOGGING__SAVE_DIR.
+# Earlier releases write outside the isolated domain; mode thresholds live in launch.
 _FLOOR = (2, 24, 0)
-#: The newest Vibe release line whose unified session store this reader
-#: understands: 2.26.x writes store_format_minor 8 (vibe 376f6a33). The probe is
-#: display-only, so launch planning enforces the same ceiling (launch.plan_launch);
-#: bump the ceiling in the same commit as unified_store_types.STORE_FORMAT_MINOR —
-#: the qualified range once outran the reader, and finished jobs waited forever on
-#: stores no reader could open.
+#: The first Vibe release not yet proved compatible with this store reader.
+#: Launch planning enforces the ceiling because the probe is display-only.
 _CEILING = (2, 27, 0)
+_POLICY = f"vibe-harness-{'.'.join(map(str, _FLOOR))}-compatible"
 
 
 def vibe_qualified_range_text() -> str:
@@ -41,7 +35,7 @@ def vibe_store_format_ceiling() -> tuple[int, int, int]:
 
 
 def probe_vibe_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
-    """The isolated transcript domain and env overrides need the 2.24.0 config."""
+    """The isolated transcript domain and env overrides need the floor's config."""
     try:
         result = subprocess.run(
             [context.binary or "vibe", "--version"],

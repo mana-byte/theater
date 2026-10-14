@@ -8,20 +8,26 @@ import subprocess
 from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
 
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?: \(Claude Code\))?")
-_POLICY = "claude-hooks-2.1.119-compatible"
-_MESSAGING_POLICY = "claude-messaging-native-controls-2.1.248"
+_HOOK_FLOOR = (2, 1, 119)
+_HOOK_UPPER = (3, 0, 0)
+_MESSAGING_FLOOR = (2, 1, 248)
+_POLICY = f"claude-hooks-{'.'.join(map(str, _HOOK_FLOOR))}-compatible"
+_MESSAGING_POLICY = f"claude-messaging-native-controls-{'.'.join(map(str, _MESSAGING_FLOOR))}"
+
+
+def claude_messaging_range_text() -> str:
+    return f">={'.'.join(map(str, _MESSAGING_FLOOR))}"
 
 
 def probe_claude_hooks(context: RuntimeProbeContext) -> RuntimeCompatibility:
     """Check the stable CLI range; hook payload decoding is the schema gate."""
-    # 2.1.119 is where PostToolUse/PostToolUseFailure gained duration_ms; the older
-    # floor (2.1.202) was set before that evidence was checked against real binaries.
-    return _probe_claude(context, floor=(2, 1, 119), policy=_POLICY, upper=(3, 0, 0))
+    # The hook floor is where PostToolUse/PostToolUseFailure gained duration_ms.
+    return _probe_claude(context, floor=_HOOK_FLOOR, policy=_POLICY, upper=_HOOK_UPPER)
 
 
 def probe_claude_native_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
     """Check the documented same-machine messaging floor."""
-    return _probe_claude(context, floor=(2, 1, 248), policy=_MESSAGING_POLICY)
+    return _probe_claude(context, floor=_MESSAGING_FLOOR, policy=_MESSAGING_POLICY)
 
 
 def _probe_claude(
@@ -51,7 +57,7 @@ def _probe_claude(
     version = tuple(int(part) for part in match.groups())
     supported = version >= floor and (upper is None or version < upper)
     lower_text = ".".join(str(part) for part in floor)
-    range_text = f">={lower_text}" if upper is None else f">={lower_text},<3"
+    range_text = f">={lower_text}" if upper is None else f">={lower_text},<{upper[0]}"
     return RuntimeCompatibility(
         supported=supported,
         policy=policy,

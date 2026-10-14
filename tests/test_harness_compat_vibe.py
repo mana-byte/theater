@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.harness_compat.adapters.vibe import ADAPTER
-from scripts.harness_compat.adapters.vibe_bump import COMPAT, COMPAT_TEST, DOC, LAUNCH_TEST
+from scripts.harness_compat.adapters.vibe_bump import COMPAT
 from scripts.harness_compat.adapters.vibe_store import READER_STORE, store_check
 from scripts.harness_compat.contract import Check, InstallFailed, version_key
 from scripts.harness_compat.sandbox import make_sandbox
@@ -135,7 +135,7 @@ def test_real_vibe_reader_turn() -> None:
 
 def _tree(root: Path) -> Path:
     source = Path(__file__).resolve().parents[1]
-    for relative in (COMPAT, COMPAT_TEST, READER_STORE, DOC, LAUNCH_TEST):
+    for relative in (COMPAT, READER_STORE):
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source / relative, target)
@@ -155,15 +155,10 @@ def test_vibe_bump_is_patch_bounded_and_idempotent(tmp_path: Path) -> None:
     new_ceiling = _next_patch(latest)
 
     changed = ADAPTER.apply_bump(root, [candidate, latest])
-    assert changed == [COMPAT, COMPAT_TEST, LAUNCH_TEST, DOC]
+    assert changed == [COMPAT]
     assert ADAPTER.verified(root).ceiling == new_ceiling
     assert ADAPTER.apply_bump(root, [candidate, latest]) == []
-    assert f"<{new_ceiling}" in (root / COMPAT_TEST).read_text()
-    floor = ADAPTER.verified(root).floor
-    assert f"Vibe compatibility range: >={floor},<{new_ceiling}." in (root / DOC).read_text()
-    for relative in (COMPAT, COMPAT_TEST, LAUNCH_TEST):
-        ast.parse((root / relative).read_text())
-    assert "first stable release not yet proved" in (root / COMPAT).read_text()
+    ast.parse((root / COMPAT).read_text())
 
 
 def test_vibe_bump_ignores_composition_discovery(
@@ -189,19 +184,17 @@ def test_vibe_bump_ignores_composition_discovery(
     assert ADAPTER.apply_bump(root, [green]) == []
 
 
-def test_vibe_bump_requires_launch_safety_anchor(tmp_path: Path) -> None:
+def test_vibe_bump_requires_ceiling_anchor(tmp_path: Path) -> None:
     root = _tree(tmp_path)
     green = ADAPTER.verified(root).ceiling
     assert green is not None
-    launch = root / LAUNCH_TEST
-    launch.write_text(
-        launch.read_text().replace('@pytest.mark.parametrize("version",', "# missing")
-    )
-    before = (root / COMPAT).read_text()
+    source = root / COMPAT
+    source.write_text(source.read_text().replace("_CEILING = ", "MISSING_CEILING = "))
+    before = source.read_text()
 
-    with pytest.raises(ValueError, match="launch-safety ceiling parameter anchor missing"):
+    with pytest.raises(ValueError, match="Vibe gate assignment missing: _CEILING"):
         ADAPTER.apply_bump(root, [green])
-    assert (root / COMPAT).read_text() == before
+    assert source.read_text() == before
 
 
 @pytest.mark.parametrize("bumped", [True, False], ids=["candidate", "watch"])

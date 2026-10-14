@@ -14,7 +14,7 @@ from theater.harness.contracts.manifest import (
     NativeCompatibilityManifest,
 )
 
-from .compatibility import probe_claude_native_compatibility
+from .compatibility import claude_messaging_range_text, probe_claude_native_compatibility
 from .launch import LAUNCH, _resume_launch_overlay, _resume_preflight
 from .observation import OBSERVATION, observation_for
 
@@ -29,7 +29,7 @@ MANIFEST = HarnessManifest(
     controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
     mcp=McpRenderingManifest(renderer=render_mcp_servers_file),
     native_compatibility=NativeCompatibilityManifest(
-        qualified_range=">=2.1.248",
+        qualified_range=claude_messaging_range_text(),
         probe=probe_claude_native_compatibility,
     ),
 )

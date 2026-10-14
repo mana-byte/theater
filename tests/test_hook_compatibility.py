@@ -12,6 +12,10 @@ from theater import paths
 from theater.daemon.spawning.hook_compatibility import probe_hook_channels
 from theater.daemon.spawning.planning import install_hook_plan
 from theater.harness.builtin.plugins.claude.compatibility import (
+    _HOOK_FLOOR,
+    _HOOK_UPPER,
+    _MESSAGING_FLOOR,
+    claude_messaging_range_text,
     probe_claude_hooks,
     probe_claude_native_compatibility,
 )
@@ -140,40 +144,67 @@ def test_optional_installer_failure_rolls_back_replacements_and_credentials(thea
     assert not plan.channel_credentials
 
 
+def _cli_version(parts: tuple[int, int, int]) -> str:
+    return f"{'.'.join(map(str, parts))} (Claude Code)"
+
+
 @pytest.mark.parametrize(
-    ("version", "supported"),
+    ("sample", "supported"),
     [
-        ("2.1.118 (Claude Code)", False),
-        ("2.1.119 (Claude Code)", True),
-        ("2.1.202 (Claude Code)", True),
-        ("2.1.220 (Claude Code)", True),
-        ("2.2.0 (Claude Code)", True),
-        ("3.0.0 (Claude Code)", False),
-        ("2.1.220-beta (Claude Code)", False),
-        ("unknown", False),
+        pytest.param((_HOOK_FLOOR[0], _HOOK_FLOOR[1], _HOOK_FLOOR[2] - 1), False, id="hook-below"),
+        pytest.param(_HOOK_FLOOR, True, id="hook-floor"),
+        pytest.param(
+            (_HOOK_FLOOR[0], _HOOK_FLOOR[1], _HOOK_FLOOR[2] + 1), True, id="hook-next-patch"
+        ),
+        pytest.param((_HOOK_UPPER[0] - 1, 99, 99), True, id="hook-last-major"),
+        pytest.param(_HOOK_UPPER, False, id="hook-ceiling"),
     ],
 )
-def test_claude_hook_version_range(version, supported, monkeypatch):
+def test_claude_hook_version_range(sample, supported, monkeypatch):
+    version = _cli_version(sample)
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
     )
-    assert probe_claude_hooks(RuntimeProbeContext()).supported is supported
+    result = probe_claude_hooks(RuntimeProbeContext())
+    assert result.supported is supported
+    assert result.policy == f"claude-hooks-{'.'.join(map(str, _HOOK_FLOOR))}-compatible"
+    hook_range = f">={'.'.join(map(str, _HOOK_FLOOR))},<{_HOOK_UPPER[0]}"
+    assert result.reason == (None if supported else f"Claude native support requires {hook_range}")
+
+
+@pytest.mark.parametrize("version", ["unknown", f"{_cli_version(_HOOK_FLOOR)}-beta"])
+def test_claude_hook_rejects_malformed_version(version, monkeypatch):
+    monkeypatch.setattr(
+        "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
+    )
+    assert probe_claude_hooks(RuntimeProbeContext()).reason == (
+        "Claude did not report a stable CLI version"
+    )
 
 
 @pytest.mark.parametrize(
-    ("version", "supported"),
+    ("sample", "supported"),
     [
-        ("2.1.220 (Claude Code)", False),
-        ("2.1.248 (Claude Code)", True),
-        ("3.0.0 (Claude Code)", True),
+        ((_MESSAGING_FLOOR[0], _MESSAGING_FLOOR[1], _MESSAGING_FLOOR[2] - 1), False),
+        (_MESSAGING_FLOOR, True),
+        ((_MESSAGING_FLOOR[0], _MESSAGING_FLOOR[1], _MESSAGING_FLOOR[2] + 1), True),
+        (_HOOK_UPPER, True),
     ],
 )
-def test_claude_messaging_version_floor(version, supported, monkeypatch):
+def test_claude_messaging_version_floor(sample, supported, monkeypatch):
+    version = _cli_version(sample)
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
     )
     result = probe_claude_native_compatibility(RuntimeProbeContext())
     assert result.supported is supported
-    assert result.native_version == version.split()[0]
+    assert result.native_version == ".".join(map(str, sample))
+    assert result.policy == (
+        f"claude-messaging-native-controls-{'.'.join(map(str, _MESSAGING_FLOOR))}"
+    )
+    assert result.reason == (
+        None if supported else f"Claude native support requires {claude_messaging_range_text()}"
+    )

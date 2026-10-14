@@ -13,6 +13,11 @@ import pytest
 from scripts.harness_compat.adapters.claude import ADAPTER, changelog_hints, seed_config
 from scripts.harness_compat.contract import Check, InstallFailed
 from scripts.harness_compat.sandbox import make_sandbox
+from theater.harness.builtin.plugins.claude.compatibility import _HOOK_FLOOR, _HOOK_UPPER
+
+
+def _version(parts: tuple[int, int, int]) -> str:
+    return ".".join(map(str, parts))
 
 
 def test_claude_name_policy_and_optional_upper(tmp_path: Path) -> None:
@@ -20,13 +25,13 @@ def test_claude_name_policy_and_optional_upper(tmp_path: Path) -> None:
     source.parent.mkdir(parents=True)
     source.write_text(
         "def probe_claude_hooks(context):\n"
-        "    return _probe_claude(context, floor=(2, 1, 119), policy=_POLICY)\n"
+        f"    return _probe_claude(context, floor={_HOOK_FLOOR!r}, policy=_POLICY)\n"
     )
-    assert ADAPTER.verified(tmp_path).floor == "2.1.119"
+    assert ADAPTER.verified(tmp_path).floor == _version(_HOOK_FLOOR)
     assert ADAPTER.verified(tmp_path).ceiling is None
 
 
-def test_claude_real_gate_and_evidence_only_bump(tmp_path: Path) -> None:
+def test_claude_real_gate_and_noop_bump(tmp_path: Path) -> None:
     real_source = (
         Path(__file__).resolve().parents[1]
         / "theater/harness/builtin/plugins/claude/compatibility.py"
@@ -35,15 +40,13 @@ def test_claude_real_gate_and_evidence_only_bump(tmp_path: Path) -> None:
     source.parent.mkdir(parents=True)
     shutil.copy2(real_source, source)
     gate = ADAPTER.verified(tmp_path)
-    assert gate.floor == "2.1.119" and gate.ceiling == "3.0.0"
+    assert gate.floor == _version(_HOOK_FLOOR) and gate.ceiling == _version(_HOOK_UPPER)
     assert ADAPTER.version_line("2.1.296") == "2.1.296 (Claude Code)"
-    changed = ADAPTER.apply_bump(tmp_path, ["3.0.0"])
-    assert changed == [Path("tests/fixtures/harness_compat/claude/3.0.0.json")]
-    assert ADAPTER.apply_bump(tmp_path, ["3.0.0"]) == []
-    evidence = json.loads((tmp_path / changed[0]).read_text())
-    assert evidence["harness"] == "claude" and evidence["version"] == "3.0.0"
-    assert ADAPTER.verified(tmp_path).evidenced == frozenset({"3.0.0"})
+    assert ADAPTER.apply_bump(tmp_path, [_version(_HOOK_UPPER)]) == []
+    assert ADAPTER.apply_bump(tmp_path, [_version(_HOOK_UPPER)]) == []
+    assert ADAPTER.verified(tmp_path).evidenced == frozenset()
     assert source.read_bytes() == real_source.read_bytes()
+    assert list(tmp_path.rglob("*.json")) == []
 
 
 def test_claude_seed_config_uses_realpath(tmp_path: Path) -> None:

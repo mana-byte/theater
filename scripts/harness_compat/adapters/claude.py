@@ -20,7 +20,6 @@ from ..contract import (
     Result,
     Sandbox,
     VerifiedSet,
-    evidence_file,
     load_evidenced,
     verdict_from_checks,
 )
@@ -65,6 +64,13 @@ def changelog_hints(version: str, changelog: str) -> tuple[str, ...]:
 
 def _gate(root: Path) -> tuple[str, str | None]:
     tree = ast.parse((root / _PROBE_SOURCE).read_text(encoding="utf-8"))
+    constants = {
+        target.id: ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name) and target.id in {"_HOOK_FLOOR", "_HOOK_UPPER"}
+    }
     probe = next(
         node
         for node in tree.body
@@ -76,7 +82,11 @@ def _gate(root: Path) -> tuple[str, str | None]:
         if isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
     )
     values = {
-        keyword.arg: ast.literal_eval(keyword.value)
+        keyword.arg: (
+            constants[keyword.value.id]
+            if isinstance(keyword.value, ast.Name)
+            else ast.literal_eval(keyword.value)
+        )
         for keyword in call.keywords
         if keyword.arg in {"floor", "upper"}
     }
@@ -91,10 +101,8 @@ class ClaudeAdapter:
     stub_help = ""
     green_tests = _GREEN_TESTS
     consistency_tests = (
-        "tests/test_hook_compatibility.py::test_claude_hook_version_range"
-        "[2.1.119 (Claude Code)-True]",
-        "tests/test_hook_compatibility.py::test_claude_hook_version_range"
-        "[3.0.0 (Claude Code)-False]",
+        "tests/test_hook_compatibility.py::test_claude_hook_version_range[hook-floor]",
+        "tests/test_hook_compatibility.py::test_claude_hook_version_range[hook-ceiling]",
     )
     expected_skips: ClassVar[Mapping[str, str]] = MappingProxyType({})
     expected_routes = frozenset(
@@ -155,18 +163,8 @@ class ClaudeAdapter:
         return f"{version} (Claude Code)"
 
     def apply_bump(self, root: Path, greens: Sequence[str]) -> list[Path]:
-        changed: list[Path] = []
-        for version in sorted(set(greens)):
-            path = evidence_file(root, self.name, version)
-            if path.exists():
-                continue
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(Result(self.name, version, "green").to_evidence(), indent=2) + "\n",
-                encoding="utf-8",
-            )
-            changed.append(path.relative_to(root))
-        return changed
+        del root, greens
+        return []
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
         cwd = sb.root / "project"

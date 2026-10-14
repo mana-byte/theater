@@ -40,7 +40,7 @@ class VibeAdapter:
         "tests/test_vibe_launch_safety.py",
         "tests/test_harness_compat_vibe.py::test_vibe_bump_is_patch_bounded_and_idempotent",
         "tests/test_harness_compat_vibe.py::test_vibe_bump_ignores_composition_discovery",
-        "tests/test_harness_compat_vibe.py::test_vibe_bump_requires_launch_safety_anchor",
+        "tests/test_harness_compat_vibe.py::test_vibe_bump_requires_ceiling_anchor",
         "tests/test_harness_compat_vibe.py::test_vibe_qualify_gates_candidate_and_watch_on_consistency",
         "tests/test_harness_compat_vibe.py::test_vibe_qualify_reaches_proofs_after_consistency",
         "tests/test_harness_compat_vibe.py::test_vibe_store_format_classification",

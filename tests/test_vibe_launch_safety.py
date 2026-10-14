@@ -9,6 +9,7 @@ from shipped import pin_installed_vibe_version
 
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.vibe.approval_guard import shadowed_approval_profile
+from theater.harness.builtin.plugins.vibe.compatibility import _FLOOR, vibe_store_format_ceiling
 from theater.harness.builtin.plugins.vibe.constants import VIBE_BYPASS_TOOL_PERMISSIONS_ENV
 from theater.models import BadRequest
 
@@ -16,7 +17,17 @@ from theater.models import BadRequest
 @pytest.fixture(autouse=True)
 def _modern_vibe(monkeypatch):
     """Pin a modern Vibe: these plans must not depend on the installed CLI."""
-    pin_installed_vibe_version(monkeypatch, (2, 25, 8))
+    pin_installed_vibe_version(monkeypatch, (_FLOOR[0], _FLOOR[1] + 1, 0))
+
+
+def _last_admitted_version() -> tuple[int, int, int]:
+    major, minor, patch = vibe_store_format_ceiling()
+    return (major, minor, patch - 1) if patch else (major, minor - 1, 99)
+
+
+def _next_minor_version() -> tuple[int, int, int]:
+    major, minor, _ = vibe_store_format_ceiling()
+    return major, minor + 1, 0
 
 
 @pytest.mark.parametrize("approval", ["manual", "edits"])
@@ -43,7 +54,7 @@ def test_yolo_leaves_the_bypass_env_unset(tmp_path):
 
 
 def test_launch_admits_the_newest_qualified_writer(tmp_path, monkeypatch):
-    pin_installed_vibe_version(monkeypatch, (2, 26, 0))
+    pin_installed_vibe_version(monkeypatch, _last_admitted_version())
     plan = plan_launch(
         "vibe",
         participant_id="a",
@@ -54,7 +65,7 @@ def test_launch_admits_the_newest_qualified_writer(tmp_path, monkeypatch):
     assert plan.argv[0] == "vibe"
 
 
-@pytest.mark.parametrize("version", [(2, 27, 0), (3, 0, 0)])
+@pytest.mark.parametrize("version", [vibe_store_format_ceiling(), _next_minor_version()])
 def test_launch_refuses_a_writer_newer_than_the_store_reader(tmp_path, monkeypatch, version):
     """A writer whose unified store no reader understands must fail at spawn."""
     pin_installed_vibe_version(monkeypatch, version)
@@ -70,7 +81,9 @@ def test_launch_refuses_a_writer_newer_than_the_store_reader(tmp_path, monkeypat
 
 def _live_guard_plan(tmp_path, monkeypatch, *, approval, cwd, resume=None):
     """A manual/edits plan through the real shadow probe, against a scratch home."""
-    pin_installed_vibe_version(monkeypatch, (2, 25, 8), approval_guard=shadowed_approval_profile)
+    pin_installed_vibe_version(
+        monkeypatch, _last_admitted_version(), approval_guard=shadowed_approval_profile
+    )
     monkeypatch.setenv("VIBE_HOME", str(tmp_path / "vibe-home"))
     return plan_launch(
         "vibe",
