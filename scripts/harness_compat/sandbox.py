@@ -38,6 +38,8 @@ def _new_temp_dir() -> Path:
 
 def _remove_tree(path: Path) -> None:
     """Delete ``path`` even when a tool left read-only directories; report what stays behind."""
+    if not path.exists():
+        return
     stuck: list[str] = []
 
     def unlock(function: Callable[[str], Any], target: str, error: BaseException) -> None:

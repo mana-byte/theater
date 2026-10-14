@@ -36,6 +36,7 @@ says so. A human decides whether to raise that ceiling after reviewing the proof
   tested in ascending order. The first red stops the run, and the bump goes only to the last
   contiguous green. A range gate also qualifies its newest admitted release every day: a red
   result there opens an `admitted-regression` issue, a green one stays silent.
+  A forced `--version` is promoted only when every discovered release below it is proved too.
 - Claude's gate has no ceiling to move, so its green releases produce evidence only.
 - Evidence on the rolling branch is reused only while the framework, the adapter, the proof tests
   with their imported helpers and conftests, and the harness plugin are unchanged; otherwise the
