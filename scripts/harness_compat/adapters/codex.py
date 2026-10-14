@@ -11,6 +11,7 @@ import sys
 import tempfile
 import urllib.error
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
@@ -34,6 +35,9 @@ _FIXTURES = Path("tests/fixtures/codex_native_runtime")
 _INDEX = _FIXTURES / "index.json"
 _DOCS = (Path("docs/harness-plugins.md"), Path("docs/native-interaction/codex.md"))
 _POLICY = "codex-appserver-verified"
+_MOCK_LOG = "codex_mock_requests.jsonl"
+# These endpoints are telemetry side channels; their existing responses remain unchanged.
+_BENIGN_MOCK_ROUTES = frozenset({("POST", "/v1/analytics/codex/turn-costs")})
 _CONSISTENCY = (
     "tests/test_harness_compat_codex.py",
     "tests/test_codex_native_runtime_proof.py::TestOfflineConformanceBundle",
@@ -100,6 +104,25 @@ def _complete_bundle(path: Path) -> bool:
     expected = set(BEHAVIOR_FILES) | {f"protocol_schema/{name}" for name in SCHEMA_FILES}
     actual = {item.relative_to(path).as_posix() for item in path.rglob("*") if item.is_file()}
     return actual == expected
+
+
+def _classify_mock_routes(result: Result, log: Path) -> Result:
+    if result.verdict == "green" or not log.is_file():
+        return result
+    try:
+        entries = [json.loads(line) for line in log.read_text().splitlines()]
+        unscripted = {
+            (entry["method"], entry["path"]) for entry in entries if entry.get("scripted") is False
+        }
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        check = Check("mock_routes", "fail", f"invalid private mock log: {error}")
+        return replace(result, verdict="tooling", checks=(*result.checks, check))
+    unexpected = sorted(unscripted - _BENIGN_MOCK_ROUTES)
+    if not unexpected:
+        return result
+    routes = [f"{method} {path}" for method, path in unexpected]
+    check = Check("mock_routes", "fail", f"unexpected private mock routes: {routes}")
+    return replace(result, verdict="tooling", checks=(*result.checks, check))
 
 
 def _public_git_tags() -> list[str]:
@@ -251,6 +274,7 @@ class CodexAdapter:
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
         bundle = sb.evidence_dir / version
+        mock_log = sb.evidence_dir / _MOCK_LOG
         command = [
             sys.executable,
             "-m",
@@ -270,6 +294,7 @@ class CodexAdapter:
             "THEATER_CODEX_NATIVE_PROVIDER": "mock",
             "THEATER_CODEX_NATIVE_BIN": str(binary),
             "THEATER_CODEX_NATIVE_SMOKE": "1",
+            "THEATER_COMPAT_MOCK_LOG": str(mock_log),
         }
         capture_env = {**sb.offline_env, **common_env}
         # The UI's update check may need network; model calls stay on local mocks.
@@ -285,13 +310,20 @@ class CodexAdapter:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            return Result(
-                self.name, version, "tooling", (Check("collect_bundle", "error", str(error)),)
+            return _classify_mock_routes(
+                Result(
+                    self.name,
+                    version,
+                    "tooling",
+                    (Check("collect_bundle", "error", str(error)),),
+                ),
+                mock_log,
             )
         if done.returncode or not _complete_bundle(bundle):
             detail = (done.stderr or done.stdout)[-400:]
-            return Result(
-                self.name, version, "tooling", (Check("collect_bundle", "error", detail),)
+            return _classify_mock_routes(
+                Result(self.name, version, "tooling", (Check("collect_bundle", "error", detail),)),
+                mock_log,
             )
         staged = root / _FIXTURES / "candidates" / version
         staged.parent.mkdir(parents=True, exist_ok=True)
@@ -304,7 +336,9 @@ class CodexAdapter:
             root, self.consistency_tests, env=capture_env, expected_skips={}, timeout=900
         )
         if not consistency or any(check.status != "pass" for check in consistency):
-            return Result(self.name, version, "tooling", consistency, sb.evidence_dir)
+            return _classify_mock_routes(
+                Result(self.name, version, "tooling", consistency, sb.evidence_dir), mock_log
+            )
         green = framework.run_pytest(
             root, self.green_tests, env=proof_env, expected_skips=self.expected_skips, timeout=900
         )
@@ -318,7 +352,8 @@ class CodexAdapter:
             verdict = "inconclusive"
         else:
             verdict = "green"
-        return Result(self.name, version, verdict, (*consistency, *green), sb.evidence_dir)
+        result = Result(self.name, version, verdict, (*consistency, *green), sb.evidence_dir)
+        return _classify_mock_routes(result, mock_log)
 
 
 ADAPTER = CodexAdapter()

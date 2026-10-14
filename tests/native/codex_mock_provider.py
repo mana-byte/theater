@@ -30,12 +30,14 @@ Test helper only: no production code may import it.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -421,6 +423,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.provider.record(
             RecordedRequest(self.path, structured, marker, last_user[:_PREVIEW_CHARS])
         )
+        self.provider.log_compat_request("POST", self.path, self.path.endswith("/responses"))
         if not self.path.endswith("/responses"):
             # Turn-cost analytics and other side channels: harmless, never scripted.
             self.send_response(204)
@@ -461,7 +464,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return False
 
     def do_GET(self) -> None:
-        if self.path.endswith("/models"):
+        scripted = self.path.endswith("/models")
+        self.provider.log_compat_request("GET", self.path, scripted)
+        if scripted:
             encoded = json.dumps(
                 {"data": [{"id": MOCK_MODEL, "object": "model", "owned_by": "theater"}]}
             ).encode()
@@ -473,6 +478,25 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self.send_response(404)
         self.end_headers()
+
+    def _unsupported(self) -> None:
+        self.provider.log_compat_request(self.command, self.path, False)
+        self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
+
+    def do_PUT(self) -> None:
+        self._unsupported()
+
+    def do_PATCH(self) -> None:
+        self._unsupported()
+
+    def do_DELETE(self) -> None:
+        self._unsupported()
+
+    def do_HEAD(self) -> None:
+        self._unsupported()
+
+    def do_OPTIONS(self) -> None:
+        self._unsupported()
 
 
 class MockResponsesProvider:
@@ -494,6 +518,8 @@ class MockResponsesProvider:
         self.default = default if default is not None else final_message_stream("ok")
         self.filler = filler if filler is not None else structured_filler_stream()
         self.requests: list[RecordedRequest] = []
+        log = os.environ.get("THEATER_COMPAT_MOCK_LOG")
+        self._compat_log = Path(log) if log else None
         self._lock = threading.Lock()
         self._httpd: _MockServer | None = None
         self._thread: threading.Thread | None = None
@@ -536,6 +562,13 @@ class MockResponsesProvider:
             if len(self.requests) >= MAX_RECORDED_REQUESTS:
                 self.requests.pop(0)
             self.requests.append(request)
+
+    def log_compat_request(self, method: str, path: str, scripted: bool) -> None:
+        if self._compat_log is None:
+            return
+        entry = {"method": method, "path": path.split("?", 1)[0], "scripted": scripted}
+        with self._lock, self._compat_log.open("a") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
 
     def matched_requests(self, marker: str) -> list[RecordedRequest]:
         return [request for request in self.requests if request.marker == marker]
