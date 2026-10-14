@@ -121,6 +121,11 @@
       "directory": "0.159.1",
       "status": "qualified",
       "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.162.1": {
+      "directory": "0.162.1",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
     }
   }
 }

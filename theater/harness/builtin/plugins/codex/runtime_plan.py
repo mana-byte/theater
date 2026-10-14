@@ -49,6 +49,7 @@ CODEX_RUNTIME_VERIFIED_VERSIONS = frozenset(
         "0.158.0",
         "0.159.0",
         "0.159.1",
+        "0.162.1",
     }
 )
 
