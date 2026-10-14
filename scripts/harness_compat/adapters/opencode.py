@@ -1,7 +1,6 @@
 """OpenCode 1.x adapter; the server proof uses the sandbox model mock.
 
-Stock TUI proofs do not run because detached runtime lacks a frontend installer.
-Its gate rests on server proofs, probe and --help flags; human review is required.
+Detached runtime lacks a TUI installer, so that gate requires human review.
 """
 
 from __future__ import annotations

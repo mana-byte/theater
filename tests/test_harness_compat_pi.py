@@ -80,7 +80,6 @@ def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path)
     root = Path(__file__).parents[1]
     shutil.copytree(root / "theater", tmp_path / "theater")
     _copy_coupled(root, tmp_path)
-    stub = tmp_path / "pi-stub"
     initial = pi.ADAPTER.verified(tmp_path)
     assert initial.ceiling is not None and initial.floor is not None
     previous = _previous_patch(initial.ceiling)
@@ -98,7 +97,9 @@ def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path)
         assert gate.ceiling == pi_bump._next_patch(version)
         assert gate.admits(version) and not gate.admits(gate.ceiling)
         probe = (tmp_path / pi_bump._PROBE).read_text(encoding="utf-8")
-        old_gate = f"in_qualified = (0, 85, 1) <= parsed <= ({pi_bump._tuple(previous)})"
+        old_gate = (
+            f"in_qualified = ({pi_bump._tuple(resume)}) <= parsed <= ({pi_bump._tuple(previous)})"
+        )
         assert old_gate not in probe
         old_range = f">={initial.floor},<{bad} || >={resume},<={previous}"
         for path in (pi_bump._PROBE, pi_bump._MANIFEST, pi_bump._DOC):
@@ -107,9 +108,9 @@ def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path)
             assert pi_bump._major_guard(previous) not in fixture.read_text(encoding="utf-8")
         for cache in (tmp_path / "theater").rglob("__pycache__"):
             shutil.rmtree(cache)
-        supported, reason = _probe(pi.ADAPTER, tmp_path, version, stub)
+        supported, reason = _probe(pi.ADAPTER, tmp_path, version, tmp_path / "pi-stub")
         assert supported is True, reason
-        supported, reason = _probe(pi.ADAPTER, tmp_path, gate.ceiling, stub)
+        supported, reason = _probe(pi.ADAPTER, tmp_path, gate.ceiling, tmp_path / "pi-stub")
         assert supported is False, reason
         snapshots = {path: (tmp_path / path).read_bytes() for path in changed}
         assert pi.ADAPTER.apply_bump(tmp_path, [version]) == []
