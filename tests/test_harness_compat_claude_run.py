@@ -58,23 +58,23 @@ def _run_turn(*, settings: Path | None = None, prompt: str = "Reply with a short
     command = [str(binary), f"--session-id={session_id}", "--name=compat-proof"]
     if settings is not None:
         command.extend([f"--settings={settings}", "--permission-mode=default"])
-    launched = _run_tmux(
-        socket,
-        "new-session",
-        "-d",
-        "-s",
-        "compat",
-        "-x",
-        "150",
-        "-y",
-        "45",
-        "-c",
-        str(cwd),
-        shlex.join(command),
-    )
-    assert launched.returncode == 0, launched.stderr
-    assert _run_tmux(socket, "set-option", "-g", "remain-on-exit", "on").returncode == 0
     try:
+        launched = _run_tmux(
+            socket,
+            "new-session",
+            "-d",
+            "-s",
+            "compat",
+            "-x",
+            "150",
+            "-y",
+            "45",
+            "-c",
+            str(cwd),
+            shlex.join(command),
+        )
+        assert launched.returncode == 0, launched.stderr
+        assert _run_tmux(socket, "set-option", "-g", "remain-on-exit", "on").returncode == 0
         accepted_bypass = False
 
         def ready() -> bool:
@@ -126,6 +126,27 @@ def _run_turn(*, settings: Path | None = None, prompt: str = "Reply with a short
             ) from exc
     finally:
         _run_tmux(socket, "kill-server")
+
+
+@pytest.mark.parametrize("failure", ["new-session", "set-option"])
+def test_claude_turn_reaps_tmux_when_setup_fails(tmp_path: Path, monkeypatch, failure: str) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_tmux(socket: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        del socket
+        calls.append(args)
+        if args[0] == failure == "new-session":
+            raise subprocess.TimeoutExpired(args, 10)
+        return subprocess.CompletedProcess(args, 1 if args[0] == "set-option" else 0, "", "")
+
+    monkeypatch.setenv("HARNESS_COMPAT_BINARY", str(tmp_path / "claude"))
+    monkeypatch.setenv("HARNESS_COMPAT_WORKDIR", str(tmp_path))
+    monkeypatch.setenv("HARNESS_COMPAT_TMUX_SOCKET", str(tmp_path / "tmux.sock"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(sys.modules[__name__], "_run_tmux", fake_tmux)
+    with pytest.raises((AssertionError, subprocess.TimeoutExpired)):
+        _run_turn()
+    assert calls[-1] == ("kill-server",)
 
 
 @pytest.fixture(scope="module")

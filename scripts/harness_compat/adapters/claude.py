@@ -190,13 +190,16 @@ class ClaudeAdapter:
         }
         # Claude asks for confirmation when ANTHROPIC_API_KEY is set, even if it is a dummy.
         env.pop("ANTHROPIC_API_KEY", None)
+        consistency = framework.run_pytest(root, self.consistency_tests, env=env, expected_skips={})
+        if any(check.status != "pass" for check in consistency):
+            return Result(self.name, version, "tooling", consistency, evidence_dir=sb.evidence_dir)
         try:
             notes = changelog_hints(
                 version, github.raw_file("anthropics/claude-code", "main", "CHANGELOG.md")
             )
         except (OSError, ValueError):
             notes = ()
-        checks = list(
+        green_checks = list(
             framework.run_pytest(
                 root, self.green_tests[:2], env=env, expected_skips=self.expected_skips
             )
@@ -208,26 +211,24 @@ class ClaudeAdapter:
                 tool_calls=(MockToolCall("Read", {"file_path": str(cwd / "hook-proof.txt")}),),
             ),
         )
-        checks.extend(
+        green_checks.extend(
             framework.run_pytest(
                 root, self.green_tests[2:], env=env, expected_skips=self.expected_skips
             )
         )
-        green_checks = list(checks)
-        consistency = framework.run_pytest(root, self.consistency_tests, env=env, expected_skips={})
-        checks.extend(consistency)
         if notes:
-            checks[0] = Check(
-                checks[0].name, checks[0].status, checks[0].detail + "\n" + "\n".join(notes)
+            green_checks[0] = Check(
+                green_checks[0].name,
+                green_checks[0].status,
+                green_checks[0].detail + "\n" + "\n".join(notes),
             )
+        checks = [*consistency, *green_checks]
         verdict = verdict_from_checks(green_checks)
         if any(
             check.status == "skip" and check.name not in self.expected_skips
             for check in green_checks
         ):
             verdict = "inconclusive"
-        if any(check.status != "pass" for check in consistency):
-            verdict = "tooling"
         unexpected = [
             request
             for request in sb.mock.requests
