@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   cheap-checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -56,7 +56,7 @@ jobs:
   qualify:
     if: github.event_name != 'pull_request'
     needs: cheap-checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -139,35 +139,38 @@ jobs:
           ISSUE_LABELS: ${{ steps.compat.outputs.issue_labels }}
           ISSUE_TITLE: ${{ steps.compat.outputs.issue_title }}
         run: |
+          set -euo pipefail
           gh label create "compat:$HARNESS" --color 5319e7 --force
           gh label create tooling --color d93f0b --force
           gh label create admitted-regression --color b60205 --force
-          number="$(gh issue list --state open --label "compat:$HARNESS" \
-            --limit 1 --json number --jq '.[0].number // empty')"
-          IFS=',' read -ra labels <<< "$ISSUE_LABELS"
+          number="$(gh issue list --state open --limit 100 --json number,title |
+            jq -r --arg title "$ISSUE_TITLE" 'map(select(.title == $title))[0].number // empty')"
           if [[ -n "$number" ]]; then
-            for stale in tooling admitted-regression; do
-              if gh issue view "$number" --json labels --jq '.labels[].name' | grep -Fxq "$stale"; then
-                gh issue edit "$number" --remove-label "$stale"
-              fi
-            done
-            args=(--title "$ISSUE_TITLE" --body "$ISSUE_BODY")
-            for label in "${labels[@]}"; do args+=(--add-label "$label"); done
-            gh issue edit "$number" "${args[@]}"
+            gh issue edit "$number" --body "$ISSUE_BODY"
           else
-            args=(--title "$ISSUE_TITLE" --body "$ISSUE_BODY")
-            for label in "${labels[@]}"; do args+=(--label "$label"); done
-            gh issue create "${args[@]}"
+            number="$(gh issue create --title "$ISSUE_TITLE" --body "$ISSUE_BODY" | sed 's|.*/||')"
           fi
+          # The REST endpoint fails loudly where `gh issue create --label` silently drops labels.
+          IFS=',' read -ra labels <<< "$ISSUE_LABELS"
+          for stale in tooling admitted-regression; do
+            if [[ ! ",$ISSUE_LABELS," == *",$stale,"* ]]; then
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$number/labels/$stale" --silent 2>/dev/null || true
+            fi
+          done
+          add=()
+          for label in "${labels[@]}"; do add+=(-f "labels[]=$label"); done
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$number/labels" "${add[@]}" --silent
       - name: Close recovered issue
         if: >-
           steps.select.outputs.run == 'true' &&
           steps.compat.outputs.issue_action == 'close'
         env:
           GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN }}
+          ISSUE_TITLE: ${{ steps.compat.outputs.issue_title }}
         run: |
-          number="$(gh issue list --state open --label "compat:$HARNESS" \
-            --limit 1 --json number --jq '.[0].number // empty')"
+          set -euo pipefail
+          number="$(gh issue list --state open --limit 100 --json number,title |
+            jq -r --arg title "$ISSUE_TITLE" 'map(select(.title == $title))[0].number // empty')"
           if [[ -n "$number" ]]; then
             gh issue close "$number" --comment "The latest conclusive qualification is green."
           fi
