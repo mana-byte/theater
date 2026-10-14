@@ -753,6 +753,8 @@ _QUALIFIED_PI_VERSIONS = (
     "0.87.1",
     "0.99.0",
     "0.99.1",
+    "0.99.2",
+    "1.0.0",
 )
 
 
@@ -777,16 +779,14 @@ def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> N
     assert calls == [("pi", "--version")]
 
 
-@pytest.mark.parametrize("version", ["0.80.3", "0.80.7", "0.85.0", "0.99.2", "1.0.0"])
+@pytest.mark.parametrize("version", ["0.80.3", "0.80.7", "0.85.0", "1.0.1"])
 def test_pi_frontend_probe_refuses_unqualified_versions(version, monkeypatch) -> None:
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: _Completed(f"{version}\n"))
     refused = pi_runtime_module.probe_pi_frontend_compatibility(RuntimeProbeContext(binary="pi"))
     assert refused.supported is False
     assert refused.reason is not None
-    # 1.0.0 is not a stable 0.x.y release at all, so no version is reported.
-    if version != "1.0.0":
-        assert refused.native_version == version
-        assert "outside the qualified range" in refused.reason
+    assert refused.native_version == version
+    assert "outside the qualified range" in refused.reason
 
 
 def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None:

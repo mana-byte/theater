@@ -1,0 +1,39 @@
+{
+  "adapter_digest": "83d7b2b2149eaf2c6fa9d21571c40163b2aab761e90971548d0ff3fc0b30f360",
+  "checks": [
+    {
+      "detail": "4 passed",
+      "name": "tests/test_harness_compat_pi.py",
+      "status": "pass"
+    },
+    {
+      "detail": "14 passed",
+      "name": "tests/test_pi_native_bridge.py::test_pi_frontend_probe_accepts_qualified_versions",
+      "status": "pass"
+    },
+    {
+      "detail": "4 passed",
+      "name": "tests/test_pi_native_bridge.py::test_pi_frontend_probe_refuses_unqualified_versions",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_pi_native_control.py::test_pi_core_correlation_proof_holds_on_stock_pi",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_pi_native_control.py::test_pi_active_run_interrupt_proof_holds_on_stock_pi",
+      "status": "pass"
+    },
+    {
+      "detail": "1 passed",
+      "name": "tests/test_pi_native_control.py::test_pi_steer_admission_proof_holds_on_stock_pi",
+      "status": "pass"
+    }
+  ],
+  "harness": "pi",
+  "run_url": "https://github.com/mana-byte/theater/actions/runs/38572272220",
+  "verdict": "green",
+  "version": "1.0.0"
+}

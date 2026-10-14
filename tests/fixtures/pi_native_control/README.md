@@ -1,7 +1,7 @@
 # Pi native control proof
 
 `pi_core_correlation_proof.mts` runs the real installed stock Pi SDK (qualified
-releases 0.80.8-0.84.x and 0.85.1-0.99.1)
+releases 0.80.8-0.84.x and 0.85.1-1.0.0)
 (`AgentSession`, file-backed `SessionManager`, mock assistant stream after
 Pi's own agent-session test methodology) and loads the real shipped
 `theater_mcp_bridge.ts` through the genuine loader (`DefaultResourceLoader`

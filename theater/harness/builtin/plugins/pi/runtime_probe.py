@@ -15,7 +15,7 @@ from .runtime_constants import (
 
 
 def parse_pi_version(output: str) -> str | None:
-    """Extract a stable ``0.x.y`` Pi release version from ``pi --version``."""
+    """Extract a stable Pi release version from ``pi --version``."""
     match = _VERSION_TOKEN.search(output)
     return None if match is None else match.group("version")
 
@@ -25,15 +25,15 @@ def _version_in_supported_range(version: str) -> bool:
     if match is None:
         return False
     try:
-        parsed = (0, int(match.group("minor")), int(match.group("patch")))
+        parsed = tuple(int(match.group(part)) for part in ("major", "minor", "patch"))
     except ValueError:
         return False
-    # Qualified: (0,80,8) <= v < (0,85,0) or (0,85,1) <= v <= (0,99,1).
+    # Qualified: (0,80,8) <= v < (0,85,0) or (0,85,1) <= v <= (1,0,0).
     # 0.85.0 is a broken published artifact (unresolvable pi-server import);
     # 0.80.3-0.80.7 never qualify: their SDK crashes at import and lacks
     # ModelRuntime and agent_settled.
     in_080 = (0, 80, 8) <= parsed < (0, 85, 0)
-    in_qualified = (0, 85, 1) <= parsed <= (0, 99, 1)
+    in_qualified = (0, 85, 1) <= parsed <= (1, 0, 0)
     return in_080 or in_qualified
 
 
@@ -71,11 +71,11 @@ def probe_pi_frontend_compatibility(context: RuntimeProbeContext) -> RuntimeComp
         return _unsupported_probe(f"Pi --version exited with {version_result.returncode}")
     version = parse_pi_version(f"{version_result.stdout}\n{version_result.stderr}")
     if version is None:
-        return _unsupported_probe("Pi --version did not report a stable 0.x.y release")
+        return _unsupported_probe("Pi --version did not report a stable release")
     if not _version_in_supported_range(version):
         return _unsupported_probe(
             f"Pi {version} is outside the qualified range "
-            ">=0.80.8,<0.85.0 || >=0.85.1,<=0.99.1 "
+            ">=0.80.8,<0.85.0 || >=0.85.1,<=1.0.0 "
             "(0.85.0 is a broken published artifact)",
             version=version,
         )

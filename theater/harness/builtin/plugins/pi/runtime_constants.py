@@ -2,7 +2,7 @@
 
 import re
 
-PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY = "pi-extension-0.80.8-0.99.1-supported"
+PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY = "pi-extension-0.80.8-1.0.0-supported"
 PI_FRONTEND_RUNTIME_PROBE_TIMEOUT_SECONDS = 5.0
 PI_FRONTEND_CONTROL_TIMEOUT_SECONDS = 10.0
 PI_FRONTEND_DIAGNOSTICS_MAX = 8
@@ -10,7 +10,9 @@ PI_FRONTEND_HISTORY_MAX = 64
 PI_FRONTEND_CHANNEL_ID = "pi-frontend-live"
 PI_FRONTEND_SEND_PROMPT_MAX_CHARS = 100_000
 
-_VERSION_TOKEN = re.compile(r"(?<![\w.])(?P<version>0\.(?P<minor>\d+)\.(?P<patch>\d+))(?![\w.-])")
+_VERSION_TOKEN = re.compile(
+    r"(?<![\w.])(?P<version>(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+))(?![\w.-])"
+)
 _REJECTED_SETTINGS_ERRORS = frozenset(
     {
         "busy",

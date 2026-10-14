@@ -62,15 +62,19 @@ function resolveStockPi(): StockPi | undefined {
 	const distIndex = join(root, "dist", "index.js");
 	if (!existsSync(distIndex)) return undefined;
 	// Mirrors the probe: admit iff (0,80,8) <= v < (0,85,0) or
-	// (0,85,1) <= v <= (0,99,1). 0.85.0 is a broken published artifact;
+	// (0,85,1) <= v <= (1,0,0). 0.85.0 is a broken published artifact;
 	// <= 0.80.7 lack ModelRuntime and agent_settled, so never qualify.
-	const versionMatch = /^0\.(\d+)\.(\d+)$/.exec(version);
+	const versionMatch = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
 	if (versionMatch === null) return undefined;
-	const minor = Number(versionMatch[1]);
-	const patch = Number(versionMatch[2]);
-	if (minor < 80 || (minor === 80 && patch < 8)) return undefined;
-	if (minor === 85 && patch === 0) return undefined;
-	if (minor > 99 || (minor === 99 && patch > 1)) return undefined;
+	const major = Number(versionMatch[1]);
+	const minor = Number(versionMatch[2]);
+	const patch = Number(versionMatch[3]);
+	if (major === 0 && (minor < 80 || (minor === 80 && patch < 8))) return undefined;
+	if (major === 0 && minor === 85 && patch === 0) return undefined;
+	if (major > 1 ||
+		(major === 1 && minor > 0) ||
+		(major === 1 && minor === 0 && patch > 0))
+		return undefined;
 	return { root, distIndex, version };
 }
 
@@ -300,11 +304,12 @@ function triggerRootedAtLeaf(
 }
 
 function versionAtLeast(version: string, minor: number, patch: number): boolean {
-	const match = /^0\.(\d+)\.(\d+)$/.exec(version);
+	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
 	if (match === null) return false;
-	const actualMinor = Number(match[1]);
-	const actualPatch = Number(match[2]);
-	return actualMinor > minor || (actualMinor === minor && actualPatch >= patch);
+	const major = Number(match[1]);
+	const actualMinor = Number(match[2]);
+	const actualPatch = Number(match[3]);
+	return major > 0 || actualMinor > minor || (actualMinor === minor && actualPatch >= patch);
 }
 
 async function main(): Promise<number> {

@@ -12,7 +12,7 @@ daemon transport or database schema.
 
 ## Qualified Pi range
 
-`>=0.80.8,<0.85.0 || >=0.85.1,<=0.99.1` — declared in
+`>=0.80.8,<0.85.0 || >=0.85.1,<=1.0.0` — declared in
 [`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py) and enforced
 numerically by the probe. Every release inside the range was proven by running the
 three stock-Pi proofs (core correlation, active-run interrupt, steer admission)
@@ -21,7 +21,7 @@ stream — no paid model calls:
 
 - 0.80.8, 0.80.9, 0.80.10, 0.81.0, 0.81.1, 0.82.0, 0.82.1, 0.83.0, 0.84.0,
   0.84.1, 0.84.2, 0.84.3, 0.84.4, 0.85.1, 0.86.0, 0.86.1, 0.87.0, 0.87.1,
-  0.99.0, 0.99.1: all three proofs
+  0.99.0, 0.99.1, 0.99.2, 1.0.0: all three proofs
   green. From 0.86.0 on Pi persists a transcript-backed
   `{type:"message", role:"system"}` entry (the session prompt, plus later prompt
   patches) between the prior leaf and the run's trigger entry, so
@@ -265,7 +265,7 @@ optional phase-two stretch work, not part of interrupt acceptance.
 ### Phase 4 result — proof run, steer stays unavailable
 
 The executable stock-Pi proof (qualified releases 0.80.8-0.84.x and
-0.85.1-0.99.1) is
+0.85.1-1.0.0) is
 [`tests/fixtures/pi_native_control/pi_steer_admission_proof.mts`](../../tests/fixtures/pi_native_control/pi_steer_admission_proof.mts)
 (runner: `tests/test_pi_native_control.py`). It drives the public
 `sendUserMessage(..., {deliverAs: "steer"})` route against the real installed SDK
