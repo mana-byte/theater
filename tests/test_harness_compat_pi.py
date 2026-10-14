@@ -7,13 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.adapters import pi
+from scripts.harness_compat.adapters import pi, pi_bump
 from scripts.harness_compat.contract import Check, InstallFailed
+from scripts.harness_compat.probe import _probe
 from scripts.harness_compat.sandbox import make_sandbox
 
 
 def _copy_coupled(root: Path, destination: Path) -> None:
-    for relative in pi._COUPLED:
+    for relative in pi_bump._COUPLED:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / relative, target)
@@ -34,7 +35,7 @@ def test_verified_parses_exclusive_ceiling_and_known_bad(tmp_path: Path) -> None
     assert gate.evidenced == frozenset({"0.99.1"})
     assert gate.admits("0.99.1") and not gate.admits("0.85.0")
 
-    probe = tmp_path / pi._PROBE
+    probe = tmp_path / pi_bump._PROBE
     source = probe.read_text(encoding="utf-8")
     source = source.replace(
         "in_080 = (0, 80, 8) <= parsed < (0, 85, 0)",
@@ -51,32 +52,50 @@ def test_verified_parses_exclusive_ceiling_and_known_bad(tmp_path: Path) -> None
 
 def test_apply_bump_updates_every_coupled_gate_and_is_idempotent(tmp_path: Path) -> None:
     root = Path(__file__).parents[1]
+    shutil.copytree(root / "theater", tmp_path / "theater")
     _copy_coupled(root, tmp_path)
-    greens = ("0.99.2", "1.0.0", "1.0.1")
+    stub = tmp_path / "pi-stub"
+    previous = "0.99.1"
+    greens = ("0.99.2", "0.99.3", "0.99.4", "1.0.0")
+    for version in greens:
+        before = {path: (tmp_path / path).read_bytes() for path in pi_bump._COUPLED}
+        changed = pi.ADAPTER.apply_bump(tmp_path, [version])
+        assert changed == list(pi_bump._COUPLED)
+        assert all((tmp_path / path).read_bytes() != before[path] for path in changed)
+        gate = pi.ADAPTER.verified(tmp_path)
+        assert gate.ceiling == pi_bump._next_patch(version)
+        assert gate.admits(version) and not gate.admits(gate.ceiling)
+        probe = (tmp_path / pi_bump._PROBE).read_text(encoding="utf-8")
+        old_gate = f"in_qualified = (0, 85, 1) <= parsed <= ({pi_bump._tuple(previous)})"
+        assert old_gate not in probe
+        old_range = f">=0.80.8,<0.85.0 || >=0.85.1,<={previous}"
+        for path in (pi_bump._PROBE, pi_bump._MANIFEST, pi_bump._DOC):
+            assert old_range not in (tmp_path / path).read_text(encoding="utf-8")
+        for fixture in (tmp_path / "tests/fixtures/pi_native_control").glob("*.mts"):
+            assert pi_bump._major_guard(previous) not in fixture.read_text(encoding="utf-8")
+        for cache in (tmp_path / "theater").rglob("__pycache__"):
+            shutil.rmtree(cache)
+        supported, reason = _probe(pi.ADAPTER, tmp_path, version, stub)
+        assert supported is True, reason
+        supported, reason = _probe(pi.ADAPTER, tmp_path, gate.ceiling, stub)
+        assert supported is False, reason
+        snapshots = {path: (tmp_path / path).read_bytes() for path in changed}
+        assert pi.ADAPTER.apply_bump(tmp_path, [version]) == []
+        assert snapshots == {path: (tmp_path / path).read_bytes() for path in changed}
+        previous = version
 
-    changed = pi.ADAPTER.apply_bump(tmp_path, greens)
-    snapshots = {path: (tmp_path / path).read_bytes() for path in changed}
-
-    assert changed == list(pi._COUPLED)
-    gate = pi.ADAPTER.verified(tmp_path)
-    assert gate.ceiling == "1.0.2"
-    assert all(gate.admits(version) for version in greens)
-    assert not gate.admits("1.0.2")
     bridge_test = (tmp_path / "tests/test_pi_native_bridge.py").read_text(encoding="utf-8")
-    refused = pi._REFUSED_RE.search(bridge_test)
+    refused = pi_bump._REFUSED_RE.search(bridge_test)
     assert refused is not None
     assert '"1.0.0"' not in refused.group("versions")
-    assert '"1.0.2"' in refused.group("versions")
+    assert '"1.0.1"' in refused.group("versions")
     assert "stable 0.x.y" not in bridge_test
     assert all(f'    "{version}",' in bridge_test for version in greens)
     for fixture in (tmp_path / "tests/fixtures/pi_native_control").glob("*.mts"):
         source = fixture.read_text(encoding="utf-8")
         assert "const major = Number(versionMatch[1]);" in source
         assert "major === 0 && minor === 85 && patch === 0" in source
-        assert "major === 1 && minor === 0 && patch > 1" in source
-
-    assert pi.ADAPTER.apply_bump(tmp_path, greens) == []
-    assert snapshots == {path: (tmp_path / path).read_bytes() for path in changed}
+        assert "major === 1 && minor === 0 && patch > 0" in source
 
 
 def test_qualify_uses_offline_environment_and_maps_errors_to_inconclusive(
@@ -114,7 +133,7 @@ def test_install_failure_raises_install_failed(
         stdout = ""
         stderr = "fake npm failure"
 
-    monkeypatch.setattr(pi.subprocess, "run", lambda *args, **kwargs: Failed())
+    monkeypatch.setattr(pi.opencode_pi_process, "run_group", lambda *args, **kwargs: Failed())
     with (
         make_sandbox("pi", root=tmp_path / "sandbox") as sandbox,
         pytest.raises(InstallFailed, match="fake npm failure"),

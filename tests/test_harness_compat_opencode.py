@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from scripts.harness_compat import contract
-from scripts.harness_compat.adapters import opencode, opencode_bump, opencode_sandbox
+from scripts.harness_compat.adapters import (
+    opencode,
+    opencode_bump,
+    opencode_pi_process,
+    opencode_sandbox,
+)
+from scripts.harness_compat.probe import _probe
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,34 +84,53 @@ def test_apply_bump_raises_the_ceiling_and_moves_every_bound(coupled_tree: Path)
 
 
 def test_apply_bump_is_idempotent_and_deterministic(coupled_tree: Path, tmp_path: Path) -> None:
-    _floor, ceiling = _gate(coupled_tree)
-    greens = [ceiling]
-    assert opencode.ADAPTER.apply_bump(coupled_tree, greens)
+    shutil.copytree(_REPO_ROOT / "theater", coupled_tree / "theater", dirs_exist_ok=True)
+    ladder = ("1.18.35", "1.18.36", "1.19.0")
+    stub = coupled_tree / "opencode-stub"
+    for version in ladder:
+        floor, old_ceiling = _gate(coupled_tree)
+        changed = opencode.ADAPTER.apply_bump(coupled_tree, [version])
+        assert set(changed) == set(opencode_bump.COUPLED_FILES)
+        assert _gate(coupled_tree) == (floor, opencode_bump.next_patch(version))
+        active = (coupled_tree / opencode_bump.RUNTIME_PLAN).read_text(encoding="utf-8")
+        assert f"{floor}-{opencode_bump.previous_patch(old_ceiling)}" not in active
+        for path in (opencode_bump.SERVER_PLAN, opencode_bump.STOCK_UI_TEST):
+            assert f"{floor}-{opencode_bump.previous_patch(old_ceiling)}" not in (
+                coupled_tree / path
+            ).read_text(encoding="utf-8")
+        manifest = (coupled_tree / opencode_bump.MANIFEST).read_text(encoding="utf-8")
+        assert f",<{old_ceiling} || " not in manifest
+        for cache in (coupled_tree / "theater").rglob("__pycache__"):
+            shutil.rmtree(cache)
+        supported, reason = _probe(opencode.ADAPTER, coupled_tree, version, stub)
+        assert supported is True, reason
+        supported, reason = _probe(
+            opencode.ADAPTER, coupled_tree, opencode_bump.next_patch(version), stub
+        )
+        assert supported is False, reason
+        assert opencode.ADAPTER.apply_bump(coupled_tree, [version]) == []
+
     snapshot = {
         relative: (coupled_tree / relative).read_bytes() for relative in opencode_bump.COUPLED_FILES
     }
-    assert opencode.ADAPTER.apply_bump(coupled_tree, greens) == []
-    assert {
-        relative: (coupled_tree / relative).read_bytes() for relative in opencode_bump.COUPLED_FILES
-    } == snapshot
-
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     for relative in opencode_bump.COUPLED_FILES:
         destination = fresh / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes((_REPO_ROOT / relative).read_bytes())
-    opencode.ADAPTER.apply_bump(fresh, greens)
+    for version in ladder:
+        opencode.ADAPTER.apply_bump(fresh, [version])
     assert {
         relative: (fresh / relative).read_bytes() for relative in opencode_bump.COUPLED_FILES
     } == snapshot
 
 
-def test_apply_bump_refuses_to_admit_untested_releases(coupled_tree: Path) -> None:
+def test_apply_bump_refuses_unordered_or_v2_releases(coupled_tree: Path) -> None:
     floor, ceiling = _gate(coupled_tree)
     beyond = opencode_bump.next_patch(ceiling)
-    with pytest.raises(ValueError, match="first green must be the current exclusive ceiling"):
-        opencode.ADAPTER.apply_bump(coupled_tree, [beyond])
+    with pytest.raises(ValueError, match="unique and ascending"):
+        opencode.ADAPTER.apply_bump(coupled_tree, [beyond, ceiling])
     with pytest.raises(ValueError, match=r"only admits 1\.x releases"):
         opencode.ADAPTER.apply_bump(coupled_tree, ["2.0.6"])
     assert _gate(coupled_tree) == (floor, ceiling)
@@ -200,6 +228,44 @@ def test_qualify_is_green_when_the_server_proofs_pass(
     assert seen_env["THEATER_OPENCODE_STOCK_CONFORMANCE"] == ""
     override = (sb.config_dir / "opencode" / "opencode.json").read_text(encoding="utf-8")
     assert sb.mock_base_urls["openai"] in override
+    skips = [check for check in result.checks if check.name in opencode.ADAPTER.expected_skips]
+    assert len(skips) == 2
+    assert all("stock-TUI proof NOT run" in check.detail for check in skips)
+    assert all("human review required" in check.detail for check in skips)
+    regie = next(check for check in result.checks if "test_dashboard_rich.py" in check.name)
+    assert regie.status == "skip" and "not executed" in regie.detail
+
+
+@pytest.mark.parametrize("announce", [True, False])
+def test_prewarm_stops_forked_serve_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, announce: bool
+) -> None:
+    sb = _sandbox(tmp_path)
+    sb.bin_dir.mkdir()
+    stub = sb.bin_dir / "opencode"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import os, time\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    while True: time.sleep(10)\n"
+        "open('serve.pids', 'w').write(f'{os.getpid()} {child}')\n"
+        f"if {announce!r}:\n"
+        "    print('opencode server listening on http://127.0.0.1:12345', flush=True)\n"
+        "while True: time.sleep(10)\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    sb.env["PATH"] = f"{sb.bin_dir}:{sb.env['PATH']}"
+    monkeypatch.setattr(opencode_sandbox, "_post", lambda *args, **kwargs: 200)
+    monkeypatch.setattr(opencode_sandbox, "_await_catalog", lambda *args, **kwargs: True)
+    assert opencode_sandbox.prewarm_catalog(sb, timeout=1) is announce
+    pids = (sb.root / "opencode-prewarm" / "serve.pids").read_text().split()
+    for pid in pids:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", pid], capture_output=True, text=True, check=False
+        )
+        assert not result.stdout.strip() or result.stdout.strip().startswith("Z")
 
 
 def test_qualify_is_tooling_when_the_catalog_pre_warm_fails(
@@ -287,6 +353,6 @@ def test_install_failure_raises_install_failed(
         stdout = ""
         stderr = "npm ERR! network unreachable"
 
-    monkeypatch.setattr(opencode.subprocess, "run", lambda *args, **kwargs: _Result())
+    monkeypatch.setattr(opencode_pi_process, "run_group", lambda *args, **kwargs: _Result())
     with pytest.raises(contract.InstallFailed, match="exited 1"):
         opencode.ADAPTER.install(_sandbox(tmp_path), "1.18.35")
