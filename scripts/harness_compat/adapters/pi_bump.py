@@ -9,12 +9,8 @@ from pathlib import Path
 from ..contract import VerifiedSet, load_evidenced, version_key
 
 _CONSTANTS = Path("theater/harness/builtin/plugins/pi/runtime_constants.py")
-_GATE_NAMES = (
-    "PI_FRONTEND_QUALIFIED_FLOOR",
-    "PI_FRONTEND_QUALIFIED_HOLE",
-    "PI_FRONTEND_QUALIFIED_RESUME",
-    "PI_FRONTEND_QUALIFIED_MAX",
-)
+_ANCHOR_NAMES = ("PI_FRONTEND_QUALIFIED_FLOOR", "PI_FRONTEND_QUALIFIED_MAX")
+_EXCLUDED_NAME = "PI_FRONTEND_QUALIFIED_EXCLUDED"
 
 
 def _next_patch(version: str) -> str:
@@ -26,58 +22,87 @@ def _version(values: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in values)
 
 
-def _gate_literals(root: Path) -> tuple[str, dict[str, tuple[int, int, int]], ast.Assign]:
+def _is_triple(value: object) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 3
+        and all(type(part) is int and part >= 0 for part in value)
+    )
+
+
+class _GateLiterals:
+    """Parsed Pi gate anchors: the two range triples, the excluded triples, the MAX node."""
+
+    def __init__(
+        self,
+        source: str,
+        anchors: dict[str, tuple[int, int, int]],
+        excluded: tuple[tuple[int, int, int], ...],
+        max_node: ast.Assign,
+    ) -> None:
+        self.source = source
+        self.anchors = anchors
+        self.excluded = excluded
+        self.max_node = max_node
+
+
+def _gate_literals(root: Path) -> _GateLiterals:
     source = (root / _CONSTANTS).read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(_CONSTANTS))
-    values: dict[str, tuple[int, int, int]] = {}
+    anchors: dict[str, tuple[int, int, int]] = {}
+    excluded: tuple[tuple[int, int, int], ...] | None = None
     max_node: ast.Assign | None = None
     for node in tree.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
-        if not isinstance(target, ast.Name) or target.id not in _GATE_NAMES:
+        if not isinstance(target, ast.Name):
             continue
-        if target.id in values:
-            raise ValueError(f"duplicate Pi gate anchor {target.id} in {_CONSTANTS}")
-        value = ast.literal_eval(node.value)
-        if (
-            not isinstance(value, tuple)
-            or len(value) != 3
-            or any(type(part) is not int or part < 0 for part in value)
-        ):
-            raise ValueError(f"Pi gate anchor {target.id} must be a three-integer literal")
-        values[target.id] = value
-        if target.id == "PI_FRONTEND_QUALIFIED_MAX":
-            max_node = node
-    if set(values) != set(_GATE_NAMES) or max_node is None:
+        if target.id in _ANCHOR_NAMES:
+            if target.id in anchors:
+                raise ValueError(f"duplicate Pi gate anchor {target.id} in {_CONSTANTS}")
+            value = ast.literal_eval(node.value)
+            if not _is_triple(value):
+                raise ValueError(f"Pi gate anchor {target.id} must be a three-integer literal")
+            anchors[target.id] = value
+            if target.id == "PI_FRONTEND_QUALIFIED_MAX":
+                max_node = node
+        elif target.id == _EXCLUDED_NAME:
+            if excluded is not None:
+                raise ValueError(f"duplicate Pi gate anchor {target.id} in {_CONSTANTS}")
+            value = ast.literal_eval(node.value)
+            if not isinstance(value, tuple) or not all(_is_triple(entry) for entry in value):
+                raise ValueError(
+                    f"Pi gate anchor {_EXCLUDED_NAME} must be a tuple of three-integer literals"
+                )
+            excluded = value
+    if set(anchors) != set(_ANCHOR_NAMES) or excluded is None or max_node is None:
         raise ValueError(f"missing Pi gate anchor in {_CONSTANTS}")
-    return source, values, max_node
+    return _GateLiterals(source, anchors, excluded, max_node)
 
 
 def verified(root: Path) -> VerifiedSet:
-    _, values, _ = _gate_literals(root)
-    floor, bad, resume, upper = (_version(values[name]) for name in _GATE_NAMES)
-    if _next_patch(bad) != resume:
-        raise ValueError(f"Pi compatibility gap is not one excluded patch: {bad} to {resume}")
+    gate = _gate_literals(root)
     return VerifiedSet(
         "range",
-        floor=floor,
-        ceiling=_next_patch(upper),
-        known_bad=frozenset({bad}),
+        floor=_version(gate.anchors["PI_FRONTEND_QUALIFIED_FLOOR"]),
+        ceiling=_next_patch(_version(gate.anchors["PI_FRONTEND_QUALIFIED_MAX"])),
+        known_bad=frozenset(_version(entry) for entry in gate.excluded),
         evidenced=load_evidenced(root, "pi"),
     )
 
 
 def apply_bump(root: Path, greens: Sequence[str]) -> list[Path]:
-    source, values, node = _gate_literals(root)
+    gate = _gate_literals(root)
     verified(root)
+    source, node = gate.source, gate.max_node
     ordered = list(dict.fromkeys(greens))
     if not ordered:
         return []
     if ordered != sorted(ordered, key=version_key):
         raise ValueError("Pi green releases must be stable and ascending")
 
-    current = values["PI_FRONTEND_QUALIFIED_MAX"]
+    current = gate.anchors["PI_FRONTEND_QUALIFIED_MAX"]
     new = version_key(ordered[-1])
     if new <= current:
         return []

@@ -64,6 +64,12 @@ def test_verified_reads_plugin_literal_and_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="missing Pi gate anchor"):
         pi.ADAPTER.apply_bump(tmp_path, [pi_bump._next_patch(upper)])
 
+    source.write_text(
+        original.replace("PI_FRONTEND_QUALIFIED_EXCLUDED =", "PI_FRONTEND_QUALIFIED_SKIPPED =")
+    )
+    with pytest.raises(ValueError, match="missing Pi gate anchor"):
+        pi.ADAPTER.verified(tmp_path)
+
 
 def test_apply_bump_changes_one_value_and_is_idempotent(tmp_path: Path) -> None:
     root = Path(__file__).parents[1]

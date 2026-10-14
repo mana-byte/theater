@@ -3,20 +3,29 @@
 import re
 
 PI_FRONTEND_QUALIFIED_FLOOR = (0, 80, 8)
-PI_FRONTEND_QUALIFIED_HOLE = (0, 85, 0)
-PI_FRONTEND_QUALIFIED_RESUME = (0, 85, 1)
-PI_FRONTEND_QUALIFIED_MAX = (1, 0, 0)
+PI_FRONTEND_QUALIFIED_MAX = (1, 2, 0)
+# Broken published artifacts inside [FLOOR, MAX]: 0.85.0 crashes at import
+# (no ModelRuntime/agent_settled); 1.0.1-1.1.0 import a codemode symbol that
+# @earendil-works/pi-codemode 1.2.0 removed, so codemode fails to load.
+PI_FRONTEND_QUALIFIED_EXCLUDED = (
+    (0, 85, 0),
+    (1, 0, 1),
+    (1, 0, 2),
+    (1, 0, 3),
+    (1, 0, 4),
+    (1, 1, 0),
+)
 
 
 def pi_version_text(version: tuple[int, int, int]) -> str:
     return ".".join(map(str, version))
 
 
+_EXCLUDED_TEXT = ", ".join(pi_version_text(entry) for entry in PI_FRONTEND_QUALIFIED_EXCLUDED)
 PI_FRONTEND_QUALIFIED_RANGE = (
     f">={pi_version_text(PI_FRONTEND_QUALIFIED_FLOOR)},"
-    f"<{pi_version_text(PI_FRONTEND_QUALIFIED_HOLE)} || "
-    f">={pi_version_text(PI_FRONTEND_QUALIFIED_RESUME)},"
     f"<={pi_version_text(PI_FRONTEND_QUALIFIED_MAX)}"
+    f" (excluding {_EXCLUDED_TEXT})"
 )
 PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY = (
     f"pi-extension-{pi_version_text(PI_FRONTEND_QUALIFIED_FLOOR)}-"

@@ -22,11 +22,10 @@ from theater.harness.builtin.plugins.pi.frontend import (
 from theater.harness.builtin.plugins.pi.launch import plan_launch
 from theater.harness.builtin.plugins.pi.runtime import PiFrontendPeer, PiFrontendRuntime
 from theater.harness.builtin.plugins.pi.runtime_constants import (
+    PI_FRONTEND_QUALIFIED_EXCLUDED,
     PI_FRONTEND_QUALIFIED_FLOOR,
-    PI_FRONTEND_QUALIFIED_HOLE,
     PI_FRONTEND_QUALIFIED_MAX,
     PI_FRONTEND_QUALIFIED_RANGE,
-    PI_FRONTEND_QUALIFIED_RESUME,
     PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY,
     PI_FRONTEND_SEND_PROMPT_MAX_CHARS,
     pi_version_text,
@@ -756,11 +755,13 @@ _QUALIFIED_PI_VERSIONS = (
     "0.84.2",
     "0.84.3",
     "0.84.4",
-    pi_version_text(PI_FRONTEND_QUALIFIED_RESUME),
+    "0.85.1",  # first release after the excluded 0.85.0.
     "0.86.0",
     "0.86.1",
     "0.87.0",
     "0.87.1",
+    "0.99.2",
+    "1.0.0",  # last release before the excluded 1.0.1-1.1.0 band.
     pi_version_text(PI_FRONTEND_QUALIFIED_MAX),
 )
 
@@ -798,7 +799,8 @@ def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> N
                 PI_FRONTEND_QUALIFIED_FLOOR[2] - 1,
             )
         ),
-        pi_version_text(PI_FRONTEND_QUALIFIED_HOLE),
+        # Every excluded broken release: 0.85.0 and the 1.0.1-1.1.0 band.
+        *(pi_version_text(entry) for entry in PI_FRONTEND_QUALIFIED_EXCLUDED),
         pi_version_text(
             (
                 PI_FRONTEND_QUALIFIED_MAX[0],
