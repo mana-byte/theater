@@ -49,7 +49,14 @@ from .observer import (
     validate_receipt,
 )
 from .render_mcp import render_mcp_servers
-from .runtime_plan import SERVER_STDOUT_MAX_BYTES
+from .runtime_plan import (
+    OPENCODE_SERVER_MAX_VERSION,
+    OPENCODE_SERVER_MIN_VERSION,
+    OPENCODE_SERVER_V2_MAX_VERSION,
+    OPENCODE_SERVER_V2_MIN_VERSION,
+    SERVER_STDOUT_MAX_BYTES,
+    release_text,
+)
 from .server_discovery import parse_server_stdout_endpoint
 from .server_plan import (
     SERVER_SECRET_ENV,
@@ -137,7 +144,12 @@ MANIFEST = HarnessManifest(
     models=ModelDiscoveryManifest(discoverer=discover_models),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
     native_compatibility=NativeCompatibilityManifest(
-        qualified_range=">=1.17.15,<1.18.35 || >=2.0.6,<2.1.0",
+        qualified_range=(
+            f">={release_text(OPENCODE_SERVER_MIN_VERSION)},"
+            f"<{release_text(OPENCODE_SERVER_MAX_VERSION)} || "
+            f">={release_text(OPENCODE_SERVER_V2_MIN_VERSION)},"
+            f"<{release_text(OPENCODE_SERVER_V2_MAX_VERSION)}"
+        ),
         probe=probe_opencode_server_compatibility,
     ),
     runtime=RuntimeManifest(

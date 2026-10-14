@@ -1,4 +1,4 @@
-"""Opt-in stock proof for the pinned detached OpenCode server topology."""
+"""Opt-in stock proof for the admitted detached OpenCode server topology."""
 
 from __future__ import annotations
 
@@ -23,6 +23,13 @@ from urllib.parse import urlsplit
 import pytest
 
 from theater.harness.builtin.plugins.opencode.http import OpenCodeClient
+from theater.harness.builtin.plugins.opencode.runtime_plan import (
+    OPENCODE_SERVER_MAX_VERSION,
+    OPENCODE_SERVER_MIN_VERSION,
+    OPENCODE_V1_QUALIFIED_RANGE,
+    parse_opencode_version,
+    release_text,
+)
 from theater.harness.builtin.plugins.opencode.server_discovery import (
     parse_server_stdout_endpoint,
 )
@@ -38,7 +45,6 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 
-_PINNED_VERSION = "1.18.34"
 _PROOF_ENV = "THEATER_OPENCODE_SERVER_CONFORMANCE"
 _PLUGIN_FIXTURE = Path(__file__).parent / "fixtures" / "opencode_probe_plugin.mjs"
 
@@ -54,10 +60,19 @@ def _binary_version() -> str | None:
 
 
 _BINARY_VERSION = _binary_version()
+_PARSED_VERSION = parse_opencode_version(_BINARY_VERSION or "")
+_ADMITTED_STOCK = (
+    _PARSED_VERSION is not None
+    and OPENCODE_SERVER_MIN_VERSION <= _PARSED_VERSION < OPENCODE_SERVER_MAX_VERSION
+)
+_STOCK_VERSION = release_text(_PARSED_VERSION) if _PARSED_VERSION is not None else None
+if os.environ.get(_PROOF_ENV) == "1" and _ADMITTED_STOCK:
+    print(f"OpenCode stock proof uses {_BINARY_VERSION}")
 pytestmark = pytest.mark.skipif(
-    os.environ.get(_PROOF_ENV) != "1" or _BINARY_VERSION != _PINNED_VERSION,
+    os.environ.get(_PROOF_ENV) != "1" or not _ADMITTED_STOCK,
     reason=(
-        f"set {_PROOF_ENV}=1 with stock OpenCode {_PINNED_VERSION} (found {_BINARY_VERSION!r})"
+        f"set {_PROOF_ENV}=1 with stock OpenCode {OPENCODE_V1_QUALIFIED_RANGE} "
+        f"(found {_BINARY_VERSION!r})"
     ),
 )
 
@@ -275,7 +290,7 @@ def _attach_authenticated_and_alive(server: StockServer, session_id: str) -> boo
 
 
 async def test_port0_banner_and_basic_auth_reach_every_surface(stock: StockServer) -> None:
-    assert await stock.client().health() == _PINNED_VERSION
+    assert await stock.client().health() == _STOCK_VERSION
     for method, path in (
         ("GET", "/global/health"),
         ("GET", "/session/status"),
@@ -294,7 +309,7 @@ async def test_exact_session_identity_and_idle_absence(stock: StockServer) -> No
     binding = await runtime.open_session(mode=SessionOpenMode.NEW)
     session_id = binding.native_session_id
     assert session_id is not None
-    assert binding.native_version == _PINNED_VERSION
+    assert binding.native_version == _STOCK_VERSION
     readback = await stock.client().read_session(session_id)
     assert readback["id"] == session_id
     assert await stock.client().list_messages(session_id) == ()
@@ -427,7 +442,7 @@ async def test_attach_authentication_and_server_survival(stock: StockServer) -> 
     alive = await asyncio.to_thread(_attach_authenticated_and_alive, stock, session_id)
     assert alive, "attach with the file-held credential exited before rendering"
 
-    assert await stock.client().health() == _PINNED_VERSION
+    assert await stock.client().health() == _STOCK_VERSION
     readback = await stock.client().read_session(session_id)
     assert readback["id"] == session_id
 

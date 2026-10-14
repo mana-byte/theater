@@ -37,12 +37,14 @@ from .runtime_plan import (
     OPENCODE_SERVER_V2_COMPATIBILITY_POLICY,
     OPENCODE_SERVER_V2_MAX_VERSION,
     OPENCODE_SERVER_V2_MIN_VERSION,
+    OPENCODE_V1_QUALIFIED_RANGE,
     SERVER_STDOUT_MAX_BYTES,
     parse_opencode_version,
+    release_text,
 )
 from .server_discovery import parse_server_stdout_endpoint
 
-#: Evidence-pinned route facts for 1.17.15-1.18.34 (stock-binary model-free probes;
+#: Evidence-pinned route facts for OPENCODE_SERVER_MIN_VERSION/MAX_VERSION;
 #: the Theater-consumed upstream surfaces are byte-stable across those releases):
 #: banner on stdout, Basic auth, /global/health, POST /session, GET /session/:id,
 #: POST /session/:id/fork, GET /session/:id/message, /session/:id/prompt_async
@@ -173,7 +175,7 @@ def probe_opencode_server_compatibility(context: RuntimeProbeContext) -> Runtime
     version = parse_opencode_version(f"{version_run.stdout}\n{version_run.stderr}")
     if version_run.returncode != 0 or version is None:
         return _unsupported("opencode --version did not report a usable release")
-    rendered = ".".join(str(part) for part in version)
+    rendered = release_text(version)
     if version[0] == 2:
         if context.resume:
             # A resume continues in the predecessor's lineage database; the native
@@ -195,7 +197,7 @@ def probe_opencode_server_compatibility(context: RuntimeProbeContext) -> Runtime
             native_version=rendered,
             reason=(
                 "OpenCode release is outside the server-topology compatibility "
-                "range; qualified releases are 1.17.15-1.18.34"
+                f"range; qualified releases are {OPENCODE_V1_QUALIFIED_RANGE}"
             ),
         )
     serve_help = f"{help_run.stdout}\n{help_run.stderr}"

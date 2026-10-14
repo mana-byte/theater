@@ -52,16 +52,11 @@ def test_verified_reads_an_exclusive_range_gate(coupled_tree: Path) -> None:
     assert not gate.admits(opencode_bump.previous_patch(floor))
 
 
-def test_apply_bump_raises_the_ceiling_and_moves_every_bound(coupled_tree: Path) -> None:
+def test_apply_bump_changes_only_the_source_ceiling(coupled_tree: Path) -> None:
     floor, ceiling = _gate(coupled_tree)
     last_green = ceiling  # the oldest unadmitted candidate
     changed = opencode.ADAPTER.apply_bump(coupled_tree, [last_green])
-    # The probe-refusal sample only moves when the ceiling crosses a minor line.
-    assert {str(path) for path in changed} >= {
-        str(relative)
-        for relative in opencode_bump.COUPLED_FILES
-        if relative != opencode_bump.FRONTEND_TEST
-    }
+    assert changed == [opencode_bump.RUNTIME_PLAN]
     new_ceiling = opencode_bump.next_patch(last_green)
     assert _gate(coupled_tree) == (floor, new_ceiling)
     assert opencode.ADAPTER.verified(coupled_tree).admits(last_green)
@@ -69,25 +64,8 @@ def test_apply_bump_raises_the_ceiling_and_moves_every_bound(coupled_tree: Path)
 
     major, minor, patch = contract.version_key(new_ceiling)
     runtime_plan = (coupled_tree / opencode_bump.RUNTIME_PLAN).read_text(encoding="utf-8")
-    # The exclusive limit is the tuple and the manifest ceiling; the textual bound
-    # stays the last green: inclusive prose, exclusive code.
     assert f"OPENCODE_TUI_MAX_VERSION = ({major}, {minor}, {patch})" in runtime_plan
-    assert f"opencode-tui-native-controls-{floor}-{last_green}" in runtime_plan
-    assert f"pinned to stock {last_green}" in runtime_plan
-    manifest = (coupled_tree / opencode_bump.MANIFEST).read_text(encoding="utf-8")
-    assert f">={floor},<{new_ceiling} || " in manifest
-    window = (coupled_tree / opencode_bump.SERVER_PLAN_TEST).read_text(encoding="utf-8")
-    assert f'("{last_green}", True), ("{new_ceiling}", False)' in window
-    proof = (coupled_tree / opencode_bump.SERVER_PROOF_TEST).read_text(encoding="utf-8")
-    assert f'_PINNED_VERSION = "{last_green}"' in proof
-    stock = (coupled_tree / opencode_bump.STOCK_UI_TEST).read_text(encoding="utf-8")
-    assert f"expected stock OpenCode {floor}-{last_green}" in stock
-    drift = (coupled_tree / opencode_bump.SERVER_RUNTIME_TEST).read_text(encoding="utf-8")
-    assert f'"health-version"] = "{new_ceiling}"' in drift
-    docs = (coupled_tree / opencode_bump.OPCODE_DOC).read_text(encoding="utf-8")
-    assert f"`{floor}`–`{last_green}`" in docs and f"pinned to stock `{last_green}`" in docs
-    dashboard = (coupled_tree / opencode_bump.DASHBOARD_TEST).read_text(encoding="utf-8")
-    assert f'"{floor}–{last_green} · 2.0.6–2.0.x"' in dashboard
+    assert "OPENCODE_SERVER_MAX_VERSION = OPENCODE_TUI_MAX_VERSION" in runtime_plan
 
 
 def test_apply_bump_is_idempotent_and_deterministic(coupled_tree: Path, tmp_path: Path) -> None:
@@ -100,18 +78,10 @@ def test_apply_bump_is_idempotent_and_deterministic(coupled_tree: Path, tmp_path
     )
     stub = coupled_tree / "opencode-stub"
     for version in ladder:
-        floor, old_ceiling = _gate(coupled_tree)
+        floor, _ = _gate(coupled_tree)
         changed = opencode.ADAPTER.apply_bump(coupled_tree, [version])
-        assert set(changed) >= set(opencode_bump.COUPLED_FILES) - {opencode_bump.FRONTEND_TEST}
+        assert changed == [opencode_bump.RUNTIME_PLAN]
         assert _gate(coupled_tree) == (floor, opencode_bump.next_patch(version))
-        active = (coupled_tree / opencode_bump.RUNTIME_PLAN).read_text(encoding="utf-8")
-        assert f"{floor}-{opencode_bump.previous_patch(old_ceiling)}" not in active
-        for path in (opencode_bump.SERVER_PLAN, opencode_bump.STOCK_UI_TEST):
-            assert f"{floor}-{opencode_bump.previous_patch(old_ceiling)}" not in (
-                coupled_tree / path
-            ).read_text(encoding="utf-8")
-        manifest = (coupled_tree / opencode_bump.MANIFEST).read_text(encoding="utf-8")
-        assert f",<{old_ceiling} || " not in manifest
         for cache in (coupled_tree / "theater").rglob("__pycache__"):
             shutil.rmtree(cache)
         supported, reason = _probe(opencode.ADAPTER, coupled_tree, version, stub)
@@ -122,11 +92,6 @@ def test_apply_bump_is_idempotent_and_deterministic(coupled_tree: Path, tmp_path
         assert supported is False, reason
         assert opencode.ADAPTER.apply_bump(coupled_tree, [version]) == []
 
-    frontend = (coupled_tree / opencode_bump.FRONTEND_TEST).read_text(encoding="utf-8")
-    initial_refusal = opencode_bump.next_minor(initial_ceiling)
-    final_refusal = opencode_bump.next_minor(opencode_bump.next_patch(ladder[-1]))
-    assert f'_Result("{final_refusal}")' in frontend
-    assert f'_Result("{initial_refusal}")' not in frontend
     snapshot = {
         relative: (coupled_tree / relative).read_bytes() for relative in opencode_bump.COUPLED_FILES
     }
@@ -153,17 +118,25 @@ def test_apply_bump_refuses_unordered_or_v2_releases(coupled_tree: Path) -> None
     assert _gate(coupled_tree) == (floor, ceiling)
 
 
+def test_apply_bump_fails_closed_when_ceiling_anchor_is_missing(coupled_tree: Path) -> None:
+    path = coupled_tree / opencode_bump.RUNTIME_PLAN
+    source = path.read_text(encoding="utf-8")
+    path.write_text(source.replace("OPENCODE_TUI_MAX_VERSION =", "MISSING_MAX_VERSION ="))
+    with pytest.raises(ValueError, match="unreadable"):
+        opencode.ADAPTER.apply_bump(coupled_tree, [_candidate()])
+
+
 def test_discover_keeps_only_the_1x_line(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         opencode.github,
         "npm_versions",
-        lambda package: ["1.0.0", "1.18.34", "2.0.6", "2.1.0"],
+        lambda package: ["1.0.0", "1.16.0", "2.0.6", "2.1.0"],
     )
-    assert opencode.ADAPTER.discover() == ["1.0.0", "1.18.34"]
+    assert opencode.ADAPTER.discover() == ["1.0.0", "1.16.0"]
 
 
 def test_version_line_is_the_bare_release() -> None:
-    assert opencode.ADAPTER.version_line("1.18.34") == "1.18.34"
+    assert opencode.ADAPTER.version_line("1.16.0") == "1.16.0"
 
 
 def test_expected_skips_cover_only_the_disabled_stock_tui_proof() -> None:
@@ -251,7 +224,7 @@ def test_qualify_is_green_when_the_server_proofs_pass(
     assert all("stock-TUI proof NOT run" in check.detail for check in skips)
     assert all("human review required" in check.detail for check in skips)
     regie = next(check for check in result.checks if "test_dashboard_rich.py" in check.name)
-    assert regie.status == "skip" and "not executed" in regie.detail
+    assert regie.status == "skip" and "tested separately" in regie.detail
 
 
 @pytest.mark.parametrize("announce", [True, False])
