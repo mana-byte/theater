@@ -13,12 +13,7 @@ from pathlib import Path
 
 from .artifacts import tracked_changes, untracked_files
 from .contract import EVIDENCE_ROOT, Adapter, VerifiedSet, is_stable, version_key
-
-
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, timeout=30, check=False
-    )
+from .stale import stale_references
 
 
 def _probe(adapter: Adapter, root: Path, version: str, stub: Path) -> tuple[bool | None, str]:
@@ -78,30 +73,6 @@ def _next_release(adapter: Adapter, bumped: Sequence[str], gate: VerifiedSet) ->
     return f"{major}.{minor}.{patch + 1}"
 
 
-def _old_limit_problems(adapter: Adapter, root: Path, new_ceiling: str | None) -> list[str]:
-    with tempfile.TemporaryDirectory(prefix="compat-old-gate-") as temporary:
-        old_root = Path(temporary) / "tree"
-        added = _git(root, "worktree", "add", "--detach", str(old_root), "HEAD")
-        if added.returncode:
-            return [f"cannot read old gate: {added.stderr.strip()}"]
-        try:
-            old = adapter.verified(old_root)
-            if old.kind != "range" or not old.ceiling or old.ceiling == new_ceiling:
-                return []
-            paths = _git(root, "diff", "--name-only", "HEAD", "--").stdout.splitlines()
-            paths.extend(
-                _git(root, "ls-files", "--others", "--exclude-standard").stdout.splitlines()
-            )
-            return [
-                f"old limit {old.ceiling} remains in {name}"
-                for name in paths
-                if (root / name).is_file()
-                and old.ceiling in (root / name).read_text(encoding="utf-8", errors="replace")
-            ]
-        finally:
-            _git(root, "worktree", "remove", "--force", str(old_root))
-
-
 def evidence_only_bump(
     adapter: Adapter,
     root: Path,
@@ -157,7 +128,7 @@ def check_bump_problems(adapter: Adapter, root: Path, bumped: Sequence[str]) -> 
                     problems.append(
                         f"probe {version}: supported={supported}, expected={expected}: {detail}"
                     )
-        problems.extend(_old_limit_problems(adapter, root, gate.ceiling))
+        problems.extend(stale_references(adapter, root)[0])
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         problems.append(f"bump check errored: {exc}")
     return problems

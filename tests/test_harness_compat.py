@@ -27,6 +27,7 @@ from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.runner import classify_routes
 from scripts.harness_compat.sandbox import make_sandbox
 from scripts.harness_compat.select import newest_in_range, plan_bump, select_candidates
+from scripts.harness_compat.stale import stale_references, stale_warnings
 
 
 class FakeAdapter:
@@ -36,6 +37,20 @@ class FakeAdapter:
 
     def discover(self) -> list[str]:
         return ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"]
+
+
+class ExactAdapter:
+    def discover(self) -> list[str]:
+        return [
+            "0.1.0",
+            "1.4.0",
+            "1.5.0",
+            "1.6.0",
+            "1.7.0",
+            "1.8.0",
+            "1.9.0",
+            "2.0.0",
+        ]
 
 
 def _git(root: Path, *args: str) -> None:
@@ -84,6 +99,149 @@ def test_range_policy_evidence_reuse_routes_and_watch(tmp_path: Path) -> None:
     assert classified.verdict == "tooling"
     assert "POST /unknown body keys=messages,model" in classified.checks[-1].detail
     assert classify_routes(adapter, results[-1], ()).verdict == "red"
+
+
+def test_exact_candidates_stay_above_oldest_admission() -> None:
+    adapter = ExactAdapter()
+    gate = VerifiedSet(
+        "exact",
+        versions=frozenset({"1.5.0", "1.7.0"}),
+        known_bad=frozenset({"1.9.0"}),
+    )
+    assert select_candidates(adapter, gate, max_candidates=2) == ["1.8.0", "2.0.0"]
+    assert select_candidates(adapter, gate, {"2.0.0"}, max_candidates=2) == ["1.6.0", "1.8.0"]
+    assert newest_in_range(adapter, gate) is None
+    assert select_candidates(
+        adapter, VerifiedSet("exact", versions=frozenset()), max_candidates=2
+    ) == ["1.9.0", "2.0.0"]
+
+
+def test_exact_candidates_exhaust_new_releases_then_holes() -> None:
+    adapter = ExactAdapter()
+    gate = VerifiedSet(
+        "exact",
+        versions=frozenset({"1.5.0", "1.7.0"}),
+        known_bad=frozenset({"1.9.0"}),
+    )
+    evidenced = {"1.8.0", "2.0.0"}
+    assert select_candidates(adapter, gate, evidenced) == ["1.6.0"]
+    evidenced.add("1.6.0")
+    assert select_candidates(adapter, gate, evidenced) == []
+    results = [
+        Result("codex", "1.4.0", "green"),
+        Result("codex", "1.6.0", "green"),
+        Result("codex", "2.0.0", "green"),
+    ]
+    assert plan_bump(gate, results) == ["1.6.0", "2.0.0"]
+
+
+class LimitAdapter:
+    def verified(self, root: Path) -> VerifiedSet:
+        return VerifiedSet("range", floor="0.1.0", ceiling=(root / "gate.txt").read_text().strip())
+
+
+def _limit_repo(root: Path, old_ceiling: str, old_inclusive: str) -> None:
+    (root / "gate.txt").write_text(f"{old_ceiling}\n")
+    (root / "docs.txt").write_text(f"<= {old_inclusive}\n")
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "compat@example.invalid")
+    _git(root, "config", "user.name", "Compat")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "old limit")
+
+
+@pytest.mark.parametrize(
+    ("old_ceiling", "old_inclusive", "new_ceiling", "new_inclusive"),
+    [
+        ("0.99.2", "0.99.1", "0.99.3", "0.99.2"),
+        ("1.18.35", "1.18.34", "1.18.36", "1.18.35"),
+    ],
+)
+def test_old_limit_scan_allows_new_inclusive_bound(
+    tmp_path: Path,
+    old_ceiling: str,
+    old_inclusive: str,
+    new_ceiling: str,
+    new_inclusive: str,
+) -> None:
+    _limit_repo(tmp_path, old_ceiling, old_inclusive)
+    (tmp_path / "gate.txt").write_text(f"{new_ceiling}\n")
+    (tmp_path / "docs.txt").write_text(f"< {new_ceiling} and <= {new_inclusive}\n")
+    adapter = LimitAdapter()
+    assert stale_references(adapter, tmp_path) == ([], [])
+
+
+def test_old_limit_scan_finds_only_whole_stale_versions(tmp_path: Path) -> None:
+    _limit_repo(tmp_path, "0.99.2", "0.99.1")
+    (tmp_path / "gate.txt").write_text("0.99.3\n")
+    docs = tmp_path / "docs.txt"
+    docs.write_text("<= 0.99.2; unrelated 10.99.1 and 0.99.10\n")
+    adapter = LimitAdapter()
+    assert stale_references(adapter, tmp_path) == ([], [])
+    docs.write_text(docs.read_text() + "stale <= 0.99.1\n")
+    assert stale_references(adapter, tmp_path) == (
+        ["old limit 0.99.1 remains in docs.txt:2"],
+        [],
+    )
+
+
+def test_pi_historical_proofs_are_soft_but_bounds_are_hard(tmp_path: Path) -> None:
+    _limit_repo(tmp_path, "0.99.2", "0.99.1")
+    (tmp_path / "gate.txt").write_text("0.99.3\n")
+    docs = tmp_path / "docs.txt"
+    docs.write_text(">=0.85.1,<=0.99.2\n0.99.0, 0.99.1: all three proofs\n")
+    source = tmp_path / "plugin.py"
+    source.write_text("# 0.99.1 was proven on stock Pi\n")
+    adapter = LimitAdapter()
+    assert stale_references(adapter, tmp_path) == (
+        [],
+        ["docs.txt:2 (0.99.1)", "plugin.py:1 (0.99.1)"],
+    )
+    assert stale_warnings(adapter, tmp_path, ["0.99.2"]) == [
+        "docs.txt:2 (0.99.1)",
+        "plugin.py:1 (0.99.1)",
+    ]
+    source.write_text(
+        "# 0.99.1 was proven on stock Pi\n"
+        "in_qualified = (0, 85, 1) <= parsed <= (0, 99, 1)\n"
+        'range_text = "<= 0.99.1"\n'
+    )
+    assert stale_references(adapter, tmp_path)[0] == [
+        "old limit 0.99.1 remains in plugin.py:2",
+        "old limit 0.99.1 remains in plugin.py:3",
+    ]
+
+
+def test_opencode_historical_header_is_soft_but_range_string_and_tuple_are_hard(
+    tmp_path: Path,
+) -> None:
+    _limit_repo(tmp_path, "1.18.35", "1.18.34")
+    (tmp_path / "gate.txt").write_text("1.18.36\n")
+    (tmp_path / "docs.txt").write_text("Qualified: 1.17.15–1.18.35\n")
+    source = tmp_path / "runtime_plan.py"
+    source.write_text(
+        "# 1.17.15-1.18.34 qualified by byte-stable Theater-consumed surfaces\n"
+        "# model-free live probes on stock 1.17.15/1.18.34\n"
+        "# the paid suite is pinned to stock 1.18.34 (previously 1.18.29)\n"
+    )
+    adapter = LimitAdapter()
+    assert stale_references(adapter, tmp_path) == (
+        [],
+        [
+            "runtime_plan.py:1 (1.18.34)",
+            "runtime_plan.py:2 (1.18.34)",
+            "runtime_plan.py:3 (1.18.34)",
+        ],
+    )
+    source.write_text(
+        source.read_text()
+        + 'reason = "(qualified releases are 1.17.15-1.18.34)"\n'
+        + "OPENCODE_TUI_MAX_VERSION = (1, 18, 35)\n"
+    )
+    assert stale_references(adapter, tmp_path)[0] == [
+        "old limit 1.18.34 remains in runtime_plan.py:4",
+        "old limit 1.18.35 remains in runtime_plan.py:5",
+    ]
 
 
 class ArtifactAdapter:
@@ -216,9 +374,14 @@ def test_framework_replaces_placeholder_evidence_and_reports_ceiling(tmp_path: P
         text=True,
         check=True,
     ).stdout.splitlines() == ["tests/fixtures/harness_compat/claude/3.0.0.json"]
+    summary["stale_warnings"] = [f"docs/old.md:{line:02} (2.9.9)" for line in range(1, 23)]
     report = prepare_publication(summary, tmp_path / "summary.json")
     assert report.pr_needed is True
     assert "Compatibility ceiling was NOT raised" in report.pr_body
+    assert "Historical references to the previous limit remain (review):" in report.pr_body
+    assert "docs/old.md:20 (2.9.9)" in report.pr_body
+    assert "docs/old.md:21 (2.9.9)" not in report.pr_body
+    assert "and 2 more" in report.pr_body
 
 
 def test_forced_in_range_candidate_reuses_its_watch_result(

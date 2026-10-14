@@ -44,6 +44,7 @@ def build_report(
     routes: Iterable[Route] = (),
     admitted_versions: Iterable[str] = (),
     evidence_only: bool = False,
+    stale_warnings: Iterable[str] = (),
 ) -> PublishReport:
     """Build one rolling PR/issue report; inconclusive results cause neither."""
     if any(result.harness != harness for result in results):
@@ -62,6 +63,14 @@ def build_report(
         labels.append("admitted-regression")
 
     pr_body = _body(f"Qualified {harness} releases", green, run_url=run_url, routes=ordered_routes)
+    warnings = sorted(set(stale_warnings))
+    if warnings:
+        lines = [f"- {_markdown_text(item)}" for item in warnings[:20]]
+        if len(warnings) > 20:
+            lines.append(f"- … and {len(warnings) - 20} more")
+        pr_body += "\n\nHistorical references to the previous limit remain (review):\n" + "\n".join(
+            lines
+        )
     if evidence_only:
         pr_body += (
             "\n\nCompatibility ceiling was NOT raised. This PR records evidence only; "
