@@ -131,6 +131,11 @@
       "directory": "0.162.1",
       "status": "qualified",
       "compatibility_policy": "codex-appserver-verified"
+    },
+    "0.163.0": {
+      "directory": "0.163.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-verified"
     }
   }
 }
