@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+from collections.abc import Collection
 from pathlib import Path
 
 from .contract import EVIDENCE_ROOT
@@ -115,8 +116,11 @@ class CandidateArtifacts:
             _copy(source, self.storage / relative)
             self.owners[relative] = version
 
-    def copy_into(self, tree: Path) -> None:
+    def copy_into(self, tree: Path, versions: Collection[str]) -> None:
+        """Only promoted releases' files; a captured green that is not promoted must not ship."""
         for relative in sorted(self.owners):
+            if self.owners[relative] not in versions:
+                continue
             target = tree / relative
             if target.exists() or target.is_symlink():
                 raise RuntimeError(f"artifact path already exists in composed tree: {relative}")

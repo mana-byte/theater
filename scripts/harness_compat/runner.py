@@ -167,7 +167,7 @@ def _compose(
 ) -> tuple[list[str], bool, bool, list[str]]:
     try:
         with _worktree(root) as tree, make_sandbox(adapter.name) as sandbox:
-            artifacts.copy_into(tree)
+            artifacts.copy_into(tree, greens)
             changed = adapter.apply_bump(tree, greens)
             if not changed:
                 return [], False, False, []

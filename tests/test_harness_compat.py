@@ -22,6 +22,7 @@ from scripts.harness_compat.contract import (
     Result,
     Sandbox,
     VerifiedSet,
+    version_key,
 )
 from scripts.harness_compat.diagnostics import clip_diagnostic
 from scripts.harness_compat.evidence import (
@@ -374,6 +375,36 @@ class ArtifactAdapter:
         return Result(self.name, version, "green", (Check("proof", "pass"),))
 
 
+class TwoReleaseAdapter(ArtifactAdapter):
+    """Codex-shaped: qualify moves its bundle into fixtures/ itself, so capture sees that path."""
+
+    def discover(self) -> list[str]:
+        return ["1.2.0", "1.3.0"]
+
+    def verified(self, root: Path) -> VerifiedSet:
+        return VerifiedSet("exact", versions=frozenset((root / "gate.txt").read_text().split()))
+
+    def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
+        gate = set((root / "gate.txt").read_text().split()) | set(greens)
+        (root / "gate.txt").write_text("".join(f"{item}\n" for item in sorted(gate)))
+        changed = [Path("gate.txt")]
+        for version in greens:
+            staged = root / f"candidates/{version}.json"
+            if staged.exists():
+                target = root / f"fixtures/{version}.json"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(staged, target)
+                changed.append(target.relative_to(root))
+        return changed
+
+    def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+        staged = root / f"candidates/{version}.json"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text('{"proved": true}\n')
+        self.apply_bump(root, [version])
+        return Result(self.name, version, "green", (Check("proof", "pass"),))
+
+
 class EvidenceOnlyAdapter:
     name = "claude"
     probe = "unavailable:probe"
@@ -481,21 +512,24 @@ def test_forced_in_range_candidate_reuses_its_watch_result(
     assert "Routes:" not in report.pr_body
 
 
+def _artifact_repo(root: Path, gate: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapters = root / "scripts/harness_compat/adapters"
+    adapters.mkdir(parents=True)
+    (root / "scripts/harness_compat/contract.py").write_text("contract\n")
+    (adapters / "vibe.py").write_text("adapter\n")
+    (root / "gate.txt").write_text(gate)
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "compat@example.invalid")
+    _git(root, "config", "user.name", "Compat")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "source")
+    monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
+
+
 def test_green_candidate_artifact_is_composed_and_staged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source = tmp_path / "scripts/harness_compat"
-    adapters = source / "adapters"
-    adapters.mkdir(parents=True)
-    (source / "contract.py").write_text("contract\n")
-    (adapters / "vibe.py").write_text("adapter\n")
-    (tmp_path / "gate.txt").write_text("none\n")
-    _git(tmp_path, "init", "-b", "main")
-    _git(tmp_path, "config", "user.email", "compat@example.invalid")
-    _git(tmp_path, "config", "user.name", "Compat")
-    _git(tmp_path, "add", ".")
-    _git(tmp_path, "commit", "-m", "source")
-    monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
+    _artifact_repo(tmp_path, "none\n", monkeypatch)
 
     summary = runner.run_harness(ArtifactAdapter(), tmp_path, publish=True)
 
@@ -540,6 +574,32 @@ def test_green_candidate_artifact_is_composed_and_staged(
     assert CandidateArtifacts(tmp_path / "forbidden-pool").capture(first, "1.2.0") == [
         "candidate wrote forbidden evidence path: tests/fixtures/harness_compat/vibe/1.2.0.json"
     ]
+
+
+def test_unpromoted_candidate_artifacts_stay_out_of_the_composed_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #37: an older green candidate must not ride along with the promoted release."""
+    _artifact_repo(tmp_path, "", monkeypatch)
+    adapter = TwoReleaseAdapter()
+    older, newer = sorted(adapter.discover(), key=version_key)
+    assert runner.run_harness(adapter, tmp_path, publish=True)["greens"] == [newer]
+    _git(tmp_path, "checkout", "-b", "rolling")
+    _git(tmp_path, "commit", "-m", "rolling gate")
+    _git(tmp_path, "checkout", "main")
+
+    second = runner.run_harness(adapter, tmp_path, publish=True)
+
+    assert (second["candidates"], second["greens"], second["published"]) == ([older], [newer], True)
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert staged == [f"fixtures/{newer}.json", "gate.txt"]
+    assert not (tmp_path / f"fixtures/{older}.json").exists()
 
 
 def test_pr_body_is_one_line_per_release_with_bounded_warnings() -> None:
