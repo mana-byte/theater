@@ -3,7 +3,7 @@
 import re
 
 PI_FRONTEND_QUALIFIED_FLOOR = (0, 80, 8)
-PI_FRONTEND_QUALIFIED_MAX = (1, 2, 0)
+PI_FRONTEND_QUALIFIED_MAX = (1, 3, 0)
 # Broken published artifacts inside [FLOOR, MAX]: 0.85.0 crashes at import
 # (no ModelRuntime/agent_settled); 1.0.1-1.1.0 import a codemode symbol that
 # @earendil-works/pi-codemode 1.2.0 removed, so codemode fails to load.
