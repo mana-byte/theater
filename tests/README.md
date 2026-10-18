@@ -14,7 +14,7 @@ uv run pytest tests/daemon/controls # one area; any directory or file works
 Never run bare `pytest` for the whole suite; use the Makefile. Lanes are markers
 (`pyproject.toml`): `tmux` drives a real tmux server and self-skips without it;
 `integration` launches real third-party binaries or builds distributions and is excluded
-from `make test-unit`.
+from `make test-unit`; `requires_node` shells out to node and skips when it is absent.
 
 ## Layout
 

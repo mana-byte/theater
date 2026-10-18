@@ -238,3 +238,13 @@ async def client(daemon):
     await c.connect()
     yield c
     await c.aclose()
+
+
+def pytest_collection_modifyitems(items):
+    """`requires_node` tests skip, not fail, on a machine without node."""
+    if shutil.which("node") is not None:
+        return
+    skip = pytest.mark.skip(reason="node is not installed")
+    for item in items:
+        if "requires_node" in item.keywords:
+            item.add_marker(skip)

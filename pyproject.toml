@@ -109,6 +109,7 @@ testpaths = ["tests", "packages/regie/tests"]
 markers = [
     "tmux: drives a real tmux server; skipped when tmux is not installed",
     "integration: launches real third-party binaries or builds distributions; slow, excluded by make test-unit",
+    "requires_node: shells out to node; skipped (not failed) when node is not on PATH",
 ]
 
 [tool.coverage.run]
