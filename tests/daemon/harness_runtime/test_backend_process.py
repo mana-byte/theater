@@ -1,8 +1,6 @@
-"""Focused tests for detached backend process ownership.
+"""Detached backend process ownership: launch, verified identity, termination and adoption.
 
-Real processes (python subprocesses), real signals, real identity facts — the
-launch path, session detachment, verified pid identity, graceful terminate,
-kill fallback, and the fail-closed mismatch rule.
+Real python subprocesses and signals; any identity mismatch fails closed without signalling.
 """
 
 from __future__ import annotations
@@ -18,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.backend_snippets import SLEEP_SNIPPET
 from theater import paths
 from theater.daemon.harness_runtime import backend as harness_backend
 from theater.daemon.harness_runtime.backend import (
@@ -39,7 +38,6 @@ from theater.daemon.harness_runtime.errors import (
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import RuntimePlan
 
-SLEEP_SNIPPET = "import time; time.sleep(300)"
 IGNORE_SIGTERM_SNIPPET = (
     "import signal, time\n"
     "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
@@ -224,8 +222,6 @@ async def test_unkillable_process_reports_failure(workdir: Path) -> None:
 
 
 async def test_launch_refuses_empty_argv_and_missing_cwd(workdir: Path) -> None:
-    from theater.daemon.harness_runtime.errors import BackendLaunchError
-
     with pytest.raises(BackendLaunchError, match="empty backend argv"):
         await launch_detached_backend(_plan([]), participant_id="p-empty", cwd=workdir)
     with pytest.raises(BackendLaunchError, match="does not exist"):

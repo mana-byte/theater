@@ -1,8 +1,7 @@
-"""Stdout endpoint discovery, secret-env resolution, and their persistence.
+"""Stdout endpoint discovery and secret-env resolution for detached backends.
 
-Real processes announce real endpoints; the core owns the bounds (deadline,
-bytes, line length, loopback shape) and the plugin owns only line parsing.
-Every failure reaps the just-launched child and fails closed.
+The core owns the bounds (deadline, bytes, line length, loopback shape); every failure
+reaps the just-launched child and fails closed.
 """
 
 from __future__ import annotations

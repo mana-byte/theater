@@ -1,20 +1,21 @@
-"""Focused tests for the daemon runtime manager.
+"""Daemon runtime manager: lifecycle, native-route cache, adoption and recovery monitors.
 
-Concurrency assertions use deterministic barriers (events the test releases
-only after every caller has arrived), never timing. Close-without-kill,
-generation guards, and concurrent get-or-create are exercised against both the
-Wave 1 fake runtime and a real detached backend process.
+Concurrency assertions use deterministic barriers (events released only after every
+caller has arrived), never timing.
 """
 
 from __future__ import annotations
 
 import asyncio
 import sys
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from opentelemetry.context import attach, detach
 
+from tests.support.backend_snippets import SLEEP_SNIPPET
 from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from tests.support.waiting import wait_until
 from theater.daemon.harness_runtime import manager as manager_mod
@@ -24,7 +25,7 @@ from theater.daemon.harness_runtime.errors import (
     BackendIdentityMismatch,
     RuntimeGenerationMismatch,
 )
-from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
+from theater.daemon.harness_runtime.manager import HarnessRuntimeManager, ManagedRuntime
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -34,8 +35,7 @@ from theater.harness.contracts.runtime import (
     RuntimePlan,
     RuntimeSettingField,
 )
-
-SLEEP_SNIPPET = "import time; time.sleep(300)"
+from theater.observability.tracing import extract_trace_context, inject_trace_context
 
 
 async def _park(task: asyncio.Task, turns: int = 20) -> None:
@@ -803,3 +803,25 @@ async def test_a_dead_backend_stays_retryable_until_its_jobs_are_settled() -> No
     second = await manager._recover_disconnected("p1", 1, callback, backend=dead)  # type: ignore[arg-type]
     assert second is True
     await manager.aclose()
+
+
+async def test_health_monitor_starts_outside_request_trace(monkeypatch):
+    inherited = ContextVar("unrelated", default="empty")
+    inherited.set("preserved")
+    observed = asyncio.Future()
+    manager = HarnessRuntimeManager()
+
+    async def monitor(*_):
+        observed.set_result((inject_trace_context(), inherited.get()))
+
+    monkeypatch.setattr(manager, "_monitor_health", monitor)
+    manager._recovery_callback = lambda *_: None
+    parent = {"traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01"}
+    token = attach(extract_trace_context(parent))
+    try:
+        manager._ensure_monitor(ManagedRuntime("test", runtime=object()), 1)
+        assert await observed == ({}, "preserved")
+        assert inject_trace_context() == parent
+    finally:
+        detach(token)
+        await manager.aclose()

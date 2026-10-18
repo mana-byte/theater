@@ -1,9 +1,4 @@
-"""Focused transport tests: the WebSocket-over-Unix client against a real socket.
-
-Every test drives the actual client through the frozen ``RuntimeIO`` /
-``RuntimeConnection`` seams against a minimal in-rig RFC 6455 server: real
-handshake bytes, real masked frames, real fragmentation, real disconnects.
-"""
+"""WebSocket-over-Unix runtime transport: RFC 6455 frame codec and client against a real socket."""
 
 from __future__ import annotations
 
@@ -12,11 +7,14 @@ import base64
 import hashlib
 import itertools
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from tests.support.waiting import wait_until
 from tests.support.ws_server import WsTestServer
+from theater.daemon.harness_runtime.constants import RUNTIME_WS_MAX_FRAME_BYTES
 from theater.daemon.harness_runtime.errors import (
     RuntimeConnectionSaturated,
     RuntimeHandshakeError,
@@ -24,7 +22,17 @@ from theater.daemon.harness_runtime.errors import (
     RuntimePayloadTooLarge,
     RuntimeProtocolError,
 )
-from theater.daemon.harness_runtime.frames import OP_CLOSE, OP_PONG
+from theater.daemon.harness_runtime.frames import (
+    CLOSE_NORMAL,
+    OP_CLOSE,
+    OP_CONTINUATION,
+    OP_PING,
+    OP_PONG,
+    OP_TEXT,
+    FrameDecoder,
+    FrameProtocolError,
+    encode_frame,
+)
 from theater.daemon.harness_runtime.transport import (
     WebSocketRuntimeIO,
     wait_for_unix_endpoint,
@@ -37,25 +45,153 @@ from theater.harness.contracts.runtime import (
     RuntimeRequestTimeout,
 )
 
+
+def _decode_single(data: bytes, *, expect_masked: bool = False) -> tuple[int, bytes, bool]:
+    decoder = FrameDecoder(expect_masked=expect_masked, max_frame_bytes=RUNTIME_WS_MAX_FRAME_BYTES)
+    frames = decoder.feed(data)
+    assert len(frames) == 1
+    frame = frames[0]
+    return frame.opcode, frame.payload, frame.fin
+
+
+def test_masked_roundtrip() -> None:
+    encoded = encode_frame(OP_TEXT, b'{"id": 1}', mask=True)
+    decoder = FrameDecoder(expect_masked=True, max_frame_bytes=RUNTIME_WS_MAX_FRAME_BYTES)
+    frames = decoder.feed(encoded)
+    assert len(frames) == 1
+    assert (frames[0].opcode, frames[0].payload, frames[0].fin) == (
+        OP_TEXT,
+        b'{"id": 1}',
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("opcode", "payload"),
+    [
+        pytest.param(OP_TEXT, b"hello", id="short"),
+        pytest.param(OP_PONG, b"", id="empty"),
+        pytest.param(OP_TEXT, bytes(range(256)) * 3, id="sixteen_bit_length"),
+        pytest.param(OP_TEXT, b"y" * 70_000, id="sixty_four_bit_length"),
+    ],
+)
+def test_unmasked_roundtrip(opcode: int, payload: bytes) -> None:
+    decoded_opcode, decoded, _ = _decode_single(encode_frame(opcode, payload, mask=False))
+    assert (decoded_opcode, decoded) == (opcode, payload)
+
+
+def test_mask_bit_is_set_on_client_frames() -> None:
+    encoded = encode_frame(OP_TEXT, b"abc", mask=True)
+    assert encoded[1] & 0x80, "client frames must set the mask bit"
+    server_decoder = FrameDecoder(expect_masked=True, max_frame_bytes=RUNTIME_WS_MAX_FRAME_BYTES)
+    frames = server_decoder.feed(encoded)
+    assert frames[0].payload == b"abc"
+    assert frames[0].masked is True
+
+
+def test_decode_across_single_byte_feeds() -> None:
+    encoded = encode_frame(OP_TEXT, b"x" * 300, mask=True)
+    decoder = FrameDecoder(expect_masked=True, max_frame_bytes=RUNTIME_WS_MAX_FRAME_BYTES)
+    frames: list[object] = []
+    for byte in encoded:
+        frames.extend(decoder.feed(bytes([byte])))
+    assert len(frames) == 1
+
+
+def test_fragmented_message_decodes_frame_by_frame() -> None:
+    decoder = FrameDecoder(expect_masked=False, max_frame_bytes=RUNTIME_WS_MAX_FRAME_BYTES)
+    first = encode_frame(OP_TEXT, b'{"id"', mask=False, fin=False)
+    middle = encode_frame(OP_CONTINUATION, b': 1, "meth', mask=False, fin=False)
+    last = encode_frame(OP_CONTINUATION, b'od": "x"}', mask=False, fin=True)
+    frames = decoder.feed(first + middle + last)
+    assert [frame.opcode for frame in frames] == [OP_TEXT, OP_CONTINUATION, OP_CONTINUATION]
+    assert [frame.fin for frame in frames] == [False, False, True]
+    assert b"".join(frame.payload for frame in frames) == b'{"id": 1, "method": "x"}'
+
+
+@pytest.mark.parametrize(
+    ("opcode", "payload", "fin", "match"),
+    [
+        pytest.param(OP_PING, b"p" * 126, True, "125-byte", id="control_payload_over_125"),
+        pytest.param(
+            OP_CLOSE, CLOSE_NORMAL.to_bytes(2, "big"), False, "fragmented", id="fragmented_control"
+        ),
+    ],
+)
+def test_encoder_refuses_malformed_control_frames(
+    opcode: int, payload: bytes, fin: bool, match: str
+) -> None:
+    with pytest.raises(FrameProtocolError, match=match):
+        encode_frame(opcode, payload, mask=True, fin=fin)
+
+
+def _rsv_set() -> bytes:
+    encoded = bytearray(encode_frame(OP_TEXT, b"z", mask=False))
+    encoded[0] |= 0x40
+    return bytes(encoded)
+
+
+def _unknown_opcode() -> bytes:
+    encoded = bytearray(encode_frame(OP_TEXT, b"z", mask=False))
+    encoded[0] = (encoded[0] & 0xF0) | 0x3
+    return bytes(encoded)
+
+
+@pytest.mark.parametrize(
+    ("frame", "match"),
+    [
+        pytest.param(_rsv_set(), "rsv", id="rsv_bits"),
+        pytest.param(_unknown_opcode(), "unknown websocket opcode", id="unknown_opcode"),
+        pytest.param(
+            encode_frame(OP_TEXT, b"z", mask=True),
+            "server frames must never be masked",
+            id="masked_server_frame",
+        ),
+    ],
+)
+def test_decoder_rejects_malformed_server_frames(frame: bytes, match: str) -> None:
+    with pytest.raises(FrameProtocolError, match=match):
+        _decode_single(frame)
+
+
+def test_unmasked_client_frame_is_rejected_server_side() -> None:
+    encoded = encode_frame(OP_TEXT, b"z", mask=False)
+    decoder = FrameDecoder(expect_masked=True, max_frame_bytes=RUNTIME_WS_MAX_FRAME_BYTES)
+    with pytest.raises(FrameProtocolError, match="client frames must be masked"):
+        decoder.feed(encoded)
+
+
+def test_declared_frame_over_bound_is_rejected_before_buffering() -> None:
+    # A declared length beyond the bound, without any payload bytes following.
+    header = bytes([0x81, 0x7F]) + (70_000).to_bytes(8, "big")
+    decoder = FrameDecoder(expect_masked=False, max_frame_bytes=1024)
+    with pytest.raises(FrameProtocolError, match="exceeds the bound"):
+        decoder.feed(header)
+
+
+def test_partial_header_keeps_buffering() -> None:
+    decoder = FrameDecoder(expect_masked=False, max_frame_bytes=1024)
+    encoded = encode_frame(OP_TEXT, b"payload", mask=False)
+    for cut in range(1, len(encoded)):
+        decoder = FrameDecoder(expect_masked=False, max_frame_bytes=1024)
+        assert decoder.feed(encoded[:cut]) == []
+        frames = decoder.feed(encoded[cut:])
+        assert len(frames) == 1
+        assert frames[0].payload == b"payload"
+
+
 SOCKET_DIR = Path("/tmp") / "thtr-runtime-ws-tests"
+
 
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
-async def _settle(predicate, *, attempts: int = 500) -> None:
-    """Yield event-loop turns until the reader loop caught up, deterministically."""
-    for _ in range(attempts):
-        if predicate():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError("the transport never reached the expected state")
-
-
 @pytest.fixture
 def socket_path(tmp_path: Path) -> Path:
-    # tmp_path runs ~120 bytes deep; sun_path caps at 104 on macOS.
+    # tmp_path runs ~120 bytes deep; sun_path caps at 104 on macOS. The pid keeps xdist
+    # workers (each with its own counter) off each other's sockets.
     SOCKET_DIR.mkdir(exist_ok=True)
-    return SOCKET_DIR / f"ws-{next(_socket_seq)}.sock"
+    return SOCKET_DIR / f"ws-{os.getpid()}-{next(_socket_seq)}.sock"
 
 
 _socket_seq = itertools.count(1)
@@ -291,7 +427,7 @@ async def test_deadline_cleanup_leaves_connection_usable(server: WsTestServer, c
     assert connection.statistics().outstanding_requests == 0
     # The late reply must not crash the loop; it is an unsolicited reply.
     server.send_json({"id": 1, "result": {"late": True}})
-    await _settle(lambda: connection.statistics().unsolicited_replies == 1)
+    await wait_until(lambda: connection.statistics().unsolicited_replies == 1)
     assert connection.statistics().outstanding_requests == 0
     # And the next request still works on the same connection.
     task = asyncio.create_task(connection.request("next", {}, timeout=5.0))
@@ -491,7 +627,7 @@ async def test_notification_overflow_fails_closed_instead_of_dropping_evidence(
     # Fill the buffer to its bound with no consumer, then exceed it.
     for index in range(129):
         server.send_json({"method": "stream/item", "params": {"n": index}})
-    await _settle(lambda: connection.statistics().closed)
+    await wait_until(lambda: connection.statistics().closed)
 
     stats = connection.statistics()
     assert stats.closed is True, "buffer saturation must close the connection"
@@ -517,7 +653,7 @@ async def test_notification_overflow_reaches_plugin_visible_iteration(
     RuntimeConnectionError (the frozen vocabulary) is raised to the caller."""
     for index in range(129):
         server.send_json({"method": "stream/item", "params": {"n": index}})
-    await _settle(lambda: connection.statistics().closed)
+    await wait_until(lambda: connection.statistics().closed)
 
     # The only surface plugin code holds: RuntimeConnection.notifications().
     iterator = connection.notifications()
@@ -551,7 +687,7 @@ async def test_notification_overflow_after_server_requests_never_answers_them(
     # closes rather than silently discarding them.
     for index in range(129):
         server.send_json({"id": index, "method": "approval/request", "params": {"n": index}})
-    await _settle(lambda: connection.statistics().closed)
+    await wait_until(lambda: connection.statistics().closed)
     stats = connection.statistics()
     assert stats.closed is True
     assert "saturated" in (stats.close_error or "")
@@ -597,7 +733,7 @@ async def test_aclose_is_deterministic_and_idempotent(server: WsTestServer, conn
     assert opcode == OP_CLOSE
     assert int.from_bytes(payload[:2], "big") == 1000
     await connection.aclose()  # idempotent: exactly one close frame, ever
-    await _settle(lambda: not server.frames)
+    await wait_until(lambda: not server.frames)
     assert server.frames == []
 
 
