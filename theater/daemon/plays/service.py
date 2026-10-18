@@ -112,6 +112,12 @@ class PlayService:
             if governing is not None:
                 mine = governing.is_master and governing.participant_id == caller_id
                 if mine and governing.play == play.name:
+                    require_plugins(
+                        governing.rules,
+                        store=self.store,
+                        participant_id=caller_id,
+                        connection=unit.connection,
+                    )
                     return _outcome(play, "already_master")
                 return _outcome(play, "not_started", reason=_inside(governing, caller_id))
             below = next(self._memberships_in(caller_id, connection=unit.connection), None)

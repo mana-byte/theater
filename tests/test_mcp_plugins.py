@@ -284,7 +284,7 @@ def test_disabled_broken_package_is_omitted_without_a_diagnostic(tmp_path):
     package.mkdir(parents=True)
     (package / "manifest.py").write_text("raise RuntimeError('must not import')", encoding="utf-8")
 
-    loaded = config.Config()
+    loaded = config.Config(mcp=config.McpSection(enabled=[]))
     assert registry.install(loaded, local_dir=local, shipped_dir=tmp_path / "shipped") == []
     assert registry.diagnostics() == ()
 

@@ -121,7 +121,12 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
         _cleanup_package(package_name)
         return _broken(plugin, f"{manifest_path}: validation failed: {exc!r}")
     try:
-        plays = load_declared_plays(plugin.path / "skills", manifest.plays, provider=plugin.name)
+        plays = load_declared_plays(
+            plugin.path / "skills",
+            manifest.plays,
+            provider=plugin.name,
+            play_permissions=manifest.play_permissions,
+        )
         skills = load_declared_skills(
             plugin.path / "skills",
             manifest.skills,

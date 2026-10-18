@@ -7,6 +7,7 @@ import logging
 import shutil
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
 
@@ -450,6 +451,17 @@ class Spawner:
         participant.session_id = None
         participant.session_correlation = None
         try:
+            from theater.daemon.plays.dependencies import require_rendered_plugins
+
+            require_rendered_plugins(
+                participant.id,
+                store=self.registry.store,
+                rendered=[
+                    record.plugin_name
+                    for record in self.registry.store.mcp_plugin_credentials(participant.id)
+                    if Path(record.credential_path) in plan.private_files
+                ],
+            )
             self.registry.store.upsert_participant(participant)
             self._record_plan_artifacts(participant, plan)
             self._record_launch_identity(participant, plan, harness.observer)

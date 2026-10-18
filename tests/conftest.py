@@ -393,11 +393,15 @@ def clean_registry(shipped_harnesses):
     itself.
     """
     from theater import harness
+    from theater.mcp_plugins import registry as mcp_registry
 
     harnesses = dict(harness.HARNESSES)
     aliases = dict(harness._ALIASES)
     registered = dict(harness._PLUGINS)
     broken = list(harness._BROKEN)
+    mcp_servers = dict(mcp_registry.MCP_SERVERS)
+    mcp_plugins = dict(mcp_registry._PLUGINS)
+    mcp_diagnostics = list(mcp_registry._DIAGNOSTICS)
     yield
     harness.HARNESSES.clear()
     harness.HARNESSES.update(harnesses)
@@ -407,6 +411,12 @@ def clean_registry(shipped_harnesses):
     harness._PLUGINS.update(registered)
     harness._BROKEN.clear()
     harness._BROKEN.extend(broken)
+    mcp_registry.MCP_SERVERS.clear()
+    mcp_registry.MCP_SERVERS.update(mcp_servers)
+    mcp_registry._PLUGINS.clear()
+    mcp_registry._PLUGINS.update(mcp_plugins)
+    mcp_registry._DIAGNOSTICS.clear()
+    mcp_registry._DIAGNOSTICS.extend(mcp_diagnostics)
 
 
 @pytest.fixture

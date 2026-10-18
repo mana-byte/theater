@@ -221,7 +221,11 @@ def _load_package(
 
 
 def load_declared_plays(
-    root: Path, names: Sequence[str], *, provider: str
+    root: Path,
+    names: Sequence[str],
+    *,
+    provider: str,
+    play_permissions: frozenset[str] | None = None,
 ) -> tuple[LoadedPlay, ...]:
     """Load only explicitly declared, data-only plugin plays."""
     if not names:
@@ -229,12 +233,24 @@ def load_declared_plays(
     root_fd = _open_directory(root, "MCP-plugin play root")
     assert root_fd is not None
     try:
-        return tuple(
+        plays = tuple(
             _load_play(
                 name, source=SkillSource.MCP_PLUGIN, root=root, root_fd=root_fd, provider=provider
             )
             for name in names
         )
+        if play_permissions is not None:
+            for loaded in plays:
+                declared = loaded.play.rules.plugin_permissions.get(provider, {})
+                unknown = {
+                    grant for grants in declared.values() for grant in grants
+                } - play_permissions
+                if unknown:
+                    raise SkillValidationError(
+                        f"play {loaded.play.name!r} declares unsupported {provider!r} "
+                        f"permissions: {sorted(unknown)}"
+                    )
+        return plays
     finally:
         _close_fd(root_fd)
 

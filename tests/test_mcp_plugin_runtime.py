@@ -18,7 +18,7 @@ import pytest
 from theater import paths
 from theater.cli.commands import plugin as plugin_cli
 from theater.client import CALL_TIMEOUT, DaemonClient
-from theater.config import Config
+from theater.config import Config, McpSection
 from theater.constants.plugins import MCP_PLUGIN_SPAWN_OMISSION_MAX
 from theater.daemon.persistence.store import Store
 from theater.daemon.plugins.credentials import mint_credential
@@ -600,7 +600,7 @@ async def test_disabled_malformed_package_does_not_emit_a_spawn_omission(
     package.mkdir(parents=True)
     assert (
         mcp_registry.install(
-            Config(),
+            Config(mcp=McpSection(enabled=[])),
             local_dir=package.parent,
             shipped_dir=tmp_path / "shipped",
         )

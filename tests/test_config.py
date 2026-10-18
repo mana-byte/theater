@@ -35,6 +35,20 @@ def test_missing_file_is_not_an_error():
     assert loaded.observer.poll_interval == 0.25
     assert loaded.scratchpad.ttl_days == 7.0
     assert loaded.terminals.default_provider == "tmux"
+    assert loaded.mcp.enabled == ["beads"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("[mcp]\n", ["beads"]),
+        ("[mcp]\nenabled = []\n", []),
+        ('[mcp]\nenabled = ["acme"]\n', ["acme"]),
+    ],
+)
+def test_mcp_defaults_preserve_explicit_plugin_lists(text, expected):
+    write(text)
+    assert cfg.load().mcp.enabled == expected
 
 
 def test_missing_file_reports_every_value_as_default():

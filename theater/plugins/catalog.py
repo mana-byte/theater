@@ -128,7 +128,12 @@ def _load(path: Path, name: str, source: str) -> LoadedPlugin | LoadedMcpPlugin 
     try:
         validate_manifest(name, manifest)
         skills = load_declared_skills(path / "skills", manifest.skills, provider=name)
-        plays = load_declared_plays(path / "skills", manifest.plays, provider=name)
+        plays = load_declared_plays(
+            path / "skills",
+            manifest.plays,
+            provider=name,
+            play_permissions=manifest.play_permissions,
+        )
     except KeyboardInterrupt:
         cleanup_package(package_name)
         raise

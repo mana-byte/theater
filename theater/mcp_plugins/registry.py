@@ -79,6 +79,7 @@ class McpPluginCatalog:
         )
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         object.__setattr__(self, "registered_skills", tuple(self.registered_skills))
+        object.__setattr__(self, "registered_plays", tuple(self.registered_plays))
 
     @property
     def servers(self) -> tuple[CompiledMcpPlugin, ...]:
