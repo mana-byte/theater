@@ -22,9 +22,11 @@ green results outside the checkout.
 
 Green evidence lives at `$HARNESS_COMPAT_CACHE/<harness>/<version>.json`, or under
 `$XDG_CACHE_HOME/theater/harness-compat` (default `~/.cache/theater/harness-compat`).
-GitHub Actions restores and saves that directory between runs. Generated Codex bundles needed
-to reuse a green result live beside the cached JSON. The rolling PR changes the plugin gate
-and any required Codex bundle data; its body has one verdict and run link per release.
+GitHub Actions restores and saves that directory between runs. The Codex bundle a green run
+captured lives beside the cached JSON, so a reused green can still refresh the retained
+`latest` fixture. The rolling PR changes the plugin gate (for Codex one ceiling line) and, only
+when the captured evidence differs, that one fixture; its body has one verdict and run link per
+release.
 The detailed checks stay in the workflow run. A red issue carries `compat:<harness>`;
 `tooling` marks an automation or mock failure, and `admitted-regression` marks an in-range
 release that failed the daily watch. The issue closes after a conclusive green run.
@@ -35,14 +37,17 @@ remain cache-only and never produce a PR.
 
 - A candidate is a stable upstream release without reusable cached evidence and outside the
   harness's `known_bad` list. `--version X` forces one release.
-- Exact gates (Codex): qualify only the newest unadmitted release above the oldest admission.
-  The PR promotes only the newest green release, including cached greens.
-- Range gates (Claude, OpenCode, Pi, Vibe): the oldest releases at or above the current ceiling,
-  tested in ascending order. `--max-candidates N` (default 5) caps the run. The first red stops
+- Range gates (Claude, Codex, OpenCode, Pi, Vibe): the oldest releases at or above the current
+  ceiling, tested in ascending order. `--max-candidates N` (default 5) caps the run. The first red stops
   the run, and the bump goes only to the last contiguous green. A range gate also qualifies its
   newest admitted release every day: a red result there opens an `admitted-regression` issue,
   while a green one stays silent.
   A forced `--version` is promoted only when every discovered release below it is proved too.
+- Codex's range is a record of run releases, not a semver promise (evidence outranks semver):
+  the ceiling moves only over an unbroken run of greens, a release that cannot be proved goes
+  into `CODEX_RUNTIME_QUALIFIED_EXCLUDED` with its measured cause, and anything outside the
+  range stays on the legacy launch. The retained `latest` fixture is rewritten only when a
+  capture's evidence differs, so an unchanged schema bumps one ceiling line.
 - An adapter that changes no gate value produces no PR, including Claude.
 - Cached evidence is reused only while the framework, the adapter, the proof tests
   with their imported helpers and conftests, and the harness plugin are unchanged; otherwise the

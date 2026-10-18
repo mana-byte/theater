@@ -14,17 +14,19 @@ native events.
 
 - [`codex/manifest.py`](../../theater/harness/builtin/plugins/codex/manifest.py#L115)
   declares the detached runtime and native live channel.
-- [`codex/runtime_plan.py`](../../theater/harness/builtin/plugins/codex/runtime_plan.py#L28)
-  allows exactly the releases with a qualified evidence bundle (`0.148.0`–`0.159.1`);
-  the planner starts the app-server at line 211.
+- [`codex/runtime_plan.py`](../../theater/harness/builtin/plugins/codex/runtime_plan.py#L24)
+  admits the qualified release range: a floor, an exclusive ceiling and an excluded tuple
+  (`CODEX_RUNTIME_QUALIFIED_*`); the probe at line 123 refuses everything else, and the
+  planner starts the app-server at line 241.
 - [`codex/runtime.py`](../../theater/harness/builtin/plugins/codex/runtime.py#L385)
   implements send with `clientUserMessageId`, steer at line 424, interrupt at line
   466, and settings update at line 494.
 - [`tests/test_codex_native_runtime_proof.py`](../../tests/test_codex_native_runtime_proof.py)
   contains offline fixture assertions plus opt-in stock-binary tests.
 - [`tests/fixtures/codex_native_runtime/`](../../tests/fixtures/codex_native_runtime)
-  contains the generated schemas and sanitized behavior captured per qualified release.
-  `0.154.0` is the real-provider baseline; every other bundle records `"provider": "mock"`.
+  retains two bundles of generated schemas and sanitized behavior, `floor` and `latest`,
+  selected by role from `index.json`; both record `"provider": "mock"`. Earlier per-release
+  bundles live in git history only.
 
 No phase-two production change is justified until a newly qualified release exhibits
 a real dialect difference or fixes a known limitation.
@@ -66,7 +68,7 @@ accepts an explicit output directory and performs only evidence collection:
    normalize arrays or discard descriptions/enums;
 4. run the stock topology/behavior probe and emit sanitized fixture JSON;
 5. print a deterministic recursive diff against the last qualified release;
-6. never edit the verified-version allowlist.
+6. never edit the release gate.
 
 The command must refuse a dirty output directory unless passed a newly created
 release directory. It must not overwrite prior evidence in place. Credential values,
@@ -74,12 +76,12 @@ prompts, absolute home paths, and transcript content are redacted before writing
 
 ## Phase 1 — versioned evidence layout
 
-Move the flat fixture into a per-release bundle so adding a release does not erase the
-comparison baseline:
+Keep the evidence as bundles, so adding a release does not erase the comparison baseline.
+Only two stay committed, at fixed names, so a refresh diffs as just the lines that changed:
 
 ```text
 tests/fixtures/codex_native_runtime/
-  <release>/
+  floor/ and latest/        # one bundle each, shaped as below
     installed_release.json
     protocol_schema/
     handshake.json
@@ -92,18 +94,17 @@ tests/fixtures/codex_native_runtime/
   index.json
 ```
 
-`index.json` should map exact versions to their fixture directory, qualification
-status, and compatibility dialect. Tests choose the bundle from an explicit expected
-version; they must not select “latest” by lexical or semantic comparison.
+`index.json` maps the two role names (`floor`, `latest`) to their fixture directory and
+qualification status. Tests choose a bundle by role from the index; they must not pick one
+by comparing versions lexically or semantically.
 
 Migration requirements:
 
-- move the existing files byte-for-byte except deterministic formatting;
-- keep the current offline assertions passing against every qualified release;
-- validate that every allowed version has a complete bundle and every passing bundle
-  appears in the allowlist;
-- a captured-but-failing candidate may remain in a clearly named `candidates/`
-  directory, but must never be interpreted as supported.
+- keep the current offline assertions passing against both retained bundles, and check
+  that each captured release lies inside the gate;
+- validate that the index names exactly the two retained bundles and both are complete;
+- a fresh capture waits untracked in `candidates/<release>/` until a bump composes it,
+  and is never interpreted as supported.
 
 ## Phase 2 — schema diff gate
 
@@ -183,11 +184,12 @@ the ordinary CI gate, but a skipped stock test never qualifies a release.
 
 If a candidate passes without protocol changes:
 
-1. add its fixture bundle;
-2. add its exact version to `CODEX_RUNTIME_VERIFIED_VERSIONS`;
+1. capture its bundle; refresh `latest/` only when the captured evidence differs from the
+   retained one (everything except `installed_release.json`, which names the binary);
+2. move `CODEX_RUNTIME_QUALIFIED_CEILING` past it, a one-line edit (`codex_bump.py`);
 3. update the compatibility-policy name only if policy semantics changed;
 4. run the entire native runtime and spawn/recovery suite;
-5. commit the allowlist change last, after evidence and tests.
+5. commit the ceiling change last, after evidence and tests.
 
 If schemas or behavior differ, add the smallest explicit dialect branch. A possible
 shape is:
@@ -201,8 +203,8 @@ class CodexDialect:
 ```
 
 Introduce this only after two releases actually require different handling. Until
-then, direct exact-version checks are clearer. Never infer a dialect from major/minor
-semver or accept an untested range.
+then, no branch is clearer. Never infer a dialect from major/minor semver; the range
+is only what the pipeline has run, release by release.
 
 Capability loss may be per capability if the rest of the release remains proven. For
 example, removal of `expectedTurnId` disables native steer while native send remains
@@ -237,13 +239,13 @@ mock-captured bundle records `"provider": "mock"` in `installed_release.json`
 real-provider evidence. Theater's native Codex runtime consumes the app-server wire
 protocol and the stock TUI's `--remote` attach, and the mock leaves both binaries
 unmodified (only the model behind them is scripted), so a release that passes
-the full mock suite is compatible and belongs in the allowlist: the allowlist exists
+the full mock suite is compatible and belongs inside the gate: the gate exists
 to prevent breakage, not to withhold releases that are known to work. Known mock-environment deltas, each explainable and none of them a
 behaviour gap: the release tarball's binary has no model-metadata table, so the
 app-server emits one advisory `warning` notification a metadata-installed
 binary does not; mock turns carry synthetic assistant text.
 
-Exact commands to qualify a candidate release X.Y.Z.W (allowlist edit always
+Exact commands to qualify a candidate release X.Y.Z (ceiling bump always
 last, never persisted):
 
 ```sh
@@ -251,7 +253,7 @@ SCRATCH=$(mktemp -d /tmp/codex-qualify.XXXXXX)
 uv run python tests/native/codex_fetch_release.py --version X.Y.Z --dest "$SCRATCH/bin"
 uv run python tests/native/codex_qualify_runtime.py \
   --out "$SCRATCH/bundle-X.Y.Z-mock" --capture-behavior --provider mock \
-  --baseline tests/fixtures/codex_native_runtime/0.154.0 \
+  --baseline tests/fixtures/codex_native_runtime/latest \
   --codex "$SCRATCH/bin/codex"
 THEATER_CODEX_NATIVE_PROOF=1 THEATER_CODEX_NATIVE_PROVIDER=mock \
   THEATER_CODEX_NATIVE_BIN="$SCRATCH/bin/codex" \
@@ -265,16 +267,17 @@ rm -rf "$SCRATCH"
 
 The env switches are qualification-run only and never persisted:
 `THEATER_CODEX_NATIVE_BIN` targets the fetched binary; `THEATER_CODEX_QUALIFY_VERSION`
-admits exactly that one version for the test process (the allowlist itself is
-untouched, so a candidate is exercised before any allowlist edit);
+admits exactly that one version for the test process (the gate itself is
+untouched, so a candidate is exercised before any ceiling bump);
 `THEATER_CODEX_NATIVE_PROVIDER=mock` wires the smoke suite's isolated CODEX_HOME
 at the mock provider instead of copying the ambient config. Real-provider runs
 remain the default everywhere (`--provider ambient`, env unset). Review the
 printed diff against the baseline: additive schema changes are benign; a removed
 or reshaped required method, notification, or error text is a real dialect break.
-Then commit the bundle, add its `index.json` entry, and edit
-`CODEX_RUNTIME_VERIFIED_VERSIONS` last. A release that passes everything except one
-capability (for example settings readback) is a dialect decision, not a silent pass.
+Then refresh `latest/` if the capture differs, and move `CODEX_RUNTIME_QUALIFIED_CEILING`
+last (the daily pipeline does both, see `docs/harness-compat.md`). A release that passes
+everything except one capability (for example settings readback) is a dialect decision,
+not a silent pass.
 
 ## Release dialects
 
@@ -303,11 +306,11 @@ workspace-trust dialog is not suppressed: a worktree inside a trusted repo did n
 - `tests/native/codex_native_client.py`: reusable collection helpers only; preserve
   hard frame/time bounds.
 - add `tests/native/qualify_codex_runtime.py`: explicit evidence-capture command with
-  no allowlist write.
-- `tests/test_codex_native_runtime_proof.py`: parameterize offline bundle checks and
-  keep opt-in stock scenarios.
-- `tests/fixtures/codex_native_runtime/`: versioned immutable evidence.
-- `theater/harness/builtin/plugins/codex/runtime_plan.py`: exact allowlist change last.
+  no gate write.
+- `tests/test_codex_native_runtime_proof.py`: parameterize offline bundle checks over the
+  retained bundles and keep opt-in stock scenarios.
+- `tests/fixtures/codex_native_runtime/`: the retained `floor` and `latest` evidence.
+- `theater/harness/builtin/plugins/codex/runtime_plan.py`: ceiling bump last.
 - `theater/harness/builtin/plugins/codex/runtime.py`: only for a proven dialect delta;
   preserve current send, steer, interrupt, settings, and reconciliation semantics.
 - CI documentation/workflow: run offline bundles normally; expose a manual stock
@@ -327,16 +330,20 @@ Then run the opt-in stock proof with the exact binary whose digest is in the fix
 
 ## Acceptance and stop criteria
 
-A version enters `CODEX_RUNTIME_VERIFIED_VERSIONS` only when:
+A release falls inside the gate (`CODEX_RUNTIME_QUALIFIED_CEILING` moves past it) only when:
 
-- its generated schema and stock behavior bundle are committed;
+- its generated schema and stock behavior bundle were captured and compared with `latest`;
 - every required mutation preserves exact session/turn identity;
 - concurrent UI/control, restart, overflow, and stale-turn tests pass;
 - approval ownership remains in the stock UI;
 - all `UNKNOWN` paths remain terminal and unreplayed;
-- the compatibility test proves the bundle/allowlist match.
+- the offline proof shows both retained bundles lie inside the gate.
 
-Keep exact-version fail-closed selection until multiple consecutive releases pass and
-upstream publishes a compatibility guarantee strong enough to replace it. Even then,
-evidence outranks semver. A failed new release is not urgent production work: `auto`
+The gate is a range, but it advances only over an unbroken run of proven releases: the
+daily pipeline moves the ceiling past a release only after every release between the old
+ceiling and it passed (`scripts/harness_compat/select.py`), and a release that cannot be
+admitted is listed in `CODEX_RUNTIME_QUALIFIED_EXCLUDED` with its measured cause. Evidence
+outranks semver: the range records releases that were actually run, never an inference from
+version numbers, and a release above the ceiling, a prerelease or an unparsable version stays
+fail-closed on legacy. A failed new release is not urgent production work: `auto`
 must select legacy and explicit native must explain why it was refused.
