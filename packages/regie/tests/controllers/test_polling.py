@@ -1,4 +1,6 @@
-"""LongPollLoop: primes without blocking, then long-polls; failures back off."""
+"""Background loops: state follow, bus long-poll and failure back-off."""
+
+from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
@@ -9,6 +11,7 @@ from regie import bus as bus_module
 from regie.bus import DiagnosticBusController
 from regie.controllers import long_poll
 from regie.controllers.long_poll import LongPollLoop
+from regie.controllers.state_follow import StateFollowLoop
 
 from theater.frontend import ErrorCode, ErrorValue, FrontendClient, FrontendResponseError
 
@@ -113,3 +116,31 @@ async def test_previous_daemon_falls_back_to_bounded_polls(monkeypatch: pytest.M
     assert controller.after_id == 4
     assert await controller.poll(25.0, kinds=kinds) == ()
     assert "wait_seconds" not in tail.calls[-1] and sleeps == [1.0]
+
+
+async def test_follow_loop_catches_up_then_backs_off_and_closes():
+    calls = 0
+    caught_up = asyncio.Event()
+    errors = []
+
+    async def refresh():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return True
+        caught_up.set()
+        return False
+
+    follower = StateFollowLoop(refresh, retry_delay=60, on_error=errors.append)
+    try:
+        follower.start()
+        follower.start()
+        async with asyncio.timeout(1):
+            await caught_up.wait()
+        await asyncio.sleep(0)
+        assert calls == 2
+    finally:
+        await follower.close()
+    follower.start()
+    await asyncio.sleep(0)
+    assert calls == 2 and not errors

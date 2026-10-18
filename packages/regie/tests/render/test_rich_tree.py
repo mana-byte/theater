@@ -9,8 +9,10 @@ leaf shape.
 from __future__ import annotations
 
 from itertools import pairwise
+from pathlib import Path
 
 import pytest
+from regie.formatting import tilde
 from regie.motions.pulse import working_harness_style
 from regie.motions.routes import RouteAnimationController
 from regie.render.glyphs import node_label, separator_label
@@ -42,6 +44,7 @@ PARENT = {
     "children": [],
 }
 
+
 CHILD = {
     "id": "112233445566",
     "tier": "spawned",
@@ -52,6 +55,7 @@ CHILD = {
     "addressable": True,
     "children": [],
 }
+
 
 UNMANAGED = {
     "pane": "%9",
@@ -336,8 +340,6 @@ def test_selected_participant_on_separator_returns_none():
 
 
 # ---- shorten_path --------------------------------------------------------
-
-
 def test_shorten_path_boundaries():
     """Deep paths elide; short, root and home paths render as documented."""
     run_rows(
@@ -356,8 +358,6 @@ def test_shorten_path_boundaries():
 
 
 # ---- status glyphs --------------------------------------------------------
-
-
 def test_idle_status_uses_harness_icon():
     """Idle renders the harness's own icon, not a separate glyph column."""
     node = {**PARENT, "status": "idle", "harness": "claude"}
@@ -440,8 +440,6 @@ def test_startup_reveal_is_applied_after_route_overlay():
 
 
 # ---- cwd_segments driven by config ----------------------------------------
-
-
 def test_cwd_segments_controls_path_shortening():
     """shorten_path is driven by cwd_segments, not a hardcoded 2."""
     node = {**PARENT, "cwd": "/a/b/c/d/e"}
@@ -460,8 +458,6 @@ def test_cwd_segments_controls_path_shortening():
 # rail, along a branch, never across the empty space between two columns. The
 # fixtures are small enough that the whole expected route can be written out,
 # which is a stricter check than any property could be.
-
-
 def _grid(lines) -> list[str]:
     """Every rendered row of the tree, flattened — three per leaf."""
     rows: list[str] = []
@@ -573,8 +569,6 @@ def test_send_path_from_a_root_to_a_grandchild_descends_each_branch():
 # uninvolved siblings, and it is drawn over glyphs the tree already owns. The
 # tests below are written against the directions each cell carries, because
 # that is what decides how much of a junction may go heavy.
-
-
 def _await_cells(lines, from_id: str, to_id: str) -> dict[tuple[int, int], AwaitCell]:
     """The await route keyed by cell, for assertions that ask about one place."""
     cells = await_highlight_cells(lines, from_id, to_id)
@@ -835,8 +829,6 @@ def test_cell_leaf_splits_a_grid_row_into_leaf_and_row_within_it():
 
 
 # ---- the overlay ----------------------------------------------------------
-
-
 def test_overlay_draws_one_heavy_character_and_leaves_the_rest_alone():
     plain = _rows(node_label(CHILD, "    └── ", cont_prefix="        "))
     label = node_label(CHILD, "    └── ", cont_prefix="        ", overlay={(1, 4): "━"})
@@ -883,3 +875,12 @@ def test_overlay_keeps_the_styles_of_the_text_it_splits():
     assert "$text dim" in _styles(label)
 
     assert SEND_STYLE in _styles(label)
+
+
+def test_tilde_only_abbreviates_paths_inside_home(monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: Path("/Users/bob"))
+
+    assert tilde("/Users/bob") == "~"
+    assert tilde("/Users/bob/repo") == "~/repo"
+    assert tilde("/Users/bob2/repo") == "/Users/bob2/repo"
+    assert tilde(None) == "-"
