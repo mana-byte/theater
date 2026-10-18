@@ -1,79 +1,23 @@
-"""Tests for the garbage-collection engine.
-
-Each test covers a load-bearing invariant from the GC design. Removing the
-behaviour a test guards must make it fail — a test that asserts a mock returns
-what it was told proves nothing.
-
-Uses explicit timestamps rather than sleeping: the sweep filters on
-``finished_at`` and ``ts``, so inserting rows with old timestamps exercises
-the same code path without the test being slow or flaky.
-"""
+"""The retention sweep: jobs, participants, touch rows, bus rows, batching and scratchpad expiry."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
 from tests.support.builders import make_bus_row, make_job, make_participant, make_touch
-from theater import paths
+from tests.support.gc_sweep import count_rows, retention
 from theater.config import RetentionSection
 from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
-from theater.constants.observation import FENCED_TURNS
-from theater.daemon import artifacts as artifacts_module
-from theater.daemon import gc as gc_module
-from theater.daemon.artifacts import (
-    ArtifactKind,
-    OwnedArtifact,
-    artifacts_for_plan,
-    cleanup_orphan_paths,
-    remove_secret_file,
-)
 from theater.daemon.gc import SweepResult, sweep
 from theater.daemon.jobs import JobManager, JobState
-from theater.daemon.registry import Registry
-from theater.daemon.schema import (
-    bus,
-    global_scratchpad,
-    jobs,
-    participant_artifacts,
-    participants,
-    touch,
-)
-from theater.harness.contracts.channels import ChannelKind
-from theater.harness.contracts.launch import LaunchPlan
-from theater.models import (
-    BadRequest,
-    Participant,
-    Status,
-    Tier,
-    WorkspaceRecord,
-    WorkspaceUsageRecord,
-    now,
-)
+from theater.daemon.schema import bus, global_scratchpad, jobs, participants, touch
+from theater.models import Status, WorkspaceRecord, WorkspaceUsageRecord, now
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
-# ---- helpers ---------------------------------------------------------------
-
-
 _DAY = 86400.0
-
-
-def _retention(**overrides) -> RetentionSection:
-    defaults = {
-        "bus_days": 7,
-        "events_days": 7,
-        "jobs_days": 60,
-        "refused_cap": 10000,
-        "stale_running_days": 7,
-        "batch": 5000,
-        "interval": 3600.0,
-        "enabled": True,
-    }
-    defaults.update(overrides)
-    return RetentionSection(**defaults)
 
 
 def _scratchpad_entry(
@@ -97,78 +41,6 @@ def _scratchpad_entry(
     )
 
 
-def _count(store, table) -> int:
-    from sqlalchemy import func, select
-
-    return store.conn.execute(select(func.count()).select_from(table)).scalar()
-
-
-def _materialize_participant_artifacts(store, participant: Participant) -> tuple[Path, ...]:
-    root = paths.participant_dir(participant.id)
-    observation = paths.participant_observation_dir(participant.id, participant.harness)
-    files = (
-        paths.mcp_config_path(participant.id),
-        paths.participant_launch_dir(participant.id) / "harness.json",
-        observation / "messages.jsonl",
-        observation / "receipt-token",
-        observation / "hook.token",
-        paths.participant_plugin_dir(participant.id, "alerts") / "credential",
-    )
-    for path in files:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(path.name)
-    store.add_participant_artifacts(
-        participant.id,
-        (
-            OwnedArtifact(root, ArtifactKind.DIRECTORY),
-            *(OwnedArtifact(path, ArtifactKind.FILE) for path in files),
-        ),
-    )
-    store.set_receipt_token(
-        participant.id,
-        "receipt-secret",
-        token_path=str(observation / "receipt-token"),
-    )
-    store.set_channel_credential(
-        participant.id,
-        harness=participant.harness,
-        kind=ChannelKind.HOOK,
-        channel_id="native-hooks",
-        token="channel-secret",
-        token_path=str(observation / "hook.token"),
-    )
-    return (root, *files)
-
-
-def test_read_only_artifact_trees_are_removed_without_leaving_the_owner_root(
-    theater_home, tmp_path
-):
-    """Vibe's plugin packages are r-x directories; rmtree alone failed on them forever."""
-    owner = "a" * 12
-    root = paths.participant_dir(owner)
-    package = root / "observations" / "vibe" / "plugins" / "packages" / "82" / "hash"
-    package.mkdir(parents=True)
-    (package / "module.py").write_text("x")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "keep.txt").write_text("keep")
-    (package / "link").symlink_to(outside)
-    for directory in (package, package.parent, package.parent.parent):
-        directory.chmod(0o555)
-    outside.chmod(0o500)  # a followed symlink would try to delete from here
-
-    try:
-        failures = cleanup_orphan_paths(((OwnedArtifact(root, ArtifactKind.DIRECTORY), owner),))
-        assert failures == () and not root.exists()
-        assert (outside / "keep.txt").read_text() == "keep"
-        assert outside.stat().st_mode & 0o777 == 0o500  # never chmodded through the link
-    finally:
-        outside.chmod(0o700)
-
-
-# ---- MF1: running job survives, and finish() still works -------------------
-
-
 async def test_running_job_survives_sweep(store):
     """A running job (finished_at = NULL) must never be deleted by the sweep.
 
@@ -185,7 +57,7 @@ async def test_running_job_survives_sweep(store):
         finished_at=None,
         created_at=now() - 999 * _DAY,
     )
-    result = await sweep(store, _retention(jobs_days=1))
+    result = await sweep(store, retention(jobs_days=1))
     assert result.jobs == 0
     assert store.get_job("job1") is not None
 
@@ -213,7 +85,7 @@ async def test_finish_still_works_after_sweep(store):
     event = asyncio.Event()
     jm._events["job1"] = event
 
-    await sweep(store, _retention(jobs_days=1), live_handles=frozenset({"job1"}))
+    await sweep(store, retention(jobs_days=1), live_handles=frozenset({"job1"}))
 
     # finish() must still find the job, set its event, and return it.
     # The event is popped from _events during finish(), so we hold our own
@@ -222,9 +94,6 @@ async def test_finish_still_works_after_sweep(store):
     assert finished is not None
     assert finished.state == JobState.DONE
     assert event.is_set()
-
-
-# ---- MF1 (stale): abandoned running jobs are marked crashed ----------------
 
 
 async def test_stale_running_job_is_marked_crashed(store):
@@ -240,7 +109,7 @@ async def test_stale_running_job_is_marked_crashed(store):
         finished_at=None,
         created_at=now() - 30 * _DAY,
     )
-    result = await sweep(store, _retention(stale_running_days=7, jobs_days=60))
+    result = await sweep(store, retention(stale_running_days=7, jobs_days=60))
     assert result.running_marked == 1
     job = store.get_job("stale")
     assert job is not None
@@ -264,7 +133,7 @@ async def test_live_running_job_is_not_marked(store):
     )
     result = await sweep(
         store,
-        _retention(stale_running_days=7),
+        retention(stale_running_days=7),
         live_handles=frozenset({"live"}),
     )
     assert result.running_marked == 0
@@ -272,9 +141,6 @@ async def test_live_running_job_is_not_marked(store):
     assert job is not None
     assert job.state == "running"
     assert job.finished_at is None
-
-
-# ---- MF3: participant gated delete, durable reference guards --------------
 
 
 async def test_dead_participant_referenced_as_parent_is_kept(store):
@@ -290,7 +156,7 @@ async def test_dead_participant_referenced_as_parent_is_kept(store):
     make_participant(store, pid="parent", parent_id=None)
     make_participant(store, pid="child", parent_id="parent")
 
-    result = await sweep(store, _retention())
+    result = await sweep(store, retention())
     # The child is dead and unreferenced — it goes. The parent is protected
     # by the fourth guard: the child's parent_id is "parent".
     assert store.get_participant("parent") is not None
@@ -312,7 +178,7 @@ async def test_dead_participant_becomes_eligible_when_child_gone(store):
         participants.update().where(participants.c.id == "child").values(parent_id=None)
     )
 
-    result = await sweep(store, _retention())
+    result = await sweep(store, retention())
     assert result.participants == 2
     assert store.get_participant("parent") is None
     assert store.get_participant("child") is None
@@ -329,7 +195,7 @@ async def test_dead_participant_referenced_as_target_id_is_kept(store):
         finished_at=now() - 90 * _DAY,
         created_at=now() - 90 * _DAY,
     )
-    result = await sweep(store, _retention(jobs_days=1))
+    result = await sweep(store, retention(jobs_days=1))
     # The job is old enough to be deleted...
     assert result.jobs == 1
     # ...but the participant deletion happens after the jobs phase, so the
@@ -356,7 +222,7 @@ async def test_dead_participant_referenced_as_caller_id_is_kept(store):
         finished_at=now(),
         created_at=now(),
     )
-    result = await sweep(store, _retention(jobs_days=60))
+    result = await sweep(store, retention(jobs_days=60))
     assert result.participants == 0
     assert store.get_participant("caller") is not None
 
@@ -384,7 +250,7 @@ async def test_active_workspace_usage_keeps_dead_participant_and_workspace(store
         store.workspaces.create(workspace, connection=unit.connection)
         assert store.workspaces.acquire_usage(usage, connection=unit.connection)
 
-    result = await sweep(store, _retention())
+    result = await sweep(store, retention())
 
     assert result.participants == 0
     assert store.get_participant("holder") is not None
@@ -398,13 +264,13 @@ async def test_tmux_restart_participant_waits_for_jobs_retention_after_terminati
     participant.terminated_at = now()
     store.upsert_participant(participant)
 
-    result = await sweep(store, _retention(jobs_days=2))
+    result = await sweep(store, retention(jobs_days=2))
     assert result.participants == 0
     assert store.get_participant(participant.id) is not None
 
     participant.terminated_at = now() - 3 * _DAY
     store.upsert_participant(participant)
-    result = await sweep(store, _retention(jobs_days=2))
+    result = await sweep(store, retention(jobs_days=2))
     assert result.participants == 1
     assert store.get_participant(participant.id) is None
 
@@ -415,21 +281,18 @@ async def test_resume_predecessor_is_kept_until_its_successor_is_deleted(store):
     successor.resumed_from_id = predecessor.id
     store.upsert_participant(successor)
 
-    result = await sweep(store, _retention())
+    result = await sweep(store, retention())
     assert result.participants == 0
     assert store.get_participant(predecessor.id) is not None
 
     store.set_status(successor.id, Status.DEAD)
-    result = await sweep(store, _retention())
+    result = await sweep(store, retention())
     assert result.participants == 1
     assert store.get_participant(predecessor.id) is not None
 
-    result = await sweep(store, _retention())
+    result = await sweep(store, retention())
     assert result.participants == 1
     assert store.get_participant(predecessor.id) is None
-
-
-# ---- Jobs and touch go together -------------------------------------------
 
 
 async def test_no_touch_row_survives_without_its_job(store):
@@ -448,7 +311,7 @@ async def test_no_touch_row_survives_without_its_job(store):
     make_touch(store, job_handle="old", path="a.py")
     make_touch(store, job_handle="old", path="b.py")
 
-    result = await sweep(store, _retention(jobs_days=60))
+    result = await sweep(store, retention(jobs_days=60))
     assert result.jobs == 1
     assert result.touch == 2
 
@@ -490,7 +353,7 @@ async def test_repair_and_audit_rows_go_with_their_job_and_contracts_with_their_
         store.record_contract_audit(handle, "p1", "repair_exhausted", None, at=now())
     store.register_response_contract("p1", "x", "{}", created_at=now(), limit=4)
 
-    await sweep(store, _retention(jobs_days=60))
+    await sweep(store, retention(jobs_days=60))
 
     assert [a.job_handle for a in store.repair_attempts_for_job("old")] == []
     assert store.contract_audit_for_job("old") == []
@@ -500,7 +363,7 @@ async def test_repair_and_audit_rows_go_with_their_job_and_contracts_with_their_
     assert store.get_response_contract("p1", "x") == "{}"
 
     store.conn.execute(jobs.delete())
-    await sweep(store, _retention(jobs_days=60))
+    await sweep(store, retention(jobs_days=60))
     assert store.get_participant("p1") is None
     assert store.get_response_contract("p1", "x") is None
     assert store.repair_attempts_for_job("recent") == []
@@ -548,11 +411,11 @@ async def test_a_fenced_repair_keeps_its_job_until_its_context_is_provably_gone(
     for binding in (None, 1):  # no binding, then the very same generation and session
         if binding:
             bind(binding)
-        assert (await sweep(store, _retention(jobs_days=60))).jobs == 0
+        assert (await sweep(store, retention(jobs_days=60))).jobs == 0
         assert store.get_job("old") is not None and store.repair_fence_active("p1")
 
     bind(2)  # a new backend generation: the old turn cannot still be running
-    assert (await sweep(store, _retention(jobs_days=60))).jobs == 1
+    assert (await sweep(store, retention(jobs_days=60))).jobs == 1
     assert store.get_job("old") is None and not store.repair_fence_active("p1")
 
 
@@ -569,13 +432,10 @@ async def test_touch_rows_for_surviving_jobs_are_kept(store):
     )
     make_touch(store, job_handle="recent", path="c.py")
 
-    result = await sweep(store, _retention(jobs_days=60))
+    result = await sweep(store, retention(jobs_days=60))
     assert result.jobs == 0
     assert result.touch == 0
-    assert _count(store, touch) == 1
-
-
-# ---- Bus -------------------------------------------------------------------
+    assert count_rows(store, touch) == 1
 
 
 async def test_old_bus_rows_are_deleted(store):
@@ -583,9 +443,9 @@ async def test_old_bus_rows_are_deleted(store):
     make_bus_row(store, kind="job.created", ts=old_ts)
     make_bus_row(store, kind="job.finished", ts=old_ts)
 
-    result = await sweep(store, _retention(bus_days=7))
+    result = await sweep(store, retention(bus_days=7))
     assert result.bus == 2
-    assert _count(store, bus) == 0
+    assert count_rows(store, bus) == 0
 
 
 async def test_active_identity_loss_audit_survives_batched_bus_retention(store):
@@ -601,7 +461,7 @@ async def test_active_identity_loss_audit_survives_batched_bus_retention(store):
     make_bus_row(store, kind="job.created", ts=old_ts)
     make_bus_row(store, kind="job.finished", ts=old_ts)
 
-    result = await sweep(store, _retention(bus_days=7, batch=1))
+    result = await sweep(store, retention(bus_days=7, batch=1))
 
     assert result.bus == 2
     assert [row[0] for row in store.conn.execute(bus.select()).fetchall()] == [loss_id]
@@ -639,7 +499,7 @@ async def test_identity_loss_audit_retention_follows_clearing_events(
     )
     make_bus_row(store, kind=kind, ts=now(), to_id="p1", payload=payload)
 
-    result = await sweep(store, _retention(bus_days=7, batch=1))
+    result = await sweep(store, retention(bus_days=7, batch=1))
 
     assert result.bus == deleted
     assert [row._mapping["kind"] for row in store.conn.execute(bus.select())] == remaining
@@ -652,9 +512,9 @@ async def test_send_refused_of_same_age_survives(store):
     old_ts = now() - 30 * _DAY
     make_bus_row(store, kind="send.refused", ts=old_ts)
 
-    result = await sweep(store, _retention(bus_days=7))
+    result = await sweep(store, retention(bus_days=7))
     assert result.bus == 0
-    assert _count(store, bus) == 1
+    assert count_rows(store, bus) == 1
 
 
 async def test_refused_cap_trims_oldest(store):
@@ -668,7 +528,7 @@ async def test_refused_cap_trims_oldest(store):
     # ids are autoincrement, so ids[0] < ids[1] < ... < ids[4]
     # The newest `cap` should survive: ids[2], ids[3], ids[4].
 
-    result = await sweep(store, _retention(bus_days=7, refused_cap=cap))
+    result = await sweep(store, retention(bus_days=7, refused_cap=cap))
     assert result.bus == 2  # 5 - 3
 
     from sqlalchemy import select
@@ -679,9 +539,6 @@ async def test_refused_cap_trims_oldest(store):
     ]
     # The newest `cap` rows survive — higher id = newer (autoincrement).
     assert remaining == sorted(ids)[-cap:]
-
-
-# ---- Batching --------------------------------------------------------------
 
 
 async def test_batching_loops_until_all_deleted(store):
@@ -700,280 +557,25 @@ async def test_batching_loops_until_all_deleted(store):
         )
         make_touch(store, job_handle=f"j{i}", path=f"file{i}.py")
 
-    result = await sweep(store, _retention(jobs_days=60, batch=2))
+    result = await sweep(store, retention(jobs_days=60, batch=2))
     assert result.jobs == 10
     assert result.touch == 10
-    assert _count(store, jobs) == 0
-    assert _count(store, touch) == 0
+    assert count_rows(store, jobs) == 0
+    assert count_rows(store, touch) == 0
 
 
 async def test_participant_sweep_honours_small_batches(store):
     for index in range(5):
         make_participant(store, pid=f"dead-{index}")
 
-    result = await sweep(store, _retention(batch=2))
+    result = await sweep(store, retention(batch=2))
     assert result.participants == 5
-    assert _count(store, participants) == 0
-
-
-async def test_invalid_artifact_owner_does_not_starve_later_participants(store):
-    blocked_id = "000000000001"
-    later_id = "000000000002"
-    make_participant(store, pid=blocked_id)
-    store.conn.execute(
-        participant_artifacts.insert().values(
-            participant_id=blocked_id,
-            # Match the repository's canonical key even when /tmp is a symlink
-            # (as on macOS), so baseline insertion cannot hide the corrupt row.
-            path=str(paths.mcp_config_path(blocked_id).resolve(strict=False)),
-            kind="corrupt",
-        )
-    )
-    make_participant(store, pid=later_id)
-
-    result = await sweep(store, _retention(batch=1))
-
-    assert result.participants == 1
-    assert store.get_participant(blocked_id) is not None
-    assert store.get_participant(later_id) is None
-    assert store.participant_artifact_owner_ids() == (blocked_id,)
-    with pytest.raises(ValueError):
-        store.participant_artifacts(blocked_id)
-
-
-async def test_retained_dead_participant_keeps_nonsecret_artifacts(store):
-    participant = make_participant(store, pid="abcdef123456", status=Status.IDLE)
-    artifact_paths = _materialize_participant_artifacts(store, participant)
-    Registry(store).mark_dead(participant.id)
-    observation = paths.participant_observation_dir(participant.id, participant.harness)
-    assert not (observation / "receipt-token").exists()
-    assert not (observation / "hook.token").exists()
-    make_participant(store, pid="child", parent_id=participant.id, status=Status.IDLE)
-
-    result = await sweep(store, _retention())
-
-    assert result.participants == 0
-    assert store.get_participant(participant.id) is not None
-    assert paths.participant_dir(participant.id).exists()
-    assert all(
-        path.exists() for path in artifact_paths if path.name not in {"receipt-token", "hook.token"}
-    )
-
-
-async def test_retained_dead_row_cleans_secret_credentials_after_crash(store):
-    participant = make_participant(store, pid="abcdef123456")
-    _materialize_participant_artifacts(store, participant)
-    store.set_status(participant.id, Status.DEAD)
-    make_participant(store, pid="child", parent_id=participant.id, status=Status.IDLE)
-
-    observation = paths.participant_observation_dir(participant.id, participant.harness)
-    receipt = observation / "receipt-token"
-    channel = observation / "hook.token"
-    assert receipt.exists() and channel.exists()
-
-    result = await sweep(store, _retention())
-
-    assert result.participants == 0
-    assert store.get_participant(participant.id) is not None
-    assert not receipt.exists() and not channel.exists()
-    assert store.get_meta(f"receipt_token:{participant.id}") is None
-    assert store.get_meta(f"channel_credential:{participant.id}:hook:native-hooks") is None
-    assert paths.participant_dir(participant.id).exists()
-
-
-async def test_eligible_participant_removes_all_owned_artifacts(store):
-    participant = make_participant(store, pid="abcdef123456")
-    artifact_paths = _materialize_participant_artifacts(store, participant)
-    global_state = paths.plugin_state_dir("alerts")
-    global_state.mkdir()
-    (global_state / "state.db").write_text("keep")
-    with store.write_unit() as unit:  # turn fences are bounded, newest kept, and go with it
-        for index in range(FENCED_TURNS + 2):
-            fence = f"turn-{index:03d}"
-            store.turn_fences.add(
-                participant.id,
-                [fence],
-                job_handle=None,
-                created_at=index,
-                connection=unit.connection,
-            )
-    assert store.turn_fences.keys(participant.id)[0] == "turn-002"
-    assert len(store.turn_fences.keys(participant.id)) == FENCED_TURNS
-
-    result = await sweep(store, _retention())
-
-    assert result.participants == 1
-    assert store.turn_fences.keys(participant.id) == ()
-    assert store.get_participant(participant.id) is None
-    assert not paths.participant_dir(participant.id).exists()
-    assert all(not path.exists() for path in artifact_paths)
-    assert (global_state / "state.db").exists()
-    assert store.get_meta(f"receipt_token:{participant.id}") is None
-    assert store.participant_artifact_owner_ids() == ()
-
-
-def test_launch_artifact_paths_are_owned_and_follow_runtime_home(
-    theater_home, monkeypatch, tmp_path
-):
-    runtime_home = tmp_path / "runtime-home"
-    monkeypatch.setenv("THEATER_HOME", str(runtime_home))
-    paths.ensure_home()
-    participant = Participant(id="abcdef123456", harness="custom", tier=Tier.SPAWNED)
-
-    valid = LaunchPlan(files={paths.mcp_config_path(participant.id): "{}"}, argv=[])
-    owned = artifacts_for_plan(valid, participant)
-    assert paths.mcp_config_path(participant.id) in {artifact.path for artifact in owned}
-
-    outside = tmp_path / "user-file"
-    with pytest.raises(BadRequest):
-        artifacts_for_plan(LaunchPlan(files={outside: "unsafe"}, argv=[]), participant)
-
-    other = paths.mcp_config_path("fedcba654321")
-    with pytest.raises(BadRequest):
-        artifacts_for_plan(LaunchPlan(files={other: "unsafe"}, argv=[]), participant)
-
-
-def test_secret_cleanup_uses_runtime_home_and_refuses_symlink_parents(monkeypatch, tmp_path):
-    runtime_home = tmp_path / "runtime-home"
-    monkeypatch.setenv("THEATER_HOME", str(runtime_home))
-    paths.ensure_home()
-    participant_id = "abcdef123456"
-    legitimate = paths.participant_observation_dir(participant_id, "custom") / "receipt-token"
-    legitimate.parent.mkdir(parents=True, exist_ok=True)
-    legitimate.write_text("secret")
-
-    remove_secret_file(legitimate, owner_id=participant_id)
-
-    assert not legitimate.exists()
-
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    target = outside / "token"
-    target.write_text("secret")
-    linked_parent = paths.participant_dir(participant_id) / "linked"
-    linked_parent.parent.mkdir(parents=True, exist_ok=True)
-    linked_parent.symlink_to(outside, target_is_directory=True)
-
-    remove_secret_file(linked_parent / "token", owner_id=participant_id)
-
-    assert target.exists()
-
-
-async def test_secret_cleanup_refuses_external_paths_but_removes_metadata(store, tmp_path):
-    receipt = tmp_path / "receipt-token"
-    channel = tmp_path / "channel-token"
-    receipt.write_text("secret")
-    channel.write_text("secret")
-    store.set_receipt_token("missing", "receipt", token_path=str(receipt))
-    store.set_channel_credential(
-        "missing",
-        harness="custom",
-        kind=ChannelKind.HOOK,
-        channel_id="hooks",
-        token="channel",
-        token_path=str(channel),
-    )
-
-    await sweep(store, _retention())
-
-    assert receipt.exists() and channel.exists()
-    assert store.get_meta("receipt_token:missing") is None
-    assert store.get_meta("channel_credential:missing:hook:hooks") is None
-
-
-async def test_failed_artifact_cleanup_keeps_ownership_for_retry(store, monkeypatch):
-    participant = make_participant(store, pid="abcdef123456")
-    _materialize_participant_artifacts(store, participant)
-    target = paths.participant_dir(participant.id).resolve(strict=False)
-    original_remove = artifacts_module._remove_one
-    failed = False
-
-    def fail_once(artifact):
-        nonlocal failed
-        if artifact.path == target and not failed:
-            failed = True
-            raise OSError("temporarily busy")
-        return original_remove(artifact)
-
-    monkeypatch.setattr(artifacts_module, "_remove_one", fail_once)
-    first = await sweep(store, _retention())
-
-    assert first.participants == 1
-    assert store.get_participant(participant.id) is None
-    assert target.exists()
-    assert store.participant_artifacts(participant.id)
-
-    monkeypatch.setattr(artifacts_module, "_remove_one", original_remove)
-    second = await sweep(store, _retention())
-
-    assert second.participants == 0
-    assert not target.exists()
-    assert store.participant_artifact_owner_ids() == ()
-
-
-async def test_orphan_participant_roots_are_cleaned_without_touching_user_data(store):
-    owner_id = "fedcba654321"
-    orphan = paths.participant_dir(owner_id)
-    (orphan / "observations" / "vibe").mkdir(parents=True)
-    (orphan / "observations" / "vibe" / "messages.jsonl").write_text("durable")
-    unrelated = paths.plugins_dir() / "keep"
-    unrelated.mkdir()
-    (unrelated / "manifest.py").write_text("keep")
-
-    await sweep(store, _retention())
-
-    assert not orphan.exists()
-    assert unrelated.exists()
-
-
-async def test_orphan_cleanup_rechecks_owner_before_removal(store, monkeypatch):
-    owner_id = "fedcba654321"
-    orphan = paths.participant_dir(owner_id)
-    orphan.mkdir(parents=True)
-    (orphan / "data").write_text("keep")
-    original_to_thread = gc_module.workers.to_thread
-
-    async def race_to_thread(fn, /, *args, label, **kwargs):
-        result = await original_to_thread(fn, *args, label=label, **kwargs)
-        if fn is gc_module.orphan_paths:
-            make_participant(store, pid=owner_id, status=Status.IDLE)
-        return result
-
-    monkeypatch.setattr(gc_module.workers, "to_thread", race_to_thread)
-
-    await sweep(store, _retention())
-
-    assert store.get_participant(owner_id) is not None
-    assert orphan.exists()
-
-
-async def test_participant_artifact_cleanup_honours_batches(store):
-    for index in range(5):
-        participant = make_participant(store, pid=f"{index + 1:012x}")
-        _materialize_participant_artifacts(store, participant)
-
-    result = await sweep(store, _retention(batch=2))
-
-    assert result.participants == 5
-    assert _count(store, participants) == 0
-    assert store.participant_artifact_owner_ids() == ()
-
-
-# ---- Counts ----------------------------------------------------------------
-
-
-# ---- Disabled --------------------------------------------------------------
+    assert count_rows(store, participants) == 0
 
 
 async def test_disabled_sweep_deletes_nothing():
-    """With enabled = False, the loop performs no deletion.
+    """With enabled = False the daemon never creates the GC task (sweep itself ignores the flag)."""
 
-    The sweep function itself does not check `enabled` — the daemon loop
-    does (it skips creating the task). This test verifies that calling
-    sweep with a disabled config is still safe, but the real check is in
-    the loop. So we test the loop's behaviour: with enabled=False, the
-    daemon never creates the _gc task.
-    """
     from theater.daemon.server import Daemon
 
     daemon = Daemon(harnesses={}, config=__disabled_config())
@@ -989,12 +591,9 @@ def __disabled_config():
     return Config(retention=RetentionSection(enabled=False))
 
 
-# ---- Empty database --------------------------------------------------------
-
-
 async def test_sweep_on_empty_database_is_noop(store):
     """A sweep against an empty database raises nothing and returns all-zero."""
-    result = await sweep(store, _retention())
+    result = await sweep(store, retention())
     assert result == SweepResult()
     assert result.bus == 0
     assert result.jobs == 0
@@ -1004,33 +603,27 @@ async def test_sweep_on_empty_database_is_noop(store):
     assert result.scratchpad == 0
 
 
-# ---- global scratchpad expiry ---------------------------------------------
-
-
 async def test_expired_global_scratchpad_is_cleaned(store):
     _scratchpad_entry(store, key="k1", expires_at=now() - 1)
     _scratchpad_entry(store, key="k2", expires_at=now() - 1)
-    result = await sweep(store, _retention())
+    result = await sweep(store, retention())
     assert result.scratchpad == 2
-    assert _count(store, global_scratchpad) == 0
+    assert count_rows(store, global_scratchpad) == 0
 
 
 async def test_unexpired_global_scratchpad_is_retained_without_participants(store):
     _scratchpad_entry(store, expires_at=now() + _DAY)
-    result = await sweep(store, _retention())
+    result = await sweep(store, retention())
     assert result.scratchpad == 0
-    assert _count(store, global_scratchpad) == 1
+    assert count_rows(store, global_scratchpad) == 1
 
 
 async def test_global_scratchpad_cleanup_is_batched(store):
     for i in range(10):
         _scratchpad_entry(store, key=f"k{i}", expires_at=now() - 1)
-    result = await sweep(store, _retention(batch=3))
+    result = await sweep(store, retention(batch=3))
     assert result.scratchpad == 10
-    assert _count(store, global_scratchpad) == 0
-
-
-# ---- SweepResult counts ----------------------------------------------------
+    assert count_rows(store, global_scratchpad) == 0
 
 
 async def test_sweep_result_counts_match_all_tables(store):
@@ -1054,16 +647,16 @@ async def test_sweep_result_counts_match_all_tables(store):
 
     _scratchpad_entry(store, expires_at=now() - 1)
 
-    before_jobs = _count(store, jobs)
-    before_touch = _count(store, touch)
-    before_bus = _count(store, bus)
-    before_part = _count(store, participants)
-    before_kv = _count(store, global_scratchpad)
+    before_jobs = count_rows(store, jobs)
+    before_touch = count_rows(store, touch)
+    before_bus = count_rows(store, bus)
+    before_part = count_rows(store, participants)
+    before_kv = count_rows(store, global_scratchpad)
 
-    result = await sweep(store, _retention(bus_days=7, jobs_days=60))
+    result = await sweep(store, retention(bus_days=7, jobs_days=60))
 
-    assert result.jobs == before_jobs - _count(store, jobs)
-    assert result.touch == before_touch - _count(store, touch)
-    assert result.bus == before_bus - _count(store, bus)
-    assert result.participants == before_part - _count(store, participants)
-    assert result.scratchpad == before_kv - _count(store, global_scratchpad)
+    assert result.jobs == before_jobs - count_rows(store, jobs)
+    assert result.touch == before_touch - count_rows(store, touch)
+    assert result.bus == before_bus - count_rows(store, bus)
+    assert result.participants == before_part - count_rows(store, participants)
+    assert result.scratchpad == before_kv - count_rows(store, global_scratchpad)

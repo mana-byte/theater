@@ -1,25 +1,93 @@
-"""GC-1 and GC-2 regression wiring: NULL-safe reference guards and pruned dependents.
-
-Covers the two sweep defects the retention config could hide: a NULL ``caller_id``
-poisoning ``NOT IN`` (no dead participant was ever collected), and dangling
-terminal/runtime/control rows surviving the participant that owned them.
-"""
+"""Retention sweeps: journal retirement, WAL checkpoints, NULL-safe guards and pruned dependents."""
 
 from __future__ import annotations
 
-from sqlalchemy import func, select, update
+import asyncio
+import sqlite3
 
+from sqlalchemy import select, update
+
+from tests.support.gc_sweep import count_rows
 from theater.config import RetentionSection
-from theater.daemon.gc import sweep
+from theater.daemon.gc import _sweep_journal, sweep
+from theater.daemon.persistence.checkpoint import passive_checkpoint
 from theater.daemon.schema import (
     control_operations,
     jobs,
     native_terminal_evidence,
+    orchestration_events,
     participant_runtime_bindings,
     participants,
     terminal_bindings,
 )
-from theater.models import Job, Participant, Status, Tier, now
+from theater.models import Job, JournalEventRecord, Participant, Status, Tier, now
+
+
+async def test_journal_retention_bounds_reads_and_keeps_partial_groups(store):
+    with store.write_unit() as unit:
+        for size in (300, 300, 500, 1):
+            store.journal.append_group(
+                unit,
+                [
+                    JournalEventRecord(
+                        kind="catalog.invalidated",
+                        entity_id="test",
+                        entity_revision=1,
+                        payload={},
+                        recorded_at=10.0,
+                    )
+                    for _ in range(size)
+                ],
+            )
+    prefix = store.journal.expired_prefix(cutoff=11.0, limit=500)
+    assert (prefix.ending_sequence, prefix.scanned, prefix.expired) == (300, 500, 300)
+    assert store.journal.expired_prefix(cutoff=10.0, limit=5000).scanned == 1
+    assert await _sweep_journal(store, cutoff=11.0, batch=500) == 1101
+    assert store.journal.current_sequence() == 1101
+
+
+async def test_journal_retention_keeps_malformed_group(store):
+    with store.write_unit() as unit:
+        store.journal.append_group(
+            unit,
+            [
+                JournalEventRecord(
+                    kind="catalog.invalidated",
+                    entity_id="test",
+                    entity_revision=1,
+                    payload={},
+                    recorded_at=10.0,
+                )
+                for _ in range(3)
+            ],
+        )
+    store.conn.execute(update(orchestration_events).values(ending_sequence=2))
+    assert await _sweep_journal(store, cutoff=11.0, batch=500) == 0
+
+
+async def test_passive_checkpoint_does_not_wait_for_pinned_reader(tmp_path):
+    path = tmp_path / "checkpoint.db"
+    writer = sqlite3.connect(path, isolation_level=None)
+    reader = sqlite3.connect(path, isolation_level=None)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE test (value INTEGER)")
+        writer.execute("INSERT INTO test VALUES (1)")
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT value FROM test").fetchall() == [(1,)]
+        writer.execute("INSERT INTO test VALUES (2)")
+        busy, frames, checkpointed = await asyncio.wait_for(
+            asyncio.to_thread(passive_checkpoint, path), 1
+        )
+        assert busy == 0
+        assert frames > checkpointed >= 0
+        assert reader.execute("SELECT value FROM test").fetchall() == [(1,)]
+        reader.execute("ROLLBACK")
+        assert writer.execute("SELECT value FROM test").fetchall() == [(1,), (2,)]
+    finally:
+        reader.close()
+        writer.close()
+
 
 _DAY = 86400.0
 
@@ -145,16 +213,12 @@ def _binding(store, *, participant_id: str, lifecycle: str) -> None:
     )
 
 
-def _count(store, table) -> int:
-    return store.conn.execute(select(func.count()).select_from(table)).scalar()
-
-
 def _op_ids(store) -> set[str]:
     return set(store.conn.execute(select(control_operations.c.operation_id)).scalars())
 
 
 async def test_null_caller_job_does_not_block_dead_participant_sweep(store):
-    """GC-1: NULL ``caller_id`` made ``id NOT IN (SELECT caller_id)`` UNKNOWN for every row."""
+    """NULL ``caller_id`` made ``id NOT IN (SELECT caller_id)`` UNKNOWN for every row."""
     _participant(store, pid="gone")
     _finished_job(store, handle="h-null", caller_id=None, target_id="other", age_days=2)
     _participant(store, pid="kept-target")
@@ -198,10 +262,10 @@ async def test_participant_deletion_drops_dependents_and_fences_live_owners(stor
     assert store.get_participant("orphan-queued") is None
     assert store.get_participant("barriered") is not None
     assert store.get_participant("live-backend") is not None
-    assert _count(store, terminal_bindings) == 1  # live-backend's
-    assert _count(store, participant_runtime_bindings) == 1  # live-backend's
+    assert count_rows(store, terminal_bindings) == 1  # live-backend's
+    assert count_rows(store, participant_runtime_bindings) == 1  # live-backend's
     assert _op_ids(store) == {"op-barrier"}
-    assert _count(store, native_terminal_evidence) == 0
+    assert count_rows(store, native_terminal_evidence) == 0
 
 
 async def test_control_operation_and_evidence_prunes_delete_only_old_settled_rows(store):
