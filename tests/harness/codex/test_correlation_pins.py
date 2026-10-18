@@ -14,7 +14,7 @@ from theater.provenance import TranscriptProvenance
 SESSION_C = "01a00cdf-ffff-7f92-8429-d75394c3edfc"
 
 
-async def test_a_heuristic_pin_is_replaced_by_what_the_process_holds(monkeypatch, codex_tree):
+async def test_a_heuristic_pin_is_replaced_by_what_the_process_holds(monkeypatch, rollout_pair):
     """The upgrade path, and the one that fixes participants already running.
 
     A participant bound before process evidence existed carries an admitted
@@ -23,17 +23,19 @@ async def test_a_heuristic_pin_is_replaced_by_what_the_process_holds(monkeypatch
     contested — and `read_transcript` would keep refusing — for the rest of
     the session.
     """
-    hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    history = await history_of(reader, codex_tree["project"], known_location=str(codex_tree["b"]))
+    history = await history_of(
+        reader, rollout_pair["project"], known_location=str(rollout_pair["b"])
+    )
 
-    assert history.location == str(codex_tree["a"].resolve())
+    assert history.location == str(rollout_pair["a"].resolve())
     assert history.correlation == "proven"
 
 
 async def test_the_watcher_restages_a_pinned_sibling_and_commits_the_proven_one(
-    monkeypatch, codex_tree
+    monkeypatch, rollout_pair
 ):
     """The repair as the poll loop performs it, not as `read_transcript` does.
 
@@ -44,28 +46,28 @@ async def test_the_watcher_restages_a_pinned_sibling_and_commits_the_proven_one(
     exercised separately, because removing the upgrade from `_attach` alone
     leaves the history test green.
     """
-    hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
     source = reader.open_source(
-        cwd=str(codex_tree["project"]),
-        known_location=str(codex_tree["b"]),
+        cwd=str(rollout_pair["project"]),
+        known_location=str(rollout_pair["b"]),
     )
     try:
         batch = await source.read()
 
         assert batch.attached is not None
-        assert batch.attached.location == str(codex_tree["a"].resolve())
+        assert batch.attached.location == str(rollout_pair["a"].resolve())
         assert batch.attached.correlation == "proven"
         assert source.path is None, "a candidate must not go live before the reducer accepts it"
 
         source.commit_attachment()
 
-        assert source.path == codex_tree["a"].resolve()
+        assert source.path == rollout_pair["a"].resolve()
     finally:
         await source.aclose()
 
 
-async def test_a_pin_the_process_cannot_improve_on_is_left_alone(monkeypatch, codex_tree):
+async def test_a_pin_the_process_cannot_improve_on_is_left_alone(monkeypatch, rollout_pair):
     """A probe that proves nothing must not turn a pin into a fresh guess.
 
     The pin here is the *older* rollout, so a fall-through to the cwd scan
@@ -73,32 +75,34 @@ async def test_a_pin_the_process_cannot_improve_on_is_left_alone(monkeypatch, co
     correct outcome; drifting is the mis-attribution.
     """
     hold(monkeypatch, {PID_A: []})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    history = await history_of(reader, codex_tree["project"], known_location=str(codex_tree["a"]))
+    history = await history_of(
+        reader, rollout_pair["project"], known_location=str(rollout_pair["a"])
+    )
 
-    assert history.location == str(codex_tree["a"])
+    assert history.location == str(rollout_pair["a"])
     assert history.correlation == "heuristic"
 
 
-async def test_newer_codex_guess_is_only_noncommittable_loss_evidence(monkeypatch, codex_tree):
-    os.utime(codex_tree["a"], ns=(1_000_000_000, 1_000_000_000))
-    os.utime(codex_tree["b"], ns=(1_500_000_000, 1_500_000_000))
+async def test_newer_codex_guess_is_only_noncommittable_loss_evidence(monkeypatch, rollout_pair):
+    os.utime(rollout_pair["a"], ns=(1_000_000_000, 1_000_000_000))
+    os.utime(rollout_pair["b"], ns=(1_500_000_000, 1_500_000_000))
     hold(monkeypatch, {PID_A: []})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
     source = reader.open_source(
-        cwd=str(codex_tree["project"]),
+        cwd=str(rollout_pair["project"]),
         session_id=SESSION_A,
         session_provenance=TranscriptProvenance.OPERATOR,
-        known_location=str(codex_tree["a"]),
+        known_location=str(rollout_pair["a"]),
     )
     initial = await source.read()
     assert initial.attached is not None
     source.commit_attachment()
     newer = write_rollout(
-        codex_tree["root"],
+        rollout_pair["root"],
         SESSION_C,
-        codex_tree["project"],
+        rollout_pair["project"],
         at="01-20-46",
         text="not attributed",
     )
@@ -110,16 +114,16 @@ async def test_newer_codex_guess_is_only_noncommittable_loss_evidence(monkeypatc
     assert refresh.attached is None
     assert evidence is not None
     assert evidence.location == str(newer)
-    assert source.path == codex_tree["a"]
+    assert source.path == rollout_pair["a"]
 
 
-def test_native_subagents_do_not_trigger_or_exhaust_identity_loss_probe(codex_tree):
-    os.utime(codex_tree["a"], ns=(1, 1))
-    os.utime(codex_tree["b"], ns=(0, 0))
+def test_native_subagents_do_not_trigger_or_exhaust_identity_loss_probe(rollout_pair):
+    os.utime(rollout_pair["a"], ns=(1, 1))
+    os.utime(rollout_pair["b"], ns=(0, 0))
     primary = write_rollout(
-        codex_tree["root"],
+        rollout_pair["root"],
         SESSION_C,
-        codex_tree["project"],
+        rollout_pair["project"],
         at="01-20-46",
         text="independent primary",
         metadata={"thread_source": "user", "source": "cli"},
@@ -127,42 +131,42 @@ def test_native_subagents_do_not_trigger_or_exhaust_identity_loss_probe(codex_tr
     os.utime(primary, ns=(2, 2))
     for index in range(9):
         child = write_rollout(
-            codex_tree["root"],
+            rollout_pair["root"],
             f"01a00cdf-dead-beef-9a9f-{index:012d}",
-            codex_tree["project"],
+            rollout_pair["project"],
             at=f"01-21-{index:02d}",
             text="native child",
             metadata={"thread_source": "subagent", "source": {"subagent": {}}},
         )
         os.utime(child, ns=(10 + index, 10 + index))
-    reader = CodexObserver(root=codex_tree["root"])
+    reader = CodexObserver(root=rollout_pair["root"])
 
     candidate = reader.identity_loss_candidate(
-        cwd=str(codex_tree["project"]),
-        current=codex_tree["a"],
-        current_mtime_ns=codex_tree["a"].stat().st_mtime_ns,
+        cwd=str(rollout_pair["project"]),
+        current=rollout_pair["a"],
+        current_mtime_ns=rollout_pair["a"].stat().st_mtime_ns,
     )
 
     assert candidate == primary
 
 
-async def test_process_proven_codex_rotation_still_attaches(monkeypatch, codex_tree):
-    held = {PID_A: [codex_tree["a"]]}
+async def test_process_proven_codex_rotation_still_attaches(monkeypatch, rollout_pair):
+    held = {PID_A: [rollout_pair["a"]]}
     hold(monkeypatch, held)
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
     source = reader.open_source(
-        cwd=str(codex_tree["project"]),
+        cwd=str(rollout_pair["project"]),
         session_id=SESSION_A,
         session_provenance=TranscriptProvenance.OPERATOR,
-        known_location=str(codex_tree["a"]),
+        known_location=str(rollout_pair["a"]),
     )
     initial = await source.read()
     assert initial.attached is not None
     source.commit_attachment()
     newer = write_rollout(
-        codex_tree["root"],
+        rollout_pair["root"],
         SESSION_C,
-        codex_tree["project"],
+        rollout_pair["project"],
         at="01-20-46",
         text="still mine",
     )
@@ -175,16 +179,16 @@ async def test_process_proven_codex_rotation_still_attaches(monkeypatch, codex_t
     assert refresh.attached.correlation == "proven"
 
 
-async def test_quiet_transcript_backs_off_rotation_probes(monkeypatch, codex_tree):
-    asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
+async def test_quiet_transcript_backs_off_rotation_probes(monkeypatch, rollout_pair):
+    asked = hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
     clock = [100.0]
     monkeypatch.setattr("theater.harness.transcript.source.time.monotonic", lambda: clock[0])
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
     source = reader.open_source(
-        cwd=str(codex_tree["project"]),
+        cwd=str(rollout_pair["project"]),
         session_id=SESSION_A,
         session_provenance=TranscriptProvenance.OPERATOR,
-        known_location=str(codex_tree["a"]),
+        known_location=str(rollout_pair["a"]),
     )
     await source.read()
     source.commit_attachment()
@@ -197,12 +201,14 @@ async def test_quiet_transcript_backs_off_rotation_probes(monkeypatch, codex_tre
     assert probes == [True, False, True, False]  # 5 s, then 10 s spacing
 
 
-async def test_committing_a_guess_gives_up_the_claim_that_the_id_was_exact(monkeypatch, codex_tree):
+async def test_committing_a_guess_gives_up_the_claim_that_the_id_was_exact(
+    monkeypatch, rollout_pair
+):
     """Even an unscoped source cannot launder a guessed location into proof."""
     hold(monkeypatch, {PID_A: []})
-    reader = CodexObserver(root=codex_tree["root"], session_provenance=TranscriptProvenance.EXACT)
+    reader = CodexObserver(root=rollout_pair["root"], session_provenance=TranscriptProvenance.EXACT)
     source = reader.open_source(
-        cwd=str(codex_tree["project"]),
+        cwd=str(rollout_pair["project"]),
         session_id="01a00cdf-0000-0000-0000-000000000000",
         session_provenance=TranscriptProvenance.EXACT,
     )
@@ -219,7 +225,9 @@ async def test_committing_a_guess_gives_up_the_claim_that_the_id_was_exact(monke
     assert after.correlation == "heuristic"
 
 
-async def test_open_source_does_not_let_the_two_provenance_flags_disagree(monkeypatch, codex_tree):
+async def test_open_source_does_not_let_the_two_provenance_flags_disagree(
+    monkeypatch, rollout_pair
+):
     """`session_exact` has to reach the ordering, not just the labelling.
 
     The observer decides which key discovery asks first and the source decides
@@ -227,46 +235,46 @@ async def test_open_source_does_not_let_the_two_provenance_flags_disagree(monkey
     alone would be told its exact id is exact while the process was still
     asked ahead of it.
     """
-    asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    asked = hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
     history = await history_of(
         reader,
-        codex_tree["project"],
+        rollout_pair["project"],
         session_id=SESSION_B,
         session_provenance=TranscriptProvenance.EXACT,
     )
 
-    assert history.location == str(codex_tree["b"])
+    assert history.location == str(rollout_pair["b"])
     assert asked.anything == []
 
 
-async def test_a_pin_that_is_already_exact_is_not_probed(monkeypatch, codex_tree):
+async def test_a_pin_that_is_already_exact_is_not_probed(monkeypatch, rollout_pair):
     """Nothing to gain, three subprocesses to lose."""
-    asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
+    asked = hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
     reader = CodexObserver(
-        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
+        root=rollout_pair["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
     )
 
     history = await history_of(
         reader,
-        codex_tree["project"],
+        rollout_pair["project"],
         session_id=SESSION_B,
         session_provenance=TranscriptProvenance.EXACT,
-        known_location=str(codex_tree["b"]),
+        known_location=str(rollout_pair["b"]),
     )
 
-    assert history.location == str(codex_tree["b"])
+    assert history.location == str(rollout_pair["b"])
     assert history.correlation == "exact"
     assert asked.anything == []
 
 
-async def test_two_open_rollouts_are_not_evidence(monkeypatch, codex_tree):
+async def test_two_open_rollouts_are_not_evidence(monkeypatch, rollout_pair):
     """One codex session holds one rollout. Two means we are guessing again."""
-    hold(monkeypatch, {PID_A: [codex_tree["a"], codex_tree["b"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    hold(monkeypatch, {PID_A: [rollout_pair["a"], rollout_pair["b"]]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    source = reader.open_source(cwd=str(codex_tree["project"]))
+    source = reader.open_source(cwd=str(rollout_pair["project"]))
     try:
         batch = await source.read()
         history = await source.history(last_n=0)
@@ -280,23 +288,23 @@ async def test_two_open_rollouts_are_not_evidence(monkeypatch, codex_tree):
 
 
 async def test_native_subagent_rollout_does_not_make_process_proof_ambiguous(
-    monkeypatch, codex_tree
+    monkeypatch, rollout_pair
 ):
     child = write_rollout(
-        codex_tree["root"],
+        rollout_pair["root"],
         SESSION_C,
-        codex_tree["project"],
+        rollout_pair["project"],
         at="01-20-46",
         text="native child",
         metadata={"thread_source": "subagent", "source": {"subagent": {}}},
     )
-    hold(monkeypatch, {PID_A: [codex_tree["a"], child]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    hold(monkeypatch, {PID_A: [rollout_pair["a"], child]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    found = reader.find_transcript(cwd=str(codex_tree["project"]))
+    found = reader.find_transcript(cwd=str(rollout_pair["project"]))
 
-    assert found == codex_tree["a"].resolve()
-    assert reader.proved(codex_tree["a"])
+    assert found == rollout_pair["a"].resolve()
+    assert reader.proved(rollout_pair["a"])
 
 
 @pytest.mark.parametrize(

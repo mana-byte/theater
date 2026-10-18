@@ -24,28 +24,28 @@ from theater.provenance import TranscriptProvenance
 PID_SHELL = 74001
 
 
-async def test_the_held_rollout_wins_over_the_newest_cwd_match(monkeypatch, codex_tree):
+async def test_the_held_rollout_wins_over_the_newest_cwd_match(monkeypatch, rollout_pair):
     """The cwd scan would return B for everyone; the process says A."""
-    hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    found = reader.find_transcript(cwd=str(codex_tree["project"]))
+    found = reader.find_transcript(cwd=str(rollout_pair["project"]))
 
-    assert found == codex_tree["a"].resolve()
+    assert found == rollout_pair["a"].resolve()
 
 
-async def test_a_held_rollout_is_reported_as_proven(monkeypatch, codex_tree):
+async def test_a_held_rollout_is_reported_as_proven(monkeypatch, rollout_pair):
     """Process proof is trusted, distinct from an exact launch/session id."""
-    hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    history = await history_of(reader, codex_tree["project"])
+    history = await history_of(reader, rollout_pair["project"])
 
     assert history.correlation == "proven"
-    assert history.location == str(codex_tree["a"].resolve())
+    assert history.location == str(rollout_pair["a"].resolve())
 
 
-def test_established_process_proof_reuses_os_discovery(monkeypatch, codex_tree):
+def test_established_process_proof_reuses_os_discovery(monkeypatch, rollout_pair):
     """Repeated proof reads reuse the exact process-owned rollout until invalidated."""
     calls: list[list[str]] = []
     started_at = [123.0]
@@ -61,17 +61,17 @@ def test_established_process_proof_reuses_os_discovery(monkeypatch, codex_tree):
         return subprocess.CompletedProcess(
             argv,
             0,
-            stdout=f"p{PID_A}\nf12\nn{codex_tree['a']}\n",
+            stdout=f"p{PID_A}\nf12\nn{rollout_pair['a']}\n",
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "check_output", check_output)
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(proc, "process_started_at", lambda pid: started_at[0])
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    assert reader.proven_transcript(cwd=str(codex_tree["project"])) == codex_tree["a"].resolve()
-    assert reader.proven_transcript(cwd=str(codex_tree["project"])) == codex_tree["a"].resolve()
+    assert reader.proven_transcript(cwd=str(rollout_pair["project"])) == rollout_pair["a"].resolve()
+    assert reader.proven_transcript(cwd=str(rollout_pair["project"])) == rollout_pair["a"].resolve()
 
     assert calls == [
         ["ps", "-p", str(PID_A), "-o", "comm="],
@@ -79,21 +79,21 @@ def test_established_process_proof_reuses_os_discovery(monkeypatch, codex_tree):
     ]
 
     started_at[0] = 124.0
-    assert reader.proven_transcript(cwd=str(codex_tree["project"])) == codex_tree["a"].resolve()
+    assert reader.proven_transcript(cwd=str(rollout_pair["project"])) == rollout_pair["a"].resolve()
     assert sum(call[0] == "lsof" for call in calls) == 2
     assert all(call[:2] != ["ps", "-eo"] for call in calls)
 
 
-async def test_two_siblings_each_read_their_own_transcript(monkeypatch, codex_tree):
+async def test_two_siblings_each_read_their_own_transcript(monkeypatch, rollout_pair):
     """The whole point: one cwd, one root, two agents, two right answers."""
-    hold(monkeypatch, {PID_A: [codex_tree["a"]], PID_B: [codex_tree["b"]]})
-    harness = CodexHarness(root=codex_tree["root"])
+    hold(monkeypatch, {PID_A: [rollout_pair["a"]], PID_B: [rollout_pair["b"]]})
+    harness = CodexHarness(root=rollout_pair["root"])
 
     first = open_participant_source(
-        harness.observer, participant_id="one", cwd=str(codex_tree["project"]), pane_pid=PID_A
+        harness.observer, participant_id="one", cwd=str(rollout_pair["project"]), pane_pid=PID_A
     )
     second = open_participant_source(
-        harness.observer, participant_id="two", cwd=str(codex_tree["project"]), pane_pid=PID_B
+        harness.observer, participant_id="two", cwd=str(rollout_pair["project"]), pane_pid=PID_B
     )
     try:
         assert (first._observer.pane_pid, second._observer.pane_pid) == (PID_A, PID_B)
@@ -109,34 +109,34 @@ async def test_two_siblings_each_read_their_own_transcript(monkeypatch, codex_tr
     assert one.correlation == two.correlation == "proven"
 
 
-async def test_process_evidence_outranks_a_session_id_we_were_given(monkeypatch, codex_tree):
+async def test_process_evidence_outranks_a_session_id_we_were_given(monkeypatch, rollout_pair):
     """A persisted id may itself be an earlier guess, so it does not go first.
 
     This is the upgrade path for a participant that attached heuristically
     before Theater could ask the process: taking the id's glob first would
     re-derive the same wrong file on every poll, forever.
     """
-    hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    found = reader.find_transcript(cwd=str(codex_tree["project"]), session_id=SESSION_B)
+    found = reader.find_transcript(cwd=str(rollout_pair["project"]), session_id=SESSION_B)
 
-    assert found == codex_tree["a"].resolve()
+    assert found == rollout_pair["a"].resolve()
 
 
-async def test_the_birth_time_floor_does_not_veto_process_evidence(monkeypatch, codex_tree):
+async def test_the_birth_time_floor_does_not_veto_process_evidence(monkeypatch, rollout_pair):
     """The floor is a proxy for ownership; the open file is the thing itself.
 
     A resumed session's rollout predates the participant that resumed it, and
     it is still that participant's rollout.
     """
-    hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
-    tomorrow = codex_tree["a"].stat().st_mtime + 86_400
+    hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
+    tomorrow = rollout_pair["a"].stat().st_mtime + 86_400
 
-    found = reader.find_transcript(cwd=str(codex_tree["project"]), after=tomorrow)
+    found = reader.find_transcript(cwd=str(rollout_pair["project"]), after=tomorrow)
 
-    assert found == codex_tree["a"].resolve()
+    assert found == rollout_pair["a"].resolve()
 
 
 @pytest.mark.parametrize("sibling_exists", [False, True])
@@ -170,7 +170,7 @@ async def test_one_source_recovers_when_the_rollout_finally_appears(
     assert second.location == str(rollout.resolve())
 
 
-async def test_an_id_we_were_given_outranks_the_process(monkeypatch, codex_tree):
+async def test_an_id_we_were_given_outranks_the_process(monkeypatch, rollout_pair):
     """A resume token names the file outright; nothing beats it, not even us.
 
     The mirror of the test above. There the id had been read back off a file
@@ -178,18 +178,18 @@ async def test_an_id_we_were_given_outranks_the_process(monkeypatch, codex_tree)
     is a launch receipt, and asking the process could only introduce doubt —
     a second codex in the pane, a pid the kernel has since reissued.
     """
-    asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
+    asked = hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
     reader = CodexObserver(
-        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
+        root=rollout_pair["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
     )
 
-    found = reader.find_transcript(cwd=str(codex_tree["project"]), session_id=SESSION_B)
+    found = reader.find_transcript(cwd=str(rollout_pair["project"]), session_id=SESSION_B)
 
-    assert found == codex_tree["b"]
+    assert found == rollout_pair["b"]
     assert asked.anything == []
 
 
-async def test_an_id_we_were_given_that_names_nothing_falls_through(monkeypatch, codex_tree):
+async def test_an_id_we_were_given_that_names_nothing_falls_through(monkeypatch, rollout_pair):
     """An exact id for a rollout that does not exist yet is not a dead end.
 
     A deliberate choice of availability over caution, and worth naming as one:
@@ -201,27 +201,27 @@ async def test_an_id_we_were_given_that_names_nothing_falls_through(monkeypatch,
     channels are labelled as what they are, and the test below holds them to
     it.
     """
-    hold(monkeypatch, {PID_A: [codex_tree["a"]]})
+    hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
     reader = CodexObserver(
-        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
+        root=rollout_pair["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
     )
 
     found = reader.find_transcript(
-        cwd=str(codex_tree["project"]),
+        cwd=str(rollout_pair["project"]),
         session_id="01a00cdf-0000-0000-0000-000000000000",
     )
 
-    assert found == codex_tree["a"].resolve()
+    assert found == rollout_pair["a"].resolve()
 
 
-async def test_missing_exact_id_does_not_fall_back_to_a_sibling(monkeypatch, codex_tree):
+async def test_missing_exact_id_does_not_fall_back_to_a_sibling(monkeypatch, rollout_pair):
     """No rollout from the recorded process means pending, never a same-cwd guess."""
     hold(monkeypatch, {PID_A: []})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
     history = await history_of(
         reader,
-        codex_tree["project"],
+        rollout_pair["project"],
         session_id="01a00cdf-0000-0000-0000-000000000000",
         session_provenance=TranscriptProvenance.EXACT,
     )
@@ -230,7 +230,7 @@ async def test_missing_exact_id_does_not_fall_back_to_a_sibling(monkeypatch, cod
     assert history.correlation == "heuristic"
 
 
-async def test_a_pane_process_that_is_not_codex_is_not_evidence(monkeypatch, codex_tree):
+async def test_a_pane_process_that_is_not_codex_is_not_evidence(monkeypatch, rollout_pair):
     """Holding a rollout open is not evidence unless the holder is the CLI.
 
     Descriptors travel from parent to child and never back, so a shell does
@@ -242,18 +242,18 @@ async def test_a_pane_process_that_is_not_codex_is_not_evidence(monkeypatch, cod
     """
     hold(
         monkeypatch,
-        {PID_SHELL: [codex_tree["a"]]},
+        {PID_SHELL: [rollout_pair["a"]]},
         comms={PID_SHELL: "-zsh"},
     )
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_SHELL)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_SHELL)
 
-    history = await history_of(reader, codex_tree["project"])
+    history = await history_of(reader, rollout_pair["project"])
 
     assert history.correlation == "heuristic"
-    assert not reader.proved(codex_tree["a"])
+    assert not reader.proved(rollout_pair["a"])
 
 
-async def test_an_adopted_pane_gets_no_proof_from_its_descendants(monkeypatch, codex_tree):
+async def test_an_adopted_pane_gets_no_proof_from_its_descendants(monkeypatch, rollout_pair):
     """A shell outlives what it ran, so what runs under it now proves nothing.
 
     Searching an adopted pane's descendants is the version of this that looks
@@ -265,19 +265,19 @@ async def test_an_adopted_pane_gets_no_proof_from_its_descendants(monkeypatch, c
     """
     hold(
         monkeypatch,
-        {PID_A: [codex_tree["a"]]},
+        {PID_A: [rollout_pair["a"]]},
         comms={PID_SHELL: "-zsh", PID_A: "codex"},
         beneath=[(PID_A, "codex")],
     )
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_SHELL)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_SHELL)
 
-    history = await history_of(reader, codex_tree["project"])
+    history = await history_of(reader, rollout_pair["project"])
 
     assert history.correlation == "heuristic"
-    assert not reader.proved(codex_tree["a"])
+    assert not reader.proved(rollout_pair["a"])
 
 
-async def test_a_codex_below_the_pane_process_is_never_reached(monkeypatch, codex_tree):
+async def test_a_codex_below_the_pane_process_is_never_reached(monkeypatch, rollout_pair):
     """A spawned pane *is* the CLI, so anything under it is somebody else.
 
     Codex can launch codex — as a sub-agent, or because the agent typed it.
@@ -286,21 +286,21 @@ async def test_a_codex_below_the_pane_process_is_never_reached(monkeypatch, code
     """
     hold(
         monkeypatch,
-        {PID_B: [codex_tree["b"]]},
+        {PID_B: [rollout_pair["b"]]},
         comms={PID_A: "codex", PID_B: "codex"},
         beneath=[(PID_B, "codex")],
     )
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    history = await history_of(reader, codex_tree["project"])
+    history = await history_of(reader, rollout_pair["project"])
 
     assert history.correlation == "heuristic"
-    assert not reader.proved(codex_tree["b"])
+    assert not reader.proved(rollout_pair["b"])
 
 
 @pytest.mark.parametrize("provider_bound", [False, True])
 async def test_both_siblings_bind_and_neither_job_is_refused(
-    monkeypatch, registry: Registry, codex_tree, provider_bound
+    monkeypatch, registry: Registry, rollout_pair, provider_bound
 ):
     """End to end: the collision guard admits two exact, distinct claims.
 
@@ -309,10 +309,10 @@ async def test_both_siblings_bind_and_neither_job_is_refused(
     """
     from tests.support.waiting import until
 
-    hold(monkeypatch, {PID_A: [codex_tree["a"]], PID_B: [codex_tree["b"]]})
+    hold(monkeypatch, {PID_A: [rollout_pair["a"]], PID_B: [rollout_pair["b"]]})
     watcher = Observer(
         registry,
-        {"codex": CodexHarness(root=codex_tree["root"])},
+        {"codex": CodexHarness(root=rollout_pair["root"])},
         poll=0.01,
         search=0.01,
         sync=0.01,
@@ -322,10 +322,10 @@ async def test_both_siblings_bind_and_neither_job_is_refused(
         return "› "
 
     watcher._capture = capture
-    first = registry.register(harness="codex", pane=None, cwd=str(codex_tree["project"]))
+    first = registry.register(harness="codex", pane=None, cwd=str(rollout_pair["project"]))
     first.pid = PID_A
     registry.store.upsert_participant(first)
-    second = registry.register(harness="codex", pane=None, cwd=str(codex_tree["project"]))
+    second = registry.register(harness="codex", pane=None, cwd=str(rollout_pair["project"]))
     second.pid = PID_B
     registry.store.upsert_participant(second)
     if provider_bound:
@@ -374,33 +374,33 @@ async def test_both_siblings_bind_and_neither_job_is_refused(
     finally:
         await watcher.aclose()
 
-    assert bound[first.id] == str(codex_tree["a"].resolve())
-    assert bound[second.id] == str(codex_tree["b"].resolve())
+    assert bound[first.id] == str(rollout_pair["a"].resolve())
+    assert bound[second.id] == str(rollout_pair["b"].resolve())
     assert registry.get(first.id).session_correlation == "proven"
     assert registry.get(second.id).session_correlation == "proven"
     assert registry.get(first.id).session_id == SESSION_A
     assert registry.get(second.id).session_id == SESSION_B
 
 
-async def test_probe_identity_loss_populates_session_id(monkeypatch, codex_tree):
+async def test_probe_identity_loss_populates_session_id(monkeypatch, rollout_pair):
     """The probe returns the harness session_id it read off the candidate."""
-    os.utime(codex_tree["a"], ns=(1_000_000_000, 1_000_000_000))
+    os.utime(rollout_pair["a"], ns=(1_000_000_000, 1_000_000_000))
     hold(monkeypatch, {PID_A: []})
     reader = CodexObserver(
-        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.OPERATOR
+        root=rollout_pair["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.OPERATOR
     )
     source = reader.open_source(
-        cwd=str(codex_tree["project"]),
+        cwd=str(rollout_pair["project"]),
         session_id=SESSION_A,
         session_provenance=TranscriptProvenance.OPERATOR,
-        known_location=str(codex_tree["a"]),
+        known_location=str(rollout_pair["a"]),
     )
     initial = await source.read()
     assert initial.attached is not None
     source.commit_attachment()
 
     # SESSION_B is already newer than SESSION_A in the fixture.
-    os.utime(codex_tree["b"], ns=(2_000_000_000, 2_000_000_000))
+    os.utime(rollout_pair["b"], ns=(2_000_000_000, 2_000_000_000))
 
     evidence = await source.probe_identity_loss()
     assert evidence is not None
@@ -408,7 +408,7 @@ async def test_probe_identity_loss_populates_session_id(monkeypatch, codex_tree)
 
 
 async def test_probe_identity_loss_session_id_none_when_candidate_has_no_session_id(
-    monkeypatch, codex_tree, tmp_path
+    monkeypatch, rollout_pair, tmp_path
 ):
     """A candidate whose filename has no UUID tail leaves evidence.session_id None.
 
@@ -417,18 +417,18 @@ async def test_probe_identity_loss_session_id_none_when_candidate_has_no_session
     the right cwd (so ``_transcript_cwd`` matches and the candidate is found)
     but whose name lacks the UUID stem pattern (so ``session_id`` returns None).
     """
-    os.utime(codex_tree["a"], ns=(1_000_000_000, 1_000_000_000))
+    os.utime(rollout_pair["a"], ns=(1_000_000_000, 1_000_000_000))
     # Make SESSION_B older than SESSION_A so the probe does not find it.
-    os.utime(codex_tree["b"], ns=(500_000_000, 500_000_000))
+    os.utime(rollout_pair["b"], ns=(500_000_000, 500_000_000))
     hold(monkeypatch, {PID_A: []})
     reader = CodexObserver(
-        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.OPERATOR
+        root=rollout_pair["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.OPERATOR
     )
     source = reader.open_source(
-        cwd=str(codex_tree["project"]),
+        cwd=str(rollout_pair["project"]),
         session_id=SESSION_A,
         session_provenance=TranscriptProvenance.OPERATOR,
-        known_location=str(codex_tree["a"]),
+        known_location=str(rollout_pair["a"]),
     )
     initial = await source.read()
     assert initial.attached is not None
@@ -436,14 +436,14 @@ async def test_probe_identity_loss_session_id_none_when_candidate_has_no_session
 
     # A rollout whose session_meta has the right cwd but whose filename
     # does not match the _STEM UUID pattern, so session_id() returns None.
-    day = codex_tree["root"] / "2026" / "08" / "17"
+    day = rollout_pair["root"] / "2026" / "08" / "17"
     no_sid = day / "rollout-broken.jsonl"
     no_sid.write_text(
         json.dumps(
             {
                 "timestamp": "2026-08-17T01:21:00.000Z",
                 "type": "session_meta",
-                "payload": {"id": "no-uuid-here", "cwd": str(codex_tree["project"])},
+                "payload": {"id": "no-uuid-here", "cwd": str(rollout_pair["project"])},
             }
         )
         + "\n",

@@ -16,54 +16,54 @@ from theater.models import Status
 
 
 async def test_a_file_outside_the_transcript_root_is_not_evidence(
-    monkeypatch, codex_tree, tmp_path
+    monkeypatch, rollout_pair, tmp_path
 ):
     """A rollout-shaped name elsewhere on disk proves nothing about this root."""
     stray = write_rollout(
-        tmp_path / "elsewhere", SESSION_A, codex_tree["project"], at="01-19-02", text="x"
+        tmp_path / "elsewhere", SESSION_A, rollout_pair["project"], at="01-19-02", text="x"
     )
     hold(monkeypatch, {PID_A: [stray]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    history = await history_of(reader, codex_tree["project"])
+    history = await history_of(reader, rollout_pair["project"])
 
     assert history.correlation == "heuristic"
     assert not reader.proved(stray)
 
 
-async def test_a_rollout_for_another_directory_is_not_evidence(monkeypatch, codex_tree, tmp_path):
+async def test_a_rollout_for_another_directory_is_not_evidence(monkeypatch, rollout_pair, tmp_path):
     """`session_meta.cwd` has to agree, or the process is in a different job."""
     other = tmp_path / "other"
     other.mkdir()
     foreign = write_rollout(
-        codex_tree["root"],
+        rollout_pair["root"],
         "01a00cdf-dead-beef-9a9f-67e9ebe0e2b2",
         other,
         at="01-20-00",
         text="somewhere else",
     )
     hold(monkeypatch, {PID_A: [foreign]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    history = await history_of(reader, codex_tree["project"])
+    history = await history_of(reader, rollout_pair["project"])
 
     assert history.correlation == "heuristic"
     assert history.location != str(foreign.resolve())
 
 
-async def test_an_ordinary_open_file_is_not_evidence(monkeypatch, codex_tree):
+async def test_an_ordinary_open_file_is_not_evidence(monkeypatch, rollout_pair):
     """Codex has the repo open too; only a rollout name is considered."""
-    ordinary = codex_tree["project"] / "notes.jsonl"
+    ordinary = rollout_pair["project"] / "notes.jsonl"
     ordinary.write_text("{}\n")
     hold(monkeypatch, {PID_A: [ordinary]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    history = await history_of(reader, codex_tree["project"])
+    history = await history_of(reader, rollout_pair["project"])
 
     assert history.correlation == "heuristic"
 
 
-async def test_a_non_codex_process_in_the_pane_is_not_opened(monkeypatch, codex_tree):
+async def test_a_non_codex_process_in_the_pane_is_not_opened(monkeypatch, rollout_pair):
     """Identified, then dropped: its files are never read at all.
 
     The companion to the test above, which shows that a non-codex root yields
@@ -75,22 +75,22 @@ async def test_a_non_codex_process_in_the_pane_is_not_opened(monkeypatch, codex_
     `ps comm` is an absolute path here because that is how it reports a binary
     invoked by path, which the name check has to tolerate.
     """
-    asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]}, comm="/bin/zsh")
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    asked = hold(monkeypatch, {PID_A: [rollout_pair["a"]]}, comm="/bin/zsh")
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=PID_A)
 
-    history = await history_of(reader, codex_tree["project"])
+    history = await history_of(reader, rollout_pair["project"])
 
     assert history.correlation == "heuristic"
     assert asked.comm == [PID_A]
     assert asked.open_files == []
 
 
-async def test_without_a_pid_the_operating_system_is_never_asked(monkeypatch, codex_tree):
+async def test_without_a_pid_the_operating_system_is_never_asked(monkeypatch, rollout_pair):
     """An external participant has no pane, so there is no process to inspect."""
-    asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=None)
+    asked = hold(monkeypatch, {PID_A: [rollout_pair["a"]]})
+    reader = CodexObserver(root=rollout_pair["root"], pane_pid=None)
 
-    history = await history_of(reader, codex_tree["project"])
+    history = await history_of(reader, rollout_pair["project"])
 
     assert asked.anything == []
     assert history.correlation == "heuristic"

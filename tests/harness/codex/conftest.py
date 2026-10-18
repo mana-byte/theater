@@ -1,4 +1,4 @@
-"""Fixtures for the Codex harness tests: a fake pane process tree for correlation."""
+"""Fixtures for the Codex harness tests: two rollouts in one working directory."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from tests.support.codex_rollouts import write_rollout
 
 
 @pytest.fixture
-def codex_tree(tmp_path):
+def rollout_pair(tmp_path):
     """A codex session root with two rollouts sharing one working directory."""
     root = tmp_path / ".codex" / "sessions"
     root.mkdir(parents=True)
