@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import secrets
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -163,11 +162,9 @@ async def _evaluate(transport: OpenCodeClient, sid: str, action: str) -> str:
     return effect
 
 
-@pytest.mark.skipif(
-    not os.environ.get("THEATER_OPENCODE_STOCK_PROBE"), reason="opt-in stock 2.0.18 probe"
-)
+@pytest.mark.skipif(not os.environ.get("THEATER_OPENCODE_STOCK_PROBE"), reason="opt-in stock probe")
 @pytest.mark.parametrize("approval", ["manual", "edits"])
-async def test_stock_2_0_18_keeps_native_denies_and_tightens_saved_allows(tmp_path, approval):
+async def test_stock_release_keeps_native_denies_and_tightens_saved_allows(tmp_path, approval):
     """Against the stock binary with an agent-level edit deny: the deny survives,
     native allows the hook tightens still ask, and a saved always-allow cannot
     bypass the enforced policy."""
@@ -298,7 +295,7 @@ process.exit(0)
 """
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the plugin")
+@pytest.mark.requires_node
 @pytest.mark.parametrize(
     ("approval", "edit", "shell"),
     [("manual", "ask", "ask"), ("edits", "allow", "ask"), ("yolo", "allow", "allow")],
@@ -380,7 +377,7 @@ for (const version of ['2.0.17', '2.0.18', '2.0.19', '2.0.20']) {
 """
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the plugin")
+@pytest.mark.requires_node
 def test_generated_tui_recovers_a_failed_viewport(tmp_path: Path) -> None:
     config = tmp_path / "config.json"
     for path, content in render_native_plugin_v2(

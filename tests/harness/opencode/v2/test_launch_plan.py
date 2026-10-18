@@ -11,6 +11,7 @@ import sys
 import pytest
 
 from tests.support.opencode_recorder_v2 import rec as shared_rec
+from tests.support.opencode_releases import V2_RELEASE, V2_UNQUALIFIED
 from tests.support.shipped import OpenCodeHarness
 from theater.harness import theater_mcp_servers
 from theater.harness.builtin.plugins.opencode.dialect import (
@@ -50,14 +51,14 @@ def _bootstrap_settings(plan, config) -> dict:
 
 
 def test_the_2x_version_banner_names_its_release():
-    assert parse_opencode_version("opencode v2.0.18\n") == (2, 0, 18)
-    assert parse_opencode_version("1.18.29") == (1, 18, 29)
+    assert parse_opencode_version("opencode v2.3.4\n") == (2, 3, 4)
+    assert parse_opencode_version("1.5.6") == (1, 5, 6)
 
 
 def test_a_2x_launch_runs_a_private_server_on_its_own_database(
     tmp_path, monkeypatch, fake_opencode
 ):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
     config = tmp_path / "abc.json"
     plan = OpenCodeHarness(dialect=V2).plan_launch(
         participant_id="abc123",
@@ -100,7 +101,7 @@ def test_a_2x_launch_runs_a_private_server_on_its_own_database(
 def test_a_promptless_enforced_launch_still_precreates_its_protected_session(
     tmp_path, monkeypatch, fake_opencode
 ):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
     config = tmp_path / "abc.json"
     plan = OpenCodeHarness(dialect=V2).plan_launch(
         participant_id="abc123",
@@ -115,7 +116,7 @@ def test_a_promptless_enforced_launch_still_precreates_its_protected_session(
 
 
 def test_an_enforced_resume_verifies_its_plugin_before_any_ui(tmp_path, monkeypatch, fake_opencode):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
     config = tmp_path / "abc.json"
     plan = OpenCodeHarness(dialect=V2).plan_launch(
         participant_id="abc123",
@@ -131,7 +132,7 @@ def test_an_enforced_resume_verifies_its_plugin_before_any_ui(tmp_path, monkeypa
 
 
 def test_an_unqualified_2x_release_refuses_enforced_approval(tmp_path, monkeypatch, fake_opencode):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.1.0")
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_UNQUALIFIED)
     with pytest.raises(BadRequest, match=r"qualified 2\.x range"):
         OpenCodeHarness(dialect=V2).plan_launch(
             participant_id="abc123",
@@ -150,7 +151,7 @@ def test_an_unqualified_2x_release_refuses_enforced_approval(tmp_path, monkeypat
 
 
 def test_a_new_session_exists_before_its_tui_opens_on_it(tmp_path, fake_opencode):
-    """2.0.18 drops a cold home screen's `--prompt`; a session's screen submits it once ready."""
+    """A 2.x TUI drops a cold home screen's `--prompt`; a session's screen submits it once ready."""
     plan = OpenCodeHarness(dialect=V2).plan_launch(
         participant_id="abc123",
         prompt="say hello",

@@ -7,6 +7,7 @@ import base64
 import json
 from typing import Any, ClassVar
 
+from tests.support.opencode_releases import V1_RELEASE
 from theater.harness.builtin.plugins.opencode.http import (
     BASIC_USERNAME,
 )
@@ -133,7 +134,7 @@ class ServerFake:
             if self.behaviors.get("health") == "fail":
                 await self._send(writer, 500, "Internal Server Error", b"{}")
                 return
-            version = self.behaviors.get("health-version", "1.18.29")
+            version = self.behaviors.get("health-version", V1_RELEASE)
             payload = json.dumps({"healthy": True, "version": version}).encode()
             await self._send(writer, 200, "OK", payload)
             return

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.opencode_releases import V2_RELEASE
 from tests.support.shipped import OpenCodeHarness
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.opencode.dialect import OpenCodeDialect
@@ -144,7 +145,7 @@ def test_opencode_2x_enforced_bootstrap_stores_the_literal_prompt(
     tmp_path, monkeypatch, opencode_binary, prompt
 ):
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
     config = tmp_path / "x.json"
     plan = OpenCodeHarness(dialect=OpenCodeDialect.V2).plan_launch(
         participant_id="p",

@@ -211,12 +211,12 @@ def test_native_compatibility_records_separate_version_and_route_support(local_d
     supported = RuntimeCompatibility(
         supported=True,
         policy="test-policy",
-        native_version="2.1.248",
+        native_version="7.0.2",
     )
     unsupported = RuntimeCompatibility(
         supported=False,
         policy="test-policy",
-        native_version="2.1.220",
+        native_version="7.0.1",
         reason="below floor",
     )
 
@@ -230,7 +230,7 @@ def test_native_compatibility_records_separate_version_and_route_support(local_d
         harness_registry.HARNESSES["claude"], installed=True, result=unsupported
     ) == {
         "status": "legacy-only",
-        "installed_version": "2.1.220",
+        "installed_version": "7.0.1",
         "qualified_range": None,
         "policy": "test-policy",
         "reason": "no native runtime; controls use the provider terminal",

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.opencode_probe import patch_probe
+from tests.support.opencode_releases import V1_RELEASE, V2_RELEASE, V2_UNQUALIFIED
 from theater import paths
 from theater.harness.builtin.plugins.opencode.dialect import (
     domain_for,
@@ -54,7 +55,8 @@ def fake_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     fake = tmp_path / "bin" / "opencode"
     fake.parent.mkdir()
     fake.write_text(
-        '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "opencode 1.18.29\\n"; exit 0; fi\n'
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then '
+        f'printf "opencode {V1_RELEASE}\\n"; exit 0; fi\n'
         'printf "unexpected invocation: %s\\n" "$*" >&2\nexit 1\n'
     )
     fake.chmod(0o755)
@@ -127,7 +129,7 @@ def test_manifest_selects_the_detached_server_runtime() -> None:
 def test_a_2x_release_serves_its_own_lineage_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_opencode
 ) -> None:
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
     plan = plan_opencode_server(_context(tmp_path, approval="manual"))
     database = v2_database_path("h00000000001")
     assert plan.backend.argv == [
@@ -142,11 +144,11 @@ def test_a_2x_release_serves_its_own_lineage_database(
     assert plan.backend.transcript_domain == domain_for(database)
     assert v2_lineage_marker("h00000000001")[0] in plan.backend.files
 
-    patch_probe(monkeypatch, "opencode v2.0.18\n", "--port --hostname")
+    patch_probe(monkeypatch, f"opencode v{V2_RELEASE}\n", "--port --hostname")
     qualified = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
-    assert (qualified.supported, qualified.native_version) == (True, "2.0.18")
+    assert (qualified.supported, qualified.native_version) == (True, V2_RELEASE)
     assert qualified.policy == OPENCODE_SERVER_V2_COMPATIBILITY_POLICY
-    patch_probe(monkeypatch, "opencode v2.1.0\n", "--port --hostname")
+    patch_probe(monkeypatch, f"opencode v{V2_UNQUALIFIED}\n", "--port --hostname")
     assert not probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode")).supported
 
 

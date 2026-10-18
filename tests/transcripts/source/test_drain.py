@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.claude_seal import VERSION as SEAL_VERSION
 from tests.support.shipped import ClaudeCodeObserver
 from tests.support.transcript_source_rig import attach, record, source, transcript
 from tests.support.transcript_source_rig import root as shared_root
@@ -382,14 +383,11 @@ async def test_a_cost_state_followed_by_records_is_consumed(root, workdir, monke
     assert s.offset == path.stat().st_size
 
 
-_SEAL_V = "2.1.284"
-
-
 def _held_marker_lines() -> list[str]:
     """An out-of-order turn: a1's parentUuid ("late") is an attachment flushed after the marker."""
 
     def rec(**kw) -> str:
-        return json.dumps({"version": _SEAL_V, **kw})
+        return json.dumps({"version": SEAL_VERSION, **kw})
 
     return [
         rec(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 
 import pytest
@@ -15,12 +14,10 @@ from theater.harness.contracts.runtime import RuntimeExecutionState, RuntimeNoti
 from theater.models import Status
 
 
+@pytest.mark.requires_node
 def test_tui_child_dialog_counts_are_scoped_without_polling_http():
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is required to execute the OpenCode TUI input observer")
     result = subprocess.run(
-        [node, "--input-type=module"],
+        ["node", "--input-type=module"],
         input=TUI_INPUTS
         + """
 import assert from "node:assert/strict"

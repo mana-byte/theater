@@ -65,15 +65,14 @@ def test_extension_overlay_uses_only_the_passive_public_tui_surface(monkeypatch,
     assert "operation_id" in plugin
 
 
+@pytest.mark.integration
+@pytest.mark.requires_node
 def test_rendered_extension_scopes_lifecycle_and_reconnects_after_host_restart(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     monkeypatch.delenv("OPENCODE_TUI_CONFIG", raising=False)
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is required to execute the rendered OpenCode TUI extension")
-    assert node is not None
+    node = shutil.which("node")  # requires_node guarantees it
     socket_path = Path("/tmp") / f"theater-opencode-{tmp_path.name}.sock"
     token_path = tmp_path / "token"
     plugin_path = tmp_path / "theater-observer.mjs"
@@ -271,13 +270,12 @@ def test_frontend_overlay_preserves_the_ordinary_opencode_launch(
     assert set(plan.files).issubset(overlay.files)
 
 
+@pytest.mark.integration
+@pytest.mark.requires_node
 def test_opencode_extension_executable_conformance(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     monkeypatch.delenv("OPENCODE_TUI_CONFIG", raising=False)
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is required to execute the rendered OpenCode TUI extension")
-    assert node is not None
+    node = shutil.which("node")  # requires_node guarantees it
     conformance = fixture("opencode_frontend_control_conformance.mts")
 
     with tempfile.TemporaryDirectory(prefix="oc-control-") as raw_root:

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.opencode_releases import V1_RELEASE, V2_RELEASE
 from theater.daemon.runtime import wiring as wiring_mod
 from theater.daemon.spawning import planning
 from theater.daemon.spawning.models import NativeSpawnSelection, SpawnRequest
@@ -79,7 +80,7 @@ def _context(tmp_path: Path, participant_id: str = "h00000000001") -> RuntimeCon
 def test_the_factory_selects_v1_for_an_unmarked_participant_despite_an_installed_2x(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(dialect.VERSION_ENV, "2.0.18")
+    monkeypatch.setenv(dialect.VERSION_ENV, V2_RELEASE)
     runtime = opencode_server_runtime_factory(_context(tmp_path))
     assert isinstance(runtime, OpenCodeServerRuntime)
 
@@ -87,7 +88,7 @@ def test_the_factory_selects_v1_for_an_unmarked_participant_despite_an_installed
 def test_the_factory_selects_v2_from_the_marker_despite_an_installed_1x(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(dialect.VERSION_ENV, "1.18.29")
+    monkeypatch.setenv(dialect.VERSION_ENV, V1_RELEASE)
     marker, payload = v2_lineage_marker("h00000000001")
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(payload)
@@ -110,7 +111,7 @@ def test_the_factory_selects_v2_when_the_cli_is_missing_entirely(
 def test_the_v2_marker_is_written_with_the_backend_plan_before_the_factory_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available_harness_binaries
 ) -> None:
-    monkeypatch.setenv(dialect.VERSION_ENV, "2.0.18")
+    monkeypatch.setenv(dialect.VERSION_ENV, V2_RELEASE)
     plan = plan_opencode_server(
         RuntimePlanningContext(
             participant_id="h00000000001",
@@ -202,7 +203,7 @@ async def test_the_event_loop_stays_live_during_a_blocked_version_probe(
         f"#!/bin/sh\n"
         f": > {started}\n"
         f"while [ ! -e {release} ]; do {sleep} 0.01; done\n"
-        f'echo "1.18.29"\n'
+        f'echo "{V1_RELEASE}"\n'
     )
     binary.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))

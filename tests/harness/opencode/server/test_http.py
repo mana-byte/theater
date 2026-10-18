@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.opencode_releases import V1_RELEASE
 from theater import paths
 from theater.harness.builtin.plugins.opencode import http as opencode_http
 from theater.harness.builtin.plugins.opencode.http import (
@@ -36,6 +37,7 @@ class FakeServer:
         self.requests: list[dict[str, Any]] = []
         self._behaviors: dict[str, Any] = {}
         self._handler: Any = None
+        self._connections: set[asyncio.Task[Any]] = set()
 
     @property
     def endpoint(self) -> str:
@@ -49,6 +51,11 @@ class FakeServer:
     async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
+            # Stalled handlers sleep for 30 s; cancel them so wait_closed returns at once.
+            connections = tuple(self._connections)
+            for task in connections:
+                task.cancel()
+            await asyncio.gather(*connections, return_exceptions=True)
             await self._server.wait_closed()
 
     def set_behavior(self, name: str, value: Any) -> None:
@@ -88,6 +95,9 @@ class FakeServer:
         await writer.drain()
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        self._connections.add(task)
         try:
             request_line = await reader.readline()
             if not request_line:
@@ -114,6 +124,7 @@ class FakeServer:
         except (ConnectionError, asyncio.IncompleteReadError):
             pass
         finally:
+            self._connections.discard(task)
             writer.close()
 
     def _authorized(self, record: dict[str, Any]) -> bool:
@@ -164,7 +175,7 @@ class FakeServer:
             await self._send(writer, 200, "OK", b"healthy", content_type="text/plain")
             return
         if behavior == "chunked":
-            payload = json.dumps({"healthy": True, "version": "1.18.29"}).encode()
+            payload = json.dumps({"healthy": True, "version": V1_RELEASE}).encode()
             await self._send(writer, 200, "OK", payload, chunked=True)
             return
         if behavior == "redirect":
@@ -174,7 +185,7 @@ class FakeServer:
             )
             await writer.drain()
             return
-        payload = json.dumps({"healthy": True, "version": "1.18.29"}).encode()
+        payload = json.dumps({"healthy": True, "version": V1_RELEASE}).encode()
         await self._send(writer, 200, "OK", payload)
 
     async def _route_control(self, record: dict[str, Any], writer: asyncio.StreamWriter) -> None:
@@ -264,7 +275,7 @@ def test_secret_file_refuses_insecure_representations(token_file: Path) -> None:
 
 async def test_health_create_status_and_abort(server: FakeServer, token_file: Path) -> None:
     client = _client(server, token_file)
-    assert await client.health() == "1.18.29"
+    assert await client.health() == V1_RELEASE
     assert await client.create_session(title="t") == "ses_proof_1"
     assert (await client.read_session("ses_proof_1"))["id"] == "ses_proof_1"
     session_status = (await client.session_status())["ses_proof_1"]
@@ -354,7 +365,7 @@ async def test_redirect_and_wrong_content_type_fail_closed(
     with pytest.raises(OpenCodeHttpError, match="not application/json"):
         await client.health()
     server.set_behavior("health", "chunked")
-    assert await client.health() == "1.18.29"
+    assert await client.health() == V1_RELEASE
 
 
 async def test_missing_session_answer_fails_closed(server: FakeServer, token_file: Path) -> None:

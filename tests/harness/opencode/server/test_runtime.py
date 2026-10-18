@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.opencode_releases import V1_RELEASE
 from tests.support.opencode_server import PASSWORD, ServerFake
 from tests.support.waiting import wait_until
 from theater import paths
@@ -176,7 +177,7 @@ async def test_new_session_binding_is_exact_and_idle(server: ServerFake, token_f
     assert binding.endpoint == server.endpoint
     assert binding.native_session_id in server.sessions
     assert binding.protocol == "opencode-server-http"
-    assert binding.native_version == "1.18.29"
+    assert binding.native_version == V1_RELEASE
     assert binding.compatibility_policy == OPENCODE_SERVER_COMPATIBILITY_POLICY
 
     snapshot = await runtime.snapshot()
