@@ -1,3 +1,5 @@
+"""Live trajectory follow: panel state transitions and stream recovery."""
+
 from __future__ import annotations
 
 import asyncio

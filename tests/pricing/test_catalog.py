@@ -1,3 +1,5 @@
+"""Pricing catalog: model-name resolution, aliases and rate fallbacks."""
+
 from __future__ import annotations
 
 from theater.harness.base import TokenUsage

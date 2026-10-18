@@ -1,3 +1,5 @@
+"""Presence snapshots and the fail-closed absence-access helpers."""
+
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError

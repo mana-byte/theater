@@ -1,3 +1,5 @@
+"""Observed timing: batch and bus stamps applied to trajectory records."""
+
 from __future__ import annotations
 
 from dataclasses import replace

@@ -1,3 +1,5 @@
+"""Store: durable rows, scratchpad quotas and tmux-restart diagnoses."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta

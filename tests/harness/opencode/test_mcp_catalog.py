@@ -1,3 +1,5 @@
+"""OpenCode MCP catalog: verified tool mappings and atomic reloads."""
+
 from __future__ import annotations
 
 import json

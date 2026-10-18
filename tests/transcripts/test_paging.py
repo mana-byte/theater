@@ -1,3 +1,5 @@
+"""Transcript paging: bounded pages, cursors and oversized-event chunking."""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,5 @@
+"""TrajectoryRuntime bus listener lifecycle."""
+
 from __future__ import annotations
 
 import asyncio

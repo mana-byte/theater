@@ -1,3 +1,5 @@
+"""Trajectory snapshots: lazy capture, pagination, search and shutdown."""
+
 from __future__ import annotations
 
 import asyncio

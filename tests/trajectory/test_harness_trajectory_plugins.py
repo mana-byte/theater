@@ -1,3 +1,5 @@
+"""Harness trajectory plugins: record parsing into trajectory facts."""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,5 @@
+"""Theater home layout: owned directories, permissions and Alembic bootstrap."""
+
 from __future__ import annotations
 
 import stat

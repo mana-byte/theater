@@ -1,3 +1,5 @@
+"""Trajectory panel state derived from history and participant liveness."""
+
 from __future__ import annotations
 
 import pytest

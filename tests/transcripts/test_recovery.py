@@ -1,3 +1,5 @@
+"""Transcript recovery: candidate enumeration and bind admission."""
+
 from __future__ import annotations
 
 import asyncio

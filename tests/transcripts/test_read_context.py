@@ -1,3 +1,5 @@
+"""transcripts.read context: retained prompts and role validation."""
+
 from __future__ import annotations
 
 import dataclasses
