@@ -1,9 +1,4 @@
-"""Tests for ``theater.daemon.blob.blob_sha``.
-
-The blob hash must match git's own notion of a blob hash on a repo with no
-.gitattributes filters, and must return None for a file that cannot be read
-— None is how a deletion is represented in the touch index, not an error.
-"""
+"""blob_sha matches git's blob hash and returns None for unreadable files (a deletion)."""
 
 from __future__ import annotations
 
