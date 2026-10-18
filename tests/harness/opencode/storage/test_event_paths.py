@@ -1,32 +1,18 @@
-"""Path capture in the opencode adapter: Event.paths extraction.
-
-Tests the recall substrate (docs/v2_recall.md, piece 1) against the real
-fixture shapes and the real opencode tool input dialect. opencode stores
-its tool-call arguments in ``state.input`` as a JSON object whose keys are
-the parameter schema field names — ``filePath`` for write/edit/read,
-``path`` (a directory) for glob/grep, and no path at all for bash/shell.
-
-The Recorder here extends the one in ``test_storage_observer.py`` with a
-``tool_with_input`` method that writes a tool part whose ``state.input``
-matches the real shape, so the path extraction runs against the same
-record structure the adapter sees in production.
-"""
+"""OpenCode tool-call paths and their relativisation."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import sqlite3
-import sys
 from pathlib import Path
 
 import pytest
 
-from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
+from tests.support.shipped import OpenCodeObserver
 from theater.harness import EventKind
 from theater.harness.base import EventPath
 from theater.harness.builtin.plugins.opencode import _paths_from_tool, _relativise
-from theater.models import BadRequest
 
 SCHEMA = """
 CREATE TABLE session (
@@ -172,9 +158,6 @@ def _tool_call_events(events: list) -> list:
     return [e for e in events if e.kind is EventKind.TOOL_CALL]
 
 
-# ---- unit: _paths_from_tool ---------------------------------------------
-
-
 def test_write_tool_input_yields_write_path():
     state = {"input": {"filePath": "src/app.py", "content": "x = 1"}}
     assert _paths_from_tool("write", state, "/repo") == (
@@ -214,9 +197,6 @@ def test_non_string_filepath_yields_no_paths():
     assert _paths_from_tool("write", state, "/repo") == ()
 
 
-# ---- unit: _relativise ---------------------------------------------------
-
-
 def test_relativise_absolute_path_inside_repo():
     assert _relativise("/repo/src/app.py", "/repo") == "src/app.py"
 
@@ -237,9 +217,6 @@ def test_relativise_absolute_path_without_cwd_is_none():
 
 def test_relativise_empty_is_none():
     assert _relativise("", "/repo") is None
-
-
-# ---- integration: live path (read) ---------------------------------------
 
 
 def test_a_write_tool_call_attaches_a_write_path(rec, workdir):
@@ -320,9 +297,6 @@ def test_two_tool_calls_in_one_message_each_carry_paths(rec, workdir):
     assert calls[1].paths == (EventPath(path="src/old.py", mode="read"),)
 
 
-# ---- integration: history path ------------------------------------------
-
-
 def test_history_also_carries_paths(rec, workdir):
     """The history path (``_replay``) attaches paths the same way the live
     path does, so ``read_transcript`` returns them too."""
@@ -341,63 +315,3 @@ def test_history_also_carries_paths(rec, workdir):
     calls = _tool_call_events(list(history.events))
     assert len(calls) == 1
     assert calls[0].paths == (EventPath(path="src/app.py", mode="write"),)
-
-
-# ---- resume -------------------------------------------------------------
-
-
-def test_resume_forks_the_session_and_waits_for_its_receipt(tmp_path, available_harness_binaries):
-    """Manual/edits cannot be proven on the TUI route, so the resume keeps
-    working for yolo — the enforced choices are covered by the refusal test."""
-    with pytest.raises(BadRequest, match="cannot prove its approval plugin loaded"):
-        OpenCodeHarness().plan_launch(
-            participant_id="abc123",
-            prompt="do something",
-            config_path=tmp_path / "x.json",
-            approval="manual",
-            resume="ses_ffb42302cffeaasiFBDGgLmkRf",
-        )
-    plan = OpenCodeHarness().plan_launch(
-        participant_id="abc123",
-        prompt="do something",
-        config_path=tmp_path / "x.json",
-        approval="yolo",
-        resume="ses_ffb42302cffeaasiFBDGgLmkRf",
-    )
-    assert plan.argv == [
-        str(Path(sys.executable).resolve()),
-        "--auto",
-        "-s",
-        "ses_ffb42302cffeaasiFBDGgLmkRf",
-        "--fork",
-    ]
-    receipt = tmp_path / "x.opencode-session"
-    assert receipt not in plan.files
-    assert plan.session_id is None
-
-
-def test_resume_with_model_and_auto(tmp_path, available_harness_binaries):
-    """Model and approval flags still apply when resuming."""
-    plan = OpenCodeHarness().plan_launch(
-        participant_id="abc123",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="yolo",
-        model="openai-foundry/zai-glm-5-2",
-        resume="ses_abc",
-    )
-    assert plan.argv == [
-        str(Path(sys.executable).resolve()),
-        "--model",
-        "openai-foundry/zai-glm-5-2",
-        "--auto",
-        "-s",
-        "ses_abc",
-        "--fork",
-    ]
-
-
-def test_resume_takes_prompt_is_false():
-    """opencode drops the prompt when resuming: `-s` routes to the session
-    view and `--prompt` is only read on the home screen."""
-    assert OpenCodeHarness.resume_takes_prompt is False

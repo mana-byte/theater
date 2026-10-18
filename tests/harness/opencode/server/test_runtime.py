@@ -1,9 +1,4 @@
-"""The detached OpenCode server runtime against a real loopback fake server.
-
-No transport mocking: a real TCP server streams real SSE and HTTP answers,
-because admission (204 + exact id confirmation) and the never-replayed
-UNKNOWN paths only mean something over a socket.
-"""
+"""The OpenCode detached-server runtime: binding, sends, reconnects and the plugin proof gate."""
 
 from __future__ import annotations
 
@@ -143,9 +138,6 @@ async def _open_new(
     return runtime, binding
 
 
-# ---- construction -------------------------------------------------------
-
-
 def test_the_runtime_requires_endpoint_and_credential(tmp_path: Path) -> None:
     base = {
         "participant_id": "h00000000001",
@@ -173,9 +165,6 @@ def test_the_factory_builds_the_runtime(token_file: Path) -> None:
         )
     )
     assert isinstance(runtime, OpenCodeServerRuntime)
-
-
-# ---- session lifecycle ---------------------------------------------------
 
 
 async def test_new_session_binding_is_exact_and_idle(server: ServerFake, token_file: Path) -> None:
@@ -321,9 +310,6 @@ async def test_fork_binds_the_child_never_the_parent(server: ServerFake, token_f
     assert snapshot.execution_state is RuntimeExecutionState.IDLE
     assert snapshot.native_turn_id is None
     await runtime.aclose()
-
-
-# ---- send admission -------------------------------------------------------
 
 
 async def test_send_accepts_once_with_sse_confirmation(
@@ -560,9 +546,6 @@ async def test_stream_loss_makes_state_unknown_and_reconnect_restores_health(
     await runtime.aclose()
 
 
-# ---- policy-gated surfaces ------------------------------------------------
-
-
 async def test_pending_input_readback_restores_awaiting_after_reconnect(
     server: ServerFake, token_file: Path
 ) -> None:
@@ -658,9 +641,6 @@ async def test_frontend_plan_builds_the_attach_command(
     ]
     assert plan.secret_env == {SERVER_SECRET_ENV: token_file}
     await runtime.aclose()
-
-
-# ---- fail-closed approval proof ------------------------------------------
 
 
 def _enforced_launch_files(

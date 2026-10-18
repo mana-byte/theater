@@ -1,13 +1,10 @@
-"""OpenCode dialect verification and routing safety: version probes, binary pinning,
-marker-based reconnect dialect selection, and event-loop isolation of pure callbacks."""
+"""OpenCode native-wiring selection and event-loop liveness while blocking planners run."""
 
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,11 +21,7 @@ from theater.harness import get as get_harness
 from theater.harness.base import ResumeLaunchOverlay
 from theater.harness.builtin.plugins.opencode import dialect
 from theater.harness.builtin.plugins.opencode.dialect import (
-    OpenCodeDialect,
-    installed_dialect,
-    installed_version,
     is_v2_participant,
-    resolve_binary,
     v2_lineage_marker,
 )
 from theater.harness.builtin.plugins.opencode.server_plan import plan_opencode_server
@@ -81,93 +74,6 @@ def _context(tmp_path: Path, participant_id: str = "h00000000001") -> RuntimeCon
         endpoint="http://127.0.0.1:1",
         token_file=token,
     )
-
-
-def test_resolve_binary_pins_the_absolute_executable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    binary = tmp_path / "opencode"
-    binary.write_text("#!/bin/sh\necho 1.18.29\n")
-    binary.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path))
-    assert resolve_binary("opencode") == str(binary.resolve())
-    with pytest.raises(BadRequest, match="not on PATH"):
-        resolve_binary("definitely-not-opencode")
-
-
-def test_unverified_version_refuses_before_any_launch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    binary = tmp_path / "opencode"
-    binary.write_text("#!/bin/sh\necho not-a-version\n")
-    binary.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.delenv(dialect.VERSION_ENV, raising=False)
-
-    with pytest.raises(BadRequest, match=dialect.VERSION_ENV):
-        installed_dialect("opencode")
-    # The daemon's planning entry refuses the same way, before any backend or
-    # participant work could touch a database.
-    req = SpawnRequest(harness="opencode", prompt="", cwd="/tmp", approval="manual")
-    participant = SimpleNamespace(id="h00000000001", harness="opencode")
-    with pytest.raises(BadRequest, match=dialect.VERSION_ENV):
-        asyncio.run(planning.build_plan(req, participant, None, registry=None))
-
-
-def test_an_explicit_pin_supplies_the_release_without_a_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("PATH", str(tmp_path))  # no opencode at all
-    monkeypatch.setenv(dialect.VERSION_ENV, "2.0.18")
-    assert installed_dialect("opencode") is OpenCodeDialect.V2
-
-
-def _counting_binary(directory: Path, body: str) -> tuple[Path, Path]:
-    counter = directory / "opencode.runs"
-    counter.write_text("")
-    binary = directory / "opencode"
-    binary.write_text(f'#!/bin/sh\necho run >> "{counter}"\n{body}\n')
-    binary.chmod(0o755)
-    return binary, counter
-
-
-def test_a_failed_probe_caches_within_the_backoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _binary, counter = _counting_binary(tmp_path, "echo not-a-version")
-    monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.delenv(dialect.VERSION_ENV, raising=False)
-
-    assert installed_version("opencode") is None
-    assert installed_version("opencode") is None
-    assert len(counter.read_text().splitlines()) == 1  # the failure cached
-
-
-def test_a_failed_probe_expires_and_recovers_on_an_unchanged_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    binary, counter = _counting_binary(tmp_path, "echo not-a-version")
-    identity = binary.stat()
-    monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.delenv(dialect.VERSION_ENV, raising=False)
-    monkeypatch.setattr(dialect, "_FAILURE_CACHE_SECONDS", 0.05)
-
-    assert installed_version("opencode") is None
-    assert len(counter.read_text().splitlines()) == 1
-
-    # Repair the CLI with the same size and mtime: only the failure's expiry
-    # (not a file-identity change) can drive the re-probe.
-    repaired = f'#!/bin/sh\necho run >> "{counter}"\necho 1.18.29\n'
-    padding = identity.st_size - len(repaired.encode())
-    assert padding >= 2
-    repaired += "#" + "x" * (padding - 2) + "\n"
-    binary.write_text(repaired)
-    os.utime(binary, ns=(identity.st_atime_ns, identity.st_mtime_ns))
-    assert binary.stat().st_size == identity.st_size
-
-    time.sleep(0.1)  # past the patched backoff, far under the 20s probe timeout
-    assert installed_version("opencode") == (1, 18, 29)
-    assert len(counter.read_text().splitlines()) == 2
 
 
 def test_the_factory_selects_v1_for_an_unmarked_participant_despite_an_installed_2x(

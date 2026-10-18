@@ -1,9 +1,4 @@
-"""The OpenCode HTTP/SSE client against a real loopback fake server.
-
-No mocking of the transport: a real TCP server streams real bytes, exercises
-auth, chunked bodies, disconnects, and SSE boundaries — the write-ambiguity
-and redaction rules are only meaningful over a socket.
-"""
+"""The OpenCode HTTP client and event stream against a fake server."""
 
 from __future__ import annotations
 
@@ -229,9 +224,6 @@ def _client(server: FakeServer, token_file: Path) -> OpenCodeClient:
     return OpenCodeClient(endpoint=server.endpoint, token_file=token_file)
 
 
-# ---- endpoint + credential hygiene ----------------------------------
-
-
 def test_endpoint_validation_accepts_only_bare_loopback() -> None:
     assert validate_loopback_endpoint("http://127.0.0.1:4096") == ("127.0.0.1", 4096)
     assert validate_loopback_endpoint("http://[::1]:4096") == ("::1", 4096)
@@ -268,9 +260,6 @@ def test_secret_file_refuses_insecure_representations(token_file: Path) -> None:
     empty.chmod(0o600)
     with pytest.raises(ValueError, match="bounded token"):
         read_client_secret(empty)
-
-
-# ---- named surfaces ---------------------------------------------------
 
 
 async def test_health_create_status_and_abort(server: FakeServer, token_file: Path) -> None:
@@ -392,9 +381,6 @@ async def test_request_body_is_bounded_before_connect(server: FakeServer, token_
         await client.prompt_async("ses_proof_1", {"text": "x" * 1_048_577})
     assert raised.value.written is False
     assert server.requests == []
-
-
-# ---- SSE --------------------------------------------------------------
 
 
 async def test_events_stream_until_server_closes(server: FakeServer, token_file: Path) -> None:

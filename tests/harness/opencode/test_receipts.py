@@ -1,4 +1,4 @@
-"""OpenCode generic transcript receipt coverage."""
+"""OpenCode generic receipts: validation, admission, staging and root-session switching."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.opencode_recorder import rec as shared_rec
 from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
 from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
@@ -512,3 +513,62 @@ def test_source_rejects_a_mismatched_exact_location(tmp_path):
 
     with pytest.raises(SourceContractError, match="location"):
         source.admit_exact_location(location="other://ses-one", session_id="ses-one")
+
+
+rec = shared_rec  # the shared fixture, under the name the tests ask for
+
+
+def test_generic_receipts_disambiguate_concurrent_sessions_in_the_same_cwd(rec, workdir):
+    """Exact receipts disambiguate concurrent sessions sharing a cwd."""
+    rec.conn.execute(
+        "INSERT INTO session (id, parent_id, directory, time_created) "
+        "VALUES ('ses_two', NULL, ?, 2000)",
+        (str(workdir.resolve()),),
+    )
+    rec.conn.commit()
+    observer = OpenCodeObserver(db=rec.path)
+    source_a = observer.open_source_for(
+        participant_id="participant_a",
+        cwd=str(workdir),
+        # Simulate the pre-fix daemon restarting with the wrong stored binding.
+        session_id="ses_two",
+        after=0.0,
+    )
+    source_b = observer.open_source_for(
+        participant_id="participant_b",
+        cwd=str(workdir),
+        session_id="ses_one",
+        after=0.0,
+    )
+
+    assert (
+        source_a.admit_exact_location(location="opencode://ses_one", session_id="ses_one")
+        == "staged"
+    )
+    assert (
+        source_b.admit_exact_location(location="opencode://ses_two", session_id="ses_two")
+        == "staged"
+    )
+    assert asyncio.run(source_a.read()).attached.session_id == "ses_one"
+    assert asyncio.run(source_b.read()).attached.session_id == "ses_two"
+
+
+def test_a_receipt_capable_process_waits_for_its_receipt(rec, workdir, tmp_path):
+    """Never fall back during the creation-event/receipt race window."""
+    correlation = tmp_path / "mcp"
+    correlation.mkdir()
+    (correlation / "participant.opencode.mjs").write_text("// capability marker\n")
+    observer = OpenCodeObserver(db=rec.path, correlation_dir=correlation)
+
+    source = observer.open_source_for(
+        participant_id="participant",
+        cwd=str(workdir),
+        after=0.0,
+    )
+    batch = asyncio.run(source.read())
+
+    assert batch.waiting is True
+    assert batch.attached is None
+    source._receipt_deadline = 0.0
+    failed = asyncio.run(source.read())
+    assert failed.error_code == "transcript_correlation_failed"

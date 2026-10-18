@@ -1,24 +1,4 @@
-"""OpenCode turn-completion fidelity, audited against the native source.
-
-The reproductions this file pins down come from reading the native tree
-(/Users/manaiki.laut/Desktop/coding_clis/opencode, read-only):
-
-- ``session/prompt.ts`` ends the loop for a finish reason other than
-  ``tool-calls`` and ``unknown`` — an ``unknown`` step finish continues the
-  turn, so it must never resolve an awaiting caller.
-- ``session/processor.ts`` halts a failed turn by storing a message ``error``
-  and setting the session idle *without writing any finish*; cleanup then
-  persists ``time.completed``. A naive "finish means done" reader emits no
-  terminal event for that row and the participant waits for rescue forever.
-- Transient states leave no terminal marker on the message at all: retries
-  only move session status, and an auto-compaction overflow persists
-  ``time.completed`` with neither finish nor error while the loop continues
-  with a fresh assistant message.
-
-Everything runs against a real SQLite file with the four tables opencode
-writes, in both shapes the adapter reads: the event log (`read()`) and the
-stored message rows (`history()`), which must agree.
-"""
+"""OpenCode turn completion: unknown finishes, terminal errors and tool-call steps."""
 
 from __future__ import annotations
 
@@ -161,9 +141,6 @@ def read_events(src) -> list:
     return asyncio.run(src.read()).events
 
 
-# ---- an unknown step finish continues the turn ----------------------------
-
-
 def test_an_unknown_finish_is_a_step_not_a_turn_end(rec, workdir):
     """prompt.ts excludes both `tool-calls` and `unknown` when deciding a
     turn ended, so an `unknown` step must read as a step: a snapshot with
@@ -206,9 +183,6 @@ def test_an_unknown_finish_keeps_the_session_status_working(rec, workdir):
     rec.update(step, finish="unknown", time=dict(step["time"], completed=rec.tick()))
 
     assert asyncio.run(source(rec, workdir).read()).status is Status.WORKING
-
-
-# ---- a stored error ends the turn without any finish ----------------------
 
 
 def test_a_terminal_error_without_finish_ends_the_turn(rec, workdir):
@@ -298,9 +272,6 @@ def test_an_error_after_a_tool_calls_finish_still_ends_the_turn(rec, workdir):
     assert terminal[0].usage is None
 
 
-# ---- transients must not complete early ----------------------------------
-
-
 def test_a_completed_message_without_finish_or_error_is_still_working(rec, workdir):
     """Both a retrying turn and an auto-compaction overflow persist
     time.completed on the message with no finish and no error; the loop
@@ -369,9 +340,6 @@ def test_repeated_terminal_finishes_emit_one_turn_end(rec, workdir):
     events = read_events(src)
 
     assert [e.turn_end for e in events] == [True]
-
-
-# ---- streaming and history agree ------------------------------------------
 
 
 def test_history_classifies_an_unknown_finish_as_a_step(rec, workdir):
@@ -521,9 +489,6 @@ def test_live_and_history_agree_on_an_error_only_turn(rec, workdir):
     assert [(e.kind, e.text, e.turn_end) for e in live] == [
         (e.kind, e.text, e.turn_end) for e in stored
     ]
-
-
-# ---- a stop with live tool calls continues the turn --------------------
 
 
 def _completed_tool_state():

@@ -1,4 +1,4 @@
-"""The OpenCode 2.x server runtime against a loopback fake answering 2.0.18's `/api` routes."""
+"""The OpenCode 2.x server runtime: prompts over HTTP and plugin proofs."""
 
 from __future__ import annotations
 

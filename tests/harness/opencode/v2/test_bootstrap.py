@@ -1,12 +1,4 @@
-"""The legacy 2.x bootstrap end to end: the real generated launcher, a fake opencode.
-
-The fake `opencode` is a Python script on PATH: `serve` announces a banner and answers
-the `/api` routes the bootstrap gates on; anything else is the TUI. Every invocation
-and request is logged, so the tests assert behaviour — one private server, the plugin
-proven on that same server, the session admitted, and only then one TUI — plus the
-failure paths: no TUI on refusal, no orphan backend, no leaked credential, and the
-password never in argv.
-"""
+"""The OpenCode 2.x launcher script: one verified server, then one TUI."""
 
 from __future__ import annotations
 
@@ -26,6 +18,7 @@ from theater.harness.builtin.plugins.opencode.legacy_bootstrap_v2 import render_
 from theater.harness.builtin.plugins.opencode.native_plugin_v2 import plugin_dir
 
 V2 = OpenCodeDialect.V2
+
 
 _FAKE = """#!{executable}
 import base64

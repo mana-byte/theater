@@ -1,9 +1,4 @@
-"""The fail-closed 2.x approval gate against a loopback fake answering `/api/plugin`.
-
-The fake records every request, so the tests assert behaviour: what was polled and
-what refused. The stock-2.0.18 regression runs only when `THEATER_OPENCODE_STOCK_PROBE`
-names the stock binary; it needs no model and changes no user state.
-"""
+"""The OpenCode 2.x plugin: load gate, approval ruleset, tightened decisions and TUI recovery."""
 
 from __future__ import annotations
 
@@ -11,6 +6,8 @@ import asyncio
 import json
 import os
 import secrets
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -93,9 +90,6 @@ def client(fake: PluginFake, tmp_path: Path) -> OpenCodeV2Client:
     return OpenCodeV2Client(endpoint=fake.endpoint, token_file=token)
 
 
-# ---- the plugin gate -----------------------------------------------------
-
-
 def test_a_missing_plugin_refuses():
     with pytest.raises(PluginNotActive, match="not loaded"):
         classify_plugin_state([], plugin_id=PLUGIN_ID, source_path=SOURCE)
@@ -151,9 +145,6 @@ async def test_a_plugin_that_never_registers_refuses_at_the_deadline(fake, clien
         await require_plugin_active(
             client, plugin_id=PLUGIN_ID, source_path=SOURCE, timeout=0.05, interval=0.01
         )
-
-
-# ---- the stock regression (opt-in) ----------------------------------------
 
 
 async def _evaluate(transport: OpenCodeClient, sid: str, action: str) -> str:
@@ -270,3 +261,137 @@ async def test_stock_2_0_18_keeps_native_denies_and_tightens_saved_allows(tmp_pa
         except TimeoutError:
             process.kill()
             await process.wait()
+
+
+_PLUGIN_PROBE = """
+const plugin = (await import(process.argv[1])).default
+const hooks = {}
+const registered = (name) => async (hook, callback) => {
+  hooks[`${name}.${hook}`] = callback
+  return { dispose: async () => {} }
+}
+const never = { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) }
+await plugin.setup({
+  location: { directory: "/w" },
+  permission: { hook: registered("permission") },
+  session: { hook: registered("session"), get: async () => ({ id: "ses_1" }) },
+  tool: { hook: registered("tool") },
+  mcp: { list: async () => ({ data: [] }) },
+  event: { subscribe: () => never },
+})
+const decide = (action, resources, effect = "allow") => {
+  const event = { action, resources, effect }
+  hooks["permission.evaluate"]?.(event)
+  return event.effect
+}
+console.log(JSON.stringify({
+  id: plugin.id,
+  shell: decide("shell", ["ls"]),
+  read: decide("read", ["/w/a.txt"]),
+  env: decide("read", ["/w/.env"]),
+  example: decide("read", ["/w/.env.example"]),
+  edit: decide("edit", ["/w/a.txt"]),
+  model: decide("provider.use", ["anthropic/claude"]),
+  nativeAsk: decide("read", ["/w/a.txt"], "ask"),
+}))
+process.exit(0)
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the plugin")
+@pytest.mark.parametrize(
+    ("approval", "edit", "shell"),
+    [("manual", "ask", "ask"), ("edits", "allow", "ask"), ("yolo", "allow", "allow")],
+)
+def test_the_plugin_only_tightens_native_decisions(tmp_path, approval, edit, shell):
+    files = render_native_plugin_v2("abc123", tmp_path / "x.json", tmp_path / "token", approval)
+    for path, body in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    server = plugin_dir(tmp_path / "x.json") / "server.js"
+    run = subprocess.run(
+        ["node", "--input-type=module", "-e", _PLUGIN_PROBE, server.as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    decided = json.loads(run.stdout)
+    assert decided["id"] == "theater.opencode-session"
+    assert (decided["edit"], decided["shell"]) == (edit, shell)
+    assert decided["read"] == "allow" and decided["model"] == "allow"
+    assert decided["nativeAsk"] == "ask"
+    if approval != "yolo":
+        assert (decided["env"], decided["example"]) == ("ask", "allow")
+
+
+_PROBE = """
+import assert from 'node:assert/strict'
+const { default: plugin } = await import(process.argv[1])
+const failure = new RangeError('visual row count exceeds native u32 length limit')
+let failed = false
+let repaints = 0
+let hitClip = false
+const buffer = {
+  clipped: false, opacity: 1,
+  clearScissorRects() { this.clipped = false },
+  clearOpacity() { this.opacity = 1 },
+}
+const root = {
+  render(current, deltaTime) {
+    assert.equal(this, root)
+    assert.equal(current, buffer)
+    assert.equal(deltaTime, 16)
+    if (!failed) {
+      failed = true
+      current.clipped = true
+      current.opacity = 0.5
+      hitClip = true
+      throw failure
+    }
+    assert.equal(current.clipped, false)
+    assert.equal(current.opacity, 1)
+    assert.equal(hitClip, false)
+    return 'header, chat, sidebar, prompt'
+  },
+}
+const renderer = {
+  root,
+  clearHitGridScissorRects() { hitClip = false },
+  requestRender() { repaints++ },
+}
+const original = root.render
+for (const version of ['2.0.16', '2.0.99']) {
+  assert.equal(plugin.setup({ app: { version }, renderer }), undefined)
+  assert.equal(root.render, original)
+}
+for (const version of ['2.0.17', '2.0.18', '2.0.19', '2.0.20']) {
+  const dispose = plugin.setup({ app: { version }, renderer })
+  assert.throws(() => root.render(buffer, 16), error => error === failure)
+  assert.equal(repaints, 1)
+  assert.equal(root.render(buffer, 16), 'header, chat, sidebar, prompt')
+  assert.equal(repaints, 1)
+  dispose()
+  assert.equal(root.render, original)
+  failed = false
+  repaints = 0
+  hitClip = false
+}
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the plugin")
+def test_generated_tui_recovers_a_failed_viewport(tmp_path: Path) -> None:
+    config = tmp_path / "config.json"
+    for path, content in render_native_plugin_v2(
+        "test", config, tmp_path / "token", "manual"
+    ).items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    subprocess.run(
+        ["node", "--input-type=module", "-e", _PROBE, (plugin_dir(config) / "tui.js").as_uri()],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
