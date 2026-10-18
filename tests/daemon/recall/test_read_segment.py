@@ -1,165 +1,17 @@
-"""Tests for ``theater.daemon.recall_read.read_segment``.
-
-Each test is a genuine regression: it would fail if the behaviour it
-covers were removed. The two paths that will actually happen in
-production and are easiest to fake passing — a missing transcript and a
-gap git cannot explain — each have a dedicated test.
-"""
+"""Reading a job segment: its metadata and a bounded, trust-checked transcript page."""
 
 from __future__ import annotations
 
 import json
-import subprocess
 import threading
-from pathlib import Path
 
 import pytest
-from sqlalchemy import insert, select
 
+from tests.support.recall_segments import add_touch, append_records, make_job, vibe_session
 from tests.support.shipped import VibeHarness
 from theater.daemon.observer import Observer
 from theater.daemon.recall_read import read_segment
-from theater.daemon.schema import touch
 from theater.provenance import TranscriptProvenance
-
-# ---- helpers -------------------------------------------------------------
-
-
-def _vibe_session(tmp_path: Path) -> tuple[Path, Path, str, Path]:
-    """A Vibe log root with one session whose cwd is a temp project.
-
-    Returns (root, project, session_id, transcript). The transcript is
-    a real file that the VibeObserver can locate and parse, so the
-    job-segment reader goes through the same ``open_source`` path as
-    production.
-    """
-    root = tmp_path / "logs" / "session"
-    session = root / "session_20260101_000000_deadbeef"
-    session.mkdir(parents=True)
-    project = tmp_path / "project"
-    project.mkdir()
-    sid = "deadbeef-1111-2222-3333"
-    (session / "meta.json").write_text(
-        json.dumps(
-            {
-                "session_id": sid,
-                "environment": {"working_directory": str(project)},
-            }
-        )
-    )
-    transcript = session / "messages.jsonl"
-    transcript.write_text("")
-    return root, project, sid, transcript
-
-
-def _append(transcript: Path, *records: dict) -> None:
-    with transcript.open("a") as fh:
-        for record in records:
-            fh.write(json.dumps(record) + "\n")
-        fh.flush()
-
-
-def _make_job(
-    store,
-    registry,
-    *,
-    handle: str,
-    harness: str = "vibe",
-    cwd: str | None = None,
-    target_cwd: str | None = None,
-    session_id: str | None = None,
-    session_correlation: str | None = None,
-) -> str:
-    """Create a job row and its target participant. Returns the participant id."""
-    p = registry.register(
-        harness=harness,
-        pane=None,
-        cwd=target_cwd or cwd,
-        session_id=session_id,
-    )
-    if session_correlation is not None or session_id is not None:
-        p.session_correlation = session_correlation or str(TranscriptProvenance.EXACT)
-        registry.store.upsert_participant(p)
-    store.create_job(
-        type(
-            "J",
-            (),
-            {
-                "handle": handle,
-                "caller_id": "caller",
-                "target_id": p.id,
-                "kind": "spawn",
-                "prompt": "do the thing",
-                "state": "done",
-                "result": "it is done",
-                "error_code": None,
-                "created_at": 1000.0,
-                "finished_at": 1001.0,
-            },
-        )()
-    )
-    return p.id
-
-
-def _add_touch(
-    store,
-    *,
-    handle: str,
-    path: str,
-    sha_before: str | None,
-    sha_after: str | None,
-    mode: str = "write",
-) -> None:
-    store.conn.execute(
-        insert(touch).values(
-            job_handle=handle,
-            path=path,
-            mode=mode,
-            sha_before=sha_before,
-            sha_after=sha_after,
-        )
-    )
-
-
-def _init_git(repo: Path) -> None:
-    """A real git repo with a configured author, for gap-segment tests."""
-    repo.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=repo,
-        check=True,
-    )
-
-
-def _commit(repo: Path, message: str) -> str:
-    """Stage everything and commit. Returns the commit sha."""
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
-
-
-def _blob_sha(repo: Path, ref: str) -> str:
-    """The blob sha of a path at a git ref, via ``git rev-parse``."""
-    result = subprocess.run(
-        ["git", "rev-parse", ref],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
-
-
-# ---- job segments --------------------------------------------------------
 
 
 async def test_job_segment_returns_metadata_and_transcript(registry, tmp_path):
@@ -169,7 +21,7 @@ async def test_job_segment_returns_metadata_and_transcript(registry, tmp_path):
     (vibe) answers the same way one whose output is a database would.
     The transcript events are unclipped and filtered to readable kinds.
     """
-    root, project, sid, transcript = _vibe_session(tmp_path)
+    root, project, sid, transcript = vibe_session(tmp_path)
 
     # Swap the shipped vibe harness for one pointed at our temp root,
     # so the observer finds our test transcript.
@@ -178,20 +30,20 @@ async def test_job_segment_returns_metadata_and_transcript(registry, tmp_path):
     vibe = VibeHarness(root=root)
     harness_mod.HARNESSES["vibe"] = vibe
 
-    _append(
+    append_records(
         transcript,
         {"role": "user", "content": "do the thing"},
         {"role": "assistant", "content": "it is done"},
     )
 
-    _make_job(
+    make_job(
         registry.store,
         registry,
         handle="vibe-abc",
         target_cwd=str(project),
         session_id=sid,
     )
-    _add_touch(
+    add_touch(
         registry.store,
         handle="vibe-abc",
         path="src.py",
@@ -226,13 +78,13 @@ async def test_recall_reads_only_a_bounded_history_page_off_loop(registry, tmp_p
     from theater.daemon import recall_history, recall_read
     from theater.harness.transcript.source import TranscriptSource
 
-    root, project, sid, transcript = _vibe_session(tmp_path)
+    root, project, sid, transcript = vibe_session(tmp_path)
     monkeypatch.setitem(harness_mod.HARNESSES, "vibe", VibeHarness(root=root))
-    _append(
+    append_records(
         transcript,
         *({"role": "assistant", "content": f"{index}:" + "x" * 600} for index in range(1000)),
     )
-    _make_job(registry.store, registry, handle="bounded", target_cwd=str(project), session_id=sid)
+    make_job(registry.store, registry, handle="bounded", target_cwd=str(project), session_id=sid)
     loop_thread = threading.get_ident()
     original_open = recall_history.open_participant_source
     original_budget = recall_read._apply_response_budget
@@ -269,12 +121,12 @@ async def test_recall_reads_only_a_bounded_history_page_off_loop(registry, tmp_p
 
 async def test_job_segment_refuses_a_contested_heuristic_transcript(registry, tmp_path):
     """Recall must not bypass read_transcript's Fulgenzio/Senterello guard."""
-    root, project, sid, transcript = _vibe_session(tmp_path)
+    root, project, sid, transcript = vibe_session(tmp_path)
     from theater import harness as harness_mod
 
     harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
-    _append(transcript, {"role": "assistant", "content": "belongs to the sibling"})
-    target_id = _make_job(
+    append_records(transcript, {"role": "assistant", "content": "belongs to the sibling"})
+    target_id = make_job(
         registry.store,
         registry,
         handle="ambiguous-vibe",
@@ -302,11 +154,11 @@ async def test_job_segment_refuses_a_contested_heuristic_transcript(registry, tm
 
 
 async def test_job_segment_reports_transcript_identity_lost(registry, tmp_path):
-    root, project, sid, _transcript = _vibe_session(tmp_path)
+    root, project, sid, _transcript = vibe_session(tmp_path)
     from theater import harness as harness_mod
 
     harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
-    target_id = _make_job(
+    target_id = make_job(
         registry.store,
         registry,
         handle="lost-vibe",
@@ -344,11 +196,11 @@ async def test_job_segment_reports_transcript_identity_lost(registry, tmp_path):
 async def test_dead_trusted_owner_missing_transcript_is_unavailable_not_quarantined(
     registry, tmp_path
 ):
-    root, project, sid, _transcript = _vibe_session(tmp_path)
+    root, project, sid, _transcript = vibe_session(tmp_path)
     from theater import harness as harness_mod
 
     harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
-    target_id = _make_job(
+    target_id = make_job(
         registry.store,
         registry,
         handle="dead-missing-vibe",
@@ -384,12 +236,12 @@ async def test_dead_trusted_owner_missing_transcript_is_unavailable_not_quaranti
 )
 async def test_job_segment_trusts_restored_location_after_restart(registry, tmp_path, provenance):
     """A short-lived recall source reopens persisted trusted provenance."""
-    root, project, sid, transcript = _vibe_session(tmp_path)
+    root, project, sid, transcript = vibe_session(tmp_path)
     from theater import harness as harness_mod
 
     harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
-    _append(transcript, {"role": "assistant", "content": str(provenance)})
-    target_id = _make_job(
+    append_records(transcript, {"role": "assistant", "content": str(provenance)})
+    target_id = make_job(
         registry.store,
         registry,
         handle=f"restored-{provenance}",
@@ -420,12 +272,12 @@ async def test_job_segment_does_not_apply_restored_trust_without_location(
     registry, tmp_path, provenance
 ):
     """Persisted trusted provenance is scoped to its bound transcript path."""
-    root, project, sid, transcript = _vibe_session(tmp_path)
+    root, project, sid, transcript = vibe_session(tmp_path)
     from theater import harness as harness_mod
 
     harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
-    _append(transcript, {"role": "assistant", "content": "same id, unbound path"})
-    _make_job(
+    append_records(transcript, {"role": "assistant", "content": "same id, unbound path"})
+    make_job(
         registry.store,
         registry,
         handle=f"unbound-{provenance}",
@@ -464,14 +316,14 @@ async def test_job_segment_missing_transcript_still_returns_metadata(registry, t
     vibe = VibeHarness(root=empty_root)
     harness_mod.HARNESSES["vibe"] = vibe
 
-    _make_job(
+    make_job(
         registry.store,
         registry,
         handle="codex-dead",
         harness="vibe",
         target_cwd=str(tmp_path / "nowhere"),
     )
-    _add_touch(
+    add_touch(
         registry.store,
         handle="codex-dead",
         path="gone.py",
@@ -502,10 +354,10 @@ async def test_job_segment_missing_transcript_still_returns_metadata(registry, t
 async def test_job_segment_filters_legacy_touch_paths(registry, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    _make_job(registry.store, registry, handle="filtered", target_cwd=str(project))
-    _add_touch(registry.store, handle="filtered", path="/tmp/secret", sha_before="a", sha_after="b")
-    _add_touch(registry.store, handle="filtered", path="../escape", sha_before="a", sha_after="b")
-    _add_touch(registry.store, handle="filtered", path="safe.py", sha_before="a", sha_after="b")
+    make_job(registry.store, registry, handle="filtered", target_cwd=str(project))
+    add_touch(registry.store, handle="filtered", path="/tmp/secret", sha_before="a", sha_after="b")
+    add_touch(registry.store, handle="filtered", path="../escape", sha_before="a", sha_after="b")
+    add_touch(registry.store, handle="filtered", path="safe.py", sha_before="a", sha_after="b")
 
     result = await read_segment(
         "filtered", store=registry.store, registry=registry, cwd=str(tmp_path)
@@ -560,16 +412,16 @@ async def test_job_segment_clips_older_events_under_the_response_budget(
     from theater.daemon import recall_read as recall_read_mod
 
     monkeypatch.setattr(recall_read_mod, "RECALL_READ_RESPONSE_MAX_BYTES", 2048)
-    root, project, sid, transcript = _vibe_session(tmp_path)
+    root, project, sid, transcript = vibe_session(tmp_path)
     from theater import harness as harness_mod
 
     harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
     for index in range(40):
-        _append(
+        append_records(
             transcript,
             {"role": "assistant", "content": f"event {index:02d} " + "x" * 100},
         )
-    _make_job(
+    make_job(
         registry.store,
         registry,
         handle="vibe-big",
@@ -602,16 +454,16 @@ async def test_job_segment_clips_an_oversized_single_event(registry, tmp_path, m
     from theater.daemon import recall_read as recall_read_mod
 
     monkeypatch.setattr(recall_read_mod, "RECALL_READ_RESPONSE_MAX_BYTES", 2048)
-    root, project, sid, transcript = _vibe_session(tmp_path)
+    root, project, sid, transcript = vibe_session(tmp_path)
     from theater import harness as harness_mod
 
     harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
-    _append(
+    append_records(
         transcript,
         {"role": "user", "content": "small question"},
         {"role": "assistant", "content": "huge " + "é" * 2000},
     )
-    _make_job(
+    make_job(
         registry.store,
         registry,
         handle="vibe-huge",
@@ -632,162 +484,6 @@ async def test_job_segment_clips_an_oversized_single_event(registry, tmp_path, m
     assert len(json.dumps(result).encode("utf-8")) <= 2048
 
 
-# ---- gap segments -------------------------------------------------------
-
-
-async def test_gap_segment_git_can_explain(tmp_path):
-    """A gap that git can explain returns the commits that touched the
-    path between the two blob shas."""
-    repo = tmp_path / "repo"
-    _init_git(repo)
-
-    # Create a file, commit it.
-    f = repo / "src.py"
-    f.write_text("original\n")
-    _commit(repo, "initial")
-    before_blob = _blob_sha(repo, "HEAD:src.py")
-
-    # Modify the file, commit again.
-    f.write_text("modified\n")
-    _commit(repo, "change it")
-    after_blob = _blob_sha(repo, "HEAD:src.py")
-
-    segment = f"gap:src.py:{before_blob}..{after_blob}"
-    result = await read_segment(segment, store=None, registry=None, cwd=str(repo))
-
-    assert result["kind"] == "gap"
-    assert result["path"] == "src.py"
-    assert result["sha_before"] == before_blob
-    assert result["sha_after"] == after_blob
-    assert result["explained"] is True
-    assert len(result["commits"]) >= 1
-    commit = result["commits"][0]
-    assert "sha" in commit
-    assert "author" in commit
-    assert "date" in commit
-    assert "subject" in commit
-    assert commit["subject"] == "change it"
-
-
-async def test_gap_segment_git_cannot_explain(tmp_path):
-    """A gap where the blobs are not in git history — an uncommitted
-    local edit — says so explicitly rather than returning an empty list
-    that reads like "nothing happened"."""
-    repo = tmp_path / "repo"
-    _init_git(repo)
-
-    # Create and commit a file.
-    f = repo / "src.py"
-    f.write_text("original\n")
-    _commit(repo, "initial")
-
-    # Make an uncommitted edit. The blob sha of this content is not
-    # in git history.
-    f.write_text("uncommitted change\n")
-    fake_before = "0" * 40
-    fake_after = "1" * 40
-
-    segment = f"gap:src.py:{fake_before}..{fake_after}"
-    result = await read_segment(segment, store=None, registry=None, cwd=str(repo))
-
-    assert result["kind"] == "gap"
-    assert result["explained"] is False
-    assert result["commits"] == []
-    assert "note" in result
-    assert "no commit" in result["note"]
-
-
-async def test_gap_segment_refuses_path_escape(tmp_path):
-    """A gap segment whose path contains ``..`` is an attack, not a
-    typo. The git root is a hard privacy wall."""
-    repo = tmp_path / "repo"
-    _init_git(repo)
-
-    segment = "gap:../../etc/passwd:aaa..bbb"
-    result = await read_segment(segment, store=None, registry=None, cwd=str(repo))
-
-    assert result["kind"] == "gap"
-    assert result["explained"] is False
-    assert result["commits"] == []
-    assert "escapes" in result["note"]
-
-
-async def test_gap_segment_not_in_a_git_repo(tmp_path):
-    """A gap segment called from a directory that is not a git repo
-    says so explicitly."""
-    not_a_repo = tmp_path / "nope"
-    not_a_repo.mkdir()
-
-    segment = "gap:src.py:aaa..bbb"
-    result = await read_segment(segment, store=None, registry=None, cwd=str(not_a_repo))
-
-    assert result["kind"] == "gap"
-    assert result["explained"] is False
-    assert "not inside a git repository" in result["note"]
-
-
-async def test_gap_segment_null_sha_sentinels(tmp_path):
-    """A gap with ``-`` as a sha (null — a creation or deletion) is
-    converted to None and does not crash."""
-    repo = tmp_path / "repo"
-    _init_git(repo)
-    f = repo / "src.py"
-    f.write_text("hello\n")
-    _commit(repo, "create")
-    blob = _blob_sha(repo, "HEAD:src.py")
-
-    # ``-`` means the file did not exist before (creation).
-    segment = f"gap:src.py:-..{blob}"
-    result = await read_segment(segment, store=None, registry=None, cwd=str(repo))
-
-    assert result["kind"] == "gap"
-    assert result["sha_before"] is None
-    assert result["sha_after"] == blob
-
-
-# ---- read-only ----------------------------------------------------------
-
-
-async def test_read_segment_writes_nothing_to_the_database(registry, tmp_path):
-    """``read_segment`` is read-only with respect to the database. It
-    writes nothing — not a log row, not a cache. Asserting the bus row
-    count is unchanged before and after proves this."""
-    from sqlalchemy import func
-
-    from theater import harness as harness_mod
-    from theater.daemon.schema import bus
-
-    empty_root = tmp_path / "empty_logs" / "session"
-    empty_root.mkdir(parents=True)
-    harness_mod.HARNESSES["vibe"] = VibeHarness(root=empty_root)
-
-    _make_job(
-        registry.store,
-        registry,
-        handle="ro-test",
-        target_cwd=str(tmp_path / "nowhere"),
-    )
-
-    # Measure after the job is created, so the bus rows that
-    # ``registry.register`` writes do not count against ``read_segment``.
-    before = registry.store.conn.execute(select(func.count()).select_from(bus)).scalar()
-
-    # Read a job segment.
-    await read_segment("ro-test", store=registry.store, registry=registry, cwd=str(tmp_path))
-    # Read a gap segment.
-    repo = tmp_path / "repo"
-    _init_git(repo)
-    await read_segment(
-        "gap:src.py:aaa..bbb",
-        store=registry.store,
-        registry=registry,
-        cwd=str(repo),
-    )
-
-    after = registry.store.conn.execute(select(func.count()).select_from(bus)).scalar()
-    assert before == after
-
-
 async def test_job_segment_reports_the_parent_of_the_editing_session(registry, tmp_path):
     """The brief names whoever spawned the agent that ran the job.
 
@@ -797,7 +493,7 @@ async def test_job_segment_reports_the_parent_of_the_editing_session(registry, t
     """
     project = tmp_path / "project"
     project.mkdir()
-    pid = _make_job(registry.store, registry, handle="h-child", target_cwd=str(project))
+    pid = make_job(registry.store, registry, handle="h-child", target_cwd=str(project))
     registry.store.reparent_participant(pid, new_parent_id="boss")
 
     result = await read_segment(
