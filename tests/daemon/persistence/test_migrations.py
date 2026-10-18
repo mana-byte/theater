@@ -1,4 +1,4 @@
-"""The migrations must describe the same database that `schema.py` declares."""
+"""Alembic migrations: schema drift, legacy adoption and per-revision data migrations."""
 
 from __future__ import annotations
 
