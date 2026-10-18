@@ -49,7 +49,7 @@ _TUI_SKIP_DETAIL = (
     "probe and --help flags only; human review required"
 )
 _REGIE_SKIP = Check(
-    "packages/regie/tests/test_dashboard_rich.py",
+    "packages/regie/tests/dashboard/test_content.py",
     "skip",
     "regie dashboard formatting is tested separately; isolated pytest cannot import regie",
 )

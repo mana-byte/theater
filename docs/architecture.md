@@ -1332,7 +1332,7 @@ facades remain only for established import paths.
 
 - **`budgets` table is unused.** Token and cost accounting is written but never
   read; the budget rail counts participants instead.
-- **tmux behaviour is tested only where tmux exists.** `packages/regie/tests/test_tmux_provider.py`
+- **tmux behaviour is tested only where tmux exists.** `packages/regie/tests/tmux/test_provider.py`
   drives a real private tmux server and asserts on exact pty bytes, but it is
   marked `tmux` and self-skips when tmux is absent — a sandbox without tmux
   silently loses that coverage (see AGENTS.md).

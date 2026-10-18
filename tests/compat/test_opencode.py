@@ -224,7 +224,7 @@ def test_qualify_is_green_when_the_server_proofs_pass(
     assert len(skips) == 2
     assert all("stock-TUI proof NOT run" in check.detail for check in skips)
     assert all("human review required" in check.detail for check in skips)
-    regie = next(check for check in result.checks if "test_dashboard_rich.py" in check.name)
+    regie = next(check for check in result.checks if "dashboard/test_content.py" in check.name)
     assert regie.status == "skip" and "tested separately" in regie.detail
 
 
