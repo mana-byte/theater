@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -82,158 +83,155 @@ def _observer(
     return ManifestHarnessObserver(observation, harness_name=harness_name)
 
 
-def test_native_children_forwards_exact_context_and_value() -> None:
-    seen: list[NativeChildrenContext] = []
-    expected = [NativeChild(session_id="child-1")]
-    callback = lambda ctx: seen.append(ctx) or expected  # noqa: E731
+@dataclass(frozen=True)
+class _Hook:
+    """One optional observer callback: where it is declared and how it is called."""
+
+    section: str
+    field: str
+    call: Callable[[ManifestHarnessObserver], object]
+    context: object
+    expected: object
+    bad: object
+    bad_match: str
+    absent: Callable[[ManifestHarnessObserver], None]
+
+
+def _absent_value(call, value):
+    def check(observer: ManifestHarnessObserver) -> None:
+        result = call(observer)
+        assert result is None if value is None else result == value
+
+    return check
+
+
+def _absent_refusal(call, match, *, supports_receipts: bool | None = None):
+    def check(observer: ManifestHarnessObserver) -> None:
+        with pytest.raises(ValueError, match=match):
+            call(observer)
+        if supports_receipts is not None:
+            assert observer.supports_transcript_receipts is supports_receipts
+
+    return check
+
+
+_CANDIDATE = TranscriptCandidate(location="/work/t.jsonl", session_id="s1")
+_CALL_NATIVE_CHILDREN = lambda o: o.native_children(Path("/work/t.jsonl"))  # noqa: E731
+_CALL_STREAM_FLOOR = lambda o: o.stream_floor("/work/t.jsonl")  # noqa: E731
+_CALL_CANDIDATES = lambda o: o.transcript_candidates(cwd="/work", domain="d", after=1.0)  # noqa: E731
+_CALL_RECEIPT = lambda o: o.validate_transcript_receipt(  # noqa: E731
+    payload={"key": "value"}, cwd="/work", expected_session_id="s1"
+)
+_CALL_OPERATOR = lambda o: o.admit_operator_candidate(  # noqa: E731
+    cwd="/work", candidate="/work/t.jsonl", domain="d", after=2.0
+)
+
+_HOOKS = {
+    "native_children": _Hook(
+        section="lineage",
+        field="native_children",
+        call=_CALL_NATIVE_CHILDREN,
+        context=NativeChildrenContext(transcript=Path("/work/t.jsonl")),
+        expected=[NativeChild(session_id="child-1")],
+        bad=[object()],
+        bad_match="native children",
+        absent=_absent_value(_CALL_NATIVE_CHILDREN, []),
+    ),
+    "stream_floor": _Hook(
+        section="identity",
+        field="stream_floor",
+        call=_CALL_STREAM_FLOOR,
+        context=StreamFloorContext(location="/work/t.jsonl"),
+        expected=StreamPoint(records=10, size=500),
+        bad="not-a-stream-point",
+        bad_match="stream-floor",
+        absent=_absent_value(_CALL_STREAM_FLOOR, None),
+    ),
+    "transcript_candidates": _Hook(
+        section="identity",
+        field="transcript_candidates",
+        call=_CALL_CANDIDATES,
+        context=TranscriptCandidatesContext(cwd="/work", domain="d", after=1.0),
+        expected=[_CANDIDATE],
+        bad=[object()],
+        bad_match="transcript candidates",
+        absent=_absent_value(_CALL_CANDIDATES, []),
+    ),
+    "receipt_validator": _Hook(
+        section="identity",
+        field="receipt_validator",
+        call=_CALL_RECEIPT,
+        context=ReceiptValidationContext(
+            payload={"key": "value"}, cwd="/work", expected_session_id="s1"
+        ),
+        expected=_CANDIDATE,
+        bad="not-a-candidate",
+        bad_match="receipt validator",
+        absent=_absent_refusal(
+            _CALL_RECEIPT, r"harness 'acme'.*does not implement", supports_receipts=False
+        ),
+    ),
+    "operator_candidate_admitter": _Hook(
+        section="identity",
+        field="operator_candidate_admitter",
+        call=_CALL_OPERATOR,
+        context=OperatorCandidateContext(
+            cwd="/work", candidate="/work/t.jsonl", domain="d", after=2.0
+        ),
+        expected=_CANDIDATE,
+        bad="not-a-candidate",
+        bad_match="operator candidate admitter",
+        absent=_absent_refusal(_CALL_OPERATOR, "has no operator-bindable"),
+    ),
+}
+_HOOK = pytest.mark.parametrize("hook", list(_HOOKS.values()), ids=list(_HOOKS))
+
+
+def _hooked(hook: _Hook, callback) -> ManifestHarnessObserver:
+    section = {"lineage": LineageManifest, "identity": IdentityManifest}[hook.section]
+    return _observer(
+        primary=SourceManifest(factory=_source, channel=_primary_channel()),
+        harness_name="acme",
+        **{hook.section: section(**{hook.field: callback})},
+    )
+
+
+@_HOOK
+def test_callback_forwards_exact_context_and_value(hook: _Hook) -> None:
+    seen: list[object] = []
+    observer = _hooked(hook, lambda ctx: (seen.append(ctx), hook.expected)[1])
+    assert hook.call(observer) == hook.expected
+    assert seen == [hook.context]
+
+
+@_HOOK
+def test_absent_callback_returns_the_superclass_default(hook: _Hook) -> None:
     observer = _observer(
         primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        lineage=LineageManifest(native_children=callback),
+        harness_name="acme",
     )
-    result = observer.native_children(Path("/work/transcript.jsonl"))
-    assert result == expected
-    assert seen == [NativeChildrenContext(transcript=Path("/work/transcript.jsonl"))]
+    hook.absent(observer)
 
 
-def test_native_children_absent_returns_superclass_default() -> None:
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-    )
-    assert observer.native_children(Path("/work/t.jsonl")) == []
+@_HOOK
+def test_callback_wrong_result_type_raises_type_error(hook: _Hook) -> None:
+    observer = _hooked(hook, lambda _ctx: hook.bad)
+    with pytest.raises(TypeError, match=hook.bad_match):
+        hook.call(observer)
 
 
-def test_native_children_wrong_result_type_raises_type_error() -> None:
-    callback = lambda _ctx: [object()]  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        lineage=LineageManifest(native_children=callback),
-    )
-    with pytest.raises(TypeError, match="native children"):
-        observer.native_children(Path("/work/t.jsonl"))
-
-
-def test_native_children_exception_propagates() -> None:
-    error = RuntimeError("boom")
-    callback = lambda _ctx: (_ for _ in ()).throw(error)  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        lineage=LineageManifest(native_children=callback),
-    )
+@_HOOK
+def test_callback_exception_propagates(hook: _Hook) -> None:
+    error = RuntimeError(f"{hook.field}-boom")
+    observer = _hooked(hook, lambda _ctx: (_ for _ in ()).throw(error))
     with pytest.raises(RuntimeError) as raised:
-        observer.native_children(Path("/work/t.jsonl"))
+        hook.call(observer)
     assert raised.value is error
-
-
-def test_stream_floor_forwards_exact_context_and_value() -> None:
-    seen: list[StreamFloorContext] = []
-    expected = StreamPoint(records=10, size=500)
-    callback = lambda ctx: (seen.append(ctx), expected)[1]  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(stream_floor=callback),
-    )
-    result = observer.stream_floor("/work/t.jsonl")
-    assert result == expected
-    assert seen == [StreamFloorContext(location="/work/t.jsonl")]
-
-
-def test_stream_floor_absent_returns_superclass_default() -> None:
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-    )
-    assert observer.stream_floor("/work/t.jsonl") is None
 
 
 def test_stream_floor_none_return_is_accepted() -> None:
-    callback = lambda _ctx: None  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(stream_floor=callback),
-    )
+    observer = _hooked(_HOOKS["stream_floor"], lambda _ctx: None)
     assert observer.stream_floor("/work/t.jsonl") is None
-
-
-def test_stream_floor_wrong_result_type_raises_type_error() -> None:
-    callback = lambda _ctx: "not-a-stream-point"  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(stream_floor=callback),
-    )
-    with pytest.raises(TypeError, match="stream-floor"):
-        observer.stream_floor("/work/t.jsonl")
-
-
-def test_stream_floor_exception_propagates() -> None:
-    error = RuntimeError("floor-boom")
-    callback = lambda _ctx: (_ for _ in ()).throw(error)  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(stream_floor=callback),
-    )
-    with pytest.raises(RuntimeError) as raised:
-        observer.stream_floor("/work/t.jsonl")
-    assert raised.value is error
-
-
-def test_transcript_candidates_forwards_exact_context_and_value() -> None:
-    seen: list[TranscriptCandidatesContext] = []
-    expected = [TranscriptCandidate(location="/work/t.jsonl", session_id="s1")]
-    callback = lambda ctx: (seen.append(ctx), expected)[1]  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(transcript_candidates=callback),
-    )
-    result = observer.transcript_candidates(cwd="/work", domain="d", after=1.0)
-    assert result == expected
-    assert seen == [TranscriptCandidatesContext(cwd="/work", domain="d", after=1.0)]
-
-
-def test_transcript_candidates_absent_returns_superclass_default() -> None:
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-    )
-    assert observer.transcript_candidates(cwd="/work") == []
-
-
-def test_transcript_candidates_wrong_result_type_raises_type_error() -> None:
-    callback = lambda _ctx: [object()]  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(transcript_candidates=callback),
-    )
-    with pytest.raises(TypeError, match="transcript candidates"):
-        observer.transcript_candidates(cwd="/work")
-
-
-def test_transcript_candidates_exception_propagates() -> None:
-    error = RuntimeError("cand-boom")
-    callback = lambda _ctx: (_ for _ in ()).throw(error)  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(transcript_candidates=callback),
-    )
-    with pytest.raises(RuntimeError) as raised:
-        observer.transcript_candidates(cwd="/work")
-    assert raised.value is error
-
-
-def test_receipt_validator_forwards_exact_context_and_value() -> None:
-    seen: list[ReceiptValidationContext] = []
-    expected = TranscriptCandidate(location="/work/t.jsonl", session_id="s1")
-    callback = lambda ctx: (seen.append(ctx), expected)[1]  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(receipt_validator=callback),
-    )
-    payload: Mapping[str, object] = {"key": "value"}
-    result = observer.validate_transcript_receipt(
-        payload=payload, cwd="/work", expected_session_id="s1"
-    )
-    assert result == expected
-    assert len(seen) == 1
-    assert seen[0].cwd == "/work"
-    assert seen[0].expected_session_id == "s1"
-    assert seen[0].payload["key"] == "value"
 
 
 def test_receipt_validation_context_payload_is_immutable_copy() -> None:
@@ -245,94 +243,9 @@ def test_receipt_validation_context_payload_is_immutable_copy() -> None:
         ctx.payload["key"] = "mutate"  # type: ignore[index]
 
 
-def test_receipt_validator_absent_returns_superclass_refusal() -> None:
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        harness_name="acme",
-    )
-    with pytest.raises(ValueError, match=r"harness 'acme'.*does not implement"):
-        observer.validate_transcript_receipt(payload={}, cwd="/work", expected_session_id=None)
-    assert observer.supports_transcript_receipts is False
-
-
 def test_receipt_validator_declares_support() -> None:
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(
-            receipt_validator=lambda _context: TranscriptCandidate(location="/work/t.jsonl")
-        ),
-    )
-
+    observer = _hooked(_HOOKS["receipt_validator"], lambda _ctx: _CANDIDATE)
     assert observer.supports_transcript_receipts is True
-
-
-def test_receipt_validator_wrong_result_type_raises_type_error() -> None:
-    callback = lambda _ctx: "not-a-candidate"  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(receipt_validator=callback),
-    )
-    with pytest.raises(TypeError, match="receipt validator"):
-        observer.validate_transcript_receipt(payload={}, cwd="/work", expected_session_id=None)
-
-
-def test_receipt_validator_exception_propagates() -> None:
-    error = RuntimeError("receipt-boom")
-    callback = lambda _ctx: (_ for _ in ()).throw(error)  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(receipt_validator=callback),
-    )
-    with pytest.raises(RuntimeError) as raised:
-        observer.validate_transcript_receipt(payload={}, cwd="/work", expected_session_id=None)
-    assert raised.value is error
-
-
-def test_operator_admitter_forwards_exact_context_and_value() -> None:
-    seen: list[OperatorCandidateContext] = []
-    expected = TranscriptCandidate(location="/work/t.jsonl", session_id="s1")
-    callback = lambda ctx: (seen.append(ctx), expected)[1]  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(operator_candidate_admitter=callback),
-    )
-    result = observer.admit_operator_candidate(
-        cwd="/work", candidate="/work/t.jsonl", domain="d", after=2.0
-    )
-    assert result == expected
-    assert seen == [
-        OperatorCandidateContext(cwd="/work", candidate="/work/t.jsonl", domain="d", after=2.0)
-    ]
-
-
-def test_operator_admitter_absent_returns_superclass_refusal() -> None:
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-    )
-    with pytest.raises(ValueError, match="has no operator-bindable"):
-        observer.admit_operator_candidate(cwd="/work", candidate="/work/t.jsonl")
-
-
-def test_operator_admitter_wrong_result_type_raises_type_error() -> None:
-    callback = lambda _ctx: "not-a-candidate"  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(operator_candidate_admitter=callback),
-    )
-    with pytest.raises(TypeError, match="operator candidate admitter"):
-        observer.admit_operator_candidate(cwd="/work", candidate="/work/t.jsonl")
-
-
-def test_operator_admitter_exception_propagates() -> None:
-    error = RuntimeError("admit-boom")
-    callback = lambda _ctx: (_ for _ in ()).throw(error)  # noqa: E731
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-        identity=IdentityManifest(operator_candidate_admitter=callback),
-    )
-    with pytest.raises(RuntimeError) as raised:
-        observer.admit_operator_candidate(cwd="/work", candidate="/work/t.jsonl")
-    assert raised.value is error
 
 
 def test_trajectory_capabilities_survive_compilation() -> None:
@@ -360,16 +273,3 @@ def test_default_trajectory_capabilities_match_observer_default() -> None:
         primary=SourceManifest(factory=_source, channel=_primary_channel()),
     )
     assert observer.trajectory_capabilities == HarnessObserver.trajectory_capabilities
-
-
-def test_all_absent_optional_callbacks_preserve_superclass_behaviour() -> None:
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-    )
-    assert observer.native_children(Path("/work/t.jsonl")) == []
-    assert observer.stream_floor("/work/t.jsonl") is None
-    assert observer.transcript_candidates(cwd="/work") == []
-    with pytest.raises(ValueError, match="does not implement"):
-        observer.validate_transcript_receipt(payload={}, cwd="/work", expected_session_id=None)
-    with pytest.raises(ValueError, match="has no operator-bindable"):
-        observer.admit_operator_candidate(cwd="/work", candidate="/work/t.jsonl")

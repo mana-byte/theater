@@ -158,65 +158,60 @@ def _tool_call_events(events: list) -> list:
     return [e for e in events if e.kind is EventKind.TOOL_CALL]
 
 
-def test_write_tool_input_yields_write_path():
-    state = {"input": {"filePath": "src/app.py", "content": "x = 1"}}
-    assert _paths_from_tool("write", state, "/repo") == (
-        EventPath(path="src/app.py", mode="write"),
-    )
+@pytest.mark.parametrize(
+    ("tool", "state", "expected"),
+    [
+        pytest.param(
+            "write",
+            {"input": {"filePath": "src/app.py", "content": "x = 1"}},
+            (EventPath(path="src/app.py", mode="write"),),
+            id="write",
+        ),
+        pytest.param(
+            "edit",
+            {"input": {"filePath": "src/app.py", "oldString": "a", "newString": "b"}},
+            (EventPath(path="src/app.py", mode="write"),),
+            id="edit",
+        ),
+        pytest.param(
+            "read",
+            {"input": {"filePath": "README.md", "offset": 1, "limit": 100}},
+            (EventPath(path="README.md", mode="read"),),
+            id="read",
+        ),
+        pytest.param(
+            "webfetch",
+            {"input": {"url": "https://example.com", "format": "markdown"}},
+            (),
+            id="webfetch_has_no_paths",
+        ),
+        pytest.param(
+            "write",
+            {"status": "pending", "input": {}},
+            (),
+            id="pending_carries_no_input_yet",
+        ),
+        pytest.param("write", {"input": {"content": "x"}}, (), id="missing_filepath"),
+        pytest.param("write", {"input": {"filePath": 42}}, (), id="non_string_filepath"),
+    ],
+)
+def test_tool_input_yields_its_paths(tool, state, expected):
+    assert _paths_from_tool(tool, state, "/repo") == expected
 
 
-def test_edit_tool_input_yields_write_path():
-    state = {
-        "input": {"filePath": "src/app.py", "oldString": "a", "newString": "b"},
-    }
-    assert _paths_from_tool("edit", state, "/repo") == (EventPath(path="src/app.py", mode="write"),)
-
-
-def test_read_tool_input_yields_read_path():
-    state = {"input": {"filePath": "README.md", "offset": 1, "limit": 100}}
-    assert _paths_from_tool("read", state, "/repo") == (EventPath(path="README.md", mode="read"),)
-
-
-def test_webfetch_yields_no_paths():
-    state = {"input": {"url": "https://example.com", "format": "markdown"}}
-    assert _paths_from_tool("webfetch", state, "/repo") == ()
-
-
-def test_pending_state_yields_no_paths():
-    """Pending carries no input yet."""
-    assert _paths_from_tool("write", {"status": "pending", "input": {}}, "/repo") == ()
-
-
-def test_missing_filepath_yields_no_paths():
-    state = {"input": {"content": "x"}}
-    assert _paths_from_tool("write", state, "/repo") == ()
-
-
-def test_non_string_filepath_yields_no_paths():
-    state = {"input": {"filePath": 42}}
-    assert _paths_from_tool("write", state, "/repo") == ()
-
-
-def test_relativise_absolute_path_inside_repo():
-    assert _relativise("/repo/src/app.py", "/repo") == "src/app.py"
-
-
-def test_relativise_relative_path_unchanged():
-    assert _relativise("src/app.py", "/repo") == "src/app.py"
-
-
-def test_relativise_absolute_path_outside_repo_is_none():
-    assert _relativise("/other/src/app.py", "/repo") is None
-
-
-def test_relativise_absolute_path_without_cwd_is_none():
-    """An absolute path with no cwd to relativise against would leak a home
-    directory into the index, so it is dropped."""
-    assert _relativise("/Users/manaiki.laut/repo/src/app.py", None) is None
-
-
-def test_relativise_empty_is_none():
-    assert _relativise("", "/repo") is None
+@pytest.mark.parametrize(
+    ("path", "cwd", "expected"),
+    [
+        pytest.param("/repo/src/app.py", "/repo", "src/app.py", id="absolute_inside_repo"),
+        pytest.param("src/app.py", "/repo", "src/app.py", id="relative_unchanged"),
+        pytest.param("/other/src/app.py", "/repo", None, id="absolute_outside_repo"),
+        # No cwd to relativise against: keeping the path would leak a home directory.
+        pytest.param("/home/alice/repo/src/app.py", None, None, id="absolute_without_cwd"),
+        pytest.param("", "/repo", None, id="empty"),
+    ],
+)
+def test_relativise(path, cwd, expected):
+    assert _relativise(path, cwd) == expected
 
 
 def test_a_write_tool_call_attaches_a_write_path(rec, workdir):

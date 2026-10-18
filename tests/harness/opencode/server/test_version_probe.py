@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.support.opencode_probe import ProbeResult, patch_probe
+from tests.support.opencode_releases import V1_RELEASE, V2_RELEASE
 from theater.daemon.spawning import planning
 from theater.daemon.spawning.models import SpawnRequest
 from theater.harness.builtin.plugins.opencode import dialect, server_plan
@@ -26,8 +27,11 @@ from theater.harness.builtin.plugins.opencode.runtime_plan import (
     OPENCODE_SERVER_COMPATIBILITY_POLICY,
     OPENCODE_SERVER_MAX_VERSION,
     OPENCODE_SERVER_MIN_VERSION,
+    OPENCODE_SERVER_V2_MAX_VERSION,
+    OPENCODE_SERVER_V2_MIN_VERSION,
     OPENCODE_TUI_COMPATIBILITY_POLICY,
     OPENCODE_TUI_MAX_VERSION,
+    OPENCODE_TUI_MIN_VERSION,
     OPENCODE_V1_QUALIFIED_RANGE,
     probe_opencode_compatibility,
     release_text,
@@ -45,11 +49,11 @@ from theater.models import BadRequest
 def test_probe_requires_both_successful_checks(
     monkeypatch: pytest.MonkeyPatch, returncodes: tuple[int, int]
 ) -> None:
-    patch_probe(monkeypatch, "opencode 1.18.29+c470c79\n", "--port --hostname", returncodes)
+    patch_probe(monkeypatch, f"opencode {V1_RELEASE}+c470c79\n", "--port --hostname", returncodes)
     compatibility = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
     assert compatibility.supported is (returncodes == (0, 0))
     if compatibility.supported:
-        assert compatibility.native_version == "1.18.29"
+        assert compatibility.native_version == V1_RELEASE
 
 
 def _patch_offset(version: tuple[int, int, int], offset: int) -> str:
@@ -85,7 +89,7 @@ def test_probe_qualifies_exactly_the_1x_window(
 
 
 def test_probe_requires_the_serve_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_probe(monkeypatch, "1.18.29", "--model --auto")
+    patch_probe(monkeypatch, V1_RELEASE, "--model --auto")
     compatibility = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
     assert compatibility.supported is False
     assert "port-0 flags" in (compatibility.reason or "")
@@ -93,7 +97,18 @@ def test_probe_requires_the_serve_flags(monkeypatch: pytest.MonkeyPatch) -> None
 
 @pytest.mark.parametrize(
     ("version", "supported"),
-    [("2.0.5", False), ("2.0.6", True), ("2.0.20", True), ("2.1.0", False)],
+    [
+        (_patch_offset(OPENCODE_SERVER_V2_MIN_VERSION, -1), False),
+        (release_text(OPENCODE_SERVER_V2_MIN_VERSION), True),
+        # A late patch of the last qualified minor.
+        (
+            release_text(
+                (*OPENCODE_SERVER_V2_MAX_VERSION[:1], OPENCODE_SERVER_V2_MAX_VERSION[1] - 1, 99)
+            ),
+            True,
+        ),
+        (release_text(OPENCODE_SERVER_V2_MAX_VERSION), False),
+    ],
 )
 def test_probe_qualifies_exactly_the_2x_window(
     monkeypatch: pytest.MonkeyPatch, version: str, supported: bool
@@ -107,7 +122,7 @@ def test_probe_qualifies_exactly_the_2x_window(
 
 def test_a_2x_resume_probe_refuses_before_any_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     """A resume continues in the lineage database, which the native backend cannot open."""
-    patch_probe(monkeypatch, "opencode v2.0.18\n", "--port --hostname")
+    patch_probe(monkeypatch, f"opencode v{V2_RELEASE}\n", "--port --hostname")
     refused = probe_opencode_server_compatibility(
         RuntimeProbeContext(binary="opencode", resume=True)
     )
@@ -116,12 +131,12 @@ def test_a_2x_resume_probe_refuses_before_any_backend(monkeypatch: pytest.Monkey
 
 
 def test_a_1x_resume_probe_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_probe(monkeypatch, "opencode 1.18.29+c470c79\n", "--port --hostname")
+    patch_probe(monkeypatch, f"opencode {V1_RELEASE}+c470c79\n", "--port --hostname")
     qualified = probe_opencode_server_compatibility(
         RuntimeProbeContext(binary="opencode", resume=True)
     )
     assert qualified.supported is True
-    assert qualified.native_version == "1.18.29"
+    assert qualified.native_version == V1_RELEASE
 
 
 @pytest.mark.parametrize("failing_check", ["--version", "--help"])
@@ -138,7 +153,7 @@ def test_probe_reports_probe_failures_and_joins_both_checks(
         try:
             if argv[-1] == failing_check:
                 raise failure
-            return ProbeResult("1.18.29" if argv[-1] == "--version" else "--port --hostname")
+            return ProbeResult(V1_RELEASE if argv[-1] == "--version" else "--port --hostname")
         finally:
             finished.add(argv[-1])
 
@@ -149,16 +164,26 @@ def test_probe_reports_probe_failures_and_joins_both_checks(
     assert finished == {"--version", "--help"}
 
 
-def test_probe_accepts_the_declared_release_range(monkeypatch) -> None:
-    class _Result:
-        def __init__(self, output: str) -> None:
-            self.returncode = 0
-            self.stdout = output
-            self.stderr = ""
-
+@pytest.mark.parametrize(
+    ("version", "supported", "names_range"),
+    [
+        pytest.param(
+            release_text(OPENCODE_TUI_MIN_VERSION), True, False, id="declared_release_range"
+        ),
+        pytest.param(
+            f"{release_text(OPENCODE_TUI_MIN_VERSION)}-beta.1", False, False, id="prerelease"
+        ),
+        pytest.param(
+            release_text(OPENCODE_TUI_MAX_VERSION), False, True, id="outside_tested_window"
+        ),
+    ],
+)
+def test_tui_probe_qualifies_only_the_declared_release_range(
+    monkeypatch, version: str, supported: bool, names_range: bool
+) -> None:
     def run(argv, **kwargs):
         del kwargs
-        return _Result("1.18.29") if argv[-1] == "--version" else _Result("--model --auto --fork")
+        return ProbeResult(version if argv[-1] == "--version" else "--model --auto --fork")
 
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.opencode.runtime_plan.subprocess.run",
@@ -166,46 +191,10 @@ def test_probe_accepts_the_declared_release_range(monkeypatch) -> None:
     )
 
     compatibility = probe_opencode_compatibility(RuntimeProbeContext(binary="opencode"))
-    assert compatibility.supported is True
+    assert compatibility.supported is supported
     assert compatibility.policy == OPENCODE_TUI_COMPATIBILITY_POLICY
-
-
-def test_probe_rejects_a_prerelease(monkeypatch) -> None:
-    class _Result:
-        returncode = 0
-        stdout = "1.18.29-beta.1"
-        stderr = ""
-
-    monkeypatch.setattr(
-        "theater.harness.builtin.plugins.opencode.runtime_plan.subprocess.run",
-        lambda *args, **kwargs: _Result(),
-    )
-
-    compatibility = probe_opencode_compatibility(RuntimeProbeContext(binary="opencode"))
-    assert compatibility.supported is False
-
-
-def test_probe_rejects_releases_outside_the_tested_window(monkeypatch) -> None:
-    class _Result:
-        def __init__(self, output: str) -> None:
-            self.returncode = 0
-            self.stdout = output
-            self.stderr = ""
-
-    def run(argv, **kwargs):
-        del kwargs
-        version = release_text(OPENCODE_TUI_MAX_VERSION)
-        return _Result(version) if argv[-1] == "--version" else _Result("--model --auto --fork")
-
-    monkeypatch.setattr(
-        "theater.harness.builtin.plugins.opencode.runtime_plan.subprocess.run",
-        run,
-    )
-
-    compatibility = probe_opencode_compatibility(RuntimeProbeContext(binary="opencode"))
-    assert compatibility.supported is False
-    assert compatibility.policy == OPENCODE_TUI_COMPATIBILITY_POLICY
-    assert OPENCODE_V1_QUALIFIED_RANGE in (compatibility.reason or "")
+    if names_range:
+        assert OPENCODE_V1_QUALIFIED_RANGE in (compatibility.reason or "")
 
 
 @pytest.fixture(autouse=True)
@@ -217,7 +206,7 @@ def test_resolve_binary_pins_the_absolute_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     binary = tmp_path / "opencode"
-    binary.write_text("#!/bin/sh\necho 1.18.29\n")
+    binary.write_text(f"#!/bin/sh\necho {V1_RELEASE}\n")
     binary.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
     assert resolve_binary("opencode") == str(binary.resolve())
@@ -248,7 +237,7 @@ def test_an_explicit_pin_supplies_the_release_without_a_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))  # no opencode at all
-    monkeypatch.setenv(dialect.VERSION_ENV, "2.0.18")
+    monkeypatch.setenv(dialect.VERSION_ENV, V2_RELEASE)
     assert installed_dialect("opencode") is OpenCodeDialect.V2
 
 
@@ -287,7 +276,7 @@ def test_a_failed_probe_expires_and_recovers_on_an_unchanged_file(
 
     # Repair the CLI with the same size and mtime: only the failure's expiry
     # (not a file-identity change) can drive the re-probe.
-    repaired = f'#!/bin/sh\necho run >> "{counter}"\necho 1.18.29\n'
+    repaired = f'#!/bin/sh\necho run >> "{counter}"\necho {V1_RELEASE}\n'
     padding = identity.st_size - len(repaired.encode())
     assert padding >= 2
     repaired += "#" + "x" * (padding - 2) + "\n"
@@ -296,5 +285,5 @@ def test_a_failed_probe_expires_and_recovers_on_an_unchanged_file(
     assert binary.stat().st_size == identity.st_size
 
     time.sleep(0.1)  # past the patched backoff, far under the 20s probe timeout
-    assert installed_version("opencode") == (1, 18, 29)
+    assert installed_version("opencode") == OPENCODE_TUI_MIN_VERSION
     assert len(counter.read_text().splitlines()) == 2

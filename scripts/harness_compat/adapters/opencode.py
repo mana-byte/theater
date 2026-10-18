@@ -69,7 +69,7 @@ class OpenCodeAdapter:
         "tests/compat/test_opencode.py",
         "tests/harness/opencode/server/test_version_probe.py::test_probe_qualifies_exactly_the_1x_window",
         "tests/harness/opencode/server/test_runtime.py::test_server_handshake_rejects_version_drift",
-        "tests/harness/opencode/server/test_version_probe.py::test_probe_rejects_releases_outside_the_tested_window",
+        "tests/harness/opencode/server/test_version_probe.py::test_tui_probe_qualifies_only_the_declared_release_range[outside_tested_window]",
     )
     #: The routed mistral provider talks to the mock's OpenAI chat surface.
     expected_routes: frozenset[Route] = frozenset({("POST", "/v1/chat/completions")})

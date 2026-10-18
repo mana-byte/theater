@@ -116,50 +116,25 @@ def test_launch_uses_a_core_owned_generic_receipt_token(
 
 
 @pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])
-def test_generic_receipt_cli_reports_token_read_failure_only_in_strict_mode(
-    tmp_path, monkeypatch, strict, expected
+@pytest.mark.parametrize("failure", ["token_read", "parse", "rpc"])
+def test_generic_receipt_cli_reports_failures_only_in_strict_mode(
+    tmp_path, monkeypatch, failure, strict, expected
 ):
-    token_file = tmp_path / "missing-token"
+    token_file = tmp_path / ("missing-token" if failure == "token_read" else "token")
+    if failure != "token_read":
+        token_file.write_text("secret")
     argv = ["transcript-receipt", "--id", "participant", "--token-file", str(token_file)]
     if strict:
         argv.append("--strict-exit")
     args = cli._parser().parse_args(argv)
-    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"session_id": "ses-root"})))
+    if failure == "rpc":
 
-    assert cli.cmd_transcript_receipt(args) == expected
+        async def reject(*args, **kwargs):
+            raise ConnectionError("daemon unavailable")
 
-
-@pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])
-def test_generic_receipt_cli_reports_parse_failure_only_in_strict_mode(
-    tmp_path, monkeypatch, strict, expected
-):
-    token_file = tmp_path / "token"
-    token_file.write_text("secret")
-    argv = ["transcript-receipt", "--id", "participant", "--token-file", str(token_file)]
-    if strict:
-        argv.append("--strict-exit")
-    args = cli._parser().parse_args(argv)
-    monkeypatch.setattr("sys.stdin", io.StringIO("not-json"))
-
-    assert cli.cmd_transcript_receipt(args) == expected
-
-
-@pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])
-def test_generic_receipt_cli_reports_rpc_failure_only_in_strict_mode(
-    tmp_path, monkeypatch, strict, expected
-):
-    token_file = tmp_path / "token"
-    token_file.write_text("secret")
-    argv = ["transcript-receipt", "--id", "participant", "--token-file", str(token_file)]
-    if strict:
-        argv.append("--strict-exit")
-    args = cli._parser().parse_args(argv)
-
-    async def reject(*args, **kwargs):
-        raise ConnectionError("daemon unavailable")
-
-    monkeypatch.setattr(identity_mod, "_send_transcript_receipt", reject)
-    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"session_id": "ses-root"})))
+        monkeypatch.setattr(identity_mod, "_send_transcript_receipt", reject)
+    stdin = "not-json" if failure == "parse" else json.dumps({"session_id": "ses-root"})
+    monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
 
     assert cli.cmd_transcript_receipt(args) == expected
 
@@ -181,7 +156,16 @@ def test_validator_accepts_a_root_id_before_its_database_row_exists(tmp_path):
 
 @pytest.mark.parametrize(
     "payload",
-    ({}, {"session_id": ""}, {"session_id": " "}, {"session_id": 1}),
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"session_id": ""}, id="empty"),
+        pytest.param({"session_id": " "}, id="blank"),
+        pytest.param({"session_id": 1}, id="non_string"),
+        pytest.param({"session_id": "root"}, id="bare_root"),
+        pytest.param({"session_id": "ses-root\nother"}, id="newline"),
+        pytest.param({"session_id": "ses-" + "x" * 256}, id="too_long"),
+        pytest.param({"session_id": "ses-\ud800"}, id="surrogate"),
+    ],
 )
 def test_validator_rejects_invalid_session_ids(tmp_path, payload):
     observer = OpenCodeObserver(db=tmp_path / "opencode.db")
@@ -210,26 +194,6 @@ def test_validator_rejects_locations_and_accepts_new_root_ids(tmp_path):
     )
     assert candidate.location == "opencode://ses-root"
     assert candidate.session_id == "ses-root"
-
-
-@pytest.mark.parametrize(
-    "session_id",
-    (
-        "root",
-        "ses-root\nother",
-        "ses-" + "x" * 256,
-        "ses-\ud800",
-    ),
-)
-def test_validator_rejects_unsafe_session_ids(tmp_path, session_id):
-    observer = OpenCodeObserver(db=tmp_path / "opencode.db")
-
-    with pytest.raises(ValueError, match="session_id"):
-        observer.validate_transcript_receipt(
-            payload={"session_id": session_id},
-            cwd=None,
-            expected_session_id=None,
-        )
 
 
 def test_exact_admission_waits_for_its_root_row_without_cwd_fallback(tmp_path):

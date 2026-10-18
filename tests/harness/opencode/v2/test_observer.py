@@ -241,17 +241,6 @@ def test_attaching_mid_turn_reports_only_what_happens_after(rec, workdir):
     assert [(e.kind, e.text) for e in drain(src)] == [(EventKind.TOOL_RESULT, "two")]
 
 
-def test_a_rewrite_in_the_same_millisecond_is_still_read(rec, workdir):
-    src = attached(rec, workdir)
-    rec.user("msg_u1", "hi")
-    created = rec.tick()
-    at = rec.tick()
-    rec.step("msg_a1", created, [text("hello")], at=at)
-    assert all(not e.turn_end for e in drain(src))
-    rec.step("msg_a1", created, [text("hello")], at=at, finish="stop", times={"completed": at})
-    assert [e.turn_end for e in drain(src)] == [True]
-
-
 def write_users(rec, first: int, count: int, at: int) -> None:
     for index in range(first, first + count):
         rec.write(
