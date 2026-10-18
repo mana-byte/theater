@@ -1,14 +1,4 @@
-"""Tests for provider and native live delivery.
-
-Covers: send to an addressable target, human_present rejection, busy
-rejection, send to an unaddressable target, and the full send → await →
-result loop.
-
-The terminal provider is an in-process callback double.
-The job lifecycle is real — the observer's _answer_turn would
-finish the send job if it were connected to a real transcript, but here
-the tests finish jobs directly via the JobManager.
-"""
+"""Live delivery by send: provider and native routes, refusals, TTL and results."""
 
 from __future__ import annotations
 
@@ -556,10 +546,7 @@ async def test_unknown_provider_evidence_blocks_send(client, terminal_provider, 
     assert terminal_provider.deliveries == []
 
 
-# ---- native routing (Wave 4A) ---------------------------------------------
-#
-# A participant whose harness has a live runtime is delivered through the
-# control service instead of its provider terminal.
+# ---- native participants: delivered through the control service, not the pane ----
 
 
 async def _install_native_runtime(daemon, pid: str):

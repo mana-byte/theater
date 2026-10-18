@@ -1,14 +1,4 @@
-"""Focused Wave 5 observability regressions: inspected fields, not behavior.
-
-Every test here spies the process's one metric bridge and asserts the exact
-metric names and bounded attribute sets the Wave 5 instrumentation emits —
-control latency across every public kind and accepted/rejected/unknown/queued
-outcome, the unknown-delivery counter and its fixed reason vocabulary, the
-runtime-reconnect span, the aggregate queue-depth gauge source, and the
-live observation gap with its per-watch reset. Nothing here depends on
-timing beyond ordering, and every failure-isolation test proves control
-behavior is untouched when the bridge itself is broken.
-"""
+"""Control metrics and spans: exact names and bounded attributes, isolated from bridge failure."""
 
 from __future__ import annotations
 
