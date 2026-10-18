@@ -1,4 +1,4 @@
-"""Real Beads v1.3.1 workflow proof for the play adapter."""
+"""The Beads plugin: manifest and static tools, launcher environment, gate and real board."""
 
 from __future__ import annotations
 
@@ -6,17 +6,84 @@ import asyncio
 import contextvars
 import os
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
+from theater.config import Config
+from theater.mcp_plugins import McpLaunchContext, PluginCapability, validate_manifest
+from theater.mcp_plugins import registry as mcp_registry
 from theater.mcp_plugins.builtin.beads import retention, service
 from theater.mcp_plugins.builtin.beads.backend import BeadsError, Board
+from theater.mcp_plugins.builtin.beads.manifest import MANIFEST, plan
 from theater.mcp_plugins.builtin.beads.retention import BoardRetention
+from theater.mcp_plugins.builtin.beads.server import build
 from theater.mcp_plugins.builtin.beads.service import BeadsService, board_lock
+from theater.skills import discover
+
+
+def test_beads_manifest_and_static_tools(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "")
+    validate_manifest("beads", MANIFEST)
+    assert MANIFEST.capabilities == frozenset({PluginCapability.PLAYS_READ})
+    assert MANIFEST.plays == ("hierarchy",)
+    assert MANIFEST.play_permissions == frozenset({"read", "write"})
+    launch = plan(
+        McpLaunchContext(
+            participant_id="caller",
+            cwd=tmp_path,
+            state_dir=tmp_path / "state",
+            config={"board_ttl_seconds": 0, "bd_path": "/tmp/bd"},
+        )
+    )
+    assert launch.argv[:2] == ("-m", "theater.mcp_plugins.builtin.beads.server")
+    assert launch.argv[-2:] == ("--bd-path", "/tmp/bd")
+    tools = asyncio.run(build(tmp_path).list_tools())
+    assert {tool.name for tool in tools} == {
+        "list_tasks",
+        "get_task",
+        "create_task",
+        "update_task",
+        "set_dependency",
+        "claim_task",
+        "close_task",
+    }
+    for tool in tools:
+        assert not {"participant_id", "play_instance_id", "board_dir", "database"} & set(
+            tool.input_schema["properties"]
+        )
+    assert not (tmp_path / "plays").exists()
+
+
+def test_shipped_hierarchy_defaults_and_both_opt_outs(tmp_path: Path) -> None:
+    settings = Config()
+    mcp_registry.install(settings, local_dir=tmp_path / "plugins")
+    snapshot = mcp_registry.catalog()
+    registry = discover(user_dir=tmp_path / "skills", plugin_plays=snapshot.registered_plays)
+    assert registry.play("hierarchy").provider == "beads"
+    assert registry.load("hierarchy/master").provider == "beads"
+    assert registry.play("hierarchy").rules.plugin_permissions["beads"]["member"] == (
+        "read",
+        "write",
+    )
+    refused = discover(
+        user_dir=tmp_path / "skills",
+        plugin_plays=snapshot.registered_plays,
+        disabled=("hierarchy",),
+    )
+    assert refused.play("hierarchy") is None
+    assert all(skill.play != "hierarchy" for skill in refused.skills)
+    mcp_registry.install(
+        replace(settings, mcp=replace(settings.mcp, enabled=[])), local_dir=tmp_path / "plugins"
+    )
+    assert not mcp_registry.catalog().registered_plays
+
 
 _caller = contextvars.ContextVar("beads_test_caller", default="author")
+
+
 _instance = contextvars.ContextVar("beads_test_instance", default="instance-one")
 
 
@@ -24,17 +91,17 @@ def test_npm_launcher_preserves_node_path_and_scrubs_routing(tmp_path: Path, mon
     executable_dir = tmp_path / "bin"
     executable_dir.mkdir()
     node = executable_dir / "node"
-    node.write_text('#!/bin/sh\nprintf "bd version 1.3.1\\n"\n')
+    node.write_text('#!/bin/sh\nprintf "bd version test\\n"\n')
     node.chmod(0o755)
     launcher = executable_dir / "bd"
-    launcher.write_text('#!/usr/bin/env node\nconsole.log("bd version 1.3.1");\n')
+    launcher.write_text('#!/usr/bin/env node\nconsole.log("bd version test");\n')
     launcher.chmod(0o755)
     monkeypatch.setenv("PATH", str(executable_dir))
     monkeypatch.setenv("BEADS_DIR", "/other/board")
     monkeypatch.setenv("BEADS_DOLT_SERVER_HOST", "external")
     board = Board(tmp_path / "state", "instance-one", str(launcher))
     board.path.mkdir(parents=True)
-    assert board._run("version", json_output=False) == "bd version 1.3.1"
+    assert board._run("version", json_output=False) == "bd version test"
     assert board._env()["BEADS_DIR"] == str(board.path / ".beads")
     assert "BEADS_DOLT_SERVER_HOST" not in board._env()
 
@@ -161,7 +228,7 @@ def test_retention_retries_after_client_credential_failure(tmp_path: Path, monke
 def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) -> None:  # noqa: PLR0915
     binary = os.environ.get("THEATER_BEADS_TEST_BINARY")
     if not binary:
-        pytest.skip("set THEATER_BEADS_TEST_BINARY to checksum-verified bd v1.3.1")
+        pytest.skip("set THEATER_BEADS_TEST_BINARY to a checksum-verified bd binary")
     monkeypatch.setattr(service, "TheaterPluginClient", FakeClient)
     monkeypatch.setattr(retention, "TheaterPluginClient", FakeClient)
     FakeClient.enabled = True

@@ -1,4 +1,4 @@
-"""Focused contracts for the Wave 1 MCP-server plugin foundation."""
+"""Plugin manifest, config and registry contracts: resolution, omissions and fatal packages."""
 
 from __future__ import annotations
 
