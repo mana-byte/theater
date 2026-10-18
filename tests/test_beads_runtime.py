@@ -112,6 +112,32 @@ def test_cancelled_backend_keeps_board_lock_until_worker_finishes(
     asyncio.run(exercise())
 
 
+def test_retention_retries_after_client_credential_failure(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "plays" / "instance-one").mkdir(parents=True)
+    attempts = 0
+    ticks = 0
+
+    class StopProbe(Exception):
+        pass
+
+    def failed_client():
+        nonlocal attempts
+        attempts += 1
+        raise OSError("credential unavailable")
+
+    async def fast_sleep(_seconds):
+        nonlocal ticks
+        ticks += 1
+        if ticks == 2:
+            raise StopProbe
+
+    monkeypatch.setattr(retention, "TheaterPluginClient", failed_client)
+    monkeypatch.setattr(retention.asyncio, "sleep", fast_sleep)
+    with pytest.raises(StopProbe):
+        asyncio.run(BoardRetention(tmp_path, 0).run())
+    assert attempts == 2
+
+
 @pytest.mark.integration
 def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) -> None:  # noqa: PLR0915
     binary = os.environ.get("THEATER_BEADS_TEST_BINARY")
