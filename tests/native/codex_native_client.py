@@ -614,7 +614,7 @@ PROVIDER_ENV = "THEATER_CODEX_NATIVE_PROVIDER"
 #: Exact binary to qualify; e.g. a release fetched by codex_fetch_release.py.
 BIN_ENV = "THEATER_CODEX_NATIVE_BIN"
 #: Admits exactly this one version for this test process only, so a candidate
-#: release can be exercised BEFORE the allowlist edit (allowlist stays last).
+#: release can be exercised BEFORE the ceiling bump (the bump stays last).
 QUALIFY_VERSION_ENV = "THEATER_CODEX_QUALIFY_VERSION"
 
 

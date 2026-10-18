@@ -1,10 +1,9 @@
-"""The Codex exact gate and collector write path."""
+"""The Codex range gate, its ceiling bump, the retained-bundle refresh and the collector."""
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import urllib.error
 from pathlib import Path
@@ -13,77 +12,85 @@ from typing import cast
 
 import pytest
 
-from scripts.harness_compat.adapters import codex
+from scripts.harness_compat.adapters import codex, codex_bump
 from scripts.harness_compat.contract import Check, Result
 from scripts.harness_compat.sandbox import make_sandbox
 from tests.native import codex_qualify_runtime as collector
 
+# Synthetic gate in the real constants' shape: floor 1.0.0, ceiling 1.5.0, one excluded release.
+_PLAN_SOURCE = """\
+CODEX_RUNTIME_QUALIFIED_FLOOR = (1, 0, 0)
+CODEX_RUNTIME_QUALIFIED_CEILING = (1, 5, 0)
+CODEX_RUNTIME_QUALIFIED_EXCLUDED: tuple[tuple[int, int, int], ...] = ((1, 2, 0),)
+"""
 
-def _tree(root: Path) -> Path:
-    source = Path(__file__).resolve().parents[1]
-    plan = root / codex._PLAN
-    plan.parent.mkdir(parents=True)
-    shutil.copyfile(source / codex._PLAN, plan)
-    index = root / codex._INDEX
-    index.parent.mkdir(parents=True, exist_ok=True)
-    index.write_text(json.dumps({"bundles": {}}, indent=2) + "\n")
+
+def _tree(root: Path, plan: str = _PLAN_SOURCE) -> Path:
+    (root / codex_bump.PLAN).parent.mkdir(parents=True)
+    (root / codex_bump.PLAN).write_text(plan)
     return root
 
 
-def _bundle(path: Path) -> None:
+def _bundle(path: Path, *, marker: str = "same", release: str = "1.4.0") -> None:
     (path / "protocol_schema").mkdir(parents=True)
     for name in collector.BEHAVIOR_FILES:
-        (path / name).write_text("{}\n")
+        (path / name).write_text(f'{{"release": "{release}"}}\n' if "installed" in name else "{}\n")
     for name in collector.SCHEMA_FILES:
-        (path / "protocol_schema" / name).write_text("{}\n")
+        (path / "protocol_schema" / name).write_text(f'{{"shape": "{marker}"}}\n')
 
 
-def _next_patches(version: str, count: int = 2) -> tuple[str, ...]:
-    major, minor, patch = codex.version_key(version)
-    return tuple(f"{major}.{minor}.{patch + offset}" for offset in range(1, count + 1))
-
-
-def test_allowlist_bump_stages_complete_bundles_once(tmp_path: Path) -> None:
+def test_bump_edits_only_the_ceiling_line_and_fails_closed(tmp_path: Path) -> None:
     root = _tree(tmp_path)
     adapter = codex.ADAPTER
-    old_top = max(adapter.verified(root).versions, key=codex.version_key)
-    first_version, second_version = _next_patches(old_top)
-    first = adapter.apply_bump(root, [second_version, first_version])
-    assert first == [codex._PLAN]
-    assert adapter.verified(root).admits(second_version)
-    assert second_version not in json.loads((root / codex._INDEX).read_text())["bundles"]
+    gate = adapter.verified(root)
+    assert (gate.floor, gate.ceiling, gate.known_bad) == ("1.0.0", "1.5.0", frozenset({"1.2.0"}))
+    assert [gate.admits(v) for v in ("1.0.0", "1.2.0", "1.4.9", "1.5.0")] == [
+        True,
+        False,
+        True,
+        False,
+    ]
+    assert adapter.apply_bump(root, ["1.4.0"]) == []  # nothing is green above the ceiling
+    changed = adapter.apply_bump(root, ["1.5.0", "1.5.1"])
+    assert changed == [codex_bump.PLAN]
+    new = (root / codex_bump.PLAN).read_text().splitlines()
+    old = _PLAN_SOURCE.splitlines()
+    assert [i for i, (x, y) in enumerate(zip(old, new, strict=True)) if x != y] == [1]
+    assert new[1] == "CODEX_RUNTIME_QUALIFIED_CEILING = (1, 5, 2)"
+    assert adapter.apply_bump(root, ["1.5.0", "1.5.1"]) == []
+    with pytest.raises(ValueError, match="below the qualified floor"):
+        adapter.apply_bump(root, ["0.9.0"])
+    for broken, message in (
+        (_PLAN_SOURCE.replace("CEILING =", "MISSING ="), "missing Codex gate constant"),
+        (_PLAN_SOURCE.replace("(1, 5, 0)", "(1,5,0)"), "changed shape"),
+        (_PLAN_SOURCE.replace("(1, 5, 0)", "(1, 5)"), "three-integer literal"),
+        (_PLAN_SOURCE + _PLAN_SOURCE.splitlines()[0] + "\n", "duplicate Codex gate constant"),
+    ):
+        (root / codex_bump.PLAN).write_text(broken)
+        with pytest.raises(ValueError, match=message):
+            adapter.apply_bump(root, ["1.5.0"])
 
-    for version in (second_version, first_version):
-        _bundle(root / codex._FIXTURES / "candidates" / version)
-    changed = adapter.apply_bump(root, [second_version, first_version])
-    index = json.loads((root / codex._INDEX).read_text())["bundles"]
-    assert list(index) == [first_version, second_version]
-    assert all(entry["status"] == "qualified" for entry in index.values())
-    assert codex._INDEX in changed
-    bundles = {
-        path.relative_to(root)
-        for version in (first_version, second_version)
-        for path in (root / codex._FIXTURES / version).rglob("*")
-        if path.is_file()
-    }
-    assert set(changed) == {codex._INDEX} | bundles
-    assert adapter.verified(root).admits(second_version)
-    assert adapter.apply_bump(root, [first_version, second_version]) == []
 
-
-def test_bump_rejects_missing_anchor_and_lower_version(tmp_path: Path) -> None:
+def test_bump_refreshes_latest_only_when_the_capture_differs(tmp_path: Path) -> None:
     root = _tree(tmp_path)
-    plan = root / codex._PLAN
-    source = plan.read_text()
-    plan.write_text(source.replace("CODEX_RUNTIME_VERIFIED_VERSIONS =", "MISSING ="))
-    with pytest.raises(ValueError, match="assignment is missing"):
-        codex.ADAPTER.apply_bump(root, [])
-    plan.write_text(source)
-    lower = "0.0.0"
-    _bundle(root / codex._FIXTURES / "candidates" / lower)
-    with pytest.raises(ValueError, match="cannot move below"):
-        codex.ADAPTER.apply_bump(root, [lower])
-    assert plan.read_text() == source
+    latest = root / codex._LATEST
+    _bundle(latest)
+    candidates = root / codex._CANDIDATES
+    # Identity differs on every release; the same evidence must not touch a fixture.
+    _bundle(candidates / "1.5.0", release="1.5.0")
+    assert codex.ADAPTER.apply_bump(root, ["1.5.0"]) == [codex_bump.PLAN]
+    assert not candidates.exists()
+    assert json.loads((latest / "installed_release.json").read_text()) == {"release": "1.4.0"}
+    # Only the newest green may refresh latest; changed evidence rewrites exactly that file.
+    _bundle(candidates / "1.5.1", marker="older", release="1.5.1")
+    _bundle(candidates / "1.5.2", marker="newer", release="1.5.2")
+    changed = codex.ADAPTER.apply_bump(root, ["1.5.1", "1.5.2"])
+    schema = codex._LATEST / "protocol_schema"
+    expected = {codex_bump.PLAN, codex._LATEST / "installed_release.json"}
+    expected |= {schema / name for name in collector.SCHEMA_FILES}
+    assert set(changed) == expected
+    assert (latest / "protocol_schema/ClientRequest.json").read_text() == '{"shape": "newer"}\n'
+    assert not candidates.exists()
 
 
 def test_discovery_falls_back_to_public_tags_when_api_is_limited(
@@ -98,49 +105,52 @@ def test_discovery_falls_back_to_public_tags_when_api_is_limited(
         return subprocess.CompletedProcess(
             command,
             0,
-            "a\trefs/tags/rust-v0.162.1\n"
-            "b\trefs/tags/rust-v0.160.0\n"
-            "c\trefs/tags/rust-v0.163.0-alpha.1\n",
+            "a\trefs/tags/rust-v1.2.1\n"
+            "b\trefs/tags/rust-v1.1.0\n"
+            "c\trefs/tags/rust-v1.3.0-alpha.1\n",
             "",
         )
 
     monkeypatch.setattr(codex.github, "github_release_versions", limited)
     monkeypatch.setattr(codex.subprocess, "run", tags)
-    assert codex.ADAPTER.discover() == ["0.160.0", "0.162.1"]
+    assert codex.ADAPTER.discover() == ["1.1.0", "1.2.1"]
 
 
-def test_collector_picks_newest_and_masks_run_values(
+def test_collector_baseline_is_latest_and_masks_run_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixtures = tmp_path / "fixtures"
     fixtures.mkdir()
-    for version in ("0.9.9", "0.10.0"):
-        _bundle(fixtures / version)
+    for role in ("floor", "latest"):
+        _bundle(fixtures / role)
     (fixtures / "index.json").write_text(
         json.dumps(
             {
                 "bundles": {
-                    version: {"directory": version, "status": "qualified"}
-                    for version in ("0.9.9", "0.10.0")
+                    role: {"directory": role, "status": "qualified"} for role in ("floor", "latest")
                 }
             }
         )
     )
     monkeypatch.setattr(collector, "FIXTURE_ROOT", fixtures)
-    assert collector.default_baseline(newest=True) == fixtures / "0.10.0"
+    assert collector.default_baseline() == fixtures / "latest"
     redacted = collector.redact(
         {
             "sec-websocket-accept": "random-base64",
             "error_text": "sessions/2026/10/13/rollout-2026-10-13T11-12-13-id.jsonl",
+            "tmp": 'helper binaries under temporary dir "/tmp/xq1/t" (x)',
+            "cli": "v9.9.9",
         },
-        {},
+        {"9.9.9": "<release>"},
     )
     assert redacted == {
         "sec-websocket-accept": "<websocket-accept>",
         "error_text": "sessions/<date>/rollout-<time>-id.jsonl",
+        "tmp": 'helper binaries under temporary dir "<tmp-dir>" (x)',
+        "cli": "v<release>",
     }
-    (fixtures / "0.9.9" / "protocol_schema" / "Unused.json").write_text("{}")
-    assert collector.diff_bundle(fixtures / "0.9.9", fixtures / "0.10.0", committed_only=True) == []
+    (fixtures / "floor" / "protocol_schema" / "Unused.json").write_text("{}")
+    assert collector.diff_bundle(fixtures / "floor", fixtures / "latest", committed_only=True) == []
     session = cast(
         collector.CaptureSession,
         SimpleNamespace(
@@ -188,8 +198,7 @@ def test_collect_failure_still_classifies_logged_bootstrap_route(
 ) -> None:
     root = _tree(tmp_path / "tree")
     adapter = codex.ADAPTER
-    old_top = max(adapter.verified(root).versions, key=codex.version_key)
-    (candidate,) = _next_patches(old_top, count=1)
+    candidate = "1.5.0"
 
     def fail_collect(command, **kwargs):
         log = Path(kwargs["env"]["THEATER_COMPAT_MOCK_LOG"])
@@ -222,10 +231,7 @@ def test_qualify_accepts_only_the_named_optional_control_skip(
 ) -> None:
     root = _tree(tmp_path / "tree")
     adapter = codex.ADAPTER
-    old_top = max(adapter.verified(root).versions, key=codex.version_key)
-    (candidate,) = _next_patches(old_top, count=1)
-    _bundle(root / codex._FIXTURES / "candidates" / candidate)
-    adapter.apply_bump(root, [candidate])
+    candidate = "1.5.0"
 
     def collect(command, **kwargs):
         assert kwargs["env"]["THEATER_COMPAT_MOCK_LOG"].endswith("codex_mock_requests.jsonl")

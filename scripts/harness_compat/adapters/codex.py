@@ -1,8 +1,8 @@
-"""Exact-release qualification for the Codex native runtime."""
+"""Range qualification for the Codex native runtime."""
 
 from __future__ import annotations
 
-import ast
+import contextlib
 import json
 import os
 import shutil
@@ -26,22 +26,22 @@ from ..contract import (
     Verdict,
     VerifiedSet,
     is_stable,
-    load_evidenced,
     version_key,
 )
+from . import codex_bump
 
-_PLAN = Path("theater/harness/builtin/plugins/codex/runtime_plan.py")
 _FIXTURES = Path("tests/fixtures/codex_native_runtime")
-_INDEX = _FIXTURES / "index.json"
-_POLICY = "codex-appserver-verified"
+_CANDIDATES = _FIXTURES / "candidates"
+# The retained bundle a bump refreshes; installed_release.json names the binary it came from.
+_LATEST = _FIXTURES / "latest"
+_IDENTITY = "installed_release.json"
 _MOCK_LOG = "codex_mock_requests.jsonl"
 # These endpoints are telemetry side channels; their existing responses remain unchanged.
 _BENIGN_MOCK_ROUTES = frozenset({("POST", "/v1/analytics/codex/turn-costs")})
 _CONSISTENCY = (
     "tests/test_harness_compat_codex.py",
     "tests/test_codex_native_runtime_proof.py::TestOfflineConformanceBundle",
-    "tests/test_codex_native_runtime_proof.py::TestBundleIndexAndAllowlist",
-    "tests/test_codex_native_runtime_proof.py::TestIndexValidation",
+    "tests/test_codex_native_runtime_proof.py::TestBundleIndex",
 )
 _UI_CONTROL = (
     "tests/test_codex_native_ui_bootstrap_proof.py::"
@@ -62,47 +62,43 @@ _GREEN = (
 )
 
 
-def _allowlist_node(source: str) -> ast.Call:
-    tree = ast.parse(source)
-    for statement in tree.body:
-        if not isinstance(statement, ast.Assign):
-            continue
-        if not any(
-            isinstance(target, ast.Name) and target.id == "CODEX_RUNTIME_VERIFIED_VERSIONS"
-            for target in statement.targets
-        ):
-            continue
-        value = statement.value
-        if (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Name)
-            and value.func.id == "frozenset"
-            and len(value.args) == 1
-        ):
-            return value
-        raise ValueError("Codex allowlist is not a literal frozenset")
-    raise ValueError("Codex allowlist assignment is missing")
-
-
-def _versions(source: str) -> frozenset[str]:
-    literal = ast.literal_eval(_allowlist_node(source).args[0])
-    if not isinstance(literal, set) or not all(isinstance(item, str) for item in literal):
-        raise ValueError("Codex allowlist is not a literal string set")
-    return frozenset(literal)
-
-
-def _write_if_changed(root: Path, relative: Path, content: str) -> list[Path]:
-    path = root / relative
-    if path.read_text() == content:
-        return []
-    path.write_text(content)
-    return [relative]
-
-
 def _complete_bundle(path: Path) -> bool:
     expected = set(BEHAVIOR_FILES) | {f"protocol_schema/{name}" for name in SCHEMA_FILES}
     actual = {item.relative_to(path).as_posix() for item in path.rglob("*") if item.is_file()}
     return actual == expected
+
+
+def _comparable(bundle: Path) -> dict[str, bytes]:
+    """The bundle's evidence bytes; the capture identity differs on every release by design."""
+    return {
+        path.relative_to(bundle).as_posix(): path.read_bytes()
+        for path in sorted(bundle.rglob("*"))
+        if path.is_file() and path.name != _IDENTITY
+    }
+
+
+def _refresh_latest(root: Path, version: str) -> list[Path]:
+    """Copy a captured bundle over ``latest`` only when its evidence really differs."""
+    staged, latest = root / _CANDIDATES / version, root / _LATEST
+    if not staged.is_dir() or not _complete_bundle(staged):
+        return []
+    if latest.is_dir() and _comparable(staged) == _comparable(latest):
+        return []
+    changed: list[Path] = []
+    for path in sorted(item for item in staged.rglob("*") if item.is_file()):
+        target = latest / path.relative_to(staged)
+        if not target.is_file() or target.read_bytes() != path.read_bytes():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+            changed.append(target.relative_to(root))
+    return changed
+
+
+def _consume(root: Path, version: str) -> None:
+    """Drop a composed candidate; it is untracked scratch, never part of the staged change."""
+    shutil.rmtree(root / _CANDIDATES / version, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        (root / _CANDIDATES).rmdir()
 
 
 def _classify_mock_routes(result: Result, log: Path) -> Result:
@@ -166,8 +162,6 @@ def _public_git_tags() -> list[str]:
 
 class CodexAdapter:
     name = "codex"
-    kind = "exact"
-    known_bad: frozenset[str] = frozenset()
     probe = "theater.harness.builtin.plugins.codex.runtime_plan:probe_codex_compatibility"
     stub_help = ""
     green_tests = _GREEN
@@ -187,12 +181,7 @@ class CodexAdapter:
             return _public_git_tags()
 
     def verified(self, root: Path) -> VerifiedSet:
-        return VerifiedSet(
-            kind="exact",
-            versions=_versions((root / _PLAN).read_text()),
-            known_bad=self.known_bad,
-            evidenced=load_evidenced(root, self.name),
-        )
+        return codex_bump.verified(root)
 
     def install(self, sb: Sandbox, version: str) -> Path:
         command = [
@@ -225,45 +214,12 @@ class CodexAdapter:
         return f"codex-cli {version}"
 
     def apply_bump(self, root: Path, greens: Sequence[str]) -> list[Path]:
-        source = (root / _PLAN).read_text()
-        old = _versions(source)
-        new = set(greens) - old
-        if old and any(version_key(v) < min(map(version_key, old)) for v in new):
-            raise ValueError("Codex verified range cannot move below its existing minimum")
-        index = json.loads((root / _INDEX).read_text())
-        wanted = frozenset(old | new)
-        ordered = sorted(wanted, key=version_key)
-        node = _allowlist_node(source)
-        lines = source.splitlines(keepends=True)
-        replacement = (
-            "CODEX_RUNTIME_VERIFIED_VERSIONS = frozenset(\n    {\n"
-            + "".join(f'        "{v}",\n' for v in ordered)
-            + "    }\n)"
-        )
-        start, end = node.lineno - 1, node.end_lineno
-        lines[start:end] = [replacement + "\n"]
-        changed = _write_if_changed(root, _PLAN, "".join(lines))
-
-        for version in sorted(set(greens), key=version_key):
-            target = root / _FIXTURES / version
-            staged = root / _FIXTURES / "candidates" / version
-            if not target.exists() and staged.is_dir() and _complete_bundle(staged):
-                shutil.copytree(staged, target)
-                changed.extend(
-                    path.relative_to(root) for path in sorted(target.rglob("*")) if path.is_file()
-                )
-                shutil.rmtree(staged)
-            if target.is_dir() and _complete_bundle(target):
-                index["bundles"][version] = {
-                    "directory": version,
-                    "status": "qualified",
-                    "compatibility_policy": _POLICY,
-                }
-        index["bundles"] = {
-            version: index["bundles"][version]
-            for version in sorted(index["bundles"], key=version_key)
-        }
-        changed.extend(_write_if_changed(root, _INDEX, json.dumps(index, indent=2) + "\n"))
+        changed = codex_bump.apply_bump(root, greens)
+        if greens:
+            # Only the newest green may refresh ``latest``; the rest are just discarded.
+            changed.extend(_refresh_latest(root, max(greens, key=version_key)))
+        for version in greens:
+            _consume(root, version)
         return sorted(set(changed))
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
@@ -320,12 +276,13 @@ class CodexAdapter:
                 Result(self.name, version, "tooling", (Check("collect_bundle", "error", detail),)),
                 mock_log,
             )
-        staged = root / _FIXTURES / "candidates" / version
+        staged = root / _CANDIDATES / version
         staged.parent.mkdir(parents=True, exist_ok=True)
         if staged.exists():
             shutil.rmtree(staged)
         shutil.copytree(bundle, staged)
-        self.apply_bump(root, [version])
+        # Kept untracked: the runner captures and caches it; a tracked edit would be lost.
+        _refresh_latest(root, version)
 
         consistency = framework.run_pytest(
             root, self.consistency_tests, env=capture_env, expected_skips={}, timeout=900

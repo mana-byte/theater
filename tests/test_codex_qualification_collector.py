@@ -265,9 +265,8 @@ class TestCollectEvidence:
 class TestDefaultBaselineValidation:
     """default_baseline itself must fail closed on malicious index shapes."""
 
-    def test_default_baseline_refuses_to_pick_among_many_qualified_bundles(self) -> None:
-        with pytest.raises(collector.QualificationError, match="pass --baseline explicitly"):
-            collector.default_baseline()
+    def test_default_baseline_is_the_committed_latest_bundle(self) -> None:
+        assert collector.default_baseline() == collector.FIXTURE_ROOT / "latest"
 
     @staticmethod
     def _write_mini_bundle(root: Path, directory: str, *, complete: bool = True) -> None:
@@ -292,82 +291,78 @@ class TestDefaultBaselineValidation:
     def _write_index(root: Path, bundles: dict) -> None:
         (root / "index.json").write_text(json.dumps({"bundles": bundles}))
 
-    def _qualified_entry(self, directory: str = "0.1.0") -> dict:
-        return {"directory": directory, "status": "qualified", "compatibility_policy": "any"}
+    def _qualified_entry(self, directory: str = "latest") -> dict:
+        return {"directory": directory, "status": "qualified"}
 
-    def test_selects_the_unique_qualified_bundle(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.1.0")
-        self._write_index(fixtures, {"0.1.0": self._qualified_entry()})
-        assert collector.default_baseline() == fixtures / "0.1.0"
+    def test_selects_the_latest_qualified_bundle(self, fixtures: Path) -> None:
+        self._write_mini_bundle(fixtures, "latest")
+        self._write_index(fixtures, {"latest": self._qualified_entry()})
+        assert collector.default_baseline() == fixtures / "latest"
 
     @pytest.mark.parametrize("directory", ["../secrets", "/tmp/escape", "0.1.0/.."])
     def test_refuses_escaping_or_absolute_directories(self, fixtures: Path, directory: str) -> None:
-        self._write_mini_bundle(fixtures, "0.1.0")
+        self._write_mini_bundle(fixtures, "latest")
         entry = self._qualified_entry(directory=directory)
-        self._write_index(fixtures, {"0.1.0": entry})
+        self._write_index(fixtures, {"latest": entry})
         with pytest.raises(collector.QualificationError, match="malformed"):
             collector.default_baseline()
 
     def test_refuses_duplicate_directories(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.1.0")
+        self._write_mini_bundle(fixtures, "latest")
         self._write_index(
             fixtures,
-            {"0.1.0": self._qualified_entry(), "0.1.1": self._qualified_entry()},
+            {"latest": self._qualified_entry(), "floor": self._qualified_entry()},
         )
         with pytest.raises(collector.QualificationError, match="claimed by both"):
             collector.default_baseline()
 
     def test_refuses_an_invalid_status(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.1.0")
+        self._write_mini_bundle(fixtures, "latest")
         entry = self._qualified_entry() | {"status": "provisional"}
-        self._write_index(fixtures, {"0.1.0": entry})
+        self._write_index(fixtures, {"latest": entry})
         with pytest.raises(collector.QualificationError, match="invalid status"):
             collector.default_baseline()
 
     def test_refuses_an_incomplete_qualified_bundle(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.1.0", complete=False)
-        self._write_index(fixtures, {"0.1.0": self._qualified_entry()})
+        self._write_mini_bundle(fixtures, "latest", complete=False)
+        self._write_index(fixtures, {"latest": self._qualified_entry()})
         with pytest.raises(collector.QualificationError, match="incomplete"):
             collector.default_baseline()
 
     def test_refuses_a_qualified_bundle_under_candidates(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "candidates/0.1.0")
-        entry = self._qualified_entry(directory="candidates/0.1.0")
-        self._write_index(fixtures, {"0.1.0": entry})
+        self._write_mini_bundle(fixtures, "candidates/latest")
+        entry = self._qualified_entry(directory="candidates/latest")
+        self._write_index(fixtures, {"latest": entry})
         with pytest.raises(collector.QualificationError, match="fixture root"):
             collector.default_baseline()
 
     def test_refuses_a_version_directory_mismatch(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.1.0")
-        entry = self._qualified_entry(directory="0.1.0")
-        self._write_index(fixtures, {"0.9.9": entry})
+        self._write_mini_bundle(fixtures, "latest")
+        entry = self._qualified_entry(directory="latest")
+        self._write_index(fixtures, {"latest": entry | {"directory": "floor"}})
         with pytest.raises(collector.QualificationError, match="fixture root"):
             collector.default_baseline()
 
     def test_refuses_a_candidate_at_release_root(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.2.0")
-        entry = {"directory": "0.2.0", "status": "candidate"}
-        self._write_index(fixtures, {"0.2.0": entry})
+        self._write_mini_bundle(fixtures, "latest")
+        entry = {"directory": "latest", "status": "candidate"}
+        self._write_index(fixtures, {"latest": entry})
         with pytest.raises(collector.QualificationError, match="candidates/"):
             collector.default_baseline()
 
-    def test_refuses_zero_or_multiple_qualified_bundles(self, fixtures: Path) -> None:
-        self._write_mini_bundle(fixtures, "0.1.0")
-        self._write_mini_bundle(fixtures, "0.2.0")
-        self._write_index(
-            fixtures,
-            {"0.1.0": self._qualified_entry(), "0.2.0": self._qualified_entry("0.2.0")},
-        )
-        with pytest.raises(collector.QualificationError, match=r"multiple \(or zero\) qualified"):
+    def test_refuses_an_index_without_a_qualified_latest(self, fixtures: Path) -> None:
+        self._write_mini_bundle(fixtures, "floor")
+        self._write_index(fixtures, {"floor": self._qualified_entry("floor")})
+        with pytest.raises(collector.QualificationError, match="no qualified 'latest'"):
             collector.default_baseline()
 
 
-class TestAllowlistIndependence:
-    def test_collector_never_imports_theater_or_names_the_allowlist(self) -> None:
+class TestGateIndependence:
+    def test_collector_never_imports_theater_or_names_the_gate(self) -> None:
         source = Path(collector.__file__).read_text()
         assert "from theater" not in source
         assert "import theater" not in source
-        assert "CODEX_RUNTIME_VERIFIED_VERSIONS" not in source
+        assert "CODEX_RUNTIME_QUALIFIED" not in source
 
 
 class FakeInitializeClient:
@@ -446,7 +441,7 @@ class TestEvidenceThreadingAndExitCodes:
         out = tmp_path / "out"
         # Historical captured bundle supplies the collector's baseline schema.
         exit_code = collector.collect_evidence(
-            out, codex_binary=str(binary), baseline=collector.FIXTURE_ROOT / "0.154.0"
+            out, codex_binary=str(binary), baseline=collector.FIXTURE_ROOT / "latest"
         )
         assert exit_code == 0
         assert seen["binary"] == str(binary.resolve())

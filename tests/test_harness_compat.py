@@ -602,6 +602,61 @@ def test_unpromoted_candidate_artifacts_stay_out_of_the_composed_tree(
     assert not (tmp_path / f"fixtures/{older}.json").exists()
 
 
+class RetainedBundleAdapter(ArtifactAdapter):
+    """Codex-shaped: qualify leaves an untracked candidate; the bump refreshes a TRACKED file."""
+
+    def verified(self, root: Path) -> VerifiedSet:
+        return VerifiedSet("range", floor="1.0.0", ceiling=(root / "gate.txt").read_text().strip())
+
+    def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
+        (root / "gate.txt").write_text("1.2.1\n")
+        changed = [Path("gate.txt")]
+        staged = root / "candidates/1.2.0.json"
+        if staged.exists():
+            (root / "fixtures/latest.json").write_text(staged.read_text())
+            staged.unlink()
+            changed.append(Path("fixtures/latest.json"))
+        return changed
+
+    def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+        staged = root / "candidates/1.2.0.json"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text('{"proved": true}\n')
+        (root / "fixtures/latest.json").write_text(staged.read_text())  # lost: tracked edit
+        return Result(self.name, version, "green", (Check("proof", "pass"),))
+
+
+def test_refreshed_retained_bundle_is_staged_also_when_the_green_is_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tracked fixture is not captured; only its untracked candidate carries the refresh."""
+    _artifact_repo(tmp_path, "1.2.0\n", monkeypatch)
+    (tmp_path / "fixtures").mkdir()
+    (tmp_path / "fixtures/latest.json").write_text('{"proved": false}\n')
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "retained bundle")
+    adapter = RetainedBundleAdapter()
+
+    def staged() -> list[str]:
+        return subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+
+    assert runner.run_harness(adapter, tmp_path, publish=True)["published"] is True
+    assert staged() == ["fixtures/latest.json", "gate.txt"]
+    assert (tmp_path / "fixtures/latest.json").read_text() == '{"proved": true}\n'
+    assert not (tmp_path / "candidates").exists()
+    _git(tmp_path, "reset", "--hard", "HEAD")
+    reused = runner.run_harness(adapter, tmp_path, publish=True)
+    assert (reused["candidates"], reused["published"]) == ([], True)
+    assert staged() == ["fixtures/latest.json", "gate.txt"]
+    assert (tmp_path / "fixtures/latest.json").read_text() == '{"proved": true}\n'
+
+
 def test_pr_body_is_one_line_per_release_with_bounded_warnings() -> None:
     rows = (
         Result("pi", "0.99.2", "green", (Check("probe", "pass"), Check("tui", "skip"))),

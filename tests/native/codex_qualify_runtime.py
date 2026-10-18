@@ -3,8 +3,8 @@
 Collect the exact binary facts, the vendor-generated JSON schema, and the
 stock behaviour observations for one codex-cli release into a fresh bundle
 directory, redacted and deterministically normalized, then print a recursive
-diff against the newest qualified bundle unless --baseline is set. It never
-edits the verified-version allowlist.
+diff against the retained ``latest`` bundle unless --baseline is set. It never
+edits the release gate.
 
     uv run python tests/native/codex_qualify_runtime.py \\
         --out /tmp/codex-qualify-0.155.0 --capture-behavior
@@ -78,6 +78,7 @@ _UUID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 _ROLLOUT_DATE = re.compile(
     r"sessions/\d{4}/\d{2}/\d{2}/rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}"
 )
+_HELPER_TMP_DIR = re.compile(r'(helper binaries under temporary dir )"[^"]*"')
 _VERSION_TOKEN = re.compile(r"codex-cli[ \t]+(\S+)")
 _SEMVER_TOKEN = re.compile(r"(\d+\.\d+\.\d+)")
 
@@ -171,9 +172,9 @@ def normalize_json_file(path: Path) -> str:
 def redact(value: object, roots: dict[str, str]) -> object:
     """Recursively replace run-specific strings with stable placeholders.
 
-    ``roots`` maps actual strings (run directory, home directory) to their
+    ``roots`` maps actual strings (run directory, home directory, release) to their
     placeholders; longer actuals win so nested paths collapse correctly.
-    UUIDs collapse to ``<uuid>`` so per-run identities never leak.
+    UUIDs and the helper temp dir collapse too, so a bundle only changes when behaviour does.
     """
     if isinstance(value, dict):
         return {
@@ -189,6 +190,7 @@ def redact(value: object, roots: dict[str, str]) -> object:
     text = value
     for actual in sorted(roots, key=len, reverse=True):
         text = text.replace(actual, roots[actual])
+    text = _HELPER_TMP_DIR.sub(r'\1"<tmp-dir>"', text)
     return _UUID.sub("<uuid>", _ROLLOUT_DATE.sub("sessions/<date>/rollout-<time>", text))
 
 
@@ -347,23 +349,18 @@ def generate_schema(codex_binary: str, out_dir: Path) -> None:
             path.unlink()
 
 
+#: The retained bundle a bump refreshes and the collector diffs against.
+LATEST_BUNDLE = "latest"
 BUNDLE_STATUSES = frozenset({"qualified", "candidate"})
 CANDIDATES_DIRNAME = "candidates"
 
 
-def validate_bundle_index(
-    index: object,
-    *,
-    fixture_root: Path,
-    compatibility_policy: str | None = None,
-    verified_versions: frozenset[str] | set[str] | None = None,
-) -> None:
+def validate_bundle_index(index: object, *, fixture_root: Path) -> None:
     """Fail closed on a malformed or lying index; never guess a selection.
 
     Shared by the collector's baseline selection and the proof gate's
     offline loader, so both refuse the same malicious index shapes. The
-    allowlist and policy are passed in by the caller: this module never
-    imports Theater production code.
+    release gate lives in Theater production code, which this module never imports.
     """
     assert isinstance(index, dict) and isinstance(index.get("bundles"), dict), (
         "index.json must be an object with a bundles map"
@@ -400,28 +397,13 @@ def validate_bundle_index(
             name for name in SCHEMA_FILES if not (bundle / "protocol_schema" / name).is_file()
         ]
         assert not missing, f"qualified {version} is incomplete: missing {missing}"
-        if compatibility_policy is not None:
-            assert entry.get("compatibility_policy") == compatibility_policy, (
-                f"{version} must carry {compatibility_policy}"
-            )
-        if verified_versions is not None:
-            assert version in verified_versions, (
-                f"{version} is qualified but not in the allowlist; the allowlist "
-                "change is a separate human-reviewed commit"
-            )
-    if verified_versions is not None:
-        for version in sorted(verified_versions):
-            entry = bundles.get(version)
-            assert entry is not None and entry.get("status") == "qualified", (
-                f"allowed {version} must have a qualified bundle"
-            )
 
 
-def default_baseline(*, newest: bool = False) -> Path:
-    """Select a qualified committed bundle after validating the index.
+def default_baseline() -> Path:
+    """The retained ``latest`` bundle, after validating the index.
 
-    Structural and completeness rules only: the allowlist cross-check
-    belongs to the proof gate, which knows the production allowlist.
+    Structural and completeness rules only: which releases the bundles may
+    represent is the gate's business, checked by the proof tests.
     """
     index = json.loads((FIXTURE_ROOT / "index.json").read_text())
     try:
@@ -430,17 +412,13 @@ def default_baseline(*, newest: bool = False) -> Path:
         raise QualificationError(
             f"the committed index is malformed ({error}); pass --baseline explicitly"
         ) from error
-    qualified = [
-        version for version, entry in index["bundles"].items() if entry["status"] == "qualified"
-    ]
-    if not qualified:
-        raise QualificationError("no qualified committed bundle; pass --baseline explicitly")
-    if not newest and len(qualified) != 1:
+    entry = index["bundles"].get(LATEST_BUNDLE)
+    if entry is None or entry["status"] != "qualified":
         raise QualificationError(
-            "multiple (or zero) qualified committed bundles; pass --baseline explicitly"
+            f"no qualified {LATEST_BUNDLE!r} bundle in the committed index; "
+            "pass --baseline explicitly"
         )
-    newest = max(qualified, key=lambda version: tuple(map(int, version.split("."))))
-    return FIXTURE_ROOT / index["bundles"][newest]["directory"]
+    return FIXTURE_ROOT / entry["directory"]
 
 
 # ---------------------------------------------------------------------------
@@ -1167,6 +1145,7 @@ def collect_evidence(
 
     if capture_behavior:
         session = open_capture_session(binary, provider=provider)
+        session.roots[facts.version] = "<release>"
         try:
             if facts.version != _capture_version(session):
                 raise QualificationError(
@@ -1202,11 +1181,11 @@ def collect_evidence(
     if missing:
         print(
             f"incomplete bundle (missing {missing}): it is a candidate, not qualified "
-            "evidence; run with --capture-behavior before any allowlist change",
+            "evidence; run with --capture-behavior before any gate change",
             file=sys.stderr,
         )
 
-    prior = baseline if baseline is not None else default_baseline(newest=True)
+    prior = baseline if baseline is not None else default_baseline()
     print(f"baseline     : {prior}")
     lines = diff_bundle(prior, out, committed_only=True)
     if not lines:
@@ -1217,7 +1196,7 @@ def collect_evidence(
             print(f"  {line}")
     print(
         "next steps   : classify every difference against the phase-2 gate table, "
-        "run the stock proof with this exact binary, then review the bundle and allowlist"
+        "run the stock proof with this exact binary, then review the bundle and the gate"
     )
     return 0
 
