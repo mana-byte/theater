@@ -13,6 +13,10 @@ from theater.harness import EventKind, status_after
 from theater.harness.observation import ScreenConfidence, ScreenKind
 from theater.models import Status
 
+# Fixtures are structurally faithful slices of real transcripts: keys and discriminators kept, free
+# text replaced by placeholders. claude_code.jsonl is one whole turn: user, thinking, text,
+# tool_use, tool_result, thinking, text(end_turn), system.
+
 
 def test_claude_turn_parses_to_the_expected_event_sequence():
     events = events_for(ClaudeCodeObserver(), FIXTURES / "claude_code.jsonl")
@@ -199,6 +203,9 @@ def test_claude_working_accept_edits_footer_wins_over_agents_footer():
     assert reading.confidence is ScreenConfidence.HIGH
 
 
+# A working screen read as a prompt finishes the caller's await mid-turn. Claude and vibe keep a
+# prompt-like line on screen all turn, so the idle fixture alone cannot prove the matcher
+# discriminates; these tests pin the other side.
 def test_claude_working_fixture_classifies_as_working_not_prompt():
     """The permission-mode indicator is on screen during a turn as well.
 

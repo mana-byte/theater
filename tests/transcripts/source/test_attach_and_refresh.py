@@ -14,6 +14,9 @@ from theater.transcript_identity import (
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
+# Driven through the real Claude adapter over a temporary root, not a stub. `refresh` searches by
+# cwd only, so a source can rebind onto another session's file; the tests pin what it does.
+
 root = shared_root  # the shared fixture
 workdir = shared_workdir  # the shared fixture
 

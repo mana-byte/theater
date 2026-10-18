@@ -1,4 +1,4 @@
-"""Launch builders shared by the approval-policy tests."""
+"""A model of OpenCode's native permission merge and evaluation for the approval tests."""
 
 from __future__ import annotations
 

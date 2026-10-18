@@ -24,6 +24,9 @@ from theater.harness.builtin.plugins.opencode.http import (
     validate_loopback_endpoint,
 )
 
+# A real loopback server, no transport mocking: write ambiguity and redaction only mean
+# something over a socket.
+
 PASSWORD = "test-password-1234"
 
 

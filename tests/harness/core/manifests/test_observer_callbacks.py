@@ -273,3 +273,16 @@ def test_default_trajectory_capabilities_match_observer_default() -> None:
         primary=SourceManifest(factory=_source, channel=_primary_channel()),
     )
     assert observer.trajectory_capabilities == HarnessObserver.trajectory_capabilities
+
+
+def test_all_absent_optional_callbacks_preserve_superclass_behaviour() -> None:
+    observer = _observer(
+        primary=SourceManifest(factory=_source, channel=_primary_channel()),
+    )
+    assert observer.native_children(Path("/work/t.jsonl")) == []
+    assert observer.stream_floor("/work/t.jsonl") is None
+    assert observer.transcript_candidates(cwd="/work") == []
+    with pytest.raises(ValueError, match="does not implement"):
+        observer.validate_transcript_receipt(payload={}, cwd="/work", expected_session_id=None)
+    with pytest.raises(ValueError, match="has no operator-bindable"):
+        observer.admit_operator_candidate(cwd="/work", candidate="/work/t.jsonl")

@@ -14,6 +14,9 @@ from theater import harness as harness_registry
 from theater.harness.loading.discovery import MANIFEST_FILENAME
 from theater.harness.loading.models import PluginError
 
+# Two directories, one loader: the adapters Theater ships and `$THEATER_HOME/plugins/`. The
+# refusals, precedence and collision guards matter most.
+
 local_dir = shared_local_dir  # the shared fixture
 
 

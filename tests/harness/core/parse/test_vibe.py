@@ -133,6 +133,8 @@ def test_vibe_idle_fixture_classifies_as_prompt():
     assert reading.kind is ScreenKind.PROMPT
 
 
+# Vibe's spinner hint has a second spelling when a message is queued, and the workspace-trust
+# dialog was once unhandled: a working pane fell through to the composer prompt and read idle.
 def test_vibe_working_fixture_classifies_as_working_not_prompt():
     """The composer's empty prompt line stays on screen during a turn.
 

@@ -43,6 +43,9 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
 )
 
+# The canonical harness name is how the observer matches a participant to an adapter; a name
+# that passes through unchecked leaves the participant unobservable.
+
 
 def test_claude_code_maps_to_claude():
     assert normalize("claude_code") == "claude"

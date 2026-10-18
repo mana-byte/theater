@@ -53,6 +53,9 @@ from theater.harness.contracts.runtime import (
 )
 from theater.models import Status
 
+# A real loopback server, no transport mocking: admission (204 plus exact id) and the never-replayed
+# UNKNOWN paths only mean something over a socket.
+
 
 class _IO(RuntimeIO):
     async def connect(self, endpoint: str, *, timeout: float) -> Any:

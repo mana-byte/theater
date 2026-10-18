@@ -9,6 +9,9 @@ from tests.support.opencode_storage import a_turn_with_a_tool, drain
 from tests.support.shipped import OpenCodeObserver
 from theater.harness import EventKind
 
+# The recorder reproduces opencode's quirks: `finish` fires twice (second with time.completed),
+# text parts arrive empty then whole, tool parts go pending -> running -> completed.
+
 rec = shared_rec  # the shared fixture
 
 

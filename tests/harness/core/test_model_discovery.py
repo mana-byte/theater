@@ -8,6 +8,9 @@ import pytest
 
 from theater.harness import get as get_harness
 
+# Discovery is an authoring aid off the spawn path. A missing or reshaped source raises
+# NotImplementedError ("cannot be asked"), which is distinct from [] ("asked, none").
+
 
 @pytest.mark.parametrize("name", ["claude", "codex"])
 def test_an_adapter_with_no_source_says_so(name):

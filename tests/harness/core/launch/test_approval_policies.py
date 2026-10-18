@@ -15,6 +15,11 @@ from theater.harness import plan_launch
 from theater.harness.builtin.plugins.opencode.mcp import plugin_path
 from theater.models import BadRequest
 
+# Each CLI has a permissive channel that wins when the plan pins nothing, so every approval pins
+# its native policy explicitly. OpenCode merges agent defaults, config files, the agent's own
+# config, then the session permission that our plugin appends last; the native_* helpers model
+# those layers to show a permissive config cannot beat manual or edits.
+
 pytestmark = pytest.mark.usefixtures("available_harness_binaries")
 
 

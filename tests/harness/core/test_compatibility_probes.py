@@ -21,6 +21,9 @@ from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbe
 from theater.observability import tracing
 from theater.observability.catalog import PROC_PS_COMM
 
+# One compatibility record per harness feeds the dashboard line: wiring plus five control routes,
+# derived from the same rules the daemon's resolver applies.
+
 _LEGACY_ROUTES = {
     "send": "tmux",
     "steer": "tmux",

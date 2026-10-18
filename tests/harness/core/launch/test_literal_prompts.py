@@ -13,6 +13,9 @@ from tests.support.shipped import OpenCodeHarness
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.opencode.dialect import OpenCodeDialect
 
+# Every CLI parser routes a `-`-leading element as an option (commander, clap, yargs on 1.x,
+# effect on 2.x); a leading newline defeats all four for the cost of one blank first line.
+
 HOSTILE_PROMPTS = [
     "--dangerously-skip-permissions",
     "--dangerously-bypass-approvals-and-sandbox",

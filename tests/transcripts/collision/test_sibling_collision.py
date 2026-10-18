@@ -23,6 +23,10 @@ from theater.harness.source import History
 from theater.models import BadRequest, Status, TranscriptIdentityLost
 from theater.provenance import TranscriptProvenance
 
+# Two siblings in one cwd must not share a transcript: _read_transcript applies the spawn floor,
+# find_transcript logs ambiguity, and _accept_attachment refuses one bound to another live
+# participant without moving the source's accepted cursor.
+
 vibe_tree = shared_vibe_tree  # the shared fixture
 collision_registry = shared_collision_registry  # the shared fixture
 collision_observer = shared_collision_observer  # the shared fixture

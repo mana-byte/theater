@@ -19,6 +19,9 @@ from theater.transcript_identity import (
     trusted_location_unavailable_reason,
 )
 
+# Opaque `scheme://` locations are compared literally and never expanduser'd, resolved or stat'ed:
+# that would fabricate a path from the daemon's cwd and persist it in the ownership index.
+
 
 class _FakeSource(Source):
     """A minimal source whose admit_exact_location is controllable."""
@@ -688,6 +691,7 @@ def test_same_location_legacy_non_canonical_store_row(tmp_path):
     assert same_location(canonical, legacy)
 
 
+#: The filesystem check runs only for trusted provenance, so these tests use one throughout.
 TRUSTED_PROVENANCE = "operator"
 
 

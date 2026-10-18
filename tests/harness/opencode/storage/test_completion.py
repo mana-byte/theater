@@ -13,6 +13,10 @@ from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
 from theater.harness import EventKind, TurnTerminal
 from theater.models import Status
 
+# Native facts: an `unknown` step finish continues the turn; a failed turn stores an error and goes
+# idle with no finish (cleanup persists time.completed); retries and auto-compaction leave no
+# terminal marker. Live `read()` and stored `history()` must agree on all of it.
+
 SCHEMA = """
 CREATE TABLE session (
     id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT,

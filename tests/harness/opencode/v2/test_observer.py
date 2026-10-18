@@ -20,6 +20,9 @@ from theater.harness.builtin.plugins.opencode import source_v2
 from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
 from theater.models import Status
 
+# RecorderV2 mirrors the 2.x projection: one row per message with its parts embedded, rewritten in
+# place (so time_updated moves), and one `idle` row closing every turn.
+
 rec = shared_rec  # the shared fixture
 
 

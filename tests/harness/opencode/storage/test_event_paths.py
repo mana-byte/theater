@@ -14,6 +14,9 @@ from theater.harness import EventKind
 from theater.harness.base import EventPath
 from theater.harness.builtin.plugins.opencode import _paths_from_tool, _relativise
 
+# opencode stores tool arguments in `state.input`: `filePath` for write/edit/read, `path` for
+# glob/grep, none for bash. The Recorder's `tool_with_input` writes that shape.
+
 SCHEMA = """
 CREATE TABLE session (
     id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT,

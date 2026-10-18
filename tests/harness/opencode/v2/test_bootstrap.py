@@ -18,6 +18,9 @@ from theater.harness.builtin.plugins.opencode.dialect import OpenCodeDialect
 from theater.harness.builtin.plugins.opencode.legacy_bootstrap_v2 import render_legacy_bootstrap
 from theater.harness.builtin.plugins.opencode.native_plugin_v2 import plugin_dir
 
+# The fake `opencode` is a Python script on PATH: `serve` announces a banner and answers /api,
+# anything else is the TUI. Every invocation and request is logged for the assertions.
+
 V2 = OpenCodeDialect.V2
 
 

@@ -24,6 +24,9 @@ from theater.harness.builtin.plugins.vibe.isolation import validate_isolated_dom
 from theater.mcp_plugins import McpServerSpec
 from theater.models import BadRequest
 
+# Launch plans are pure data. The participant id must reach the MCP server through a channel
+# the SDK's environment allowlist cannot strip.
+
 
 @pytest.fixture(autouse=True)
 def _modern_vibe(monkeypatch):

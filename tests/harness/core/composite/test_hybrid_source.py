@@ -26,6 +26,9 @@ from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import Status
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
+# HybridSource has its own authority regime: durable keeps attachment, identity, history and the
+# cursor; live owns the current turn, healthy status and exact terminal evidence.
+
 TRANSCRIPT = ChannelDeclaration(id="transcript", kind=ChannelKind.TRANSCRIPT)
 
 

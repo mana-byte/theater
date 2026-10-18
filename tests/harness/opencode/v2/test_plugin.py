@@ -31,6 +31,9 @@ from theater.harness.builtin.plugins.opencode.server_discovery import (
 )
 from theater.models import BadRequest
 
+# The fake records every request, so tests assert what was polled and what refused. The stock-binary
+# regression runs only when THEATER_OPENCODE_STOCK_PROBE names the stock binary.
+
 SOURCE = "/work/x.opencode/server.js"
 
 
