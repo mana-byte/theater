@@ -267,7 +267,7 @@ optional phase-two stretch work, not part of interrupt acceptance.
 The executable stock-Pi proof (qualified releases 0.80.8-0.84.x and
 0.85.1-0.99.1) is
 [`tests/fixtures/pi_native_control/pi_steer_admission_proof.mts`](../../tests/fixtures/pi_native_control/pi_steer_admission_proof.mts)
-(runner: `tests/integration/test_pi_native_control.py`). It drives the public
+(runner: `tests/integration/pi/test_native_control.py`). It drives the public
 `sendUserMessage(..., {deliverAs: "steer"})` route against the real installed SDK
 and disproves four of the five invariants:
 
@@ -306,20 +306,20 @@ stays unimplemented, `HarnessRuntime.steer()` keeps refusing with
   rendered descriptor requires it.
 - `tests/fixtures/pi_frontend_bridge_conformance.mts`: executable active-run and abort
   cases; split a control fixture only if the existing file becomes unreadable.
-- `tests/harness/pi/test_native_bridge.py`: frame bounds, duplicates, epoch/session/turn drift,
+- `tests/harness/pi/test_bridge_*.py`: frame bounds, duplicates, epoch/session/turn drift,
   lifecycle correlation, and unknown semantics.
 - `tests/harness/pi/test_frontend_integration.py`: daemon/frontend reconnect and once-only
   behavior.
-- `tests/daemon/controls/test_service.py`: native interrupt routing, stale-turn rejection,
+- `tests/daemon/controls/test_service_*.py`: native interrupt routing, stale-turn rejection,
   queue cancellation behavior, terminal evidence, and no fallback after `UNKNOWN`.
 
 Focused verification:
 
 ```sh
-uv run pytest tests/daemon/harness_runtime/test_frontend_requests.py \
-  tests/harness/pi/test_native_bridge.py \
+uv run pytest tests/daemon/harness_runtime/test_passive_frontend.py \
+  tests/harness/pi/test_bridge_*.py \
   tests/harness/pi/test_frontend_integration.py \
-  tests/daemon/controls/test_service.py
+  tests/daemon/controls/test_service_*.py
 ```
 
 ## Acceptance and stop criteria

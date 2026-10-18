@@ -42,9 +42,9 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 | `daemon/trajectory/` | Trajectory service: snapshots, panel state, live follow |
 | `provider/` | Terminal-provider API: fencing, controls, adoption, process |
 | `frontend/` | Public SDK, socket, schemas and handshake |
-| `harness/core/` | Harness contracts, manifests, channels, shared launch/parse |
-| `harness/<name>/` | Per-harness plugin behaviour: claude, codex, opencode, pi, vibe |
-| `transcripts/` | Transcript sources, identity, paging, collision, recovery |
+| `harness/core/` | Harness contracts and shared behaviour, split into `channels/`, `composite/`, `launch/`, `manifests/`, `parse/`, `plugins/` |
+| `harness/<name>/` | Per-harness plugin behaviour: claude, codex (`runtime/`), opencode (`server/`, `v2/`, `storage/`, `frontend/`), pi, vibe (`unified_store/`) |
+| `transcripts/` | Transcript sources, identity, paging, recovery; `collision/` and `source/` hold the large suites |
 | `trajectory/` | Harness-neutral trajectory records, tools, causality, telemetry |
 | `observability/` | Metrics, tracing, logging and signals |
 | `mcp/`, `mcp/plugins/` | MCP server tools; MCP-server plugin contracts and Beads |
@@ -54,10 +54,12 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 | `boundaries/` | Import and process-boundary rules |
 | `packaging/` | Built distributions and artifacts |
 | `perf/` | Latency baselines and synthetic loads |
-| `integration/` | Wholly real-binary, opt-in proofs |
+| `integration/<vendor>/` | Real-binary, opt-in proofs (claude, codex, opencode, pi); skip unless their env vars are set |
 | `compat/` | Harness-compat pipeline tests |
 
-Régie tests live in `packages/regie/tests` with helpers in `packages/regie/tests/support`.
+Régie tests live in `packages/regie/tests`, grouped like `packages/regie/src/regie`
+(`ambience/`, `app/`, `bridge/`, `controllers/`, `dashboard/`, `motions/`, `render/`, `tmux/`,
+`trajectory/`), with helpers in `packages/regie/tests/support`.
 
 ## Rules
 

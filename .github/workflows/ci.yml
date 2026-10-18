@@ -93,9 +93,9 @@ jobs:
       - name: Peer identity, provider fencing, and live recovery
         run: >-
           uv run pytest -q -o faulthandler_timeout=120
-          tests/frontend/test_handshake.py
+          tests/frontend/test_public_socket.py
           tests/boundaries/test_process_boundary.py
-          tests/provider/test_fencing.py
+          tests/provider/test_callback_client.py
           tests/daemon/harness_runtime/test_live_recovery.py
 
   artifacts:

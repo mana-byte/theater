@@ -270,7 +270,7 @@ Suggested focused command after implementation:
 
 ```sh
 uv run pytest tests/harness/claude/test_native_control_proof.py \
-  tests/daemon/controls/test_service.py
+  tests/daemon/controls/test_service_*.py
 ```
 
 ## Release and stop gates

@@ -112,7 +112,7 @@ Recalibrated 2026-10-10. The original absolute targets were set against `docs/pe
 
 - [x] No periodic journal events at idle. `empty`: 0/h, down from 358/h of `provider.updated` (`docs/perf-baseline.md` vs `docs/perf-final.md`). `idle10`: at most 1 event per 120 s window (`job.updated`, 30/h, `docs/perf-final.md`).
 - [x] controls_changed < 10/hour per idle agent: 0.0 in every scenario (`docs/perf-baseline.md`, `docs/perf-final.md`).
-- [ ] 1 commit per observation batch, and none for an empty batch. Covered by `tests/daemon/persistence/test_write_unit.py` (`test_nonterminal_observation_batch_commits_once_with_checkpoint`, `test_terminal_batch_commits_once_and_replay_never_completes_the_next_job`) and `tests/daemon/persistence/test_write_free_batches.py` (`test_empty_batch_opens_no_write_unit`, `test_batch_with_events_opens_exactly_one_unit`). Tick when these pass on the merge commit.
+- [ ] 1 commit per observation batch, and none for an empty batch. Covered by `tests/daemon/persistence/test_transactions.py` (`test_nonterminal_observation_batch_commits_once_with_checkpoint`, `test_terminal_batch_commits_once_and_replay_never_completes_the_next_job`) and `tests/daemon/persistence/test_transactions.py` (`test_empty_batch_opens_no_write_unit`, `test_batch_with_events_opens_exactly_one_unit`). Tick when these pass on the merge commit.
 - [ ] Zero false-ABSENT admissions. There is no runtime counter for this, so it is enforced by the fail-closed presence tests (`tests/daemon/presence/`) plus code review of every presence change.
 - [ ] Full test suite, lint, mypy and `alembic check` clean on the merge commit.
 

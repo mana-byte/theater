@@ -477,7 +477,7 @@ the provider side of reverse requests.
 **G04 — Provider SDK channel.**
 
 - Own `theater/frontend/provider.py` and focused
-  `tests/provider/test_client.py`.
+  `tests/provider/test_callback_client.py`.
 - Implement handshake/channel lifecycle, callback reader/writer, bounded pending
   requests, exact correlation and unknown/late response handling.
 - Keep read processing alive while an asynchronous callback handler waits.
@@ -539,7 +539,7 @@ will rely on. These domains can be developed in parallel with separate ownership
 **S06 — Workspace lifecycle and exact Git operations.**
 
 - Own `theater/daemon/worktrees/`, workspace repository/service extensions,
-  `daemon/frontend/handlers/workspaces.py`, `tests/daemon/worktrees/test_workspaces.py` and
+  `daemon/frontend/handlers/workspaces.py`, `tests/daemon/worktrees/test_workspace_*.py` and
   relevant additions to `tests/daemon/worktrees/test_git_worktrees.py`.
 - Normalize borrowed, frontend-owned, unique and named workspace requests.
   Capture initiating checkout HEAD independently of canonical storage root.
@@ -556,7 +556,7 @@ will rely on. These domains can be developed in parallel with separate ownership
 
 - Own `persistence/repositories/scratchpad.py`, `daemon/rpc/scratchpad.py`,
   `daemon/frontend/handlers/scratchpad.py`, a focused scratchpad service module
-  if needed, and `tests/daemon/persistence/test_scratchpad_ttl.py`.
+  if needed, and `tests/daemon/persistence/test_scratchpad.py`.
 - Remove tree/Git/participant prerequisites while preserving quota/key/string/
   paging behavior and optional actor audit metadata.
 - Implement expiry from last write, idempotent-write replay without TTL refresh,
@@ -739,7 +739,7 @@ regardless of whether it originated in a public API call.
 
 - Own domain writer changes across registry, private RPCs, hooks, observation,
   control settlement, lifecycle/recovery and GC, plus
-  `tests/daemon/events/test_journal_coverage.py`.
+  `tests/daemon/events/test_event_journal.py`.
 - Trace all state projections to their actual writers. Route each transition
   through the write unit; add typed events/tombstones in the same transaction.
 - Stage registry/job cache updates after commit and preserve notification behavior.
@@ -884,7 +884,7 @@ replacement for coordinator validation.
 
 **S13 — Crash and cross-process acceptance tests.**
 
-- Own dedicated `tests/daemon/recovery/test_fault_matrix.py`,
+- Own dedicated `tests/daemon/recovery/test_control_recovery.py`,
   `test_rc10_end_to_end.py`, `test_rc10_live_recovery.py` and narrowly required
   failure-injection seams agreed with the coordinator.
 - Exercise commit/dispatch/receipt/settlement crash points from the technical
@@ -1201,13 +1201,13 @@ Commands supplied to that runner use the worker's own environment and checkpoint
 lockfile. Representative task commands after their files exist:
 
 ```text
-uv run --frozen pytest tests/frontend/test_handshake.py tests/frontend/test_public_dispatch.py
-uv run --frozen pytest tests/daemon/operations/test_operations.py tests/daemon/operations/test_idempotency.py
-uv run --frozen pytest tests/provider/test_registry.py tests/provider/test_fencing.py
-uv run --frozen pytest tests/daemon/worktrees/test_workspaces.py tests/daemon/worktrees/test_git_worktrees.py
-uv run --frozen pytest tests/daemon/persistence/test_scratchpad_ttl.py
-uv run --frozen pytest tests/daemon/recovery/test_recovery.py tests/daemon/operations/test_control_transfer.py
-uv run --frozen pytest tests/daemon/events/test_journal_coverage.py tests/frontend/test_sdk_follow.py
+uv run --frozen pytest tests/frontend/test_public_socket.py tests/frontend/test_public_socket.py
+uv run --frozen pytest tests/daemon/operations/test_operations.py tests/daemon/operations/test_operations.py
+uv run --frozen pytest tests/provider/test_registry.py tests/provider/test_callback_client.py
+uv run --frozen pytest tests/daemon/worktrees/test_workspace_*.py tests/daemon/worktrees/test_git_worktrees.py
+uv run --frozen pytest tests/daemon/persistence/test_scratchpad.py
+uv run --frozen pytest tests/daemon/recovery/test_control_recovery.py tests/daemon/operations/test_control_transfer.py
+uv run --frozen pytest tests/daemon/events/test_event_journal.py tests/frontend/test_sdk_follow.py
 ```
 
 The coordinator supplies each worker only its own focused subset and relevant
