@@ -12,6 +12,7 @@ import pytest
 from tests.support.frontend_wire import read_request
 from tests.support.sdk_fixture_server import fixture_server, send_frame
 from tests.support.sdk_state_frames import operation_frame, state_handshake
+from tests.support.waiting import wait_until
 from theater.frontend import (
     CapabilityUnavailable,
     ClientStateError,
@@ -89,10 +90,7 @@ async def test_client_replaces_a_lane_the_daemon_hung_up_on() -> None:
         FrontendClient(socket_path, client_id="sdk-reconnect") as client,
     ):
         await client.trajectory.snapshot("p")
-        for _ in range(100):
-            if not client.connected:
-                break
-            await asyncio.sleep(0.01)
+        await wait_until(lambda: not client.connected, what="the lane noticing the hang-up")
         assert (await client.trajectory.snapshot("p")).value["records"] == ()
     assert connections == 2
 
@@ -651,11 +649,7 @@ async def test_transport_is_disconnected_once_the_peer_hangs_up():
         transport = FrontendTransport(path)
         try:
             await transport.connect()
-            for _ in range(100):
-                if not transport.connected:
-                    break
-                await asyncio.sleep(0.01)
-            assert not transport.connected
+            await wait_until(lambda: not transport.connected, what="the hang-up")
         finally:
             transport.abort()
             server.close()

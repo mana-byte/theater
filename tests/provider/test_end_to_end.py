@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -11,6 +10,7 @@ import pytest
 from tests.support.frontend_wire import projection_wire
 from tests.support.paths import fixture
 from tests.support.provider_launcher import physical_events, provider_process, raw_register_provider
+from tests.support.waiting import wait_until
 from theater import paths
 from theater.daemon.spawning.models import Reservation
 from theater.frontend import FrontendClient, StateSynchronizer
@@ -384,11 +384,12 @@ async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
                     idempotency_key="lost-input",
                 )
             ).value
-            # The lost ack surfaces as uncertain once the disconnect propagates;
-            # poll rather than sample after a fixed wait (xdist load delays it).
-            async with asyncio.timeout(10):
-                while daemon.operation_service.get(sent.operation_id).state != "uncertain":
-                    await asyncio.sleep(0.005)
+            # The lost ack reads uncertain once the disconnect propagates (xdist load delays it).
+            await wait_until(
+                lambda: daemon.operation_service.get(sent.operation_id).state == "uncertain",
+                timeout=10,
+                what="the lost input ack to read uncertain",
+            )
             assert await provider.wait() == 0
 
             replay = (

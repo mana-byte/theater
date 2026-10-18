@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import re
 import sys
@@ -11,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.support.waiting import wait_until
 from theater import paths
 from theater.daemon.harness_runtime import backend as harness_backend
 from theater.daemon.harness_runtime.backend import (
@@ -364,10 +364,9 @@ async def test_secret_env_reaches_the_backend_without_leaking(workdir: Path) -> 
     assert all("sekrit-token" not in part for part in plan.backend.argv)
     backend = await _launch(plan, participant, workdir)
     try:
-        for _ in range(200):
-            if "True" in _read_log(participant):
-                break
-            await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: "True" in _read_log(participant), timeout=10, what="the backend env log"
+        )
         log = _read_log(participant)
         assert "True" in log, "secret must reach the backend env"
         assert "sekrit-token" not in log

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.backend_snippets import SLEEP_SNIPPET
+from tests.support.waiting import wait_until
 from theater import paths
 from theater.daemon.harness_runtime import backend as harness_backend
 from theater.daemon.harness_runtime.backend import (
@@ -280,11 +281,8 @@ async def test_launch_without_a_strong_identity_reaps_the_child_and_fails(
     assert not pid_alive(spawned[0]), "a failed launch must terminate and reap its child"
 
 
-async def _settle_pid_gone(pid: int, attempts: int = 200) -> None:
-    for _ in range(attempts):
-        if not pid_alive(pid):
-            return
-        await asyncio.sleep(0.05)
+async def _settle_pid_gone(pid: int) -> None:
+    await wait_until(lambda: not pid_alive(pid), timeout=10, what=f"pid {pid} to exit")
 
 
 # ---- adoption of an already-running backend ----------------------------------
