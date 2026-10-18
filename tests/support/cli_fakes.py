@@ -51,7 +51,7 @@ def daemon_stub(
     class Stub:
         def __init__(self, *args, **kwargs):
             if expect_kwargs is not None:
-                assert kwargs == expect_kwargs
+                assert not args and kwargs == expect_kwargs
 
         async def __aenter__(self):
             if enter_raises is not None:

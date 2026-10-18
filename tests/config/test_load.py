@@ -253,6 +253,8 @@ def test_explicit_path_overrides_the_default(tmp_path):
     assert loaded.path == other
 
 
+# A config layer nothing reads is the failure these tests exist to catch:
+# loading correctly is not the same as being obeyed.
 def test_daemon_reads_the_file_at_construction():
     write_config("[rails]\ndepth_cap = 7\nbudget = 42\n")
     daemon = Daemon(harnesses={})

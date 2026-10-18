@@ -105,6 +105,8 @@ def test_a_participant_row_carries_its_harness_icon():
     assert cli.harness_icon("vibe") in cli._row_line(ROW)
 
 
+# The tests below drive the commands themselves: what they ask the daemon for, what they
+# print and what they return. `call_sync` is the seam between a command and the socket.
 def test_ls_prints_participants_without_legacy_unmanaged_scan(answers, capsys):
     answers["replies"] = {"participants.list": [ROW]}
     assert cli.cmd_ls(parse("ls")) == 0
