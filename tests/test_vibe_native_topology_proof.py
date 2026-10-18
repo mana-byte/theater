@@ -8,12 +8,12 @@ human reviews upstream instead of auto-wiring a runtime.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
+from tests.support.paths import fixture
 from theater.harness.builtin.plugins.vibe.manifest import MANIFEST
 from theater.harness.contracts.manifest import InterruptPlan
 
-RECORD = Path(__file__).parent / "fixtures" / "vibe_app_server" / "topology.json"
+RECORD = fixture("vibe_app_server", "topology.json")
 PINNED_VERSION = "2.25.4"
 PINNED_COMMIT = "19b5b74faa78d0816b8d4d4c7d7543fc3520678c"
 PINNED_ARCHIVE_DIGEST = "sha256:9af6a094e2294f11651927759020e8ee3ff88376baba21e67b8d3796acd77702"

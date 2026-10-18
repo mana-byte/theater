@@ -4,7 +4,7 @@ Pure helpers get one collected item per helper: every original case is a
 labelled row, so a regression still fails CI naming every violated row.
 """
 
-from tests.rig.tables import eq_row, is_row, run_rows
+from tests.support.tables import eq_row, is_row, run_rows
 from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.harness.contracts.events import EventPath, TokenUsage
 from theater.harness.normalization import (

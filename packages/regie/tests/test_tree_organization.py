@@ -16,8 +16,8 @@ from regie.widgets.name_editor import NameEditor
 from regie.widgets.separator import SeparatorRow
 from textual.geometry import Offset
 
+from packages.regie.tests.support.waiting import wait_until
 from packages.regie.tests.test_ui import _app, _participant, _projection
-from tests.rig.waiting import wait_until
 
 
 async def test_jk_reorders_roots_and_stays_out_of_the_usage_footer(tmp_path: Path) -> None:

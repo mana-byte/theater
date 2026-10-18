@@ -1,10 +1,10 @@
 """Approval display uses requested provider evidence, not invented captures."""
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
+from tests.support.paths import fixture
 from theater import paths
 from theater.daemon.observer import QuietClock
 from theater.frontend import FrontendClient
@@ -25,7 +25,7 @@ async def test_provider_input_request_reaches_frontend_and_clears(
     terminal = terminal_provider.bind(daemon, participant.id, command=harness)
     terminal_provider.presence[terminal] = "present"
     observer = get_harness(harness).observer
-    screens = Path(__file__).parent / "fixtures" / "screens"
+    screens = fixture("screens")
     client = FrontendClient(paths.socket_path(), client_id="approval-display-test")
     try:
         follow = StateSynchronizer(client)

@@ -21,7 +21,7 @@ from regie.trajectory.ui_constants import (
 from rich.color import Color
 from textual.app import App, ComposeResult
 
-from tests.rig.waiting import wait_until
+from packages.regie.tests.support.waiting import wait_until
 from theater.frontend.trajectory import Timing, TimingProvenance, TrajectoryRecord, TrajectoryStatus
 
 

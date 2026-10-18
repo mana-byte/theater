@@ -11,6 +11,7 @@ from scripts.harness_compat.adapters import pi, pi_bump, pi_pins
 from scripts.harness_compat.contract import Check, InstallFailed, version_key
 from scripts.harness_compat.probe import _probe
 from scripts.harness_compat.sandbox import make_sandbox
+from tests.support.paths import REPO_ROOT
 
 
 def _copy_gate(root: Path, destination: Path) -> None:
@@ -38,7 +39,7 @@ def _current_upper(root: Path) -> str:
 
 
 def test_verified_reads_plugin_literal_and_fails_closed(tmp_path: Path) -> None:
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     _copy_gate(root, tmp_path)
     expected = pi.ADAPTER.verified(tmp_path)
     upper = _current_upper(tmp_path)
@@ -72,7 +73,7 @@ def test_verified_reads_plugin_literal_and_fails_closed(tmp_path: Path) -> None:
 
 
 def test_apply_bump_changes_one_value_and_is_idempotent(tmp_path: Path) -> None:
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     shutil.copytree(root / "theater", tmp_path / "theater")
     initial = pi.ADAPTER.verified(tmp_path)
     assert initial.ceiling is not None
@@ -106,7 +107,7 @@ def test_apply_bump_changes_one_value_and_is_idempotent(tmp_path: Path) -> None:
 def test_qualify_uses_offline_environment_and_maps_errors_to_inconclusive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
 
     def fake_run_pytest(root, nodeids, *, env, expected_skips, timeout=900):
@@ -144,7 +145,7 @@ def test_install_failure_raises_install_failed(
         make_sandbox("pi", root=tmp_path / "sandbox") as sandbox,
         pytest.raises(InstallFailed, match="fake npm failure"),
     ):
-        pi.ADAPTER.install(sandbox, _current_upper(Path(__file__).parents[1]))
+        pi.ADAPTER.install(sandbox, _current_upper(REPO_ROOT))
 
 
 def test_pinned_specs_pin_own_scope_simple_ranges_only() -> None:

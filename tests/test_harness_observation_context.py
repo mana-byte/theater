@@ -8,9 +8,9 @@ from math import inf, nan
 from typing import Any
 
 import pytest
-from shipped import VibeHarness
 
-from tests.rig.tables import run_rows
+from tests.support.shipped import VibeHarness
+from tests.support.tables import run_rows
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.claude.source import _ClaudeSource
 from theater.harness.builtin.plugins.codex.observer import CodexObserver

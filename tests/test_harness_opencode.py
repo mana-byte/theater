@@ -25,8 +25,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from shipped import OpenCodeHarness, OpenCodeObserver
 
+from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
 from theater.harness import EventKind, TurnTerminal, theater_mcp_servers
 from theater.harness.builtin.plugins.opencode.constants import HISTORY_MESSAGE_BATCH
 from theater.harness.builtin.plugins.opencode.mcp import plugin_path

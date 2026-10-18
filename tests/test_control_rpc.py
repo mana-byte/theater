@@ -16,8 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests._presence_doubles import AbsentPresence
-from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.presence import AbsentPresence
 from theater.constants.daemon import BUS_KIND_SEND_REFUSED
 from theater.daemon.frontend.control_handlers import controls_get
 from theater.daemon.persistence.repositories.runtime_bindings import (

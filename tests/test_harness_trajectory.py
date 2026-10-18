@@ -10,6 +10,7 @@ import pytest
 import theater.harness.builtin.plugins.claude.parser as claude_parser
 import theater.harness.builtin.plugins.claude.usage as claude_plugin
 import theater.harness.builtin.plugins.opencode as opencode_plugin
+from tests.support.paths import FIXTURES
 from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import parser as codex_plugin
@@ -29,8 +30,6 @@ from theater.trajectory.enums import (
 from theater.trajectory.records import Timing
 from theater.trajectory.requests import requests_for_records
 from theater.trajectory.tools import tool_operations_for_records
-
-FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _lines(name: str) -> list[str]:

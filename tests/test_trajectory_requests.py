@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.paths import FIXTURES
 from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_REQUEST_RECORD_LIMIT,
@@ -36,8 +37,6 @@ from theater.trajectory import (
 )
 from theater.trajectory.enums import CostProvenance, TrajectoryFailureCategory
 from theater.trajectory.records import TrajectoryFailure
-
-FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _record(

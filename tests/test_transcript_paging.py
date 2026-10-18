@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
-from shipped import OpenCodeObserver
 from test_harness_opencode import Recorder
 
+from tests.support.shipped import OpenCodeObserver
 from theater.constants.daemon import TRANSCRIPT_READ_RESPONSE_MAX_BYTES
 from theater.daemon.rpc.transcript_paging import TranscriptCursorError, TranscriptPager
 from theater.harness import Event, EventKind

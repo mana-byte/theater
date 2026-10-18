@@ -12,7 +12,7 @@ from functools import partial
 
 import pytest
 
-from tests.rig.tables import run_rows
+from tests.support.tables import run_rows
 from theater import cli, paths
 from theater import config as cfg
 from theater.cli.commands import participants as participants_mod

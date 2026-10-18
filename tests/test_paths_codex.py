@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import json
 
-from shipped import CodexObserver
-
+from tests.support.shipped import CodexObserver
 from theater.daemon.trajectory.project import project_events_and_facts
 from theater.harness import plan_launch
 from theater.harness.base import EventKind, EventPath

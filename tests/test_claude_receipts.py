@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 
 import pytest
-from shipped import ClaudeCodeHarness
 
+from tests.support.shipped import ClaudeCodeHarness
 from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient

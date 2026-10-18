@@ -8,11 +8,11 @@ import json
 import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import cast
 
 import pytest
 
+from tests.support.paths import REPO_ROOT
 from theater.harness.builtin.plugins.pi import runtime as pi_runtime_module
 from theater.harness.builtin.plugins.pi.frontend import (
     PI_FRONTEND_PROTOCOL,
@@ -835,9 +835,9 @@ def test_pi_frontend_probe_refuses_unqualified_versions(version, monkeypatch) ->
 
 
 def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None:
-    bridge = (
-        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
-    ).read_text(encoding="utf-8")
+    bridge = (REPO_ROOT / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts").read_text(
+        encoding="utf-8"
+    )
 
     assert "AgentSession" not in bridge
     assert 'pi.on("agent_settled"' in bridge
@@ -861,7 +861,7 @@ def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None
 
 def test_pi_extension_frontend_bridge_executable_conformance() -> None:
     """Drive the actual extension registration through fresh public contexts."""
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     result = subprocess.run(
         [
             "node",

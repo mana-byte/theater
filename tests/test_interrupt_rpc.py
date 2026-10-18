@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests._presence_doubles import AbsentPresence
+from tests.support.presence import AbsentPresence
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
 from theater.models import Status
 from theater.protocol import RemoteError
@@ -55,7 +55,7 @@ async def test_interrupt_refuses_self_and_non_child_callers(client, daemon, term
 
 
 async def _native_working_child(daemon, terminal_provider):
-    from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+    from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
     from theater.daemon.persistence.repositories.runtime_bindings import (
         ParticipantRuntimeBinding,
     )

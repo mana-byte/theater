@@ -7,7 +7,7 @@ import json
 import pytest
 from sqlalchemy import select
 
-from tests._presence_doubles import AbsentPresence
+from tests.support.presence import AbsentPresence
 from tests.test_control_rpc import _active_send, _native_pair
 from tests.test_presence_controls import Rig, _operation_rows
 from tests.test_send import _target

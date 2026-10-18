@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.paths import REPO_ROOT, fixture
 from theater import paths
 from theater.daemon.spawning.planning import install_frontend_plan
 from theater.harness.builtin.plugins.opencode.frontend import (
@@ -1066,7 +1067,7 @@ def test_opencode_extension_executable_conformance(monkeypatch, tmp_path) -> Non
     if node is None:
         pytest.skip("node is required to execute the rendered OpenCode TUI extension")
     assert node is not None
-    fixture = Path(__file__).parent / "fixtures" / "opencode_frontend_control_conformance.mts"
+    conformance = fixture("opencode_frontend_control_conformance.mts")
 
     with tempfile.TemporaryDirectory(prefix="oc-control-") as raw_root:
         root = Path(raw_root)
@@ -1078,11 +1079,11 @@ def test_opencode_extension_executable_conformance(monkeypatch, tmp_path) -> Non
             [
                 node,
                 "--experimental-strip-types",
-                str(fixture),
+                str(conformance),
                 plugin_path.resolve().as_uri(),
                 str(root),
             ],
-            cwd=Path(__file__).parents[1],
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             timeout=60,

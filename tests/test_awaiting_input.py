@@ -7,8 +7,8 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-from presence_fakes import ABSENT, PRESENT, FakePresence
 
+from tests.support.presence import ABSENT, PRESENT, FakePresence
 from theater.daemon.awaiting import coordinate_await, parse_targets
 from theater.daemon.jobs import JobManager
 from theater.models import JobState, Status

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.rig.tables import run_rows
+from tests.support.tables import run_rows
 from theater.daemon import worktree as wt
 from theater.daemon.spawning.service import Spawner
 from theater.models import BadRequest

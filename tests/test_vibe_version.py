@@ -11,8 +11,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from shipped import pin_installed_vibe_version
 
+from tests.support.shipped import pin_installed_vibe_version
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.vibe import version as version_module
 from theater.harness.builtin.plugins.vibe.version import installed_vibe_version

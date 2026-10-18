@@ -28,8 +28,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from shipped import OpenCodeHarness, OpenCodeObserver
 
+from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
 from theater.harness import EventKind, TurnTerminal
 from theater.models import Status
 

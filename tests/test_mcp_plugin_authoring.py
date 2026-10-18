@@ -7,16 +7,16 @@ import json
 import os
 import shlex
 import sys
-from pathlib import Path
 
 import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from tests.support.paths import fixture
 from theater import config, paths
 from theater.mcp_plugins import registry
 
-FIXTURES = Path(__file__).parent / "fixtures" / "mcp_plugins"
+FIXTURES = fixture("mcp_plugins")
 
 
 @pytest.fixture(autouse=True)

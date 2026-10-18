@@ -8,14 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.paths import FIXTURES
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.opencode import OpenCodeObserver
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
-
-FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _event_shape(events):

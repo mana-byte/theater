@@ -13,6 +13,7 @@ import pytest
 from scripts.harness_compat.adapters.claude import ADAPTER, changelog_hints, seed_config
 from scripts.harness_compat.contract import Check, InstallFailed
 from scripts.harness_compat.sandbox import make_sandbox
+from tests.support.paths import REPO_ROOT
 from theater.harness.builtin.plugins.claude.compatibility import _HOOK_FLOOR, _HOOK_UPPER
 
 
@@ -32,10 +33,7 @@ def test_claude_name_policy_and_optional_upper(tmp_path: Path) -> None:
 
 
 def test_claude_real_gate_and_noop_bump(tmp_path: Path) -> None:
-    real_source = (
-        Path(__file__).resolve().parents[1]
-        / "theater/harness/builtin/plugins/claude/compatibility.py"
-    )
+    real_source = REPO_ROOT / "theater/harness/builtin/plugins/claude/compatibility.py"
     source = tmp_path / "theater/harness/builtin/plugins/claude/compatibility.py"
     source.parent.mkdir(parents=True)
     shutil.copy2(real_source, source)

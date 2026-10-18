@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select, update
 
 import theater.daemon.frontend.participant_mutation_handlers as mutation_handlers
-from tests._presence_doubles import AbsentPresence, UnknownPresence
-from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.paths import fixture
+from tests.support.presence import AbsentPresence, UnknownPresence
 from theater.daemon.controls.routing import ControlRouteResolver
 from theater.daemon.frontend.control_handlers import (
     _error,
@@ -161,7 +161,7 @@ def _online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
             )
         # Provider sends require a proven ready composer; this fixture's
         # participants are idle codex terminals.
-        idle_screen = Path(__file__).parent / "fixtures" / "screens" / "codex_idle.txt"
+        idle_screen = fixture("screens", "codex_idle.txt")
         return {
             "provider_generation": generation,
             "report_revision": revision,

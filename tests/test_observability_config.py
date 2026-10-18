@@ -6,7 +6,7 @@ from functools import partial
 
 import pytest
 
-from tests.rig.tables import run_rows
+from tests.support.tables import run_rows
 from theater import config as cfg
 from theater.config.models import ObservabilitySection
 

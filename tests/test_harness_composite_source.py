@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
-from pathlib import Path
 
 import pytest
 
+from tests.support.paths import REPO_ROOT
 from theater.constants.harness import (
     HARNESS_CHANNEL_HEALTH_COUNTER_MAX,
     HARNESS_CHANNEL_ID_MAX_CHARS,
@@ -1423,7 +1423,7 @@ async def test_aclose_propagates_child_cancelled_error() -> None:
 
 
 def test_composite_modules_do_not_import_runtime_layers() -> None:
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     files = (
         root / "theater/harness/channels/__init__.py",
         root / "theater/harness/channels/composite.py",

@@ -11,8 +11,8 @@ import asyncio
 import json
 
 import pytest
-from presence_fakes import FakePresence
 
+from tests.support.presence import FakePresence
 from theater import paths
 from theater.client import DaemonClient
 from theater.constants.response_contract import CONTRACT_PRESET_NAMES

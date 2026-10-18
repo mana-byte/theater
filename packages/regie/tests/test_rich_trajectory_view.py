@@ -16,7 +16,7 @@ from regie.trajectory.rich.widgets.timeline import Timeline
 from textual.app import App, ComposeResult
 from textual.widgets import Input
 
-from tests.rig.waiting import wait_until
+from packages.regie.tests.support.waiting import wait_until
 from theater.frontend.trajectory import (
     PanelState,
     PanelStateInfo,

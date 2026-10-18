@@ -10,7 +10,7 @@ from functools import partial
 
 import pytest
 
-from tests.rig.tables import run_rows
+from tests.support.tables import run_rows
 from theater import timing
 from theater.observability.catalog import BY_KEY
 from theater.observability.engine import span

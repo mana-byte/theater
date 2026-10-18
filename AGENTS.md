@@ -193,7 +193,7 @@ packages/regie/src/regie/
   why, not what, one line is the target. This applies to new code: don't churn
   existing files just to shorten their comments. Long inline *error messages*
   are the separate rule above — those stay deliberate.
-- **UI tests wait for conditions, not fixed sleeps** (`tests/rig/waiting.py`):
+- **UI tests wait for conditions, not fixed sleeps** (`packages/regie/tests/support/waiting.py`):
   CI runners are slower than a laptop, and Textual schedules tasks eagerly.
 - **Only MVP tests are kept**: the minimal set that verifies the behaviour —
   one focused test beats several overlapping ones; if two prove the same

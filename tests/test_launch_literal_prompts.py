@@ -15,8 +15,8 @@ import os
 from pathlib import Path
 
 import pytest
-from shipped import OpenCodeHarness
 
+from tests.support.shipped import OpenCodeHarness
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.opencode.dialect import OpenCodeDialect
 

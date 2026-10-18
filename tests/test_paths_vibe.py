@@ -12,8 +12,8 @@ from __future__ import annotations
 import json
 
 import pytest
-from shipped import VibeHarness, VibeObserver, pin_installed_vibe_version
 
+from tests.support.shipped import VibeHarness, VibeObserver, pin_installed_vibe_version
 from theater.harness import EventPath, plan_launch
 from theater.harness.base import EventKind
 

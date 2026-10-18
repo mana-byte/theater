@@ -8,7 +8,12 @@ import time
 import pytest
 from sqlalchemy import delete
 
-from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState, completed_outcome
+from tests.support.fake_runtime import (
+    FakeRuntime,
+    FakeRuntimeIO,
+    FakeRuntimeState,
+    completed_outcome,
+)
 from theater.client import DaemonClient
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.presence import PresenceSnapshot, PresenceState

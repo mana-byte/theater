@@ -68,7 +68,8 @@ from tests.native.codex_native_client import (
     write_isolated_codex_home,
 )
 from tests.native.codex_qualify_runtime import validate_bundle_index
-from tests.rig.tables import run_rows
+from tests.support.paths import fixture
+from tests.support.tables import run_rows
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     CODEX_RUNTIME_QUALIFIED_FLOOR,
     codex_version_refusal,
@@ -76,7 +77,7 @@ from theater.harness.builtin.plugins.codex.runtime_plan import (
     qualified_versions_range_text,
 )
 
-FIXTURES = Path(__file__).parent / "fixtures" / "codex_native_runtime"
+FIXTURES = fixture("codex_native_runtime")
 NATIVE_PROOF_ENV = "THEATER_CODEX_NATIVE_PROOF"
 NATIVE_PROOF_ENABLED = os.environ.get(NATIVE_PROOF_ENV) == "1"
 

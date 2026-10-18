@@ -1,6 +1,6 @@
 """Measure WP-C spawn and participant ergonomics against an in-process daemon.
 
-Each run builds a throwaway THEATER_HOME, a fake terminal provider (tests/conftest.py),
+Each run builds a throwaway THEATER_HOME, a fake terminal provider (tests/support),
 synthetic participants, and a non-Git directory of repositories, then records what an
 agent would see. ``--base <worktree>`` re-runs this same file under that checkout's
 project to measure "before"; nothing touches ~/.theater or the network.
@@ -171,11 +171,10 @@ async def _measure(home: Path) -> dict:
     os.environ["THEATER_HOME"] = str(home)
     os.environ["THEATER_OPENCODE_VERSION"] = "1.18.29"
     os.environ["XDG_DATA_HOME"] = str(home / "xdg-data")
-    sys.path.insert(0, str(Path.cwd() / "tests"))
     import pytest
-    from conftest import FakeTerminalProvider
-    from shipped import pin_installed_vibe_version
 
+    from tests.support.shipped import pin_installed_vibe_version
+    from tests.support.terminal_provider import FakeTerminalProvider
     from theater import harness, paths
     from theater.client import DaemonClient
     from theater.config import Config

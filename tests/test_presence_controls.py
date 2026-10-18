@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
-from tests._presence_doubles import (
+from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.paths import fixture
+from tests.support.presence import (
     AbsentPresence,
     PresentPresence,
     UnknownPresence,
     _BasePresence,
 )
-from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED,
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
@@ -623,7 +623,7 @@ def _interrupt_events(daemon) -> list[dict]:
 async def test_composed_send_refused_while_present_and_recorded(client, daemon, terminal_provider):
     target = await _hello_target(client, daemon)
     terminal_id = terminal_provider.bind(daemon, target["id"])
-    idle_screen = (Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt").read_text()
+    idle_screen = (fixture("screens", "vibe_idle.txt")).read_text()
     terminal_provider.screens[terminal_id] = idle_screen
     daemon.presence = PresentPresence(capture_screen=daemon.presence.capture_screen)
 

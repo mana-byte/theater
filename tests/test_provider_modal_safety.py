@@ -2,18 +2,18 @@
 
 import asyncio
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 from sqlalchemy import text
 
+from tests.support.paths import fixture
 from tests.test_control_service import Harness, make_runtime, state_of
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import SessionOpenMode
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.models import AwaitingDecision, Busy, JobState, StaleTarget, Status
 
-SCREENS = Path(__file__).parent / "fixtures" / "screens"
+SCREENS = fixture("screens")
 
 #: Stock Codex 0.158 trust dialog rendered by the provider fixture.
 TRUST_MENU_0158 = """\

@@ -10,8 +10,8 @@ import select
 from pathlib import Path
 
 import pytest
-from shipped import ClaudeCodeObserver
 
+from tests.support.shipped import ClaudeCodeObserver
 from theater.harness.channels import filesystem
 from theater.harness.channels.filesystem import FilesystemWatcher, WatchGate
 from theater.harness.channels.wakeup import WakeupSignal

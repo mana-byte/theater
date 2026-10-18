@@ -18,8 +18,9 @@ from scripts.harness_compat.adapters import (
     opencode_sandbox,
 )
 from scripts.harness_compat.probe import _probe
+from tests.support.paths import REPO_ROOT
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = REPO_ROOT
 
 
 @pytest.fixture()

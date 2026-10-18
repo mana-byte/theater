@@ -2,7 +2,7 @@
 
 Wave 3B wires the runtime's live channel into the observation service through
 the generic ``observer.live`` seam — no plugin internals imported, no lifecycle
-imports. One fake harness with a durable reader plus ``tests/rig/fake_runtime``
+imports. One fake harness with a durable reader plus ``tests/support/fake_runtime``
 drives the whole chain: registration composes a first-class ``HybridSource``
 into the watch loop, live terminal evidence routes through a real
 ``ControlService`` and finishes its exact mapped job, and heuristic finishing
@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.jobs import JobManager
 from theater.daemon.observation.live import LiveObservationHub, LiveRegistration

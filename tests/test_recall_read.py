@@ -14,9 +14,9 @@ import threading
 from pathlib import Path
 
 import pytest
-from shipped import VibeHarness
 from sqlalchemy import insert, select
 
+from tests.support.shipped import VibeHarness
 from theater.daemon.observer import Observer
 from theater.daemon.recall_read import read_segment
 from theater.daemon.schema import touch

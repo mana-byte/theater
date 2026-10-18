@@ -7,11 +7,12 @@ import json
 import math
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "perf_baseline.py"
+from tests.support.paths import REPO_ROOT
+
+SCRIPT = REPO_ROOT / "scripts" / "perf_baseline.py"
 
 
 @pytest.fixture

@@ -10,8 +10,8 @@ import json
 from pathlib import Path
 
 import pytest
-from shipped import ClaudeCodeHarness
 
+from tests.support.shipped import ClaudeCodeHarness
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
 from theater.harness.base import ResumeLaunchOverlay

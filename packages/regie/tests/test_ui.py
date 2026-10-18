@@ -26,7 +26,7 @@ from regie.widgets.name_editor import DirectoryEditor, NameEditor
 from textual.command import CommandInput, CommandPalette
 from textual.geometry import Offset
 
-from tests.rig.waiting import wait_until
+from packages.regie.tests.support.waiting import wait_until
 from theater.frontend import (
     AcceptedOperation,
     ErrorValue,

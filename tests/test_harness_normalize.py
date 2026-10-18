@@ -7,7 +7,7 @@ spot — the participant registers, then is unobservable forever.
 
 import json
 
-from tests.rig.tables import eq_row, is_row, run_rows
+from tests.support.tables import eq_row, is_row, run_rows
 from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.harness import HARNESSES, UNKNOWN_ICON, harness_icon, normalize
 from theater.harness.normalization import (

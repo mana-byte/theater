@@ -9,12 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.rig.fake_runtime import (
+from tests.support.fake_runtime import (
     FakeRuntime,
     completed_outcome,
     fake_runtime_context,
     fake_runtime_manifest,
 )
+from tests.support.paths import fixture
 from theater.harness.contracts.channels import (
     ChannelCapability,
     ChannelDeclaration,
@@ -64,7 +65,7 @@ from theater.harness.contracts.source import (
 from theater.harness.loading import LOCAL, scan
 from theater.harness.manifests import ManifestValidationError, compile_manifest
 
-OLD_STYLE_FIXTURE = Path(__file__).parent / "fixtures" / "plugins" / "oldstyle"
+OLD_STYLE_FIXTURE = fixture("plugins", "oldstyle")
 
 
 def _screen(capture: str) -> ScreenReading:

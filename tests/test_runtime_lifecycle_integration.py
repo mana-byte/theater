@@ -2,7 +2,7 @@
 
 The daemon composes ``HarnessRuntimeManager``, ``WebSocketRuntimeIO``, and
 ``ControlService`` into its lifecycle; these tests drive that composition
-end to end against the frozen fake runtime in ``tests/rig/fake_runtime.py``
+end to end against the frozen fake runtime in ``tests/support/fake_runtime.py``
 with *real* detached backend processes (short-lived ``python -c sleep``
 children) and the fake tmux rig, on an isolated ``THEATER_HOME``.
 
@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.rig.fake_runtime import (
+from tests.support.fake_runtime import (
     FakeRuntime,
     FakeRuntimeConnection,
     FakeRuntimeIO,

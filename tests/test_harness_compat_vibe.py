@@ -18,6 +18,7 @@ from scripts.harness_compat.adapters.vibe_bump import COMPAT
 from scripts.harness_compat.adapters.vibe_store import READER_STORE, store_check
 from scripts.harness_compat.contract import Check, InstallFailed, version_key
 from scripts.harness_compat.sandbox import make_sandbox
+from tests.support.paths import REPO_ROOT
 from theater.harness.builtin.plugins.vibe.unified_source import UnifiedVibeSource
 from theater.harness.builtin.plugins.vibe.unified_store import load_unified_store
 
@@ -134,7 +135,7 @@ def test_real_vibe_reader_turn() -> None:
 
 
 def _tree(root: Path) -> Path:
-    source = Path(__file__).resolve().parents[1]
+    source = REPO_ROOT
     for relative in (COMPAT, READER_STORE):
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -277,7 +278,7 @@ def test_vibe_store_format_classification(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_vibe_install_failure_is_inconclusive(monkeypatch: pytest.MonkeyPatch) -> None:
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     candidate = ADAPTER.verified(root).ceiling
     assert candidate is not None
     with make_sandbox("vibe") as sandbox:

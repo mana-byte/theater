@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import rfc8785
 
+from tests.support.paths import fixture
 from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.vibe import unified_store
 from theater.harness.builtin.plugins.vibe.manifest import _vibe_stream_floor
@@ -412,7 +413,7 @@ def test_transient_store_errors_keep_waiting(store: Store, monkeypatch) -> None:
     assert batch.error_code is None
 
 
-GOLDEN_STORE_ROOT = Path(__file__).parent / "fixtures" / "vibe_unified_store_v2.26.0"
+GOLDEN_STORE_ROOT = fixture("vibe_unified_store_v2.26.0")
 
 
 def test_golden_store_written_by_vibe_2260_reads_back_with_turn_boundary() -> None:
@@ -852,9 +853,7 @@ def test_interrupted_turn_boundary_carries_interrupted_terminal(store: Store) ->
 
 def test_failed_turn_with_blank_message_names_the_failure(store: Store) -> None:
     """A model ReadTimeout leaves message empty; the crash result must still say why."""
-    error = json.loads(
-        (Path(__file__).parent / "fixtures/vibe_failed_turn/latest_turn_error.json").read_text()
-    )
+    error = json.loads((fixture("vibe_failed_turn", "latest_turn_error.json")).read_text())
     user = public_message("user-1", "user", "question")
     narration = public_message("assistant-1", "assistant", "Let me look at the files.")
     state = source_state([user], turn_status="in_progress")

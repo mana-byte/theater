@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from tests.rig.tables import eq_row, run_rows
+from tests.support.tables import eq_row, run_rows
 from theater.names import MASKS, is_valid_name, pick
 
 _NAME_RE = re.compile(r"^[A-Z][a-z]+$")

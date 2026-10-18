@@ -1,13 +1,12 @@
 """Codex screen classification keeps trust menus out of the composer."""
 
-from pathlib import Path
-
 import pytest
-from shipped import CodexObserver
 
+from tests.support.paths import fixture
+from tests.support.shipped import CodexObserver
 from theater.harness.observation import ScreenConfidence, ScreenKind
 
-SCREENS = Path(__file__).parent / "fixtures" / "screens"
+SCREENS = fixture("screens")
 
 #: Stock Codex 0.158 trust dialog: header plus a numbered option list whose
 #: selected row renders with the composer's `›` glyph.

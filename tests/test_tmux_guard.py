@@ -24,8 +24,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import tmux_guard
-from tmux_guard import GuardError, _pid_alive, reap_private_server
+
+from tests.support import tmux_guard
+from tests.support.tmux_guard import GuardError, _pid_alive, reap_private_server
 
 
 @pytest.fixture

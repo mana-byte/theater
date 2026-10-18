@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from tests.support.paths import fixture
 from theater.harness.builtin.plugins.opencode.http import OpenCodeClient
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
     OPENCODE_SERVER_MAX_VERSION,
@@ -46,7 +47,7 @@ from theater.harness.contracts.runtime import (
 )
 
 _PROOF_ENV = "THEATER_OPENCODE_SERVER_CONFORMANCE"
-_PLUGIN_FIXTURE = Path(__file__).parent / "fixtures" / "opencode_probe_plugin.mjs"
+_PLUGIN_FIXTURE = fixture("opencode_probe_plugin.mjs")
 
 
 def _binary_version() -> str | None:

@@ -11,8 +11,8 @@ import json
 from pathlib import Path
 
 import pytest
-from shipped import VibeHarness, pin_installed_vibe_version
 
+from tests.support.shipped import VibeHarness, pin_installed_vibe_version
 from theater import paths
 from theater.harness import (
     HARNESSES,

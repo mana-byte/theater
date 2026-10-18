@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 
 import pytest
-from shipped import ClaudeCodeHarness, ClaudeCodeObserver
 
+from tests.support.shipped import ClaudeCodeHarness, ClaudeCodeObserver
 from theater.harness import theater_mcp_servers
 
 SESSION = "b67b4276-f8b8-43ed-9987-0b5b3828c8cd"

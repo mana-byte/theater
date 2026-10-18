@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from tests.rig.fake_runtime import FakeRuntime
+from tests.support.fake_runtime import FakeRuntime
 from tests.test_control_service import (
     Harness,
     drain,

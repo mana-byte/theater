@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.rig.ws_server import WsTestServer
+from tests.support.ws_server import WsTestServer
 from theater.daemon.harness_runtime.errors import (
     RuntimeConnectionSaturated,
     RuntimeHandshakeError,

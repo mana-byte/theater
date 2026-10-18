@@ -37,9 +37,9 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-from shipped import ClaudeCodeHarness, OpenCodeHarness
 
-from tests.rig.tables import run_rows
+from tests.support.shipped import ClaudeCodeHarness, OpenCodeHarness
+from tests.support.tables import run_rows
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.opencode.mcp import plugin_path
 from theater.harness.builtin.plugins.opencode.native_plugin import render_native_plugin

@@ -13,6 +13,7 @@ from test_rc10_provider_process import (
     _raw_register_provider,
 )
 
+from tests.support.paths import fixture
 from theater import paths
 from theater.daemon.spawning.models import Reservation
 from theater.frontend import FrontendClient, StateProjection, StateSynchronizer
@@ -370,7 +371,7 @@ async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
         plan={
             "bind_requested_participant": True,
             "disconnect_after": ["terminal.deliver"],
-            "screen": (Path(__file__).parent / "fixtures/screens/codex_idle.txt").read_text(),
+            "screen": (fixture("screens", "codex_idle.txt")).read_text(),
         },
     ) as provider:
         client = FrontendClient(paths.socket_path(), client_id="s13-lost-input")

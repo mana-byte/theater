@@ -15,6 +15,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 
+from tests.support.paths import REPO_ROOT
 from theater.daemon.persistence import database as database_module
 from theater.daemon.persistence.database import (
     HEAD,
@@ -262,7 +263,7 @@ lock.release()
 """
     holder = subprocess.Popen(
         [sys.executable, "-c", script],
-        cwd=Path(__file__).parents[1],
+        cwd=REPO_ROOT,
         env={**os.environ, "THEATER_HOME": str(theater_home)},
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

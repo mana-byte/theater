@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select, update
 
-from tests._presence_doubles import AbsentPresence
+from tests.support.presence import AbsentPresence
 from tests.test_control_rpc import _native_pair
 from tests.test_handoff_send import CANCELLED_BEFORE_DELIVERY
 from theater.constants.daemon import CONTROL_QUEUE_PEER_MAX_PENDING

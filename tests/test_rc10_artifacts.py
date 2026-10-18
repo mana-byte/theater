@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.support.paths import REPO_ROOT
+
+ROOT = REPO_ROOT
 VERSION = "1.0.0rc11"
 UV = shutil.which("uv")
 

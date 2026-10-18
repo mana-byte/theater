@@ -13,7 +13,7 @@ from regie.trajectory.rich.widgets.span_detail import SpanDetailPanel
 from regie.trajectory.rich.widgets.timeline import Timeline
 from textual.app import App, ComposeResult
 
-from tests.rig.waiting import wait_until
+from packages.regie.tests.support.waiting import wait_until
 from theater.frontend.trajectory import (
     DetailField,
     ParticipantLink,

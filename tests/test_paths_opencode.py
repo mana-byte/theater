@@ -21,8 +21,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from shipped import OpenCodeHarness, OpenCodeObserver
 
+from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
 from theater.harness import EventKind
 from theater.harness.base import EventPath
 from theater.harness.builtin.plugins.opencode import _paths_from_tool, _relativise

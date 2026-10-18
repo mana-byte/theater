@@ -7,9 +7,10 @@ import importlib.util
 from functools import partial
 from pathlib import Path
 
-from tests.rig.tables import run_rows
+from tests.support.paths import REPO_ROOT
+from tests.support.tables import run_rows
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = REPO_ROOT
 _THEATER = _ROOT / "theater"
 _PLUGINS_DOTTED = "theater.harness.builtin.plugins"
 _PLUGINS_DIR = _THEATER / "harness" / "builtin" / "plugins"

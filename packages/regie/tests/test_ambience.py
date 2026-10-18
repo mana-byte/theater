@@ -17,8 +17,8 @@ from regie.widgets import ParticipantTree
 from regie.widgets.ambience_band import AmbienceBand
 from textual import events
 
+from packages.regie.tests.support.waiting import wait_until
 from packages.regie.tests.test_ui import _app
-from tests.rig.waiting import wait_until
 
 SHIPPED = load_catalog(Path("/nonexistent")).scenes
 

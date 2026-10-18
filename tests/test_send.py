@@ -13,12 +13,12 @@ the tests finish jobs directly via the JobManager.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
-from shipped import VibeHarness
 
-from tests._presence_doubles import AbsentPresence, UnknownPresence
+from tests.support.paths import fixture
+from tests.support.presence import AbsentPresence, UnknownPresence
+from tests.support.shipped import VibeHarness
 from theater.daemon.jobs import JobState
 from theater.daemon.schema import jobs
 from theater.harness import HARNESSES
@@ -26,7 +26,7 @@ from theater.harness.source import Batch
 from theater.models import Status, Tier
 from theater.protocol import RemoteError
 
-SCREENS = Path(__file__).parent / "fixtures" / "screens"
+SCREENS = fixture("screens")
 
 _JSON_SCHEMA_PREFIX = (
     "Return your final answer as a single bare JSON value (no code fences, no prose) "
@@ -588,7 +588,7 @@ async def test_unknown_provider_evidence_blocks_send(client, terminal_provider, 
 
 
 async def _install_native_runtime(daemon, pid: str):
-    from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+    from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
     from theater.daemon.persistence.repositories.runtime_bindings import (
         ParticipantRuntimeBinding,
     )

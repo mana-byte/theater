@@ -6,7 +6,7 @@ from functools import partial
 
 import pytest
 
-from tests.rig.tables import eq_row, is_row, run_rows
+from tests.support.tables import eq_row, is_row, run_rows
 from theater.observability.catalog import (
     BY_KEY,
     OPERATIONS,

@@ -98,6 +98,7 @@ from types import ModuleType
 
 import pytest
 
+from tests.support.paths import TESTS_DIR
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     codex_version_refusal,
     qualified_versions_range_text,
@@ -105,7 +106,6 @@ from theater.harness.builtin.plugins.codex.runtime_plan import (
 
 pytestmark = pytest.mark.integration
 
-TESTS_DIR = Path(__file__).parent
 _FIXTURES = TESTS_DIR / "fixtures" / "codex_native_ui_bootstrap"
 
 #: The approval overlay title the stock TUI renders for an escalated command

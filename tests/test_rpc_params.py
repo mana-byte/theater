@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.rig.tables import run_rows, run_rows_async
+from tests.support.tables import run_rows, run_rows_async
 from theater.daemon.rpc import hooks as hooks_mod
 from theater.daemon.rpc.params import _finite_number_param, _integer_param
 from theater.models import BadRequest, Status

@@ -19,8 +19,9 @@ from scripts.harness_compat.adapters import (
     vibe,
     vibe_bump,
 )
+from tests.support.paths import REPO_ROOT
 
-_SOURCE = Path(__file__).parents[1]
+_SOURCE = REPO_ROOT
 _ADAPTERS = {
     "claude": claude.ADAPTER,
     "codex": codex.ADAPTER,

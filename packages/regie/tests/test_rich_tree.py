@@ -28,7 +28,7 @@ from regie.render.routing import (
 from regie.ui_constants import REGIE_SEND_TRACE_STYLE as SEND_STYLE
 from regie.ui_constants import REGIE_SPINNER_FRAMES
 
-from tests.rig.tables import eq_row, run_rows
+from tests.support.tables import eq_row, run_rows
 
 PARENT = {
     "id": "aabbccddeeff",

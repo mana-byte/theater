@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 
 import pytest
-from shipped import pin_installed_vibe_version
 
+from tests.support.shipped import pin_installed_vibe_version
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.vibe.approval_guard import shadowed_approval_profile
 from theater.harness.builtin.plugins.vibe.compatibility import _FLOOR, vibe_store_format_ceiling

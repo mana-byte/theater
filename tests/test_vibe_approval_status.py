@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
-from shipped import VibeHarness
 
+from tests.support.paths import fixture
+from tests.support.shipped import VibeHarness
 from tests.test_vibe_unified_store import SESSION_ID, make_state, public_message
 from tests.test_vibe_unified_store import Store as VibeStore
 from theater import paths
@@ -38,7 +38,7 @@ async def test_question_dialog_overrides_quiet_running_store_in_full_watch(
     participant.transcript_domain = str(tmp_path)
     daemon.store.upsert_participant(participant)
     terminal = terminal_provider.bind(daemon, participant.id)
-    screens = Path(__file__).parent / "fixtures" / "screens"
+    screens = fixture("screens")
     terminal_provider.screens[terminal] = (screens / "vibe_question.txt").read_text()
     observer = Observer(
         daemon.registry,

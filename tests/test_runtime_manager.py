@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from theater.daemon.harness_runtime import manager as manager_mod
 from theater.daemon.harness_runtime.backend import DetachedBackendProcess
 from theater.daemon.harness_runtime.errors import (

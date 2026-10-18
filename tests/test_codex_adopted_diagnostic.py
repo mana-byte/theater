@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 import pytest
-from shipped import CodexHarness
 
+from tests.support.shipped import CodexHarness
 from theater import proc
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry

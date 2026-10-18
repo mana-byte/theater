@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.paths import fixture
 from theater import paths
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
@@ -45,7 +46,7 @@ from theater.protocol import RemoteError
 from theater.trajectory.enums import TrajectoryFailureCategory, TrajectoryKind, TrajectoryStatus
 from theater.transcript_identity import canonical_location
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "claude_hooks" / "captured_2.1.220.json"
+_FIXTURE = fixture("claude_hooks", "captured_2.1.220.json")
 
 
 def _captured() -> dict:

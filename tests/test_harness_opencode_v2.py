@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from shipped import OpenCodeHarness
 
+from tests.support.shipped import OpenCodeHarness
 from theater.harness import EventKind, TurnTerminal, theater_mcp_servers
 from theater.harness.base import EventPath
 from theater.harness.builtin.plugins.opencode.dialect import (

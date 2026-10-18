@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.paths import REPO_ROOT
 from theater.harness.contracts.harness import Harness
 from theater.harness.loading import (
     LOCAL,
@@ -517,7 +518,7 @@ def test_pre_existing_error_passthrough(root: Path) -> None:
 def test_loading_modules_do_not_import_runtime_layers() -> None:
     import ast
 
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     files = (
         root / "theater/harness/loading/models.py",
         root / "theater/harness/loading/discovery.py",

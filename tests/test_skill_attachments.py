@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._presence_doubles import AbsentPresence
+from tests.support.presence import AbsentPresence
 from tests.test_control_rpc import _GUIDANCE, _active_send, _native_pair, _until
 from theater import paths
 from theater.config.models import SkillsSection

@@ -18,13 +18,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.paths import REPO_ROOT, TESTS_DIR
 from theater import paths, protocol
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.frontend import FrontendClient
 from theater.frontend.schemas import validate_callback_response, validate_public_request
 
-PROCESS = Path(__file__).parent / "rc10_support" / "provider_process.py"
-REPOSITORY = Path(__file__).parents[1]
+PROCESS = TESTS_DIR / "support" / "provider_process.py"
+REPOSITORY = REPO_ROOT
 _LIMITS = {
     "max_frame_bytes": 67_108_864,
     "provider_pending_callbacks": 32,

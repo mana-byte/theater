@@ -7,8 +7,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from presence_fakes import FakePresence
 
+from tests.support.paths import fixture
+from tests.support.presence import FakePresence
 from theater import harness as harness_registry
 from theater import paths
 from theater.daemon import methods
@@ -1061,9 +1062,7 @@ async def test_send_addressed_by_name_reaches_the_right_target(client, terminal_
     participant.session_correlation = "operator"
     daemon.store.upsert_participant(participant)
     terminal_id = terminal_provider.bind(daemon, participant.id)
-    terminal_provider.screens[terminal_id] = (
-        Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt"
-    ).read_text()
+    terminal_provider.screens[terminal_id] = (fixture("screens", "vibe_idle.txt")).read_text()
     job = await client.call("send", target=target["name"], prompt="hello by name")
     assert job["state"] == "running"
     assert job["target_id"] == target["id"]

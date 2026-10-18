@@ -29,8 +29,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from shipped import ClaudeCodeHarness, VibeHarness, VibeObserver
 
+from tests.support.shipped import ClaudeCodeHarness, VibeHarness, VibeObserver
 from theater.daemon import methods as methods_mod
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
@@ -1259,7 +1259,7 @@ async def test_identity_loss_rebind_rearms_and_is_idempotent(
     daemon = SimpleNamespace(
         registry=collision_registry, observer=observer, store=collision_registry.store
     )
-    from presence_fakes import FakePresence
+    from tests.support.presence import FakePresence
 
     daemon.presence = FakePresence()
 

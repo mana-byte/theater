@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
+from tests.support.paths import REPO_ROOT
 from theater.harness.builtin.plugins.pi.runtime_constants import PI_FRONTEND_QUALIFIED_RANGE
 from theater.harness.builtin.plugins.pi.runtime_probe import probe_pi_frontend_compatibility
 from theater.harness.contracts.runtime import RuntimeProbeContext
@@ -30,7 +30,7 @@ def test_pi_core_correlation_proof_holds_on_stock_pi() -> None:
     # pytest.skip is NoReturn-typed, so the ``or`` keeps the command list str-only.
     node = shutil.which("node") or pytest.skip("node is unavailable")
     _require_qualified_pi()
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     result = subprocess.run(
         [
             node,
@@ -52,7 +52,7 @@ def test_pi_core_correlation_proof_holds_on_stock_pi() -> None:
 def test_pi_active_run_interrupt_proof_holds_on_stock_pi() -> None:
     node = shutil.which("node") or pytest.skip("node is unavailable")
     _require_qualified_pi()
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     result = subprocess.run(
         [
             node,
@@ -74,7 +74,7 @@ def test_pi_active_run_interrupt_proof_holds_on_stock_pi() -> None:
 def test_pi_steer_admission_proof_holds_on_stock_pi() -> None:
     node = shutil.which("node") or pytest.skip("node is unavailable")
     _require_qualified_pi()
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     result = subprocess.run(
         [
             node,

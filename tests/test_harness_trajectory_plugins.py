@@ -6,9 +6,10 @@ import json
 from pathlib import Path
 
 import pytest
-from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from test_harness_opencode import Recorder
 
+from tests.support.paths import fixture
+from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from theater.daemon.trajectory.project import fact_to_record
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.opencode.constants import LIVE_TRAJECTORY_STATE_LIMIT
@@ -18,8 +19,8 @@ from theater.trajectory import ContentFormat, TimingProvenance, TrajectoryKind, 
 from theater.trajectory.capabilities import TrajectoryFeature
 from theater.trajectory.grouping import deterministic_record_order, merge_records
 
-FIXTURE = Path(__file__).parent / "fixtures" / "vibe_messages.jsonl"
-CODEX_FIXTURE = Path(__file__).parent / "fixtures" / "trajectory_codex.jsonl"
+FIXTURE = fixture("vibe_messages.jsonl")
+CODEX_FIXTURE = fixture("trajectory_codex.jsonl")
 
 
 @pytest.fixture

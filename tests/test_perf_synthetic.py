@@ -14,12 +14,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.paths import REPO_ROOT
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.loading.discovery import discover
 from theater.harness.loading.importer import load_plugin
 
-SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+SCRIPTS = REPO_ROOT / "scripts"
 
 
 def _load(name: str):

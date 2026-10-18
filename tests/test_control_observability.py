@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.rig.fake_runtime import FakeRuntime
+from tests.support.fake_runtime import FakeRuntime
 from tests.test_control_service import (
     Harness,
     _make_operation,
@@ -541,7 +541,7 @@ async def test_broken_bridge_getter_never_changes_control(store, monkeypatch) ->
 
 
 async def test_reconnect_span_records_source_and_outcome(monkeypatch) -> None:
-    from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+    from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
     from theater.daemon.harness_runtime.errors import RuntimeGenerationMismatch
     from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
     from theater.harness.contracts.runtime import RuntimeContext

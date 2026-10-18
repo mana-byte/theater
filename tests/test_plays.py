@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
-from tests._presence_doubles import AbsentPresence
-from tests.rig.fake_runtime import FakeRuntime, completed_outcome
+from tests.support.fake_runtime import FakeRuntime, completed_outcome
+from tests.support.paths import fixture
+from tests.support.presence import AbsentPresence
 from tests.test_control_rpc import _install_runtime, _native_pair
 from tests.test_handoff_send import _pump, _source
 from tests.test_mcp_server import _payload
@@ -433,7 +433,7 @@ async def test_an_unknown_terminal_delivery_is_not_proven_by_another_turns_end(
     monkeypatch.setattr(daemon, "presence", absent, raising=False)
     master = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
-    idle = (Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt").read_text()
+    idle = (fixture("screens", "vibe_idle.txt")).read_text()
     terminal_provider.screens[terminal_provider.bind(daemon, child.id)] = idle
     await _load(client, master.id)
     request = daemon.terminal_service.connections.request

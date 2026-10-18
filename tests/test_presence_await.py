@@ -6,8 +6,8 @@ import asyncio
 import time
 
 import pytest
-from presence_fakes import ABSENT, PRESENT, UNKNOWN, FakePresence
 
+from tests.support.presence import ABSENT, PRESENT, UNKNOWN, FakePresence
 from theater.daemon import methods
 from theater.daemon.jobs import JobState
 from theater.daemon.rpc import METHODS

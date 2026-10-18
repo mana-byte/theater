@@ -13,7 +13,9 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from rc10_support.raw_client import (
+
+from tests.support.paths import TESTS_DIR, fixture
+from tests.support.raw_client import (
     MAX_EXACT_JSON_INTEGER,
     FrameDecodeError,
     FrameEOF,
@@ -27,7 +29,7 @@ from rc10_support.raw_client import (
     encode_frame,
 )
 
-FIXTURES = Path(__file__).parent / "fixtures" / "rc10"
+FIXTURES = fixture("rc10")
 
 
 def _fixture(name: str) -> dict[str, object]:
@@ -280,7 +282,7 @@ def test_raw_client_rejects_invalid_or_mismatched_responses(
 
 
 def test_raw_client_uses_only_stdlib_imports() -> None:
-    path = Path(__file__).parent / "rc10_support" / "raw_client.py"
+    path = TESTS_DIR / "support" / "raw_client.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     imports: set[str] = set()
     for node in ast.walk(tree):

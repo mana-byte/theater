@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
-from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
-from tests.rig.tables import run_rows
+from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.tables import run_rows
 from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.controls import recovery as control_recovery_module
 from theater.daemon.controls import service as control_service_module

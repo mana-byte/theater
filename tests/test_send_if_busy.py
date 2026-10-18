@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from tests._presence_doubles import AbsentPresence
+from tests.support.presence import AbsentPresence
 from tests.test_control_rpc import _active_send, _native_pair, _pair
 from theater.daemon.rpc import redirect
 from theater.models import Status

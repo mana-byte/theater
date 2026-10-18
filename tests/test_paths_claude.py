@@ -16,8 +16,7 @@ from __future__ import annotations
 
 import json
 
-from shipped import ClaudeCodeHarness, ClaudeCodeObserver
-
+from tests.support.shipped import ClaudeCodeHarness, ClaudeCodeObserver
 from theater.harness.base import EventKind
 
 

@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.rig.tables import run_rows
+from tests.support.paths import REPO_ROOT
+from tests.support.tables import run_rows
 from theater.constants.harness import (
     HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS,
     HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS,
@@ -979,7 +980,7 @@ def test_screen_only_manifest_without_callbacks_is_valid() -> None:
 
 
 def test_contract_and_compiler_modules_do_not_import_runtime_layers() -> None:
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     files = (
         root / "theater/harness/contracts/manifest.py",
         root / "theater/harness/contracts/callbacks.py",

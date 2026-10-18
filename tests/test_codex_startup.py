@@ -6,8 +6,8 @@ import json
 from uuid import uuid4
 
 import pytest
-from shipped import CodexHarness
 
+from tests.support.shipped import CodexHarness
 from tests.test_codex_process_correlation import _rollout, hold
 from tests.test_observer import until
 from theater.daemon.frontend.control_handlers import controls_get

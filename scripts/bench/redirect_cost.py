@@ -70,10 +70,10 @@ def _history(db: Path) -> dict:
 
 
 class _Rig:
-    """In-process daemon plus fake native runtimes (tests/rig), all under a temp THEATER_HOME."""
+    """In-process daemon plus fake native runtimes, all under a temp THEATER_HOME."""
 
     async def __aenter__(self) -> _Rig:
-        from tests._presence_doubles import AbsentPresence
+        from tests.support.presence import AbsentPresence
         from theater import paths
         from theater.client import DaemonClient
         from theater.daemon.server import Daemon
@@ -94,7 +94,7 @@ class _Rig:
         shutil.rmtree(self.home, ignore_errors=True)
 
     async def busy_child(self, *, steer: bool):
-        from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+        from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
         from theater.daemon.persistence.repositories.runtime_bindings import (
             ParticipantRuntimeBinding,
         )

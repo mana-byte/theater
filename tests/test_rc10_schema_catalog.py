@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import ast
 import socket
-from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
+from tests.support.paths import REPO_ROOT
 from theater.frontend.capabilities import (
     CALLBACK_CATALOG,
     MAX_EXACT_JSON_INTEGER,
@@ -572,7 +572,7 @@ def test_usage_by_participant_has_strict_params_and_result_schemas() -> None:
 
 
 def test_frontend_contract_has_no_private_imports() -> None:
-    root = Path(__file__).parents[1] / "theater" / "frontend"
+    root = REPO_ROOT / "theater" / "frontend"
     forbidden = ("theater.daemon", "theater.client", "theater.config", "theater.tmux", "textual")
     imports: set[str] = set()
     for path in root.rglob("*.py"):

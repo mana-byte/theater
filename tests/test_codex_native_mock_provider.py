@@ -35,13 +35,14 @@ from tests.native.codex_mock_provider import (
     last_user_message_text,
     standard_rules,
 )
+from tests.support.paths import fixture
 
 STEER_TEXT = "Stop writing the essay immediately. Reply with exactly: steered"
 RIVERS = "Write a long, detailed 1200 word essay about rivers."
 
 
 def _bootstrap_mock_module() -> ModuleType:
-    path = Path(__file__).parent / "fixtures/codex_native_ui_bootstrap/mock_responses.py"
+    path = fixture("codex_native_ui_bootstrap", "mock_responses.py")
     spec = importlib.util.spec_from_file_location("codex_bootstrap_mock_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

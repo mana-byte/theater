@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 
 import pytest
-from shipped import OpenCodeHarness
 
+from tests.support.shipped import OpenCodeHarness
 from theater.harness.builtin.plugins.opencode.dialect import OpenCodeDialect
 from theater.harness.builtin.plugins.opencode.legacy_bootstrap_v2 import render_legacy_bootstrap
 from theater.harness.builtin.plugins.opencode.native_plugin_v2 import plugin_dir

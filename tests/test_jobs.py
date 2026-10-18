@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
-from presence_fakes import FakePresence
+
+from tests.support.paths import fixture
+from tests.support.presence import FakePresence
 
 
 @pytest.fixture(autouse=True)
@@ -201,7 +202,7 @@ async def test_await_names_every_handle_it_could_not_find(client, terminal_provi
 def _ready_screen(daemon, terminal_provider, participant_id: str) -> None:
     """Provider sends require a proven ready composer on screen."""
     binding = daemon.store.terminal_bindings.get(participant_id)
-    screen = Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt"
+    screen = fixture("screens", "vibe_idle.txt")
     terminal_provider.screens[binding.terminal_id] = screen.read_text()
 
 

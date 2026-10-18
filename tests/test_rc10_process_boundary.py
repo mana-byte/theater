@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-ROOT = Path(__file__).parents[1]
+from tests.support.paths import REPO_ROOT
+
+ROOT = REPO_ROOT
 THEATER = ROOT / "theater"
 REGIE = ROOT / "packages" / "regie"
 

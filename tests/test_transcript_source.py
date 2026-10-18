@@ -23,8 +23,8 @@ import threading
 from pathlib import Path
 
 import pytest
-from shipped import ClaudeCodeObserver
 
+from tests.support.shipped import ClaudeCodeObserver
 from theater.harness.channels import filesystem
 from theater.harness.source import Batch, History, TranscriptSource
 from theater.harness.transcript import source as transcript_source
@@ -598,7 +598,7 @@ async def test_stream_point_is_none_for_non_file_source():
 
 def test_stream_floor_returns_none_for_nonexistent_file(root):
     """stream_floor returns None for a missing file, not a partial fact."""
-    from shipped import ClaudeCodeObserver
+    from tests.support.shipped import ClaudeCodeObserver
 
     obs = ClaudeCodeObserver(root=root)
     assert obs.stream_floor(str(root / "-work" / "missing.jsonl")) is None
@@ -606,7 +606,7 @@ def test_stream_floor_returns_none_for_nonexistent_file(root):
 
 def test_stream_floor_returns_point_for_existing_file(root, workdir):
     """stream_floor returns a StreamPoint with records, size, dev, ino."""
-    from shipped import ClaudeCodeObserver
+    from tests.support.shipped import ClaudeCodeObserver
 
     path = transcript(root, "aaa", workdir, record("one"), record("two"))
     obs = ClaudeCodeObserver(root=root)

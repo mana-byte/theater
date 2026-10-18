@@ -28,8 +28,9 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 
+from tests.support.paths import FIXTURES
+from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     _ANSWERED_TURNS,
@@ -39,8 +40,6 @@ from theater.daemon.observer import (
 )
 from theater.harness.base import Event, EventKind
 from theater.harness.source import Batch
-
-FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def events_for(observer, path: Path) -> list[Event]:

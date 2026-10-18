@@ -25,11 +25,10 @@ keeps no user record. See `answers_prompt`.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-from shipped import ClaudeCodeObserver, CodexObserver, VibeObserver
 
+from tests.support.paths import FIXTURES
+from tests.support.shipped import ClaudeCodeObserver, CodexObserver, VibeObserver
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     _PROMPT_MATCH,
@@ -42,8 +41,6 @@ from theater.daemon.observer import (
 )
 from theater.harness.base import Event, EventKind, clip
 from theater.harness.source import Batch
-
-FIXTURES = Path(__file__).parent / "fixtures"
 
 PROMPT = "please summarise the auth module"
 

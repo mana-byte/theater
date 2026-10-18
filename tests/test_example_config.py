@@ -18,14 +18,14 @@ never written down.
 from __future__ import annotations
 
 from dataclasses import MISSING, fields
-from pathlib import Path
 
 import pytest
 
+from tests.support.paths import REPO_ROOT
 from theater import config as cfg
 from theater import paths
 
-EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
+EXAMPLE = REPO_ROOT / "config.example.toml"
 
 #: Settings whose default is None, which TOML cannot express: writing the key
 #: down at all would change behaviour, so these are the ones the example leaves

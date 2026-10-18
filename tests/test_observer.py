@@ -15,9 +15,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from shipped import VibeHarness
 from sqlalchemy import delete, update
 
+from tests.support.shipped import VibeHarness
 from theater.constants.observation import (
     AWAITING_INPUT_TARGET_SECONDS,
     LAST_ACTIVITY_REFRESH_SECONDS,

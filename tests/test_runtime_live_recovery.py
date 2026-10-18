@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import pytest
 
-from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from tests.test_codex_native_runtime_plugin import (
     RequestFailure,
     ScriptedCodexConnection,

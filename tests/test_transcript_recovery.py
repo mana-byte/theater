@@ -9,9 +9,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from presence_fakes import PRESENT, UNKNOWN, FakePresence
-from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeHarness, VibeObserver
 
+from tests.support.presence import PRESENT, UNKNOWN, FakePresence
+from tests.support.shipped import (
+    ClaudeCodeObserver,
+    CodexObserver,
+    OpenCodeObserver,
+    VibeHarness,
+    VibeObserver,
+)
 from theater.daemon import methods
 from theater.daemon.registry import Registry
 from theater.harness import HARNESSES

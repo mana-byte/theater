@@ -20,13 +20,14 @@ import json
 from pathlib import Path
 
 import pytest
-from shipped import (
+
+from tests.support.paths import FIXTURES
+from tests.support.shipped import (
     ClaudeCodeObserver,
     CodexObserver,
     OpenCodeObserver,
     VibeObserver,
 )
-
 from theater.harness import EventKind, TurnTerminal, status_after
 from theater.harness.base import MAX_TEXT, Event
 from theater.harness.observation import (
@@ -36,8 +37,6 @@ from theater.harness.observation import (
     ScreenReading,
 )
 from theater.models import Status
-
-FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def events_for(observer, path: Path):

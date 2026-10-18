@@ -3,8 +3,8 @@
 import asyncio
 
 import pytest
-from shipped import VibeHarness
 
+from tests.support.shipped import VibeHarness
 from theater.daemon.observation.service import Observer
 
 
