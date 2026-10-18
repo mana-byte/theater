@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.claude_hook_rig import _captured
+from tests.support.claude_hook_rig import captured_hooks
 from theater.daemon.trajectory.project import project_batch
 from theater.harness.builtin.plugins.claude.hooks import (
     NATIVE_HOOK_CHANNEL,
@@ -69,7 +69,7 @@ def _correlation_context(
 def test_captured_tool_hooks_decode_as_non_authoritative_lifecycle(
     fixture_key, event, status, revision
 ) -> None:
-    payload = _captured()[fixture_key]
+    payload = captured_hooks()[fixture_key]
     assert isinstance(payload, dict)
     binding = _binding(event)
     native_id = binding.correlation(_correlation_context(payload, event))
@@ -105,7 +105,7 @@ def test_captured_tool_hooks_decode_as_non_authoritative_lifecycle(
 
 
 def test_hook_schema_rejects_invalid_identity_and_malformed_input() -> None:
-    payload = _captured()["pre_tool_use"]
+    payload = captured_hooks()["pre_tool_use"]
     assert isinstance(payload, dict)
 
     missing_session = dict(payload)
@@ -171,7 +171,7 @@ def test_hook_schema_rejects_invalid_identity_and_malformed_input() -> None:
 
 
 def test_hook_schema_requires_a_current_trusted_identity() -> None:
-    payload = _captured()["pre_tool_use"]
+    payload = captured_hooks()["pre_tool_use"]
     assert isinstance(payload, dict)
 
     with pytest.raises(ValueError, match="trusted transcript identity"):
@@ -209,7 +209,7 @@ def test_hook_schema_requires_a_current_trusted_identity() -> None:
 
 
 def test_hook_schema_rejects_consistently_changed_untrusted_session_and_transcript() -> None:
-    payload = _captured()["pre_tool_use"]
+    payload = captured_hooks()["pre_tool_use"]
     assert isinstance(payload, dict)
     other_session = "33333333-3333-4333-8333-333333333333"
     changed = dict(
@@ -231,7 +231,7 @@ def test_hook_schema_rejects_consistently_changed_untrusted_session_and_transcri
 
 
 def test_interrupted_tool_failure_is_lifecycle_only_not_completion_evidence() -> None:
-    payload = dict(_captured()["post_tool_use_failure"], is_interrupt=True)
+    payload = dict(captured_hooks()["post_tool_use_failure"], is_interrupt=True)
     binding = _binding("PostToolUseFailure")
     native_id = binding.correlation(_correlation_context(payload, "PostToolUseFailure"))
 
@@ -272,7 +272,7 @@ def test_absent_hook_credential_leaves_durable_transcript_primary() -> None:
 
 @pytest.mark.asyncio
 async def test_reordered_and_duplicate_lifecycle_hooks_settle_to_one_terminal_observation() -> None:
-    captured = _captured()
+    captured = captured_hooks()
     pre = captured["pre_tool_use"]
     post = captured["post_tool_use"]
     assert isinstance(pre, dict)

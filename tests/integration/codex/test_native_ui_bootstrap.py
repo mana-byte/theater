@@ -47,8 +47,6 @@ APPROVE_KEY = "y"
 #: unmodified stock app-server (the rollout is only materialised once the
 #: first turn starts).
 NO_ROLLOUT_ERROR_PREFIX = "no rollout found for thread id "
-
-
 SMOKE_ENV_VAR = "THEATER_CODEX_NATIVE_SMOKE"
 
 
@@ -452,8 +450,6 @@ async def test_codex_native_ui_bootstrap_proof() -> None:
 
 
 _UPDATE_AVAILABLE = '{"latest_version": "99.0.0", "last_checked_at": "2026-10-05T00:00:00Z"}'
-
-
 _PRODUCTION_STARTUP_DEADLINE = 30.0
 
 

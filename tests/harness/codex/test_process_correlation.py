@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.codex_process_correlation import PID_A, PID_B, SESSION_A, SESSION_B, _history
+from tests.support.codex_process_correlation import PID_A, PID_B, SESSION_A, SESSION_B, history_of
 from tests.support.codex_rollouts import hold, write_rollout
 from tests.support.shipped import CodexHarness
 from theater import proc
@@ -39,7 +39,7 @@ async def test_a_held_rollout_is_reported_as_proven(monkeypatch, codex_tree):
     hold(monkeypatch, {PID_A: [codex_tree["a"]]})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(reader, codex_tree["project"])
+    history = await history_of(reader, codex_tree["project"])
 
     assert history.correlation == "proven"
     assert history.location == str(codex_tree["a"].resolve())
@@ -219,7 +219,7 @@ async def test_missing_exact_id_does_not_fall_back_to_a_sibling(monkeypatch, cod
     hold(monkeypatch, {PID_A: []})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(
+    history = await history_of(
         reader,
         codex_tree["project"],
         session_id="01a00cdf-0000-0000-0000-000000000000",
@@ -247,7 +247,7 @@ async def test_a_pane_process_that_is_not_codex_is_not_evidence(monkeypatch, cod
     )
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_SHELL)
 
-    history = await _history(reader, codex_tree["project"])
+    history = await history_of(reader, codex_tree["project"])
 
     assert history.correlation == "heuristic"
     assert not reader.proved(codex_tree["a"])
@@ -271,7 +271,7 @@ async def test_an_adopted_pane_gets_no_proof_from_its_descendants(monkeypatch, c
     )
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_SHELL)
 
-    history = await _history(reader, codex_tree["project"])
+    history = await history_of(reader, codex_tree["project"])
 
     assert history.correlation == "heuristic"
     assert not reader.proved(codex_tree["a"])
@@ -292,7 +292,7 @@ async def test_a_codex_below_the_pane_process_is_never_reached(monkeypatch, code
     )
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(reader, codex_tree["project"])
+    history = await history_of(reader, codex_tree["project"])
 
     assert history.correlation == "heuristic"
     assert not reader.proved(codex_tree["b"])

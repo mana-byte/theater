@@ -1,4 +1,4 @@
-"""Helpers shared across a split test module."""
+"""Builders for Codex paginated rollout records shared by the rollout tests."""
 
 from __future__ import annotations
 
@@ -7,20 +7,16 @@ import json
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 
 THREAD = "01a0b0c0-0000-7000-8000-000000000001"
-
-
 TS = "2026-09-10T14:00:00.000Z"
-
-
 CWD = "/repo"
 
 
-def _record(kind: str, payload: dict, ts: str = TS) -> dict:
+def rollout_record(kind: str, payload: dict, ts: str = TS) -> dict:
     return {"timestamp": ts, "type": kind, "payload": payload}
 
 
 def item_completed(turn_id: str, item: dict, *, started_ms: int, completed_ms: int) -> dict:
-    return _record(
+    return rollout_record(
         "event_msg",
         {
             "type": "item_completed",
@@ -34,20 +30,20 @@ def item_completed(turn_id: str, item: dict, *, started_ms: int, completed_ms: i
 
 
 def session_meta() -> dict:
-    return _record("session_meta", {"id": THREAD, "cwd": CWD, "model": "gpt-5.6-sol"})
+    return rollout_record("session_meta", {"id": THREAD, "cwd": CWD, "model": "gpt-5.6-sol"})
 
 
-def _parsed(observer: CodexObserver, records: list[dict]):
+def parse_rollout(observer: CodexObserver, records: list[dict]):
     return [
         observer.parse_record(json.dumps(record), index) for index, record in enumerate(records)
     ]
 
 
-def _events(parsed) -> list:
+def rollout_events(parsed) -> list:
     return [event for record in parsed for event in record.events]
 
 
-def _facts(parsed) -> list:
+def rollout_facts(parsed) -> list:
     return [fact for record in parsed for fact in record.trajectory]
 
 

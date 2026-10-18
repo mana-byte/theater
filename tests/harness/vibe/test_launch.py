@@ -206,17 +206,9 @@ def test_a_flag_shaped_prompt_stays_a_literal_prompt(tmp_path, resume):
 
 
 RECORD = fixture("vibe_app_server", "topology.json")
-
-
 PINNED_VERSION = "2.25.4"
-
-
 PINNED_COMMIT = "19b5b74faa78d0816b8d4d4c7d7543fc3520678c"
-
-
 PINNED_ARCHIVE_DIGEST = "sha256:9af6a094e2294f11651927759020e8ee3ff88376baba21e67b8d3796acd77702"
-
-
 PINNED_RESULT = "failed: no supported stock-TUI attachment"
 
 

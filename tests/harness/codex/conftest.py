@@ -1,4 +1,4 @@
-"""Helpers shared across a split test module."""
+"""Fixtures for the Codex harness tests: a fake pane process tree for correlation."""
 
 from __future__ import annotations
 

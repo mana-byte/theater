@@ -32,14 +32,8 @@ from theater.harness.builtin.plugins.codex.runtime_plan import (
 )
 
 pytestmark = pytest.mark.integration
-
-
 NATIVE_PROOF_ENV = "THEATER_CODEX_NATIVE_PROOF"
-
-
 NATIVE_PROOF_ENABLED = os.environ.get(NATIVE_PROOF_ENV) == "1"
-
-
 VERSION_PROBE_TIMEOUT_SECONDS = 30.0
 # First release whose thread/read reports the applied effort: a fixed upstream dialect boundary.
 EFFORT_READBACK_RELEASE = (0, 153, 0)

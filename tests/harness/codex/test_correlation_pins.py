@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from tests.support.codex_process_correlation import PID_A, SESSION_A, SESSION_B, _history
+from tests.support.codex_process_correlation import PID_A, SESSION_A, SESSION_B, history_of
 from tests.support.codex_rollouts import hold, write_rollout
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.provenance import TranscriptProvenance
@@ -26,7 +26,7 @@ async def test_a_heuristic_pin_is_replaced_by_what_the_process_holds(monkeypatch
     hold(monkeypatch, {PID_A: [codex_tree["a"]]})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(reader, codex_tree["project"], known_location=str(codex_tree["b"]))
+    history = await history_of(reader, codex_tree["project"], known_location=str(codex_tree["b"]))
 
     assert history.location == str(codex_tree["a"].resolve())
     assert history.correlation == "proven"
@@ -75,7 +75,7 @@ async def test_a_pin_the_process_cannot_improve_on_is_left_alone(monkeypatch, co
     hold(monkeypatch, {PID_A: []})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(reader, codex_tree["project"], known_location=str(codex_tree["a"]))
+    history = await history_of(reader, codex_tree["project"], known_location=str(codex_tree["a"]))
 
     assert history.location == str(codex_tree["a"])
     assert history.correlation == "heuristic"
@@ -230,7 +230,7 @@ async def test_open_source_does_not_let_the_two_provenance_flags_disagree(monkey
     asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(
+    history = await history_of(
         reader,
         codex_tree["project"],
         session_id=SESSION_B,
@@ -248,7 +248,7 @@ async def test_a_pin_that_is_already_exact_is_not_probed(monkeypatch, codex_tree
         root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
     )
 
-    history = await _history(
+    history = await history_of(
         reader,
         codex_tree["project"],
         session_id=SESSION_B,

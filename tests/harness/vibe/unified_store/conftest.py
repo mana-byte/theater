@@ -1,4 +1,4 @@
-"""Helpers shared across a split test module."""
+"""Fixtures for the Vibe unified-store tests: a fresh store writer."""
 
 from __future__ import annotations
 

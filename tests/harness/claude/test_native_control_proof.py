@@ -19,14 +19,8 @@ from theater.harness.builtin.plugins.claude.manifest import MANIFEST, manifest_f
 from theater.harness.contracts.manifest import InterruptPlan
 
 PINNED_INSTALLED = "2.1.272"
-
-
 PINNED_STATIC = "2.1.248"
-
-
 PINNED_STATIC_SHA = "8c9482ad0510ad5e3c88f0ebe6f035ec148f73e2"
-
-
 PINNED_BINARY_SHA = "195e24e8e1f9bf46f1eaee72d434a33e18f9f5796f29a6348a00d16c5f8aee75"
 
 

@@ -1,4 +1,4 @@
-"""Helpers shared across a split test module."""
+"""Fixtures for the Claude harness tests: the transcript root and an observer over it."""
 
 from __future__ import annotations
 

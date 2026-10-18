@@ -1,4 +1,4 @@
-"""Audit regressions for Vibe's unified store."""
+"""Vibe unified reader: incremental reads, chunk cache, source polls and history usage."""
 
 from __future__ import annotations
 

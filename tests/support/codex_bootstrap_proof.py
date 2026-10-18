@@ -1,4 +1,4 @@
-"""Helpers shared across a split test module."""
+"""Loaded bootstrap client, mock provider and env modules plus the proof's fixed constants."""
 
 from __future__ import annotations
 
@@ -10,20 +10,10 @@ from types import ModuleType
 from tests.support.paths import TESTS_DIR
 
 FIXTURES = TESTS_DIR / "fixtures" / "codex_native_ui_bootstrap"
-
-
 MARKER_FILENAME = "approval_marker.txt"
-
-
 MARKER_CONTENT = "theater-ui-approval-proof"
-
-
 PROOF_COMMAND = f"/bin/sh -c 'echo {MARKER_CONTENT} > {MARKER_FILENAME}'"
-
-
 FIRST_TURN_PROMPT = "Run the proof command now."
-
-
 FINAL_ASSISTANT_MESSAGE = "Theater bootstrap proof turn completed."
 
 
@@ -42,8 +32,6 @@ client = load_module(
 
 
 mock_responses = load_module("codex_native_bootstrap_mock", FIXTURES / "mock_responses.py")
-
-
 codex_env = load_module("codex_native_bootstrap_env", FIXTURES / "codex_env.py")
 
 

@@ -1,4 +1,4 @@
-"""Helpers shared across a split test module."""
+"""The captured Claude hook payloads shared by the hook decode and identity tests."""
 
 from __future__ import annotations
 
@@ -9,5 +9,5 @@ from tests.support.paths import fixture
 FIXTURE = fixture("claude_hooks", "captured_2.1.220.json")
 
 
-def _captured() -> dict:
+def captured_hooks() -> dict:
     return json.loads(FIXTURE.read_text())

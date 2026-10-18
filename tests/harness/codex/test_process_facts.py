@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from tests.support.codex_process_correlation import PID_A, PID_B, SESSION_A, _history
+from tests.support.codex_process_correlation import PID_A, PID_B, SESSION_A, history_of
 from tests.support.codex_rollouts import hold, write_rollout
 from tests.support.shipped import CodexHarness
 from theater import proc
@@ -25,7 +25,7 @@ async def test_a_file_outside_the_transcript_root_is_not_evidence(
     hold(monkeypatch, {PID_A: [stray]})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(reader, codex_tree["project"])
+    history = await history_of(reader, codex_tree["project"])
 
     assert history.correlation == "heuristic"
     assert not reader.proved(stray)
@@ -45,7 +45,7 @@ async def test_a_rollout_for_another_directory_is_not_evidence(monkeypatch, code
     hold(monkeypatch, {PID_A: [foreign]})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(reader, codex_tree["project"])
+    history = await history_of(reader, codex_tree["project"])
 
     assert history.correlation == "heuristic"
     assert history.location != str(foreign.resolve())
@@ -58,7 +58,7 @@ async def test_an_ordinary_open_file_is_not_evidence(monkeypatch, codex_tree):
     hold(monkeypatch, {PID_A: [ordinary]})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(reader, codex_tree["project"])
+    history = await history_of(reader, codex_tree["project"])
 
     assert history.correlation == "heuristic"
 
@@ -78,7 +78,7 @@ async def test_a_non_codex_process_in_the_pane_is_not_opened(monkeypatch, codex_
     asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]}, comm="/bin/zsh")
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    history = await _history(reader, codex_tree["project"])
+    history = await history_of(reader, codex_tree["project"])
 
     assert history.correlation == "heuristic"
     assert asked.comm == [PID_A]
@@ -90,7 +90,7 @@ async def test_without_a_pid_the_operating_system_is_never_asked(monkeypatch, co
     asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=None)
 
-    history = await _history(reader, codex_tree["project"])
+    history = await history_of(reader, codex_tree["project"])
 
     assert asked.anything == []
     assert history.correlation == "heuristic"

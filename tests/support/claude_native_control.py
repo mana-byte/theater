@@ -5,6 +5,4 @@ from __future__ import annotations
 from tests.support.paths import fixture
 
 FIXTURES = fixture("claude_native_control")
-
-
 RECORD = FIXTURES / "messaging_conformance.json"

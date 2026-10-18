@@ -1,14 +1,4 @@
-"""Codex per-response trajectory usage identity with legacy compatibility.
-
-Modern Codex reports one ``token_count`` per provider response inside a turn:
-``info.last_token_usage`` is that response's share while
-``info.total_token_usage`` is thread-cumulative. Theater used to key usage
-records by turn id, so two responses in one turn collapsed to whichever
-snapshot the aggregation saw last (200/20 instead of 300/30) while repeated
-snapshots risked double counting. The fix derives a per-response identity
-from the totals/last pair, keeping turn-level identity for legacy records
-that carry no ``last_token_usage``.
-"""
+"""Codex per-response usage identity: responses in one turn sum, snapshots never double count."""
 
 from __future__ import annotations
 

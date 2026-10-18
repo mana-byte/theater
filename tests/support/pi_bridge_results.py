@@ -1,4 +1,4 @@
-"""Helpers shared across a split test module."""
+"""Bridge reply builders and a runtime factory shared by the Pi bridge tests."""
 
 from __future__ import annotations
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.claude_hook_rig import _captured
+from tests.support.claude_hook_rig import captured_hooks
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.daemon.spawning.planning import install_hook_plan, record_launch_identity
@@ -217,7 +217,7 @@ async def _claude_hook_event(
 
 
 def _pre_tool_payload(session_id: str, transcript_path: Path) -> dict[str, object]:
-    payload = _captured()["pre_tool_use"]
+    payload = captured_hooks()["pre_tool_use"]
     assert isinstance(payload, dict)
     return dict(payload, session_id=session_id, transcript_path=str(transcript_path))
 

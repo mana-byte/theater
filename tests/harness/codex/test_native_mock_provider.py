@@ -38,8 +38,6 @@ from tests.support.codex_bootstrap_proof import (
 from tests.support.paths import fixture
 
 STEER_TEXT = "Stop writing the essay immediately. Reply with exactly: steered"
-
-
 RIVERS = "Write a long, detailed 1200 word essay about rivers."
 
 

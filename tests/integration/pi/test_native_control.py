@@ -1,9 +1,4 @@
-"""Runs the Pi native-control correlation proof against the installed stock Pi.
-
-Exit 77 means the installed release is outside the qualified range, so the
-proof skips rather than fails; any other non-zero exit is a regression of a
-proven correlation property that gates native send and queue delivery.
-"""
+"""Opt-in stock-Pi native-control proofs: correlation, interrupt and steer admission."""
 
 from __future__ import annotations
 

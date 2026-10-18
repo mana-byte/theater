@@ -8,13 +8,13 @@ from pathlib import Path
 import pytest
 
 from tests.support.codex_rollout_items import (
-    _events,
-    _facts,
-    _parsed,
-    _record,
     file_change_item,
     item_completed,
     mcp_item,
+    parse_rollout,
+    rollout_events,
+    rollout_facts,
+    rollout_record,
     session_meta,
 )
 from theater.daemon.trajectory.project import project_events_and_facts
@@ -33,7 +33,7 @@ def _canonical(parsed):
                 record.trajectory_events if record.trajectory_events is not None else record.events
             )
         ],
-        _facts(parsed),
+        rollout_facts(parsed),
         participant_id="p",
         source_epoch="e",
     )
@@ -45,7 +45,7 @@ def _raw_tool_call(
     name: str = "apply_patch",
     input_text: str = "*** Begin Patch\n*** Add File: theater/new.py\n+ x = 1\n*** End Patch",
 ) -> dict:
-    return _record(
+    return rollout_record(
         "response_item",
         {
             "type": "custom_tool_call",
@@ -58,7 +58,7 @@ def _raw_tool_call(
 
 
 def _raw_tool_output(call_id: str, *, output: str = "ok", record_id: str | None = None) -> dict:
-    return _record(
+    return rollout_record(
         "response_item",
         {
             "type": "custom_tool_call_output",
@@ -116,10 +116,10 @@ def test_raw_patch_and_item_collapse_to_one_logical_call():
         session_meta(),
         *_dual_stream_records("call-1", file_change_item("call-1")),
     ]
-    parsed = _parsed(observer, records)
+    parsed = parse_rollout(observer, records)
 
-    calls = [e for e in _events(parsed) if e.kind is EventKind.TOOL_CALL]
-    results = [e for e in _events(parsed) if e.kind is EventKind.TOOL_RESULT]
+    calls = [e for e in rollout_events(parsed) if e.kind is EventKind.TOOL_CALL]
+    results = [e for e in rollout_events(parsed) if e.kind is EventKind.TOOL_RESULT]
     assert len(calls) == 1, "the raw pair is the only control source"
     assert len(results) == 1
     assert calls[0].tool_name == "apply_patch"
@@ -144,7 +144,7 @@ def test_raw_patch_and_item_collapse_to_one_logical_call():
     assert result_record.status is TrajectoryStatus.COMPLETED
     assert result_record.failure is None
     # The rich paths survive on the fact that fed the canonical call record.
-    call_fact = next(f for f in _facts(parsed) if f.kind is TrajectoryKind.TOOL_CALL)
+    call_fact = next(f for f in rollout_facts(parsed) if f.kind is TrajectoryKind.TOOL_CALL)
     assert call_fact.native_id == "ctc-call-1"
     assert "theater/new.py" in json.dumps(
         [getattr(detail, "value", None) for detail in call_fact.details], default=str
@@ -161,10 +161,10 @@ def test_raw_mcp_and_item_collapse_to_one_logical_call():
             name="mcp__theater__whoami",
         ),
     ]
-    parsed = _parsed(observer, records)
+    parsed = parse_rollout(observer, records)
 
-    calls = [e for e in _events(parsed) if e.kind is EventKind.TOOL_CALL]
-    results = [e for e in _events(parsed) if e.kind is EventKind.TOOL_RESULT]
+    calls = [e for e in rollout_events(parsed) if e.kind is EventKind.TOOL_CALL]
+    results = [e for e in rollout_events(parsed) if e.kind is EventKind.TOOL_RESULT]
     assert len(calls) == 1
     assert len(results) == 1
 
@@ -189,7 +189,7 @@ def test_dual_stream_failure_path_retains_the_error():
         session_meta(),
         *_dual_stream_records("call-1", item, output="patch failed"),
     ]
-    parsed = _parsed(observer, records)
+    parsed = parse_rollout(observer, records)
     canonical = _canonical(parsed)
     result_records = [r for r in canonical if r.kind is TrajectoryKind.TOOL_RESULT]
     assert [r.record_id for r in result_records] == ["e:call-1:result"]
@@ -210,7 +210,7 @@ def test_dual_stream_output_before_item_collapses_too():
             item_before_output=False,
         ),
     ]
-    parsed = _parsed(observer, records)
+    parsed = parse_rollout(observer, records)
     canonical = _canonical(parsed)
     assert sorted(
         (r.kind, r.record_id) for r in canonical if r.kind is TrajectoryKind.TOOL_CALL
@@ -218,8 +218,8 @@ def test_dual_stream_output_before_item_collapses_too():
     assert sorted(
         (r.kind, r.record_id) for r in canonical if r.kind is TrajectoryKind.TOOL_RESULT
     ) == [(TrajectoryKind.TOOL_RESULT, "e:ctco-1")]
-    calls = [e for e in _events(parsed) if e.kind is EventKind.TOOL_CALL]
-    results = [e for e in _events(parsed) if e.kind is EventKind.TOOL_RESULT]
+    calls = [e for e in rollout_events(parsed) if e.kind is EventKind.TOOL_CALL]
+    results = [e for e in rollout_events(parsed) if e.kind is EventKind.TOOL_RESULT]
     assert len(calls) == 1
     assert len(results) == 1
     # The surviving result is the item's rich version.
@@ -241,10 +241,10 @@ async def test_dual_stream_patch_and_mcp_agree_between_history_and_live(tmp_path
         patch = _dual_stream_records(f"{turn_id}-patch", file_change_item(f"{turn_id}-patch"))
         mcp = _dual_stream_records(f"{turn_id}-mcp", mcp_item(f"{turn_id}-mcp"))
         return [
-            _record("event_msg", {"type": "task_started", "turn_id": turn_id}),
+            rollout_record("event_msg", {"type": "task_started", "turn_id": turn_id}),
             *patch,
             *mcp,
-            _record("event_msg", {"type": "task_complete", "turn_id": turn_id}),
+            rollout_record("event_msg", {"type": "task_complete", "turn_id": turn_id}),
         ]
 
     write([session_meta(), *turn_records("turn-a")])

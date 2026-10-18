@@ -21,8 +21,6 @@ from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.models import JobState, ParticipantOrigin, Status, Tier, TranscriptUntrusted, now
 
 SESSION = "01a00cdf-17f9-7851-99a4-b0dbaad18bed"
-
-
 PID = 74065
 
 

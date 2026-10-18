@@ -8,13 +8,13 @@ from pathlib import Path
 import pytest
 
 from tests.support.codex_rollout_items import (
-    _events,
-    _facts,
-    _parsed,
-    _record,
     file_change_item,
     item_completed,
     mcp_item,
+    parse_rollout,
+    rollout_events,
+    rollout_facts,
+    rollout_record,
     session_meta,
 )
 from theater.daemon.observation.turns import TurnAccumulator, answers_prompt
@@ -26,7 +26,7 @@ from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
 
 def _raw_message(turn_id: str, role: str, message_id: str, text: str, block_type: str) -> dict:
-    return _record(
+    return rollout_record(
         "response_item",
         {
             "type": "message",
@@ -52,7 +52,7 @@ def _paginated_turn(
     items, and only ``task_complete`` closes the turn.
     """
     return [
-        _record("event_msg", {"type": "task_started", "turn_id": turn_id}),
+        rollout_record("event_msg", {"type": "task_started", "turn_id": turn_id}),
         _raw_message(turn_id, "user", f"raw-user-{turn_id}", prompt, "input_text"),
         item_completed(
             turn_id,
@@ -77,7 +77,7 @@ def _paginated_turn(
         ),
         _raw_message(turn_id, "assistant", f"agent-item-{turn_id}", reply, "output_text"),
         *extra,
-        _record(
+        rollout_record(
             "event_msg",
             {"type": "task_complete", "turn_id": turn_id, "last_agent_message": reply},
         ),
@@ -132,7 +132,7 @@ def test_item_completed_events_carry_exact_native_identity():
             completed_ms=1789040002000,
         ),
     ]
-    events = _events(_parsed(observer, records))
+    events = rollout_events(parse_rollout(observer, records))
 
     user_events = [event for event in events if event.kind is EventKind.USER]
     assistant_events = [event for event in events if event.kind is EventKind.ASSISTANT]
@@ -162,7 +162,7 @@ def test_multi_event_tool_items_stay_anonymous_to_avoid_collapsing():
             completed_ms=1789040000500,
         ),
     ]
-    events = _events(_parsed(observer, records))
+    events = rollout_events(parse_rollout(observer, records))
 
     tool_events = [event for event in events if event.kind is EventKind.TOOL_CALL]
     assert len(tool_events) == 1
@@ -190,7 +190,7 @@ def test_paginated_prompt_is_heard_from_the_user_item():
             ),
         ),
     ]
-    events = _events(_parsed(observer, records))
+    events = rollout_events(parse_rollout(observer, records))
 
     user_events = [event for event in events if event.kind is EventKind.USER]
     assert [event.text for event in user_events] == ["audit the repo for correctness"]
@@ -209,7 +209,7 @@ def test_an_unrelated_human_turn_does_not_answer_the_pending_prompt():
         *_paginated_turn("turn-a", "do the codex audit", "audit done"),
         *_paginated_turn("turn-b", "hello again", "hi there"),
     ]
-    events = _events(_parsed(observer, records))
+    events = rollout_events(parse_rollout(observer, records))
     turns = _accumulate(events)
 
     boundaries = [event for event in events if event.turn_end]
@@ -268,8 +268,8 @@ def test_paginated_completion_requires_its_own_task_complete():
             ),
         ),
     ]
-    parsed = _parsed(observer, records)
-    events = _events(parsed)
+    parsed = parse_rollout(observer, records)
+    events = rollout_events(parsed)
 
     assert [event.turn_id for event in events if event.turn_end] == ["turn-a"]
 
@@ -294,7 +294,7 @@ def test_modern_and_raw_representations_do_not_duplicate_messages():
     """
     observer = CodexObserver()
     records = [session_meta(), *_paginated_turn("turn-a", "do the audit", "audit done")]
-    parsed = _parsed(observer, records)
+    parsed = parse_rollout(observer, records)
 
     user_items = [
         record
@@ -317,7 +317,7 @@ def test_modern_and_raw_representations_do_not_duplicate_messages():
                 record.trajectory_events if record.trajectory_events is not None else record.events
             )
         ],
-        _facts(parsed),
+        rollout_facts(parsed),
         participant_id="p",
         source_epoch="e",
     )
@@ -332,7 +332,7 @@ def test_modern_and_raw_representations_do_not_duplicate_messages():
 def test_command_execution_and_reasoning_items_stay_silent():
     """Kinds the raw response items cover emit nothing from the items."""
     observer = CodexObserver()
-    exec_call = _record(
+    exec_call = rollout_record(
         "response_item",
         {
             "type": "custom_tool_call",
@@ -343,7 +343,7 @@ def test_command_execution_and_reasoning_items_stay_silent():
             "internal_chat_message_metadata_passthrough": {"turn_id": "turn-a"},
         },
     )
-    exec_output = _record(
+    exec_output = rollout_record(
         "response_item",
         {
             "type": "custom_tool_call_output",
@@ -379,7 +379,7 @@ def test_command_execution_and_reasoning_items_stay_silent():
         started_ms=1789040000200,
         completed_ms=1789040000300,
     )
-    parsed = _parsed(observer, [exec_call, exec_item, exec_output, reasoning_item])
+    parsed = parse_rollout(observer, [exec_call, exec_item, exec_output, reasoning_item])
 
     kinds = [(fact.kind, fact.summary) for record in parsed for fact in record.trajectory]
     tool_calls = [k for k in kinds if k[0] is TrajectoryKind.TOOL_CALL]
@@ -387,7 +387,7 @@ def test_command_execution_and_reasoning_items_stay_silent():
     assert len(tool_calls) == 1
     assert len(tool_results) == 1
 
-    events = _events(parsed)
+    events = rollout_events(parsed)
     call_events = [e for e in events if e.kind is EventKind.TOOL_CALL]
     result_events = [e for e in events if e.kind is EventKind.TOOL_RESULT]
     assert len(call_events) == 1
@@ -406,8 +406,8 @@ def test_mcp_tool_call_item_produces_paired_events_and_facts():
             completed_ms=1789040007000,
         ),
     ]
-    parsed = _parsed(observer, records)
-    events = _events(parsed)
+    parsed = parse_rollout(observer, records)
+    events = rollout_events(parsed)
 
     call = next(e for e in events if e.kind is EventKind.TOOL_CALL)
     result = next(e for e in events if e.kind is EventKind.TOOL_RESULT)
@@ -416,7 +416,7 @@ def test_mcp_tool_call_item_produces_paired_events_and_facts():
     assert result.tool_name == "theater.whoami"
     assert result.text == "whoami: ok"
 
-    facts = _facts(parsed)
+    facts = rollout_facts(parsed)
     call_fact = next(f for f in facts if f.kind is TrajectoryKind.TOOL_CALL)
     result_fact = next(f for f in facts if f.kind is TrajectoryKind.TOOL_RESULT)
     assert call_fact.native_id == "mcp-item-1"
@@ -445,13 +445,13 @@ def test_failed_mcp_item_reports_the_error_path():
         session_meta(),
         item_completed("turn-a", item, started_ms=1789040005000, completed_ms=1789040005001),
     ]
-    parsed = _parsed(observer, records)
-    facts = _facts(parsed)
+    parsed = parse_rollout(observer, records)
+    facts = rollout_facts(parsed)
     result_fact = next(f for f in facts if f.kind is TrajectoryKind.TOOL_RESULT)
     assert result_fact.status is TrajectoryStatus.ERROR
     assert result_fact.summary == "tool unavailable"
     assert result_fact.failure is not None
-    events = _events(parsed)
+    events = rollout_events(parsed)
     result_event = next(e for e in events if e.kind is EventKind.TOOL_RESULT)
     assert result_event.text == "tool unavailable"
 
@@ -467,15 +467,15 @@ def test_file_change_item_reports_apply_patch_paths():
             completed_ms=1789040009000,
         ),
     ]
-    parsed = _parsed(observer, records)
-    events = _events(parsed)
+    parsed = parse_rollout(observer, records)
+    events = rollout_events(parsed)
 
     patch_events = [e for e in events if e.tool_name == "apply_patch"]
     assert len(patch_events) == 1
     assert patch_events[0].kind is EventKind.TOOL_CALL
     assert [(p.path, p.mode) for p in patch_events[0].paths] == [("theater/new.py", "write")]
 
-    facts = _facts(parsed)
+    facts = rollout_facts(parsed)
     call_fact = next(f for f in facts if f.kind is TrajectoryKind.TOOL_CALL)
     result_fact = next(f for f in facts if f.kind is TrajectoryKind.TOOL_RESULT)
     assert call_fact.native_id == "patch-1:call"
@@ -505,7 +505,7 @@ def test_plan_and_compaction_items_report_context_facts():
             completed_ms=1789040012000,
         ),
     ]
-    facts = _facts(parsed := _parsed(observer, records))
+    facts = rollout_facts(parsed := parse_rollout(observer, records))
     context = [f for f in facts if f.kind is TrajectoryKind.CONTEXT]
     assert [(f.summary, f.native_id, f.turn_id) for f in context] == [
         ("1. read\n2. fix", "plan-1", "turn-a"),
@@ -517,14 +517,16 @@ def test_plan_and_compaction_items_report_context_facts():
 
 def _legacy_turn(turn_id: str, prompt: str, reply: str) -> list[dict]:
     return [
-        _record("event_msg", {"type": "task_started", "turn_id": turn_id}),
-        _record("event_msg", {"type": "user_message", "message": prompt, "turn_id": turn_id}),
+        rollout_record("event_msg", {"type": "task_started", "turn_id": turn_id}),
+        rollout_record(
+            "event_msg", {"type": "user_message", "message": prompt, "turn_id": turn_id}
+        ),
         _raw_message(turn_id, "user", f"raw-user-{turn_id}", prompt, "input_text"),
-        _record(
+        rollout_record(
             "event_msg",
             {"type": "agent_message", "message": reply, "phase": "final_answer"},
         ),
-        _record(
+        rollout_record(
             "event_msg",
             {"type": "task_complete", "turn_id": turn_id, "last_agent_message": reply},
         ),
@@ -535,7 +537,7 @@ def test_legacy_events_still_drive_the_same_control_outcome():
     """Legacy `user_message`/`agent_message` records keep their meaning."""
     observer = CodexObserver()
     legacy = [*_legacy_turn("turn-a", "do the audit", "audit done")]
-    events = _events(_parsed(observer, legacy))
+    events = rollout_events(parse_rollout(observer, legacy))
     turns = _accumulate(events)
 
     assert [e.turn_id for e in events if e.turn_end] == ["turn-a"]
@@ -545,8 +547,10 @@ def test_legacy_events_still_drive_the_same_control_outcome():
 
 
 def test_legacy_and_paginated_equivalents_agree():
-    legacy_events = _events(_parsed(CodexObserver(), [*_legacy_turn("t", "p", "r")]))
-    paginated_events = _events(_parsed(CodexObserver(), [*(_paginated_turn("t", "p", "r"))]))
+    legacy_events = rollout_events(parse_rollout(CodexObserver(), [*_legacy_turn("t", "p", "r")]))
+    paginated_events = rollout_events(
+        parse_rollout(CodexObserver(), [*(_paginated_turn("t", "p", "r"))])
+    )
 
     def shape(events):
         # Modern items carry a native turn claim on user text that the legacy
@@ -568,7 +572,7 @@ def test_legacy_patch_and_mcp_events_still_parse():
     observer = CodexObserver()
     records = [
         session_meta(),
-        _record(
+        rollout_record(
             "event_msg",
             {
                 "type": "patch_apply_end",
@@ -580,7 +584,7 @@ def test_legacy_patch_and_mcp_events_still_parse():
                 "changes": {"a/b.py": {"type": "update", "unified_diff": "..."}},
             },
         ),
-        _record(
+        rollout_record(
             "event_msg",
             {
                 "type": "mcp_tool_call_begin",
@@ -588,7 +592,7 @@ def test_legacy_patch_and_mcp_events_still_parse():
                 "invocation": {"server": "theater", "tool": "whoami", "arguments": {}},
             },
         ),
-        _record(
+        rollout_record(
             "event_msg",
             {
                 "type": "mcp_tool_call_end",
@@ -598,14 +602,14 @@ def test_legacy_patch_and_mcp_events_still_parse():
             },
         ),
     ]
-    parsed = _parsed(observer, records)
-    events = _events(parsed)
+    parsed = parse_rollout(observer, records)
+    events = rollout_events(parsed)
     assert [(e.tool_name, e.kind) for e in events] == [
         ("apply_patch", EventKind.TOOL_CALL),
         ("theater.whoami", EventKind.TOOL_CALL),
         ("theater.whoami", EventKind.TOOL_RESULT),
     ]
-    facts = _facts(parsed)
+    facts = rollout_facts(parsed)
     assert any(f.kind is TrajectoryKind.TOOL_CALL and f.summary == "apply_patch" for f in facts)
     mcp_result = next(
         f for f in facts if f.kind is TrajectoryKind.TOOL_RESULT and f.call_id == "mcp-1"
