@@ -1,13 +1,7 @@
-"""The MCP surface, driven through MCPServer against a real daemon.
-
-No harness and no subprocess: the tools are invoked the same way a client would,
-so tool registration, schema generation and the daemon round-trip are all real.
-Only the model is missing.
-"""
+"""The MCP surface driven through MCPServer against a real daemon."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 import pytest
@@ -19,28 +13,19 @@ from theater.client import DaemonClient
 from theater.constants.response_contract import CONTRACT_PRESET_NAMES
 from theater.daemon.response_contracts.presets import PRESET_SCHEMAS
 from theater.daemon.server import Daemon
-from theater.mcp import tools as mcp_tools
 from theater.mcp.server import await_ceiling, build
 from theater.models import JobState
 
 
 @pytest.fixture
-def presence(daemon):
+def presence(mcp_daemon):
     """No human at any pane: presence holds are exercised in their own file."""
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daemon, "presence", FakePresence(), raising=False)
+        patch.setattr(mcp_daemon, "presence", FakePresence(), raising=False)
         yield
 
 
-@pytest.fixture
-async def daemon(theater_home):
-    d = Daemon()
-    await d.start()
-    yield d
-    await d.aclose()
-
-
-async def test_tools_are_registered(daemon):
+async def test_tools_are_registered(mcp_daemon):
     tools = await build("p1", "vibe").list_tools()
     assert {t.name for t in tools} == {
         "whoami",
@@ -68,7 +53,7 @@ async def test_tools_are_registered(daemon):
 
 
 @pytest.mark.parametrize("harness", ["codex", "vibe"])
-async def test_control_and_wait_toolsets_partition_the_mcp_surface(daemon, harness):
+async def test_control_and_wait_toolsets_partition_the_mcp_surface(mcp_daemon, harness):
     control = {tool.name for tool in await build("p1", harness, "control").list_tools()}
     wait = {tool.name for tool in await build("p1", harness, "wait").list_tools()}
 
@@ -77,11 +62,11 @@ async def test_control_and_wait_toolsets_partition_the_mcp_surface(daemon, harne
     assert control | wait == {tool.name for tool in await build("p1", harness).list_tools()}
 
 
-async def test_wait_toolset_reuses_the_control_participant_identity(daemon, presence):
+async def test_wait_toolset_reuses_the_control_participant_identity(mcp_daemon, presence):
     control = build("p1", "vibe", "control")
     assert tool_payload(await control.call_tool("whoami", {}))["id"] == "p1"
-    daemon.jobs.create(handle="done", caller_id="p1", target_id=None, kind="test")
-    daemon.jobs.finish("done", state=JobState.DONE)
+    mcp_daemon.jobs.create(handle="done", caller_id="p1", target_id=None, kind="test")
+    mcp_daemon.jobs.finish("done", state=JobState.DONE)
 
     wait = build("p1", "vibe", "wait")
     result = tool_payload(await wait.call_tool("await_sessions", {"handles": ["done"]}))
@@ -94,15 +79,15 @@ async def test_wait_toolset_reuses_the_control_participant_identity(daemon, pres
     assert [row["id"] for row in rows] == ["p1"]
 
 
-async def test_await_returns_a_native_structured_result(daemon, presence):
-    daemon.jobs.create(
+async def test_await_returns_a_native_structured_result(mcp_daemon, presence):
+    mcp_daemon.jobs.create(
         handle="structured",
         caller_id="p1",
         target_id=None,
         kind="send",
         response_format="json",
     )
-    daemon.jobs.finish(
+    mcp_daemon.jobs.finish(
         "structured",
         state=JobState.DONE,
         result='{"answer":42}',
@@ -117,7 +102,7 @@ async def test_await_returns_a_native_structured_result(daemon, presence):
     assert entry["structured_result"] == {"answer": 42}
 
 
-async def test_bare_dict_tools_return_one_native_object_with_the_text_mirror(daemon):
+async def test_bare_dict_tools_return_one_native_object_with_the_text_mirror(mcp_daemon):
     mcp = build("p1", "vibe")
     whoami = next(tool for tool in await mcp.list_tools() if tool.name == "whoami")
     result = await mcp.call_tool("whoami", {"tail": 5})
@@ -136,13 +121,13 @@ def test_mcp_toolset_must_be_known():
         build("p1", "vibe", "unknown")
 
 
-async def test_every_tool_is_documented(daemon):
+async def test_every_tool_is_documented(mcp_daemon):
     """An agent picks tools by reading descriptions, so blank ones are bugs."""
     for tool in await build("p1", "vibe").list_tools():
         assert tool.description and tool.description.strip(), tool.name
 
 
-async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
+async def test_descriptions_pin_non_obvious_wire_contracts(mcp_daemon):
     mcp = build("p1", "vibe")
     descriptions = {
         tool.name: " ".join(tool.description.split()) for tool in await mcp.list_tools()
@@ -184,7 +169,7 @@ async def test_descriptions_pin_non_obvious_wire_contracts(daemon):
     ],
 )
 async def test_await_cap_stays_under_claudes_background_threshold(
-    daemon, monkeypatch, harness, env, ceiling, cap
+    mcp_daemon, monkeypatch, harness, env, ceiling, cap
 ):
     """Claude backgrounds a call past its threshold and the await result never arrives."""
     if env is None:
@@ -196,11 +181,11 @@ async def test_await_cap_stays_under_claudes_background_threshold(
     assert cap in tools["await_sessions"].description
 
 
-async def test_the_server_carries_its_instructions(daemon):
+async def test_the_server_carries_its_instructions(mcp_daemon):
     assert build("p1", "vibe").instructions.strip()
 
 
-async def test_spawn_session_forces_a_choice_of_approval(daemon):
+async def test_spawn_session_forces_a_choice_of_approval(mcp_daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     required = schema["spawn_session"]["required"]
     assert "approval" in required
@@ -208,13 +193,13 @@ async def test_spawn_session_forces_a_choice_of_approval(daemon):
     assert "cwd" not in required
 
 
-async def test_spawn_session_worktree_schema_accepts_name_bool_or_null(daemon):
+async def test_spawn_session_worktree_schema_accepts_name_bool_or_null(mcp_daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     worktree = schema["spawn_session"]["properties"]["worktree"]
     assert {entry["type"] for entry in worktree["anyOf"]} == {"string", "boolean", "null"}
 
 
-async def test_spawn_session_exposes_provider_override_and_bridge_guidance(daemon):
+async def test_spawn_session_exposes_provider_override_and_bridge_guidance(mcp_daemon):
     tools = await build("p1", "vibe").list_tools()
     spawn = next(tool for tool in tools if tool.name == "spawn_session")
 
@@ -223,7 +208,7 @@ async def test_spawn_session_exposes_provider_override_and_bridge_guidance(daemo
     assert "regie bridge start" in spawn.description
 
 
-async def test_participant_metadata_schemas_are_optional_and_nullable(daemon):
+async def test_participant_metadata_schemas_are_optional_and_nullable(mcp_daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
 
     spawn = schema["spawn_session"]
@@ -245,7 +230,7 @@ def _assert_nullable_object_schema(prop: dict) -> None:
     assert objects[0]["additionalProperties"] is True
 
 
-async def test_response_format_parameters_have_nullable_object_schema(daemon):
+async def test_response_format_parameters_have_nullable_object_schema(mcp_daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
 
     for name in ("spawn_session", "send"):
@@ -254,7 +239,7 @@ async def test_response_format_parameters_have_nullable_object_schema(daemon):
         assert "response_format" not in schema[name].get("required", [])
 
 
-async def test_new_tool_schemas_match_public_signatures(daemon):
+async def test_new_tool_schemas_match_public_signatures(mcp_daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
 
     assert schema["scratchpad_write"]["required"] == ["value", "namespace"]
@@ -264,7 +249,7 @@ async def test_new_tool_schemas_match_public_signatures(daemon):
     assert schema["load_skill"]["required"] == ["name"]
 
 
-async def test_scratchpad_descriptions_state_machine_wide_ttl_scope(daemon):
+async def test_scratchpad_descriptions_state_machine_wide_ttl_scope(mcp_daemon):
     tools = {tool.name: tool for tool in await build("p1", "vibe").list_tools()}
 
     for name in ("scratchpad_write", "scratchpad_get"):
@@ -275,31 +260,7 @@ async def test_scratchpad_descriptions_state_machine_wide_ttl_scope(daemon):
         assert "not available outside a git repository" not in description
 
 
-async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch):
-    calls = []
-
-    async def fake_list_skills(session, *, play=None) -> dict:
-        calls.append(("list", session, play))
-        return {"skills": [], "rejections": []}
-
-    async def fake_load_skill(session, *, name: str) -> dict:
-        calls.append(("load", session, name))
-        return {"name": name, "content": "# Alpha\n"}
-
-    monkeypatch.setattr(mcp_tools, "list_skills", fake_list_skills)
-    monkeypatch.setattr(mcp_tools, "load_skill", fake_load_skill)
-
-    mcp = build("p1", "vibe")
-    assert tool_payload(await mcp.call_tool("list_skills", {})) == {"skills": [], "rejections": []}
-    assert tool_payload(await mcp.call_tool("load_skill", {"name": "alpha"})) == {
-        "name": "alpha",
-        "content": "# Alpha\n",
-    }
-    assert [call[0] for call in calls] == ["list", "load"]
-    assert calls[1][2] == "alpha"
-
-
-async def test_skill_tools_round_trip_through_the_daemon(daemon):
+async def test_skill_tools_round_trip_through_the_daemon(mcp_daemon):
     mcp = build("p1", "vibe")
 
     listed = tool_payload(await mcp.call_tool("list_skills", {}))
@@ -355,7 +316,7 @@ async def test_a_disabled_skill_is_hidden_from_list_and_refused_on_load(theater_
         await d.aclose()
 
 
-async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
+async def test_targeting_tool_schemas_use_target_not_target_id(mcp_daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     transcript = schema["read_transcript"]
     assert "target" in transcript["properties"]
@@ -387,7 +348,7 @@ async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
     assert set(send["required"]) == {"target", "prompt"}
 
 
-async def test_skills_are_optional_name_lists_on_spawn_and_send(daemon):
+async def test_skills_are_optional_name_lists_on_spawn_and_send(mcp_daemon):
     mcp = build("p1", "vibe")
     tools = {t.name: t for t in await mcp.list_tools()}
 
@@ -404,14 +365,14 @@ async def test_skills_are_optional_name_lists_on_spawn_and_send(daemon):
     assert "skills=[...]" in mcp.instructions
 
 
-async def test_kill_schema_uses_target_not_target_id(daemon):
+async def test_kill_schema_uses_target_not_target_id(mcp_daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     kill = schema["terminate_session"]
     assert set(kill["properties"]) == {"target", "forget"}
     assert kill["required"] == ["target"]
 
 
-async def test_spawn_wiring_schema_offers_auto_native_legacy_daemon_default_auto(daemon):
+async def test_spawn_wiring_schema_offers_auto_native_legacy_daemon_default_auto(mcp_daemon):
     """Wiring is a spawn-surface choice; approval keeps its no-default rule."""
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     spawn = schema["spawn_session"]
@@ -422,7 +383,7 @@ async def test_spawn_wiring_schema_offers_auto_native_legacy_daemon_default_auto
     assert "approval" in spawn["required"]
 
 
-async def test_control_tool_schemas_are_thin_targeted_forwards(daemon):
+async def test_control_tool_schemas_are_thin_targeted_forwards(mcp_daemon):
     """The tools carry no policy surface: one target, the change, nothing else."""
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
 
@@ -435,7 +396,7 @@ async def test_control_tool_schemas_are_thin_targeted_forwards(daemon):
     assert controls["required"] == ["target"]
 
 
-async def test_interrupt_description_states_turn_and_followup_cancellation(daemon):
+async def test_interrupt_description_states_turn_and_followup_cancellation(mcp_daemon):
     """The frozen semantics: the active turn AND undelivered queued followups."""
     tools = {t.name: t for t in await build("p1", "vibe").list_tools()}
     description = tools["interrupt_session"].description
@@ -447,14 +408,14 @@ async def test_interrupt_description_states_turn_and_followup_cancellation(daemo
     assert "stale_target" in description
 
 
-async def test_control_tool_descriptions_point_policy_at_the_daemon(daemon):
+async def test_control_tool_descriptions_point_policy_at_the_daemon(mcp_daemon):
     """Unsupported actions show the daemon's reason; nothing is decided locally."""
     tools = {t.name: t for t in await build("p1", "vibe").list_tools()}
     assert "daemon" in tools["update_session_settings"].description
     assert "reason" in tools["get_session_controls"].description
 
 
-async def test_send_description_states_daemon_selected_delivery(daemon):
+async def test_send_description_states_daemon_selected_delivery(mcp_daemon):
     """Send follows the daemon's selected wiring — it stopped being always-tmux."""
     tools = {t.name: t for t in await build("p1", "vibe").list_tools()}
     description = tools["send"].description
@@ -467,7 +428,7 @@ async def test_send_description_states_daemon_selected_delivery(daemon):
     assert "not ownership-gated" in description
 
 
-async def test_spawn_wiring_description_names_the_daemon_owned_rollout(daemon):
+async def test_spawn_wiring_description_names_the_daemon_owned_rollout(mcp_daemon):
     """Auto is the daemon's call while the rollout is gated, not a capability claim."""
     spawn = next(t for t in await build("p1", "vibe").list_tools() if t.name == "spawn_session")
     description = spawn.description
@@ -477,260 +438,13 @@ async def test_spawn_wiring_description_names_the_daemon_owned_rollout(daemon):
     assert "per capability" in description
 
 
-async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
-    calls = {}
-
-    async def fake_send(session, **kwargs):
-        calls["send"] = (session, kwargs)
-        return {"handle": "p-child#4", "route": "queued"}
-
-    async def fake_settings(session, **kwargs):
-        calls["settings"] = (session, kwargs)
-        return {"applied": True}
-
-    async def fake_controls(session, **kwargs):
-        calls["controls"] = (session, kwargs)
-        return {"capabilities": {}}
-
-    monkeypatch.setattr(mcp_tools, "send_prompt", fake_send)
-    monkeypatch.setattr(mcp_tools, "update_session_settings", fake_settings)
-    monkeypatch.setattr(mcp_tools, "get_session_controls", fake_controls)
-
-    mcp = build("p1", "vibe")
-    response_format = {"type": "object"}
-    assert tool_payload(
-        await mcp.call_tool(
-            "send",
-            {
-                "target": "child",
-                "prompt": "later",
-                "if_busy": "queue",
-                "job_handle": "h#2",
-                "response_format": response_format,
-                "after": "Writer",
-                "skills": ["theater-debate"],
-            },
-        )
-    ) == {"handle": "p-child#4", "route": "queued"}
-    assert tool_payload(
-        await mcp.call_tool("update_session_settings", {"target": "child", "model": "opus-5"})
-    ) == {"applied": True}
-    assert tool_payload(await mcp.call_tool("get_session_controls", {"target": "child"})) == {
-        "capabilities": {}
-    }
-
-    assert all(isinstance(call[0], mcp_tools.Session) for call in calls.values())
-    assert calls["send"][1] == {
-        "target_id": "child",
-        "prompt": "later",
-        "if_busy": "queue",
-        "job_handle": "h#2",
-        "response_format": response_format,
-        "after": "Writer",
-        "skills": ["theater-debate"],
-    }
-    assert calls["settings"][1] == {
-        "target": "child",
-        "model": "opus-5",
-        "reasoning_effort": None,
-    }
-    assert calls["controls"][1] == {"target": "child"}
-
-
-async def test_spawn_wrapper_forwards_wiring_unchanged(monkeypatch):
-    calls = {}
-
-    async def fake_spawn(session, **kwargs):
-        calls["spawn"] = (session, kwargs)
-        return {"ok": "spawn"}
-
-    monkeypatch.setattr(mcp_tools, "spawn_session", fake_spawn)
-
-    mcp = build("p1", "vibe")
-    assert tool_payload(
-        await mcp.call_tool(
-            "spawn_session",
-            {"harness": "vibe", "approval": "manual", "wiring": "legacy"},
-        )
-    ) == {"ok": "spawn"}
-    assert calls["spawn"][1]["wiring"] == "legacy"
-
-
-async def test_list_participants_schema_exposes_keyset_pagination(daemon):
+async def test_list_participants_schema_exposes_keyset_pagination(mcp_daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     props = schema["list_participants"]["properties"]
     assert {"limit", "after_id"} <= set(props)
 
 
-async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
-    calls = {}
-
-    async def fake_spawn(session, **kwargs):
-        calls["spawn"] = (session, kwargs)
-        return {"ok": "spawn"}
-
-    async def fake_send(session, **kwargs):
-        calls["send"] = (session, kwargs)
-        return {"ok": "send"}
-
-    monkeypatch.setattr(mcp_tools, "spawn_session", fake_spawn)
-    monkeypatch.setattr(mcp_tools, "send_prompt", fake_send)
-
-    mcp = build("p1", "vibe")
-    spawn_format = {}
-    send_format = {"type": "object"}
-
-    assert tool_payload(
-        await mcp.call_tool(
-            "spawn_session",
-            {
-                "harness": "vibe",
-                "approval": "edits",
-                "prompt": "answer in JSON",
-                "response_format": spawn_format,
-            },
-        )
-    ) == {"ok": "spawn"}
-    assert tool_payload(
-        await mcp.call_tool(
-            "send",
-            {
-                "target": "p-child",
-                "prompt": "answer in JSON",
-                "response_format": send_format,
-            },
-        )
-    ) == {"ok": "send"}
-
-    spawn_session, spawn_kwargs = calls["spawn"]
-    send_session, send_kwargs = calls["send"]
-    assert isinstance(spawn_session, mcp_tools.Session)
-    assert isinstance(send_session, mcp_tools.Session)
-    assert spawn_kwargs["response_format"] == spawn_format
-    assert send_kwargs["response_format"] == send_format
-    assert send_kwargs["target_id"] == "p-child"
-
-
-async def test_participant_metadata_wrappers_forward_to_tool_bodies(monkeypatch):
-    calls = {}
-
-    async def fake_spawn(session, **kwargs):
-        calls["spawn"] = (session, kwargs)
-        return {"ok": "spawn"}
-
-    async def fake_update(session, **kwargs):
-        calls["update"] = (session, kwargs)
-        return {"ok": "update"}
-
-    monkeypatch.setattr(mcp_tools, "spawn_session", fake_spawn)
-    monkeypatch.setattr(mcp_tools, "update_participant", fake_update)
-
-    mcp = build("p1", "vibe")
-    assert tool_payload(
-        await mcp.call_tool(
-            "spawn_session",
-            {
-                "harness": "vibe",
-                "approval": "edits",
-                "name": "Metadata-Child",
-                "description": "Implement metadata",
-            },
-        )
-    ) == {"ok": "spawn"}
-    assert tool_payload(
-        await mcp.call_tool(
-            "update_participant",
-            {"target": "child", "description": "Updated metadata"},
-        )
-    ) == {"ok": "update"}
-    assert calls["spawn"][1]["name"] == "Metadata-Child"
-    assert calls["spawn"][1]["description"] == "Implement metadata"
-    assert calls["update"][1] == {
-        "target": "child",
-        "name": None,
-        "description": "Updated metadata",
-    }
-
-
-async def test_interrupt_wrapper_forwards_to_tool_body(monkeypatch):
-    calls = {}
-
-    async def fake_interrupt(session, **kwargs):
-        calls["interrupt"] = (session, kwargs)
-        return {"interrupted": True}
-
-    monkeypatch.setattr(mcp_tools, "interrupt_session", fake_interrupt)
-
-    mcp = build("p1", "vibe")
-    assert tool_payload(await mcp.call_tool("interrupt_session", {"target": "child"})) == {
-        "interrupted": True
-    }
-    interrupt_session, kwargs = calls["interrupt"]
-    assert isinstance(interrupt_session, mcp_tools.Session)
-    assert kwargs == {"target": "child"}
-
-
-async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
-    calls = []
-
-    async def fake_scratchpad_write(
-        session, *, value: str, namespace: str, key: str | None = None
-    ) -> dict:
-        calls.append(("scratchpad_write", session, namespace, value, key))
-        return {"namespace": namespace, "key": "abc123"}
-
-    async def fake_scratchpad_get(
-        session,
-        *,
-        namespace: str,
-        keys: list[str] | None = None,
-        after_key: str | None = None,
-        keys_only: bool | None = None,
-    ) -> dict:
-        calls.append(("scratchpad_get", session, namespace, keys, after_key, keys_only))
-        return {"namespace": namespace, "entries": [], "keys": [], "truncated": False}
-
-    async def fake_scratchpad_delete(
-        session,
-        *,
-        namespace: str,
-        keys: list[str] | None = None,
-        digests: list[str] | None = None,
-        clear: bool = False,
-    ) -> dict:
-        calls.append(("scratchpad_delete", session, namespace, keys, digests, clear))
-        return {"namespace": namespace, "deleted": keys}
-
-    monkeypatch.setattr(mcp_tools, "scratchpad_write", fake_scratchpad_write)
-    monkeypatch.setattr(mcp_tools, "scratchpad_get", fake_scratchpad_get)
-    monkeypatch.setattr(mcp_tools, "scratchpad_delete", fake_scratchpad_delete)
-
-    mcp = build("p1", "vibe")
-    assert tool_payload(
-        await mcp.call_tool(
-            "scratchpad_write",
-            {"namespace": "plan", "value": "p-you"},
-        )
-    ) == {"namespace": "plan", "key": "abc123"}
-    assert tool_payload(await mcp.call_tool("scratchpad_get", {"namespace": "plan"})) == {
-        "namespace": "plan",
-        "entries": [],
-        "keys": [],
-        "truncated": False,
-    }
-    assert tool_payload(
-        await mcp.call_tool("scratchpad_delete", {"namespace": "plan", "keys": ["abc123"]})
-    ) == {"namespace": "plan", "deleted": ["abc123"]}
-
-    assert [(call[0], *call[2:]) for call in calls] == [
-        ("scratchpad_write", "plan", "p-you", None),
-        ("scratchpad_get", "plan", None, None, None),
-        ("scratchpad_delete", "plan", ["abc123"], None, False),
-    ]
-    assert all(isinstance(call[1], mcp_tools.Session) for call in calls)
-
-
-async def test_whoami_registers_on_first_call(daemon):
+async def test_whoami_registers_on_first_call(mcp_daemon):
     mcp = build("chosen-id", "vibe")
     me = tool_payload(await mcp.call_tool("whoami", {}))
 
@@ -745,7 +459,7 @@ async def test_whoami_registers_on_first_call(daemon):
     assert [r["id"] for r in rows] == ["chosen-id"]
 
 
-async def test_list_participants_marks_the_caller(daemon):
+async def test_list_participants_marks_the_caller(mcp_daemon):
     mine = build("me", "vibe")
     theirs = build("them", "claude")
     await mine.call_tool("whoami", {})
@@ -774,7 +488,7 @@ async def test_list_participants_marks_the_caller(daemon):
     [("codex", True, "bad_request: "), ("vibe", False, "REFUSED bad_request: ")],
 )
 async def test_a_refusal_is_one_envelope_in_the_harness_delivery_mode(
-    daemon, harness, is_error, prefix
+    mcp_daemon, harness, is_error, prefix
 ):
     """Vibe hides isError content, so its manifest asks for the envelope as plain text."""
     mcp = build("me", harness)
@@ -789,7 +503,7 @@ async def test_a_refusal_is_one_envelope_in_the_harness_delivery_mode(
     assert result.structured_content["error"]["retryable"] is False
 
 
-async def test_a_daemon_that_does_not_answer_is_daemon_unavailable(daemon, monkeypatch):
+async def test_a_daemon_that_does_not_answer_is_daemon_unavailable(mcp_daemon, monkeypatch):
     mcp = build("me", "codex")
 
     async def broken(*args, **kwargs):
@@ -801,394 +515,13 @@ async def test_a_daemon_that_does_not_answer_is_daemon_unavailable(daemon, monke
     assert error["side_effect"] == "unknown" and error["next"]
 
 
-async def test_unknown_arguments_are_reported_not_dropped(daemon):
+async def test_unknown_arguments_are_reported_not_dropped(mcp_daemon):
     mcp = build("me", "vibe")
     payload = tool_payload(await mcp.call_tool("whoami", {"tail": 5, "x": 1}))
     assert payload["id"] == "me"
     assert payload["ignored_arguments"] == [{"tail": "removed; page with next_cursor"}, "x"]
     rows = await mcp.call_tool("list_harnesses", {"harness": "vibe"})
     assert "ignored_arguments" not in rows.model_dump_json()
-
-
-# ---- list_participants: resume_state pinned to spawner --------------------
-#
-# Each case asserts the resume_state value and then calls spawn(resume=...)
-# to verify it refuses if and only if the state is not 'resumable'.  The
-# harness fixtures are module-level to keep individual tests short.
-
-from pathlib import Path  # noqa: E402  (import after module body — only for fixtures below)
-
-from theater.harness import HARNESSES, Harness, LaunchPlan  # noqa: E402
-from theater.harness.contracts.harness import LaunchParameterSupport  # noqa: E402
-from theater.harness.observation import TranscriptObserver  # noqa: E402
-from theater.protocol import RemoteError  # noqa: E402
-
-
-class _ResumeObs(TranscriptObserver):
-    """Minimal observer for test harnesses."""
-
-    has_transcript = True
-
-    def find_transcript(self, *, cwd, session_id=None, after=None):
-        return None
-
-    def session_id(self, transcript):
-        return None
-
-    def parse(self, line, index, *, clip_text=True):
-        return []
-
-    def is_idle_screen(self, capture):
-        return False
-
-
-class _PinResumeHarness(Harness):
-    """Harness that supports resume — used by most resume_state cases."""
-
-    name = "resume-pin-test"
-    binary = "resume-pin-test"
-    icon = "P"
-    launch_parameter_support = LaunchParameterSupport(resume=True)
-
-    def __init__(self):
-        self.observer = _ResumeObs()
-
-    def plan_launch(
-        self,
-        *,
-        participant_id: str,
-        prompt: str,
-        config_path: Path,
-        approval: str,
-        resume: str | None = None,
-    ) -> LaunchPlan:
-        argv = ["resume-pin-test"]
-        if resume:
-            argv += ["--resume", resume]
-        return LaunchPlan(argv=argv)
-
-
-class _PinNoResumeHarness(Harness):
-    """Harness whose plan_launch predates the resume parameter."""
-
-    name = "no-resume-pin-test"
-    binary = "no-resume-pin-test"
-    icon = "Q"
-
-    def __init__(self):
-        self.observer = _ResumeObs()
-
-    def plan_launch(
-        self,
-        *,
-        participant_id: str,
-        prompt: str,
-        config_path: Path,
-        approval: str,
-    ) -> LaunchPlan:
-        return LaunchPlan(argv=["no-resume-pin-test"])
-
-
-@pytest.fixture
-def pin_harnesses(monkeypatch, daemon, terminal_provider):
-    """Install the two test harnesses and stub shutil.which."""
-    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
-    monkeypatch.setattr(
-        "theater.daemon.spawning.provider_launch.shutil.which", lambda b: f"/usr/bin/{b}"
-    )
-    monkeypatch.setitem(HARNESSES, "resume-pin-test", _PinResumeHarness())
-    monkeypatch.setitem(HARNESSES, "no-resume-pin-test", _PinNoResumeHarness())
-    terminal_provider.install(daemon)
-
-
-async def test_resume_state_live_spawn_refuses(daemon, pin_harnesses):
-    """live => spawn(resume=id) refuses with _resolve_resume_reference's 'still live' message."""
-    async with DaemonClient(autostart=False) as c:
-        me = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        pid = me["id"]
-        rows = await c.call("participants.list")
-        row = next(r for r in rows if r["id"] == pid)
-        assert row["resume_state"] == "live"
-        with pytest.raises(RemoteError) as exc:
-            await c.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume=pid,
-            )
-        assert exc.value.code == "bad_request"
-        assert "still live" in exc.value.message
-
-
-async def test_resume_state_no_session_id_spawn_refuses(daemon, pin_harnesses):
-    """no_session_id => spawn(resume=id) refuses with 'not recorded' message."""
-    async with DaemonClient(autostart=False) as c:
-        me = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        pid = me["id"]
-        daemon.registry.mark_dead(pid)
-        rows = await c.call("participants.list", include_dead=True)
-        row = next(r for r in rows if r["id"] == pid)
-        assert row["resume_state"] == "no_session_id"
-        with pytest.raises(RemoteError) as exc:
-            await c.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume=pid,
-            )
-        assert exc.value.code == "bad_request"
-        assert "harness session id" in exc.value.message
-
-
-async def test_resume_state_harness_cannot_resume_spawn_refuses(daemon, pin_harnesses):
-    """harness_cannot_resume => spawn(resume=session_id) refuses with 'does not support' message."""
-    async with DaemonClient(autostart=False) as c:
-        p = await c.call("hello", harness="no-resume-pin-test", cwd="/tmp")
-        pid = p["id"]
-        part = daemon.registry.get(pid)
-        part.session_id = "sess-noresume"
-        part.session_correlation = "operator"
-        daemon.store.upsert_participant(part)
-        daemon.registry.mark_dead(pid)
-        rows = await c.call("participants.list", include_dead=True)
-        row = next(r for r in rows if r["id"] == pid)
-        assert row["resume_state"] == "harness_cannot_resume"
-        with pytest.raises(RemoteError) as exc:
-            await c.call(
-                "spawn",
-                harness="no-resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume="sess-noresume",
-            )
-        assert exc.value.code == "bad_request"
-        assert "does not support resume" in exc.value.message
-
-
-async def test_resume_state_untrusted_spawn_refuses(daemon, pin_harnesses):
-    """untrusted => spawn(resume=session_id) refuses with 'no trusted ... binding' message."""
-    async with DaemonClient(autostart=False) as c:
-        p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        pid = p["id"]
-        part = daemon.registry.get(pid)
-        part.session_id = "sess-untrusted"
-        part.session_correlation = "heuristic"
-        daemon.store.upsert_participant(part)
-        daemon.registry.mark_dead(pid)
-        rows = await c.call("participants.list", include_dead=True)
-        row = next(r for r in rows if r["id"] == pid)
-        assert row["resume_state"] == "untrusted"
-        with pytest.raises(RemoteError) as exc:
-            await c.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume="sess-untrusted",
-            )
-        assert exc.value.code == "bad_request"
-        # The spawner reaches the "no trusted dead binding" gate, not the live-owner gate.
-        assert "no trusted" in exc.value.message
-
-
-async def test_resume_state_resumable_spawn_succeeds(daemon, pin_harnesses):
-    """resumable => spawn(resume=session_id) succeeds (no refusal)."""
-    async with DaemonClient(autostart=False) as c:
-        p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        pid = p["id"]
-        part = daemon.registry.get(pid)
-        part.session_id = "sess-resumable"
-        part.session_correlation = "operator"
-        daemon.store.upsert_participant(part)
-        daemon.registry.mark_dead(pid)
-        rows = await c.call("participants.list", include_dead=True)
-        row = next(r for r in rows if r["id"] == pid)
-        assert row["resume_state"] == "resumable"
-        result = await c.call(
-            "spawn",
-            harness="resume-pin-test",
-            prompt="",
-            approval="manual",
-            cwd="/tmp",
-            resume="sess-resumable",
-        )
-        assert result["id"] is not None
-
-
-async def test_resume_predecessor_claim_prevents_a_second_live_recovery(daemon, pin_harnesses):
-    async with DaemonClient(autostart=False) as c:
-        predecessor = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        participant = daemon.registry.get(predecessor["id"])
-        participant.session_id = "sess-predecessor-claim"
-        participant.session_correlation = "operator"
-        daemon.store.upsert_participant(participant)
-        daemon.registry.mark_dead(predecessor["id"])
-
-        first = await c.call(
-            "spawn",
-            harness="resume-pin-test",
-            prompt="",
-            approval="manual",
-            cwd="/tmp",
-            resume=predecessor["id"],
-        )
-        assert daemon.registry.get(first["id"]).resumed_from_id == predecessor["id"]
-        rows = await c.call("participants.list", include_dead=True)
-        row = next(row for row in rows if row["id"] == predecessor["id"])
-        assert row["resume_state"] == "owned_by_live"
-
-        with pytest.raises(RemoteError) as exc:
-            await c.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume=predecessor["id"],
-            )
-        assert exc.value.code == "bad_request"
-        assert "live successor" in exc.value.message
-
-        daemon.registry.mark_dead(first["id"])
-        recovered = await c.call(
-            "spawn",
-            harness="resume-pin-test",
-            prompt="",
-            approval="manual",
-            cwd="/tmp",
-            resume=predecessor["id"],
-        )
-        assert recovered["id"] != first["id"]
-
-
-async def test_concurrent_resume_claims_leave_one_live_successor(daemon, pin_harnesses):
-    async with DaemonClient(autostart=False) as setup:
-        predecessor = await setup.call("hello", harness="resume-pin-test", cwd="/tmp")
-        participant = daemon.registry.get(predecessor["id"])
-        participant.session_id = "sess-concurrent-claim"
-        participant.session_correlation = "operator"
-        daemon.store.upsert_participant(participant)
-        daemon.registry.mark_dead(predecessor["id"])
-
-    async with DaemonClient(autostart=False) as first, DaemonClient(autostart=False) as second:
-        results = await asyncio.gather(
-            first.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume=predecessor["id"],
-            ),
-            second.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume=predecessor["id"],
-            ),
-            return_exceptions=True,
-        )
-
-    successes = [result for result in results if isinstance(result, dict)]
-    failures = [result for result in results if isinstance(result, RemoteError)]
-    assert len(successes) == 1
-    assert len(failures) == 1
-    assert failures[0].code == "bad_request"
-    assert "live successor" in failures[0].message
-
-
-async def test_resume_state_owned_by_live_trusted_dead_spawn_refuses(daemon, pin_harnesses):
-    """owned_by_live, trusted dead + trusted live => 'trusted owner is still live' message."""
-    async with DaemonClient(autostart=False) as c:
-        # Live owner with trusted binding.
-        live_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        lo_id = live_p["id"]
-        live_part = daemon.registry.get(lo_id)
-        live_part.session_id = "sess-owned"
-        live_part.session_correlation = "operator"
-        daemon.store.upsert_participant(live_part)
-
-        # Dead predecessor sharing the same session id (trusted provenance).
-        dead_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        dp_id = dead_p["id"]
-        dead_part = daemon.registry.get(dp_id)
-        dead_part.session_id = "sess-owned"
-        dead_part.session_correlation = "operator"
-        daemon.store.upsert_participant(dead_part)
-        daemon.registry.mark_dead(dp_id)
-
-        rows = await c.call("participants.list", include_dead=True)
-        dp_row = next(r for r in rows if r["id"] == dp_id)
-        assert dp_row["resume_state"] == "owned_by_live"
-
-        with pytest.raises(RemoteError) as exc:
-            await c.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume="sess-owned",
-            )
-        assert exc.value.code == "bad_request"
-        assert "still live" in exc.value.message
-        assert lo_id in exc.value.message
-
-
-async def test_resume_state_owned_by_live_untrusted_dead_spawn_refuses(daemon, pin_harnesses):
-    """owned_by_live wins even when the subject dead row is untrusted.
-
-    An untrusted dead row and a trusted live peer sharing a session id: the
-    spawner's _validate_resume_identity filters to trusted rows only, so the
-    untrusted dead row enters neither list and the live trusted peer triggers
-    the 'trusted owner is still live' gate.  resume_state must report
-    owned_by_live (not untrusted), and the spawner must refuse with the
-    'still live' message — proving the two implementations agree.
-    """
-    async with DaemonClient(autostart=False) as c:
-        # Live owner with trusted binding.
-        live_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        lo_id = live_p["id"]
-        live_part = daemon.registry.get(lo_id)
-        live_part.session_id = "sess-mixed"
-        live_part.session_correlation = "operator"
-        daemon.store.upsert_participant(live_part)
-
-        # Dead row sharing the session id but with UNTRUSTED provenance.
-        dead_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        dp_id = dead_p["id"]
-        dead_part = daemon.registry.get(dp_id)
-        dead_part.session_id = "sess-mixed"
-        dead_part.session_correlation = "heuristic"  # untrusted
-        daemon.store.upsert_participant(dead_part)
-        daemon.registry.mark_dead(dp_id)
-
-        rows = await c.call("participants.list", include_dead=True)
-        dp_row = next(r for r in rows if r["id"] == dp_id)
-        # Must be owned_by_live, not untrusted — the live peer dominates.
-        assert dp_row["resume_state"] == "owned_by_live"
-
-        with pytest.raises(RemoteError) as exc:
-            await c.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume="sess-mixed",
-            )
-        assert exc.value.code == "bad_request"
-        # Must hit the live-owner gate, not the untrusted gate.
-        assert "still live" in exc.value.message
-        assert lo_id in exc.value.message
 
 
 def test_only_daemon_transport_failures_map_to_daemon_unavailable():
@@ -1198,69 +531,3 @@ def test_only_daemon_transport_failures_map_to_daemon_unavailable():
     assert refusal_envelope(FileNotFoundError("cwd")) is None
     envelope = refusal_envelope(ConnectionError("daemon closed the connection"))
     assert envelope is not None and envelope["error"]["code"] == "daemon_unavailable"
-
-
-async def test_handoff_arguments_reach_the_tools_and_are_taught_once(daemon):
-    mcp = build("p1", "vibe")
-    tools = {t.name: t for t in await mcp.list_tools()}
-    descriptions = {name: " ".join(t.description.split()) for name, t in tools.items()}
-
-    spawn, send = tools["spawn_session"].input_schema, tools["send"].input_schema
-    assert {"after", "task_kind"} <= set(spawn["properties"])
-    assert "after" in send["properties"] and "task_kind" not in send["properties"]
-    assert "independent_review" in json.dumps(spawn["properties"]["task_kind"])
-    assert "source_not_reviewable" in descriptions["spawn_session"]
-    assert "pinned commit" in descriptions["spawn_session"]
-    assert "queued" in descriptions["send"] and "cancel_job" in descriptions["send"]
-    assert "or a send to yourself" in descriptions["send"]  # human_present is not refuse-only
-    assert "waiting for its `after` source" in descriptions["cancel_job"]
-    # Shared guidance teaches natural send and `after`, and no longer sends agents to the
-    # transcript after every await.
-    assert 'after="Writer"' in mcp.instructions
-    assert "read_transcript to read what it actually said" not in mcp.instructions
-    assert "diagnose a stuck, failed or surprising child" in mcp.instructions
-    assert "Diagnose" in descriptions["read_transcript"]
-    assert "Diagnose" in descriptions["get_session_controls"]
-
-
-async def test_after_and_task_kind_are_forwarded_unchanged_to_the_daemon():
-    from theater.mcp.session import Session
-
-    class Recorder:
-        def __init__(self):
-            self.calls = []
-
-        async def call(self, method, **params):
-            self.calls.append((method, params))
-            keys = ("name", "description", "tier", "status", "cwd", "branch", "session_id")
-            return {
-                "id": "c1",
-                "handle": "c1",
-                "harness": "codex",
-                "parent_id": "p1",
-                "addressable": False,
-                "handoff": {"state": "waiting"},
-                **dict.fromkeys(keys),
-            }
-
-    client = Recorder()
-    session = Session(participant_id="p1", harness="vibe", client=client, _resolved=True)
-
-    spawned = await mcp_tools.spawn_session(
-        session,
-        harness="codex",
-        approval="yolo",
-        prompt="Review",
-        worktree=True,
-        after="Writer",
-        task_kind="independent_review",
-        skills=["theater-debate"],
-    )
-    await mcp_tools.send_prompt(session, target_id="Bob", prompt="x", after="Writer")
-
-    (_, spawn_params), (_, send_params) = client.calls
-    assert (spawn_params["after"], spawn_params["task_kind"]) == ("Writer", "independent_review")
-    assert send_params["after"] == "Writer"
-    assert "task_kind" not in send_params
-    assert (spawn_params["skills"], send_params["skills"]) == (["theater-debate"], None)
-    assert spawned["handoff"] == {"state": "waiting"}

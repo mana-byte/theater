@@ -1,4 +1,4 @@
-"""Harness discovery and optional model policy must match what the daemon accepts."""
+"""The list_harnesses tool and the harness names `spawn_session` teaches, against a real daemon."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from tests.support.mcp_tools import resolved
 from tests.support.plugin_packages import install, write_plugin
 from theater.client import DaemonClient
 from theater.config import Config
@@ -194,3 +195,35 @@ async def test_spawning_a_listed_harness_is_accepted(daemon, terminal_provider, 
     )
     message = refused.structured_content["error"]["message"]
     assert "not-on-the-list" in message and "opus-5" in message
+
+
+async def test_harnesses_hides_the_ones_that_cannot_be_spawned():
+    """Offering a harness the daemon would refuse only invites a failed call."""
+    rows = [
+        {"name": "vibe", "icon": "V", "binary": "vibe", "installed": True, "error": None},
+        {"name": "gone", "icon": "G", "binary": "gone", "installed": False, "error": None},
+        {"name": "broken", "icon": "B", "binary": "b", "installed": True, "error": "boom"},
+    ]
+    got = await tools.harnesses(resolved(harnesses=rows))
+    assert [r["name"] for r in got] == ["vibe"]
+    assert "installed" not in got[0]
+    assert "icon" not in got[0]
+
+
+async def test_harnesses_forwards_approvals_and_nulls_when_the_daemon_predates_them():
+    """A mixed-version daemon omits approvals; the row says null, not a guess."""
+    rows = [
+        {
+            "name": "vibe",
+            "icon": "V",
+            "binary": "vibe",
+            "installed": True,
+            "error": None,
+            "approvals": ["manual", "edits", "yolo"],
+        },
+        {"name": "older", "icon": "O", "binary": "older", "installed": True, "error": None},
+    ]
+    got = await tools.harnesses(resolved(harnesses=rows))
+    assert got[0]["approvals"] == ["manual", "edits", "yolo"]
+    # An older daemon never sends the key: null, never an invented list.
+    assert got[1]["approvals"] is None

@@ -1,4 +1,4 @@
-"""MCP presentation stays compact without weakening transcript evidence or continuation."""
+"""read_transcript: forwarding, cursors and compact presentation that keeps transcript evidence."""
 
 from __future__ import annotations
 
@@ -12,7 +12,36 @@ from theater.daemon.rpc.transcript_paging import TranscriptEventChunk, Transcrip
 from theater.daemon.rpc.transcripts import _read_transcript
 from theater.harness import HARNESSES, Event, EventKind
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
+from theater.mcp import tools
 from theater.mcp.toolsets.transcripts import read_transcript
+
+
+async def test_read_transcript_forwards_a_live_name_without_listing_first():
+    s = resolved(read_transcript={"id": "p-you", "events": []})
+    await tools.read_transcript(s, target="Arlequin")
+    assert s.client.methods == ["read_transcript"]
+    assert s.client.params("read_transcript") == {"id": "Arlequin"}
+
+
+async def test_read_transcript_forwards_only_the_returned_cursor():
+    s = resolved(
+        read_transcript={
+            "id": "p-you",
+            "events": [],
+            "cursor": "trc1.cursor",
+            "next_cursor": None,
+            "has_more": False,
+        }
+    )
+    page = await tools.read_transcript(
+        s, target="Arlequin", cursor="trc1.cursor", roles=["assistant"]
+    )
+    assert s.client.params("read_transcript") == {
+        "id": "Arlequin",
+        "cursor": "trc1.cursor",
+        "roles": ["assistant"],
+    }
+    assert page == {"id": "p-you", "events": [], "next_cursor": None}
 
 
 async def test_only_complete_causally_matching_answer_and_seal_are_coalesced(daemon, monkeypatch):
