@@ -26,9 +26,9 @@ def _require_qualified_pi() -> None:
         pytest.skip(f"installed Pi is outside the qualified range {PI_FRONTEND_QUALIFIED_RANGE}")
 
 
+@pytest.mark.requires_node
 def test_pi_core_correlation_proof_holds_on_stock_pi() -> None:
-    # pytest.skip is NoReturn-typed, so the ``or`` keeps the command list str-only.
-    node = shutil.which("node") or pytest.skip("node is unavailable")
+    node = shutil.which("node") or "node"
     _require_qualified_pi()
     root = REPO_ROOT
     result = subprocess.run(
@@ -49,8 +49,9 @@ def test_pi_core_correlation_proof_holds_on_stock_pi() -> None:
     assert "pi core correlation proof: ok" in result.stdout
 
 
+@pytest.mark.requires_node
 def test_pi_active_run_interrupt_proof_holds_on_stock_pi() -> None:
-    node = shutil.which("node") or pytest.skip("node is unavailable")
+    node = shutil.which("node") or "node"
     _require_qualified_pi()
     root = REPO_ROOT
     result = subprocess.run(
@@ -71,8 +72,9 @@ def test_pi_active_run_interrupt_proof_holds_on_stock_pi() -> None:
     assert "pi active-run interrupt proof: ok" in result.stdout
 
 
+@pytest.mark.requires_node
 def test_pi_steer_admission_proof_holds_on_stock_pi() -> None:
-    node = shutil.which("node") or pytest.skip("node is unavailable")
+    node = shutil.which("node") or "node"
     _require_qualified_pi()
     root = REPO_ROOT
     result = subprocess.run(

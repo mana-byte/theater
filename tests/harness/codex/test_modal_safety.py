@@ -8,9 +8,9 @@ from theater.harness.observation import ScreenConfidence, ScreenKind
 
 SCREENS = fixture("screens")
 
-#: Stock Codex 0.158 trust dialog: header plus a numbered option list whose
+#: Stock Codex trust dialog: header plus a numbered option list whose
 #: selected row renders with the composer's `›` glyph.
-TRUST_MENU_0158 = """\
+TRUST_MENU_STOCK = """\
 Codex CLI
 
 Trust this folder?
@@ -22,7 +22,7 @@ Working with untrusted contents carries risk.
   Press enter to continue
 """
 
-#: A restricted-folder variant keeps the 0.158 header but warns about the
+#: A restricted-folder variant keeps the stock header but warns about the
 #: restricted workspace in its own words.
 TRUST_MENU_RESTRICTED = """\
 Trust this folder?
@@ -52,11 +52,11 @@ def _screen(name: str) -> str:
 
 @pytest.mark.parametrize(
     "capture",
-    [TRUST_MENU_0158, TRUST_MENU_RESTRICTED],
-    ids=["stock-0.158", "restricted-folder"],
+    [TRUST_MENU_STOCK, TRUST_MENU_RESTRICTED],
+    ids=["stock", "restricted-folder"],
 )
 def test_trust_menu_classifies_as_trust_not_prompt(capture):
-    """The 0.158 trust menu must never advertise a ready composer."""
+    """The stock trust menu must never advertise a ready composer."""
     observer = CodexObserver()
     reading = observer.screen_reading(capture)
     assert reading.kind is ScreenKind.TRUST

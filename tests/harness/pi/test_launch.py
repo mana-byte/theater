@@ -116,10 +116,9 @@ def test_pi_launch_argv_is_independent_of_approval_and_manifest_rejects_other_mo
             )
 
 
+@pytest.mark.requires_node
 def test_pi_bootstrap_suppresses_only_the_expected_cold_warning(monkeypatch) -> None:
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is unavailable")
+    node = shutil.which("node") or "node"
     captured: dict[str, object] = {}
 
     def execvpe(file, args, env):
@@ -252,11 +251,11 @@ def _pi_argv(plan_argv: list[str]) -> list[str]:
 
 
 def _parse_with_pi(pi_argv: list[str]) -> dict[str, object]:
-    """Run Pi's real parseArgs; skip when node or the source checkout is missing."""
+    """Run Pi's real parseArgs; skip when the source checkout is missing."""
     args_ts = _PI_SOURCE / "packages/coding-agent/src/cli/args.ts"
-    node = shutil.which("node")
-    if node is None or not args_ts.is_file():
-        pytest.skip("node or the Pi source checkout is unavailable")
+    node = shutil.which("node") or "node"
+    if not args_ts.is_file():
+        pytest.skip("the Pi source checkout is unavailable")
     # Bare imports in args.ts (chalk, cross-spawn) are uninstalled here and
     # unused by parseArgs, so unresolved bare specifiers get a stub module.
     probe = (
@@ -291,6 +290,7 @@ def _parse_with_pi(pi_argv: list[str]) -> dict[str, object]:
     return json.loads(result.stdout)
 
 
+@pytest.mark.requires_node
 @pytest.mark.parametrize("prompt", HOSTILE_PROMPTS)
 def test_pi_launch_prompt_survives_pi_parser(prompt: str) -> None:
     planned = _plan_argv(prompt)
@@ -304,6 +304,7 @@ def test_pi_launch_prompt_survives_pi_parser(prompt: str) -> None:
     }
 
 
+@pytest.mark.requires_node
 def test_pi_launch_ordinary_prompt_is_unchanged() -> None:
     planned = _plan_argv("inspect this repository")
     assert planned[-1] == "inspect this repository"

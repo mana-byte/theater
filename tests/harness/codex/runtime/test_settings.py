@@ -115,7 +115,7 @@ async def test_settings_are_confirmed_by_the_applied_broadcast_when_readback_car
     runtime, _binding = await open_new(server)
 
     async def update_and_broadcast(operation_id: str, applied_effort: str):
-        # Codex <=0.152: thread/read never carries effort; only this broadcast names it.
+        # Older Codex: thread/read never carries effort; only this broadcast names it.
         task = asyncio.create_task(
             runtime.update_settings(operation_id=operation_id, reasoning_effort="medium")
         )

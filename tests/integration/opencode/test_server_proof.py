@@ -69,13 +69,16 @@ _ADMITTED_STOCK = (
 _STOCK_VERSION = release_text(_PARSED_VERSION) if _PARSED_VERSION is not None else None
 if os.environ.get(_PROOF_ENV) == "1" and _ADMITTED_STOCK:
     print(f"OpenCode stock proof uses {_BINARY_VERSION}")
-pytestmark = pytest.mark.skipif(
-    os.environ.get(_PROOF_ENV) != "1" or not _ADMITTED_STOCK,
-    reason=(
-        f"set {_PROOF_ENV}=1 with stock OpenCode {OPENCODE_V1_QUALIFIED_RANGE} "
-        f"(found {_BINARY_VERSION!r})"
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.environ.get(_PROOF_ENV) != "1" or not _ADMITTED_STOCK,
+        reason=(
+            f"set {_PROOF_ENV}=1 with stock OpenCode {OPENCODE_V1_QUALIFIED_RANGE} "
+            f"(found {_BINARY_VERSION!r})"
+        ),
     ),
-)
+]
 
 
 class _IO(RuntimeIO):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests.support.shipped import ClaudeCodeObserver
 from theater.harness.base import EventKind
 
@@ -40,65 +42,74 @@ def _parse_one(line: str) -> list:
     return ClaudeCodeObserver().parse(line, 0)
 
 
-def test_write_yields_a_write_path():
-    record = _tool_use_record("Write", {"file_path": "/home/ada/repo/src/app.py"})
-    (event,) = _parse_one(record)
+@pytest.mark.parametrize(
+    ("tool", "tool_input", "mode", "path"),
+    [
+        pytest.param(
+            "Write", {"file_path": "/home/ada/repo/src/app.py"}, "write", "src/app.py", id="write"
+        ),
+        pytest.param(
+            "Edit", {"file_path": "/home/ada/repo/lib/mod.ts"}, "write", "lib/mod.ts", id="edit"
+        ),
+        # MultiEdit batches several edits to one file; it names the file once.
+        pytest.param(
+            "MultiEdit",
+            {
+                "file_path": "/home/ada/repo/config.py",
+                "edits": [
+                    {"old_string": "a", "new_string": "b"},
+                    {"old_string": "c", "new_string": "d"},
+                ],
+            },
+            "write",
+            "config.py",
+            id="multiedit-names-the-file-once",
+        ),
+        pytest.param(
+            "NotebookEdit",
+            {"notebook_path": "/home/ada/repo/nb.ipynb"},
+            "write",
+            "nb.ipynb",
+            id="notebookedit",
+        ),
+        pytest.param(
+            "Read", {"file_path": "/home/ada/repo/README.md"}, "read", "README.md", id="read"
+        ),
+    ],
+)
+def test_file_tools_yield_one_path_in_their_mode(tool, tool_input, mode, path):
+    (event,) = _parse_one(_tool_use_record(tool, tool_input))
     assert event.kind is EventKind.TOOL_CALL
-    assert event.tool_name == "Write"
+    assert event.tool_name == tool
     assert len(event.paths) == 1
-    assert event.paths[0].mode == "write"
-    assert event.paths[0].path == "src/app.py"
+    assert event.paths[0].mode == mode
+    assert event.paths[0].path == path
 
 
-def test_edit_yields_a_write_path():
-    record = _tool_use_record("Edit", {"file_path": "/home/ada/repo/lib/mod.ts"})
-    (event,) = _parse_one(record)
-    assert event.paths[0].mode == "write"
-    assert event.paths[0].path == "lib/mod.ts"
-
-
-def test_multiedit_yields_one_write_path_for_the_file():
-    """MultiEdit batches several edits to one file; it names the file once."""
-    record = _tool_use_record(
-        "MultiEdit",
-        {
-            "file_path": "/home/ada/repo/config.py",
-            "edits": [
-                {"old_string": "a", "new_string": "b"},
-                {"old_string": "c", "new_string": "d"},
-            ],
-        },
-    )
-    (event,) = _parse_one(record)
-    assert len(event.paths) == 1
-    assert event.paths[0].mode == "write"
-    assert event.paths[0].path == "config.py"
-
-
-def test_notebookedit_yields_a_write_path():
-    record = _tool_use_record("NotebookEdit", {"notebook_path": "/home/ada/repo/nb.ipynb"})
-    (event,) = _parse_one(record)
-    assert event.paths[0].mode == "write"
-    assert event.paths[0].path == "nb.ipynb"
-
-
-def test_read_yields_a_read_path():
-    record = _tool_use_record("Read", {"file_path": "/home/ada/repo/README.md"})
-    (event,) = _parse_one(record)
-    assert event.paths[0].mode == "read"
-    assert event.paths[0].path == "README.md"
-
-
-def test_bash_yields_no_paths():
-    """A shell command is not a named file; parsing it would be guessing."""
-    record = _tool_use_record("Bash", {"command": "cat src/app.py && rm -f /tmp/trash"})
-    (event,) = _parse_one(record)
-    assert event.paths == ()
-
-
-def test_unknown_tool_yields_no_paths():
-    """A tool the adapter does not recognise yields nothing, not a guess."""
-    record = _tool_use_record("Frobnicate", {"file_path": "/home/ada/repo/x.py"})
+@pytest.mark.parametrize(
+    "record",
+    [
+        # A shell command is not a named file; parsing it would be guessing.
+        pytest.param(
+            _tool_use_record("Bash", {"command": "cat src/app.py && rm -f /tmp/trash"}),
+            id="shell-command",
+        ),
+        # A tool the adapter does not recognise yields nothing, not a guess.
+        pytest.param(
+            _tool_use_record("Frobnicate", {"file_path": "/home/ada/repo/x.py"}),
+            id="unknown-tool",
+        ),
+        # A file outside the repo is not recall's business: relative would be a lie and
+        # absolute a privacy breach.
+        pytest.param(
+            _tool_use_record(
+                "Write", {"file_path": "/home/ada/.config/secret.json"}, cwd="/home/ada/repo"
+            ),
+            id="outside-cwd",
+        ),
+    ],
+)
+def test_calls_without_a_recallable_file_yield_no_paths(record):
     (event,) = _parse_one(record)
     assert event.paths == ()
 
@@ -125,18 +136,6 @@ def test_tool_use_with_scrubbed_input_yields_no_paths():
     )
     (event,) = _parse_one(record)
     assert event.tool_name == "Read"
-    assert event.paths == ()
-
-
-def test_path_outside_cwd_is_dropped():
-    """A file outside the repo is not recall's business; emitting it relative
-    would be a lie, and emitting it absolute is a privacy breach."""
-    record = _tool_use_record(
-        "Write",
-        {"file_path": "/home/ada/.config/secret.json"},
-        cwd="/home/ada/repo",
-    )
-    (event,) = _parse_one(record)
     assert event.paths == ()
 
 

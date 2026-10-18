@@ -15,6 +15,10 @@ from theater.daemon.spawning.models import SpawnRequest
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import HARNESSES
 from theater.harness.builtin.plugins.pi.manifest import MANIFEST
+from theater.harness.builtin.plugins.pi.runtime_constants import (
+    PI_FRONTEND_QUALIFIED_FLOOR,
+    pi_version_text,
+)
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.runtime import (
     DeliveryResult,
@@ -32,7 +36,7 @@ def _install(monkeypatch, *, compatible=True):
         probe=lambda _: RuntimeCompatibility(
             supported=compatible,
             policy="pi-integration",
-            native_version="0.84.4",
+            native_version=pi_version_text(PI_FRONTEND_QUALIFIED_FLOOR),
             reason=None if compatible else "unsupported version",
         ),
     )

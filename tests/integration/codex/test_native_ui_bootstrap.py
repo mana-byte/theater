@@ -44,7 +44,7 @@ APPROVE_KEY = "y"
 
 
 #: Exact stock error a zero-turn `thread/resume` answers with, on the
-#: historical unmodified 0.154.0 app-server (the rollout is only materialised once the
+#: unmodified stock app-server (the rollout is only materialised once the
 #: first turn starts).
 NO_ROLLOUT_ERROR_PREFIX = "no rollout found for thread id "
 

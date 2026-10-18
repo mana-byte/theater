@@ -41,6 +41,8 @@ NATIVE_PROOF_ENABLED = os.environ.get(NATIVE_PROOF_ENV) == "1"
 
 
 VERSION_PROBE_TIMEOUT_SECONDS = 30.0
+# First release whose thread/read reports the applied effort: a fixed upstream dialect boundary.
+EFFORT_READBACK_RELEASE = (0, 153, 0)
 
 
 def require_installed_allowed_version() -> str:
@@ -429,12 +431,12 @@ class TestNativeSmokeTurnControls:
         readback = experimental.request("thread/read", {"threadId": thread_id})
         thread = readback["result"]["thread"]
         release = tuple(int(part) for part in require_installed_allowed_version().split("."))
-        if release >= (0, 153, 0):
-            # Historical 0.153.0+ dialect: readback must reflect the applied effort, so a
+        if release >= EFFORT_READBACK_RELEASE:
+            # Newer dialect: readback must reflect the applied effort, so a
             # release that drops it cannot qualify through the broadcast branch.
             assert thread.get("reasoningEffort") == "medium"
         else:
-            # Pre-0.153 dialect: thread/read never carries effort; the applied-
+            # Older dialect: thread/read never carries effort; the applied-
             # settings broadcast is the confirmation, exactly as production does.
             assert "reasoningEffort" not in thread
             updated = experimental.wait_notification("thread/settings/updated", timeout=60)

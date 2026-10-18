@@ -70,20 +70,26 @@ class _Completed:
     returncode: int = 0
 
 
+def _admitted(*releases: tuple[int, int, int]) -> list[str]:
+    """The releases the qualified range admits, as version texts, without repeats."""
+    kept: list[tuple[int, int, int]] = []
+    for release in releases:
+        inside = PI_FRONTEND_QUALIFIED_FLOOR <= release <= PI_FRONTEND_QUALIFIED_MAX
+        if inside and release not in PI_FRONTEND_QUALIFIED_EXCLUDED and release not in kept:
+            kept.append(release)
+    return [pi_version_text(release) for release in kept]
+
+
+_FLOOR_MAJOR, _FLOOR_MINOR, _FLOOR_PATCH = PI_FRONTEND_QUALIFIED_FLOOR
 _QUALIFIED_PI_VERSIONS = (
-    pi_version_text(PI_FRONTEND_QUALIFIED_FLOOR),
-    # Historical releases with distinct bridge layouts and protocol behavior.
-    "0.80.10",
-    "0.83.9",
-    "0.84.2",
-    "0.84.3",
-    "0.84.4",
-    "0.86.0",
-    "0.86.1",
-    "0.87.0",
-    "0.87.1",
-    "0.99.2",
-    pi_version_text(PI_FRONTEND_QUALIFIED_MAX),
+    *_admitted(
+        PI_FRONTEND_QUALIFIED_FLOOR,
+        (_FLOOR_MAJOR, _FLOOR_MINOR, _FLOOR_PATCH + 1),
+        # A two-digit patch still orders numerically, not as text.
+        (_FLOOR_MAJOR, _FLOOR_MINOR, 10),
+        (_FLOOR_MAJOR, _FLOOR_MINOR + 1, 0),
+        PI_FRONTEND_QUALIFIED_MAX,
+    ),
     # Immediate neighbours of every excluded release stay accepted.
     *(
         pi_version_text((major, minor, patch + offset))
@@ -123,7 +129,6 @@ def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> N
 @pytest.mark.parametrize(
     "version",
     [
-        "0.80.3",  # Historical import failure in a specific release.
         pi_version_text(
             (
                 PI_FRONTEND_QUALIFIED_FLOOR[0],
@@ -182,6 +187,7 @@ def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None
     assert 'bridge.transition(ctx, "agent_end", "active")' in bridge
 
 
+@pytest.mark.requires_node
 def test_pi_extension_frontend_bridge_executable_conformance() -> None:
     """Drive the actual extension registration through fresh public contexts."""
     root = REPO_ROOT

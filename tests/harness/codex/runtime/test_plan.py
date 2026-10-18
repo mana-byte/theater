@@ -55,12 +55,14 @@ class _FakeCompleted:
         self.returncode = returncode
 
 
-def _patch_version(monkeypatch, output: str | None, *, error: Exception | None = None) -> None:
+def _patch_version(
+    monkeypatch, output: str | None, *, error: Exception | None = None, returncode: int = 0
+) -> None:
     def fake_run(argv, **kwargs):
         assert argv[1:2] == ["--version"]
         if error is not None:
             raise error
-        return _FakeCompleted(output or "")
+        return _FakeCompleted(output or "", returncode)
 
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.codex.runtime_plan.subprocess.run", fake_run
@@ -118,26 +120,23 @@ def test_probe_range_gate_and_manifest_range(monkeypatch, version: str, supporte
     )
 
 
-def test_probe_rejects_unparseable_output(monkeypatch) -> None:
-    _patch_version(monkeypatch, "some other tool 1.2.3\n")
-    compatibility = probe_codex_compatibility(RuntimeProbeContext())
-    assert compatibility.supported is False
-    assert compatibility.native_version is None
-
-
-def test_probe_rejects_missing_binary(monkeypatch) -> None:
-    _patch_version(monkeypatch, None, error=FileNotFoundError("codex"))
+@pytest.mark.parametrize(
+    ("output", "error", "returncode", "reason_part"),
+    [
+        ("some other tool 1.2.3\n", None, 0, "did not name a codex-cli version"),
+        (None, FileNotFoundError("codex"), 0, "could not run"),
+        ("boom", None, 1, "exited with 1"),
+    ],
+    ids=["unparseable-output", "missing-binary", "failed-version-command"],
+)
+def test_probe_rejects_a_binary_without_a_readable_version(
+    monkeypatch, output, error, returncode, reason_part
+) -> None:
+    _patch_version(monkeypatch, output, error=error, returncode=returncode)
     compatibility = probe_codex_compatibility(RuntimeProbeContext(binary="/no/such/codex"))
     assert compatibility.supported is False
-    assert "could not run" in compatibility.reason
-
-
-def test_probe_rejects_failed_version_command(monkeypatch) -> None:
-    _patch_version(monkeypatch, "boom", error=None)
-    compatibility = probe_codex_compatibility(
-        RuntimeProbeContext(binary="/no/such/codex"),
-    )
-    assert compatibility.supported is False
+    assert compatibility.native_version is None
+    assert reason_part in compatibility.reason
 
 
 def planning_context(**overrides) -> RuntimePlanningContext:
@@ -176,26 +175,34 @@ def test_backend_plan_is_exact_app_server_listen_with_scoped_config() -> None:
     assert plan.endpoint == ENDPOINT
 
 
-def test_backend_plan_approval_modes_match_legacy_mapping() -> None:
-    edits = codex_backend_config_overrides(planning_context(approval="edits"))
-    manual = codex_backend_config_overrides(planning_context(approval="manual"))
-    yolo = codex_backend_config_overrides(planning_context(approval="yolo"))
-    assert edits == (("approval_policy", "on-request"), ("sandbox_mode", "workspace-write"))
-    assert manual == (("approval_policy", "on-request"), ("sandbox_mode", "read-only"))
-    assert yolo == (("approval_policy", "never"), ("sandbox_mode", "danger-full-access"))
+@pytest.mark.parametrize(
+    ("approval", "expected"),
+    [
+        ("edits", (("approval_policy", "on-request"), ("sandbox_mode", "workspace-write"))),
+        ("manual", (("approval_policy", "on-request"), ("sandbox_mode", "read-only"))),
+        ("yolo", (("approval_policy", "never"), ("sandbox_mode", "danger-full-access"))),
+    ],
+    ids=["edits", "manual", "yolo"],
+)
+def test_backend_plan_approval_modes_match_legacy_mapping(approval, expected) -> None:
+    assert codex_backend_config_overrides(planning_context(approval=approval)) == expected
 
 
-def test_backend_plan_rejects_missing_or_unknown_approval() -> None:
-    # Approval is explicit per spawn — it has no default anywhere: a missing
-    # or unknown mode is rejected, never silently mapped to manual.
+# Approval is explicit per spawn and has no default anywhere: a missing or unknown mode is
+# rejected, never silently mapped to manual.
+@pytest.mark.parametrize(
+    "plan",
+    [
+        lambda: codex_backend_config_overrides(planning_context(approval=None)),
+        lambda: codex_backend_config_overrides(planning_context(approval="nonsense")),
+        lambda: plan_codex_runtime_backend(planning_context(approval=None)),
+        lambda: plan_codex_frontend(ENDPOINT, native_session_id=None, approval=None),
+    ],
+    ids=["overrides-missing", "overrides-unknown", "backend-missing", "frontend-missing"],
+)
+def test_backend_plan_rejects_missing_or_unknown_approval(plan) -> None:
     with pytest.raises(ValueError, match="approval has no default"):
-        codex_backend_config_overrides(planning_context(approval=None))
-    with pytest.raises(ValueError, match="approval has no default"):
-        codex_backend_config_overrides(planning_context(approval="nonsense"))
-    with pytest.raises(ValueError, match="approval has no default"):
-        plan_codex_runtime_backend(planning_context(approval=None))
-    with pytest.raises(ValueError, match="approval has no default"):
-        plan_codex_frontend(ENDPOINT, native_session_id=None, approval=None)
+        plan()
 
 
 def test_backend_plan_carries_no_credentials_or_files() -> None:

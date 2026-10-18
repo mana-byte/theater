@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests.support.shipped import VibeObserver
 from theater.harness import EventPath
 from theater.harness.base import EventKind
@@ -66,14 +68,22 @@ def test_multiple_tool_calls_each_emit_their_own_paths():
     assert tool_calls[2].paths == (EventPath("c.py", "write"),)
 
 
-def test_bash_emits_no_paths():
-    """Shell commands are not parsed for file paths."""
+@pytest.mark.parametrize(
+    ("call", "cwd"),
+    [
+        # Shell commands are not parsed for file paths.
+        pytest.param(_fn("bash", command=f"cat {REPO}/secret.txt"), REPO, id="shell-command"),
+        # A path not under the repo root is not emitted as an absolute.
+        pytest.param(_fn("read_file", file_path="/etc/passwd"), REPO, id="outside-cwd"),
+        # Without a cwd an absolute path cannot be relativised, so it is dropped.
+        pytest.param(_fn("read_file", file_path=f"{REPO}/src/main.py"), None, id="no-cwd"),
+    ],
+)
+def test_calls_without_a_recallable_file_yield_no_paths(call, cwd):
     observer = VibeObserver()
-    _set_cwd(observer, REPO)
-    events = _parse(
-        observer,
-        _assistant_with_tools(_fn("bash", command=f"cat {REPO}/secret.txt")),
-    )
+    if cwd is not None:
+        _set_cwd(observer, cwd)
+    events = _parse(observer, _assistant_with_tools(call))
     tool_calls = [e for e in events if e.kind is EventKind.TOOL_CALL]
     assert tool_calls[0].paths == ()
 
@@ -87,27 +97,3 @@ def test_relative_path_passes_through():
     )
     tool_calls = [e for e in events if e.kind is EventKind.TOOL_CALL]
     assert tool_calls[0].paths[0].path == "src/main.py"
-
-
-def test_path_outside_cwd_is_dropped():
-    """A path not under the repo root is not emitted as an absolute."""
-    observer = VibeObserver()
-    _set_cwd(observer, REPO)
-    events = _parse(
-        observer,
-        _assistant_with_tools(_fn("read_file", file_path="/etc/passwd")),
-    )
-    tool_calls = [e for e in events if e.kind is EventKind.TOOL_CALL]
-    assert tool_calls[0].paths == ()
-
-
-def test_no_cwd_drops_absolute_path():
-    """Without a cwd, an absolute path cannot be relativised and is dropped."""
-    observer = VibeObserver()
-    # _cwd is None by default — find_transcript was never called
-    events = _parse(
-        observer,
-        _assistant_with_tools(_fn("read_file", file_path=f"{REPO}/src/main.py")),
-    )
-    tool_calls = [e for e in events if e.kind is EventKind.TOOL_CALL]
-    assert tool_calls[0].paths == ()

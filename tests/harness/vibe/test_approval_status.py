@@ -22,7 +22,7 @@ from theater.provenance import TranscriptProvenance
 async def test_question_dialog_overrides_quiet_running_store_in_full_watch(
     tmp_path, daemon, terminal_provider
 ):
-    """Vibe 2.25.4 leaves the durable session running during its question callback."""
+    """Vibe leaves the durable session running during its question callback."""
     storage = VibeStore(tmp_path)
     storage.publish(
         generation="0000000000000001",

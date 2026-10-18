@@ -62,6 +62,11 @@ PINNED_GATE_STATUSES = {
 }
 
 
+_FLOOR = harness.SAME_MACHINE_FLOOR
+_FLOOR_TEXT = ".".join(map(str, _FLOOR))
+_BELOW_FLOOR = (_FLOOR[0], _FLOOR[1], _FLOOR[2] - 1) if _FLOOR[2] else (_FLOOR[0], _FLOOR[1] - 1, 0)
+
+
 def _facts(version: tuple[int, int, int]) -> harness.BinaryFacts:
     return harness.BinaryFacts(
         resolved="/usr/local/bin/claude",
@@ -122,12 +127,12 @@ def test_pinned_fixture_records_the_honest_no_go() -> None:
 
 
 def test_harness_pins_the_documented_wire_facts() -> None:
-    assert harness.SAME_MACHINE_FLOOR == (2, 1, 248)
+    assert tuple(int(part) for part in PINNED_STATIC.split(".")) == _FLOOR
     assert harness.MAX_LINE_CHARS == 1_048_576
     assert harness.FIRST_LINE_DEADLINE_SECONDS == 30.0
-    assert _facts((2, 1, 248)).qualified
-    assert not _facts((2, 1, 224)).qualified
-    assert _facts((2, 1, 248)).version_text == "2.1.248"
+    assert _facts(_FLOOR).qualified
+    assert not _facts(_BELOW_FLOOR).qualified
+    assert _facts(_FLOOR).version_text == _FLOOR_TEXT
 
 
 def test_user_frame_rejects_undocumented_shapes() -> None:
@@ -250,13 +255,14 @@ def test_session_mismatch_uses_a_mismatched_id(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_assembled_record_cannot_claim_pass_without_all_gates() -> None:
-    facts = _facts((2, 1, 248))
+    facts = _facts(_FLOOR)
     passing = [harness.GateResult(name, "pass", {}) for name in GATE_NAMES]
     record: dict = harness.assemble_record(facts, passing, _outcome())
     assert record["result"] == (
-        "pass: idle send only (claude 2.1.248; wire facts statically inspected at 2.1.248)"
+        f"pass: idle send only (claude {_FLOOR_TEXT}; "
+        f"wire facts statically inspected at {harness.STATIC_INSPECTED_VERSION})"
     )
-    assert record["inspected"]["version"] == "2.1.248"
+    assert record["inspected"]["version"] == _FLOOR_TEXT
     assert record["inspected"]["sha256"] == facts.sha256
     assert record["inspected"]["binary"] == "<resolved claude executable>"
     assert record["idleSend"]["frameProven"] is True
@@ -296,7 +302,7 @@ def test_assembled_record_cannot_claim_pass_without_all_gates() -> None:
 
 def test_record_write_is_atomic_and_redacts_before_replacing(tmp_path: Path) -> None:
     out = tmp_path / "fresh" / "record.json"
-    record = harness.assemble_record(_facts((2, 1, 248)), [], _outcome())
+    record = harness.assemble_record(_facts(_FLOOR), [], _outcome())
     record["leak"] = "tok-do-not-record"
     harness.write_record_atomic(out, record, ("tok-do-not-record",))
     written = json.loads(out.read_text())
@@ -354,7 +360,7 @@ def test_run_conformance_guards_its_output_path(tmp_path: Path) -> None:
 def test_run_conformance_refuses_an_unqualified_binary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(harness, "binary_facts", lambda path=None: _facts((2, 1, 220)))
+    monkeypatch.setattr(harness, "binary_facts", lambda path=None: _facts(_BELOW_FLOOR))
     out = tmp_path / "never-written.json"
     with pytest.raises(harness.ConformanceError, match="same-machine floor"):
         harness.run_conformance("claude", out_path=out)

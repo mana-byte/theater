@@ -1,24 +1,10 @@
-"""Event.path extraction in the codex parser.
-
-Codex's transcript carries file paths in exactly one structured place: the
-``apply_patch`` custom tool call, whose ``input`` is a raw patch text with
-explicit per-file markers (``*** Update File:``, ``*** Add File:``, ``*** Delete
-File:``). Every other tool call — ``exec`` (JavaScript source), ``shell_command``
-(a JSON blob with a ``workdir`` directory), ``local_shell_call`` (a command vector
-with a ``working_directory`` directory) — embeds paths inside code or command
-strings, which the recall contract refuses to parse: a wrong path in the touch
-index is worse than a missing one.
-
-The patch markers are a structured grammar defined in
-codex-rs/apply-patch/src/parser.rs:39-41, not prose, so extracting paths from
-them is reading a structured field. The paths are repo-relative by construction:
-codex's apply_patch applies them relative to the session cwd, so no
-relativisation is needed inside parse.
-"""
+"""Codex parser Event.path extraction from apply_patch, and the resume argv."""
 
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from tests.support.shipped import CodexObserver
 from theater.daemon.trajectory.project import project_events_and_facts
@@ -27,6 +13,8 @@ from theater.harness.base import EventKind, EventPath
 from theater.trajectory import ContentFormat, TimingProvenance, TrajectoryKind
 from theater.trajectory.tools import TrajectoryToolIdentity, tool_operations_for_records
 
+# Every other tool call embeds paths in code or command strings, which the recall contract
+# refuses to parse: a wrong path in the touch index is worse than a missing one.
 #: A minimal apply_patch input that touches three files: one update, one add,
 #: one delete. The patch body is irrelevant to path extraction — only the
 #: ``*** <Verb> File: <path>`` lines matter.
@@ -317,62 +305,46 @@ def test_patch_apply_end_without_valid_changes_is_not_an_activity():
     assert events == []
 
 
-# ---- read: codex has no structured read tool ---------------------------
-
-
-def test_exec_tool_call_yields_no_paths():
-    """The ``exec`` custom tool takes freeform JavaScript source as input.
-
-    File paths appear only embedded in code, which is prose from the recall
-    contract's perspective — not a structured field. So exec yields nothing.
-    """
-    events = _parse(
-        {
-            "type": "custom_tool_call",
-            "name": "exec",
-            "call_id": "c1",
-            "input": "const fs = require('fs'); fs.readFileSync('src/main.rs')",
-        }
-    )
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # The ``exec`` custom tool takes freeform JavaScript source: paths appear only embedded
+        # in code, which is prose to the recall contract, not a structured field.
+        pytest.param(
+            {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "c1",
+                "input": "const fs = require('fs'); fs.readFileSync('src/main.rs')",
+            },
+            id="exec-source",
+        ),
+        # ``shell_command`` carries a ``workdir`` directory, not a file read or written, inside
+        # a JSON blob in the CLI's own dialect.
+        pytest.param(
+            {
+                "type": "function_call",
+                "name": "shell_command",
+                "call_id": "c2",
+                "arguments": json.dumps({"command": "cat src/main.rs", "workdir": "/tmp/repo"}),
+            },
+            id="shell-command",
+        ),
+        pytest.param(
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "c1",
+                "output": [{"type": "input_text", "text": "done"}],
+            },
+            id="tool-result",
+        ),
+        # A garbled input is not a partial guess: no paths, not maybe-paths.
+        pytest.param(_apply_patch_call("not a patch at all"), id="malformed-apply-patch"),
+    ],
+)
+def test_events_without_a_structured_file_field_yield_no_paths(payload):
+    events = _parse(payload)
     assert len(events) == 1
-    assert events[0].paths == ()
-
-
-def test_function_call_shell_command_yields_no_paths():
-    """The ``shell_command`` function call has a ``workdir`` in its arguments,
-    but that is a directory, not a file being read or written — and the
-    ``arguments`` string is a JSON blob whose structure is the CLI's dialect,
-    not a structured field the harness gives us for path extraction."""
-    events = _parse(
-        {
-            "type": "function_call",
-            "name": "shell_command",
-            "call_id": "c2",
-            "arguments": json.dumps({"command": "cat src/main.rs", "workdir": "/tmp/repo"}),
-        }
-    )
-    assert len(events) == 1
-    assert events[0].paths == ()
-
-
-# ---- no paths: events that should never carry paths --------------------
-
-
-def test_tool_result_yields_no_paths():
-    events = _parse(
-        {
-            "type": "custom_tool_call_output",
-            "call_id": "c1",
-            "output": [{"type": "input_text", "text": "done"}],
-        }
-    )
-    assert len(events) == 1
-    assert events[0].paths == ()
-
-
-def test_malformed_apply_patch_input_yields_no_paths():
-    """A garbled input is not a partial guess. No paths, not maybe-paths."""
-    events = _parse(_apply_patch_call("not a patch at all"))
     assert events[0].paths == ()
 
 
