@@ -105,7 +105,6 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 addopts = ["--import-mode=importlib"]
-pythonpath = ["tests"]
 testpaths = ["tests", "packages/regie/tests"]
 markers = [
     "tmux: drives a real tmux server; skipped when tmux is not installed",

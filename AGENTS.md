@@ -195,6 +195,9 @@ packages/regie/src/regie/
   are the separate rule above — those stay deliberate.
 - **UI tests wait for conditions, not fixed sleeps** (`packages/regie/tests/support/waiting.py`):
   CI runners are slower than a laptop, and Textual schedules tasks eagerly.
+- **Shared test helpers live in `tests/support/`** and are imported as
+  `from tests.support.<module> import ...` — one style, and test modules never import each
+  other. Régie-only helpers live in `packages/regie/tests/support/`.
 - **Only MVP tests are kept**: the minimal set that verifies the behaviour —
   one focused test beats several overlapping ones; if two prove the same
   thing, keep one. Don't grow sprawling suites beside a passing test (the 80%
