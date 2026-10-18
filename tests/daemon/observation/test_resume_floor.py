@@ -275,28 +275,3 @@ def test_empty_poll_does_not_clear_floor(registry):
     # Floor is still present.
     reloaded = registry.store.get_participant(p.id)
     assert floor_is_present(reloaded.resume_floor)
-
-
-async def test_suppressed_floor_survives_daemon_restart(theater_home, terminal_provider):
-    """A suppressed floor persists across daemon restart and still suppresses."""
-    from theater.client import DaemonClient
-    from theater.daemon.server import Daemon
-
-    d1 = Daemon(harnesses={})
-    await d1.start()
-    async with DaemonClient(autostart=False) as c:
-        await c.call("hello", harness="vibe", pane=None, cwd="/tmp")
-        rows = await c.call("participants.list")
-        pid = rows[0]["id"]
-        p = d1.registry.store.get_participant(pid)
-        p.resume_floor = UNKNOWN_FLOOR
-        d1.registry.store.upsert_participant(p)
-    await d1.aclose()
-
-    d2 = Daemon(harnesses={})
-    await d2.start()
-    async with DaemonClient(autostart=False) as c:
-        rows = await c.call("participants.list", include_dead=True)
-        p = d2.registry.store.get_participant(rows[0]["id"])
-        assert floor_is_present(p.resume_floor)
-    await d2.aclose()

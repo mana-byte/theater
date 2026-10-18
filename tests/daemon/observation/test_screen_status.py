@@ -71,38 +71,24 @@ def test_unstatused_semantic_progress_clears_a_stale_awaiting_input_hint(registr
 
 # The transcript only settles IDLE or WORKING: an approval modal is silence there,
 # so the screen check must run for every non-DEAD status, not just WORKING.
-@pytest.mark.asyncio
-async def test_an_idle_participant_at_an_approval_screen_becomes_awaiting_input(
-    registry,
-):
-    """The regression: the old gate only checked when status was WORKING.
-
-    A finished turn settles IDLE, so the participant was never screen-checked
-    and AWAITING_INPUT was unreachable in the common case.
-    """
+@pytest.mark.parametrize(
+    ("kind", "start", "expected"),
+    [
+        # A finished turn settles IDLE, so AWAITING_INPUT was unreachable under the old gate.
+        pytest.param(
+            ScreenKind.APPROVAL, Status.IDLE, Status.AWAITING_INPUT, id="approval-while-idle"
+        ),
+        # A turn that ended without an observed boundary must settle IDLE: `_rescue_jobs`
+        # never touches participant status, so it would read WORKING forever.
+        pytest.param(ScreenKind.PROMPT, Status.WORKING, Status.IDLE, id="prompt-while-working"),
+    ],
+)
+async def test_the_screen_reading_settles_the_participant_status(registry, kind, start, expected):
     observer, screen, p = screen_checked(
-        registry,
-        reading=ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.LOW),
+        registry, reading=ScreenReading(kind, ScreenConfidence.LOW), status=start
     )
     await observer._check_idle_screen(p.id, screen)
-    assert registry.get(p.id).status is Status.AWAITING_INPUT
-
-
-@pytest.mark.asyncio
-async def test_a_working_participant_at_a_prompt_becomes_idle(registry):
-    """The turn ended without an observed boundary.
-
-    Settling IDLE is correct, and it is not safe to leave it to the rescue
-    timer: `_rescue_jobs` does not touch participant status, so the
-    participant would read WORKING forever.
-    """
-    observer, screen, p = screen_checked(
-        registry,
-        reading=ScreenReading(ScreenKind.PROMPT, ScreenConfidence.LOW),
-        status=Status.WORKING,
-    )
-    await observer._check_idle_screen(p.id, screen)
-    assert registry.get(p.id).status is Status.IDLE
+    assert registry.get(p.id).status is expected
 
 
 @pytest.mark.asyncio

@@ -194,16 +194,13 @@ def test_rename_with_only_casing_changed_is_applied(registry):
     assert result.name == upper
 
 
-def test_rename_rejects_a_hex_string_id(registry):
+@pytest.mark.parametrize(
+    "name", ["deadbeefcafe", "bad name"], ids=["hex-string-id", "name-with-space"]
+)
+def test_rename_rejects_an_invalid_name(registry, name):
     p = registry.register(harness="vibe", pane=None, cwd="/tmp")
     with pytest.raises(BadRequest):
-        registry.rename(p.id, "deadbeefcafe")
-
-
-def test_rename_rejects_a_name_with_a_space(registry):
-    p = registry.register(harness="vibe", pane=None, cwd="/tmp")
-    with pytest.raises(BadRequest):
-        registry.rename(p.id, "bad name")
+        registry.rename(p.id, name)
 
 
 def test_spawned_metadata_is_normalized_and_name_is_reserved_before_a_pane(registry):
@@ -481,9 +478,6 @@ def test_resolve_stale_missing_name_mapping(registry):
 
 
 _NAME_RE = re.compile(r"^[A-Z][a-z]+$")
-
-
-_HEX = set("0123456789abcdef")
 
 
 def test_every_mask_matches_the_capitalised_ascii_pattern():

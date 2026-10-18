@@ -12,13 +12,6 @@ from theater.daemon.rpc import jobs as jobs_rpc
 from theater.protocol import RemoteError
 
 
-def _fake_inventory_empty():
-    async def observe_inventory():
-        return None
-
-    return observe_inventory
-
-
 async def test_bus_records_the_story(client, terminal_provider):
     await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     kinds = [e["kind"] for e in await client.call("bus.tail")]

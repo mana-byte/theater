@@ -387,12 +387,28 @@ def test_prefix_named_sibling_repo_is_excluded(store, tmp_path):
     )
 
 
-def test_resume_true_when_harness_supports_and_session_id_exists(store, tmp_path):
-    """``resume: true`` when the harness can resume AND a session_id exists."""
+@pytest.mark.parametrize(
+    ("harness", "session_id", "correlation", "resumable", "note"),
+    [
+        pytest.param("vibe", "ses-1", "exact", True, None, id="harness-and-exact-session"),
+        pytest.param("vibe", "ses-1", "heuristic", False, "cwd/time", id="heuristic-session"),
+        # The caller learns a missing session id here, not at spawn time.
+        pytest.param("vibe", None, None, False, "no session id", id="no-session-id"),
+        # An unregistered harness has no adapter to resume with.
+        pytest.param(
+            "nonexistent", "ses-1", None, False, "not registered", id="unregistered-harness"
+        ),
+    ],
+)
+def test_resume_is_reported_as_a_capability(
+    store, tmp_path, harness, session_id, correlation, resumable, note
+):
+    """``resume`` is true only when the harness can resume AND a trusted session_id exists."""
     root = setup_repo(tmp_path)
-    p = add_participant(store, cwd=root, harness="vibe", session_id="ses-1")
-    p.session_correlation = "exact"
-    store.upsert_participant(p)
+    p = add_participant(store, cwd=root, harness=harness, session_id=session_id)
+    if correlation is not None:
+        p.session_correlation = correlation
+        store.upsert_participant(p)
     add_job(store, handle="h1", target_id=p.id)
     add_touch_row(
         store,
@@ -404,67 +420,11 @@ def test_resume_true_when_harness_supports_and_session_id_exists(store, tmp_path
 
     result = recall(store, paths=["f.py"], caller_cwd=root)
     point = result["f.py"]["timeline"][0]
-    assert point["resume"] is True
-    assert "resume_note" not in point
-
-
-def test_resume_false_when_session_id_is_only_heuristic(store, tmp_path):
-    root = setup_repo(tmp_path)
-    p = add_participant(store, cwd=root, harness="vibe", session_id="ses-1")
-    p.session_correlation = "heuristic"
-    store.upsert_participant(p)
-    add_job(store, handle="h1", target_id=p.id)
-    add_touch_row(
-        store,
-        job_handle="h1",
-        path="f.py",
-        sha_before="aaa",
-        sha_after="bbb",
-    )
-
-    result = recall(store, paths=["f.py"], caller_cwd=root)
-    point = result["f.py"]["timeline"][0]
-    assert point["resume"] is False
-    assert "cwd/time" in point["resume_note"]
-
-
-def test_resume_false_when_no_session_id(store, tmp_path):
-    """A harness that can resume but has no recorded session_id cannot
-    actually resume — the caller learns this here, not at spawn time."""
-    root = setup_repo(tmp_path)
-    p = add_participant(store, cwd=root, harness="vibe", session_id=None)
-    add_job(store, handle="h1", target_id=p.id)
-    add_touch_row(
-        store,
-        job_handle="h1",
-        path="f.py",
-        sha_before="aaa",
-        sha_after="bbb",
-    )
-
-    result = recall(store, paths=["f.py"], caller_cwd=root)
-    point = result["f.py"]["timeline"][0]
-    assert point["resume"] is False
-    assert "no session id" in point["resume_note"]
-
-
-def test_resume_false_when_harness_not_registered(store, tmp_path):
-    """An unregistered harness cannot resume — the adapter does not exist."""
-    root = setup_repo(tmp_path)
-    p = add_participant(store, cwd=root, harness="nonexistent", session_id="ses-1")
-    add_job(store, handle="h1", target_id=p.id)
-    add_touch_row(
-        store,
-        job_handle="h1",
-        path="f.py",
-        sha_before="aaa",
-        sha_after="bbb",
-    )
-
-    result = recall(store, paths=["f.py"], caller_cwd=root)
-    point = result["f.py"]["timeline"][0]
-    assert point["resume"] is False
-    assert "not registered" in point["resume_note"]
+    assert point["resume"] is resumable
+    if note is None:
+        assert "resume_note" not in point
+    else:
+        assert note in point["resume_note"]
 
 
 def test_reads_are_counted_not_rendered(store, tmp_path):

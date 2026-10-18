@@ -22,100 +22,66 @@ from theater.harness.observation import (
 from theater.models import (
     now,
 )
+from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
+
+# The same failure grace that protects other source errors protects identity-loss job
+# destruction: quarantine begins at once, but a job is crashed only once the grace elapsed.
+_GRACE_CASES = [
+    pytest.param(30.0, "fresh-job", "running", None, id="within-grace-keeps-the-job-running"),
+    pytest.param(
+        0.0, "old-job", "crashed", TRANSCRIPT_IDENTITY_LOST_CODE, id="after-grace-crashes"
+    ),
+]
 
 
-@pytest.mark.asyncio
+@pytest.mark.parametrize(("grace", "handle", "state", "error_code"), _GRACE_CASES)
 async def test_identity_loss_job_destruction_respects_observation_failure_grace(
-    registry, monkeypatch
+    registry, grace, handle, state, error_code
 ):
-    """A freshly-created job must not be instantly crashed by identity loss.
+    """A freshly-created job is not instantly crashed by identity loss.
 
-    The OBSERVATION_FAILURE_GRACE that protects other source errors also
-    protects identity-loss job destruction: ``max(first_failure, job.created_at)``
-    must elapse before the job is crashed. Quarantine (``_identity_lost``)
-    begins immediately; job destruction waits.
+    ``max(first_failure, job.created_at)`` must elapse before the job is crashed.
     """
-    observer = Observer(registry, harnesses={}, failure_grace=30.0)
+    observer = Observer(registry, harnesses={}, failure_grace=grace)
     participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
     manager = JobManager(registry.store)
     observer.jobs = manager
-    manager.create(handle="fresh-job", caller_id="caller", target_id=participant.id, kind="send")
-
-    # Enter quarantine. The job was just created, so the grace has not elapsed.
-    observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
-
-    assert observer.transcript_identity_lost(participant.id)
-    job = manager.get("fresh-job")
-    assert job.state == "running"
-
-
-@pytest.mark.asyncio
-async def test_identity_loss_job_destruction_crashes_after_grace(registry, monkeypatch):
-    """Once the grace window elapses, identity loss crashes the job."""
-    from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
-
-    observer = Observer(registry, harnesses={}, failure_grace=0.0)
-    participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
-    manager = JobManager(registry.store)
-    observer.jobs = manager
-    manager.create(handle="old-job", caller_id="caller", target_id=participant.id, kind="send")
+    manager.create(handle=handle, caller_id="caller", target_id=participant.id, kind="send")
 
     observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
 
     assert observer.transcript_identity_lost(participant.id)
-    job = manager.get("old-job")
-    assert job.state == "crashed"
-    assert job.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+    job = manager.get(handle)
+    assert job.state == state
+    if error_code is not None:
+        assert job.error_code == error_code
 
 
-@pytest.mark.asyncio
+@pytest.mark.parametrize(("grace", "handle", "state", "error_code"), _GRACE_CASES)
 async def test_identity_loss_restart_replay_applies_grace_to_job_destruction(
-    registry, monkeypatch, vibe_tree
+    registry, vibe_tree, grace, handle, state, error_code
 ):
-    """Restart replay quarantines immediately but does not crash fresh jobs."""
+    """Restart replay quarantines immediately but crashes only jobs that predate the grace."""
     participant = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     participant.session_id = "deadbeef-1111-2222-3333"
     participant.session_correlation = "operator"
     participant.transcript_location = str(vibe_tree["transcript"])
     registry.store.upsert_participant(participant)
 
-    first = Observer(registry, harnesses={}, failure_grace=30.0)
+    first = Observer(registry, harnesses={}, failure_grace=grace)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
 
     manager = JobManager(registry.store)
-    manager.create(handle="replay-job", caller_id="caller", target_id=participant.id, kind="send")
+    manager.create(handle=handle, caller_id="caller", target_id=participant.id, kind="send")
 
-    restarted = Observer(registry, harnesses={}, jobs=manager, failure_grace=30.0)
+    restarted = Observer(registry, harnesses={}, jobs=manager, failure_grace=grace)
     restarted._restore_transcript_identity_loss(participant.id)
 
     assert restarted.transcript_identity_lost(participant.id)
-    assert manager.get("replay-job").state == "running"
-
-
-@pytest.mark.asyncio
-async def test_identity_loss_restart_replay_crashes_old_jobs(registry, monkeypatch, vibe_tree):
-    """Restart replay crashes jobs that predate the grace window."""
-    from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
-
-    participant = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
-    participant.session_id = "deadbeef-1111-2222-3333"
-    participant.session_correlation = "operator"
-    participant.transcript_location = str(vibe_tree["transcript"])
-    registry.store.upsert_participant(participant)
-
-    first = Observer(registry, harnesses={}, failure_grace=0.0)
-    first.mark_transcript_identity_lost(participant.id, "rotation evidence")
-
-    manager = JobManager(registry.store)
-    manager.create(handle="stale-job", caller_id="caller", target_id=participant.id, kind="send")
-
-    restarted = Observer(registry, harnesses={}, jobs=manager, failure_grace=0.0)
-    restarted._restore_transcript_identity_loss(participant.id)
-
-    assert restarted.transcript_identity_lost(participant.id)
-    job = manager.get("stale-job")
-    assert job.state == "crashed"
-    assert job.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+    job = manager.get(handle)
+    assert job.state == state
+    if error_code is not None:
+        assert job.error_code == error_code
 
 
 @pytest.mark.asyncio

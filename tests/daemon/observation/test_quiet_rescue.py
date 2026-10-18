@@ -246,25 +246,18 @@ async def test_a_quiet_participant_over_an_idle_screen_releases_its_caller(regis
     assert job.error_code == "turn_end_unseen"
 
 
-@pytest.mark.asyncio
-async def test_a_busy_screen_is_not_rescued(registry):
-    """Quiet plus a working screen is a slow tool call, not a missed boundary."""
-    observer, screen, cursor, p, jobs = poised(registry, idle=False)
-    await observer._rescue_jobs(p.id, screen, cursor)
-    assert str(jobs.get("h1").state) == "running"
-
-
-@pytest.mark.asyncio
-async def test_an_unreadable_screen_decides_nothing(registry):
-    observer, screen, cursor, p, jobs = poised(registry, capture=None)
-    await observer._rescue_jobs(p.id, screen, cursor)
-    assert str(jobs.get("h1").state) == "running"
-
-
-@pytest.mark.asyncio
-async def test_a_participant_with_no_pane_cannot_be_rescued(registry):
-    """No terminal, no screen, no second opinion — so silence alone decides nothing."""
-    observer, screen, cursor, p, jobs = poised(registry, provider_bound=False)
+@pytest.mark.parametrize(
+    "poise",
+    [
+        # Quiet plus a working screen is a slow tool call, not a missed boundary.
+        pytest.param({"idle": False}, id="busy-screen"),
+        pytest.param({"capture": None}, id="unreadable-screen"),
+        # No terminal, no screen, no second opinion: silence alone decides nothing.
+        pytest.param({"provider_bound": False}, id="no-pane"),
+    ],
+)
+async def test_a_screen_that_cannot_confirm_idleness_rescues_nothing(registry, poise):
+    observer, screen, cursor, p, jobs = poised(registry, **poise)
     await observer._rescue_jobs(p.id, screen, cursor)
     assert str(jobs.get("h1").state) == "running"
 

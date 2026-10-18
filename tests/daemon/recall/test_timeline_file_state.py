@@ -209,48 +209,15 @@ def test_current_distinguishes_unavailable_hash_from_missing_file(store, tmp_pat
     assert result["large.bin"]["current_error"] == "too_large"
 
 
-def test_dirty_true_when_working_tree_differs_from_head(store, tmp_path):
-    """``dirty`` means the working tree differs from HEAD.
-
-    Comes from the one ``git status --porcelain`` call. An uncommitted
-    edit makes the file dirty.
-    """
-    root = setup_repo(tmp_path)
-    p = add_participant(store, cwd=root)
-    add_job(store, handle="h1", target_id=p.id)
-    add_touch_row(
-        store,
-        job_handle="h1",
-        path="f.py",
-        sha_before="aaa",
-        sha_after="bbb",
-    )
-
-    # Create and commit the file, then modify it.
-    f = tmp_path / "f.py"
-    f.write_bytes(b"committed")
-    subprocess.run(
-        ["git", "add", "f.py"],
-        cwd=root,
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=root,
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    f.write_bytes(b"modified")
-
-    result = recall(store, paths=["f.py"], caller_cwd=root)
-    assert result["f.py"]["dirty"] is True
-
-
-def test_dirty_false_when_file_matches_head(store, tmp_path):
-    """A file that matches HEAD is not dirty."""
+@pytest.mark.parametrize(
+    ("edited", "dirty"),
+    [
+        # Comes from the one `git status --porcelain` call: an uncommitted edit is dirty.
+        pytest.param(True, True, id="edited-after-commit"),
+        pytest.param(False, False, id="matches-head"),
+    ],
+)
+def test_dirty_means_the_working_tree_differs_from_head(store, tmp_path, edited, dirty):
     root = setup_repo(tmp_path)
     p = add_participant(store, cwd=root)
     add_job(store, handle="h1", target_id=p.id)
@@ -278,9 +245,11 @@ def test_dirty_false_when_file_matches_head(store, tmp_path):
         timeout=10,
         check=False,
     )
+    if edited:
+        f.write_bytes(b"modified")
 
     result = recall(store, paths=["f.py"], caller_cwd=root)
-    assert result["f.py"]["dirty"] is False
+    assert result["f.py"]["dirty"] is dirty
 
 
 def test_git_root_returns_none_outside_repo(tmp_path):

@@ -66,21 +66,17 @@ def test_get_missing_raises(registry):
         registry.get("nope")
 
 
-def test_resolve_finds_by_id(registry):
+@pytest.mark.parametrize(
+    "key",
+    [
+        pytest.param(lambda p: p.id, id="by-id"),
+        pytest.param(lambda p: p.name, id="by-exact-name"),
+        pytest.param(lambda p: p.name.upper(), id="by-differently-cased-name"),
+    ],
+)
+def test_resolve_finds_a_participant(registry, key):
     p = registry.register(harness="vibe", pane=None, cwd="/tmp")
-    found = registry.resolve(p.id)
-    assert found.id == p.id
-
-
-def test_resolve_finds_by_exact_name(registry):
-    p = registry.register(harness="vibe", pane=None, cwd="/tmp")
-    found = registry.resolve(p.name)
-    assert found.id == p.id
-
-
-def test_resolve_finds_by_differently_cased_name(registry):
-    p = registry.register(harness="vibe", pane=None, cwd="/tmp")
-    found = registry.resolve(p.name.upper())
+    found = registry.resolve(key(p))
     assert found.id == p.id
 
 
@@ -383,72 +379,99 @@ def test_dead_intermediary_does_not_hide_live_descendant_from_budget(store):
     assert live.status is Status.IDLE
 
 
-def test_naming_no_model_is_always_allowed():
+_ALLOWLIST_KINDS = [
+    pytest.param(check_model_allowed, ModelNotAllowed, "vibe", "big", "bigger", id="model"),
+    pytest.param(
+        check_reasoning_allowed, ReasoningNotAllowed, "codex", "high", "higher", id="reasoning"
+    ),
+]
+
+
+@pytest.mark.parametrize(("check", "refusal", "harness", "value", "longer"), _ALLOWLIST_KINDS)
+def test_naming_nothing_is_always_allowed(check, refusal, harness, value, longer):
     """The case every install starts in, and the one that must never break."""
-    check_model_allowed("vibe", None, [])  # does not raise
+    check(harness, None, [])  # does not raise
 
 
-def test_a_listed_model_is_allowed():
-    check_model_allowed("vibe", "big", ["small", "big"])  # does not raise
+@pytest.mark.parametrize(("check", "refusal", "harness", "value", "longer"), _ALLOWLIST_KINDS)
+def test_a_listed_value_is_allowed(check, refusal, harness, value, longer):
+    check(harness, value, ["a-lesser", value])  # does not raise
 
 
-def test_a_model_that_is_not_listed_is_refused():
-    with pytest.raises(ModelNotAllowed) as exc:
-        check_model_allowed("vibe", "enormous", ["small", "big"])
+@pytest.mark.parametrize(
+    ("check", "refusal", "harness", "value", "allowed", "listing"),
+    [
+        pytest.param(
+            check_model_allowed,
+            ModelNotAllowed,
+            "vibe",
+            "enormous",
+            ["small", "big"],
+            "big, small",
+            id="model",
+        ),
+        pytest.param(
+            check_reasoning_allowed,
+            ReasoningNotAllowed,
+            "codex",
+            "ultra",
+            ["low", "high"],
+            "high, low",
+            id="reasoning",
+        ),
+    ],
+)
+def test_a_value_that_is_not_listed_is_refused(check, refusal, harness, value, allowed, listing):
+    with pytest.raises(refusal) as exc:
+        check(harness, value, allowed)
     message = str(exc.value)
-    assert "enormous" in message
+    assert value in message
     # The allowed set, so the fix does not need a second command.
-    assert "big, small" in message
+    assert listing in message
 
 
-def test_an_empty_allowlist_refuses_an_explicit_model():
+@pytest.mark.parametrize(
+    ("check", "refusal", "harness", "value", "guidance"),
+    [
+        pytest.param(
+            check_model_allowed,
+            ModelNotAllowed,
+            "vibe",
+            "big",
+            "theater models --discover vibe",
+            id="model",
+        ),
+        pytest.param(
+            check_reasoning_allowed,
+            ReasoningNotAllowed,
+            "codex",
+            "high",
+            "no reasoning efforts are configured",
+            id="reasoning",
+        ),
+    ],
+)
+def test_an_empty_allowlist_refuses_an_explicit_value(check, refusal, harness, value, guidance):
     """Not silently coerced to the default: that starts the wrong model."""
-    with pytest.raises(ModelNotAllowed) as exc:
-        check_model_allowed("vibe", "big", [])
-    assert "theater models --discover vibe" in str(exc.value)
+    with pytest.raises(refusal) as exc:
+        check(harness, value, [])
+    assert guidance in str(exc.value)
 
 
-def test_the_empty_case_names_the_harness_it_refused_for():
-    with pytest.raises(ModelNotAllowed) as exc:
-        check_model_allowed("claude", "big", [])
+@pytest.mark.parametrize(("check", "refusal", "harness", "value", "longer"), _ALLOWLIST_KINDS)
+def test_the_empty_case_names_the_harness_it_refused_for(check, refusal, harness, value, longer):
+    with pytest.raises(refusal) as exc:
+        check("claude", value, [])
     assert "claude" in str(exc.value)
 
 
-def test_matching_is_exact():
+@pytest.mark.parametrize(("check", "refusal", "harness", "value", "longer"), _ALLOWLIST_KINDS)
+def test_matching_is_exact(check, refusal, harness, value, longer):
     """No prefixes, no case folding: the CLI's spelling is the only spelling."""
-    with pytest.raises(ModelNotAllowed):
-        check_model_allowed("vibe", "BIG", ["big"])
-    with pytest.raises(ModelNotAllowed):
-        check_model_allowed("vibe", "big", ["bigger"])
-
-
-def test_naming_no_reasoning_effort_is_always_allowed():
-    """The case every install starts in, and the one that must never break."""
-    check_reasoning_allowed("codex", None, [])  # does not raise
-
-
-def test_a_listed_reasoning_effort_is_allowed():
-    check_reasoning_allowed("codex", "high", ["low", "high"])  # does not raise
-
-
-def test_a_reasoning_effort_that_is_not_listed_is_refused():
-    with pytest.raises(ReasoningNotAllowed) as exc:
-        check_reasoning_allowed("codex", "ultra", ["low", "high"])
-    message = str(exc.value)
-    assert "ultra" in message
-    assert "high, low" in message
-
-
-def test_an_empty_reasoning_allowlist_refuses_an_explicit_effort():
-    with pytest.raises(ReasoningNotAllowed) as exc:
-        check_reasoning_allowed("codex", "high", [])
-    assert "no reasoning efforts are configured" in str(exc.value)
-
-
-def test_the_reasoning_empty_case_names_the_harness_it_refused_for():
-    with pytest.raises(ReasoningNotAllowed) as exc:
-        check_reasoning_allowed("claude", "high", [])
-    assert "claude" in str(exc.value)
+    with pytest.raises(refusal):
+        check(harness, value.upper(), [value])
+    with pytest.raises(refusal):
+        check(harness, value, [longer])
 
 
 def test_an_empty_string_reasoning_effort_is_rejected():
@@ -457,10 +480,3 @@ def test_an_empty_string_reasoning_effort_is_rejected():
     with pytest.raises(ReasoningNotAllowed) as exc:
         check_reasoning_allowed("codex", "", ["low", "high", ""])
     assert "must not be empty" in str(exc.value)
-
-
-def test_reasoning_matching_is_exact():
-    with pytest.raises(ReasoningNotAllowed):
-        check_reasoning_allowed("codex", "HIGH", ["high"])
-    with pytest.raises(ReasoningNotAllowed):
-        check_reasoning_allowed("codex", "high", ["higher"])

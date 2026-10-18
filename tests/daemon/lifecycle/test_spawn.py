@@ -181,17 +181,27 @@ async def test_spawn_writes_a_config_for_claude(client, terminal_provider):
     assert "--dangerously-skip-permissions" in terminal_provider.creations[0]["command"]
 
 
-async def test_spawn_requires_an_approval_mode(client, terminal_provider):
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        pytest.param({"approval": None}, None, id="missing-approval-mode"),
+        pytest.param(
+            {"approval": "auto"},
+            "approval must be one of manual|edits|yolo, got 'auto'",
+            id="unknown-approval-value",
+        ),
+        pytest.param({"harness": "cursor"}, None, id="unknown-harness"),
+    ],
+)
+async def test_spawn_rejects_bad_arguments(client, terminal_provider, overrides, message):
+    arguments = {"harness": "vibe", "prompt": "hi", "approval": "manual", "cwd": "/tmp"}
+    arguments.update(overrides)
+    arguments = {key: value for key, value in arguments.items() if value is not None}
     with pytest.raises(RemoteError) as exc:
-        await client.call("spawn", harness="vibe", prompt="hi", cwd="/tmp")
+        await client.call("spawn", **arguments)
     assert exc.value.code == "bad_request"
-
-
-async def test_spawn_names_the_allowed_approval_values(client, terminal_provider):
-    with pytest.raises(RemoteError) as exc:
-        await client.call("spawn", harness="vibe", prompt="hi", approval="auto", cwd="/tmp")
-    assert exc.value.code == "bad_request"
-    assert "approval must be one of manual|edits|yolo, got 'auto'" in str(exc.value)
+    if message is not None:
+        assert message in str(exc.value)
 
 
 async def test_spawn_worktree_outside_git_names_child_repos(client, terminal_provider, tmp_path):
@@ -209,12 +219,6 @@ async def test_spawn_worktree_outside_git_names_child_repos(client, terminal_pro
     named = str(exc.value).split("[", 1)[1].split("]", 1)[0]
     assert sorted(named.split(", ")) == ["linked", "older"]
     assert terminal_provider.creations == []
-
-
-async def test_spawn_rejects_an_unknown_harness(client, terminal_provider):
-    with pytest.raises(RemoteError) as exc:
-        await client.call("spawn", harness="cursor", prompt="hi", approval="manual", cwd="/tmp")
-    assert exc.value.code == "bad_request"
 
 
 def allow_models(daemon, **by_harness) -> None:

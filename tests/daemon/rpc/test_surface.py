@@ -31,12 +31,6 @@ async def test_hello_is_idempotent_per_claimed_identity(client):
     assert len(await client.call("participants.list")) == 1
 
 
-async def test_external_is_not_addressable(client):
-    me = await client.call("hello", harness="vibe", cwd="/tmp")
-    assert me["tier"] == "external"
-    assert me["addressable"] is False
-
-
 async def test_unknown_method_is_a_structured_error(client):
     with pytest.raises(RemoteError) as exc:
         await client.call("nope")

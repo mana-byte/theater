@@ -65,31 +65,20 @@ async def test_list_ids_unknown_silently_omitted(client):
     assert rows == []
 
 
-async def test_list_ids_not_a_list_is_bad_request(client):
-    """ids must be a list."""
+@pytest.mark.parametrize(
+    "ids",
+    [
+        pytest.param("abc", id="not-a-list"),
+        pytest.param([1], id="non-string-element"),
+        # An empty string element must not silently widen the query.
+        pytest.param([""], id="empty-string-element"),
+        pytest.param([f"x-{i}" for i in range(201)], id="over-200"),
+    ],
+)
+async def test_list_rejects_malformed_ids(client, ids):
+    """ids must be a list of at most 200 non-empty strings."""
     with pytest.raises(RemoteError) as exc:
-        await client.call("participants.list", ids="abc")
-    assert exc.value.code == "bad_request"
-
-
-async def test_list_ids_element_not_string_is_bad_request(client):
-    """Any non-string element is rejected."""
-    with pytest.raises(RemoteError) as exc:
-        await client.call("participants.list", ids=[1])
-    assert exc.value.code == "bad_request"
-
-
-async def test_list_ids_empty_string_element_is_bad_request(client):
-    """An empty string element must not silently widen the query."""
-    with pytest.raises(RemoteError) as exc:
-        await client.call("participants.list", ids=[""])
-    assert exc.value.code == "bad_request"
-
-
-async def test_list_ids_over_200_is_bad_request(client):
-    """More than 200 ids at once is refused."""
-    with pytest.raises(RemoteError) as exc:
-        await client.call("participants.list", ids=[f"x-{i}" for i in range(201)])
+        await client.call("participants.list", ids=ids)
     assert exc.value.code == "bad_request"
 
 
