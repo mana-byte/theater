@@ -1,104 +1,30 @@
-"""Wave 0 proof: promptless native TUI bootstrap on a shared app-server backend.
-
-Feasibility question (harness-runtime wiring plan §3.1–3.2): a control client
-can call thread/start, but before the first turn there is no rollout and stock
-`codex --remote unix://SOCKET resume THREAD_ID` fails with "no rollout found".
-Can the stock native TUI instead be launched promptlessly as
-`codex --remote unix://SOCKET` — no prompt, no resume id — create/attach its
-own zero-turn thread, while a Theater-like observer discovers that exact
-thread from native evidence, waits for event-based readiness, submits exactly
-one turn/start, and keeps approval answers exclusively in the UI?
-
-Historical answers against the unmodified installed release (codex-cli 0.154.0):
-
-- YES, promptless bootstrap works. With no prompt and no resume id the stock
-  TUI takes the `StartFresh` startup path and eagerly issues `thread/start`
-  (codex-rs `tui/src/app/startup.rs`).
-- YES, exact discovery works. `thread_start_task` broadcasts `thread/started`
-  with the full Thread object to every initialized connection, so an observer
-  that initialized before the UI learns the exact thread id — no cwd/time
-  guessing (the cwd predicate only confirms the broadcast names this repo).
-- NO, pre-subscription does not work at zero turns: `thread/resume` on the
-  live zero-turn thread fails with the exact stock error
-  `no rollout found for thread id <uuid>`. The observer therefore cannot
-  subscribe before the first turn — this is a genuine finding, asserted as
-  explicit evidence below, not worked around.
-- The gap does not block readiness tracking: `thread/status/changed` is
-  broadcast by the ThreadWatchManager to all initialized connections
-  (codex-rs `app-server/src/thread_status.rs` + `outgoing_message.rs` — an
-  empty connection list becomes `OutgoingEnvelope::Broadcast`), so the
-  unsubscribed observer still sees idle/active/waitingOnApproval transitions.
-- YES, approvals stay in the UI, structurally: approval requests are sent to
-  the thread's *subscribed* connections
-  (`ThreadScopedOutgoingMessageSender::send_request` +
-  `ThreadStateManager::subscribed_connection_ids`), and `turn/start` does NOT
-  subscribe its caller (only `thread/start`/`thread/resume` call
-  `try_add_connection_to_thread`). The UI is the only subscribed connection,
-  so the approval overlay and its `y` keybinding are the only answer path.
-- YES, abrupt control-connection close is survivable mid-turn: the backend,
-  the UI, and the turn all continue, and a fresh control client re-subscribes
-  to the exact same thread via `thread/resume` (the rollout exists once the
-  turn started) and receives `turn/completed` for the exact same turn.
-
-One extra stock behavior the fixture must tolerate: after the first user
-message the TUI spawns an ephemeral `ThreadSource::Feature("system")`
-title-generation thread (codex-rs `tui/src/app/thread_title.rs` +
-`tui/src/temporary_structured_request.rs`) and runs a structured turn through
-it, embedding the first-turn prompt verbatim. Those requests carry
-`text.format.type == "json_schema"` and are served filler streams by the mock.
-
-The smoke test proves the full chain against the unmodified installed release:
-
-1. isolated app-server on a private Unix socket, isolated CODEX_HOME, temp repo
-2. Theater-like observing control client completes initialize/initialized
-   first, so the later `thread/started` broadcast must reach it
-3. real native TUI in tmux: `codex --remote unix://SOCKET`, no prompt, no resume
-4. exact thread discovery from the `thread/started` broadcast; the zero-turn
-   `thread/resume` attempt captures the exact stock error as evidence
-5. UI readiness from state/event predicates: broadcast received with a live
-   thread status, TUI process alive and rendered — no sleep
-6. exactly one `turn/start` from the control client after readiness; the
-   scripted model turn demands an escalated command; the approval reaches
-   only the subscribed connection (the UI) and only the UI answers (`y`)
-7. abrupt close of the control connection mid-turn (the mock provider holds
-   the continuation); a fresh control client re-subscribes to the exact same
-   thread and observes the same turn complete via `turn/completed`, while
-   backend and UI stay alive
-
-The offline tests cover the wire shapes and the mock's dispatch rules without
-codex or tmux: RFC 6455 framing, the upgrade handshake, upstream's mock SSE
-format and config template, the exact-evidence discovery predicate, and the
-json_schema-based routing that keeps TUI-internal structured requests from
-consuming the scripted turn streams.
-
-Run the smoke (opt-in, real binary, real tmux on a private server):
-
-    THEATER_CODEX_NATIVE_SMOKE=1 uv run --frozen pytest -q \\
-        tests/harness/codex/test_native_ui_bootstrap_proof.py -k native_ui_bootstrap
-
-Everything else here runs offline and unconditionally.
-"""
+"""Opt-in real-codex promptless TUI bootstrap on a shared app-server."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import importlib.util
-import json
 import os
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
-from tests.support.paths import TESTS_DIR
+from tests.support.codex_bootstrap_proof import (
+    FINAL_ASSISTANT_MESSAGE,
+    FIRST_TURN_PROMPT,
+    MARKER_CONTENT,
+    MARKER_FILENAME,
+    PROOF_COMMAND,
+    client,
+    codex_env,
+    discover_ui_thread,
+    mock_responses,
+    ui_ready_evidence,
+)
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     codex_version_refusal,
     qualified_versions_range_text,
@@ -106,311 +32,22 @@ from theater.harness.builtin.plugins.codex.runtime_plan import (
 
 pytestmark = pytest.mark.integration
 
-_FIXTURES = TESTS_DIR / "fixtures" / "codex_native_ui_bootstrap"
 
 #: The approval overlay title the stock TUI renders for an escalated command
 #: (codex-rs `tui/src/bottom_pane/approval_overlay.rs`, Exec branch).
 APPROVAL_OVERLAY_TITLE = "Would you like to run the following command?"
 
+
 #: Default keybinding for ApprovalKeymap::approve in the stock TUI
 #: (codex-rs `tui/src/keymap.rs`).
 APPROVE_KEY = "y"
 
-MARKER_FILENAME = "approval_marker.txt"
-MARKER_CONTENT = "theater-ui-approval-proof"
-PROOF_COMMAND = f"/bin/sh -c 'echo {MARKER_CONTENT} > {MARKER_FILENAME}'"
-FIRST_TURN_PROMPT = "Run the proof command now."
-FINAL_ASSISTANT_MESSAGE = "Theater bootstrap proof turn completed."
 
 #: Exact stock error a zero-turn `thread/resume` answers with, on the
 #: historical unmodified 0.154.0 app-server (the rollout is only materialised once the
 #: first turn starts).
 NO_ROLLOUT_ERROR_PREFIX = "no rollout found for thread id "
 
-
-def _load_module(name: str, path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-client = _load_module(
-    "codex_ui_bootstrap_client", TESTS_DIR / "native" / "codex_ui_bootstrap_client.py"
-)
-mock_responses = _load_module("codex_native_bootstrap_mock", _FIXTURES / "mock_responses.py")
-codex_env = _load_module("codex_native_bootstrap_env", _FIXTURES / "codex_env.py")
-
-
-# ---------------------------------------------------------------------------
-# Exact-evidence discovery predicate (pure, tested offline)
-# ---------------------------------------------------------------------------
-
-
-def discover_ui_thread(received: list[client.Received], *, cwd: str) -> dict:
-    """Find the thread/started broadcast for exactly this cwd.
-
-    Identity comes from the notification payload itself: the app-server
-    broadcasts `thread/started` with the full Thread object, and we require an
-    exact string match on its `cwd`. No creation-time window, no directory
-    listing, no guessing.
-    """
-    matches = [
-        received_event.payload["thread"]
-        for received_event in received
-        if received_event.kind == "notification"
-        and received_event.method == "thread/started"
-        and received_event.payload.get("thread", {}).get("cwd") == cwd
-    ]
-    if len(matches) != 1:
-        raise AssertionError(
-            f"expected exactly one thread/started broadcast for cwd {cwd}, got {len(matches)}"
-        )
-    return matches[0]
-
-
-def ui_ready_evidence(started_thread: dict) -> list[str]:
-    """State/event predicates that gate the single turn/start, in order.
-
-    The zero-turn `thread/resume` attempt has already failed with the exact
-    stock error (captured separately), so readiness here rests on the
-    `thread/started` broadcast itself: the thread must be live (idle) in the
-    payload the app-server broadcast to every initialized connection.
-    """
-    status = started_thread.get("status")
-    if not (isinstance(status, dict) and status.get("type") in ("idle", "active")):
-        raise AssertionError(f"thread is not in a live state: {status!r}")
-    return [
-        f"thread/started broadcast delivered the exact id {started_thread['id']}",
-        f"thread state is live: {status.get('type')}",
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Offline wire-shape tests
-# ---------------------------------------------------------------------------
-
-
-def test_client_text_frames_are_masked_and_round_trip() -> None:
-    for size in (0, 5, 125, 300, 70_000):
-        payload = bytes(range(256))[: min(size, 256)] * (size // 256 + 1)
-        payload = payload[:size]
-        mask = b"\x0f\x1e\x2d\x3c"
-        frame = client.encode_client_text_frame(payload, mask)
-        assert frame[0] == 0x81  # FIN + text
-        assert frame[1] & 0x80, "client frames must set the mask bit"
-        length = frame[1] & 0x7F
-        offset = 2
-        if length == 126:
-            length = int.from_bytes(frame[2:4], "big")
-            offset = 4
-        elif length == 127:
-            length = int.from_bytes(frame[2:10], "big")
-            offset = 10
-        assert length == size
-        body = frame[offset:]
-        assert len(body) == 4 + size
-        unmasked = bytes(byte ^ body[i % 4] for i, byte in enumerate(body[4:]))
-        assert unmasked == payload
-
-
-def test_decode_server_frame_small_medium_large() -> None:
-    for size in (3, 200, 70_000):
-        payload = b"x" * size
-        wire = _server_frame(payload)
-        frame = client.decode_server_frame(wire)
-        assert frame is not None
-        assert frame.fin and frame.opcode == client.OP_TEXT
-        assert frame.payload == payload
-        assert client._frame_consumed(wire) == len(wire)
-
-
-def test_decode_server_frame_waits_for_complete_header() -> None:
-    payload = b"hello"
-    wire = _server_frame(payload)
-    for cut in range(len(wire)):
-        assert client.decode_server_frame(wire[:cut]) is None
-        assert client._frame_consumed(wire[:cut]) is None
-
-
-def test_upgrade_request_carries_required_headers_and_no_origin() -> None:
-    key = base64.b64encode(b"0123456789abcdef").decode()
-    request = client.build_upgrade_request("/", key).decode("ascii")
-    lines = request.split("\r\n")
-    assert lines[0] == "GET / HTTP/1.1"
-    assert not any(line.lower().startswith("origin:") for line in lines)
-    headers = {line.split(":")[0].lower(): line.split(":", 1)[1].strip() for line in lines[1:-2]}
-    assert headers["upgrade"] == "websocket"
-    assert headers["connection"] == "Upgrade"
-    assert headers["sec-websocket-version"] == "13"
-    assert headers["sec-websocket-key"] == key
-
-
-def test_expected_accept_header_matches_rfc_6455_vector() -> None:
-    # RFC 6455 §1.3 example handshake.
-    assert client.expected_accept_header("dGhlIHNhbXBsZSBub25jZQ==") == (
-        "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-    )
-
-
-def test_escalated_sse_stream_matches_upstream_mock_format() -> None:
-    stream = mock_responses.escalated_exec_call_response(PROOF_COMMAND, "call-proof-1", "m.txt")
-    events = [line for line in stream.splitlines() if line.startswith("event: ")]
-    assert [line.removeprefix("event: ") for line in events] == [
-        "response.created",
-        "response.output_item.done",
-        "response.completed",
-    ]
-    data = [
-        line.removeprefix("data: ") for line in stream.splitlines() if line.startswith("data: ")
-    ]
-    parsed = [json.loads(item) for item in data]
-    assert parsed[0]["response"]["id"] == "resp-proof-1"
-    call = parsed[1]["item"]
-    assert call["type"] == "function_call"
-    assert call["name"] == "exec_command"
-    arguments = json.loads(call["arguments"])
-    assert arguments["cmd"] == PROOF_COMMAND
-    assert arguments["sandbox_permissions"] == "require_escalated"
-    assert arguments["justification"].startswith("Theater native UI bootstrap proof")
-
-
-def test_final_message_stream_completes_the_turn() -> None:
-    stream = mock_responses.final_assistant_message_response(FINAL_ASSISTANT_MESSAGE)
-    data = [
-        json.loads(line.removeprefix("data: "))
-        for line in stream.splitlines()
-        if line.startswith("data: ")
-    ]
-    message = data[1]["item"]
-    assert message["type"] == "message"
-    assert message["content"][0]["text"] == FINAL_ASSISTANT_MESSAGE
-    assert data[2]["type"] == "response.completed"
-
-
-def test_mock_config_toml_mirrors_upstream_provider_template(tmp_path):
-    config = codex_env.write_mock_config(tmp_path / "home", "http://127.0.0.1:9/v1")
-    text = config.read_text()
-    assert 'model_provider = "mock_provider"' in text
-    assert 'base_url = "http://127.0.0.1:9/v1"' in text
-    assert 'wire_api = "responses"' in text
-    assert 'approval_policy = "on-request"' in text
-    assert "request_max_retries = 0" in text
-
-
-def test_git_repo_fixture_is_a_real_repo(tmp_path):
-    repo = codex_env.make_git_repo(tmp_path / "repo")
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
-    )
-    assert head.stdout.strip()
-
-
-def test_discover_ui_thread_requires_exactly_one_broadcast_for_cwd() -> None:
-    thread = {"id": "019da1a1-bed9-7a43-88a2-b49d43915021", "cwd": "/tmp/repo"}
-
-    def notification(method, payload):
-        return client.Received(kind="notification", method=method, id=None, payload=payload)
-
-    received = [
-        notification("thread/tokenUsage/updated", {"threadId": "other"}),
-        notification("thread/started", {"thread": thread}),
-    ]
-    assert discover_ui_thread(received, cwd="/tmp/repo") == thread
-    with pytest.raises(AssertionError, match="exactly one thread/started"):
-        discover_ui_thread(received, cwd="/tmp/different")
-    duplicate = notification("thread/started", {"thread": dict(thread)})
-    with pytest.raises(AssertionError, match="exactly one thread/started"):
-        discover_ui_thread([*received, duplicate], cwd="/tmp/repo")
-
-
-def test_ui_ready_evidence_requires_a_live_broadcast_status() -> None:
-    thread = {"id": "t1", "status": {"type": "idle"}}
-    assert ui_ready_evidence(thread) == [
-        "thread/started broadcast delivered the exact id t1",
-        "thread state is live: idle",
-    ]
-    with pytest.raises(AssertionError, match="not in a live state"):
-        ui_ready_evidence({"id": "t1", "status": {"type": "notLoaded"}})
-
-
-def test_is_structured_request_detects_json_schema_output_only() -> None:
-    # Ordinary turn request: no `text` key at all.
-    assert not mock_responses.is_structured_request({"model": "mock-model", "input": []})
-    # Title/recap generation request: turn started with an `output_schema`.
-    assert mock_responses.is_structured_request(
-        {"model": "mock-model", "text": {"format": {"type": "json_schema", "strict": True}}}
-    )
-    assert not mock_responses.is_structured_request({"text": {}})
-    assert not mock_responses.is_structured_request(None)
-
-
-def test_mock_dispatch_routes_marked_turns_and_filler_to_structured() -> None:
-    turn_request = json.dumps({"model": "mock-model", "input": [{"text": FIRST_TURN_PROMPT}]})
-    title_request = json.dumps(
-        {
-            "model": "mock-model",
-            "input": [{"text": "generate a title for: " + FIRST_TURN_PROMPT}],
-            "text": {"format": {"type": "json_schema"}},
-        }
-    )
-    exec_stream = mock_responses.escalated_exec_call_response(PROOF_COMMAND, "call-1", "m.txt")
-    final_stream = mock_responses.final_assistant_message_response(FINAL_ASSISTANT_MESSAGE)
-    mock = mock_responses.MockResponsesServer([exec_stream, final_stream], marker=FIRST_TURN_PROMPT)
-
-    # A TUI-internal structured request embeds the prompt verbatim but must
-    # get filler, without consuming the scripted turn streams.
-    assert mock.next_stream("/v1/responses", title_request, structured=True) == mock.filler
-    assert mock.streams == [exec_stream, final_stream]
-    assert mock.requests == []
-
-    # The real turn's requests consume the script in order.
-    assert mock.next_stream("/v1/responses", turn_request) == exec_stream
-    assert mock.next_stream("/v1/responses", turn_request) == final_stream
-    assert mock.next_stream("/v1/responses", turn_request) is None
-
-
-def test_mock_gate_holds_only_the_second_matched_stream() -> None:
-    turn_request = json.dumps({"input": [{"text": FIRST_TURN_PROMPT}]})
-    exec_stream = mock_responses.escalated_exec_call_response(PROOF_COMMAND, "call-1", "m.txt")
-    final_stream = mock_responses.final_assistant_message_response(FINAL_ASSISTANT_MESSAGE)
-    filler = mock_responses.final_assistant_message_response('{"title": "t"}')
-    mock = mock_responses.MockResponsesServer(
-        [exec_stream, final_stream], marker=FIRST_TURN_PROMPT, filler=filler
-    )
-    mock.hold_second_response()
-    assert mock.next_stream("/v1/responses", turn_request) == exec_stream
-
-    result: list[str] = []
-    holder = threading.Thread(
-        target=lambda: result.append(mock.next_stream("/v1/responses", turn_request))
-    )
-    holder.start()
-    holder.join(timeout=1.0)
-    assert holder.is_alive(), "second matched stream must be held on the gate"
-    assert result == []
-    mock.release_held_response()
-    holder.join(timeout=5.0)
-    assert result == [final_stream]
-
-
-def _server_frame(payload: bytes) -> bytes:
-    """Unmasked server text frame, the shape the app-server sends."""
-    length = len(payload)
-    if length < 126:
-        header = bytes([0x81, length])
-    elif length < 1 << 16:
-        header = bytes([0x81, 126]) + length.to_bytes(2, "big")
-    else:
-        header = bytes([0x81, 127]) + length.to_bytes(8, "big")
-    return header + payload
-
-
-# ---------------------------------------------------------------------------
-# Real-native smoke (opt-in)
-# ---------------------------------------------------------------------------
 
 SMOKE_ENV_VAR = "THEATER_CODEX_NATIVE_SMOKE"
 
@@ -729,11 +366,6 @@ def _assert_sentinels(
     assert len(matched_requests) == 2, (
         f"expected exactly two turn model calls, got {len(matched_requests)}"
     )
-    # TUI/app-server-internal model traffic varies by release (none on 0.148;
-    # a structured title turn plus a turn_ids summary request on 0.150; a
-    # structured title turn on 0.154+). The mock never lets it consume the
-    # scripted streams — only a matching request pops one — so the exactly-two
-    # matches above prove the turn's model calls were the scripted ones.
 
 
 @pytest.mark.tmux
@@ -820,6 +452,8 @@ async def test_codex_native_ui_bootstrap_proof() -> None:
 
 
 _UPDATE_AVAILABLE = '{"latest_version": "99.0.0", "last_checked_at": "2026-10-05T00:00:00Z"}'
+
+
 _PRODUCTION_STARTUP_DEADLINE = 30.0
 
 

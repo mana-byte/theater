@@ -1,20 +1,13 @@
-"""Offline tests for the mock provider's dispatch, hold, and steer scripting.
-
-No codex binary and no tmux: these prove the scripting rules the
-qualification relies on — last-user-message dispatch (the steer seam),
-structured-request filler, FIFO exhaustion, the held stream's
-disconnect tolerance, and the approval exec-call derivation.
-
-Everything else here (the suites that need the real binary) is opt-in in
-tests/harness/codex/test_native_runtime_proof.py.
-"""
+"""Codex mock model provider: dispatch, held streams, compat log and archive digest."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
 import socket
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import ModuleType
@@ -35,9 +28,18 @@ from tests.native.codex_mock_provider import (
     last_user_message_text,
     standard_rules,
 )
+from tests.support.codex_bootstrap_proof import (
+    FINAL_ASSISTANT_MESSAGE,
+    FIRST_TURN_PROMPT,
+    PROOF_COMMAND,
+    codex_env,
+    mock_responses,
+)
 from tests.support.paths import fixture
 
 STEER_TEXT = "Stop writing the essay immediately. Reply with exactly: steered"
+
+
 RIVERS = "Write a long, detailed 1200 word essay about rivers."
 
 
@@ -348,3 +350,116 @@ def test_fetch_refuses_an_archive_that_does_not_match_the_published_digest(
     with pytest.raises(fetch.FetchError, match="does not match the digest"):
         fetch.fetch_release("0.0.0", tmp_path / "bin")
     assert unpacked == []
+
+
+def test_escalated_sse_stream_matches_upstream_mock_format() -> None:
+    stream = mock_responses.escalated_exec_call_response(PROOF_COMMAND, "call-proof-1", "m.txt")
+    events = [line for line in stream.splitlines() if line.startswith("event: ")]
+    assert [line.removeprefix("event: ") for line in events] == [
+        "response.created",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    data = [
+        line.removeprefix("data: ") for line in stream.splitlines() if line.startswith("data: ")
+    ]
+    parsed = [json.loads(item) for item in data]
+    assert parsed[0]["response"]["id"] == "resp-proof-1"
+    call = parsed[1]["item"]
+    assert call["type"] == "function_call"
+    assert call["name"] == "exec_command"
+    arguments = json.loads(call["arguments"])
+    assert arguments["cmd"] == PROOF_COMMAND
+    assert arguments["sandbox_permissions"] == "require_escalated"
+    assert arguments["justification"].startswith("Theater native UI bootstrap proof")
+
+
+def test_final_message_stream_completes_the_turn() -> None:
+    stream = mock_responses.final_assistant_message_response(FINAL_ASSISTANT_MESSAGE)
+    data = [
+        json.loads(line.removeprefix("data: "))
+        for line in stream.splitlines()
+        if line.startswith("data: ")
+    ]
+    message = data[1]["item"]
+    assert message["type"] == "message"
+    assert message["content"][0]["text"] == FINAL_ASSISTANT_MESSAGE
+    assert data[2]["type"] == "response.completed"
+
+
+def test_mock_config_toml_mirrors_upstream_provider_template(tmp_path):
+    config = codex_env.write_mock_config(tmp_path / "home", "http://127.0.0.1:9/v1")
+    text = config.read_text()
+    assert 'model_provider = "mock_provider"' in text
+    assert 'base_url = "http://127.0.0.1:9/v1"' in text
+    assert 'wire_api = "responses"' in text
+    assert 'approval_policy = "on-request"' in text
+    assert "request_max_retries = 0" in text
+
+
+def test_git_repo_fixture_is_a_real_repo(tmp_path):
+    repo = codex_env.make_git_repo(tmp_path / "repo")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    )
+    assert head.stdout.strip()
+
+
+def test_is_structured_request_detects_json_schema_output_only() -> None:
+    # Ordinary turn request: no `text` key at all.
+    assert not mock_responses.is_structured_request({"model": "mock-model", "input": []})
+    # Title/recap generation request: turn started with an `output_schema`.
+    assert mock_responses.is_structured_request(
+        {"model": "mock-model", "text": {"format": {"type": "json_schema", "strict": True}}}
+    )
+    assert not mock_responses.is_structured_request({"text": {}})
+    assert not mock_responses.is_structured_request(None)
+
+
+def test_mock_dispatch_routes_marked_turns_and_filler_to_structured() -> None:
+    turn_request = json.dumps({"model": "mock-model", "input": [{"text": FIRST_TURN_PROMPT}]})
+    title_request = json.dumps(
+        {
+            "model": "mock-model",
+            "input": [{"text": "generate a title for: " + FIRST_TURN_PROMPT}],
+            "text": {"format": {"type": "json_schema"}},
+        }
+    )
+    exec_stream = mock_responses.escalated_exec_call_response(PROOF_COMMAND, "call-1", "m.txt")
+    final_stream = mock_responses.final_assistant_message_response(FINAL_ASSISTANT_MESSAGE)
+    mock = mock_responses.MockResponsesServer([exec_stream, final_stream], marker=FIRST_TURN_PROMPT)
+
+    # A TUI-internal structured request embeds the prompt verbatim but must
+    # get filler, without consuming the scripted turn streams.
+    assert mock.next_stream("/v1/responses", title_request, structured=True) == mock.filler
+    assert mock.streams == [exec_stream, final_stream]
+    assert mock.requests == []
+
+    # The real turn's requests consume the script in order.
+    assert mock.next_stream("/v1/responses", turn_request) == exec_stream
+    assert mock.next_stream("/v1/responses", turn_request) == final_stream
+    assert mock.next_stream("/v1/responses", turn_request) is None
+
+
+def test_mock_gate_holds_only_the_second_matched_stream() -> None:
+    turn_request = json.dumps({"input": [{"text": FIRST_TURN_PROMPT}]})
+    exec_stream = mock_responses.escalated_exec_call_response(PROOF_COMMAND, "call-1", "m.txt")
+    final_stream = mock_responses.final_assistant_message_response(FINAL_ASSISTANT_MESSAGE)
+    filler = mock_responses.final_assistant_message_response('{"title": "t"}')
+    mock = mock_responses.MockResponsesServer(
+        [exec_stream, final_stream], marker=FIRST_TURN_PROMPT, filler=filler
+    )
+    mock.hold_second_response()
+    assert mock.next_stream("/v1/responses", turn_request) == exec_stream
+
+    result: list[str] = []
+    holder = threading.Thread(
+        target=lambda: result.append(mock.next_stream("/v1/responses", turn_request))
+    )
+    holder.start()
+    holder.join(timeout=1.0)
+    assert holder.is_alive(), "second matched stream must be held on the gate"
+    assert result == []
+    mock.release_held_response()
+    holder.join(timeout=5.0)
+    assert result == [final_stream]

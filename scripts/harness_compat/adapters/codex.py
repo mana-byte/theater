@@ -40,24 +40,24 @@ _MOCK_LOG = "codex_mock_requests.jsonl"
 _BENIGN_MOCK_ROUTES = frozenset({("POST", "/v1/analytics/codex/turn-costs")})
 _CONSISTENCY = (
     "tests/compat/test_codex.py",
-    "tests/harness/codex/test_native_runtime_proof.py::TestOfflineConformanceBundle",
-    "tests/harness/codex/test_native_runtime_proof.py::TestBundleIndex",
+    "tests/harness/codex/test_native_conformance.py::TestOfflineConformanceBundle",
+    "tests/harness/codex/test_native_conformance.py::TestBundleIndex",
 )
 _UI_CONTROL = (
-    "tests/harness/codex/test_native_ui_bootstrap_proof.py::"
+    "tests/integration/codex/test_native_ui_bootstrap.py::"
     "test_codex_native_ui_starts_a_thread_unattended[update-available-control-False]"
 )
 _GREEN = (
-    "tests/harness/codex/test_native_runtime_proof.py::TestNativeSmokeHandshakeAndFraming",
-    "tests/harness/codex/test_native_runtime_proof.py::TestNativeSmokeSharedUiSession",
-    "tests/harness/codex/test_native_runtime_proof.py::TestNativeSmokeTurnControls",
-    "tests/harness/codex/test_native_runtime_proof.py::TestNativeSmokeForkReconnectSurvival",
-    "tests/harness/codex/test_native_runtime_proof.py::TestNativeSmokeRemoteNecessity",
-    "tests/harness/codex/test_native_ui_bootstrap_proof.py::test_codex_native_ui_bootstrap_proof",
-    "tests/harness/codex/test_native_ui_bootstrap_proof.py::"
+    "tests/integration/codex/test_native_smoke.py::TestNativeSmokeHandshakeAndFraming",
+    "tests/integration/codex/test_native_smoke.py::TestNativeSmokeSharedUiSession",
+    "tests/integration/codex/test_native_smoke.py::TestNativeSmokeTurnControls",
+    "tests/integration/codex/test_native_smoke.py::TestNativeSmokeForkReconnectSurvival",
+    "tests/integration/codex/test_native_smoke.py::TestNativeSmokeRemoteNecessity",
+    "tests/integration/codex/test_native_ui_bootstrap.py::test_codex_native_ui_bootstrap_proof",
+    "tests/integration/codex/test_native_ui_bootstrap.py::"
     "test_codex_native_ui_starts_a_thread_unattended[update-available-True]",
     _UI_CONTROL,
-    "tests/harness/codex/test_native_ui_bootstrap_proof.py::"
+    "tests/integration/codex/test_native_ui_bootstrap.py::"
     "test_codex_native_ui_starts_a_thread_unattended[worktree-of-trusted-repo-True]",
 )
 
