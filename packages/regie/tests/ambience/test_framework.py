@@ -124,6 +124,8 @@ class _Sticky(Probe):
     """Draws in every phase so the band's visibility shows the driver's state."""
 
     min_rows: ClassVar[int] = 2
+    intro_seconds = 0.2  # short transitions: the app tests wait for them in real time
+    outro_seconds = 0.2
 
 
 async def _set_app_focus(pilot, focused: bool) -> None:
