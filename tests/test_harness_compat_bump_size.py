@@ -11,6 +11,7 @@ import pytest
 from scripts.harness_compat.adapters import (
     claude,
     codex,
+    codex_bump,
     opencode,
     opencode_bump,
     pi,
@@ -18,7 +19,6 @@ from scripts.harness_compat.adapters import (
     vibe,
     vibe_bump,
 )
-from scripts.harness_compat.contract import version_key
 
 _SOURCE = Path(__file__).parents[1]
 _ADAPTERS = {
@@ -30,7 +30,7 @@ _ADAPTERS = {
 }
 _INPUTS = {
     "claude": (claude._PROBE_SOURCE,),
-    "codex": (codex._PLAN, codex._INDEX),
+    "codex": (codex_bump.PLAN,),
     "opencode": (opencode_bump.RUNTIME_PLAN,),
     "pi": (pi_bump._CONSTANTS,),
     "vibe": (vibe_bump.COMPAT,),
@@ -51,31 +51,12 @@ def _measure_bump(name: str, root: Path) -> tuple[set[Path], int, set[Path]]:
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(_SOURCE / relative, target)
-    # Snapshot before staging Codex input so only publishable changes count.
     before = _snapshot(root)
     adapter = _ADAPTERS[name]
     gate = adapter.verified(root)
     declared = set(_INPUTS[name]) if name != "claude" else set()
 
-    if name == "codex":
-        highest = max(gate.versions, key=version_key)
-        major, minor, patch = version_key(highest)
-        version = f"{major}.{minor}.{patch + 1}"
-        available = [
-            path
-            for path in (_SOURCE / codex._FIXTURES).iterdir()
-            if path.name in gate.versions and path.is_dir() and codex._complete_bundle(path)
-        ]
-        source_bundle = max(available, key=lambda path: version_key(path.name))
-        staged = codex._FIXTURES / "candidates" / version
-        shutil.copytree(source_bundle, root / staged)
-        published = codex._FIXTURES / version
-        declared.update(
-            published / path.relative_to(root / staged)
-            for path in (root / staged).rglob("*")
-            if path.is_file()
-        )
-    elif name == "claude":
+    if name == "claude":
         assert gate.floor is not None
         version = gate.floor
     else:
@@ -95,7 +76,7 @@ def _measure_bump(name: str, root: Path) -> tuple[set[Path], int, set[Path]]:
     assert not any(path.parts[:3] == ("tests", "fixtures", "harness_compat") for path in changed)
 
     lines = sum(_changed_lines(before.get(path, b""), after.get(path, b"")) for path in changed)
-    if name in {"opencode", "pi", "vibe"}:
+    if name in {"codex", "opencode", "pi", "vibe"}:
         assert lines <= 4, f"{name}: {lines} changed diff lines"
     assert adapter.apply_bump(root, [version]) == []
     assert _snapshot(root) == after
