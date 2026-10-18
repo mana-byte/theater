@@ -243,7 +243,7 @@ class _Diagnostics:
         self.calls.append({"after_id": after_id, "limit": limit})
         items = tuple(row for row in self.rows if int(row["id"]) > after_id)[:limit]
         if wait_seconds and not items:
-            await asyncio.sleep(0.01)  # stands in for the daemon-side block
+            await asyncio.sleep(0.1)  # stands in for the daemon-side block; 100 Hz kept the CPU hot
         return SimpleNamespace(value=SimpleNamespace(items=items))
 
 
@@ -421,7 +421,8 @@ class _Trajectory:
         )
 
     async def follow(self, stream_id: str, cursor: str, *, wait_seconds: int) -> object:
-        del stream_id, cursor, wait_seconds
+        del stream_id, cursor
+        await asyncio.sleep(wait_seconds)  # the daemon holds the long-poll open; never spin hot
         return SimpleNamespace(value={"stream_id": "trajectory-a", "upserts": []})
 
     async def search(self, participant_id: str, query: str, *, limit: int) -> object:

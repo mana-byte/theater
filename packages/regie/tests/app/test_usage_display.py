@@ -83,7 +83,9 @@ async def test_usage_footer_starts_hidden_and_dollar_toggles_only_the_footer() -
 
 
 @pytest.mark.asyncio
-async def test_agent_cost_shows_on_the_selected_row_only_even_with_the_footer_hidden() -> None:
+async def test_agent_cost_shows_on_the_selected_row_only_even_with_the_footer_hidden(
+    fast_count_up,
+) -> None:
     app, client, _presentation = build_app(usage_visible=False)
 
     async with app.run_test(size=(100, 36)) as pilot:
@@ -122,7 +124,9 @@ class _LateState(FakeState):
 
 
 @pytest.mark.asyncio
-async def test_startup_usage_waits_for_participants_so_costs_appear_immediately() -> None:
+async def test_startup_usage_waits_for_participants_so_costs_appear_immediately(
+    fast_count_up,
+) -> None:
     app, client, _presentation = build_app(usage_visible=False)
     app._state = cast(StateController, _LateState(make_projection()))
 
@@ -142,7 +146,9 @@ async def test_startup_usage_waits_for_participants_so_costs_appear_immediately(
 
 
 @pytest.mark.asyncio
-async def test_hovering_an_unselected_agent_shows_its_cost_until_the_pointer_leaves() -> None:
+async def test_hovering_an_unselected_agent_shows_its_cost_until_the_pointer_leaves(
+    fast_count_up,
+) -> None:
     app, _client, _presentation = build_app(usage_visible=False)
 
     async with app.run_test(size=(100, 36)) as pilot:
@@ -169,8 +175,19 @@ async def test_hovering_an_unselected_agent_shows_its_cost_until_the_pointer_lea
 
 
 @pytest.mark.asyncio
-async def test_selected_agent_cost_counts_up_like_the_footer_and_others_just_update() -> None:
+async def test_selected_agent_cost_counts_up_like_the_footer_and_others_just_update(
+    fast_count_up, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app, client, _presentation = build_app(usage_visible=False)
+    ticks: list[str] = []  # every frame the selected agent's count-up drew, in order
+    count_tick = AgentLeaf._tick_cost
+
+    def recording_tick(leaf: AgentLeaf) -> None:
+        count_tick(leaf)
+        if leaf.participant_id == "participant-1":
+            ticks.append(str(leaf.render()))
+
+    monkeypatch.setattr(AgentLeaf, "_tick_cost", recording_tick)
 
     async with app.run_test(size=(100, 36)) as pilot:
         tree = app.query_one(ParticipantTree)
@@ -182,19 +199,15 @@ async def test_selected_agent_cost_counts_up_like_the_footer_and_others_just_upd
         await wait_until(pilot, lambda: tree.selected_participant_id is not None, 5.0)
         assert tree.selected_participant_id == "participant-1"
         # Startup: the first cost counts up from zero, as the footer does.
-        await wait_until(pilot, lambda: "$0." in row("participant-1"), 5.0)
-        assert "$0.42" not in row("participant-1")
         await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
+        assert any("$0." in tick and "$0.42" not in tick for tick in ticks)
+        ticks.clear()
 
         # Selected: the count passes through intermediate values before settling.
         client.usage.participant_cost_microcents = 142_000_000
         await app._refresh_usage()
-        await wait_until(
-            pilot,
-            lambda: "$0.42" not in row("participant-1") and "$1.42" not in row("participant-1"),
-            5.0,
-        )
         await wait_until(pilot, lambda: "$1.42" in row("participant-1"), 5.0)
+        assert any("$0.42" not in tick and "$1.42" not in tick for tick in ticks)
 
         # Unselected: the value is adopted silently and shows as is on selection.
         await pilot.press("j")

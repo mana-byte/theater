@@ -149,7 +149,9 @@ async def _counting_leaf(app, pilot, tree):
     return leaf
 
 
-async def test_visible_cost_count_up_completes_and_releases_the_clock(tmp_path: Path) -> None:
+async def test_visible_cost_count_up_completes_and_releases_the_clock(
+    tmp_path: Path, fast_count_up
+) -> None:
     projection = replace(
         make_projection(), participants=MappingProxyType({"a": make_participant("a", name="a")})
     )

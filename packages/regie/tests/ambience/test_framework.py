@@ -158,6 +158,9 @@ async def test_the_band_plays_under_the_tree_when_its_setting_says(
         await wait_until(pilot, app._trajectory_has_focus)
         await wait_until(pilot, lambda: bool(band.display) is not on_tree)
         await pilot.press("escape")
+        # Leaving the trajectory removes the focused timeline, and Textual may not deliver its
+        # blur in time; the app re-syncs on the next focus event, which is delivered here.
+        app._sync_ambience()
         await wait_until(pilot, lambda: bool(band.display) is on_tree)
 
 
