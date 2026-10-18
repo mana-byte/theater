@@ -1,3 +1,5 @@
+"""The tmux terminal provider against a real, isolated tmux server."""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,12 +13,11 @@ from pathlib import Path
 import pytest
 from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig, PresentationTarget
-from regie.tmux import bootstrap, terminals
+from regie.tmux import bootstrap
 from regie.tmux.bootstrap import REGIE_DEFAULT_SESSION
 from regie.tmux.command import TmuxError, available, run, sequence_argv
 from regie.tmux.identity import pane_snapshot
 from regie.tmux.presentation import TmuxPresentation
-from regie.tmux.session import REGIE_LAUNCH_SESSION_OPTION
 from regie.tmux.terminals import (
     create_terminal,
     deliver_action,
@@ -27,65 +28,6 @@ from regie.tmux.terminals import (
 )
 
 pytestmark = [pytest.mark.tmux, pytest.mark.integration]
-
-
-async def test_provider_launch_prefers_regie_pinned_session(monkeypatch) -> None:
-    calls: list[tuple[str, ...]] = []
-
-    async def fake_run(*args: str, **_kwargs) -> str:
-        calls.append(args)
-        if args[0] == "show-options":
-            assert args[-1] == REGIE_LAUNCH_SESSION_OPTION
-            return "$7"
-        if args[0] == "list-panes":
-            return "$2\t%2\t0\t\t\n$7\t%7\t0\t1\t%7"
-        raise AssertionError(args)
-
-    monkeypatch.setattr(terminals, "run", fake_run)
-
-    assert await terminals._launch_session() == "$7"
-    assert calls[-1][0] == "list-panes"
-
-
-async def test_provider_launch_ignores_stale_regie_pin_and_prefers_default(monkeypatch) -> None:
-    async def fake_run(*args: str, **_kwargs) -> str:
-        if args[0] == "show-options":
-            return "$7"
-        if args[0] == "list-panes":
-            return "$7\t%8\t0\t1\t%7\n$2\t%2\t0\t\t"
-        if args[0] == "list-sessions":
-            return f"zeta\n{REGIE_DEFAULT_SESSION}\nalpha"
-        raise AssertionError(args)
-
-    monkeypatch.setattr(terminals, "run", fake_run)
-
-    assert await terminals._launch_session() == REGIE_DEFAULT_SESSION
-
-
-async def test_provider_launch_creates_default_session_when_unpinned(monkeypatch) -> None:
-    calls: list[tuple[str, ...]] = []
-
-    async def fake_run(*args: str, **_kwargs) -> str:
-        calls.append(args)
-        if args[0] == "show-options":
-            return ""
-        if args[0] == "list-sessions":
-            return "work"
-        if args[0] == "new-session":
-            return ""
-        raise AssertionError(args)
-
-    monkeypatch.setattr(terminals, "run", fake_run)
-
-    assert await terminals._launch_session(cwd="/project") == REGIE_DEFAULT_SESSION
-    assert calls[-1] == (
-        "new-session",
-        "-d",
-        "-s",
-        REGIE_DEFAULT_SESSION,
-        "-c",
-        "/project",
-    )
 
 
 @pytest.fixture
