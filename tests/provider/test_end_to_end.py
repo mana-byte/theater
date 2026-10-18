@@ -1,4 +1,4 @@
-"""Public RC10 candidate flow through an independent provider process."""
+"""Public flow through an independent provider process: spawn, adoption, workspaces, lost acks."""
 
 from __future__ import annotations
 

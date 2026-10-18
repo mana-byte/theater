@@ -1,4 +1,4 @@
-"""Black-box checks for the standalone RC10 non-tmux provider fixture process."""
+"""Black-box checks for the standalone non-tmux provider fixture process."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ async def _callback_peer(socket_path: Path) -> AsyncIterator[_CallbackPeer]:
                 "result": {
                     "api": {"major": 1, "minor": 1},
                     "daemon_instance_id": "fixture-daemon",
-                    "package_version": "1.0.0rc10",
+                    "package_version": "0.0.0-test",
                     "capabilities": ["terminal-provider.v1"],
                     "limits": _LIMITS,
                     "provider_generation": 7,
@@ -218,7 +218,6 @@ def _integer(value: object) -> int:
     return value
 
 
-@pytest.mark.asyncio
 async def test_fixture_process_connects_to_candidate_daemon_public_socket(daemon) -> None:
     credential = "fixture-candidate-credential"
     provider_id = await raw_register_provider(paths.socket_path(), credential)
@@ -265,9 +264,8 @@ async def test_fixture_process_connects_to_candidate_daemon_public_socket(daemon
         assert [entry["method"] for entry in physical_events(provider)] == ["terminal.create"]
 
 
-@pytest.mark.asyncio
 async def test_fixture_process_handles_public_callbacks_with_durable_evidence() -> None:
-    root = Path(tempfile.mkdtemp(prefix="r10peer-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="provider-peer-", dir="/tmp"))
     socket_path = root / "callback.sock"
     try:
         async with (
@@ -340,9 +338,8 @@ async def test_fixture_process_handles_public_callbacks_with_durable_evidence() 
         shutil.rmtree(root, ignore_errors=True)
 
 
-@pytest.mark.asyncio
 async def test_fixture_process_replaces_occupants_reuses_ids_and_deduplicates_execution() -> None:
-    root = Path(tempfile.mkdtemp(prefix="r10peer-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="provider-peer-", dir="/tmp"))
     socket_path = root / "callback.sock"
     try:
         async with _callback_peer(socket_path) as peer:
@@ -413,9 +410,8 @@ async def test_fixture_process_replaces_occupants_reuses_ids_and_deduplicates_ex
         shutil.rmtree(root, ignore_errors=True)
 
 
-@pytest.mark.asyncio
 async def test_fixture_process_allows_independent_terminals_but_serializes_one_terminal() -> None:
-    root = Path(tempfile.mkdtemp(prefix="r10peer-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="provider-peer-", dir="/tmp"))
     socket_path = root / "callback.sock"
     try:
         async with (
@@ -491,14 +487,13 @@ async def test_fixture_process_allows_independent_terminals_but_serializes_one_t
         shutil.rmtree(root, ignore_errors=True)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("control", "expected_physical"), [("disconnect_before", 0), ("disconnect_after", 1)]
 )
 async def test_fixture_process_disconnect_controls_bound_execution_evidence(
     control: str, expected_physical: int
 ) -> None:
-    root = Path(tempfile.mkdtemp(prefix="r10peer-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="provider-peer-", dir="/tmp"))
     socket_path = root / "callback.sock"
     try:
         async with (
@@ -515,9 +510,8 @@ async def test_fixture_process_disconnect_controls_bound_execution_evidence(
         shutil.rmtree(root, ignore_errors=True)
 
 
-@pytest.mark.asyncio
 async def test_fixture_process_timeout_replays_unknown_without_repeating_side_effect() -> None:
-    root = Path(tempfile.mkdtemp(prefix="r10peer-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="provider-peer-", dir="/tmp"))
     socket_path = root / "callback.sock"
     try:
         async with _callback_peer(socket_path) as peer:

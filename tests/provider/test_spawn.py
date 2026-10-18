@@ -1,4 +1,4 @@
-"""Focused RC10 provider-backed spawn acceptance and fencing checks."""
+"""Provider-backed spawn and adoption: reservation, fencing, rollback, exact-identity adoption."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import func, select
 
+from tests.support.provider_records import online_provider, register_provider
 from tests.support.waiting import settle_operations
 from theater.daemon.operations import OperationOutcome
 from theater.daemon.persistence.repositories._json import decode_json
@@ -18,12 +19,13 @@ from theater.daemon.rpc.spawning import _spawn
 from theater.daemon.schema import launch_reservations, orchestration_events, participants
 from theater.daemon.spawning.models import Reservation
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
-from theater.daemon.terminals import ProviderUnavailable
+from theater.daemon.terminals import ProviderUnavailable, TerminalIdentityMismatch
 from theater.daemon.worktrees import identity as workspace_identity_module
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validate_callback_request, validator_for
 from theater.harness.base import LaunchPlan
-from theater.models import BadRequest, JobState, ProviderRecord, Status, now
+from theater.models import BadRequest, JobState, Status, Tier
+from theater.provenance import TranscriptProvenance
 
 pytestmark = pytest.mark.usefixtures("available_harness_binaries")
 
@@ -42,23 +44,6 @@ async def test_missing_harness_binary_refuses_spawn_before_reserving_state(
 
     assert daemon.store.operations.get_idempotency("operator-a", "missing-binary") is None
     assert daemon.store.conn.execute(select(func.count()).select_from(participants)).scalar() == 0
-
-
-def _provider(provider_id: str, selector: str) -> ProviderRecord:
-    timestamp = now()
-    return ProviderRecord(
-        provider_id=provider_id,
-        selector=selector,
-        kind="fixture",
-        credential_verifier="a" * 64,
-        configuration_version=1,
-        capabilities=("terminal-provider.v1",),
-        limits={},
-        generation=1,
-        last_report_revision=1,
-        created_at=timestamp,
-        updated_at=timestamp,
-    )
 
 
 def _identity(provider_id: str, participant_id: str) -> dict[str, object]:
@@ -94,10 +79,7 @@ def _git(repository: Path, *args: str) -> str:
 
 
 def _install_provider(daemon, provider_id: str = "provider-tmux", selector: str = "tmux") -> None:
-    with daemon.store.write_unit() as unit:
-        daemon.store.providers.register(
-            _provider(provider_id, selector), connection=unit.connection
-        )
+    register_provider(daemon, provider_id, selector=selector)
 
 
 def _make_launch_preparation(monkeypatch, daemon) -> None:
@@ -127,9 +109,7 @@ def _make_launch_preparation(monkeypatch, daemon) -> None:
 async def test_provider_launch_pins_daemon_resolved_executable(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _install_provider(daemon)
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    online_provider(daemon, monkeypatch)
     fixture_which = shutil.which
     resolved = "/opt/homebrew/bin/codex"
 
@@ -204,9 +184,7 @@ def test_public_spawn_request_defaults_an_omitted_prompt_to_empty() -> None:
 async def test_root_and_child_spawn_use_reserved_ids_and_handoff_workspace(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _install_provider(daemon)
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    online_provider(daemon, monkeypatch)
     _make_launch_preparation(monkeypatch, daemon)
     dispatched: list[dict[str, object]] = []
 
@@ -325,9 +303,7 @@ async def test_private_spawn_uses_configured_default_provider(
 async def test_private_spawn_reports_unconfirmed_launch_without_replaying(
     daemon, monkeypatch, tmp_path
 ) -> None:
-    _install_provider(daemon)
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    online_provider(daemon, monkeypatch)
     _make_launch_preparation(monkeypatch, daemon)
     error = {"code": "terminal_create_failed", "message": "tmux creation failed"}
     calls = 0
@@ -424,9 +400,7 @@ async def test_selected_provider_absence_and_no_failover(daemon, monkeypatch, tm
 async def test_pre_dispatch_failure_rolls_back_reserved_state(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _install_provider(daemon)
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    online_provider(daemon, monkeypatch)
 
     async def refuse_preparation(*_args, **_kwargs):
         raise BadRequest("launch plan cannot be built")
@@ -466,9 +440,7 @@ async def test_pre_dispatch_failure_removes_only_its_durable_unique_workspace(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     repository = _repository(tmp_path)
-    _install_provider(daemon)
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    online_provider(daemon, monkeypatch)
 
     async def refuse_preparation(*_args, **_kwargs):
         raise BadRequest("launch plan cannot be built")
@@ -507,9 +479,7 @@ async def test_spawn_resolves_git_before_acceptance_and_skips_it_for_replay(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     repository = _repository(tmp_path)
-    _install_provider(daemon)
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    online_provider(daemon, monkeypatch)
     _make_launch_preparation(monkeypatch, daemon)
 
     async def reject(*_args, **_kwargs):
@@ -552,9 +522,7 @@ async def test_spawn_resolves_git_before_acceptance_and_skips_it_for_replay(
 async def test_definitive_create_rejection_rolls_back_after_persisting_target(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _install_provider(daemon)
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    online_provider(daemon, monkeypatch)
     _make_launch_preparation(monkeypatch, daemon)
     observed_target: list[tuple[str | None, int | None]] = []
 
@@ -600,9 +568,7 @@ async def test_definitive_create_rejection_rolls_back_after_persisting_target(
 async def test_lost_create_ack_stays_uncertain_and_retains_workspace(
     daemon, monkeypatch, tmp_path
 ) -> None:
-    _install_provider(daemon)
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    online_provider(daemon, monkeypatch)
     _make_launch_preparation(monkeypatch, daemon)
     calls = 0
 
@@ -664,3 +630,175 @@ async def test_lost_create_ack_stays_uncertain_and_retains_workspace(
     assert daemon.store.terminal_bindings.get(str(accepted["participant_id"])) is None
     assert daemon.store.workspaces.get_usage(row.workspace_usage_id).released_at is None
     assert daemon.registry.get(str(accepted["participant_id"])).status is Status.IDLE
+
+
+def _terminal(*, occupant: str = "occupant-a", pid: int = 42) -> dict[str, object]:
+    return {
+        "provider_id": "provider-a",
+        "provider_generation": 1,
+        "terminal_id": "terminal-a",
+        "terminal_incarnation": "incarnation-a",
+        "occupant": {
+            "occupant_id": occupant,
+            "harness": "codex",
+            "cwd": "/tmp/adopted",
+        },
+        "process": {"pid": pid, "started_at": 10.0, "executable": "/bin/codex"},
+    }
+
+
+async def test_explicit_adoption_uses_fresh_inspect_and_binds_new_participant(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    online_provider(daemon, monkeypatch, "provider-a")
+    inspected: list[tuple[str, int, str, str]] = []
+
+    async def inspect(provider_id, generation, terminal_id, incarnation, *, screen_max_bytes=0):
+        inspected.append((provider_id, generation, terminal_id, incarnation))
+        return {
+            "provider_generation": generation,
+            "report_revision": 2,
+            "terminal": _terminal(),
+            "presence": {"state": "absent", "revision": 1},
+            "lifecycle": {"alive": True},
+        }
+
+    monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
+    accepted = ParticipantLaunchService(daemon).adopt(
+        client_id="operator-a",
+        idempotency_key="adopt-a",
+        params={
+            "provider_id": "provider-a",
+            "terminal_id": "terminal-a",
+            "terminal_incarnation": "incarnation-a",
+        },
+    )
+    validator_for(METHOD_CATALOG["frontend.participants.adopt"].result_schema_id).validate(accepted)
+    await settle_operations(daemon)
+
+    participant_id = str(accepted["participant_id"])
+    participant = daemon.registry.get(participant_id)
+    binding = daemon.store.terminal_bindings.get(participant_id)
+    assert inspected == [("provider-a", 1, "terminal-a", "incarnation-a")]
+    assert participant.tier is Tier.ADOPTED
+    assert participant.origin.value == "adopted"
+    assert participant.harness == "codex"
+    assert participant.cwd == "/tmp/adopted"
+    assert binding is not None and binding.occupant_evidence["occupant_id"] == "occupant-a"
+    operation = daemon.operation_service.get(str(accepted["operation_id"]))
+    assert operation.state == "succeeded"
+    assert operation.dispatch_terminal_incarnation == "incarnation-a"
+
+
+async def test_adoption_refuses_replaced_process_for_existing_external(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    online_provider(daemon, monkeypatch, "provider-a")
+    external = daemon.registry.register(
+        harness="codex",
+        pane=None,
+        pane_pid=41,
+        cwd="/tmp/adopted",
+        session_id="trusted-session",
+    )
+    external.session_correlation = str(TranscriptProvenance.EXACT)
+    external.pid = 41
+    daemon.store.upsert_participant(external)
+
+    async def inspect(*_args, **_kwargs):
+        return {
+            "provider_generation": 1,
+            "report_revision": 2,
+            "terminal": _terminal(pid=42),
+            "presence": {"state": "absent", "revision": 1},
+            "lifecycle": {"alive": True, "session_id": "trusted-session"},
+        }
+
+    monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
+    accepted = ParticipantLaunchService(daemon).adopt(
+        client_id="operator-a",
+        idempotency_key="adopt-replaced",
+        params={
+            "provider_id": "provider-a",
+            "terminal_id": "terminal-a",
+            "terminal_incarnation": "incarnation-a",
+            "participant_id": external.id,
+        },
+    )
+    await settle_operations(daemon)
+
+    operation = daemon.operation_service.get(str(accepted["operation_id"]))
+    assert operation.state == "failed"
+    assert operation.error_code == TerminalIdentityMismatch.code
+    assert daemon.store.terminal_bindings.get(external.id) is None
+    assert daemon.registry.get(external.id).status is Status.IDLE
+    assert daemon.registry.get(external.id).termination_reason is None
+
+
+async def test_adoption_refuses_inspection_of_replaced_incarnation(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    online_provider(daemon, monkeypatch, "provider-a")
+
+    async def inspect(*_args, **_kwargs):
+        terminal = _terminal()
+        terminal["terminal_incarnation"] = "replacement-incarnation"
+        return {
+            "provider_generation": 1,
+            "report_revision": 2,
+            "terminal": terminal,
+            "presence": {"state": "absent", "revision": 1},
+            "lifecycle": {"alive": True},
+        }
+
+    monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
+    accepted = ParticipantLaunchService(daemon).adopt(
+        client_id="operator-a",
+        idempotency_key="adopt-stale",
+        params={
+            "provider_id": "provider-a",
+            "terminal_id": "terminal-a",
+            "terminal_incarnation": "incarnation-a",
+        },
+    )
+    await settle_operations(daemon)
+    operation = daemon.operation_service.get(str(accepted["operation_id"]))
+    assert operation.state == "failed"
+    assert operation.error_code == "terminal_identity_mismatch"
+    participant = daemon.registry.get(str(accepted["participant_id"]))
+    assert participant.status is Status.DEAD
+    assert participant.termination_reason == "adoption_failed"
+
+
+async def test_adoption_refuses_definitively_dead_occupant_and_retires_reservation(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    online_provider(daemon, monkeypatch, "provider-a")
+
+    async def inspect(*_args, **_kwargs):
+        return {
+            "provider_generation": 1,
+            "report_revision": 2,
+            "terminal": _terminal(),
+            "presence": {"state": "absent", "revision": 1},
+            "lifecycle": {"alive": False},
+        }
+
+    monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
+    accepted = ParticipantLaunchService(daemon).adopt(
+        client_id="operator-a",
+        idempotency_key="adopt-dead",
+        params={
+            "provider_id": "provider-a",
+            "terminal_id": "terminal-a",
+            "terminal_incarnation": "incarnation-a",
+        },
+    )
+    await settle_operations(daemon)
+
+    operation = daemon.operation_service.get(str(accepted["operation_id"]))
+    participant = daemon.registry.get(str(accepted["participant_id"]))
+    assert operation.state == "failed"
+    assert operation.error_code == TerminalIdentityMismatch.code
+    assert participant.status is Status.DEAD
+    assert daemon.store.terminal_bindings.get(participant.id) is None

@@ -1,4 +1,4 @@
-"""Focused RC10 provider registry and public lifecycle checks."""
+"""Provider registry and public provider lifecycle: registration, leases, reports and inventory."""
 
 from __future__ import annotations
 
