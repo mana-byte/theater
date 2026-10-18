@@ -95,6 +95,40 @@ def _identity(generation: int, *, occupant: str = "occupant-a") -> dict:
     }
 
 
+_PROCESS_FACTS = {"pid": 42, "started_at": 2.0, "executable": "/bin/agent"}
+
+
+def _bind_terminal(
+    store: _Store,
+    *,
+    generation: int,
+    health: str = "healthy",
+    process_facts: dict | None = _PROCESS_FACTS,
+) -> None:
+    """Persist participant-a bound to terminal-a at the given provider generation."""
+    with store.write_unit() as unit:
+        store._participants.upsert(
+            Participant(id="participant-a", harness="codex", tier=Tier.EXTERNAL, cwd=None),
+            connection=unit.connection,
+        )
+        store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id="participant-a",
+                provider_id="provider-a",
+                provider_generation=generation,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-a",
+                occupant_evidence={"occupant_id": "occupant-a"},
+                process_facts=process_facts,
+                health=health,
+                report_revision=0,
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+
+
 def test_registration_is_idempotent_and_never_projects_the_verifier(tmp_path: Path) -> None:
     store = _Store(tmp_path / "providers.db")
     clock = _Clock(1.0)
@@ -295,27 +329,7 @@ async def test_inspect_snapshot_does_not_stale_a_delayed_heartbeat(
     try:
         _register(service)
         generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
-        with store.write_unit() as unit:
-            store._participants.upsert(
-                Participant(id="participant-a", harness="codex", tier=Tier.EXTERNAL, cwd=None),
-                connection=unit.connection,
-            )
-            store.terminal_bindings.bind(
-                TerminalBindingRecord(
-                    participant_id="participant-a",
-                    provider_id="provider-a",
-                    provider_generation=generation,
-                    terminal_id="terminal-a",
-                    terminal_incarnation="incarnation-a",
-                    occupant_evidence={"occupant_id": "occupant-a"},
-                    process_facts={"pid": 42, "started_at": 2.0, "executable": "/bin/agent"},
-                    health="healthy",
-                    report_revision=0,
-                    created_at=1.0,
-                    updated_at=1.0,
-                ),
-                connection=unit.connection,
-            )
+        _bind_terminal(store, generation=generation)
 
         revisions = iter((3, 5))
 
@@ -360,27 +374,7 @@ def test_report_restores_only_an_exact_terminal_identity(tmp_path: Path) -> None
         "limits": {},
     }
     service.registry.register(client_id="operator-a", idempotency_key="register-a", params=params)
-    with store.write_unit() as unit:
-        store._participants.upsert(
-            Participant(id="participant-a", harness="codex", tier=Tier.EXTERNAL, cwd=None),
-            connection=unit.connection,
-        )
-        store.terminal_bindings.bind(
-            TerminalBindingRecord(
-                participant_id="participant-a",
-                provider_id="provider-a",
-                provider_generation=0,
-                terminal_id="terminal-a",
-                terminal_incarnation="incarnation-a",
-                occupant_evidence={"occupant_id": "occupant-a"},
-                process_facts={"pid": 42, "started_at": 2.0, "executable": "/bin/agent"},
-                health="reconciling",
-                report_revision=0,
-                created_at=1.0,
-                updated_at=1.0,
-            ),
-            connection=unit.connection,
-        )
+    _bind_terminal(store, generation=0, health="reconciling")
     generation, _token = service.connections.acquire_callback("provider-a", "credential-a")
     restored = service.report(
         "provider-a",
@@ -430,27 +424,7 @@ def test_reconfirming_a_healthy_terminal_journals_nothing(tmp_path: Path) -> Non
     service = _service(store, clock)
     _register(service)
     generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
-    with store.write_unit() as unit:
-        store._participants.upsert(
-            Participant(id="participant-a", harness="codex", tier=Tier.EXTERNAL, cwd=None),
-            connection=unit.connection,
-        )
-        store.terminal_bindings.bind(
-            TerminalBindingRecord(
-                participant_id="participant-a",
-                provider_id="provider-a",
-                provider_generation=generation,
-                terminal_id="terminal-a",
-                terminal_incarnation="incarnation-a",
-                occupant_evidence={"occupant_id": "occupant-a"},
-                process_facts={"pid": 42, "started_at": 2.0, "executable": "/bin/agent"},
-                health="healthy",
-                report_revision=0,
-                created_at=1.0,
-                updated_at=1.0,
-            ),
-            connection=unit.connection,
-        )
+    _bind_terminal(store, generation=generation)
     service.report("provider-a", generation, 1, {"terminals": [_identity(generation)]})
     before = store.journal.current_sequence()
 
@@ -471,26 +445,7 @@ def test_complete_inventory_marks_disappeared_bindings_missing(tmp_path: Path) -
     service = _service(store, clock)
     _register(service)
     generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
-    with store.write_unit() as unit:
-        store._participants.upsert(
-            Participant(id="participant-a", harness="codex", tier=Tier.EXTERNAL, cwd=None),
-            connection=unit.connection,
-        )
-        store.terminal_bindings.bind(
-            TerminalBindingRecord(
-                participant_id="participant-a",
-                provider_id="provider-a",
-                provider_generation=generation,
-                terminal_id="terminal-a",
-                terminal_incarnation="incarnation-a",
-                occupant_evidence={"occupant_id": "occupant-a"},
-                health="healthy",
-                report_revision=0,
-                created_at=1.0,
-                updated_at=1.0,
-            ),
-            connection=unit.connection,
-        )
+    _bind_terminal(store, generation=generation, process_facts=None)
 
     service.report("provider-a", generation, 1, {"terminals": [], "complete": False})
     binding = store.terminal_bindings.get("participant-a")
