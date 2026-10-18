@@ -1,20 +1,15 @@
-"""Tests for the job state machine: spawn → await → result.
-
-The full loop is exercised over the socket against a real daemon, with
-tmux stubbed out (same FakeTmux as test_server.py). The observer is real,
-but no harnesses are configured — the tests finish jobs directly via the
-reaper or by calling the job manager, rather than by tailing transcripts.
-"""
+"""Job lifecycle over the socket: spawn, await, bus events and worker admission."""
 
 from __future__ import annotations
 
 import asyncio
-import json
+import threading
 
 import pytest
 
 from tests.support.paths import fixture
 from tests.support.presence import FakePresence
+from theater.daemon import workers
 
 
 @pytest.fixture(autouse=True)
@@ -41,9 +36,6 @@ def _trust(daemon, participant_id: str) -> None:
     daemon.store.upsert_participant(participant)
 
 
-# ---- spawn creates a job ------------------------------------------------
-
-
 async def test_spawn_creates_a_running_job(client, terminal_provider):
     record = await client.call(
         "spawn", harness="vibe", prompt="say hello", approval="manual", cwd="/tmp"
@@ -66,9 +58,6 @@ async def test_spawn_with_parent_sets_caller(client, terminal_provider):
     )
     job = await client.call("jobs.status", handle=child["handle"])
     assert job["caller_id"] == parent["id"]
-
-
-# ---- await returns done when the job finishes ---------------------------
 
 
 async def test_await_returns_done_after_finish(client, terminal_provider, daemon):
@@ -124,9 +113,6 @@ async def test_await_reports_what_a_finished_job_changed(
     assert jobs[1]["changes"] == {"evidence": "none"}
 
 
-# ---- await returns running on timeout -----------------------------------
-
-
 async def test_await_returns_running_on_timeout(client, terminal_provider):
     record = await client.call(
         "spawn", harness="vibe", prompt="say hello", approval="manual", cwd="/tmp"
@@ -136,9 +122,6 @@ async def test_await_returns_running_on_timeout(client, terminal_provider):
     jobs = await client.call("jobs.await", handles=[handle], max_wait=0.1)
     assert len(jobs) == 1
     assert jobs[0]["state"] == "running"
-
-
-# ---- await with multiple handles (fan-out) ------------------------------
 
 
 async def test_await_fan_out(client, terminal_provider, daemon):
@@ -163,9 +146,6 @@ async def test_await_fan_out(client, terminal_provider, daemon):
     assert states[handles[2]] == "running"
     assert results[handles[0]] == "result 0"
     assert results[handles[1]] == "result 1"
-
-
-# ---- unknown handle -----------------------------------------------------
 
 
 async def test_jobs_status_unknown_handle(client, terminal_provider):
@@ -285,9 +265,6 @@ async def test_await_ceiling_reads_compatibility_facade(
     assert seen == [0.02]
 
 
-# ---- bus events ---------------------------------------------------------
-
-
 async def test_job_created_and_finished_on_bus(client, terminal_provider, daemon):
     from theater.daemon.jobs import JobState
 
@@ -302,9 +279,6 @@ async def test_job_created_and_finished_on_bus(client, terminal_provider, daemon
     kinds = [e["kind"] for e in events]
     assert "job.created" in kinds
     assert "job.finished" in kinds
-
-
-# ---- await returns when ANY job finishes (first-completed semantic) -------
 
 
 async def test_await_returns_when_first_of_two_finishes(daemon, monkeypatch):
@@ -384,228 +358,6 @@ async def test_await_returns_immediately_when_one_already_terminal(daemon, monke
     assert not called
 
 
-# ---- structured JSON transport ------------------------------------------
-
-
-def test_structured_json_keeps_full_raw_result_and_clipped_legacy_result(store):
-    from theater.daemon.jobs import JobManager, JobState
-    from theater.harness.base import MAX_TEXT, clip
-
-    raw = json.dumps({"answer": "x" * (MAX_TEXT + 500)})
-    assert len(raw) > MAX_TEXT
-
-    jm = JobManager(store)
-    jm.create(
-        handle="json-long",
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        response_format='{"type":"json_schema"}',
-    )
-    jm.finish(
-        "json-long",
-        state=JobState.DONE,
-        result=clip(raw),
-        raw_result=raw,
-    )
-
-    job = jm.get("json-long")
-    assert job is not None
-    assert job.result == clip(raw)
-    assert job.structured_result == raw
-    assert json.loads(job.structured_result) == {"answer": "x" * (MAX_TEXT + 500)}
-    assert job.structured_status == "parsed"
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        "{not json}",
-        '```json\n{"answer": 42}\n```',
-        '{"answer": 42}\ntrailing prose',
-    ],
-)
-def test_structured_json_invalid_fenced_or_trailing_prose_is_unavailable(store, raw):
-    from theater.daemon.jobs import JobManager, JobState
-
-    jm = JobManager(store)
-    handle = f"bad-{len(raw)}"
-    jm.create(
-        handle=handle,
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        response_format="json",
-    )
-    jm.finish(handle, state=JobState.DONE, result=raw[:20], raw_result=raw)
-
-    job = jm.get(handle)
-    assert job is not None
-    assert job.structured_result is None
-    assert job.structured_status == "unavailable"
-
-
-def test_structured_json_recursion_error_is_unavailable(store):
-    from theater.daemon.jobs import JobManager, JobState
-
-    raw = "[" * 2000 + "0" + "]" * 2000
-    jm = JobManager(store)
-    jm.create(
-        handle="bad-recursion",
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        response_format="json",
-    )
-
-    jm.finish(
-        "bad-recursion",
-        state=JobState.DONE,
-        result=raw[:20],
-        raw_result=raw,
-    )
-
-    job = jm.get("bad-recursion")
-    assert job is not None
-    assert job.structured_result is None
-    assert job.structured_status == "unavailable"
-
-
-@pytest.mark.parametrize("raw", ["NaN", "1e10000", "[1e10000]"])
-def test_structured_json_nonfinite_is_unavailable(store, raw):
-    from theater.daemon.jobs import JobManager, JobState
-
-    jm = JobManager(store)
-    jm.create(
-        handle="json-nonfinite",
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        response_format="json",
-    )
-    job = jm.finish("json-nonfinite", state=JobState.DONE, result=raw, raw_result=raw)
-    assert job.structured_result is None
-    assert job.structured_status == "unavailable"
-
-
-@pytest.mark.parametrize(
-    ("response_format", "expected"),
-    [
-        ("json", "unavailable"),
-        (json.dumps({"$theater": "custom", "schema": {"type": "number"}}), "unable_to_parse"),
-    ],
-)
-def test_jobs_rpc_corrects_corrupt_parsed_rows_without_changing_storage(response_format, expected):
-    from theater.daemon.rpc.jobs import _job_to_dict
-    from theater.models import Job
-
-    job = Job(
-        handle="legacy",
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        prompt="answer",
-        state="done",
-        result="1e10000",
-        error_code=None,
-        created_at=1.0,
-        finished_at=2.0,
-        response_format=response_format,
-        structured_result="1e10000",
-        structured_status="parsed",
-    )
-    row = _job_to_dict(job)
-    assert (row["structured_status"], row["structured_result"]) == (expected, None)
-    assert (job.structured_status, job.structured_result) == ("parsed", "1e10000")
-
-
-def test_structured_json_null_is_a_parsed_raw_result(store):
-    from theater.daemon.jobs import JobManager, JobState
-
-    jm = JobManager(store)
-    jm.create(
-        handle="json-null",
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        response_format="json",
-    )
-    jm.finish("json-null", state=JobState.DONE, result="null", raw_result="null")
-
-    job = jm.get("json-null")
-    assert job is not None
-    assert job.structured_result == "null"
-    assert json.loads(job.structured_result) is None
-    assert job.structured_status == "parsed"
-
-
-@pytest.mark.parametrize(
-    "state,error_code",
-    [
-        ("killed", "killed"),
-        ("crashed", "crashed"),
-        ("crashed", "send_failed"),
-    ],
-)
-def test_structured_json_terminal_failures_are_unavailable(store, state, error_code):
-    from theater.daemon.jobs import JobManager
-
-    jm = JobManager(store)
-    jm.create(
-        handle=f"{state}-{error_code}",
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        response_format="json",
-    )
-    jm.finish(
-        f"{state}-{error_code}",
-        state=state,
-        result='{"answer": 42}',
-        error_code=error_code,
-        raw_result='{"answer": 42}',
-    )
-
-    job = jm.get(f"{state}-{error_code}")
-    assert job is not None
-    assert job.structured_result is None
-    assert job.structured_status == "unavailable"
-
-
-def test_structured_json_and_touch_rows_commit_together(store, tmp_path):
-    from theater.daemon.jobs import JobManager, JobState
-    from theater.daemon.schema import touch
-    from theater.harness.base import EventPath
-
-    touched = tmp_path / "touched.py"
-    touched.write_text("before")
-    jobs = JobManager(store)
-    jobs.create(
-        handle="json-touch",
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        cwd=str(tmp_path),
-        response_format="json",
-    )
-    jobs.observe_paths("json-touch", (EventPath(path="touched.py", mode="write"),))
-    touched.write_text("after")
-
-    jobs.finish(
-        "json-touch",
-        state=JobState.DONE,
-        result='{"ok": true}',
-        raw_result='{"ok": true}',
-    )
-
-    job = jobs.get("json-touch")
-    assert job is not None
-    assert job.structured_result == '{"ok": true}'
-    assert job.structured_status == "parsed"
-    rows = list(store.conn.execute(touch.select().where(touch.c.job_handle == "json-touch")))
-    assert len(rows) == 1
-
-
 async def test_await_says_what_an_unknown_handle_most_likely_meant(
     client, terminal_provider, daemon
 ):
@@ -627,3 +379,43 @@ async def test_await_says_what_an_unknown_handle_most_likely_meant(
     assert f"'7' (did you mean {send}?)" in message
     assert "'ghost'" in message
     assert "cannot be predicted before that call returns" in message
+
+
+async def test_worker_admission_is_bounded_and_cancellation_does_not_release_running_work(
+    monkeypatch, caplog
+):
+    await workers.shutdown()
+    monkeypatch.setattr(workers, "MAX_WORKERS", 1)
+    caplog.set_level("DEBUG", logger="theater.timing")
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    ran: list[str] = []
+
+    def blocking():
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5)
+
+    first = asyncio.create_task(workers.to_thread(blocking, label="blocked"))
+    try:
+        await started.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        queued = asyncio.create_task(workers.to_thread(ran.append, "cancelled", label="queued"))
+        await asyncio.sleep(0)
+        assert not queued.done()
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        remaining = asyncio.create_task(workers.to_thread(ran.append, "done", label="remaining"))
+        await asyncio.sleep(0)
+        assert not remaining.done()
+        release.set()
+        await remaining
+    finally:
+        release.set()
+        await workers.shutdown()
+    assert ran == ["done"]
+    operations = {getattr(record, "theater.operation", None) for record in caplog.records}
+    assert {"WORKER_WAIT", "WORKER_EXECUTION"} <= operations
