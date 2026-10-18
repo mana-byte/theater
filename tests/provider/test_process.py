@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import shutil
@@ -15,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.provider_callback_daemon import provider_callback_server
 from tests.support.provider_launcher import (
     physical_events,
     provider_process,
@@ -23,14 +23,6 @@ from tests.support.provider_launcher import (
 from theater import paths
 from theater.frontend import FrontendClient
 from theater.frontend.schemas import validate_callback_response, validate_public_request
-
-_LIMITS = {
-    "max_frame_bytes": 67_108_864,
-    "provider_pending_callbacks": 32,
-    "provider_callback_timeout_seconds": 30,
-    "provider_lease_seconds": 30,
-    "provider_mutations_per_terminal": 1,
-}
 
 
 @dataclass
@@ -62,73 +54,15 @@ class _CallbackPeer:
 
 @asynccontextmanager
 async def _callback_peer(socket_path: Path) -> AsyncIterator[_CallbackPeer]:
-    sessions: asyncio.Queue[_CallbackSession] = asyncio.Queue()
-    stop = asyncio.Event()
-    writers: set[asyncio.StreamWriter] = set()
-    tasks: set[asyncio.Task[None]] = set()
-    failures: list[BaseException] = []
-
-    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        task = asyncio.current_task()
-        assert task is not None
-        tasks.add(task)
-        writers.add(writer)
-        try:
-            raw = await asyncio.wait_for(reader.readline(), timeout=1)
-            request = json.loads(raw)
-            validate_public_request(request)
-            assert request == {
-                "id": 1,
-                "method": "frontend.handshake",
-                "params": {
-                    "api": {"major": 1, "minor": 1},
-                    "client_id": "fixture-client",
-                    "role": "provider",
-                    "channel": "callback",
-                    "required_capabilities": ["terminal-provider.v1"],
-                    "provider_id": "fixture-provider",
-                    "provider_credential": "fixture-credential",
-                },
-            }
-            response = {
-                "id": 1,
-                "ok": True,
-                "result": {
-                    "api": {"major": 1, "minor": 1},
-                    "daemon_instance_id": "fixture-daemon",
-                    "package_version": "0.0.0-test",
-                    "capabilities": ["terminal-provider.v1"],
-                    "limits": _LIMITS,
-                    "provider_generation": 7,
-                },
-            }
-            writer.write(json.dumps(response, separators=(",", ":")).encode() + b"\n")
-            await writer.drain()
-            await sessions.put(_CallbackSession(reader, writer))
-            await stop.wait()
-        except BaseException as exc:
-            failures.append(exc)
-        finally:
-            tasks.discard(task)
-            writers.discard(writer)
-            writer.close()
-            with contextlib.suppress(OSError, ConnectionError):
-                await writer.wait_closed()
-
-    server = await asyncio.start_unix_server(serve, path=str(socket_path))
-    try:
+    async with provider_callback_server(
+        socket_path,
+        client_id="fixture-client",
+        provider_id="fixture-provider",
+        credential="fixture-credential",
+        make_session=_CallbackSession,
+        check_request=validate_public_request,
+    ) as sessions:
         yield _CallbackPeer(socket_path, sessions)
-    finally:
-        stop.set()
-        server.close()
-        await server.wait_closed()
-        for writer in tuple(writers):
-            writer.close()
-        if tasks:
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
-        socket_path.unlink(missing_ok=True)
-        if failures:
-            raise failures[0]
 
 
 def _create(

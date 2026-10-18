@@ -56,26 +56,34 @@ class FixtureDaemon:
         return await asyncio.wait_for(self._sessions.get(), timeout=1)
 
 
+PROVIDER_HANDSHAKE_LIMITS: dict[str, object] = {
+    "max_frame_bytes": 67_108_864,
+    "provider_pending_callbacks": 32,
+    "provider_callback_timeout_seconds": 30,
+    "provider_lease_seconds": 30,
+    "provider_mutations_per_terminal": 1,
+}
+
+
 @asynccontextmanager
-async def fixture_daemon(  # noqa: PLR0915
-    *, limits: Mapping[str, object] | None = None
-) -> AsyncIterator[FixtureDaemon]:
-    root = Path(tempfile.mkdtemp(prefix="provider-fixture-", dir="/tmp"))
-    socket_path = root / "frontend.sock"
-    sessions: asyncio.Queue[CallbackSession] = asyncio.Queue()
+async def provider_callback_server(
+    socket_path: Path,
+    *,
+    client_id: str,
+    provider_id: str,
+    credential: str,
+    make_session: Callable[[asyncio.StreamReader, asyncio.StreamWriter], object],
+    limits: Mapping[str, object] | None = None,
+    result_extra: Mapping[str, object] | None = None,
+    check_request: Callable[[object], object] | None = None,
+) -> AsyncIterator[asyncio.Queue]:
+    """Answer one provider callback handshake per connection and queue the open session."""
+    sessions: asyncio.Queue = asyncio.Queue()
     stop = asyncio.Event()
     tasks: set[asyncio.Task[None]] = set()
     writers: set[asyncio.StreamWriter] = set()
     failures: list[BaseException] = []
-    handshake_limits: dict[str, object] = {
-        "max_frame_bytes": 67_108_864,
-        "provider_pending_callbacks": 32,
-        "provider_callback_timeout_seconds": 30,
-        "provider_lease_seconds": 30,
-        "provider_mutations_per_terminal": 1,
-    }
-    if limits is not None:
-        handshake_limits.update(limits)
+    handshake_limits = {**PROVIDER_HANDSHAKE_LIMITS, **(limits or {})}
 
     async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
@@ -83,19 +91,21 @@ async def fixture_daemon(  # noqa: PLR0915
         tasks.add(task)
         writers.add(writer)
         try:
-            frame = await asyncio.wait_for(reader.readline(), timeout=1)
-            request = json.loads(frame)
-            assert request["id"] == 1
-            assert request["method"] == "frontend.handshake"
-            params = request["params"]
-            assert params == {
-                "api": {"major": 1, "minor": 1},
-                "client_id": "provider-fixture",
-                "role": "provider",
-                "channel": "callback",
-                "required_capabilities": ["terminal-provider.v1"],
-                "provider_id": "provider-a",
-                "provider_credential": "credential-a",
+            request = json.loads(await asyncio.wait_for(reader.readline(), timeout=1))
+            if check_request is not None:
+                check_request(request)
+            assert request == {
+                "id": 1,
+                "method": "frontend.handshake",
+                "params": {
+                    "api": {"major": 1, "minor": 1},
+                    "client_id": client_id,
+                    "role": "provider",
+                    "channel": "callback",
+                    "required_capabilities": ["terminal-provider.v1"],
+                    "provider_id": provider_id,
+                    "provider_credential": credential,
+                },
             }
             response = {
                 "id": 1,
@@ -107,12 +117,12 @@ async def fixture_daemon(  # noqa: PLR0915
                     "capabilities": ["terminal-provider.v1"],
                     "limits": handshake_limits,
                     "provider_generation": 7,
-                    "future_handshake_field": {"kept": True},
+                    **(result_extra or {}),
                 },
             }
             writer.write(json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n")
             await writer.drain()
-            await sessions.put(CallbackSession(reader, writer))
+            await sessions.put(make_session(reader, writer))
             await stop.wait()
         except BaseException as exc:
             failures.append(exc)
@@ -125,8 +135,7 @@ async def fixture_daemon(  # noqa: PLR0915
 
     server = await asyncio.start_unix_server(serve, path=str(socket_path))
     try:
-        daemon = FixtureDaemon(socket_path, sessions)
-        yield daemon
+        yield sessions
     finally:
         stop.set()
         server.close()
@@ -136,9 +145,29 @@ async def fixture_daemon(  # noqa: PLR0915
         if tasks:
             await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
         socket_path.unlink(missing_ok=True)
-        shutil.rmtree(root)
         if failures:
             raise failures[0]
+
+
+@asynccontextmanager
+async def fixture_daemon(
+    *, limits: Mapping[str, object] | None = None
+) -> AsyncIterator[FixtureDaemon]:
+    root = Path(tempfile.mkdtemp(prefix="provider-fixture-", dir="/tmp"))
+    socket_path = root / "frontend.sock"
+    try:
+        async with provider_callback_server(
+            socket_path,
+            client_id="provider-fixture",
+            provider_id="provider-a",
+            credential="credential-a",
+            make_session=CallbackSession,
+            limits=limits,
+            result_extra={"future_handshake_field": {"kept": True}},
+        ) as sessions:
+            yield FixtureDaemon(socket_path, sessions)
+    finally:
+        shutil.rmtree(root)
 
 
 def provider_client(socket_path: Path, handlers: Mapping[str, Handler]) -> ProviderClient:
