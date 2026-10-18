@@ -10,12 +10,18 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from tests.support.opencode_stock_ui import (
+    OpenAICompatibleProvider,
+    Probe,
+    StockLaunch,
+    assistant_parent_ids,
+)
 from theater import paths
 from theater.daemon.harness_runtime.frontend import FrontendRuntimeHost
 from theater.daemon.runtime.wiring import frontend_endpoint
@@ -25,9 +31,7 @@ from theater.daemon.spawning.planning import (
     write_plan_files,
 )
 from theater.harness.builtin.plugins.opencode.launch import plan_launch
-from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
-from theater.harness.builtin.plugins.opencode.runtime import OpenCodeFrontendRuntime
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
     OPENCODE_TUI_MAX_VERSION,
     OPENCODE_TUI_MIN_VERSION,
@@ -41,246 +45,12 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
     NativeTurnTerminal,
     RuntimeCapability,
-    RuntimeContext,
-    RuntimeFrontendConnection,
-    RuntimeIO,
     RuntimeNotification,
 )
 from theater.harness.contracts.source import Batch
 from theater.models import Participant, Status
 
 pytestmark = [pytest.mark.tmux, pytest.mark.integration]
-
-
-class _StockIO(RuntimeIO):
-    async def connect(self, endpoint: str, *, timeout: float):
-        del timeout
-        raise AssertionError(f"the stock gate never opens a backend connection: {endpoint}")
-
-
-class _RecordingConnection(RuntimeFrontendConnection):
-    """Records notifications while the runtime stays the sole consumer."""
-
-    def __init__(self, inner: RuntimeFrontendConnection, sink: list[RuntimeNotification]) -> None:
-        self._inner = inner
-        self._sink = sink
-
-    @property
-    def closed(self) -> bool:
-        return self._inner.closed
-
-    async def notifications(self) -> AsyncIterator[RuntimeNotification]:
-        async for item in self._inner.notifications():
-            self._sink.append(item)
-            yield item
-
-    async def request(self, method: str, params: Mapping[str, object], *, timeout: float):
-        return await self._inner.request(method, params, timeout=timeout)
-
-    async def aclose(self) -> None:
-        await self._inner.aclose()
-
-
-def _assistant_parent_ids(probe: _Probe) -> list[object]:
-    """Every parentID the forwarded assistant message.updated events named."""
-    parents: list[object] = []
-    for item in probe.notifications:
-        event = item.params.get("event")
-        if not isinstance(event, Mapping) or event.get("type") != "message.updated":
-            continue
-        properties = event.get("properties")
-        info = properties.get("info") if isinstance(properties, Mapping) else None
-        if isinstance(info, Mapping) and info.get("role") == "assistant":
-            parents.append(info.get("parentID"))
-    return parents
-
-
-@dataclass(slots=True)
-class _Probe:
-    """Daemon-shaped wiring: one OpenCode runtime per plugin connection."""
-
-    notifications: list[RuntimeNotification] = field(default_factory=list)
-    connections: list[RuntimeFrontendConnection] = field(default_factory=list)
-    disconnected: list[RuntimeFrontendConnection] = field(default_factory=list)
-    trusted_session_id: str | None = None
-    runtimes: list[OpenCodeFrontendRuntime] = field(default_factory=list)
-
-    @property
-    def live(self) -> OpenCodeTuiLiveSource:
-        assert self.runtimes, "no plugin connection yet"
-        return self.runtimes[-1].live_source()
-
-    async def on_connect(self, connection: RuntimeFrontendConnection) -> None:
-        self.connections.append(connection)
-        runtime = OpenCodeFrontendRuntime(
-            RuntimeContext(
-                participant_id="open-1",
-                cwd="/tmp",
-                io=_StockIO(),
-                backend_generation=1,
-                endpoint="unix:///tmp/oc-stock.sock",
-                frontend=_RecordingConnection(connection, self.notifications),
-                trusted_session_id_provider=lambda: self.trusted_session_id,
-            )
-        )
-        self.runtimes.append(runtime)
-        runtime.live_source()
-
-    async def on_disconnect(self, connection: RuntimeFrontendConnection) -> None:
-        self.disconnected.append(connection)
-
-
-@dataclass(frozen=True, slots=True)
-class _StockLaunch:
-    participant: Participant
-    endpoint: str
-    plan: LaunchPlan
-    token: str
-    session_id: str
-
-
-class _OpenAICompatibleProvider:
-    def __init__(self) -> None:
-        self.request_received = asyncio.Event()
-        self.response_completed = asyncio.Event()
-        self._release = asyncio.Event()
-        self._server: asyncio.Server | None = None
-        self._writers: set[asyncio.StreamWriter] = set()
-        self._handlers: set[asyncio.Task[None]] = set()
-        self.requests: list[tuple[str, dict[str, object]]] = []
-        self.errors: list[str] = []
-
-    @property
-    def base_url(self) -> str:
-        assert self._server is not None
-        socket = next(iter(self._server.sockets or ()), None)
-        assert socket is not None
-        host, port = socket.getsockname()[:2]
-        return f"http://{host}:{port}/v1"
-
-    async def start(self) -> None:
-        self._server = await asyncio.start_server(self._handle, host="127.0.0.1", port=0)
-
-    def release(self) -> None:
-        self._release.set()
-
-    async def aclose(self) -> None:
-        self._release.set()
-        server = self._server
-        if server is not None:
-            server.close()
-        for writer in tuple(self._writers):
-            writer.close()
-        for task in tuple(self._handlers):
-            if not task.done():
-                task.cancel()
-        if self._handlers:
-            await asyncio.gather(*self._handlers, return_exceptions=True)
-        if server is not None:
-            await server.wait_closed()
-
-    def detail(self) -> str:
-        return f"requests={self.requests!r}, errors={self.errors!r}"
-
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        task = asyncio.current_task()
-        if task is not None:
-            self._handlers.add(task)
-        self._writers.add(writer)
-        try:
-            request_line = (await reader.readline()).decode("latin-1").rstrip("\r\n")
-            method, target, _version = request_line.split(" ", 2)
-            headers = await _http_headers(reader)
-            length = int(headers.get("content-length", "0"))
-            body = await reader.readexactly(length) if length else b""
-            payload = json.loads(body) if body else {}
-            if not isinstance(payload, dict):
-                self.errors.append("OpenAI-compatible request body was not an object")
-                return
-            self.requests.append((target, payload))
-            if method == "GET" and target == "/v1/models":
-                await _http_json(writer, {"object": "list", "data": [{"id": "test-model"}]})
-                return
-            if method != "POST" or target != "/v1/chat/completions":
-                await _http_json(
-                    writer, {"error": {"message": "unsupported test endpoint"}}, status=404
-                )
-                return
-            self.request_received.set()
-            writer.write(
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: text/event-stream\r\n"
-                b"Cache-Control: no-cache\r\n"
-                b"Connection: close\r\n\r\n"
-            )
-            await writer.drain()
-            await self._release.wait()
-            for chunk in _chat_completion_chunks():
-                writer.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
-                await writer.drain()
-            writer.write(b"data: [DONE]\n\n")
-            await writer.drain()
-            self.response_completed.set()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.errors.append(f"{type(exc).__name__}: {exc}")
-        finally:
-            self._writers.discard(writer)
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
-            if task is not None:
-                self._handlers.discard(task)
-
-
-async def _http_headers(reader: asyncio.StreamReader) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    while line := await reader.readline():
-        if line in {b"\r\n", b"\n"}:
-            return headers
-        key, value = line.decode("latin-1").split(":", 1)
-        headers[key.lower()] = value.strip()
-    raise ConnectionError("OpenAI-compatible request ended before headers")
-
-
-async def _http_json(
-    writer: asyncio.StreamWriter, payload: Mapping[str, object], *, status: int = 200
-) -> None:
-    body = json.dumps(payload).encode()
-    header = (
-        f"HTTP/1.1 {status} {'OK' if status == 200 else 'Not Found'}\r\n"
-        "Content-Type: application/json\r\n"
-        f"Content-Length: {len(body)}\r\n"
-        "Connection: close\r\n\r\n"
-    ).encode()
-    writer.write(header + body)
-    await writer.drain()
-
-
-def _chat_completion_chunks() -> tuple[dict[str, object], ...]:
-    common = {
-        "id": "chatcmpl-stock-proof",
-        "object": "chat.completion.chunk",
-        "created": 0,
-        "model": "test-model",
-    }
-    return (
-        {
-            **common,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": "stock streamed answer"},
-                    "finish_reason": None,
-                }
-            ],
-        },
-        {
-            **common,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-        },
-    )
 
 
 def _enabled() -> bool:
@@ -457,7 +227,7 @@ async def _start_listener(
     participant: Participant,
     endpoint: str,
     token: str,
-    probe: _Probe,
+    probe: Probe,
 ) -> None:
     await host.start(
         participant_id=participant.id,
@@ -499,8 +269,8 @@ async def _launch_initial(
     cwd: Path,
     marker: Path,
     runtime,
-    probe: _Probe,
-) -> _StockLaunch:
+    probe: Probe,
+) -> StockLaunch:
     participant = Participant(id="open-1", harness="opencode")
     endpoint = frontend_endpoint(participant.id)
     plan, token = _frontend_plan(participant, runtime, endpoint, prompt="stock status prompt")
@@ -522,13 +292,13 @@ async def _launch_initial(
     assert isinstance(session_id, str) and session_id
     probe.trusted_session_id = session_id
     assert "--model" in plan.argv and "--auto" in plan.argv
-    return _StockLaunch(participant, endpoint, plan, token, session_id)
+    return StockLaunch(participant, endpoint, plan, token, session_id)
 
 
 async def _restart_listener(
     host: FrontendRuntimeHost,
-    launch: _StockLaunch,
-    probe: _Probe,
+    launch: StockLaunch,
+    probe: Probe,
     socket: Path,
     expected_status: str,
 ) -> None:
@@ -560,8 +330,8 @@ async def _launch_fork(
     socket: Path,
     cwd: Path,
     runtime,
-    parent: _StockLaunch,
-    probe: _Probe,
+    parent: StockLaunch,
+    probe: Probe,
 ) -> None:
     participant = Participant(id="open-2", harness="opencode")
     endpoint = frontend_endpoint(participant.id)
@@ -582,7 +352,7 @@ async def _launch_fork(
     )
 
 
-async def _cleanup(host: FrontendRuntimeHost, socket: Path, probes: tuple[_Probe, ...]) -> None:
+async def _cleanup(host: FrontendRuntimeHost, socket: Path, probes: tuple[Probe, ...]) -> None:
     with contextlib.suppress(subprocess.SubprocessError):
         await _tmux_run(socket, "kill-server")
     for connection in (connection for probe in probes for connection in probe.connections):
@@ -649,9 +419,9 @@ async def test_stock_tui_loads_passive_extension_and_reconnects(monkeypatch) -> 
     socket = root / "tmux.sock"
     marker = root / "user-plugin.log"
     host = FrontendRuntimeHost()
-    initial_probe = _Probe()
-    fork_probe = _Probe()
-    provider = _OpenAICompatibleProvider()
+    initial_probe = Probe()
+    fork_probe = Probe()
+    provider = OpenAICompatibleProvider()
     try:
         await provider.start()
         cwd = _configure_isolation(monkeypatch, root, marker, provider.base_url)
@@ -713,7 +483,7 @@ async def test_stock_tui_loads_passive_extension_and_reconnects(monkeypatch) -> 
 
 
 async def _wait_for_batch(
-    probe: _Probe,
+    probe: Probe,
     socket: Path,
     *,
     timeout: float,
@@ -739,9 +509,9 @@ async def _launch_idle_stock(
     socket: Path,
     cwd: Path,
     marker: Path,
-    probe: _Probe,
-    provider: _OpenAICompatibleProvider,
-) -> _StockLaunch:
+    probe: Probe,
+    provider: OpenAICompatibleProvider,
+) -> StockLaunch:
     manifest_runtime = MANIFEST.runtime
     assert manifest_runtime is not None
     initial = await _launch_initial(host, socket, cwd, marker, manifest_runtime, probe)
@@ -781,8 +551,8 @@ async def test_stock_tui_accepts_native_send_with_exact_lineage(monkeypatch) -> 
     socket = root / "tmux.sock"
     marker = root / "user-plugin.log"
     host = FrontendRuntimeHost()
-    probe = _Probe()
-    provider = _OpenAICompatibleProvider()
+    probe = Probe()
+    provider = OpenAICompatibleProvider()
     try:
         await provider.start()
         cwd = _configure_isolation(monkeypatch, root, marker, provider.base_url)
@@ -835,7 +605,7 @@ async def test_stock_tui_accepts_native_send_with_exact_lineage(monkeypatch) -> 
         assert batch.status is Status.IDLE
 
         # Directly: the persisted assistant info names our messageID as parent.
-        assert receipt.native_turn_id in _assistant_parent_ids(probe)
+        assert receipt.native_turn_id in assistant_parent_ids(probe)
 
         # A duplicate operation answers from the cached receipt without a
         # third model request: mutations happen exactly once.
