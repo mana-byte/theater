@@ -231,6 +231,8 @@ async def test_a_backend_that_died_before_identification_reports_its_exit(
         "capture_process_identity",
         lambda pid: harness_backend.BackendProcessIdentity(pid=pid, started_at=None),
     )
+    # Wait long enough for the child to exit even when a loaded machine starts it slowly.
+    monkeypatch.setattr(harness_backend, "RUNTIME_BACKEND_POLL_INTERVAL_SECONDS", 10.0)
     with pytest.raises(
         BackendLaunchError, match="exited with code 3 before it could be identified"
     ):
