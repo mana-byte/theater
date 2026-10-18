@@ -154,8 +154,8 @@ async def test_model_and_skill_catalogs_reuse_daemon_owned_discovery(daemon, cat
 def test_native_compatibility_dto_round_trips_wiring_and_routes():
     record = {
         "status": "outside-qualified-range",
-        "installed_version": "0.158.0",
-        "qualified_range": "==0.154.0",
+        "installed_version": "2.0.1",
+        "qualified_range": "==2.0.0",
         "policy": "codex-qualified",
         "reason": "wiring=auto selects legacy below the qualified range",
         "wiring": "legacy",

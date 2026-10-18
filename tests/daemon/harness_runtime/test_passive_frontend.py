@@ -506,7 +506,7 @@ class _FrontendHarness(Harness):
             probe=lambda context: RuntimeCompatibility(
                 supported=True,
                 policy="frontend-test-1",
-                native_version="1.18.29",
+                native_version="1.2.3",
             ),
             plan=None,
             factory=factory,
@@ -590,7 +590,7 @@ async def test_frontend_spawn_keeps_the_stock_plan_and_passive_binding(terminal_
         participant = await _spawn(daemon, _request())
         binding = daemon.store.get_runtime_binding(participant.id)
         assert binding is not None
-        assert binding.native_version == "1.18.29"
+        assert binding.native_version == "1.2.3"
         assert binding.compatibility_policy == "frontend-test-1"
         assert daemon.runtime_manager.get(participant.id) is None
         assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_provider

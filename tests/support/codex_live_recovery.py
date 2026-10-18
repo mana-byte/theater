@@ -116,7 +116,7 @@ class CodexLiveHarness(Harness):
         def probe(context) -> RuntimeCompatibility:
             del context
             return RuntimeCompatibility(
-                supported=True, policy="scripted-verified", native_version="0.154.0"
+                supported=True, policy="scripted-verified", native_version="1.2.3"
             )
 
         def plan(context) -> RuntimePlan:
