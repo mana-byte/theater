@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.support.control_harness import (
     Harness,
     make_operation,
@@ -355,10 +357,24 @@ async def test_ambiguous_mapping_fails_newer_accepted_job_closed(store: Store) -
     assert store.get_job(forged_handle).state == JobState.CRASHED  # untouched
 
 
-async def test_reconcile_turn_id_collision_on_new_generation_closes_delivery(
-    store: Store,
+@pytest.mark.parametrize(
+    "relaunch",
+    [
+        # The backend relaunched: same turn id, different generation.
+        pytest.param(
+            lambda state: setattr(state, "backend_generation", state.backend_generation + 1),
+            id="new-generation",
+        ),
+        # A new native thread: same turn id, different session.
+        pytest.param(
+            lambda state: setattr(state, "native_session_id", "thread-reused"), id="new-session"
+        ),
+    ],
+)
+async def test_reconcile_turn_id_collision_on_a_new_identity_closes_delivery(
+    store: Store, relaunch
 ) -> None:
-    """An id collision after a generation change must not postpone the close."""
+    """An id collision after a generation or session change must not postpone the close."""
 
     class UncertainRuntime(FakeRuntime):
         async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
@@ -375,9 +391,7 @@ async def test_reconcile_turn_id_collision_on_new_generation_closes_delivery(
     service = harness.service
 
     job = await service.send("p1", caller_id="caller", prompt="uncertain")
-    turn = state.native_turn_id
-    # The backend relaunched: same turn id, different generation.
-    state.backend_generation = state.backend_generation + 1
+    relaunch(state)
 
     resolved = await service.reconcile_ambiguous_delivery("p1", now_ts=now() + 31.0)
 
@@ -385,35 +399,3 @@ async def test_reconcile_turn_id_collision_on_new_generation_closes_delivery(
     finished = store.get_job(job.handle)
     assert finished.state == JobState.CRASHED
     assert finished.error_code == "delivery_unknown"
-    del turn
-
-
-async def test_reconcile_turn_id_collision_on_new_session_closes_delivery(
-    store: Store,
-) -> None:
-    """An id collision after a session change must not postpone the close."""
-
-    class UncertainRuntime(FakeRuntime):
-        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
-            receipt = await super().send(operation_id=operation_id, prompt=prompt)
-            return ControlReceipt(
-                operation_id=operation_id,
-                result=DeliveryResult.UNKNOWN,
-                native_turn_id=receipt.native_turn_id,
-            )
-
-    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), UncertainRuntime)})
-    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
-    state = state_of(harness, "p1")
-    service = harness.service
-
-    job = await service.send("p1", caller_id="caller", prompt="uncertain")
-    turn = state.native_turn_id
-    # A new native thread: same turn id, different session.
-    state.native_session_id = "thread-reused"
-
-    resolved = await service.reconcile_ambiguous_delivery("p1", now_ts=now() + 31.0)
-
-    assert [j.handle for j in resolved] == [job.handle]
-    assert store.get_job(job.handle).error_code == "delivery_unknown"
-    del turn

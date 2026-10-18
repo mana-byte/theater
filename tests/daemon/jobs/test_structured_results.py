@@ -40,72 +40,32 @@ def test_structured_json_keeps_full_raw_result_and_clipped_legacy_result(store):
 @pytest.mark.parametrize(
     "raw",
     [
-        "{not json}",
-        '```json\n{"answer": 42}\n```',
-        '{"answer": 42}\ntrailing prose',
+        pytest.param("{not json}", id="invalid-json"),
+        pytest.param('```json\n{"answer": 42}\n```', id="fenced"),
+        pytest.param('{"answer": 42}\ntrailing prose', id="trailing-prose"),
+        pytest.param("[" * 2000 + "0" + "]" * 2000, id="recursion-error"),
+        pytest.param("NaN", id="nan"),
+        pytest.param("1e10000", id="infinity"),
+        pytest.param("[1e10000]", id="nested-infinity"),
     ],
 )
-def test_structured_json_invalid_fenced_or_trailing_prose_is_unavailable(store, raw):
+def test_structured_json_that_does_not_parse_is_unavailable(store, raw):
     from theater.daemon.jobs import JobManager, JobState
 
     jm = JobManager(store)
-    handle = f"bad-{len(raw)}"
     jm.create(
-        handle=handle,
+        handle="bad-json",
         caller_id="cli",
         target_id="target",
         kind="send",
         response_format="json",
     )
-    jm.finish(handle, state=JobState.DONE, result=raw[:20], raw_result=raw)
+    finished = jm.finish("bad-json", state=JobState.DONE, result=raw[:20], raw_result=raw)
 
-    job = jm.get(handle)
-    assert job is not None
-    assert job.structured_result is None
-    assert job.structured_status == "unavailable"
-
-
-def test_structured_json_recursion_error_is_unavailable(store):
-    from theater.daemon.jobs import JobManager, JobState
-
-    raw = "[" * 2000 + "0" + "]" * 2000
-    jm = JobManager(store)
-    jm.create(
-        handle="bad-recursion",
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        response_format="json",
-    )
-
-    jm.finish(
-        "bad-recursion",
-        state=JobState.DONE,
-        result=raw[:20],
-        raw_result=raw,
-    )
-
-    job = jm.get("bad-recursion")
-    assert job is not None
-    assert job.structured_result is None
-    assert job.structured_status == "unavailable"
-
-
-@pytest.mark.parametrize("raw", ["NaN", "1e10000", "[1e10000]"])
-def test_structured_json_nonfinite_is_unavailable(store, raw):
-    from theater.daemon.jobs import JobManager, JobState
-
-    jm = JobManager(store)
-    jm.create(
-        handle="json-nonfinite",
-        caller_id="cli",
-        target_id="target",
-        kind="send",
-        response_format="json",
-    )
-    job = jm.finish("json-nonfinite", state=JobState.DONE, result=raw, raw_result=raw)
-    assert job.structured_result is None
-    assert job.structured_status == "unavailable"
+    for job in (finished, jm.get("bad-json")):
+        assert job is not None
+        assert job.structured_result is None
+        assert job.structured_status == "unavailable"
 
 
 @pytest.mark.parametrize(
