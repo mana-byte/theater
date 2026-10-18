@@ -1,10 +1,11 @@
-"""Rescue arms on an idle prompt and ends a job only after a later, quiet source read."""
+"""Quiet clocks and the rescue that ends a job whose turn end was never read."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import shutil
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -28,21 +29,318 @@ from tests.support.vibe_store import Store as VibeStore
 from theater.constants.observation import (
     COMPLETION_UNVERIFIED_CODE,
     RESCUE_CODE,
+    RESCUE_CONFIRM_SECONDS,
     STALE_OPEN_TURN_SECONDS,
 )
 from theater.daemon.jobs import JobManager
 from theater.daemon.observation.service import _WatchContext
-from theater.daemon.observer import Observer
+from theater.daemon.observer import (
+    AWAITING_INPUT_TIMEOUT,
+    RELOCATE_TIMEOUT,
+    RESCUE_TIMEOUT,
+    Observer,
+    QuietClock,
+    TurnAccumulator,
+)
 from theater.daemon.persistence.repositories.turn_fences import TurnFenceRepository
 from theater.daemon.rpc.jobs import _job_to_dict
+from theater.harness.base import Event, EventKind
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
-from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.source import Batch, NativeTurnState, Source
-from theater.models import JobState
+from theater.models import (
+    JobState,
+)
 from theater.provenance import TranscriptProvenance
+
+
+def test_begin_quiet_starts_the_clocks_once_and_leaves_them_running():
+    cursor = QuietClock()
+    cursor.begin_quiet(100.0)
+    cursor.begin_quiet(140.0)  # still the same silence
+    assert cursor.quiet_for(140.0) == 40.0
+    assert cursor.screen_quiet_for(140.0) == 40.0
+
+
+def test_the_screen_clock_survives_a_relocate_resetting_nothing():
+    """The v1 bug: one shared clock meant the screen check never fired.
+
+    The relocate fires at 5s and the screen check shortly after. If the
+    relocate reset the clock the screen check reads, the screen quiet
+    never accumulates and AWAITING_INPUT is unreachable. Only the screen
+    check may reset its own clock.
+    """
+    cursor = QuietClock()
+    cursor.begin_quiet(0.0)
+
+    # Two relocate windows go by. Nothing resets anything.
+    assert cursor.quiet_for(6.0) > RELOCATE_TIMEOUT
+    assert cursor.quiet_for(11.0) > RELOCATE_TIMEOUT
+
+    # The screen check is still reachable, and throttles only itself.
+    assert cursor.screen_quiet_for(11.0) > AWAITING_INPUT_TIMEOUT
+    cursor.screen_quiet_since = 11.0
+    assert cursor.screen_quiet_for(12.0) < AWAITING_INPUT_TIMEOUT
+    assert cursor.quiet_for(12.0) == 12.0  # relocate clock untouched
+
+
+def test_new_bytes_restart_both_clocks():
+    cursor = QuietClock()
+    cursor.begin_quiet(0.0)
+    cursor.screen_quiet_since = 5.0
+    cursor.stir()
+    assert cursor.quiet_since is None and cursor.screen_quiet_since is None
+    assert cursor.quiet_for(20.0) == 0.0
+
+
+def test_raw_only_progress_preserves_the_screen_clock():
+    cursor = QuietClock()
+    cursor.begin_quiet(0.0)
+    cursor.stir_raw()
+    assert cursor.quiet_since is None
+    assert cursor.rescue_since is None
+    assert cursor.screen_quiet_for(20.0) == 20.0
+
+
+def test_the_rescue_clock_survives_the_screen_check_throttling_itself():
+    """The rescue must not read a clock that another timer keeps pushing.
+
+    `_check_idle_screen` throttles itself by setting screen_quiet_since to now
+    every time it fires. A rescue reading that clock would restart every
+    `awaiting_input_timeout` and never reach its own, much longer, timeout —
+    the same shape of bug as the relocate one above, but silent: the symptom
+    is a caller that waits forever, not a status that never changes.
+    """
+    cursor = QuietClock()
+    cursor.begin_quiet(0.0)
+
+    # Enough screen windows to exceed the rescue timeout, each one
+    # throttling the screen clock.
+    t = 0.0
+    while t <= RESCUE_TIMEOUT:
+        t += AWAITING_INPUT_TIMEOUT + 0.5
+        assert cursor.screen_quiet_for(t) > AWAITING_INPUT_TIMEOUT
+        cursor.screen_quiet_since = t
+
+    # The rescue clock has been counting that whole time regardless.
+    assert cursor.rescue_quiet_for(t) == t
+    assert cursor.rescue_quiet_for(t) > RESCUE_TIMEOUT
+
+
+def test_new_bytes_restart_the_rescue_clock_too():
+    cursor = QuietClock()
+    cursor.begin_quiet(0.0)
+    cursor.stir()
+    assert cursor.rescue_since is None
+    assert cursor.rescue_quiet_for(90.0) == 0.0
+
+
+def expire_rescue_clock(clock: QuietClock, observer: Observer) -> None:
+    clock.rescue_since = time.monotonic() - observer.rescue - 1
+
+
+def let_rescue_confirm(clock: QuietClock) -> None:
+    """Age the arming capture past the confirmation window; the next quiet check confirms."""
+    assert clock.rescue_armed_at is not None
+    clock.rescue_armed_at -= RESCUE_CONFIRM_SECONDS
+
+
+async def rescue(observer: Observer, screen, clock: QuietClock, pid: str) -> None:
+    """Rescue's two steps: an idle capture arms, a later one confirms."""
+    assert await observer._rescue_jobs(pid, screen, clock)
+    let_rescue_confirm(clock)
+    assert not await observer._rescue_jobs(pid, screen, clock)
+
+
+class QuietSource(Source):
+    async def read(self) -> Batch:
+        return Batch()
+
+
+@pytest.mark.asyncio
+async def test_rescue_waits_for_the_job_itself_to_age(registry):
+    """A long-idle pane must not hand its old quiet time to a fresh job.
+
+    Claude's JSONL records no stop reason, so an interrupted turn is rescued
+    here as done with ``turn_end_unseen`` — never killed."""
+    observer, screen, clock, p, jobs = poised(registry)
+    observer.rescue = 60.0
+    expire_rescue_clock(clock, observer)
+
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == "running"
+    assert job.error_code is None
+
+    age_job(registry, "h1", observer.rescue + 1)
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    assert str(jobs.get("h1").state) == "running"  # armed, not ended
+    let_rescue_confirm(clock)
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.error_code == "turn_end_unseen"
+
+
+@pytest.mark.asyncio
+async def test_rescue_gate_uses_the_oldest_running_job(registry):
+    """A fresh queued job must not keep an older wedged caller waiting."""
+    observer, screen, clock, p, jobs = poised(registry)
+    observer.rescue = 60.0
+    age_job(registry, "h1", observer.rescue + 1)
+    jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
+    expire_rescue_clock(clock, observer)
+
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    let_rescue_confirm(clock)
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    assert str(jobs.get("h1").state) == "done"
+    assert str(jobs.get("h2").state) == "done"
+
+
+@pytest.mark.asyncio
+async def test_rescue_gate_tolerates_no_running_jobs(registry):
+    observer, screen, clock, p, jobs = poised(registry)
+    observer._answer_turn(p.id, "done already")
+    expire_rescue_clock(clock, observer)
+    expired_since = clock.rescue_since
+
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    assert jobs.get("h1").result == "done already"
+    assert clock.rescue_since is not None
+    assert expired_since is not None
+    assert clock.rescue_since > expired_since
+
+
+@pytest.mark.asyncio
+async def test_rescue_attempts_are_still_throttled(registry):
+    observer, screen, clock, p, jobs = poised(registry, idle=False)
+    observer.rescue = 60.0
+    age_job(registry, "h1", observer.rescue + 1)
+    captures = 0
+
+    async def capture_pane(_pane):
+        nonlocal captures
+        captures += 1
+        return "$ "
+
+    observer._capture = capture_pane
+    expire_rescue_clock(clock, observer)
+
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+
+    assert captures == 1
+    assert str(jobs.get("h1").state) == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_participant_over_an_idle_screen_releases_its_caller(registry):
+    observer, screen, cursor, p, jobs = poised(registry)
+    await rescue(observer, screen, cursor, p.id)
+    job = jobs.get("h1")
+    # DONE, not a failure: the caller has a usable answer, and failing the job
+    # would leave it blocked on exactly the thing being rescued. The error code
+    # is what says this was salvaged rather than declared finished.
+    assert str(job.state) == "done"
+    assert job.result == "the last thing it said"
+    assert job.error_code == "turn_end_unseen"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_screen_is_not_rescued(registry):
+    """Quiet plus a working screen is a slow tool call, not a missed boundary."""
+    observer, screen, cursor, p, jobs = poised(registry, idle=False)
+    await observer._rescue_jobs(p.id, screen, cursor)
+    assert str(jobs.get("h1").state) == "running"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_screen_decides_nothing(registry):
+    observer, screen, cursor, p, jobs = poised(registry, capture=None)
+    await observer._rescue_jobs(p.id, screen, cursor)
+    assert str(jobs.get("h1").state) == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_participant_with_no_pane_cannot_be_rescued(registry):
+    """No terminal, no screen, no second opinion — so silence alone decides nothing."""
+    observer, screen, cursor, p, jobs = poised(registry, provider_bound=False)
+    await observer._rescue_jobs(p.id, screen, cursor)
+    assert str(jobs.get("h1").state) == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_end_that_was_actually_read_carries_no_error_code(registry):
+    observer, _screen, _cursor, p, jobs = poised(registry)
+    observer._answer_turn(p.id, "a real reply")
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == "a real reply"
+    assert job.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_structured_rescue_is_unavailable(registry):
+    observer, screen, cursor, p, jobs = poised(registry, response_format="json")
+    cursor.last_text = '{"answer": 42}'
+    await rescue(observer, screen, cursor, p.id)
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == '{"answer": 42}'
+    assert job.error_code == "turn_end_unseen"
+    assert job.structured_result is None
+    assert job.structured_status == "unavailable"
+
+
+def test_structured_screen_result_is_unavailable(registry):
+    observer, _screen, _cursor, p, jobs = poised(registry, response_format="json")
+    observer._end_turn_from_screen(p.id, '{"answer": 42}\n$ ')
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == '{"answer": 42}'
+    assert job.structured_result is None
+    assert job.structured_status == "unavailable"
+
+
+def test_structured_error_boundary_is_unavailable(registry):
+    observer, _screen, clock, p, jobs = poised(registry, response_format="json")
+    batch = Batch(
+        events=[
+            Event(
+                kind=EventKind.ERROR,
+                text="null",
+                raw_text="null",
+                turn_end=True,
+            )
+        ]
+    )
+    observer._apply(p.id, batch, clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == "null"
+    assert job.structured_result is None
+    assert job.structured_status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_rescue_still_releases_every_waiting_caller(registry):
+    """The backstop stays fan-out: nothing else will ever free the rest.
+
+    Per-turn matching has already failed by the time rescue fires, so there is
+    no boundary left to pair a job with. Releasing one at a time would drip the
+    queue out over one rescue window each.
+    """
+    observer, screen, clock, p, jobs = poised(registry)
+    jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
+    await rescue(observer, screen, clock, p.id)
+    assert str(jobs.get("h1").state) == "done"
+    assert str(jobs.get("h2").state) == "done"
+
 
 #: Hint guidance makes every structured prompt share far more than the 120 matched characters.
 GUIDANCE = "Answer with JSON only. " * 8
+
+
 OPEN_A = NativeTurnState(turn_id="turn-a", open=True)
 
 
