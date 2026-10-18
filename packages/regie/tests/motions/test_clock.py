@@ -17,8 +17,8 @@ from regie.widgets import ParticipantTree
 from regie.widgets.animation_clock import AnimationClock, animation_clock
 from regie.widgets.leaf import AgentLeaf
 
+from packages.regie.tests.app.test_ui import _app, _participant, _projection
 from packages.regie.tests.support.waiting import wait_until
-from packages.regie.tests.test_ui import _app, _participant, _projection
 
 
 class _StubTimer:
