@@ -37,7 +37,7 @@ class VibeAdapter:
     green_tests = _GREEN_TESTS
     consistency_tests = (
         "tests/harness/vibe/test_compatibility.py",
-        "tests/harness/vibe/test_launch_safety.py",
+        "tests/harness/vibe/test_launch.py",
         "tests/compat/test_vibe.py::test_vibe_bump_is_patch_bounded_and_idempotent",
         "tests/compat/test_vibe.py::test_vibe_bump_ignores_composition_discovery",
         "tests/compat/test_vibe.py::test_vibe_bump_requires_ceiling_anchor",

@@ -1,29 +1,14 @@
-"""EventPath extraction from vibe's transcript records.
-
-Vibe's ``messages.jsonl`` stores tool calls with ``function.arguments`` as a
-JSON string. The file-path-taking tools (``read_file``, ``write_file``,
-``edit``) carry absolute paths there, and the recall index needs them
-repo-relative. These tests pin the extraction, the relativisation, the
-no-path cases, and the resume argv.
-"""
+"""EventPath extraction from Vibe transcript records."""
 
 from __future__ import annotations
 
 import json
 
-import pytest
-
-from tests.support.shipped import VibeHarness, VibeObserver, pin_installed_vibe_version
-from theater.harness import EventPath, plan_launch
+from tests.support.shipped import VibeObserver
+from theater.harness import EventPath
 from theater.harness.base import EventKind
 
 REPO = "/home/alice/project"
-
-
-@pytest.fixture(autouse=True)
-def _modern_vibe(monkeypatch):
-    """Pin a modern Vibe: these plans must not depend on the installed CLI."""
-    pin_installed_vibe_version(monkeypatch, (2, 25, 8))
 
 
 def _assistant_with_tools(*calls: dict) -> str:
@@ -51,9 +36,6 @@ def _set_cwd(observer: VibeObserver, cwd: str) -> None:
     observer._cwd = cwd
 
 
-# ---- write -------------------------------------------------------------
-
-
 def test_write_file_emits_write_path():
     observer = VibeObserver()
     _set_cwd(observer, REPO)
@@ -64,12 +46,6 @@ def test_write_file_emits_write_path():
     tool_calls = [e for e in events if e.kind is EventKind.TOOL_CALL]
     assert len(tool_calls) == 1
     assert tool_calls[0].paths == (EventPath("src/main.py", "write"),)
-
-
-# ---- read --------------------------------------------------------------
-
-
-# ---- multi-file --------------------------------------------------------
 
 
 def test_multiple_tool_calls_each_emit_their_own_paths():
@@ -90,9 +66,6 @@ def test_multiple_tool_calls_each_emit_their_own_paths():
     assert tool_calls[2].paths == (EventPath("c.py", "write"),)
 
 
-# ---- no paths ----------------------------------------------------------
-
-
 def test_bash_emits_no_paths():
     """Shell commands are not parsed for file paths."""
     observer = VibeObserver()
@@ -103,9 +76,6 @@ def test_bash_emits_no_paths():
     )
     tool_calls = [e for e in events if e.kind is EventKind.TOOL_CALL]
     assert tool_calls[0].paths == ()
-
-
-# ---- repo-relative guarantee -------------------------------------------
 
 
 def test_relative_path_passes_through():
@@ -141,59 +111,3 @@ def test_no_cwd_drops_absolute_path():
     )
     tool_calls = [e for e in events if e.kind is EventKind.TOOL_CALL]
     assert tool_calls[0].paths == ()
-
-
-# ---- resume argv (Task B) ----------------------------------------------
-
-
-def test_vibe_resume_uses_resume_flag(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc",
-        prompt="do something",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        resume="session-xyz",
-    )
-    assert "--resume" in plan.argv
-    assert plan.argv[plan.argv.index("--resume") + 1] == "session-xyz"
-    assert VibeHarness.resume_strategy == "continue"
-    assert plan.argv[-1] == "do something"
-
-
-def test_vibe_resume_without_prompt(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        resume="session-xyz",
-    )
-    assert "--resume" in plan.argv
-    assert "session-xyz" in plan.argv
-    assert plan.argv[-1] == "session-xyz"
-
-
-def test_vibe_resume_preserves_approval_flags(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="yolo",
-        resume="s1",
-    )
-    assert "--yolo" in plan.argv
-    assert "--resume" in plan.argv
-
-
-def test_vibe_without_resume_has_no_resume_flag(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc",
-        prompt="hello",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-    )
-    assert "--resume" not in plan.argv
