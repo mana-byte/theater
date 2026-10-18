@@ -1085,10 +1085,10 @@ documented, not solved.
 ### Tested Codex compatibility boundaries
 
 The shipped Codex runtime is verified against exactly what its Wave 0 native
-proof exercised: compatibility policy `codex-appserver-verified`, an exact
-allowlist of releases that each have a qualified evidence bundle
-(`codex-cli 0.148.0` through `0.159.1`). The probe runs `codex --version` and
-refuses any release outside the list. Within that boundary, the tested facts are: one detached
+proof exercised: compatibility policy `codex-appserver-<floor>-compatible`, a range
+of releases the compat pipeline proved without a gap (`CODEX_RUNTIME_QUALIFIED_FLOOR` up to the
+exclusive `CODEX_RUNTIME_QUALIFIED_CEILING`, minus the excluded tuple). The probe runs
+`codex --version` and refuses any release outside the range. Within that boundary, the tested facts are: one detached
 `codex app-server --listen unix://<private-socket>` backend per participant
 (the endpoint carries WebSocket frames with an HTTP Upgrade handshake, not
 Theater NDJSON); the stock native CLI UI attached to the same thread; new,

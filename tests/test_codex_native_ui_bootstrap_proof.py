@@ -98,7 +98,10 @@ from types import ModuleType
 
 import pytest
 
-from theater.harness.builtin.plugins.codex.runtime_plan import CODEX_RUNTIME_VERIFIED_VERSIONS
+from theater.harness.builtin.plugins.codex.runtime_plan import (
+    codex_version_refusal,
+    qualified_versions_range_text,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -412,13 +415,13 @@ def _server_frame(payload: bytes) -> bytes:
 SMOKE_ENV_VAR = "THEATER_CODEX_NATIVE_SMOKE"
 
 
-def _allowed_bootstrap_versions() -> set[str]:
-    """Every allowlisted release, plus the one THEATER_CODEX_QUALIFY_VERSION candidate."""
-    allowed = set(CODEX_RUNTIME_VERIFIED_VERSIONS)
-    candidate = os.environ.get("THEATER_CODEX_QUALIFY_VERSION")
-    if candidate:
-        allowed.add(candidate)
-    return {f"codex-cli {version}" for version in allowed}
+def _require_allowed_bootstrap_version(version_line: str) -> None:
+    """A release inside the qualified range, or the one THEATER_CODEX_QUALIFY_VERSION candidate."""
+    version = version_line.removeprefix("codex-cli").strip()
+    refusal = codex_version_refusal(version)
+    assert refusal is None or version == os.environ.get("THEATER_CODEX_QUALIFY_VERSION"), (
+        f"{refusal}; qualified range {qualified_versions_range_text()}"
+    )
 
 
 def _skip_unless_smoke_enabled() -> None:
@@ -738,9 +741,7 @@ async def test_codex_native_ui_bootstrap_proof() -> None:
     """One full chain, one live backend, one UI, one prompt — asserted at
     every seam against the unmodified installed codex release."""
     _skip_unless_smoke_enabled()
-    allowed = _allowed_bootstrap_versions()
-    version = codex_env.codex_version()
-    assert version in allowed, f"expected one of {sorted(allowed)}, found {version!r}"
+    _require_allowed_bootstrap_version(codex_env.codex_version())
 
     # resolve() up front: the app-server canonicalises paths, and on macOS
     # /tmp is a symlink to /private/tmp — the exact-cwd predicate below must

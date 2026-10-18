@@ -1,7 +1,7 @@
 """Codex native runtime planning: compatibility probe and pure plans.
 
-Auto selects native only for Theater-verified releases (Wave 0 fixtures); unsupported
-versions select legacy, with the reason recorded for both auto and explicit native
+Auto selects native only inside the qualified release range (floor, ceiling, excluded);
+everything else selects legacy, with the reason recorded for both auto and explicit native
 preference (the daemon treats native as a preference, never a hard requirement).
 """
 
@@ -20,39 +20,21 @@ from theater.harness.contracts.runtime import (
 
 from .constants import CODEX_BINARY
 
-#: Name of the tested compatibility policy: one evidence bundle per exact release.
-CODEX_RUNTIME_COMPATIBILITY_POLICY = "codex-appserver-verified"
+#: First codex-cli release proved compatible; the native runtime is untested below it.
+CODEX_RUNTIME_QUALIFIED_FLOOR = (0, 148, 0)
+#: First release not yet proved; the daily compat pipeline moves it over an unbroken run of greens.
+CODEX_RUNTIME_QUALIFIED_CEILING = (0, 164, 0)
+#: Releases inside the range measured incompatible; each entry needs a comment naming the cause.
+CODEX_RUNTIME_QUALIFIED_EXCLUDED: tuple[tuple[int, int, int], ...] = ()
 
-#: Exact codex-cli releases with a qualified bundle (tests/fixtures/codex_native_runtime).
-CODEX_RUNTIME_VERIFIED_VERSIONS = frozenset(
-    {
-        "0.148.0",
-        "0.149.0",
-        "0.149.1",
-        "0.150.0",
-        "0.150.1",
-        "0.151.0",
-        "0.152.0",
-        "0.152.1",
-        "0.153.0",
-        "0.153.1",
-        "0.153.2",
-        "0.153.3",
-        "0.153.4",
-        "0.154.0",
-        "0.155.0",
-        "0.155.1",
-        "0.156.0",
-        "0.156.1",
-        "0.157.0",
-        "0.157.1",
-        "0.158.0",
-        "0.159.0",
-        "0.159.1",
-        "0.162.0",
-        "0.162.1",
-        "0.163.0",
-    }
+
+def _release_text(release: tuple[int, int, int]) -> str:
+    return ".".join(str(part) for part in release)
+
+
+#: Tested compatibility policy; derived from the floor so a ceiling bump never renames it.
+CODEX_RUNTIME_COMPATIBILITY_POLICY = (
+    f"codex-appserver-{_release_text(CODEX_RUNTIME_QUALIFIED_FLOOR)}-compatible"
 )
 
 #: ``codex --version`` prints ``codex-cli <version>`` on the verified release.
@@ -62,6 +44,7 @@ CODEX_RUNTIME_VERSION_PREFIX = "codex-cli"
 CODEX_RUNTIME_PROBE_TIMEOUT_SECONDS = 10.0
 
 _VERSION_TOKEN = re.compile(r"codex-cli[ \t]+(\S+)")
+_STABLE_RELEASE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)")
 
 #: Backend config overrides per approval mode. Approval is explicit per
 #: spawn — it has no default anywhere: a missing or unknown approval mode is
@@ -84,16 +67,42 @@ _CODEX_APPROVAL_OVERRIDES: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
-def verified_versions_text() -> str:
-    """The verified releases in release order, for refusal messages."""
-    ordered = sorted(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
-    return ", ".join(ordered)
-
-
 def qualified_versions_range_text() -> str:
-    """Display bounds for the exact verified set."""
-    ordered = sorted(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
-    return f">={ordered[0]},<={ordered[-1]}"
+    """Display text of the qualified range, derived from the gate constants."""
+    text = (
+        f">={_release_text(CODEX_RUNTIME_QUALIFIED_FLOOR)},"
+        f"<{_release_text(CODEX_RUNTIME_QUALIFIED_CEILING)}"
+    )
+    if CODEX_RUNTIME_QUALIFIED_EXCLUDED:
+        text += " excluding " + ", ".join(map(_release_text, CODEX_RUNTIME_QUALIFIED_EXCLUDED))
+    return text
+
+
+def codex_version_refusal(version: str) -> str | None:
+    """Why this release is outside the qualified range, or None when it is admitted."""
+    match = _STABLE_RELEASE.fullmatch(version)
+    if match is None:
+        return f"codex-cli {version!r} is not a stable MAJOR.MINOR.PATCH release"
+    release = (int(match[1]), int(match[2]), int(match[3]))
+    if release in CODEX_RUNTIME_QUALIFIED_EXCLUDED:
+        return f"codex-cli {version} was measured incompatible and is excluded"
+    if release < CODEX_RUNTIME_QUALIFIED_FLOOR:
+        return f"codex-cli {version} is older than the qualified floor"
+    if release >= CODEX_RUNTIME_QUALIFIED_CEILING:
+        return f"codex-cli {version} is newer than the newest proved release"
+    return None
+
+
+def codex_refusal_message(version: str) -> str | None:
+    """The actionable refusal for an unqualified release; wiring=auto falls back to legacy."""
+    refusal = codex_version_refusal(version)
+    if refusal is None:
+        return None
+    return (
+        f"{refusal} (compatibility policy {CODEX_RUNTIME_COMPATIBILITY_POLICY}, qualified range "
+        f"{qualified_versions_range_text()}); wiring=auto selects legacy, and explicit native "
+        "preference selects legacy with this reason"
+    )
 
 
 def codex_endpoint_url(endpoint: str) -> str:
@@ -112,7 +121,7 @@ def parse_codex_version(output: str) -> str | None:
 
 
 def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
-    """Read-only probe of installed codex-cli against the frozen Wave 0 compatibility policy."""
+    """Read-only probe of installed codex-cli against the qualified release range."""
     binary = context.binary or CODEX_BINARY
     version: str | None = None
     try:
@@ -155,17 +164,13 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
                 "wiring=auto and explicit native preference both select legacy with this reason"
             ),
         )
-    if version not in CODEX_RUNTIME_VERIFIED_VERSIONS:
+    refusal = codex_refusal_message(version)
+    if refusal is not None:
         return RuntimeCompatibility(
             supported=False,
             policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
             native_version=version,
-            reason=(
-                f"codex-cli {version} is not Theater-verified by compatibility policy "
-                f"{CODEX_RUNTIME_COMPATIBILITY_POLICY} (verified: "
-                f"{verified_versions_text()}); wiring=auto selects "
-                "legacy, and explicit native preference selects legacy with this reason"
-            ),
+            reason=refusal,
         )
     return RuntimeCompatibility(
         supported=True,

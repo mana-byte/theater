@@ -39,10 +39,10 @@ from .runtime_messages import (
 )
 from .runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
-    CODEX_RUNTIME_VERIFIED_VERSIONS,
     codex_thread_config_overrides,
+    codex_version_refusal,
     plan_codex_frontend,
-    verified_versions_text,
+    qualified_versions_range_text,
 )
 
 
@@ -276,15 +276,15 @@ class CodexRuntimeConnection(CodexRuntimeHost):
         native_version = _version_from_user_agent(
             result.get("userAgent") if isinstance(result, Mapping) else None
         )
-        # Recheck the verified version at handshake; the binary may have changed since the
+        # Recheck the qualified range at handshake; the binary may have changed since the
         # subprocess probe.
-        if native_version not in CODEX_RUNTIME_VERIFIED_VERSIONS:
+        if native_version is None or codex_version_refusal(native_version) is not None:
             await self._abandon_connection(connection)
             raise RuntimeConnectionError(
                 "codex app-server handshake reported unverified native version "
                 f"{native_version!r}; compatibility policy "
-                f"{CODEX_RUNTIME_COMPATIBILITY_POLICY} verifies only "
-                f"{verified_versions_text()}"
+                f"{CODEX_RUNTIME_COMPATIBILITY_POLICY} qualifies only "
+                f"{qualified_versions_range_text()}"
             )
         try:
             # The dialect requires the initialized notification exactly once after initialize; no

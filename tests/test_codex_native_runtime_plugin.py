@@ -20,13 +20,15 @@ from theater.harness.builtin.plugins.codex.runtime import CodexRuntime, codex_ru
 from theater.harness.builtin.plugins.codex.runtime_messages import _item_summary, _native_revision
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
-    CODEX_RUNTIME_VERIFIED_VERSIONS,
+    CODEX_RUNTIME_QUALIFIED_CEILING,
+    CODEX_RUNTIME_QUALIFIED_EXCLUDED,
+    CODEX_RUNTIME_QUALIFIED_FLOOR,
     codex_backend_config_overrides,
     codex_endpoint_url,
-    parse_codex_version,
     plan_codex_frontend,
     plan_codex_runtime_backend,
     probe_codex_compatibility,
+    qualified_versions_range_text,
 )
 from theater.harness.channels.hybrid import HybridSource
 from theater.harness.contracts.callbacks import LaunchContext
@@ -64,13 +66,12 @@ from theater.harness.manifests.validation import validate_manifest
 from theater.models import AwaitingDecision, Status
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
-FIXTURES = Path(__file__).parent / "fixtures" / "codex_native_runtime"
 ENDPOINT = "/private/theater/var/runtime/codex-p1.sock"
 PARTICIPANT = "codex-p1"
 CWD = "/repo"
 GENERATION = 7
-# Captured stock release used by the scripted protocol examples.
-CAPTURED_CODEX_RELEASE = "0.154.0"
+# Release the scripted protocol examples claim to talk to: the floor is always qualified.
+CAPTURED_CODEX_RELEASE = ".".join(map(str, CODEX_RUNTIME_QUALIFIED_FLOOR))
 QUEUE_METHODS = (
     "thread/queue/add",
     "thread/queue/list",
@@ -79,13 +80,6 @@ QUEUE_METHODS = (
     "thread/queue/reorder",
     "thread/queue/start",
 )
-
-
-def load_bundle(version: str, name: str) -> dict:
-    """Read one behaviour fixture from a versioned qualification bundle."""
-    index = json.loads((FIXTURES / "index.json").read_text())
-    directory = index["bundles"][version]["directory"]
-    return json.loads((FIXTURES / directory / name).read_text())
 
 
 class RequestFailure(Exception):
@@ -315,55 +309,55 @@ def test_a_tool_item_summary_is_one_line_whatever_the_command() -> None:
     assert _item_summary(item) == "codex item: commandExecution /bin/zsh -lc 'cat <<EOF hi EOF'"
 
 
-def test_installed_release_fixture_version_is_verified_policy() -> None:
-    # Every allowed version's bundle pins exactly that release string.
-    for version in sorted(CODEX_RUNTIME_VERIFIED_VERSIONS):
-        release = load_bundle(version, "installed_release.json")
-        assert parse_codex_version(release["installed_version_output"]) == version
+def _text(release: tuple[int, int, int]) -> str:
+    return ".".join(map(str, release))
+
+
+def _before(release: tuple[int, int, int]) -> tuple[int, int, int]:
+    major, minor, patch = release
+    return (major, minor, patch - 1) if patch else (major, minor - 1, 99)
 
 
 def _gate_cases() -> list[tuple[str, bool]]:
-    ordered = sorted(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
-    major, minor, patch = map(int, ordered[0].split("."))
-    below = f"{major}.{minor - 1}.{patch}"
-    between = next(
-        f"{a}.{b}.{c + 1}"
-        for version in ordered
-        for a, b, c in [tuple(map(int, version.split(".")))]
-        if f"{a}.{b}.{c + 1}" not in CODEX_RUNTIME_VERIFIED_VERSIONS
-        and f"{a}.{b}.{c + 1}" < ordered[-1]
-    )
-    a, b, c = map(int, ordered[-1].split("."))
-    above = f"{a}.{b}.{c + 1}"
-    prerelease = f"{ordered[-1]}-alpha.1"
-    return [(version, True) for version in ordered] + [
-        (version, False) for version in (below, between, above, prerelease)
+    floor, ceiling = CODEX_RUNTIME_QUALIFIED_FLOOR, CODEX_RUNTIME_QUALIFIED_CEILING
+    inside = [floor, _before(ceiling), (floor[0], floor[1] + 1, 0)]
+    admitted = [
+        release
+        for release in inside
+        if floor <= release < ceiling and release not in CODEX_RUNTIME_QUALIFIED_EXCLUDED
+    ]
+    refused = [
+        _before(floor),
+        ceiling,
+        (ceiling[0], ceiling[1], ceiling[2] + 1),
+        *CODEX_RUNTIME_QUALIFIED_EXCLUDED,
+    ]
+    return [(_text(release), True) for release in admitted] + [
+        *((_text(release), False) for release in refused),
+        (f"{_text(floor)}-alpha.1", False),
     ]
 
 
 @pytest.mark.parametrize(("version", "supported"), _gate_cases())
-def test_probe_exact_gate_and_manifest_range(monkeypatch, version: str, supported: bool) -> None:
+def test_probe_range_gate_and_manifest_range(monkeypatch, version: str, supported: bool) -> None:
     _patch_version(monkeypatch, f"codex-cli {version}\n")
-    reason = None
-    if not supported:
-        ordered = sorted(
-            CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split(".")))
-        )
-        reason = (
-            f"codex-cli {version} is not Theater-verified by compatibility policy "
-            f"{CODEX_RUNTIME_COMPATIBILITY_POLICY} (verified: {', '.join(ordered)}); "
-            "wiring=auto selects legacy, and explicit native preference selects legacy "
-            "with this reason"
-        )
-    assert probe_codex_compatibility(RuntimeProbeContext(binary="codex")) == RuntimeCompatibility(
-        supported=supported,
-        policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
-        native_version=version,
-        reason=reason,
+    compatibility = probe_codex_compatibility(RuntimeProbeContext(binary="codex"))
+    assert compatibility.supported is supported
+    assert compatibility.policy == CODEX_RUNTIME_COMPATIBILITY_POLICY
+    assert compatibility.native_version == version
+    if supported:
+        assert compatibility.reason is None
+    else:
+        # The reason names the refusal, the range and what wiring does about it.
+        assert compatibility.reason is not None
+        assert version in compatibility.reason
+        assert f"qualified range {qualified_versions_range_text()}" in compatibility.reason
+        assert "wiring=auto selects legacy" in compatibility.reason
+    qualified_range = MANIFEST.native_compatibility.qualified_range
+    assert qualified_range == qualified_versions_range_text()
+    assert qualified_range.startswith(
+        f">={_text(CODEX_RUNTIME_QUALIFIED_FLOOR)},<{_text(CODEX_RUNTIME_QUALIFIED_CEILING)}"
     )
-    low = min(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
-    high = max(CODEX_RUNTIME_VERIFIED_VERSIONS, key=lambda v: tuple(map(int, v.split("."))))
-    assert MANIFEST.native_compatibility.qualified_range == f">={low},<={high}"
 
 
 def test_probe_rejects_unparseable_output(monkeypatch) -> None:
@@ -675,7 +669,8 @@ async def test_handshake_rejects_unverified_backend_version() -> None:
     server = ScriptedCodexServer()
     # A binary changed between the probe and backend start must not bind an
     # unverified server under the verified policy.
-    server.respond("initialize", {"userAgent": "codex-cli/0.99.0 (macos; arm64)"})
+    ceiling = ".".join(map(str, CODEX_RUNTIME_QUALIFIED_CEILING))
+    server.respond("initialize", {"userAgent": f"codex-cli/{ceiling} (macos; arm64)"})
     runtime = make_runtime(server)
     with pytest.raises(RuntimeConnectionError, match="unverified native version"):
         await runtime.open_session(mode=SessionOpenMode.NEW)
