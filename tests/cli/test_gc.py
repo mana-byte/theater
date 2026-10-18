@@ -1,13 +1,4 @@
-"""The ``theater gc`` command and its RPC.
-
-Tests the front door, not the engine: every deletion query already exists in
-``gc.py`` and is tested in ``test_engine.py``. Here we verify that the RPC returns
-the documented keys with the right counts, that ``live_handles`` protects a
-live job, that ``--vacuum`` runs after the sweep, that ``retention.enabled``
-being false does not stop a manual sweep, and that the human-readable output
-communicates the one thing that matters — that deleting rows does not shrink
-the file.
-"""
+"""`theater gc`: the RPC's counts and protections, and how the sweep is reported."""
 
 from __future__ import annotations
 
@@ -26,9 +17,6 @@ from theater.models import now
 _DAY = 86400.0
 
 
-# ---- helpers ---
-
-
 def _scratchpad_row(store) -> None:
     store.conn.execute(
         global_scratchpad.insert().values(
@@ -45,7 +33,7 @@ def _count(store, table) -> int:
     return store.conn.execute(select(func.count()).select_from(table)).scalar()
 
 
-# ---- 1. RPC returns every documented key with matching counts ----------------
+# ---- RPC returns every documented key with matching counts
 
 
 async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, terminal_provider):
@@ -102,7 +90,7 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, term
     assert data["vacuum_ran"] is False
 
 
-# ---- 2. live_handles protects a live running job -----------------------------
+# ---- live_handles protects a live running job
 
 
 async def test_gc_rpc_passes_live_handles(client, daemon, terminal_provider):
@@ -133,7 +121,7 @@ async def test_gc_rpc_passes_live_handles(client, daemon, terminal_provider):
     assert job.finished_at is None
 
 
-# ---- 3. vacuum=False does not vacuum; vacuum=True does, after sweep -----------
+# ---- vacuum=False does not vacuum; vacuum=True does, after sweep
 
 
 async def test_gc_rpc_vacuum_false_does_not_vacuum(client, daemon, terminal_provider, monkeypatch):
@@ -173,7 +161,7 @@ async def test_gc_rpc_sweep_runs_before_vacuum(client, daemon, terminal_provider
     assert order == ["sweep", "vacuum"]
 
 
-# ---- 4. RPC still sweeps when retention.enabled is false ---------------------
+# ---- RPC still sweeps when retention.enabled is false
 
 
 async def test_gc_rpc_sweeps_when_retention_disabled(client, daemon, terminal_provider):
@@ -197,7 +185,7 @@ async def test_gc_rpc_sweeps_when_retention_disabled(client, daemon, terminal_pr
     assert data["jobs"] == 1
 
 
-# ---- 5. Rendering: nothing deleted says so, no wall of zeroes -----------------
+# ---- Rendering: nothing deleted says so, no wall of zeroes
 
 
 def _render(monkeypatch, capsys, payload: dict, *argv: str) -> str:
@@ -234,7 +222,7 @@ def test_render_nothing_deleted_shows_coverage(monkeypatch, capsys):
     assert "no data" in out
 
 
-# ---- 6. Rendering: rows deleted without --vacuum tells the user ---------------
+# ---- Rendering: rows deleted without --vacuum tells the user
 
 
 def test_render_deleted_without_vacuum_warns_file_did_not_shrink(monkeypatch, capsys):
@@ -293,7 +281,7 @@ def test_render_vacuum_with_nothing_reclaimed_says_so(monkeypatch, capsys):
     assert "unchanged" in out
 
 
-# ---- 7. --json emits the raw response ----------------------------------------
+# ---- --json emits the raw response
 
 
 def test_json_emits_raw_response(monkeypatch, capsys):

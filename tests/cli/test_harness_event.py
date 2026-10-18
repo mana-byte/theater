@@ -1,4 +1,4 @@
-"""Focused hidden generic hook CLI tests."""
+"""The hidden `harness-event` hook command."""
 
 from __future__ import annotations
 

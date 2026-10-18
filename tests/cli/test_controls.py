@@ -1,41 +1,11 @@
-"""CLI tests for the control commands and the spawn wiring flag.
-
-``call_sync`` is the seam, as in the rest of ``test_commands.py``: these assert what
-each command asks the daemon for, what it prints, and its exit codes — the
-socket round trip is covered by ``test_rpc.py``.
-"""
+"""Control commands: steer, queue, settings, controls and interrupt."""
 
 from __future__ import annotations
 
 import json
 
-import pytest
-
+from tests.support.cli_fakes import parse
 from theater import cli
-from theater.cli.commands import controls as controls_mod
-
-
-def parse(*argv):
-    return cli._parser().parse_args(list(argv))
-
-
-@pytest.fixture
-def answers(monkeypatch):
-    state = {"replies": {}, "calls": []}
-
-    def call_sync(method, **params):
-        state["calls"].append((method, params))
-        reply = state["replies"].get(method, [])
-        if isinstance(reply, Exception):
-            raise reply
-        return reply
-
-    monkeypatch.setattr(controls_mod, "call_sync", call_sync)
-    monkeypatch.setattr("theater.cli.commands.participants.call_sync", call_sync, raising=False)
-    return state
-
-
-# ---- steer -----------------------------------------------------------------
 
 
 def test_steer_forwards_the_cli_identity_and_the_optional_job(answers, capsys):
@@ -138,9 +108,6 @@ def test_steer_without_delivery_metadata_is_a_warning_not_success(answers, capsy
     assert "p-1#3" in captured.err
 
 
-# ---- queue -----------------------------------------------------------------
-
-
 def test_queue_creates_and_prints_the_followup_handle(answers, capsys):
     answers["replies"] = {"participant.queue_followup": {"handle": "p-1#4", "state": "running"}}
     assert cli.cmd_queue(parse("queue", "p-1", "do more")) == 0
@@ -160,9 +127,6 @@ def test_queue_json_prints_the_job_verbatim(answers, capsys):
     answers["replies"] = {"participant.queue_followup": record}
     assert cli.cmd_queue(parse("queue", "p-1", "do more", "--json")) == 0
     assert json.loads(capsys.readouterr().out) == record
-
-
-# ---- settings --------------------------------------------------------------
 
 
 def test_settings_applied_prints_effective_values(answers, capsys):
@@ -228,9 +192,6 @@ def test_settings_json_exit_code_follows_the_outcome(answers, capsys):
         "participant.settings.update": {"id": "p-1", "applied": True, "model": "m"}
     }
     assert cli.cmd_settings(parse("settings", "p-1", "--model", "m", "--json")) == 0
-
-
-# ---- controls --------------------------------------------------------------
 
 
 def test_controls_renders_wiring_capabilities_and_queue(answers, capsys):
@@ -330,9 +291,6 @@ def test_controls_names_pending_human_interaction(answers, capsys):
     assert "answer it in the native UI" in out
 
 
-# ---- interrupt -------------------------------------------------------------
-
-
 def test_interrupt_prints_the_cancelled_followups(answers, capsys):
     answers["replies"] = {
         "participant.interrupt": {
@@ -353,28 +311,3 @@ def test_interrupt_when_idle_prints_the_reason(answers, capsys):
     assert cli.cmd_interrupt(parse("interrupt", "p-1", "--json")) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload == {"id": "p-1", "interrupted": False, "reason": "already_idle"}
-
-
-# ---- spawn wiring ----------------------------------------------------------
-
-
-def test_spawn_defaults_wiring_to_auto(answers):
-    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    assert cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual")) == 0
-    assert answers["calls"][0][1]["wiring"] == "auto"
-
-
-def test_spawn_passes_the_explicit_legacy_opt_out(answers):
-    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    assert (
-        cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--wiring", "legacy"))
-        == 0
-    )
-    assert answers["calls"][0][1]["wiring"] == "legacy"
-
-
-def test_spawn_rejects_unknown_wiring_at_parse_time():
-    with pytest.raises(SystemExit):
-        cli._parser().parse_args(
-            ["spawn", "vibe", "hi", "--approval", "manual", "--wiring", "bogus"]
-        )
