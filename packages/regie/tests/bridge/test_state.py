@@ -106,6 +106,15 @@ def test_receipts_are_removed_only_after_explicit_daemon_acknowledgment(tmp_path
         assert [receipt["operation_id"] for receipt in state.receipts()] == ["deferred"]
         quarantined = state.state_dir / "unmatched-receipts"
         assert len(tuple(quarantined.glob("*.json"))) == 1
+
+        # The daemon retries an acknowledgment: receipts already removed are left alone.
+        state.acknowledge_receipts(
+            receipts,
+            acknowledged_operation_ids=["accepted", "ignored"],
+            ignored_operation_ids=["ignored"],
+        )
+        assert [receipt["operation_id"] for receipt in state.receipts()] == ["deferred"]
+        assert len(tuple(quarantined.glob("*.json"))) == 1
     finally:
         state.release()
 

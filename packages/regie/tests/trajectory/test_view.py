@@ -404,6 +404,20 @@ async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile(
         await wait_until(pilot, lambda: panel.record_id == "r1" and not loading.display, timeout=10)
 
 
+async def test_details_hide_the_loading_state_when_no_span_is_selected() -> None:
+    app = Host()
+    async with app.run_test(size=(120, 40)):
+        view = app.query_one(TrajectoryView)
+        panel = view.query_one(SpanDetailPanel)
+        loading = panel.query_one("#trajectory-span-detail-loading")
+        panel.show_pending()
+        assert loading.display
+
+        view._sync_detail()  # the cursor settled where there is no span to show
+
+        assert not loading.display
+
+
 async def test_detail_keys_move_between_sections_and_copy_section_or_page() -> None:
     copied: list[str] = []
     app = Host(copied=copied)
