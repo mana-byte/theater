@@ -23,14 +23,14 @@ class PiAdapter:
     probe: str = "theater.harness.builtin.plugins.pi.runtime_probe:probe_pi_frontend_compatibility"
     stub_help: str = ""
     green_tests: tuple[str, ...] = (
-        "tests/test_pi_native_control.py::test_pi_core_correlation_proof_holds_on_stock_pi",
-        "tests/test_pi_native_control.py::test_pi_active_run_interrupt_proof_holds_on_stock_pi",
-        "tests/test_pi_native_control.py::test_pi_steer_admission_proof_holds_on_stock_pi",
+        "tests/integration/test_pi_native_control.py::test_pi_core_correlation_proof_holds_on_stock_pi",
+        "tests/integration/test_pi_native_control.py::test_pi_active_run_interrupt_proof_holds_on_stock_pi",
+        "tests/integration/test_pi_native_control.py::test_pi_steer_admission_proof_holds_on_stock_pi",
     )
     consistency_tests: tuple[str, ...] = (
-        "tests/test_harness_compat_pi.py",
-        "tests/test_pi_native_bridge.py::test_pi_frontend_probe_accepts_qualified_versions",
-        "tests/test_pi_native_bridge.py::test_pi_frontend_probe_refuses_unqualified_versions",
+        "tests/compat/test_pi.py",
+        "tests/harness/pi/test_native_bridge.py::test_pi_frontend_probe_accepts_qualified_versions",
+        "tests/harness/pi/test_native_bridge.py::test_pi_frontend_probe_refuses_unqualified_versions",
     )
     expected_skips: Mapping[str, str] = field(default_factory=dict)
     expected_routes: frozenset[tuple[str, str]] = frozenset()

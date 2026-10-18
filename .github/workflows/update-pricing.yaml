@@ -34,7 +34,7 @@ jobs:
             -o "$tmp"
           uv run python -c "import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d,dict) and len(d)>0" "$tmp"
           mv "$tmp" theater/pricing/model_prices.json
-      - run: uv run pytest tests/test_pricing.py -q
+      - run: uv run pytest tests/pricing/test_catalog.py -q
       - name: Detect changes
         id: diff
         run: |

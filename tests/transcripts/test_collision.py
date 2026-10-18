@@ -1539,7 +1539,7 @@ async def test_identity_loss_evidence_session_id_matching_another_live_participa
 async def test_vanished_exact_pin_relocation_matching_a_live_siblings_session_id_is_rejected(
     collision_registry, tmp_path
 ):
-    """A same-session-id relocation candidate (see test_transcript_source.py's
+    """A same-session-id relocation candidate (see test_source.py's
     self-heal tests) must still be rejected when that session id already
     belongs to a different live participant, even at an unrelated path --
     and the source must reach quarantine on the next poll rather than retry

@@ -1,8 +1,8 @@
 """CLI tests for the control commands and the spawn wiring flag.
 
-``call_sync`` is the seam, as in the rest of ``test_cli.py``: these assert what
+``call_sync`` is the seam, as in the rest of ``test_commands.py``: these assert what
 each command asks the daemon for, what it prints, and its exit codes — the
-socket round trip is covered by ``test_control_rpc.py``.
+socket round trip is covered by ``test_rpc.py``.
 """
 
 from __future__ import annotations

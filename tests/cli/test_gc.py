@@ -1,7 +1,7 @@
 """The ``theater gc`` command and its RPC.
 
 Tests the front door, not the engine: every deletion query already exists in
-``gc.py`` and is tested in ``test_gc.py``. Here we verify that the RPC returns
+``gc.py`` and is tested in ``test_engine.py``. Here we verify that the RPC returns
 the documented keys with the right counts, that ``live_handles`` protects a
 live job, that ``--vacuum`` runs after the sweep, that ``retention.enabled``
 being false does not stop a manual sweep, and that the human-readable output

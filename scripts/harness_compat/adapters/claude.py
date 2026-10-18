@@ -28,9 +28,9 @@ _PACKAGE = "@anthropic-ai/claude-code"
 _PROBE_SOURCE = Path("theater/harness/builtin/plugins/claude/compatibility.py")
 _HINT = re.compile(r"transcript|hook|session|--session-id|turn_duration", re.IGNORECASE)
 _GREEN_TESTS = (
-    "tests/test_harness_compat_claude_run.py::test_claude_seeded_tui_turn",
-    "tests/test_harness_compat_claude_run.py::test_claude_observer_seals_tui_turn",
-    "tests/test_harness_compat_claude_run.py::test_claude_tool_hook_decodes_live_payload",
+    "tests/compat/test_claude_run.py::test_claude_seeded_tui_turn",
+    "tests/compat/test_claude_run.py::test_claude_observer_seals_tui_turn",
+    "tests/compat/test_claude_run.py::test_claude_tool_hook_decodes_live_payload",
 )
 
 
@@ -101,8 +101,8 @@ class ClaudeAdapter:
     stub_help = ""
     green_tests = _GREEN_TESTS
     consistency_tests = (
-        "tests/test_hook_compatibility.py::test_claude_hook_version_range[hook-floor]",
-        "tests/test_hook_compatibility.py::test_claude_hook_version_range[hook-ceiling]",
+        "tests/harness/claude/test_hook_compatibility.py::test_claude_hook_version_range[hook-floor]",
+        "tests/harness/claude/test_hook_compatibility.py::test_claude_hook_version_range[hook-ceiling]",
     )
     expected_skips: ClassVar[Mapping[str, str]] = MappingProxyType({})
     expected_routes = frozenset(

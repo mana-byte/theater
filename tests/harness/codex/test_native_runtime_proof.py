@@ -26,7 +26,7 @@ Two layers:
   them with the deterministic invocation
 
       THEATER_CODEX_NATIVE_PROOF=1 \\
-          uv run pytest tests/test_codex_native_runtime_proof.py -k native_smoke -v
+          uv run pytest tests/harness/codex/test_native_runtime_proof.py -k native_smoke -v
 
   Ordinary pytest skips them; skipped smoke tests do not satisfy the gate.
 

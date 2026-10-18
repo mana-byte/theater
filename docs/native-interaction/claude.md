@@ -21,7 +21,7 @@ complete user-message frame Theater needs.
   [`launch.py`](../../theater/harness/builtin/plugins/claude/launch.py#L74).
 - [`claude/trajectory.py`](../../theater/harness/builtin/plugins/claude/trajectory.py#L77)
   derives user-turn identity from `promptId` or the user record UUID.
-- [`test_claude_native_control_proof.py`](../../tests/test_claude_native_control_proof.py)
+- [`test_native_control_proof.py`](../../tests/harness/claude/test_native_control_proof.py)
   pins the fail-closed manifest and the harness in
   [`tests/native/claude_messaging_client.py`](../../tests/native/claude_messaging_client.py),
   while
@@ -90,7 +90,7 @@ means.
 ## Phase 0 — replace the stale proof
 
 Rewrite
-[`tests/test_claude_native_control_proof.py`](../../tests/test_claude_native_control_proof.py)
+[`tests/harness/claude/test_native_control_proof.py`](../../tests/harness/claude/test_native_control_proof.py)
 as an opt-in executable conformance test against stock Claude Code `>=2.1.248`.
 Update the fixture with exact binary version, platform, probe date, frame bytes with
 tokens redacted, response frames, and relevant JSONL records.
@@ -256,10 +256,10 @@ healthy and the exact session/idle proof is current. It should advertise `STEER`
 
 Add the minimal focused layers:
 
-- stock-binary conformance in `tests/test_claude_native_control_proof.py`;
-- rendered bridge protocol tests in `tests/test_claude_native_bridge.py` covering
+- stock-binary conformance in `tests/harness/claude/test_native_control_proof.py`;
+- rendered bridge protocol tests (planned `tests/harness/claude/test_native_bridge.py`) covering
   auth, bounds, duplicate IDs, stale epoch/session, idle admission, and unknown writes;
-- frontend lifecycle integration in `tests/test_claude_frontend_integration.py` for
+- frontend lifecycle integration (planned `tests/harness/claude/test_frontend_integration.py`) for
   launch overlay, hook coexistence, reconnect, and token secrecy;
 - control-service cases for accepted send/job correlation, queue release, busy
   rejection, `UNKNOWN` no-fallback, and terminal transcript evidence;
@@ -269,10 +269,8 @@ Add the minimal focused layers:
 Suggested focused command after implementation:
 
 ```sh
-uv run pytest tests/test_claude_native_control_proof.py \
-  tests/test_claude_native_bridge.py \
-  tests/test_claude_frontend_integration.py \
-  tests/test_control_service.py
+uv run pytest tests/harness/claude/test_native_control_proof.py \
+  tests/daemon/controls/test_service.py
 ```
 
 ## Release and stop gates

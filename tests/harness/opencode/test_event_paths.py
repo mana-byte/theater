@@ -6,7 +6,7 @@ its tool-call arguments in ``state.input`` as a JSON object whose keys are
 the parameter schema field names — ``filePath`` for write/edit/read,
 ``path`` (a directory) for glob/grep, and no path at all for bash/shell.
 
-The Recorder here extends the one in ``test_harness_opencode.py`` with a
+The Recorder here extends the one in ``test_storage_observer.py`` with a
 ``tool_with_input`` method that writes a tool part whose ``state.input``
 matches the real shape, so the path extraction runs against the same
 record structure the adapter sees in production.
@@ -49,7 +49,7 @@ CREATE TABLE part (
 
 
 class Recorder:
-    """Same shape as the one in test_harness_opencode.py, with a tool method
+    """Same shape as the one in test_storage_observer.py, with a tool method
     that accepts the real ``state.input`` structure."""
 
     def __init__(self, path: Path, sid: str, directory: str, created: int = 1000):

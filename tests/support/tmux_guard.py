@@ -1,6 +1,6 @@
 """The floor that keeps the suite's tmux off the developer's own server.
 
-This lives outside `conftest.py` so it can be tested. `tests/test_tmux_guard.py`
+This lives outside `conftest.py` so it can be tested. `tests/support/test_tmux_guard.py`
 drives `reap_private_server` through substituted seams and never starts a real
 server, which matters because on a correct run the guard never fires: without a
 test of its own it would be free to rot.

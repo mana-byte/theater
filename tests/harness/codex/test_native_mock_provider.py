@@ -6,7 +6,7 @@ structured-request filler, FIFO exhaustion, the held stream's
 disconnect tolerance, and the approval exec-call derivation.
 
 Everything else here (the suites that need the real binary) is opt-in in
-tests/test_codex_native_runtime_proof.py.
+tests/harness/codex/test_native_runtime_proof.py.
 """
 
 from __future__ import annotations

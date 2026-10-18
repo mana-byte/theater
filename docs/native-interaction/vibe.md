@@ -17,7 +17,7 @@ same runtime.
 - Existing durable observation remains in
   [`unified_source.py`](../../theater/harness/builtin/plugins/vibe/unified_source.py)
   and [`unified_store.py`](../../theater/harness/builtin/plugins/vibe/unified_store.py).
-- [`test_vibe_native_topology_proof.py`](../../tests/test_vibe_native_topology_proof.py)
+- [`test_native_topology_proof.py`](../../tests/harness/vibe/test_native_topology_proof.py)
   asserts that no runtime is installed and reads the pinned evidence fixture.
 - [`topology.json`](../../tests/fixtures/vibe_app_server/topology.json) currently pins
   `2.25.4` at commit `19b5b74faa78d0816b8d4d4c7d7543fc3520678c`.
@@ -102,7 +102,7 @@ The refreshed fixture should stay small and machine-readable:
 ```
 
 Update
-[`test_vibe_native_topology_proof.py`](../../tests/test_vibe_native_topology_proof.py)
+[`test_native_topology_proof.py`](../../tests/harness/vibe/test_native_topology_proof.py)
 to assert the current fixture version/commit and the three booleans. Keep the manifest
 assertions that `runtime is None` and Escape remains legacy while all are false.
 
@@ -182,7 +182,7 @@ adapter.
 For the monitoring-only change:
 
 ```sh
-uv run pytest tests/test_vibe_native_topology_proof.py
+uv run pytest tests/harness/vibe/test_native_topology_proof.py
 ```
 
 If topology later passes, minimum stock tests must cover shared session/turn identity,

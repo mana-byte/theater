@@ -21,7 +21,7 @@ native events.
 - [`codex/runtime.py`](../../theater/harness/builtin/plugins/codex/runtime.py#L385)
   implements send with `clientUserMessageId`, steer at line 424, interrupt at line
   466, and settings update at line 494.
-- [`tests/test_codex_native_runtime_proof.py`](../../tests/test_codex_native_runtime_proof.py)
+- [`tests/harness/codex/test_native_runtime_proof.py`](../../tests/harness/codex/test_native_runtime_proof.py)
   contains offline fixture assertions plus opt-in stock-binary tests.
 - [`tests/fixtures/codex_native_runtime/`](../../tests/fixtures/codex_native_runtime)
   retains two bundles of generated schemas and sanitized behavior, `floor` and `latest`,
@@ -50,7 +50,7 @@ Preserve the existing opt-in test entry point:
 
 ```sh
 THEATER_CODEX_NATIVE_PROOF=1 \
-  uv run pytest tests/test_codex_native_runtime_proof.py -k native_smoke -v
+  uv run pytest tests/harness/codex/test_native_runtime_proof.py -k native_smoke -v
 ```
 
 Add a small maintainer command, preferably a Python module under `tests/native/`, that
@@ -124,7 +124,7 @@ At minimum compare `ClientRequest.json`, `ClientNotification.json`,
 `ServerRequest.json`, `ServerNotification.json`, `JSONRPCRequest.json`, and
 `JSONRPCMessage.json`. Keep the assertions around required methods currently declared
 at
-[`test_codex_native_runtime_proof.py`](../../tests/test_codex_native_runtime_proof.py#L70).
+[`test_native_runtime_proof.py`](../../tests/harness/codex/test_native_runtime_proof.py#L70).
 
 Do not auto-generate runtime code from the schema during this phase. The existing
 decoders deliberately enforce stronger Theater invariants than structural schema
@@ -258,10 +258,10 @@ uv run python tests/native/codex_qualify_runtime.py \
 THEATER_CODEX_NATIVE_PROOF=1 THEATER_CODEX_NATIVE_PROVIDER=mock \
   THEATER_CODEX_NATIVE_BIN="$SCRATCH/bin/codex" \
   THEATER_CODEX_QUALIFY_VERSION=X.Y.Z \
-  uv run pytest tests/test_codex_native_runtime_proof.py -k native_smoke -v
+  uv run pytest tests/harness/codex/test_native_runtime_proof.py -k native_smoke -v
 THEATER_CODEX_NATIVE_SMOKE=1 THEATER_CODEX_NATIVE_BIN="$SCRATCH/bin/codex" \
   THEATER_CODEX_QUALIFY_VERSION=X.Y.Z \
-  uv run pytest tests/test_codex_native_ui_bootstrap_proof.py -k native_ui_bootstrap
+  uv run pytest tests/harness/codex/test_native_ui_bootstrap_proof.py -k native_ui_bootstrap
 rm -rf "$SCRATCH"
 ```
 
@@ -307,7 +307,7 @@ workspace-trust dialog is not suppressed: a worktree inside a trusted repo did n
   hard frame/time bounds.
 - add `tests/native/qualify_codex_runtime.py`: explicit evidence-capture command with
   no gate write.
-- `tests/test_codex_native_runtime_proof.py`: parameterize offline bundle checks over the
+- `tests/harness/codex/test_native_runtime_proof.py`: parameterize offline bundle checks over the
   retained bundles and keep opt-in stock scenarios.
 - `tests/fixtures/codex_native_runtime/`: the retained `floor` and `latest` evidence.
 - `theater/harness/builtin/plugins/codex/runtime_plan.py`: ceiling bump last.
@@ -319,11 +319,11 @@ workspace-trust dialog is not suppressed: a worktree inside a trusted repo did n
 Focused verification for a candidate:
 
 ```sh
-uv run pytest tests/test_codex_native_runtime_proof.py \
-  tests/test_codex_native_runtime_plugin.py \
-  tests/test_codex_native_ui_bootstrap_proof.py \
-  tests/test_runtime_lifecycle_integration.py \
-  tests/test_runtime_live_recovery.py
+uv run pytest tests/harness/codex/test_native_runtime_proof.py \
+  tests/harness/codex/test_native_runtime_plugin.py \
+  tests/harness/codex/test_native_ui_bootstrap_proof.py \
+  tests/daemon/harness_runtime/test_lifecycle_integration.py \
+  tests/daemon/harness_runtime/test_live_recovery.py
 ```
 
 Then run the opt-in stock proof with the exact binary whose digest is in the fixture.

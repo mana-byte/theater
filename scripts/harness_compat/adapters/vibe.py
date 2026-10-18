@@ -21,7 +21,7 @@ from ..contract import (
 from .vibe_bump import bump, gate
 from .vibe_store import reader_minor, store_check
 
-_PROOF = "tests/test_harness_compat_vibe.py"
+_PROOF = "tests/compat/test_vibe.py"
 _GREEN_TESTS = (
     f"{_PROOF}::test_real_vibe_store_format",
     f"{_PROOF}::test_real_vibe_mock_turn",
@@ -36,15 +36,15 @@ class VibeAdapter:
     stub_help = ""
     green_tests = _GREEN_TESTS
     consistency_tests = (
-        "tests/test_vibe_compatibility.py",
-        "tests/test_vibe_launch_safety.py",
-        "tests/test_harness_compat_vibe.py::test_vibe_bump_is_patch_bounded_and_idempotent",
-        "tests/test_harness_compat_vibe.py::test_vibe_bump_ignores_composition_discovery",
-        "tests/test_harness_compat_vibe.py::test_vibe_bump_requires_ceiling_anchor",
-        "tests/test_harness_compat_vibe.py::test_vibe_qualify_gates_candidate_and_watch_on_consistency",
-        "tests/test_harness_compat_vibe.py::test_vibe_qualify_reaches_proofs_after_consistency",
-        "tests/test_harness_compat_vibe.py::test_vibe_store_format_classification",
-        "tests/test_harness_compat_vibe.py::test_vibe_install_failure_is_inconclusive",
+        "tests/harness/vibe/test_compatibility.py",
+        "tests/harness/vibe/test_launch_safety.py",
+        "tests/compat/test_vibe.py::test_vibe_bump_is_patch_bounded_and_idempotent",
+        "tests/compat/test_vibe.py::test_vibe_bump_ignores_composition_discovery",
+        "tests/compat/test_vibe.py::test_vibe_bump_requires_ceiling_anchor",
+        "tests/compat/test_vibe.py::test_vibe_qualify_gates_candidate_and_watch_on_consistency",
+        "tests/compat/test_vibe.py::test_vibe_qualify_reaches_proofs_after_consistency",
+        "tests/compat/test_vibe.py::test_vibe_store_format_classification",
+        "tests/compat/test_vibe.py::test_vibe_install_failure_is_inconclusive",
     )
     expected_skips: Mapping[str, str] = {}
     expected_routes = frozenset({("POST", "/v1/chat/completions")})

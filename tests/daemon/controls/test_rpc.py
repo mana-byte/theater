@@ -1,6 +1,6 @@
 """Focused control RPC tests: steer, queue, settings, controls.
 
-The control service's own state machine is covered by ``test_control_service.py``;
+The control service's own state machine is covered by ``test_service.py``;
 these tests cover the daemon boundary: parameter validation, authorization
 routing through the existing gate semantics, serialization, native routing,
 and provider-only fallback policy. Native participants use the in-memory fake runtime

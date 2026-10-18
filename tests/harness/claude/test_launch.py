@@ -1,6 +1,6 @@
 """Claude Code's file layout, as opposed to its record format.
 
-The record format is covered in test_harness_parse.py against a scrubbed real
+The record format is covered in test_parse.py against a scrubbed real
 transcript. What is left, and what these tests are about, is everything the
 adapter does with the *directory*: choosing which of ~/.claude/projects/*/*.jsonl
 belongs to a participant, and reading Task sidechains out of it.

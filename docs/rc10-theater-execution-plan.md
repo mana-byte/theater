@@ -328,7 +328,7 @@ record pre-existing failures instead of making workers rediscover them.
 **G00 — Candidate subprocess isolation.**
 
 - Own new `tests/rc10_support/` isolation utilities and
-  `tests/test_rc10_isolation.py`. Read existing conftest/tmux guards; changing
+  `tests/test_rc10_isolation.py` (both since removed). Read existing conftest/tmux guards; changing
   shared conftest requires coordinator approval of the file transfer.
 - Implement helpers that allocate short test homes, isolated tmux roots and
   candidate subprocess environments without modifying the worker's control env.
@@ -357,7 +357,7 @@ explicit packaging assignment.
 **S01 — Contract and domain interfaces.**
 
 - Own new `theater/frontend/schemas/`, `dto/`, `errors.py`, `capabilities.py`,
-  and focused `tests/test_rc10_schema_catalog.py`.
+  and focused `tests/frontend/test_schema_catalog.py`.
 - Define the full method catalog from spec §8.4, role/handshake schemas,
   provider callbacks, operation/job DTOs and event transaction envelopes.
 - Define narrow shared interfaces for write units, terminal identity, actor,
@@ -374,8 +374,8 @@ contract commit and publish its exact symbols/schema revision. Only then start G
 
 **G01 — Independent raw contract consumer.**
 
-- Own `tests/rc10_support/raw_client.py`, raw JSON fixtures under
-  `tests/fixtures/rc10/`, and `tests/test_rc10_raw_framing.py`.
+- Own `tests/support/raw_client.py`, raw JSON fixtures under
+  `tests/fixtures/rc10/`, and `tests/frontend/test_raw_framing.py`.
 - Build a stdlib-only socket client/decoder from the frozen contract. It must not
   import Theater, its SDK or installed schema libraries in the client process.
 - Exercise framing, explicit errors and unknown response fields using a tiny
@@ -441,7 +441,7 @@ Required existing store/control persistence tests pass.
 **G03 — SDK ordinary connections.**
 
 - Own `theater/frontend/client.py`, `transport.py`, domain client method wrappers
-  and `tests/test_rc10_sdk.py`, `test_rc10_raw_client.py`.
+  and `tests/frontend/test_sdk.py` (`test_rc10_raw_client.py` since removed).
 - Implement connect-only lifecycle, typed envelopes/errors, one in-flight request
   per connection, wait/interactive connection separation and unknown-value decoding.
 - Drive the actual daemon with the independent raw client from G01 for handshake,
@@ -477,7 +477,7 @@ the provider side of reverse requests.
 **G04 — Provider SDK channel.**
 
 - Own `theater/frontend/provider.py` and focused
-  `tests/test_rc10_provider_client.py`.
+  `tests/provider/test_client.py`.
 - Implement handshake/channel lifecycle, callback reader/writer, bounded pending
   requests, exact correlation and unknown/late response handling.
 - Keep read processing alive while an asynchronous callback handler waits.
@@ -513,8 +513,8 @@ connecting it to production spawn/control policy.
 
 **G05 — Standalone non-tmux provider fixture.**
 
-- Own `tests/rc10_support/provider_process.py` and
-  `tests/test_rc10_provider_process.py`.
+- Own `tests/support/provider_process.py` and
+  `tests/provider/test_process.py`.
 - Implement a separate-process fixture speaking only the public wire contract.
   It must not import daemon internals or call tmux. Use fixture-owned child
   processes/terminal stand-ins with explicit identities and receipts.
@@ -539,8 +539,8 @@ will rely on. These domains can be developed in parallel with separate ownership
 **S06 — Workspace lifecycle and exact Git operations.**
 
 - Own `theater/daemon/worktrees/`, workspace repository/service extensions,
-  `daemon/frontend/handlers/workspaces.py`, `tests/test_rc10_workspaces.py` and
-  relevant additions to `tests/test_worktree.py`.
+  `daemon/frontend/handlers/workspaces.py`, `tests/daemon/worktrees/test_workspaces.py` and
+  relevant additions to `tests/daemon/worktrees/test_git_worktrees.py`.
 - Normalize borrowed, frontend-owned, unique and named workspace requests.
   Capture initiating checkout HEAD independently of canonical storage root.
 - Implement exact path/branch/base recording and atomic reservation/live usage
@@ -556,7 +556,7 @@ will rely on. These domains can be developed in parallel with separate ownership
 
 - Own `persistence/repositories/scratchpad.py`, `daemon/rpc/scratchpad.py`,
   `daemon/frontend/handlers/scratchpad.py`, a focused scratchpad service module
-  if needed, and `tests/test_rc10_scratchpad.py`.
+  if needed, and `tests/daemon/persistence/test_scratchpad_ttl.py`.
 - Remove tree/Git/participant prerequisites while preserving quota/key/string/
   paging behavior and optional actor audit metadata.
 - Implement expiry from last write, idempotent-write replay without TTL refresh,
@@ -739,7 +739,7 @@ regardless of whether it originated in a public API call.
 
 - Own domain writer changes across registry, private RPCs, hooks, observation,
   control settlement, lifecycle/recovery and GC, plus
-  `tests/test_rc10_event_coverage.py`.
+  `tests/daemon/events/test_journal_coverage.py`.
 - Trace all state projections to their actual writers. Route each transition
   through the write unit; add typed events/tombstones in the same transaction.
 - Stage registry/job cache updates after commit and preserve notification behavior.
@@ -752,7 +752,7 @@ regardless of whether it originated in a public API call.
 **G10 — SDK snapshot/follow and operation waiting.**
 
 - Own SDK state-follow/projection helpers and operation-wait client support,
-  plus `tests/test_rc10_sdk_follow.py`.
+  plus `tests/frontend/test_sdk_follow.py`.
 - Implement complete snapshot assembly, atomic replacement, transaction-group
   application, cursor/revision deduplication, reconnect and resnapshot.
 - Preserve unknown event kinds/fields safely. Separate trajectory and bus streams.
@@ -884,7 +884,7 @@ replacement for coordinator validation.
 
 **S13 — Crash and cross-process acceptance tests.**
 
-- Own dedicated `tests/test_rc10_fault_matrix.py`,
+- Own dedicated `tests/daemon/recovery/test_fault_matrix.py`,
   `test_rc10_end_to_end.py`, `test_rc10_live_recovery.py` and narrowly required
   failure-injection seams agreed with the coordinator.
 - Exercise commit/dispatch/receipt/settlement crash points from the technical
@@ -1193,7 +1193,7 @@ checkpoint simply because the worker became idle.
 ### 6.6 Focused check commands
 
 G00's utilities must include a candidate subprocess runner, for example
-`tests/rc10_support/run_candidate.py`, with a documented argv interface. It sets
+`tests/rc10_support/run_candidate.py` (since removed), with a documented argv interface. It sets
 the isolated environment for the child command and preserves the parent worker's
 control environment. The exact runner invocation is frozen at B00.
 
@@ -1201,13 +1201,13 @@ Commands supplied to that runner use the worker's own environment and checkpoint
 lockfile. Representative task commands after their files exist:
 
 ```text
-uv run --frozen pytest tests/test_rc10_handshake.py tests/test_rc10_public_dispatch.py
-uv run --frozen pytest tests/test_rc10_operations.py tests/test_rc10_idempotency.py
-uv run --frozen pytest tests/test_rc10_providers.py tests/test_rc10_provider_fencing.py
-uv run --frozen pytest tests/test_rc10_workspaces.py tests/test_worktree.py
-uv run --frozen pytest tests/test_rc10_scratchpad.py
-uv run --frozen pytest tests/test_rc10_recovery.py tests/test_rc10_control_transfer.py
-uv run --frozen pytest tests/test_rc10_event_coverage.py tests/test_rc10_sdk_follow.py
+uv run --frozen pytest tests/frontend/test_handshake.py tests/frontend/test_public_dispatch.py
+uv run --frozen pytest tests/daemon/operations/test_operations.py tests/daemon/operations/test_idempotency.py
+uv run --frozen pytest tests/provider/test_registry.py tests/provider/test_fencing.py
+uv run --frozen pytest tests/daemon/worktrees/test_workspaces.py tests/daemon/worktrees/test_git_worktrees.py
+uv run --frozen pytest tests/daemon/persistence/test_scratchpad_ttl.py
+uv run --frozen pytest tests/daemon/recovery/test_recovery.py tests/daemon/operations/test_control_transfer.py
+uv run --frozen pytest tests/daemon/events/test_journal_coverage.py tests/frontend/test_sdk_follow.py
 ```
 
 The coordinator supplies each worker only its own focused subset and relevant

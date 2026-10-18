@@ -74,7 +74,7 @@ consuming the scripted turn streams.
 Run the smoke (opt-in, real binary, real tmux on a private server):
 
     THEATER_CODEX_NATIVE_SMOKE=1 uv run --frozen pytest -q \\
-        tests/test_codex_native_ui_bootstrap_proof.py -k native_ui_bootstrap
+        tests/harness/codex/test_native_ui_bootstrap_proof.py -k native_ui_bootstrap
 
 Everything else here runs offline and unconditionally.
 """

@@ -93,10 +93,10 @@ jobs:
       - name: Peer identity, provider fencing, and live recovery
         run: >-
           uv run pytest -q -o faulthandler_timeout=120
-          tests/test_rc10_handshake.py
-          tests/test_rc10_process_boundary.py
-          tests/test_rc10_provider_fencing.py
-          tests/test_runtime_live_recovery.py
+          tests/frontend/test_handshake.py
+          tests/boundaries/test_process_boundary.py
+          tests/provider/test_fencing.py
+          tests/daemon/harness_runtime/test_live_recovery.py
 
   artifacts:
     runs-on: ubuntu-latest
@@ -113,4 +113,4 @@ jobs:
       - name: Sync dependencies
         run: uv sync --locked --all-packages --group dev
       - name: Build and smoke independent distributions
-        run: uv run pytest tests/test_rc10_artifacts.py -q
+        run: uv run pytest tests/packaging/test_artifacts.py -q

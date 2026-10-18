@@ -19,7 +19,7 @@ on:
     paths:
       - ".github/workflows/harness-compat.yml"
       - "scripts/harness_compat/**"
-      - "tests/test_harness_compat*.py"
+      - "tests/compat/**"
       - "theater/harness/builtin/plugins/**/compat*.py"
       - "theater/harness/builtin/plugins/**/runtime_plan.py"
       - "theater/harness/builtin/plugins/**/runtime_probe.py"
@@ -50,7 +50,7 @@ jobs:
       - run: uv run ruff check scripts/harness_compat
       - run: uv run ruff format --check scripts/harness_compat
       - run: uv run mypy
-      - run: uv run pytest tests/test_harness_compat*.py -q
+      - run: uv run pytest tests/compat --ignore=tests/compat/test_codex_collector.py -q
       - run: uv run python -m scripts.harness_compat check
 
   qualify:

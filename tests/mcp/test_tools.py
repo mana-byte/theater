@@ -1,6 +1,6 @@
 """The tool bodies an agent reaches through MCP.
 
-The framework wrapper is covered in test_mcp_server.py. What can be wrong here
+The framework wrapper is covered in test_server.py. What can be wrong here
 is quieter: a tool that forgets to identify itself first is filed as External
 and becomes unaddressable, and one that forgets to name its caller defeats the
 deadlock rail — neither shows up as an error, only as work that never lands.

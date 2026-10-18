@@ -27,8 +27,8 @@ from . import opencode_bump, opencode_pi_process, opencode_sandbox
 
 NPM_PACKAGE = "opencode-ai"
 
-_SERVER_PROOF = "tests/test_opencode_server_proof.py"
-_STOCK_PROOF = "tests/test_opencode_stock_ui.py"
+_SERVER_PROOF = "tests/integration/test_opencode_server_proof.py"
+_STOCK_PROOF = "tests/integration/test_opencode_stock_ui.py"
 
 _SERVER_PROOF_TESTS = (
     "test_port0_banner_and_basic_auth_reach_every_surface",
@@ -66,10 +66,10 @@ class OpenCodeAdapter:
         *(f"{_STOCK_PROOF}::{test}" for test in _STOCK_PROOF_TESTS),
     )
     consistency_tests: tuple[str, ...] = (
-        "tests/test_harness_compat_opencode.py",
-        "tests/test_opencode_server_plan.py::test_probe_qualifies_exactly_the_1x_window",
-        "tests/test_opencode_server_runtime.py::test_server_handshake_rejects_version_drift",
-        "tests/test_opencode_frontend.py::test_probe_rejects_releases_outside_the_tested_window",
+        "tests/compat/test_opencode.py",
+        "tests/harness/opencode/test_server_plan.py::test_probe_qualifies_exactly_the_1x_window",
+        "tests/harness/opencode/test_server_runtime.py::test_server_handshake_rejects_version_drift",
+        "tests/harness/opencode/test_frontend.py::test_probe_rejects_releases_outside_the_tested_window",
     )
     #: The routed mistral provider talks to the mock's OpenAI chat surface.
     expected_routes: frozenset[Route] = frozenset({("POST", "/v1/chat/completions")})

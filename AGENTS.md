@@ -46,7 +46,7 @@ the Makefile only — never bare `pytest`:
 make test                     # full suite, parallel across cores (pytest-xdist)
 make test-unit                # inner dev loop: -m "not integration" (real-binary proofs excluded)
 make test-serial              # full suite in one process (flake debugging)
-uv run pytest tests/test_x.py # one file
+uv run pytest tests/daemon/controls # one area (see tests/README.md)
 uv run pytest --cov           # coverage gate (fail_under = 80); NOT in addopts
 uv run ruff check             # lint
 uv run ruff format            # format (line-length = 100)

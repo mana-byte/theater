@@ -22,7 +22,7 @@ COLLAPSE_OVER = 64 * KIB
 
 
 class StaticSource(Source):
-    """One in-memory history page, the approach tests/test_transcript_paging.py uses."""
+    """One in-memory history page, the approach tests/transcripts/test_paging.py uses."""
 
     def __init__(self, events: tuple[Event, ...]) -> None:
         self.page = HistoryPage(

@@ -6,7 +6,7 @@ sending, and interrupting exactly as before. ``HarnessManifest.runtime``
 defaults to ``None`` and nothing below knows the runtime contracts exist.
 
 Install it by copying this directory to ``$THEATER_HOME/plugins/oldstyle/``
-and scanning; see ``tests/test_harness_runtime_contracts.py``.
+and scanning; see ``tests/harness/core/test_runtime_contracts.py``.
 """
 
 from __future__ import annotations

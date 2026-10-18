@@ -172,8 +172,8 @@ Primary shared files:
 - `theater/daemon/spawning/native.py`: replace fixed Unix readiness with the resolved
   endpoint and persist before continuing;
 - runtime-binding repository methods: one generation-checked endpoint update;
-- `tests/test_runtime_backend_process.py`, `tests/test_runtime_storage.py`, and
-  `tests/test_runtime_lifecycle_integration.py`: stale log, conflicting line,
+- `tests/daemon/harness_runtime/test_backend_process.py`, `tests/daemon/persistence/test_runtime_storage.py`, and
+  `tests/daemon/harness_runtime/test_lifecycle_integration.py`: stale log, conflicting line,
   timeout, invalid/non-loopback URL, process exit, persistence, and restart adoption.
 
 Do not make `WebSocketRuntimeIO` accept HTTP URLs. Fixed Unix-WebSocket users must keep
@@ -383,23 +383,23 @@ Minimum focused coverage:
 
 Suggested new/updated files:
 
-- `tests/test_opencode_server_proof.py`
-- `tests/test_runtime_endpoint_discovery.py`
-- `tests/test_opencode_http.py`
-- `tests/test_opencode_server_runtime.py`
-- `tests/test_runtime_lifecycle_integration.py`
-- `tests/test_control_service.py`
+- `tests/integration/test_opencode_server_proof.py`
+- `tests/daemon/harness_runtime/test_endpoint_discovery.py`
+- `tests/harness/opencode/test_http.py`
+- `tests/harness/opencode/test_server_runtime.py`
+- `tests/daemon/harness_runtime/test_lifecycle_integration.py`
+- `tests/daemon/controls/test_service.py`
 
 Run focused tests plus the existing OpenCode suite during migration:
 
 ```sh
-uv run pytest tests/test_opencode_frontend.py \
-  tests/test_opencode_stock_ui.py \
-  tests/test_opencode_server_proof.py \
-  tests/test_opencode_http.py \
-  tests/test_opencode_server_runtime.py \
-  tests/test_runtime_lifecycle_integration.py \
-  tests/test_control_service.py
+uv run pytest tests/harness/opencode/test_frontend.py \
+  tests/integration/test_opencode_stock_ui.py \
+  tests/integration/test_opencode_server_proof.py \
+  tests/harness/opencode/test_http.py \
+  tests/harness/opencode/test_server_runtime.py \
+  tests/daemon/harness_runtime/test_lifecycle_integration.py \
+  tests/daemon/controls/test_service.py
 ```
 
 ## Acceptance and stop criteria

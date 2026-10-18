@@ -16,8 +16,8 @@ from theater.harness.contracts.source import NativeTurnState
 def answers_prompt(heard: Sequence[str], prompt: str | None) -> bool:
     """Did this turn begin with the prompt we injected? (normalised prefix, both ways)
 
-    Driven harnesses echo the prompt first (``tests/test_turn_identity.py``). No user text
-    answers yes: the gate only catches positive evidence of someone else's turn.
+    Driven harnesses echo the prompt first (``tests/transcripts/test_turn_identity.py``). No user
+    text answers yes: the gate only catches positive evidence of someone else's turn.
     """
     if not prompt or not prompt.strip():
         # No prompt to claim; answer yes so the job soaks up the next turn.

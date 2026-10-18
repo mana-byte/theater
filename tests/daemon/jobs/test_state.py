@@ -1,7 +1,7 @@
 """Tests for the job state machine: spawn → await → result.
 
 The full loop is exercised over the socket against a real daemon, with
-tmux stubbed out (same FakeTmux as test_daemon.py). The observer is real,
+tmux stubbed out (same FakeTmux as test_server.py). The observer is real,
 but no harnesses are configured — the tests finish jobs directly via the
 reaper or by calling the job manager, rather than by tailing transcripts.
 """

@@ -1,7 +1,7 @@
 """The human-facing commands.
 
 Rendering is tested against plain dicts rather than a live daemon: the socket
-round trip is already covered in test_daemon.py, and what can actually be wrong
+round trip is already covered in test_server.py, and what can actually be wrong
 here is the formatting and the follow cursor.
 """
 
@@ -904,7 +904,7 @@ def _explode_on_call(*a, **k):
 # Everything above tests rendering against dicts. These test the commands
 # themselves: what they ask the daemon for, what they print, and what they
 # return. `call_sync` is the seam — it is the only thing between a command and
-# a socket, and the socket itself is covered in test_daemon.py.
+# a socket, and the socket itself is covered in test_server.py.
 
 
 @pytest.fixture

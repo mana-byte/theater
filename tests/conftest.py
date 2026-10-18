@@ -133,7 +133,7 @@ def no_inherited_pane(monkeypatch):
     reports no pane is filed as External. Under pytest the server runs
     in-process, so a suite run from inside tmux inherits a live pane instead:
     every participant is born addressable, and two registered from the same
-    shell collapse into one. Three tests in test_mcp_server.py assert the real
+    shell collapse into one. Three tests in test_server.py assert the real
     behaviour and so failed on a developer's machine and nowhere else.
 
     Autouse rather than a line in each `daemon` fixture, of which there are

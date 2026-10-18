@@ -417,7 +417,7 @@ uv run alembic revision --autogenerate -m "add a column"
 uv run alembic check          # fails if schema.py and versions/ disagree
 ```
 
-`tests/test_migrations.py` runs that same comparison in CI, plus a test that
+`tests/daemon/persistence/test_migrations.py` runs that same comparison in CI, plus a test that
 the comparison is not vacuous. A v1.2 database is **stamped** at the baseline
 revision rather than rebuilt: legacy files have exactly one possible shape,
 stamping is therefore truthful, and it keeps the live pane-to-participant
@@ -1332,7 +1332,7 @@ facades remain only for established import paths.
 
 - **`budgets` table is unused.** Token and cost accounting is written but never
   read; the budget rail counts participants instead.
-- **tmux behaviour is tested only where tmux exists.** `tests/test_tmux_rig.py`
+- **tmux behaviour is tested only where tmux exists.** `packages/regie/tests/test_tmux_provider.py`
   drives a real private tmux server and asserts on exact pty bytes, but it is
   marked `tmux` and self-skips when tmux is absent — a sandbox without tmux
   silently loses that coverage (see AGENTS.md).
