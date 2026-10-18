@@ -1,141 +1,20 @@
 {
-  "source": "explicit per-release evidence index for the Codex native runtime qualification workflow",
+  "source": "explicit index of the two evidence bundles retained for the Codex native runtime gate",
   "rules": {
-    "version_key": "exact codex-cli release string; never a range, wildcard, or semver comparison",
-    "bundle_selection": "look up the exact version; never pick 'latest' lexically or semantically",
-    "qualified": "only a qualified bundle corresponds to an entry in CODEX_RUNTIME_VERIFIED_VERSIONS",
-    "candidates": "captured-but-unqualified releases live under candidates/ and are never interpreted as supported"
+    "retained": "only floor (the oldest qualified release) and latest (a recent qualified release) are committed; git history keeps every earlier bundle",
+    "bundle_selection": "look up the role name (floor or latest); never pick a bundle by version, lexically or semantically",
+    "qualified": "a qualified bundle is complete evidence for a release inside the gate in theater/harness/builtin/plugins/codex/runtime_plan.py",
+    "latest_refresh": "a bump rewrites latest only when the captured evidence differs; installed_release.json (binary identity) is not compared",
+    "candidates": "freshly captured releases live under candidates/ untracked and are never interpreted as supported"
   },
   "bundles": {
-    "0.148.0": {
-      "directory": "0.148.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
+    "floor": {
+      "directory": "floor",
+      "status": "qualified"
     },
-    "0.149.0": {
-      "directory": "0.149.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.149.1": {
-      "directory": "0.149.1",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.150.0": {
-      "directory": "0.150.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.150.1": {
-      "directory": "0.150.1",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.151.0": {
-      "directory": "0.151.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.152.0": {
-      "directory": "0.152.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.152.1": {
-      "directory": "0.152.1",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.153.0": {
-      "directory": "0.153.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.153.1": {
-      "directory": "0.153.1",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.153.2": {
-      "directory": "0.153.2",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.153.3": {
-      "directory": "0.153.3",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.153.4": {
-      "directory": "0.153.4",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.154.0": {
-      "directory": "0.154.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.155.0": {
-      "directory": "0.155.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.155.1": {
-      "directory": "0.155.1",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.156.0": {
-      "directory": "0.156.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.156.1": {
-      "directory": "0.156.1",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.157.0": {
-      "directory": "0.157.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.157.1": {
-      "directory": "0.157.1",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.158.0": {
-      "directory": "0.158.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.159.0": {
-      "directory": "0.159.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.159.1": {
-      "directory": "0.159.1",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.162.0": {
-      "directory": "0.162.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.162.1": {
-      "directory": "0.162.1",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
-    },
-    "0.163.0": {
-      "directory": "0.163.0",
-      "status": "qualified",
-      "compatibility_policy": "codex-appserver-verified"
+    "latest": {
+      "directory": "latest",
+      "status": "qualified"
     }
   }
 }

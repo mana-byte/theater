@@ -41,7 +41,6 @@ import os
 import shutil
 import socket
 import subprocess
-import sys
 import threading
 import uuid
 from pathlib import Path
@@ -71,15 +70,13 @@ from tests.native.codex_native_client import (
 from tests.native.codex_qualify_runtime import validate_bundle_index
 from tests.rig.tables import run_rows
 from theater.harness.builtin.plugins.codex.runtime_plan import (
-    CODEX_RUNTIME_COMPATIBILITY_POLICY,
-    CODEX_RUNTIME_VERIFIED_VERSIONS,
+    CODEX_RUNTIME_QUALIFIED_FLOOR,
+    codex_version_refusal,
     parse_codex_version,
+    qualified_versions_range_text,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex_native_runtime"
-# self-reference so index-validation tests can monkeypatch this module's FIXTURES
-# under any pytest import mode
-proof = sys.modules[__name__]
 NATIVE_PROOF_ENV = "THEATER_CODEX_NATIVE_PROOF"
 NATIVE_PROOF_ENABLED = os.environ.get(NATIVE_PROOF_ENV) == "1"
 
@@ -104,6 +101,8 @@ BUNDLE_SCHEMA_FILES = (
     "JSONRPCMessage.json",
 )
 CANDIDATES_DIRNAME = "candidates"
+#: The only committed bundles: the floor release's and a recent qualified release's.
+RETAINED_BUNDLES = ("floor", "latest")
 
 
 VERSION_PROBE_TIMEOUT_SECONDS = 30.0
@@ -111,36 +110,31 @@ VERSION_PROBE_TIMEOUT_SECONDS = 30.0
 
 def load_index() -> dict:
     index = json.loads((FIXTURES / "index.json").read_text())
-    validate_bundle_index(
-        index,
-        fixture_root=FIXTURES,
-        compatibility_policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
-        verified_versions=CODEX_RUNTIME_VERIFIED_VERSIONS,
-    )
+    validate_bundle_index(index, fixture_root=FIXTURES)
     return index
 
 
-def bundle_dir(version: str) -> Path:
-    """Resolve one version's bundle from the explicit index, never by "latest"."""
+def bundle_dir(role: str) -> Path:
+    """Resolve one retained bundle from the explicit index, never by version."""
     bundles = load_index()["bundles"]
-    assert version in bundles, f"{version} has no index entry; the index is the only selector"
-    return FIXTURES / bundles[version]["directory"]
+    assert role in bundles, f"{role} has no index entry; the index is the only selector"
+    return FIXTURES / bundles[role]["directory"]
 
 
-def load_fixture(version: str, name: str) -> dict:
-    return json.loads((bundle_dir(version) / name).read_text())
+def load_fixture(role: str, name: str) -> dict:
+    return json.loads((bundle_dir(role) / name).read_text())
 
 
-def load_schema(version: str, name: str) -> dict:
-    return json.loads((bundle_dir(version) / "protocol_schema" / name).read_text())
+def load_schema(role: str, name: str) -> dict:
+    return json.loads((bundle_dir(role) / "protocol_schema" / name).read_text())
 
 
 def require_installed_allowed_version() -> str:
-    """The smoke gate: only an exactly-qualified release may run.
+    """The smoke gate: only a release inside the qualified range may run.
 
     THEATER_CODEX_QUALIFY_VERSION admits exactly one candidate version for
-    this process only, so a release can be exercised BEFORE the allowlist
-    edit (the allowlist change stays a separate human-reviewed commit, last).
+    this process only, so a release can be exercised BEFORE the ceiling
+    bump (the bump stays a separate human-reviewed commit, last).
     THEATER_CODEX_NATIVE_BIN targets a specific binary such as a release
     fetched by tests/native/codex_fetch_release.py.
     """
@@ -165,12 +159,9 @@ def require_installed_allowed_version() -> str:
     output = completed.stdout.strip()
     version = parse_codex_version(output)
     assert version is not None, f"no codex-cli version in {output!r}"
-    allowed = set(CODEX_RUNTIME_VERIFIED_VERSIONS)
-    override = qualification_version_override()
-    if override is not None:
-        allowed.add(override)
-    assert version in allowed, (
-        f"codex-cli {version} is not Theater-verified (verified: {', '.join(sorted(allowed))})"
+    refusal = codex_version_refusal(version)
+    assert refusal is None or version == qualification_version_override(), (
+        f"{refusal}; qualified range {qualified_versions_range_text()}"
     )
     return version
 
@@ -222,7 +213,7 @@ def _params_of(schema: dict, method: str) -> dict:
     raise AssertionError(f"{method} not found")
 
 
-@pytest.mark.parametrize("version", sorted(CODEX_RUNTIME_VERIFIED_VERSIONS))
+@pytest.mark.parametrize("role", RETAINED_BUNDLES)
 class TestOfflineConformanceBundle:
     """One item pinning every offline conformance rule of the installed release.
 
@@ -232,16 +223,22 @@ class TestOfflineConformanceBundle:
     dropped.
     """
 
-    def test_offline_conformance_manifest(self, version: str) -> None:  # noqa: PLR0915 — a deliberate manifest
+    def test_offline_conformance_manifest(self, role: str) -> None:  # noqa: PLR0915 — a deliberate manifest
         def bundle(name: str) -> dict:
-            return load_fixture(version, name)
+            return load_fixture(role, name)
 
         def wire(name: str) -> dict:
-            return load_schema(version, name)
+            return load_schema(role, name)
 
         def installed_release_facts() -> None:
             facts = bundle("installed_release.json")
+            version = parse_codex_version(facts["installed_version_output"])
+            assert version is not None
             assert facts["installed_version"] == f"codex-cli {version}"
+            # The floor bundle is the floor release; any other must still be inside the gate.
+            if role == "floor":
+                assert version == ".".join(map(str, CODEX_RUNTIME_QUALIFIED_FLOOR))
+            assert codex_version_refusal(version) is None, "retained bundle is outside the gate"
             assert facts["schema_generation"]["command"].startswith("codex app-server")
 
         def required_client_methods_present() -> None:
@@ -379,7 +376,7 @@ class TestOfflineConformanceBundle:
             fixture = bundle("capabilities.json")
             settings = fixture["thread_settings_update"]
             gate = settings["without_experimental_api"]
-            # The historical curated 0.154.0 bundle nests the error; newer captures do not.
+            # Older captures nest the error; newer ones do not.
             assert gate.get("error", gate) == {
                 "code": -32600,
                 "message": "thread/settings/update requires experimentalApi capability",
@@ -451,151 +448,28 @@ class TestOfflineConformanceBundle:
         )
 
 
-class TestBundleIndexAndAllowlist:
-    """The bundle/allowlist contract: complete, matched, explicitly chosen."""
+class TestBundleIndex:
+    """The retained evidence: exactly the floor and latest bundles, complete and indexed."""
 
-    def test_every_allowed_version_has_a_complete_qualified_bundle(self) -> None:
+    def test_retained_bundles_are_complete_and_indexed(self) -> None:
         bundles = load_index()["bundles"]
-        assert set(bundles) >= set(CODEX_RUNTIME_VERIFIED_VERSIONS)
-        for version in sorted(CODEX_RUNTIME_VERIFIED_VERSIONS):
-            entry = bundles[version]
-            assert entry["status"] == "qualified", f"{version} must be qualified to be allowed"
-            assert entry["compatibility_policy"] == CODEX_RUNTIME_COMPATIBILITY_POLICY
-            directory = bundle_dir(version)
+        assert set(bundles) == set(RETAINED_BUNDLES)
+        for role, entry in bundles.items():
+            assert entry["status"] == "qualified", f"{role} must be qualified"
+            directory = bundle_dir(role)
             for name in BUNDLE_BEHAVIOR_FILES:
-                assert (directory / name).is_file(), f"{version}/{name} is missing"
+                assert (directory / name).is_file(), f"{role}/{name} is missing"
             for name in BUNDLE_SCHEMA_FILES:
                 assert (directory / "protocol_schema" / name).is_file(), (
-                    f"{version}/protocol_schema/{name} is missing"
+                    f"{role}/protocol_schema/{name} is missing"
                 )
 
-    def test_every_qualified_bundle_is_explicitly_allowed(self) -> None:
-        for version, entry in load_index()["bundles"].items():
-            if entry["status"] != "qualified":
-                continue
-            assert version in CODEX_RUNTIME_VERIFIED_VERSIONS, (
-                f"{version} has a qualified bundle but is not in the allowlist; "
-                "commit the allowlist change last, after evidence and tests"
-            )
-            assert entry["compatibility_policy"] == CODEX_RUNTIME_COMPATIBILITY_POLICY
-
-    def test_unqualified_captures_live_only_under_candidates(self) -> None:
-        for version, entry in load_index()["bundles"].items():
-            if entry["status"] == "qualified":
-                continue
-            assert entry["directory"].startswith(f"{CANDIDATES_DIRNAME}/"), (
-                f"unqualified {version} must live under {CANDIDATES_DIRNAME}/, "
-                "never read as supported"
-            )
-
-    def test_no_unindexed_release_directories(self) -> None:
-        indexed = {entry["directory"].split("/")[0] for entry in load_index()["bundles"].values()}
+    def test_no_unindexed_bundle_directories(self) -> None:
+        # candidates/ holds untracked captures and is never indexed as supported.
+        indexed = {entry["directory"] for entry in load_index()["bundles"].values()}
         for child in FIXTURES.iterdir():
             if child.is_dir() and child.name != CANDIDATES_DIRNAME:
                 assert child.name in indexed, f"{child} is a bundle directory not in index.json"
-
-
-class TestIndexValidation:
-    """Selection must fail closed on a malformed or lying index."""
-
-    @staticmethod
-    def _write_mini_bundle(root: Path, directory: str, *, complete: bool = True) -> None:
-        bundle = root / directory
-        (bundle / "protocol_schema").mkdir(parents=True)
-        for name in BUNDLE_BEHAVIOR_FILES[: (None if complete else -1)]:
-            (bundle / name).write_text("{}")
-        for name in BUNDLE_SCHEMA_FILES:
-            (bundle / "protocol_schema" / name).write_text("{}")
-
-    @pytest.fixture()
-    def mini_fixtures(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        root = tmp_path / "fixtures"
-        root.mkdir()
-        monkeypatch.setattr(proof, "FIXTURES", root)
-        monkeypatch.setattr(proof, "CODEX_RUNTIME_VERIFIED_VERSIONS", frozenset({"0.1.0"}))
-        return root
-
-    def _write_index(self, root: Path, bundles: dict) -> None:
-        (root / "index.json").write_text(json.dumps({"bundles": bundles}))
-
-    def _qualified_entry(self, directory: str = "0.1.0") -> dict:
-        return {
-            "directory": directory,
-            "status": "qualified",
-            "compatibility_policy": CODEX_RUNTIME_COMPATIBILITY_POLICY,
-        }
-
-    def test_accepts_a_valid_qualified_index(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.1.0")
-        self._write_index(mini_fixtures, {"0.1.0": self._qualified_entry()})
-        assert load_index()["bundles"]["0.1.0"]["status"] == "qualified"
-
-    def test_rejects_unknown_status(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.1.0")
-        entry = self._qualified_entry() | {"status": "provisional"}
-        self._write_index(mini_fixtures, {"0.1.0": entry})
-        with pytest.raises(AssertionError, match="invalid status"):
-            load_index()
-
-    @pytest.mark.parametrize("directory", ["/tmp/escape", "../outside", "a/../../b"])
-    def test_rejects_escaping_directories(self, mini_fixtures: Path, directory: str) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.1.0")
-        entry = self._qualified_entry(directory=directory)
-        self._write_index(mini_fixtures, {"0.1.0": entry})
-        with pytest.raises(AssertionError, match=r"clean relative path|not be absolute"):
-            load_index()
-
-    def test_rejects_duplicate_directories(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.1.0")
-        self._write_index(
-            mini_fixtures,
-            {"0.1.0": self._qualified_entry(), "0.1.1": self._qualified_entry()},
-        )
-        with pytest.raises(AssertionError, match="claimed by both"):
-            load_index()
-
-    def test_rejects_qualified_incomplete_bundle(self, mini_fixtures: Path) -> None:
-        # An incomplete capture can never be read as qualified: selection
-        # fails even though the directory itself exists.
-        self._write_mini_bundle(mini_fixtures, "0.1.0", complete=False)
-        self._write_index(mini_fixtures, {"0.1.0": self._qualified_entry()})
-        with pytest.raises(AssertionError, match="incomplete"):
-            load_index()
-
-    def test_rejects_qualified_version_missing_from_allowlist(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.99.0")
-        self._write_index(mini_fixtures, {"0.99.0": self._qualified_entry("0.99.0")})
-        with pytest.raises(AssertionError, match="allowlist"):
-            load_index()
-
-    def test_rejects_candidate_at_release_root(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "candidates/0.2.0")
-        self._write_mini_bundle(mini_fixtures, "0.2.0")
-        entry = {"directory": "0.2.0", "status": "candidate"}
-        self._write_index(mini_fixtures, {"0.2.0": entry})
-        with pytest.raises(AssertionError, match="candidates/"):
-            load_index()
-
-    def test_rejects_qualified_version_directory_mismatch(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "0.1.0")
-        entry = self._qualified_entry(directory="0.1.0")
-        self._write_index(mini_fixtures, {"0.9.9": entry})
-        with pytest.raises(AssertionError, match="at the fixture root"):
-            load_index()
-
-    def test_rejects_candidate_for_another_version(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "candidates/0.2.0")
-        entry = {"directory": "candidates/0.2.0", "status": "candidate"}
-        self._write_index(mini_fixtures, {"0.3.0": entry})
-        with pytest.raises(AssertionError, match=r"must live at candidates/0\.3\.0"):
-            load_index()
-
-    def test_rejects_allowed_version_without_a_qualified_bundle(self, mini_fixtures: Path) -> None:
-        self._write_mini_bundle(mini_fixtures, "candidates/0.2.0")
-        entry = {"directory": "candidates/0.2.0", "status": "candidate"}
-        self._write_index(mini_fixtures, {"0.2.0": entry})
-        with pytest.raises(AssertionError, match="must have a qualified bundle"):
-            load_index()
 
 
 # ---------------------------------------------------------------------------
