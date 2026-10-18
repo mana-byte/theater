@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from tests.support.config_file import write_config
 from theater import cli, paths
 from theater import client as client_mod
 from theater import config as cfg
@@ -16,10 +17,6 @@ from theater.config.reload import compare
 from theater.protocol import RemoteError
 
 _PATH = "/tmp/theater-home/config.toml"
-
-
-def write(text: str) -> None:
-    paths.config_path().write_text(text, encoding="utf-8")
 
 
 def answer(**overrides) -> dict:
@@ -45,9 +42,9 @@ async def spawn_refusal(client, model: str) -> str:
 
 def test_compare_names_each_difference_by_what_applying_it_needs():
     defaults = cfg.load()
-    write("[rails]\nbudget = 20\n")  # the default, written down: provenance is not a change
+    write_config("[rails]\nbudget = 20\n")  # the default, written down: provenance is not a change
     assert not compare(defaults, cfg.load()).any
-    write(
+    write_config(
         "[rails]\nbudget = 5\n"
         '[models]\nvibe = ["small"]\n'
         '[terminals]\ndefault_provider = "elsewhere"\n'
@@ -62,7 +59,7 @@ def test_compare_names_each_difference_by_what_applying_it_needs():
 
 def test_a_changed_plugin_option_is_named_down_to_its_leaf():
     """Lists stay one value, TOML types stay apart, and a quoted dotted key never collides."""
-    write(
+    write_config(
         "[mcp.plugins.alerts]\n"
         'channels = ["ops", "dev"]\n'
         "retries = 1\n"
@@ -71,7 +68,7 @@ def test_a_changed_plugin_option_is_named_down_to_its_leaf():
         "[mcp.plugins.quiet]\n"
     )
     before = cfg.load()
-    write(
+    write_config(
         "[mcp.plugins.alerts]\n"
         'channels = ["ops", "eng"]\n'
         "retries = true\n"
@@ -94,9 +91,9 @@ def test_a_changed_plugin_option_is_named_down_to_its_leaf():
 def test_a_table_that_empties_or_vanishes_still_counts_as_a_change():
     """An empty map is a value below the section tables, which the loader folds to one default."""
     defaults = cfg.load()
-    write("[models]\n[mcp]\n[mcp.plugins]\n")
+    write_config("[models]\n[mcp]\n[mcp.plugins]\n")
     assert not compare(defaults, cfg.load()).any
-    write(
+    write_config(
         "[mcp.plugins.alerts]\n"
         'token = { env = "ALERTS" }\n'
         "unused = {}\n"
@@ -105,7 +102,7 @@ def test_a_table_that_empties_or_vanishes_still_counts_as_a_change():
         "[mcp.plugins.quiet]\n"
     )
     before = cfg.load()
-    write("[mcp.plugins.alerts]\ntoken = {}\n[mcp.plugins.solo]\n[mcp.plugins.fresh]\n")
+    write_config("[mcp.plugins.alerts]\ntoken = {}\n[mcp.plugins.solo]\n[mcp.plugins.fresh]\n")
     assert compare(before, cfg.load()).restart == (
         "mcp.plugins.alerts.token",
         "mcp.plugins.alerts.token.env",
@@ -122,7 +119,7 @@ async def test_a_hot_reload_moves_the_next_policy_check_on_the_same_socket(
 ):
     socket = client._writer
     assert await spawn_refusal(client, "small") == "model_not_allowed"
-    write('[models]\nvibe = ["small"]\n[rails]\nbudget = 5\n')
+    write_config('[models]\nvibe = ["small"]\n[rails]\nbudget = 5\n')
 
     preview = await client.call("config.reload", dry_run=True)
     assert preview["applied"] is False
@@ -147,7 +144,7 @@ async def test_one_restart_only_change_refuses_the_whole_file(
     daemon, client, available_harness_binaries
 ):
     before = daemon.config
-    write(
+    write_config(
         '[models]\nvibe = ["small"]\n'
         '[terminals]\ndefault_provider = "elsewhere"\n'
         "[observer]\npoll_interval = 0.5\n"
@@ -162,7 +159,7 @@ async def test_one_restart_only_change_refuses_the_whole_file(
 
 async def test_a_malformed_file_keeps_the_running_settings(daemon, client):
     before = daemon.config
-    write("[rails\nbudget = 5\n")
+    write_config("[rails\nbudget = 5\n")
     with pytest.raises(RemoteError) as refused:
         await client.call("config.reload")
     assert refused.value.code == "bad_request"
@@ -170,13 +167,13 @@ async def test_a_malformed_file_keeps_the_running_settings(daemon, client):
     assert "kept its current settings" in refused.value.message
     assert daemon.config is before
 
-    write("[rails]\nbudget = 5\n")
+    write_config("[rails]\nbudget = 5\n")
     assert (await client.call("config.reload"))["applied"] is True
     assert daemon.config.rails.budget == 5
 
 
 async def test_settings_the_daemon_never_reads_do_not_block_a_reload(daemon, client):
-    write('[theater]\nfavourite = "vibe"\n[observability]\nmcp_timing = true\n')
+    write_config('[theater]\nfavourite = "vibe"\n[observability]\nmcp_timing = true\n')
     result = await client.call("config.reload")
     assert result["applied"] is True
     assert result["changed"] == []
@@ -233,7 +230,7 @@ def test_reload_needs_a_running_daemon_and_never_starts_one(monkeypatch, capsys)
 
 def test_reload_leaves_validation_to_the_daemon(monkeypatch):
     """No local harness install: a file this process cannot read must not stop the request."""
-    write("[rails\n")
+    write_config("[rails\n")
 
     def request(*, dry_run: bool) -> dict:
         return answer(dry_run=dry_run)

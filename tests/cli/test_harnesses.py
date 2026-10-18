@@ -7,7 +7,8 @@ import json
 import pytest
 
 from tests.support.cli_fakes import parse
-from theater import cli, paths
+from tests.support.config_file import write_config
+from theater import cli
 from theater.cli.commands import introspection as introspection_mod
 from theater.protocol import RemoteError
 
@@ -265,10 +266,6 @@ def test_a_real_daemon_error_is_not_papered_over(monkeypatch):
     monkeypatch.setattr(introspection_mod, "DaemonClient", Broken)
     with pytest.raises(RemoteError):
         cli.cmd_harnesses(parse("harnesses"))
-
-
-def write_config(text: str) -> None:
-    paths.config_path().write_text(text, encoding="utf-8")
 
 
 def discover(monkeypatch, harness: str, result, *extra):
