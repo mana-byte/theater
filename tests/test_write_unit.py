@@ -293,7 +293,7 @@ def test_empty_observation_unit_never_copies_turn_history() -> None:
 
 
 def _two_delivered_jobs(registry, jobs, *, cwd=None):
-    from tests.test_completion_queued_followups import _op
+    from tests.support.queued_followups import provider_terminal_op
 
     participant = registry.register(harness="codex", pane=None, cwd="/tmp")
     for handle in ("job-a", "job-b"):
@@ -308,7 +308,7 @@ def _two_delivered_jobs(registry, jobs, *, cwd=None):
     with registry.store.write_unit() as unit:
         for handle in ("job-a", "job-b"):
             registry.store.reserve_control_operation(
-                _op(
+                provider_terminal_op(
                     f"op-{handle}",
                     participant.id,
                     kind=ControlKind.SEND,

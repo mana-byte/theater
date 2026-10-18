@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.codex_rollouts import hold, write_rollout
 from tests.support.shipped import CodexHarness
 from theater import proc
 from theater.daemon.observer import Observer
@@ -50,47 +51,6 @@ PID_B = 74675
 PID_SHELL = 74001
 
 
-def _rollout(
-    root: Path,
-    session_id: str,
-    cwd: Path,
-    *,
-    at: str,
-    text: str,
-    metadata: dict[str, object] | None = None,
-) -> Path:
-    """One codex rollout, filed the way codex files them.
-
-    `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<local ISO>-<session id>.jsonl`,
-    opening with the `session_meta` record that carries the cwd.
-    """
-    day = root / "2026" / "08" / "17"
-    day.mkdir(parents=True, exist_ok=True)
-    path = day / f"rollout-2026-08-17T{at}-{session_id}.jsonl"
-    path.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "timestamp": "2026-08-17T01:19:02.000Z",
-                        "type": "session_meta",
-                        "payload": {"id": session_id, "cwd": str(cwd), **(metadata or {})},
-                    }
-                ),
-                json.dumps(
-                    {
-                        "timestamp": "2026-08-17T01:19:03.000Z",
-                        "type": "event_msg",
-                        "payload": {"type": "agent_message", "message": text},
-                    }
-                ),
-            ]
-        )
-        + "\n"
-    )
-    return path
-
-
 @pytest.fixture
 def codex_tree(tmp_path):
     """A codex session root with two rollouts sharing one working directory."""
@@ -98,75 +58,9 @@ def codex_tree(tmp_path):
     root.mkdir(parents=True)
     project = tmp_path / "project"
     project.mkdir()
-    older = _rollout(root, SESSION_A, project, at="01-19-02", text="agent A")
-    newer = _rollout(root, SESSION_B, project, at="01-19-46", text="agent B")
+    older = write_rollout(root, SESSION_A, project, at="01-19-02", text="agent A")
+    newer = write_rollout(root, SESSION_B, project, at="01-19-46", text="agent B")
     return {"root": root, "project": project, "a": older, "b": newer}
-
-
-class Asked:
-    """Which pids each `theater.proc` helper was asked about, in order.
-
-    One list per helper rather than one between them: "the operating system was
-    never asked" and "the process was identified but never opened" are
-    different claims, and a recorder that pooled them could not tell a test
-    which of the two it had proved.
-    """
-
-    def __init__(self) -> None:
-        self.comm: list[int] = []
-        self.open_files: list[int] = []
-        self.descendants: list[int] = []
-
-    @property
-    def anything(self) -> list[int]:
-        return self.comm + self.open_files + self.descendants
-
-
-def hold(
-    monkeypatch,
-    held: dict[int, list[Path]],
-    *,
-    comm: str = "codex",
-    comms: dict[int, str] | None = None,
-    beneath: list[tuple[int, str]] | None = None,
-) -> Asked:
-    """Pretend each pid in *held* is a codex process holding those files open.
-
-    *comm* is what `ps` reports for the pane process; the default is the shape
-    of a pane Theater spawned, where the pane process is the CLI. Pass *comms*
-    to give different pids different commands, and *beneath* to put processes
-    under the pane — which nothing should ever ask about, and which is stubbed
-    here precisely so that a version which did would be caught.
-
-    *beneath* is `(pid, comm)` pairs because that is what `proc.descendants`
-    returns. A stub of a different shape would make a version that searched the
-    tree fail on the shape rather than on the attribution, which is the one
-    thing these tests must not mistake for a pass.
-
-    Returns the record of what the probe asked the operating system, so a test
-    can assert that a participant with no pid, or one whose answer was already
-    exact, never reaches it at all.
-    """
-    asked = Asked()
-
-    def process_comm(pid: int) -> str:
-        asked.comm.append(pid)
-        if comms is not None:
-            return comms.get(pid, "")
-        return comm
-
-    def open_files(pid: int) -> list[Path]:
-        asked.open_files.append(pid)
-        return list(held.get(pid, ()))
-
-    def descendants(pid: int) -> list[tuple[int, str]]:
-        asked.descendants.append(pid)
-        return list(beneath or ())
-
-    monkeypatch.setattr(proc, "comm", process_comm)
-    monkeypatch.setattr(proc, "open_files", open_files)
-    monkeypatch.setattr(proc, "descendants", descendants)
-    return asked
 
 
 async def _history(observer: CodexObserver, cwd: Path, **kwargs):
@@ -305,7 +199,7 @@ async def test_one_source_recovers_when_the_rollout_finally_appears(
     project = tmp_path / "project"
     project.mkdir()
     if sibling_exists:
-        _rollout(root, SESSION_B, project, at="01-19-01", text="sibling")
+        write_rollout(root, SESSION_B, project, at="01-19-01", text="sibling")
     held: dict[int, list[Path]] = {PID_A: []}
     hold(monkeypatch, held)
     reader = CodexObserver(root=root, pane_pid=PID_A)
@@ -316,7 +210,7 @@ async def test_one_source_recovers_when_the_rollout_finally_appears(
         assert waiting.waiting and waiting.attached is None and waiting.error_code is None
         assert (await source.history(last_n=0)).location is None
 
-        rollout = _rollout(root, SESSION_A, project, at="01-19-02", text="agent A")
+        rollout = write_rollout(root, SESSION_A, project, at="01-19-02", text="agent A")
         held[PID_A] = [rollout]
         second = await source.history(last_n=0)
     finally:
@@ -541,7 +435,7 @@ async def test_newer_codex_guess_is_only_noncommittable_loss_evidence(monkeypatc
     initial = await source.read()
     assert initial.attached is not None
     source.commit_attachment()
-    newer = _rollout(
+    newer = write_rollout(
         codex_tree["root"],
         SESSION_C,
         codex_tree["project"],
@@ -562,7 +456,7 @@ async def test_newer_codex_guess_is_only_noncommittable_loss_evidence(monkeypatc
 def test_native_subagents_do_not_trigger_or_exhaust_identity_loss_probe(codex_tree):
     os.utime(codex_tree["a"], ns=(1, 1))
     os.utime(codex_tree["b"], ns=(0, 0))
-    primary = _rollout(
+    primary = write_rollout(
         codex_tree["root"],
         SESSION_C,
         codex_tree["project"],
@@ -572,7 +466,7 @@ def test_native_subagents_do_not_trigger_or_exhaust_identity_loss_probe(codex_tr
     )
     os.utime(primary, ns=(2, 2))
     for index in range(9):
-        child = _rollout(
+        child = write_rollout(
             codex_tree["root"],
             f"01a00cdf-dead-beef-9a9f-{index:012d}",
             codex_tree["project"],
@@ -605,7 +499,7 @@ async def test_process_proven_codex_rotation_still_attaches(monkeypatch, codex_t
     initial = await source.read()
     assert initial.attached is not None
     source.commit_attachment()
-    newer = _rollout(
+    newer = write_rollout(
         codex_tree["root"],
         SESSION_C,
         codex_tree["project"],
@@ -731,7 +625,7 @@ async def test_two_open_rollouts_are_not_evidence(monkeypatch, codex_tree):
 async def test_native_subagent_rollout_does_not_make_process_proof_ambiguous(
     monkeypatch, codex_tree
 ):
-    child = _rollout(
+    child = write_rollout(
         codex_tree["root"],
         SESSION_C,
         codex_tree["project"],
@@ -761,7 +655,7 @@ def test_each_native_subagent_marker_blocks_exact_and_operator_attachment(
     root = tmp_path / ".codex" / "sessions"
     project = tmp_path / "project"
     project.mkdir()
-    _rollout(
+    write_rollout(
         root,
         SESSION_A,
         project,
@@ -769,7 +663,7 @@ def test_each_native_subagent_marker_blocks_exact_and_operator_attachment(
         text="parent",
         metadata={"thread_source": "user", "source": "cli"},
     )
-    child = _rollout(
+    child = write_rollout(
         root,
         SESSION_C,
         project,
@@ -793,7 +687,7 @@ def test_rejected_exact_subagent_falls_through_to_parent_process_proof(monkeypat
     root = tmp_path / ".codex" / "sessions"
     project = tmp_path / "project"
     project.mkdir()
-    parent = _rollout(
+    parent = write_rollout(
         root,
         SESSION_A,
         project,
@@ -801,7 +695,7 @@ def test_rejected_exact_subagent_falls_through_to_parent_process_proof(monkeypat
         text="parent",
         metadata={"thread_source": "user", "source": "cli"},
     )
-    _rollout(
+    write_rollout(
         root,
         SESSION_C,
         project,
@@ -819,7 +713,7 @@ def test_unknown_metadata_requires_trusted_selection_but_user_fork_remains_eligi
     root = tmp_path / ".codex" / "sessions"
     project = tmp_path / "project"
     project.mkdir()
-    unknown = _rollout(
+    unknown = write_rollout(
         root,
         SESSION_A,
         project,
@@ -827,7 +721,7 @@ def test_unknown_metadata_requires_trusted_selection_but_user_fork_remains_eligi
         text="future primary",
         metadata={"thread_source": "api", "source": {"future": {}}},
     )
-    fork = _rollout(
+    fork = write_rollout(
         root,
         SESSION_B,
         project,
@@ -852,7 +746,7 @@ async def test_a_file_outside_the_transcript_root_is_not_evidence(
     monkeypatch, codex_tree, tmp_path
 ):
     """A rollout-shaped name elsewhere on disk proves nothing about this root."""
-    stray = _rollout(
+    stray = write_rollout(
         tmp_path / "elsewhere", SESSION_A, codex_tree["project"], at="01-19-02", text="x"
     )
     hold(monkeypatch, {PID_A: [stray]})
@@ -868,7 +762,7 @@ async def test_a_rollout_for_another_directory_is_not_evidence(monkeypatch, code
     """`session_meta.cwd` has to agree, or the process is in a different job."""
     other = tmp_path / "other"
     other.mkdir()
-    foreign = _rollout(
+    foreign = write_rollout(
         codex_tree["root"],
         "01a00cdf-dead-beef-9a9f-67e9ebe0e2b2",
         other,
@@ -978,7 +872,7 @@ async def test_both_siblings_bind_and_neither_job_is_refused(
     Before process evidence this pair produced two `transcript_correlation_
     ambiguous` crashes and no transcript binding at all.
     """
-    from tests.test_observer import until
+    from tests.support.waiting import until
 
     hold(monkeypatch, {PID_A: [codex_tree["a"]], PID_B: [codex_tree["b"]]})
     watcher = Observer(

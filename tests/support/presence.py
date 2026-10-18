@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 
-import pytest
-
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.models import HumanPresent
 
@@ -177,11 +175,3 @@ class FlipOnRefreshPresence(_BasePresence):
         await super().refresh()
         if self.refreshes == 1:
             self.set_state(self._flip_state, "test double: focus arrived")
-
-
-@pytest.fixture
-async def absent_presence(daemon):
-    """No human focus: the composed gates pass; opt in per module by importing it autouse."""
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
-        yield

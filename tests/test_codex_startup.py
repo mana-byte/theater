@@ -7,9 +7,9 @@ from uuid import uuid4
 
 import pytest
 
+from tests.support.codex_rollouts import hold, write_rollout
 from tests.support.shipped import CodexHarness
-from tests.test_codex_process_correlation import _rollout, hold
-from tests.test_observer import until
+from tests.support.waiting import until
 from theater.daemon.frontend.control_handlers import controls_get
 from theater.daemon.frontend.participant_read_handlers import participant_to_wire
 from theater.daemon.rpc.controls import _controls
@@ -27,7 +27,7 @@ def _spawn_siblings(daemon, terminal_provider, root, project, held):
         session_id = str(uuid4())
         held[terminal.process_id] = []
         if index < 3:
-            rollout = _rollout(
+            rollout = write_rollout(
                 root, session_id, project, at=f"01-19-0{index}", text=f"sibling-{index}"
             )
             held[terminal.process_id] = [rollout]
@@ -50,7 +50,7 @@ def _binding_generation(daemon, child, previous, current):
 
 
 def _completed_rollout(root, session_id, project):
-    own = _rollout(root, session_id, project, at="01-19-03", text="LUNA3_OK")
+    own = write_rollout(root, session_id, project, at="01-19-03", text="LUNA3_OK")
     with own.open("a") as stream:
         stream.write(
             json.dumps(

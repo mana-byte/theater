@@ -7,13 +7,9 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from test_rc10_provider_process import (
-    _physical_events,
-    _provider_process,
-    _raw_register_provider,
-)
 
 from tests.support.paths import fixture
+from tests.support.provider_launcher import physical_events, provider_process, raw_register_provider
 from theater import paths
 from theater.daemon.spawning.models import Reservation
 from theater.frontend import FrontendClient, StateProjection, StateSynchronizer
@@ -84,14 +80,14 @@ async def test_independent_provider_root_child_adoption_workspace_and_state_flow
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     credential = "s13-provider-credential"
-    provider_id = await _raw_register_provider(paths.socket_path(), credential)
+    provider_id = await raw_register_provider(paths.socket_path(), credential)
     plan = {
         "bind_requested_participant": True,
         "replace_occupant_after": {"terminal.inspect": "replacement-occupant"},
     }
     _install_test_launch_plan(daemon, monkeypatch)
 
-    async with _provider_process(
+    async with provider_process(
         paths.socket_path(),
         provider_id=provider_id,
         provider_credential=credential,
@@ -143,9 +139,7 @@ async def test_independent_provider_root_child_adoption_workspace_and_state_flow
             assert daemon.registry.get(child.participant_id).parent_id == root.participant_id
 
             creates = [
-                event
-                for event in _physical_events(provider)
-                if event["method"] == "terminal.create"
+                event for event in physical_events(provider) if event["method"] == "terminal.create"
             ]
             assert len(creates) == 2
             assert {_physical_occupant_id(event) for event in creates} == {
@@ -223,7 +217,7 @@ async def test_independent_provider_root_child_adoption_workspace_and_state_flow
             ).value
             assert (await _wait(client, rejected.operation_id)).state == "failed"
             assert not any(
-                event["method"] == "terminal.deliver" for event in _physical_events(provider)
+                event["method"] == "terminal.deliver" for event in physical_events(provider)
             )
 
             transferred = (
@@ -289,10 +283,10 @@ async def test_lost_create_ack_keeps_one_side_effect_and_reserved_resources(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     credential = "s13-lost-ack-credential"
-    provider_id = await _raw_register_provider(paths.socket_path(), credential)
+    provider_id = await raw_register_provider(paths.socket_path(), credential)
     _install_test_launch_plan(daemon, monkeypatch)
 
-    async with _provider_process(
+    async with provider_process(
         paths.socket_path(),
         provider_id=provider_id,
         provider_credential=credential,
@@ -330,7 +324,7 @@ async def test_lost_create_ack_keeps_one_side_effect_and_reserved_resources(
             assert await provider.wait() == 0
             assert [
                 event["method"]
-                for event in _physical_events(provider)
+                for event in physical_events(provider)
                 if event["operation_id"] == accepted.operation_id
             ] == ["terminal.create"]
 
@@ -361,10 +355,10 @@ async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     credential = "s13-lost-input-credential"
-    provider_id = await _raw_register_provider(paths.socket_path(), credential)
+    provider_id = await raw_register_provider(paths.socket_path(), credential)
     _install_test_launch_plan(daemon, monkeypatch)
 
-    async with _provider_process(
+    async with provider_process(
         paths.socket_path(),
         provider_id=provider_id,
         provider_credential=credential,
@@ -425,7 +419,7 @@ async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
             assert job is not None and job.state == "running"
             assert [
                 event["method"]
-                for event in _physical_events(provider)
+                for event in physical_events(provider)
                 if event["operation_id"] == sent.operation_id
             ] == ["terminal.deliver"]
         finally:

@@ -34,6 +34,7 @@ from tests.support.fake_runtime import (
     FakeRuntimeIO,
     FakeRuntimeState,
 )
+from tests.support.waiting import wait_until
 from theater import paths
 from theater.daemon.controls.service import INTERRUPTED_ERROR_CODE
 from theater.daemon.harness_runtime import endpoint_to_path
@@ -123,15 +124,6 @@ async def _await_flag(flag: asyncio.Event, *, what: str, timeout: float = 5.0) -
     while not flag.is_set():
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"timed out after {timeout}s waiting for {what}")
-        await asyncio.sleep(0.01)
-
-
-async def _wait_until(predicate, *, what: str, timeout: float = 5.0) -> None:
-    """Bounded wait until a predicate over composed daemon state holds."""
-    deadline = asyncio.get_running_loop().time() + timeout
-    while not predicate():
-        if asyncio.get_running_loop().time() >= deadline:
-            raise AssertionError(f"timed out waiting for {what}")
         await asyncio.sleep(0.01)
 
 
@@ -916,7 +908,7 @@ async def test_session_first_failure_clears_native_identity_before_fallback(
     _launch_spy(d, launched)
     try:
         participant = await _spawn(d, _request(prompt="legacy once"))
-        await _wait_until(
+        await wait_until(
             lambda: bool(terminal_provider.creations),
             what="the accepted launch to reach the provider",
         )
@@ -1483,7 +1475,7 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
         # The transient failure clears: the monitor — never a manual call —
         # reconnects the exact persisted session and registers live wiring.
         harness.resume_fails = False
-        await _wait_until(
+        await wait_until(
             lambda: d2.observer.live.registration_for(p.id) is not None,
             what="the monitor-driven live registration",
         )
@@ -1570,7 +1562,7 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
 
         # The monitor — never a manual call — retries and registers the
         # exact runtime/session once the transient failure has passed.
-        await _wait_until(
+        await wait_until(
             lambda: d2.observer.live.registration_for(p.id) is not None,
             what="the monitor-driven live registration",
         )
@@ -1633,7 +1625,7 @@ async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
         harness.store = d2.store
         harness.resume_gate = asyncio.Event()
         start_task = asyncio.create_task(d2.start())
-        await _wait_until(
+        await wait_until(
             lambda: any(event[0] == "open_parked" for event in harness.events),
             what="the startup re-adoption parking on the gate",
         )
@@ -1724,7 +1716,7 @@ async def test_startup_success_race_never_registers_over_a_successor(  # noqa: P
         harness.store = d2.store
         harness.resume_gate = asyncio.Event()
         start_task = asyncio.create_task(d2.start())
-        await _wait_until(
+        await wait_until(
             lambda: any(event[0] == "open_parked" for event in harness.events),
             what="the startup re-adoption parking on the gate",
         )

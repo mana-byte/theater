@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.test_mcp_tools import FakeClient, resolved, session
+from tests.support.mcp_tools import FakeClient, resolved, session
 from theater.mcp import tools
 from theater.protocol import RemoteError
 

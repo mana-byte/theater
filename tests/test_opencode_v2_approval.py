@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_opencode_server_runtime import PASSWORD, ServerFake
 
+from tests.support.opencode_server import PASSWORD, ServerFake
 from theater.harness.builtin.plugins.opencode.approval_v2 import (
     PluginNotActive,
     approval_ruleset,

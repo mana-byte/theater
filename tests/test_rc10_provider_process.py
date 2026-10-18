@@ -7,9 +7,6 @@ import contextlib
 import json
 import os
 import shutil
-import signal
-import subprocess
-import sys
 import tempfile
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -18,14 +15,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.paths import REPO_ROOT, TESTS_DIR
-from theater import paths, protocol
-from theater.daemon.plugins.credentials import credential_verifier
+from tests.support.provider_launcher import (
+    physical_events,
+    provider_process,
+    raw_register_provider,
+)
+from theater import paths
 from theater.frontend import FrontendClient
 from theater.frontend.schemas import validate_callback_response, validate_public_request
 
-PROCESS = TESTS_DIR / "support" / "provider_process.py"
-REPOSITORY = REPO_ROOT
 _LIMITS = {
     "max_frame_bytes": 67_108_864,
     "provider_pending_callbacks": 32,
@@ -133,168 +131,6 @@ async def _callback_peer(socket_path: Path) -> AsyncIterator[_CallbackPeer]:
             raise failures[0]
 
 
-@dataclass
-class _ProviderProcess:
-    process: asyncio.subprocess.Process
-    root: Path
-    ready: dict[str, object]
-
-    @property
-    def evidence_path(self) -> Path:
-        value = self.ready["evidence_file"]
-        assert isinstance(value, str)
-        return Path(value)
-
-    async def wait(self, *, timeout: float = 1) -> int:
-        return await asyncio.wait_for(self.process.wait(), timeout=timeout)
-
-    async def stop(self) -> None:
-        if self.process.returncode is None:
-            self.process.send_signal(signal.SIGTERM)
-        returncode = await self.wait(timeout=2)
-        stdout, stderr = await self.process.communicate()
-        assert returncode == 0, (stdout.decode(), stderr.decode())
-
-    async def wait_for_effects(self, *operation_ids: str) -> None:
-        async with asyncio.timeout(2):
-            while not set(operation_ids).issubset(
-                event["operation_id"] for event in _physical_events(self)
-            ):
-                await asyncio.sleep(0.005)
-
-    def evidence(self) -> list[dict[str, object]]:
-        if not self.evidence_path.exists():
-            return []
-        return [
-            value
-            for line in self.evidence_path.read_text(encoding="utf-8").splitlines()
-            if isinstance(value := json.loads(line), dict)
-        ]
-
-
-@asynccontextmanager
-async def _provider_process(
-    socket_path: Path,
-    *,
-    plan: Mapping[str, object] | None = None,
-    callback_timeout: float = 30.0,
-    provider_id: str = "fixture-provider",
-    provider_credential: str = "fixture-credential",
-) -> AsyncIterator[_ProviderProcess]:
-    root = Path(tempfile.mkdtemp(prefix="r10pp-", dir="/tmp"))
-    ready_file = root / "ready.json"
-    plan_path = root / "plan.json"
-    if plan is not None:
-        plan_path.write_text(json.dumps(dict(plan)), encoding="utf-8")
-    inherited = {
-        **os.environ,
-        "THEATER_HOME": "/control/theater",
-        "THEATER_ID": "control-participant",
-        "THEATER_RUNTIME_TOKEN": "control-token",
-        "TMUX": "/private/tmp/tmux-501/default,123,0",
-        "TMUX_PANE": "%99",
-        "TMUX_TMPDIR": "/private/tmp",
-        "CLAUDE_CODE_MESSAGING_SOCKET": "/control/claude.sock",
-        "CLAUDE_CODE_MESSAGING_TOKEN": "control-token",
-    }
-    inherited.pop("PYTHONHOME", None)
-    inherited.pop("PYTHONPATH", None)
-    command = [
-        sys.executable,
-        str(PROCESS),
-        "--socket",
-        str(socket_path),
-        "--root",
-        str(root),
-        "--ready-file",
-        str(ready_file),
-        "--provider-id",
-        provider_id,
-        "--provider-credential",
-        provider_credential,
-        "--client-id",
-        "fixture-client",
-        "--callback-timeout",
-        str(callback_timeout),
-    ]
-    if plan is not None:
-        command.extend(("--plan", str(plan_path)))
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=REPOSITORY,
-        env=inherited,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    provider: _ProviderProcess | None = None
-    try:
-        ready = await _read_ready(process, ready_file)
-        provider = _ProviderProcess(process, root, ready)
-        yield provider
-    finally:
-        if provider is None:
-            if process.returncode is None:
-                process.kill()
-            await process.communicate()
-        elif process.returncode is None:
-            await provider.stop()
-        shutil.rmtree(root, ignore_errors=True)
-
-
-async def _read_ready(process: asyncio.subprocess.Process, ready_file: Path) -> dict[str, object]:
-    async with asyncio.timeout(2):
-        while not ready_file.exists():
-            if process.returncode is not None:
-                stdout, stderr = await process.communicate()
-                raise AssertionError((process.returncode, stdout.decode(), stderr.decode()))
-            await asyncio.sleep(0.005)
-    value = json.loads(ready_file.read_text(encoding="utf-8"))
-    assert isinstance(value, dict)
-    return value
-
-
-async def _raw_register_provider(socket_path: Path, credential: str) -> str:
-    reader, writer = await asyncio.open_unix_connection(str(socket_path))
-    try:
-        requests = (
-            {
-                "id": 1,
-                "method": "frontend.handshake",
-                "params": {
-                    "api": {"major": 1, "minor": 1},
-                    "client_id": "fixture-operator",
-                    "role": "operator",
-                    "channel": "rpc",
-                    "required_capabilities": [],
-                },
-            },
-            {
-                "id": 2,
-                "method": "frontend.providers.register",
-                "params": {
-                    "selector": "fixture-candidate",
-                    "kind": "test",
-                    "credential_verifier": credential_verifier(credential),
-                    "capabilities": ["terminal-provider.v1"],
-                    "limits": {},
-                },
-                "idempotency_key": "fixture-candidate-registration",
-            },
-        )
-        responses = []
-        for request in requests:
-            writer.write(protocol.encode(request))
-            await writer.drain()
-            responses.append(json.loads(await protocol.read_message(reader)))
-        assert all(response["ok"] is True for response in responses)
-        provider_id = responses[1]["result"]["provider_id"]
-        assert isinstance(provider_id, str)
-        return provider_id
-    finally:
-        writer.close()
-        await writer.wait_closed()
-
-
 def _create(
     callback_id: str, operation_id: str, *, launch_id: str = "launch-a"
 ) -> dict[str, object]:
@@ -382,16 +218,12 @@ def _integer(value: object) -> int:
     return value
 
 
-def _physical_events(provider: _ProviderProcess) -> list[dict[str, object]]:
-    return [entry for entry in provider.evidence() if entry["event"] == "physical_side_effect"]
-
-
 @pytest.mark.asyncio
 async def test_fixture_process_connects_to_candidate_daemon_public_socket(daemon) -> None:
     credential = "fixture-candidate-credential"
-    provider_id = await _raw_register_provider(paths.socket_path(), credential)
+    provider_id = await raw_register_provider(paths.socket_path(), credential)
 
-    async with _provider_process(
+    async with provider_process(
         paths.socket_path(), provider_id=provider_id, provider_credential=credential
     ) as provider:
         generation = _integer(provider.ready["provider_generation"])
@@ -430,7 +262,7 @@ async def test_fixture_process_connects_to_candidate_daemon_public_socket(daemon
         assert (
             inspected.value["terminal"]["terminal_incarnation"] == terminal["terminal_incarnation"]
         )
-        assert [entry["method"] for entry in _physical_events(provider)] == ["terminal.create"]
+        assert [entry["method"] for entry in physical_events(provider)] == ["terminal.create"]
 
 
 @pytest.mark.asyncio
@@ -440,7 +272,7 @@ async def test_fixture_process_handles_public_callbacks_with_durable_evidence() 
     try:
         async with (
             _callback_peer(socket_path) as peer,
-            _provider_process(socket_path, plan={"inventory_complete": False}) as provider,
+            provider_process(socket_path, plan={"inventory_complete": False}) as provider,
         ):
             session = await peer.next_session()
             assert provider.ready["provider_generation"] == 7
@@ -492,7 +324,7 @@ async def test_fixture_process_handles_public_callbacks_with_durable_evidence() 
                 if method == "terminal.terminate":
                     assert result["exit_confirmed"] is True
 
-            physical = _physical_events(provider)
+            physical = physical_events(provider)
             assert [entry["method"] for entry in physical] == [
                 "terminal.create",
                 "terminal.deliver",
@@ -518,7 +350,7 @@ async def test_fixture_process_replaces_occupants_reuses_ids_and_deduplicates_ex
                 "reuse_terminal_id": True,
                 "replace_occupant_after": {"terminal.deliver": "replacement-occupant"},
             }
-            async with _provider_process(socket_path, plan=plan) as provider:
+            async with provider_process(socket_path, plan=plan) as provider:
                 session = await peer.next_session()
                 await session.send(_create("create-first", "operation-create"))
                 first = _result(await session.read("terminal.create"))
@@ -528,7 +360,7 @@ async def test_fixture_process_replaces_occupants_reuses_ids_and_deduplicates_ex
                 await session.send(_create("create-retry", "operation-create"))
                 replayed = _result(await session.read("terminal.create"))
                 assert replayed == first
-                assert [entry["method"] for entry in _physical_events(provider)] == [
+                assert [entry["method"] for entry in physical_events(provider)] == [
                     "terminal.create"
                 ]
 
@@ -588,7 +420,7 @@ async def test_fixture_process_allows_independent_terminals_but_serializes_one_t
     try:
         async with (
             _callback_peer(socket_path) as peer,
-            _provider_process(socket_path, plan={"reply_gates": ["terminal.deliver"]}) as provider,
+            provider_process(socket_path, plan={"reply_gates": ["terminal.deliver"]}) as provider,
         ):
             release = provider.root / "terminal.deliver.release"
             session = await peer.next_session()
@@ -611,7 +443,7 @@ async def test_fixture_process_allows_independent_terminals_but_serializes_one_t
             await provider.wait_for_effects("operation-deliver-a", "operation-deliver-b")
             deliveries = [
                 event
-                for event in _physical_events(provider)
+                for event in physical_events(provider)
                 if event["method"] == "terminal.deliver"
             ]
             assert {event["operation_id"] for event in deliveries} == {
@@ -640,7 +472,7 @@ async def test_fixture_process_allows_independent_terminals_but_serializes_one_t
             await provider.wait_for_effects("operation-serial-first")
             serial_deliveries = [
                 event["operation_id"]
-                for event in _physical_events(provider)
+                for event in physical_events(provider)
                 if event["method"] == "terminal.deliver"
             ]
             assert serial_deliveries == [
@@ -671,12 +503,12 @@ async def test_fixture_process_disconnect_controls_bound_execution_evidence(
     try:
         async with (
             _callback_peer(socket_path) as peer,
-            _provider_process(socket_path, plan={control: ["terminal.create"]}) as provider,
+            provider_process(socket_path, plan={control: ["terminal.create"]}) as provider,
         ):
             session = await peer.next_session()
             await session.send(_create("disconnect", "operation-disconnect"))
             assert await provider.wait() == 0
-            assert len(_physical_events(provider)) == expected_physical
+            assert len(physical_events(provider)) == expected_physical
             assert any(entry["event"] == f"{control}_side_effect" for entry in provider.evidence())
             assert await asyncio.wait_for(session.reader.readline(), timeout=1) == b""
     finally:
@@ -690,7 +522,7 @@ async def test_fixture_process_timeout_replays_unknown_without_repeating_side_ef
     try:
         async with _callback_peer(socket_path) as peer:
             plan = {"reply_delays": {"terminal.create": 0.1}}
-            async with _provider_process(socket_path, plan=plan, callback_timeout=0.01) as provider:
+            async with provider_process(socket_path, plan=plan, callback_timeout=0.01) as provider:
                 session = await peer.next_session()
                 request = _create("slow-create", "operation-slow")
                 await session.send(request)
@@ -700,7 +532,7 @@ async def test_fixture_process_timeout_replays_unknown_without_repeating_side_ef
                 await session.send(request)
                 replay = await session.read("terminal.create", timeout=0.1)
                 assert replay == first
-                assert [entry["method"] for entry in _physical_events(provider)] == [
+                assert [entry["method"] for entry in physical_events(provider)] == [
                     "terminal.create"
                 ]
                 await asyncio.sleep(0.12)

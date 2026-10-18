@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from tests.support.mcp_tools import tool_payload
 from tests.support.presence import FakePresence
 from theater import paths
 from theater.client import DaemonClient
@@ -37,20 +38,6 @@ async def daemon(theater_home):
     await d.start()
     yield d
     await d.aclose()
-
-
-def _payload(result):
-    """Take the structured half of a CallToolResult.
-
-    Theater structures small bare `-> dict` controls. The SDK wraps `-> list[dict]`
-    output as {"result": [...]}; bulk bare-dict tools still return JSON text.
-    """
-    structured = result.structured_content
-    if isinstance(structured, dict) and set(structured) == {"result"}:
-        return structured["result"]
-    if structured is not None:
-        return structured
-    return json.loads(result.content[0].text)
 
 
 async def test_tools_are_registered(daemon):
@@ -92,12 +79,12 @@ async def test_control_and_wait_toolsets_partition_the_mcp_surface(daemon, harne
 
 async def test_wait_toolset_reuses_the_control_participant_identity(daemon, presence):
     control = build("p1", "vibe", "control")
-    assert _payload(await control.call_tool("whoami", {}))["id"] == "p1"
+    assert tool_payload(await control.call_tool("whoami", {}))["id"] == "p1"
     daemon.jobs.create(handle="done", caller_id="p1", target_id=None, kind="test")
     daemon.jobs.finish("done", state=JobState.DONE)
 
     wait = build("p1", "vibe", "wait")
-    result = _payload(await wait.call_tool("await_sessions", {"handles": ["done"]}))
+    result = tool_payload(await wait.call_tool("await_sessions", {"handles": ["done"]}))
     assert len(result) == 1
     assert result[0]["handle"] == "done"
     assert result[0]["state"] == "done"
@@ -125,7 +112,7 @@ async def test_await_returns_a_native_structured_result(daemon, presence):
     result = await build("p1", "vibe", "wait").call_tool(
         "await_sessions", {"handles": ["structured"]}
     )
-    entry = _payload(result)[0]
+    entry = tool_payload(result)[0]
     assert entry["structured_status"] == "parsed"
     assert entry["structured_result"] == {"answer": 42}
 
@@ -303,8 +290,8 @@ async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     monkeypatch.setattr(mcp_tools, "load_skill", fake_load_skill)
 
     mcp = build("p1", "vibe")
-    assert _payload(await mcp.call_tool("list_skills", {})) == {"skills": [], "rejections": []}
-    assert _payload(await mcp.call_tool("load_skill", {"name": "alpha"})) == {
+    assert tool_payload(await mcp.call_tool("list_skills", {})) == {"skills": [], "rejections": []}
+    assert tool_payload(await mcp.call_tool("load_skill", {"name": "alpha"})) == {
         "name": "alpha",
         "content": "# Alpha\n",
     }
@@ -315,7 +302,7 @@ async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch):
 async def test_skill_tools_round_trip_through_the_daemon(daemon):
     mcp = build("p1", "vibe")
 
-    listed = _payload(await mcp.call_tool("list_skills", {}))
+    listed = tool_payload(await mcp.call_tool("list_skills", {}))
     assert [skill["name"] for skill in listed["skills"]] == [
         "theater-configure",
         "theater-debate",
@@ -333,11 +320,11 @@ async def test_skill_tools_round_trip_through_the_daemon(daemon):
     ]
     assert pair["master"] == "pair/reviewer"
     assert pair["disposable"] == ["pair/builder"]
-    assert _payload(await mcp.call_tool("list_skills", {"play": "hierarchy"}))["plays"] == [
+    assert tool_payload(await mcp.call_tool("list_skills", {"play": "hierarchy"}))["plays"] == [
         hierarchy
     ]
 
-    loaded = _payload(await mcp.call_tool("load_skill", {"name": "theater-debate"}))
+    loaded = tool_payload(await mcp.call_tool("load_skill", {"name": "theater-debate"}))
     assert loaded["name"] == "theater-debate"
     assert loaded["source"] == "builtin"
     assert loaded["content"].startswith("---\nname: theater-debate\n")
@@ -351,7 +338,7 @@ async def test_a_disabled_skill_is_hidden_from_list_and_refused_on_load(theater_
     try:
         mcp = build("p1", "vibe")
 
-        listed = _payload(await mcp.call_tool("list_skills", {}))
+        listed = tool_payload(await mcp.call_tool("list_skills", {}))
         assert [skill["name"] for skill in listed["skills"]] == [
             "theater-debate",
             "theater-delegate",
@@ -361,7 +348,7 @@ async def test_a_disabled_skill_is_hidden_from_list_and_refused_on_load(theater_
         refused = await mcp.call_tool("load_skill", {"name": "theater-configure"})
         assert refused.structured_content["error"]["code"] == "not_found"
 
-        loaded = _payload(await mcp.call_tool("load_skill", {"name": "theater-debate"}))
+        loaded = tool_payload(await mcp.call_tool("load_skill", {"name": "theater-debate"}))
         assert loaded["name"] == "theater-debate"
         assert loaded["content"].startswith("---\nname: theater-debate\n")
     finally:
@@ -511,7 +498,7 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
 
     mcp = build("p1", "vibe")
     response_format = {"type": "object"}
-    assert _payload(
+    assert tool_payload(
         await mcp.call_tool(
             "send",
             {
@@ -525,10 +512,10 @@ async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
             },
         )
     ) == {"handle": "p-child#4", "route": "queued"}
-    assert _payload(
+    assert tool_payload(
         await mcp.call_tool("update_session_settings", {"target": "child", "model": "opus-5"})
     ) == {"applied": True}
-    assert _payload(await mcp.call_tool("get_session_controls", {"target": "child"})) == {
+    assert tool_payload(await mcp.call_tool("get_session_controls", {"target": "child"})) == {
         "capabilities": {}
     }
 
@@ -560,7 +547,7 @@ async def test_spawn_wrapper_forwards_wiring_unchanged(monkeypatch):
     monkeypatch.setattr(mcp_tools, "spawn_session", fake_spawn)
 
     mcp = build("p1", "vibe")
-    assert _payload(
+    assert tool_payload(
         await mcp.call_tool(
             "spawn_session",
             {"harness": "vibe", "approval": "manual", "wiring": "legacy"},
@@ -593,7 +580,7 @@ async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
     spawn_format = {}
     send_format = {"type": "object"}
 
-    assert _payload(
+    assert tool_payload(
         await mcp.call_tool(
             "spawn_session",
             {
@@ -604,7 +591,7 @@ async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
             },
         )
     ) == {"ok": "spawn"}
-    assert _payload(
+    assert tool_payload(
         await mcp.call_tool(
             "send",
             {
@@ -639,7 +626,7 @@ async def test_participant_metadata_wrappers_forward_to_tool_bodies(monkeypatch)
     monkeypatch.setattr(mcp_tools, "update_participant", fake_update)
 
     mcp = build("p1", "vibe")
-    assert _payload(
+    assert tool_payload(
         await mcp.call_tool(
             "spawn_session",
             {
@@ -650,7 +637,7 @@ async def test_participant_metadata_wrappers_forward_to_tool_bodies(monkeypatch)
             },
         )
     ) == {"ok": "spawn"}
-    assert _payload(
+    assert tool_payload(
         await mcp.call_tool(
             "update_participant",
             {"target": "child", "description": "Updated metadata"},
@@ -675,7 +662,7 @@ async def test_interrupt_wrapper_forwards_to_tool_body(monkeypatch):
     monkeypatch.setattr(mcp_tools, "interrupt_session", fake_interrupt)
 
     mcp = build("p1", "vibe")
-    assert _payload(await mcp.call_tool("interrupt_session", {"target": "child"})) == {
+    assert tool_payload(await mcp.call_tool("interrupt_session", {"target": "child"})) == {
         "interrupted": True
     }
     interrupt_session, kwargs = calls["interrupt"]
@@ -719,19 +706,19 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     monkeypatch.setattr(mcp_tools, "scratchpad_delete", fake_scratchpad_delete)
 
     mcp = build("p1", "vibe")
-    assert _payload(
+    assert tool_payload(
         await mcp.call_tool(
             "scratchpad_write",
             {"namespace": "plan", "value": "p-you"},
         )
     ) == {"namespace": "plan", "key": "abc123"}
-    assert _payload(await mcp.call_tool("scratchpad_get", {"namespace": "plan"})) == {
+    assert tool_payload(await mcp.call_tool("scratchpad_get", {"namespace": "plan"})) == {
         "namespace": "plan",
         "entries": [],
         "keys": [],
         "truncated": False,
     }
-    assert _payload(
+    assert tool_payload(
         await mcp.call_tool("scratchpad_delete", {"namespace": "plan", "keys": ["abc123"]})
     ) == {"namespace": "plan", "deleted": ["abc123"]}
 
@@ -745,7 +732,7 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
 
 async def test_whoami_registers_on_first_call(daemon):
     mcp = build("chosen-id", "vibe")
-    me = _payload(await mcp.call_tool("whoami", {}))
+    me = tool_payload(await mcp.call_tool("whoami", {}))
 
     assert me["id"] == "chosen-id"
     assert me["harness"] == "vibe"
@@ -775,7 +762,7 @@ async def test_list_participants_marks_the_caller(daemon):
             session_id="ses-them",
         )
 
-    rows = _payload(await mine.call_tool("list_participants", {}))
+    rows = tool_payload(await mine.call_tool("list_participants", {}))
     flags = {r["id"]: r["is_self"] for r in rows if "is_self" in r}
     assert flags == {"me": True}
     session_ids = {r["id"]: r.get("session_id") for r in rows}
@@ -816,7 +803,7 @@ async def test_a_daemon_that_does_not_answer_is_daemon_unavailable(daemon, monke
 
 async def test_unknown_arguments_are_reported_not_dropped(daemon):
     mcp = build("me", "vibe")
-    payload = _payload(await mcp.call_tool("whoami", {"tail": 5, "x": 1}))
+    payload = tool_payload(await mcp.call_tool("whoami", {"tail": 5, "x": 1}))
     assert payload["id"] == "me"
     assert payload["ignored_arguments"] == [{"tail": "removed; page with next_cursor"}, "x"]
     rows = await mcp.call_tool("list_harnesses", {"harness": "vibe"})

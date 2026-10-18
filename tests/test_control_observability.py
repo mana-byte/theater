@@ -17,17 +17,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support.fake_runtime import FakeRuntime
-from tests.test_control_service import (
+from tests.support.control_harness import (
     Harness,
-    _make_operation,
     disconnected_native_harness,
+    make_operation,
     make_runtime,
     open_harness,
     state_of,
     wrap_runtime,
 )
-from tests.test_live_observation_integration import Rig, bus_kinds, until
+from tests.support.fake_runtime import FakeRuntime
+from tests.support.observation import Rig, bus_kinds
+from tests.support.waiting import until
 from theater.constants.observability import CONTROL_QUEUE_DEPTH_GAUGE
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.runtime import (
@@ -352,7 +353,7 @@ async def test_unknown_delivery_restart_and_deadline_reasons(store, spy) -> None
     # A jobless DISPATCHED row: transmission began, so a restart settles it
     # unknown with the restart reason — never a replay.
     store.reserve_control_operation(
-        _make_operation(
+        make_operation(
             "p1#jobless:steer",
             job_handle=None,
             kind=ControlKind.STEER,

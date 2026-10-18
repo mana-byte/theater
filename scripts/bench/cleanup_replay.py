@@ -157,7 +157,7 @@ def bench_cleanup() -> list[tuple[str, str, str]]:
 
 def bench_vibe_failed_turn() -> list[tuple[str, str, str]]:
     sys.path.insert(0, str(REPO_ROOT))
-    from tests import test_vibe_unified_store as vibe
+    from tests.support import vibe_store as vibe
     from theater.daemon.observation.completion import _FINISHED_FOR_TERMINAL
     from theater.daemon.rpc.jobs import _JOB_ERROR_MESSAGES
     from theater.harness.builtin.plugins.vibe.observer import VibeObserver

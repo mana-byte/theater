@@ -6,8 +6,8 @@ from dataclasses import replace
 import pytest
 from sqlalchemy import text
 
+from tests.support.control_harness import Harness, make_runtime, state_of
 from tests.support.paths import fixture
-from tests.test_control_service import Harness, make_runtime, state_of
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import SessionOpenMode
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading

@@ -13,9 +13,10 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select, update
 
+from tests.support.handoff_rig import CANCELLED_BEFORE_DELIVERY
+from tests.support.native_rpc import native_pair
 from tests.support.presence import AbsentPresence
-from tests.test_control_rpc import _native_pair
-from tests.test_handoff_send import CANCELLED_BEFORE_DELIVERY
+from tests.support.waiting import wait_until
 from theater.constants.daemon import CONTROL_QUEUE_PEER_MAX_PENDING
 from theater.daemon.gc import _sweep_stale_running
 from theater.daemon.handoff import gitfacts
@@ -470,12 +471,6 @@ async def test_cancel_job_withdraws_a_waiting_spawn_but_never_a_launching_one(
     assert (late.cancelled, late.reason) == (False, "delivery_uncertain")
 
 
-async def _until(predicate, *, seconds: float = 3.0) -> None:
-    async with asyncio.timeout(seconds):
-        while not predicate():
-            await asyncio.sleep(0.01)
-
-
 # ---- H1: a provider that is only away --------------------------------------------------------
 
 
@@ -496,14 +491,16 @@ async def test_provider_outage_keeps_the_gate_waiting_and_retries_without_replay
     handle = reply["handle"]
 
     daemon.jobs.finish("src#1", state=JobState.DONE, result="ok")
-    await _until(lambda: daemon.store.get_handoff_gate(handle).error_code == "provider_unavailable")
+    await wait_until(
+        lambda: daemon.store.get_handoff_gate(handle).error_code == "provider_unavailable"
+    )
 
     gate = daemon.store.get_handoff_gate(handle)
     assert gate.state == "waiting" and daemon.store.get_job(handle).state == JobState.RUNNING
     assert launches == [] and _launch_rows(daemon) == 0
 
     online["now"] = True
-    await _until(lambda: len(launches) == 1)
+    await wait_until(lambda: len(launches) == 1)
     await _launch_all(daemon)
     assert daemon.store.get_handoff_gate(handle).state == "opened"
     await asyncio.sleep(0.1)
@@ -531,11 +528,13 @@ async def test_a_restart_while_the_provider_is_still_away_keeps_waiting_then_lau
     daemon.jobs._events.clear()
 
     await daemon.handoff.recover()
-    await _until(lambda: daemon.store.get_handoff_gate(handle).error_code == "provider_unavailable")
+    await wait_until(
+        lambda: daemon.store.get_handoff_gate(handle).error_code == "provider_unavailable"
+    )
     assert daemon.store.get_handoff_gate(handle).state == "waiting" and launches == []
 
     online["now"] = True
-    await _until(lambda: len(launches) == 1)
+    await wait_until(lambda: len(launches) == 1)
 
 
 # ---- H2: the placeholder is already in the tree budget ----------------------------------------
@@ -575,7 +574,7 @@ async def test_a_task_admitted_at_the_budget_still_launches_without_double_count
 async def test_naming_a_participant_never_selects_a_peers_queued_message(client, daemon):
     from theater.daemon.handoff.resolution import resolve_source
 
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     mine = daemon.jobs.create(
         handle=f"{child.id}#own",
         caller_id=parent.id,
@@ -773,7 +772,7 @@ async def test_a_gate_waiting_on_a_source_the_gc_abandoned_is_woken(daemon, laun
 
 
 async def test_the_parents_default_send_is_not_counted_against_the_peer_reserve(client, daemon):
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     state.native_turn_id = "busy"
     strangers = [daemon.registry.create_spawned(harness="vibe", cwd="/tmp") for _ in range(4)]
     for index in range(CONTROL_QUEUE_PEER_MAX_PENDING):
@@ -813,7 +812,7 @@ async def test_cancelled_and_queued_work_never_invokes_git(
     client, daemon, launches, monkeypatch, absent_presence
 ):
     """A queued message a gate waits on is cancelled: nothing was delivered, nothing is pinned."""
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     state.native_turn_id = "busy"
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     queued = await client.call("send", target=child.id, prompt="hi", caller_id=stranger.id)
@@ -831,7 +830,7 @@ async def test_cancelled_and_queued_work_never_invokes_git(
 async def test_only_a_job_that_may_have_reached_its_target_can_need_a_pin(
     client, daemon, absent_presence
 ):
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     delivered = await client.call("send", target=child.id, prompt="go", caller_id=parent.id)
     state.native_turn_id = "busy"

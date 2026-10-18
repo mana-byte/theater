@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 
-from tests.test_claude_final_seal import _fragment, _marker, _record
-from tests.test_mcp_tools import resolved
-from tests.test_transcript_paging import StaticSource, page, pager
+from tests.support.claude_seal import claude_fragment, claude_marker, claude_record
+from tests.support.mcp_tools import resolved
+from tests.support.transcript_pages import StaticSource, page, pager
 from theater.daemon.rpc.transcript_paging import TranscriptEventChunk, TranscriptReadPage
 from theater.daemon.rpc.transcripts import _read_transcript
 from theater.harness import HARNESSES, Event, EventKind
@@ -18,10 +18,10 @@ from theater.mcp.toolsets.transcripts import read_transcript
 async def test_only_complete_causally_matching_answer_and_seal_are_coalesced(daemon, monkeypatch):
     observer = ClaudeCodeObserver()
     lines = [
-        _record("u0", None, "user", message={"content": "ask"}),
-        _fragment("u1", "u0", {"type": "text", "text": "answer"}, message="other"),
-        _fragment("u2", "u1", {"type": "text", "text": "answer"}),
-        _marker("u3", "u2"),
+        claude_record("u0", None, "user", message={"content": "ask"}),
+        claude_fragment("u1", "u0", {"type": "text", "text": "answer"}, message="other"),
+        claude_fragment("u2", "u1", {"type": "text", "text": "answer"}),
+        claude_marker("u3", "u2"),
     ]
     events = tuple(event for i, line in enumerate(lines) for event in observer.parse(line, i))
     history = page(events, cursor="snapshot", older_cursor="older")

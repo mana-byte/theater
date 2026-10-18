@@ -341,8 +341,7 @@ def test_closed_loops_leave_no_global_leak(tmp_path):
 
 
 async def test_hybrid_forwards_the_wakeup_to_the_durable_gate(watched):
-    from test_hybrid_source import LIVE, ScriptedSource
-
+    from tests.support.hybrid_source import LIVE, ScriptedSource
     from theater.harness.channels.hybrid import HybridSource
     from theater.harness.contracts.runtime import LiveChannelDeclaration
 

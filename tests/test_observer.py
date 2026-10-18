@@ -17,7 +17,9 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import delete, update
 
+from tests.support.observation import age_job, bus_kinds, poised
 from tests.support.shipped import VibeHarness
+from tests.support.waiting import until
 from theater.constants.observation import (
     AWAITING_INPUT_TARGET_SECONDS,
     LAST_ACTIVITY_REFRESH_SECONDS,
@@ -50,7 +52,6 @@ from theater.harness.contracts.channels import (
     ChannelKind,
 )
 from theater.harness.observation import (
-    HarnessObserver,
     ScreenConfidence,
     ScreenKind,
     ScreenReading,
@@ -58,9 +59,7 @@ from theater.harness.observation import (
 from theater.harness.source import Attachment, Batch, Source, StreamPoint
 from theater.models import (
     JobState,
-    ProviderRecord,
     Status,
-    TerminalBindingRecord,
     now,
 )
 from theater.resume_floor import (
@@ -107,15 +106,6 @@ def append(path: Path, *records: dict) -> None:
         fh.flush()
 
 
-async def until(predicate, timeout: float = 5.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        await asyncio.sleep(0.01)
-    return False
-
-
 @pytest.fixture
 async def observing(registry, vibe_tree):
     """An observer wound tight enough to finish inside a test."""
@@ -130,10 +120,6 @@ async def observing(registry, vibe_tree):
     observer.start()
     yield observer
     await observer.aclose()
-
-
-def kinds(store, prefix="agent."):
-    return [row["kind"] for row in store.bus_tail(limit=500) if row["kind"].startswith(prefix)]
 
 
 def test_source_checkpoint_is_persisted_only_after_apply_succeeds(registry, monkeypatch):
@@ -212,23 +198,23 @@ def test_source_checkpoint_is_persisted_only_after_apply_succeeds(registry, monk
     assert persistence_failure.rolled_back is True
     assert persistence_failure.pending is True
     assert registry.get(participant.id).source_checkpoint == source.checkpoint
-    assert kinds(registry.store).count("agent.assistant") == 0
+    assert bus_kinds(registry.store).count("agent.assistant") == 0
 
     monkeypatch.setattr(observer.store, "set_source_checkpoint", persist_checkpoint)
     assert observer._persist_pending_source_checkpoint(participant.id, persistence_failure)
     assert persistence_failure.acknowledged is True
     assert persistence_failure.pending is False
-    assert kinds(registry.store).count("agent.assistant") == 0
+    assert bus_kinds(registry.store).count("agent.assistant") == 0
 
 
 async def test_new_records_reach_the_bus_as_normalized_events(registry, vibe_tree, observing):
     p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
-    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: "agent.transcript" in bus_kinds(registry.store))
 
     append(vibe_tree["transcript"], USER, WORKING, RESULT, DONE)
 
-    assert await until(lambda: "agent.assistant" in kinds(registry.store))
-    assert kinds(registry.store) == [
+    assert await until(lambda: "agent.assistant" in bus_kinds(registry.store))
+    assert bus_kinds(registry.store) == [
         "agent.transcript",
         "agent.user",
         "agent.assistant",
@@ -247,7 +233,7 @@ async def test_new_records_reach_the_bus_as_normalized_events(registry, vibe_tre
 
 async def test_status_follows_the_turn_boundary(registry, vibe_tree, observing):
     p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
-    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: "agent.transcript" in bus_kinds(registry.store))
 
     append(vibe_tree["transcript"], USER, WORKING)
     assert await until(lambda: registry.get(p.id).status is Status.WORKING)
@@ -261,15 +247,15 @@ async def test_attaching_skips_history_instead_of_replaying_it(registry, vibe_tr
     append(vibe_tree["transcript"], USER, WORKING, RESULT, DONE)
     registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
 
-    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: "agent.transcript" in bus_kinds(registry.store))
     await asyncio.sleep(0.1)
-    assert kinds(registry.store) == ["agent.transcript"]
+    assert bus_kinds(registry.store) == ["agent.transcript"]
 
     attach = next(r for r in registry.store.bus_tail(limit=500) if r["kind"] == "agent.transcript")
     assert attach["payload"]["skipped_records"] == 4
 
     append(vibe_tree["transcript"], USER)
-    assert await until(lambda: "agent.user" in kinds(registry.store))
+    assert await until(lambda: "agent.user" in bus_kinds(registry.store))
 
 
 async def test_attaching_derives_status_from_the_last_skipped_record(
@@ -286,10 +272,10 @@ async def test_attaching_derives_status_from_the_last_skipped_record(
     append(vibe_tree["transcript"], USER, WORKING, RESULT, DONE)
     p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
 
-    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: "agent.transcript" in bus_kinds(registry.store))
     assert await until(lambda: registry.get(p.id).status is Status.IDLE)
     # The bus carries only the transcript attach event — no history replay.
-    assert kinds(registry.store) == ["agent.transcript"]
+    assert bus_kinds(registry.store) == ["agent.transcript"]
 
 
 async def test_attaching_to_a_working_agent_sets_working(registry, vibe_tree, observing):
@@ -297,7 +283,7 @@ async def test_attaching_to_a_working_agent_sets_working(registry, vibe_tree, ob
     append(vibe_tree["transcript"], USER, WORKING)
     p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
 
-    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: "agent.transcript" in bus_kinds(registry.store))
     assert await until(lambda: registry.get(p.id).status is Status.WORKING)
 
 
@@ -312,29 +298,29 @@ async def test_a_half_written_record_is_not_parsed_until_it_is_complete(
     registry, vibe_tree, observing
 ):
     registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
-    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: "agent.transcript" in bus_kinds(registry.store))
 
     with vibe_tree["transcript"].open("a") as fh:
         fh.write(json.dumps(USER)[:20])
         fh.flush()
     await asyncio.sleep(0.1)
-    assert kinds(registry.store) == ["agent.transcript"]
+    assert bus_kinds(registry.store) == ["agent.transcript"]
 
     with vibe_tree["transcript"].open("a") as fh:
         fh.write(json.dumps(USER)[20:] + "\n")
         fh.flush()
-    assert await until(lambda: "agent.user" in kinds(registry.store))
+    assert await until(lambda: "agent.user" in bus_kinds(registry.store))
 
 
 async def test_a_truncated_transcript_is_re_read_from_the_top(registry, vibe_tree, observing):
     registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
-    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: "agent.transcript" in bus_kinds(registry.store))
     append(vibe_tree["transcript"], USER)
-    assert await until(lambda: kinds(registry.store).count("agent.user") == 1)
+    assert await until(lambda: bus_kinds(registry.store).count("agent.user") == 1)
 
     vibe_tree["transcript"].write_text("")
     append(vibe_tree["transcript"], USER)
-    assert await until(lambda: kinds(registry.store).count("agent.user") == 2)
+    assert await until(lambda: bus_kinds(registry.store).count("agent.user") == 2)
 
 
 async def test_a_dead_participant_stops_being_watched(registry, vibe_tree, observing):
@@ -346,7 +332,7 @@ async def test_a_dead_participant_stops_being_watched(registry, vibe_tree, obser
 
     append(vibe_tree["transcript"], USER)
     await asyncio.sleep(0.1)
-    assert "agent.user" not in kinds(registry.store)
+    assert "agent.user" not in bus_kinds(registry.store)
 
 
 async def test_participants_of_an_unknown_harness_are_left_alone(registry, vibe_tree):
@@ -356,7 +342,7 @@ async def test_participants_of_an_unknown_harness_are_left_alone(registry, vibe_
         registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
         await asyncio.sleep(0.1)
         assert observer._tasks == {}
-        assert kinds(registry.store) == []
+        assert bus_kinds(registry.store) == []
     finally:
         await observer.aclose()
 
@@ -385,7 +371,7 @@ async def test_an_observer_with_no_transcript_waits_without_spinning_out(registr
         assert await until(lambda: p.id in observer._tasks)
         await asyncio.sleep(0.1)
         assert not observer._tasks[p.id].done()
-        assert kinds(registry.store) == []
+        assert bus_kinds(registry.store) == []
     finally:
         await observer.aclose()
 
@@ -589,100 +575,6 @@ def test_usage_keeps_harness_attribution_after_participant_gc(registry):
 # ---- rescuing a job whose turn end was never read ---------------------
 
 
-class ScreenObserver(HarnessObserver):
-    """Just enough observer for `_rescue_jobs`, which reads `screen_reading`.
-
-    Inherits the default `screen_reading` shim, which derives a reading from
-    `is_idle_screen`. An observer and not a harness: rescue is observation,
-    so the reducer is handed only that half and never sees the object that
-    launches anything.
-    """
-
-    has_transcript = True
-
-    def __init__(self, idle: bool):
-        self.idle = idle
-
-    def is_idle_screen(self, capture: str) -> bool:
-        return self.idle
-
-
-def poised(
-    registry,
-    *,
-    provider_bound=True,
-    idle=True,
-    capture="$ ",
-    prompt: str | None = None,
-    response_format: str | None = None,
-    **observer_options,
-):
-    """A participant with one running job, and an observer poised to rescue it.
-
-    `capture=None` stands for a pane that could not be read at all.
-    """
-    from theater.daemon.jobs import JobManager
-
-    jobs = JobManager(registry.store)
-    p = registry.register(harness="vibe", pane=None, cwd="/tmp")
-    if provider_bound:
-        timestamp = now()
-        with registry.store.write_unit() as unit:
-            if (
-                registry.store.providers.get("observer-provider", connection=unit.connection)
-                is None
-            ):
-                registry.store.providers.register(
-                    ProviderRecord(
-                        provider_id="observer-provider",
-                        selector="observer-provider",
-                        kind="test",
-                        credential_verifier="f" * 64,
-                        configuration_version=1,
-                        capabilities=("terminal-provider.v1",),
-                        limits={},
-                        generation=1,
-                        last_report_revision=1,
-                        created_at=timestamp,
-                        updated_at=timestamp,
-                    ),
-                    connection=unit.connection,
-                )
-            registry.store.terminal_bindings.bind(
-                TerminalBindingRecord(
-                    participant_id=p.id,
-                    provider_id="observer-provider",
-                    provider_generation=1,
-                    terminal_id=f"terminal-{p.id}",
-                    terminal_incarnation="incarnation-1",
-                    occupant_evidence={"occupant_id": p.id, "harness": "vibe"},
-                    process_facts=None,
-                    health="healthy",
-                    report_revision=1,
-                    created_at=timestamp,
-                    updated_at=timestamp,
-                ),
-                connection=unit.connection,
-            )
-    jobs.create(
-        handle="h1",
-        caller_id="caller",
-        target_id=p.id,
-        kind="send",
-        prompt=prompt,
-        response_format=response_format,
-    )
-    observer = Observer(registry, harnesses={}, jobs=jobs, **observer_options)
-
-    async def capture_pane(_pane):
-        return capture
-
-    observer._capture = capture_pane
-    cursor = QuietClock()
-    cursor.last_text = "the last thing it said"
-    return observer, ScreenObserver(idle), cursor, p, jobs
-
-
 def expire_rescue_clock(clock: QuietClock, observer: Observer) -> None:
     clock.rescue_since = time.monotonic() - observer.rescue - 1
 
@@ -698,12 +590,6 @@ async def rescue(observer: Observer, screen, clock: QuietClock, pid: str) -> Non
     assert await observer._rescue_jobs(pid, screen, clock)
     let_rescue_confirm(clock)
     assert not await observer._rescue_jobs(pid, screen, clock)
-
-
-def age_job(registry, handle: str, age: float) -> None:
-    registry.store.conn.execute(
-        update(jobs_table).where(jobs_table.c.handle == handle).values(created_at=now() - age)
-    )
 
 
 class QuietSource(Source):
@@ -1443,7 +1329,7 @@ async def test_events_from_a_plugins_own_source_reach_the_bus(registry):
     observer = await watching(registry, harness)
     try:
         p = registry.register(harness="scripted", pane=None, cwd="/tmp")
-        assert await until(lambda: "agent.assistant" in kinds(registry.store))
+        assert await until(lambda: "agent.assistant" in bus_kinds(registry.store))
         assert await until(lambda: registry.get(p.id).status is Status.IDLE)
     finally:
         await observer.aclose()
@@ -1459,7 +1345,7 @@ async def test_source_backlog_skips_the_normal_poll_delay(registry):
     observer.start()
     try:
         registry.register(harness="scripted", pane=None, cwd="/tmp")
-        assert await until(lambda: "agent.assistant" in kinds(registry.store), timeout=0.5)
+        assert await until(lambda: "agent.assistant" in bus_kinds(registry.store), timeout=0.5)
     finally:
         await observer.aclose()
 
@@ -2457,11 +2343,11 @@ async def test_bus_events_carry_the_source_read_time_for_observe_to_bus(
     registry, vibe_tree, observing
 ):
     registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
-    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: "agent.transcript" in bus_kinds(registry.store))
 
     append(vibe_tree["transcript"], USER, WORKING)
 
-    assert await until(lambda: "agent.user" in kinds(registry.store))
+    assert await until(lambda: "agent.user" in bus_kinds(registry.store))
     row = next(r for r in registry.store.bus_tail(limit=500) if r["kind"] == "agent.user")
     assert row["payload"]["read_at"] > 0
     assert row["ts"] - row["payload"]["read_at"] >= 0

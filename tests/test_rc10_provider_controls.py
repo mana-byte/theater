@@ -9,8 +9,8 @@ from sqlalchemy import select, update
 
 import theater.daemon.frontend.participant_mutation_handlers as mutation_handlers
 from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
-from tests.support.paths import fixture
 from tests.support.presence import AbsentPresence, UnknownPresence
+from tests.support.provider_controls import online, provider_target
 from theater.daemon.controls.routing import ControlRouteResolver
 from theater.daemon.frontend.control_handlers import (
     _error,
@@ -60,7 +60,6 @@ from theater.models import (
     PublicOperationState,
     StaleTarget,
     Status,
-    TerminalBindingRecord,
     TheaterError,
     Tier,
     WorkspaceOwnershipKind,
@@ -81,33 +80,6 @@ def _context() -> ConnectionContext:
         api_minor=0,
         capabilities=frozenset({"orchestration.v1"}),
     )
-
-
-def _bind(daemon, participant_id: str, *, generation: int = 1, harness: str = "codex") -> None:
-    timestamp = now()
-    with daemon.store.write_unit() as unit:
-        daemon.store.terminal_bindings.bind(
-            TerminalBindingRecord(
-                participant_id=participant_id,
-                provider_id="provider-a",
-                provider_generation=generation,
-                terminal_id="terminal-a",
-                terminal_incarnation="incarnation-a",
-                occupant_evidence={"occupant_id": "occupant-a", "harness": harness},
-                process_facts={"pid": 42, "started_at": 1.0, "executable": "/bin/agent"},
-                health="healthy",
-                report_revision=1,
-                created_at=timestamp,
-                updated_at=timestamp,
-            ),
-            connection=unit.connection,
-        )
-
-
-def _target(daemon, *, harness="codex") -> str:
-    participant = daemon.registry.register(harness=harness, pane=None, cwd=None)
-    _bind(daemon, participant.id, harness=harness)
-    return participant.id
 
 
 async def _install_native_runtime(
@@ -135,53 +107,6 @@ async def _install_native_runtime(
     )
     assert installed is runtime
     return runtime, state
-
-
-def _online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
-
-    async def inspect(provider_id, generation, terminal_id, incarnation, *, screen_max_bytes=0):
-        current = next(
-            binding
-            for binding in daemon.store.terminal_bindings.list_for_provider(provider_id)
-            if binding.terminal_id == terminal_id
-            and binding.terminal_incarnation == incarnation
-            and binding.provider_generation == generation
-        )
-        revision = current.report_revision + 1
-        with daemon.store.write_unit() as unit:
-            assert daemon.store.terminal_bindings.update_health(
-                current.participant_id,
-                provider_generation=generation,
-                report_revision=revision,
-                health="healthy",
-                updated_at=now(),
-                connection=unit.connection,
-            )
-        # Provider sends require a proven ready composer; this fixture's
-        # participants are idle codex terminals.
-        idle_screen = fixture("screens", "codex_idle.txt")
-        return {
-            "provider_generation": generation,
-            "report_revision": revision,
-            "terminal": {
-                "provider_id": provider_id,
-                "provider_generation": generation,
-                "terminal_id": terminal_id,
-                "terminal_incarnation": incarnation,
-                "occupant": dict(current.occupant_evidence),
-                "process": dict(current.process_facts or {}),
-            },
-            "presence": {
-                "state": "absent",
-                "revision": revision,
-                "reason": "test-no-human-focus",
-            },
-            "screen": (idle_screen.read_text() if screen_max_bytes else None),
-        }
-
-    monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
 
 
 async def _settle(daemon) -> None:
@@ -217,8 +142,8 @@ async def _public_action_views(daemon, participant, *, actor: str):
 async def test_provider_send_links_one_public_operation_job_and_control(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     requests: list[dict[str, object]] = []
 
     async def request(_provider, generation, method, params):
@@ -285,8 +210,8 @@ async def test_provider_send_links_one_public_operation_job_and_control(
 async def test_second_provider_send_is_refused_while_first_job_is_running(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     callback_count = 0
 
     async def accepted(_provider, generation, _method, params):
@@ -327,8 +252,8 @@ async def test_second_provider_send_is_refused_while_first_job_is_running(
 async def test_public_send_acceptance_atomically_persists_job_control_and_operation(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     started: list[str] = []
 
     def suppress_start(operation_id, *, dispatch, side_effect):
@@ -388,8 +313,8 @@ async def test_public_send_acceptance_atomically_persists_job_control_and_operat
 async def test_provider_unknown_keeps_barrier_and_queued_followup(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     callback_count = 0
 
     async def unknown(_provider, _generation, _method, _params):
@@ -483,8 +408,8 @@ def test_public_error_normalization_bounds_and_discards_invalid_details() -> Non
 async def test_provider_queue_waits_for_accepted_job_to_finish(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     requests: list[str] = []
 
     async def accepted(_provider, generation, method, params):
@@ -529,8 +454,8 @@ async def test_provider_queue_waits_for_accepted_job_to_finish(
 async def test_public_provider_queue_reports_presence_refusal_on_its_original_operation(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     calls = 0
 
     async def deliver(_provider, generation, _method, params):
@@ -579,8 +504,8 @@ async def test_public_provider_queue_reports_presence_refusal_on_its_original_op
 async def test_queued_public_operation_waiter_is_owned_and_drained_on_close(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
 
     async def accepted(_provider, generation, _method, params):
         return {
@@ -627,8 +552,8 @@ async def test_queued_public_operation_waiter_is_owned_and_drained_on_close(
 async def test_provider_rejection_is_definitive_and_provider_settings_stay_unsupported(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     methods: list[str] = []
 
     async def rejected(_provider, generation, method, params):
@@ -671,7 +596,7 @@ async def test_provider_rejection_is_definitive_and_provider_settings_stay_unsup
 
 
 def test_native_route_is_not_replaced_by_terminal_binding(daemon) -> None:
-    participant_id = _target(daemon)
+    participant_id = provider_target(daemon)
     resolver = ControlRouteResolver(
         store=daemon.store,
         runtime_for=lambda _participant_id: object(),
@@ -704,7 +629,7 @@ def test_historical_pane_without_binding_is_not_a_control_route(daemon) -> None:
 async def test_provider_steer_submits_with_enter_only_where_the_harness_declares_it(
     daemon, monkeypatch: pytest.MonkeyPatch, harness: str, steers: bool
 ) -> None:
-    _online(monkeypatch, daemon)
+    online(monkeypatch, daemon)
     actions: list[str] = []
 
     async def accepted(_provider, generation, method, params):
@@ -719,7 +644,7 @@ async def test_provider_steer_submits_with_enter_only_where_the_harness_declares
         }
 
     monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
-    participant_id = _target(daemon, harness=harness)
+    participant_id = provider_target(daemon, harness=harness)
     await controls_send(
         daemon,
         _context(),
@@ -747,8 +672,8 @@ async def test_provider_steer_submits_with_enter_only_where_the_harness_declares
 async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     methods: list[str] = []
 
     async def accepted(_provider, generation, method, params):
@@ -823,8 +748,8 @@ async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(
 async def test_provider_interrupt_is_idle_noop_and_uses_each_harness_plan(
     daemon, monkeypatch, harness
 ):
-    participant_id = _target(daemon, harness=harness)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon, harness=harness)
+    online(monkeypatch, daemon)
     actions = []
 
     async def accepted(_provider, generation, method, params):
@@ -867,8 +792,8 @@ async def test_provider_interrupt_is_idle_noop_and_uses_each_harness_plan(
 async def test_provider_identity_change_refuses_without_dispatch(
     daemon, monkeypatch: pytest.MonkeyPatch, changed: str
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     called = False
 
     async def request(*_args):
@@ -908,8 +833,8 @@ async def test_provider_identity_change_refuses_without_dispatch(
 async def test_controls_projection_is_schema_valid_and_unknown_presence_blocks(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     daemon.presence = UnknownPresence()
     dispatched = False
 
@@ -950,8 +875,8 @@ async def test_controls_projection_is_schema_valid_and_unknown_presence_blocks(
 async def test_presence_transition_publishes_one_controls_change_and_stable_poll_none(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     cursor = daemon.store.journal.current_sequence()
 
     await daemon.presence.refresh()
@@ -1323,8 +1248,8 @@ async def test_native_settings_admission_requires_a_mutable_field(daemon) -> Non
 async def test_unknown_presence_detail_is_consistent_across_public_reads(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     daemon.presence = UnknownPresence()
     participant = daemon.registry.get(participant_id)
 
@@ -1343,8 +1268,8 @@ async def test_unknown_presence_detail_is_consistent_across_public_reads(
 async def test_transcript_trust_is_consistent_across_public_reads(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     daemon.presence = AbsentPresence()
     participant = daemon.registry.get(participant_id)
     participant.tier = Tier.ADOPTED
@@ -1411,8 +1336,8 @@ async def test_presence_snapshot_failures_are_consistent_across_public_reads(
         def snapshot(self, _participant_id: str):
             raise RuntimeError("provider read failed")
 
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     daemon.presence = FailingPresence()
     participant = daemon.registry.get(participant_id)
 
@@ -1786,8 +1711,8 @@ async def test_production_reconciler_requires_structured_workspace_cleanup_evide
 
 
 async def test_kill_admits_on_cached_absence_and_defers_to_provider_check(daemon, monkeypatch):
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     await daemon.presence.require_absent(participant_id)  # cache fresh absence
     inspect_calls, params_seen = [], []
     monkeypatch.setattr(
@@ -1814,8 +1739,8 @@ async def test_private_kill_persists_receipt_identity_before_dispatch(
     daemon, monkeypatch, delivery, caplog
 ):
     caplog.set_level("INFO", logger="theater.timing")
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     receipts = []
     inspect_calls = []
     original_inspect = daemon.terminal_service.inspect
@@ -1870,8 +1795,8 @@ async def test_private_kill_persists_receipt_identity_before_dispatch(
 async def test_verified_provider_termination_releases_usage_but_retains_workspace(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     daemon.store.upsert_runtime_binding(
         ParticipantRuntimeBinding(
             participant_id=participant_id,
@@ -1965,8 +1890,8 @@ async def test_verified_provider_termination_releases_usage_but_retains_workspac
 async def test_unverified_native_stop_retains_provider_participant_job_and_usage(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     participant = daemon.registry.get(participant_id)
     participant.workspace_id = "workspace-uncertain"
     daemon.store.upsert_participant(participant)
@@ -2031,8 +1956,8 @@ async def test_unverified_native_stop_retains_provider_participant_job_and_usage
 async def test_verified_termination_cancels_held_public_followup(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     methods: list[str] = []
 
     async def request(_provider, generation, method, params):
@@ -2125,7 +2050,7 @@ async def test_backend_identity_mismatch_unregisters_live_observation(
 async def test_participant_termination_normalizes_pathological_error(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
+    participant_id = provider_target(daemon)
 
     class PathologicalTermination(Exception):
         code = "x" * 600
@@ -2161,8 +2086,8 @@ async def test_participant_termination_normalizes_pathological_error(
 async def test_public_metadata_and_status_mutations_are_idempotent_and_schema_valid(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     context = _context()
     updated = await participants_update(
         daemon,

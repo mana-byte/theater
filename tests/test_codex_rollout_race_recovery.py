@@ -22,13 +22,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from tests.test_codex_native_runtime_plugin import (
-    GENERATION,
-    PARTICIPANT,
-    ScriptedCodexServer,
-    open_new,
-)
-from tests.test_live_observation_integration import minimal_gates
+from tests.support.codex_server import GENERATION, PARTICIPANT, ScriptedCodexServer, open_new
+from tests.support.observation import minimal_gates
+from tests.support.waiting import until
 from theater.daemon.awaiting import REASON_JOB_TERMINAL, coordinate_await, parse_targets
 from theater.daemon.controls.service import ControlService
 from theater.daemon.jobs import JobManager
@@ -93,15 +89,6 @@ def completed_resume_response() -> dict:
             ]
         },
     }
-
-
-async def until(predicate, timeout: float = 2.0) -> bool:
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        if predicate():
-            return True
-        await asyncio.sleep(0.005)
-    return False
 
 
 class RolloutRaceRig:

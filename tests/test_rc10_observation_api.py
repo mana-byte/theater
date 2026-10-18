@@ -8,9 +8,9 @@ import threading
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
-from test_transcript_paging import StaticSource
-from test_transcript_paging import page as transcript_page
 
+from tests.support.transcript_pages import StaticSource
+from tests.support.transcript_pages import page as transcript_page
 from theater import paths, protocol
 from theater.constants.daemon import (
     BUS_KIND_OPERATOR_TRANSCRIPT_BIND,

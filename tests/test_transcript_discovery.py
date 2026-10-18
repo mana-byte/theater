@@ -103,10 +103,8 @@ def root(tmp_path) -> Path:
 
 
 @pytest.fixture
-def workdir(tmp_path) -> str:
-    d = tmp_path / "work"
-    d.mkdir()
-    return str(d)
+def workdir(workdir) -> str:
+    return str(workdir)
 
 
 def test_discovery_warnings_are_bounded_without_suppressing_candidate_checks(

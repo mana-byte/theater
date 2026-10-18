@@ -4,24 +4,15 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-from test_harness_opencode_v2 import USAGE, RecorderV2, attached, text
-
+from tests.support import opencode_recorder_v2
+from tests.support.opencode_recorder_v2 import (
+    USAGE,
+    attached,
+    text,
+)
 from theater.harness import EventKind
 
-
-@pytest.fixture
-def workdir(tmp_path):
-    d = tmp_path / "work"
-    d.mkdir()
-    return d
-
-
-@pytest.fixture
-def rec(tmp_path, workdir):
-    r = RecorderV2(tmp_path / "opencode-v2.db", "ses_one", str(workdir))
-    yield r
-    r.conn.close()
+rec = opencode_recorder_v2.rec  # the shared fixture, under the name the tests ask for
 
 
 def _compaction(created: int, *, status: str = "completed", billed: bool = True) -> dict:

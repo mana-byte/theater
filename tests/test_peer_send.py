@@ -7,10 +7,10 @@ import json
 import pytest
 from sqlalchemy import select
 
+from tests.support.native_rpc import active_send, native_pair
 from tests.support.presence import AbsentPresence
-from tests.test_control_rpc import _active_send, _native_pair
-from tests.test_presence_controls import Rig, _operation_rows
-from tests.test_send import _target
+from tests.support.presence_rig import Rig, operation_rows
+from tests.support.send_target import send_target
 from theater.constants.daemon import (
     CONTROL_QUEUE_MAX_PENDING,
     CONTROL_QUEUE_PEER_MAX_PENDING,
@@ -86,7 +86,7 @@ async def test_permanent_refusal_is_not_masked_by_presence_and_accepts_nothing(r
     with pytest.raises(TranscriptUntrusted):
         await rig.service.send_when_safe("p1", caller_id="peer", prompt="hi")
 
-    assert _operation_rows(rig.store, "p1") == []
+    assert operation_rows(rig.store, "p1") == []
     assert _job_handles(rig.store, "p1") == []
 
 
@@ -101,7 +101,7 @@ async def test_queue_admission_is_atomic_job_and_control_row(rig, monkeypatch):
         await rig.service.send_when_safe("p1", caller_id="peer", prompt="later")
 
     assert _job_handles(rig.store, "p1") == []
-    assert _operation_rows(rig.store, "p1") == []
+    assert operation_rows(rig.store, "p1") == []
 
 
 async def test_sender_bound_leaves_room_for_others_and_lanes_keep_send_order(rig):
@@ -171,9 +171,9 @@ async def _absent(daemon):
 
 
 async def test_a_stranger_may_message_a_busy_child_and_it_dispatches(client, daemon, _absent):
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
-    active = await _active_send(client, parent, child)
+    active = await active_send(client, parent, child)
 
     queued = await client.call("send", target=child.id, prompt="hello", caller_id=stranger.id)
     assert queued["delivery"] == "queued" and queued["handle"] != active["handle"]
@@ -197,7 +197,7 @@ async def test_a_stranger_may_message_a_busy_child_and_it_dispatches(client, dae
 async def test_provider_route_refusal_after_admission_checks_leaves_one_job(
     client, daemon, terminal_provider, _absent, monkeypatch
 ):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     provider = daemon.controls._provider
     real = provider.require
     calls = {"n": 0}
@@ -230,13 +230,13 @@ async def test_presence_arriving_during_the_modal_check_leaves_one_queued_job(
 
     presence._capture_screen = capture_then_human_arrives
     monkeypatch.setattr(daemon, "presence", presence, raising=False)
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
 
     sent = await client.call("send", target=target["id"], prompt="hi", caller_id="peer")
 
     assert sent["delivery"] == "queued"
     assert _job_handles(daemon.store, target["id"]) == [sent["handle"]], "no stranded second job"
-    assert [row["delivery_phase"] for row in _operation_rows(daemon.store, target["id"])] == [
+    assert [row["delivery_phase"] for row in operation_rows(daemon.store, target["id"])] == [
         "queued"
     ]
     assert terminal_provider.deliveries == []
@@ -279,7 +279,7 @@ async def test_provider_presence_rejection_keeps_one_awaitable_message(
     uncertain,
     refusals,
 ):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     presence = daemon.presence
     original = terminal_provider.request
     callbacks: list[str] = []
@@ -352,7 +352,7 @@ async def test_provider_presence_rejection_keeps_one_awaitable_message(
 async def test_provider_presence_deferred_send_can_be_cancelled_while_human_stays(
     client, daemon, terminal_provider, _absent, monkeypatch
 ):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     original = terminal_provider.request
 
     async def reject_presence(provider_id, generation, method, params):
@@ -382,7 +382,7 @@ async def test_provider_presence_deferred_send_can_be_cancelled_while_human_stay
 async def test_provider_backoff_does_not_hold_another_senders_lane(
     client, daemon, terminal_provider, _absent, monkeypatch
 ):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     original = terminal_provider.request
     calls = 0
 
@@ -418,7 +418,7 @@ async def test_provider_backoff_does_not_hold_another_senders_lane(
 async def test_provider_presence_refusal_stays_an_error_for_self_and_explicit_refuse(
     client, daemon, terminal_provider, _absent, monkeypatch, self_send
 ):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     original = terminal_provider.request
 
     async def reject_presence(provider_id, generation, method, params):
@@ -473,7 +473,7 @@ async def test_a_participant_never_queues_a_message_to_itself(rig):
     assert "cannot queue to or await yourself" in raised.value.details["next"]
     with pytest.raises(NotYourChild):
         await rig.service.queue_followup("p1", caller_id="p1", prompt="x", origin="send")
-    assert _operation_rows(rig.store, "p1") == [] and _job_handles(rig.store, "p1") == []
+    assert operation_rows(rig.store, "p1") == [] and _job_handles(rig.store, "p1") == []
 
     _free(rig)
     _job, queued = await rig.service.send_when_safe("p1", caller_id="p1", prompt="idle self send")

@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from tests.support.queued_followups import provider_terminal_op
 from theater.constants.observation import RESCUE_CONFIRM_SECONDS
 from theater.daemon.jobs import JobManager
 from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observer import QuietClock
-from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.harness.contracts.observation import (
     ScreenConfidence,
     ScreenKind,
@@ -21,30 +21,15 @@ from theater.harness.contracts.observation import (
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
-    ControlTransport,
     DeliveryResult,
 )
-from theater.models import JobState, now
+from theater.models import JobState
 
 PROMPT_OBSERVER = SimpleNamespace(
     screen_reading=lambda capture: ScreenReading(
         kind=ScreenKind.PROMPT, confidence=ScreenConfidence.LOW
     )
 )
-
-
-def _op(operation_id, pid, *, kind, phase, job_handle, result=None):
-    return ControlOperation(
-        operation_id=operation_id,
-        participant_id=pid,
-        kind=kind,
-        transport=ControlTransport.PROVIDER_TERMINAL,
-        delivery_phase=phase,
-        delivery_result=result,
-        job_handle=job_handle,
-        created_at=now(),
-        updated_at=now(),
-    )
 
 
 def _delivered_plus_queued(registry):
@@ -55,7 +40,7 @@ def _delivered_plus_queued(registry):
     jobs.create(handle="b", caller_id="caller", target_id=p.id, kind="send", prompt="b prompt")
     with registry.store.write_unit() as unit:
         registry.store.reserve_control_operation(
-            _op(
+            provider_terminal_op(
                 "op-a",
                 p.id,
                 kind=ControlKind.SEND,
@@ -66,7 +51,7 @@ def _delivered_plus_queued(registry):
             connection=unit.connection,
         )
         registry.store.reserve_control_operation(
-            _op(
+            provider_terminal_op(
                 "op-b",
                 p.id,
                 kind=ControlKind.QUEUE_FOLLOWUP,

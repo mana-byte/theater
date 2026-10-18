@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.claude_seal import claude_fragment, claude_marker, claude_record
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
@@ -15,22 +16,6 @@ from theater.models import JobState
 from theater.provenance import TranscriptProvenance
 
 SESSION = "11111111-1111-4111-8111-111111111111"
-VERSION = "2.1.284"
-
-
-def _record(uuid: str, parent: str | None, kind: str = "assistant", **extra) -> str:
-    return json.dumps(
-        {"type": kind, "uuid": uuid, "parentUuid": parent, "version": VERSION, **extra}
-    )
-
-
-def _fragment(uuid: str, parent: str | None, block: dict, message: str = "msg_1") -> str:
-    message_body = {"id": message, "stop_reason": "end_turn", "content": [block]}
-    return _record(uuid, parent, message=message_body)
-
-
-def _marker(uuid: str, parent: str) -> str:
-    return _record(uuid, parent, "system", subtype="turn_duration")
 
 
 def _boundaries(observer: ClaudeCodeObserver, lines: list[str]) -> list:
@@ -50,7 +35,7 @@ async def test_job_finishes_on_the_marker_with_the_final_text_split_across_reads
     cwd.mkdir()
     path = tmp_path / "claude" / "projects" / "project" / f"{SESSION}.jsonl"
     path.parent.mkdir(parents=True)
-    _append(path, _record("u0", None, "user", message={"role": "user", "content": "go"}))
+    _append(path, claude_record("u0", None, "user", message={"role": "user", "content": "go"}))
     source = TranscriptSource(
         ClaudeCodeObserver(root=tmp_path / "claude" / "projects"),
         cwd=str(cwd),
@@ -75,16 +60,16 @@ async def test_job_finishes_on_the_marker_with_the_final_text_split_across_reads
     async def read_and_apply() -> None:
         observer._apply(participant.id, await source.read(), clock, turns)
 
-    _append(path, _fragment("u1", "u0", {"type": "thinking", "thinking": "hm"}))
+    _append(path, claude_fragment("u1", "u0", {"type": "thinking", "thinking": "hm"}))
     await read_and_apply()
     assert jobs.get("h1").state == JobState.RUNNING
 
-    _append(path, _fragment("u2", "u1", {"type": "text", "text": '{"ok": true}'}))
+    _append(path, claude_fragment("u2", "u1", {"type": "text", "text": '{"ok": true}'}))
     await read_and_apply()
     assert jobs.get("h1").state == JobState.RUNNING
 
     # The marker reaches its final record through one attachment hop, in a later read.
-    _append(path, _record("u3", "u2", "attachment"), _marker("u4", "u3"))
+    _append(path, claude_record("u3", "u2", "attachment"), claude_marker("u4", "u3"))
     await read_and_apply()
     job = jobs.get("h1")
     assert (job.state, job.result) == (JobState.DONE, '{"ok": true}')
@@ -92,17 +77,19 @@ async def test_job_finishes_on_the_marker_with_the_final_text_split_across_reads
 
 
 def test_a_proven_empty_final_is_one_empty_boundary_and_an_unproven_one_is_none():
-    thinking = _fragment("u1", "u0", {"type": "thinking", "thinking": "hm"})
-    marker = _marker("u2", "u1")
+    thinking = claude_fragment("u1", "u0", {"type": "thinking", "thinking": "hm"})
+    marker = claude_marker("u2", "u1")
 
-    (end,) = _boundaries(ClaudeCodeObserver(), [_record("u0", None, "user"), thinking, marker])
+    (end,) = _boundaries(
+        ClaudeCodeObserver(), [claude_record("u0", None, "user"), thinking, marker]
+    )
     assert (end.text, end.turn_id) == ("", "msg_1")
 
     # A restarted observer never saw the final record: fail closed rather than guess.
     assert _boundaries(ClaudeCodeObserver(), [marker]) == []
     # Attached mid-message: an earlier fragment may exist unseen, so the text is not provably whole.
-    text = _fragment("u5", "gone", {"type": "text", "text": "tail"})
-    assert _boundaries(ClaudeCodeObserver(), [text, _marker("u6", "u5")]) == []
+    text = claude_fragment("u5", "gone", {"type": "text", "text": "tail"})
+    assert _boundaries(ClaudeCodeObserver(), [text, claude_marker("u6", "u5")]) == []
 
 
 def _boundaries_at(observer: ClaudeCodeObserver, indexed: list[tuple[str, int]]) -> list:
@@ -111,12 +98,12 @@ def _boundaries_at(observer: ClaudeCodeObserver, indexed: list[tuple[str, int]])
 
 
 # Shared out-of-order shape: a1's parentUuid ("late") is an attachment flushed after the marker.
-_USER = _record("u0", None, "user")
-_ANSWER = _fragment("a1", "late", {"type": "text", "text": "done"})
-_ATTACH = _record("att1", "a1", "attachment")
-_MARKER = _marker("mk", "att1")
-_LATE = _record("late", "u0", "attachment")
-_SIDE = _record(
+_USER = claude_record("u0", None, "user")
+_ANSWER = claude_fragment("a1", "late", {"type": "text", "text": "done"})
+_ATTACH = claude_record("att1", "a1", "attachment")
+_MARKER = claude_marker("mk", "att1")
+_LATE = claude_record("late", "u0", "attachment")
+_SIDE = claude_record(
     "side", "u0", message={"id": "sm", "stop_reason": "end_turn", "content": []}, isSidechain=True
 )
 _SEAL_CASES = {
@@ -124,7 +111,7 @@ _SEAL_CASES = {
     "late_attachment_seals_once": ([_USER, _ANSWER, _ATTACH, _MARKER, _LATE], ["done"]),
     "parent_never_arrives": ([_USER, _ANSWER, _ATTACH, _MARKER], []),
     "new_user_drops": (
-        [_USER, _ANSWER, _ATTACH, _MARKER, _record("u9", "att1", "user"), _LATE],
+        [_USER, _ANSWER, _ATTACH, _MARKER, claude_record("u9", "att1", "user"), _LATE],
         [],
     ),
     # A newer resolvable marker supersedes the held one; only the new answer seals.
@@ -134,8 +121,8 @@ _SEAL_CASES = {
             _ANSWER,
             _ATTACH,
             _MARKER,
-            _fragment("a2", "u0", {"type": "text", "text": "new"}, "msg_2"),
-            _marker("mk2", "a2"),
+            claude_fragment("a2", "u0", {"type": "text", "text": "new"}, "msg_2"),
+            claude_marker("mk2", "a2"),
             _LATE,
         ],
         ["new"],
@@ -144,14 +131,14 @@ _SEAL_CASES = {
     "late_assistant_fragment_drops": (
         [
             _USER,
-            _fragment("tail", "head", {"type": "text", "text": "SECOND"}),
-            _marker("mk", "tail"),
-            _fragment("head", "u0", {"type": "text", "text": "FIRST"}),
+            claude_fragment("tail", "head", {"type": "text", "text": "SECOND"}),
+            claude_marker("mk", "tail"),
+            claude_fragment("head", "u0", {"type": "text", "text": "FIRST"}),
         ],
         [],
     ),
     # A main-thread marker whose parent is an unread sidechain assistant must never seal it.
-    "sidechain_parent_drops": ([_USER, _marker("mk", "side"), _SIDE], []),
+    "sidechain_parent_drops": ([_USER, claude_marker("mk", "side"), _SIDE], []),
     # A late record that carries its own terminal event (a system error) drops the held marker
     # and emits only its own boundary — never two (its error plus the stale answer).
     "late_system_error_drops": (
@@ -160,19 +147,19 @@ _SEAL_CASES = {
             _ANSWER,
             _ATTACH,
             _MARKER,
-            _record("late", "u0", "system", level="error", error="boom"),
+            claude_record("late", "u0", "system", level="error", error="boom"),
         ],
         ["boom"],
     ),
     # No sealed-id dedup: a message id reused across turns seals each turn, exactly like base.
     "reused_message_id_seals_each_turn": (
         [
-            _record("u0", None, "user"),
-            _fragment("a0", "u0", {"type": "text", "text": "FIRST"}, "shared"),
-            _marker("m0", "a0"),
-            _record("u1", None, "user"),
-            _fragment("a1b", "u1", {"type": "text", "text": "SECOND"}, "shared"),
-            _marker("m1", "a1b"),
+            claude_record("u0", None, "user"),
+            claude_fragment("a0", "u0", {"type": "text", "text": "FIRST"}, "shared"),
+            claude_marker("m0", "a0"),
+            claude_record("u1", None, "user"),
+            claude_fragment("a1b", "u1", {"type": "text", "text": "SECOND"}, "shared"),
+            claude_marker("m1", "a1b"),
         ],
         ["FIRST", "FIRST\n\nSECOND"],
     ),
@@ -190,8 +177,8 @@ def test_a_held_marker_drops_on_index_regression_and_session_change() -> None:
     # Rewind/replacement re-reads from index 0: the held marker must not seal the old answer.
     assert _boundaries_at(ClaudeCodeObserver(), [*base, (_LATE, 0)]) == []
     # A later record from a different session must not complete the held marker.
-    marker_a = _record("mk", "att1", "system", subtype="turn_duration", sessionId="sid-A")
-    late_b = _record("late", "u0", "attachment", sessionId="sid-B")
+    marker_a = claude_record("mk", "att1", "system", subtype="turn_duration", sessionId="sid-A")
+    late_b = claude_record("late", "u0", "attachment", sessionId="sid-B")
     other = [(_USER, 0), (_ANSWER, 1), (_ATTACH, 2), (marker_a, 3), (late_b, 4)]
     assert _boundaries_at(ClaudeCodeObserver(), other) == []
 
@@ -203,7 +190,7 @@ def test_a_resolving_record_keeps_its_own_baseline_events() -> None:
     lines = [_USER, _ANSWER, _ATTACH, _MARKER]
     for i, line in enumerate(lines):
         observer.parse_record(line, i)
-    tool = _record(
+    tool = claude_record(
         "late",
         "u0",
         cwd="/repo",
@@ -237,10 +224,10 @@ def test_unsupported_versions_and_sidechains_never_seal():
     assert [e.text for e in _boundaries(old, lines)] == ["answer"]
 
     side = [
-        _record(uuid, parent, isSidechain=True, message=body)
+        claude_record(uuid, parent, isSidechain=True, message=body)
         for uuid, parent, body in (
             ("s1", None, {"id": "m", "stop_reason": "end_turn", "content": [text]}),
         )
     ]
-    side.append(_record("s2", "s1", "system", subtype="turn_duration", isSidechain=True))
+    side.append(claude_record("s2", "s1", "system", subtype="turn_duration", isSidechain=True))
     assert _boundaries(ClaudeCodeObserver(), side) == []

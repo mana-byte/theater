@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.presence import AbsentPresence
-from tests.test_control_rpc import _GUIDANCE, _active_send, _native_pair, _until
+from tests.support.native_rpc import GUIDANCE, active_send, native_pair
+from tests.support.waiting import until
 from theater import paths
 from theater.config.models import SkillsSection
 from theater.constants.skills import SKILL_ATTACH_MAX_BYTES
@@ -17,12 +17,7 @@ from theater.daemon.skill_cards import SKILL_CLOSE, SKILL_OPEN, compose_prompt, 
 from theater.protocol import RemoteError
 from theater.skills import Skill, SkillSource
 
-
-@pytest.fixture(autouse=True)
-async def _absent_presence(daemon):
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
-        yield
+pytestmark = pytest.mark.usefixtures("absent_presence")
 
 
 def _user_skill(name: str, body: str) -> None:
@@ -46,7 +41,7 @@ def test_skill_cards_follow_the_task_so_turn_matching_still_tells_tasks_apart():
 
     assert answers_prompt([first], first) and not answers_prompt([second], first)
     hinted = compose_prompt("Audit module A", skills=cards, response_format='{"type":"object"}')
-    assert hinted.startswith(_GUIDANCE), "a bare hint keeps its prepend"
+    assert hinted.startswith(GUIDANCE), "a bare hint keeps its prepend"
     assert hinted.index("Audit module A") < hinted.index(SKILL_OPEN)
 
 
@@ -70,7 +65,7 @@ async def test_spawn_carries_skill_cards_on_the_childs_command_line(
 
 
 async def test_send_attaches_skill_cards_between_the_task_and_response_guidance(client, daemon):
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
 
     await client.call(
         "send",
@@ -81,7 +76,7 @@ async def test_send_attaches_skill_cards_between_the_task_and_response_guidance(
         response_format={"$theater": "delegate"},
     )
 
-    assert await _until(lambda: state.sent)
+    assert await until(lambda: state.sent)
     (delivered,) = state.sent
     sender = daemon.store.get_participant(parent.id)
     card = delivered.index(f"{SKILL_OPEN} theater-debate (builtin, sha256:")
@@ -89,7 +84,7 @@ async def test_send_attaches_skill_cards_between_the_task_and_response_guidance(
     assert f"attached by {sender.name or sender.id}." in delivered
     assert delivered.count(SKILL_OPEN) == 1, "a repeated name attaches once"
     assert "\nname: theater-debate\n" not in delivered, "the frontmatter is not attached"
-    assert card < delivered.index(SKILL_CLOSE) < delivered.index(_GUIDANCE)
+    assert card < delivered.index(SKILL_CLOSE) < delivered.index(GUIDANCE)
 
     plain = await client.call(
         "send", target=child.id, prompt="plain words", caller_id=parent.id, skills=[]
@@ -98,8 +93,8 @@ async def test_send_attaches_skill_cards_between_the_task_and_response_guidance(
 
 
 async def test_queued_sends_keep_their_skills_and_amend_refuses_them(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    active = await _active_send(client, parent, child)
+    parent, child, state = await native_pair(daemon)
+    active = await active_send(client, parent, child)
 
     queued = await client.call(
         "send",
@@ -129,7 +124,7 @@ async def test_queued_sends_keep_their_skills_and_amend_refuses_them(client, dae
 async def test_skill_attachments_are_refused_before_anything_is_created(
     client, daemon, monkeypatch
 ):
-    parent, child, _state = await _native_pair(daemon)
+    parent, child, _state = await native_pair(daemon)
     for name in ("half-a", "half-b"):
         _user_skill(name, "x" * (SKILL_ATTACH_MAX_BYTES // 2))
 

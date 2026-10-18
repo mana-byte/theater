@@ -27,8 +27,6 @@ import json
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 from tests.support.paths import FIXTURES
 from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from theater.daemon.jobs import JobManager
@@ -173,13 +171,6 @@ def replay_opencode_capture(db: Path, directory: str) -> list[Event]:
         return list(batch.events)
     finally:
         conn.close()
-
-
-@pytest.fixture
-def workdir(tmp_path):
-    d = tmp_path / "work"
-    d.mkdir()
-    return d
 
 
 def test_opencode_names_the_turn_after_the_finished_message(tmp_path, workdir):

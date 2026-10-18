@@ -11,8 +11,7 @@ from dataclasses import replace
 
 import pytest
 
-from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
-from tests.test_codex_native_runtime_plugin import (
+from tests.support.codex_server import (
     RequestFailure,
     ScriptedCodexConnection,
     ScriptedCodexServer,
@@ -20,6 +19,8 @@ from tests.test_codex_native_runtime_plugin import (
     thread_started,
     thread_status_changed,
 )
+from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.waiting import wait_until
 from theater.daemon.harness_runtime import endpoint_to_path
 from theater.daemon.harness_runtime import manager as manager_mod
 from theater.daemon.observation.live import LiveRegistration
@@ -83,15 +84,6 @@ async def _await_reaped(pid: int | None, timeout: float = 5.0) -> None:
             return
         await asyncio.sleep(0.02)
     raise AssertionError(f"pid {pid} is still alive; the backend was not terminated")
-
-
-async def _wait_until(predicate, *, timeout: float = 5.0, what: str) -> None:
-    """Bounded wait for one condition; a hang detector, never a sleep."""
-    deadline = asyncio.get_running_loop().time() + timeout
-    while not predicate():
-        if asyncio.get_running_loop().time() >= deadline:
-            raise AssertionError(f"timed out after {timeout}s waiting for {what}")
-        await asyncio.sleep(0.01)
 
 
 async def _wait_for_runtime_snapshot(
@@ -361,7 +353,7 @@ async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
 
         # The notification stream dies while the verified backend lives on.
         _disconnect(io, 0)
-        await _wait_until(lambda: server.connect_count == 2, what="one automatic reconnect")
+        await wait_until(lambda: server.connect_count == 2, what="one automatic reconnect")
 
         # Exactly one fresh initialize beyond the spawn handshake, and the
         # exact thread/resume of the persisted session id.
@@ -393,7 +385,7 @@ async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
         # Exact terminal evidence on the recovered stream completes the
         # exact spawn job under the original generation/session.
         server.push(_completed_evidence())
-        await _wait_until(
+        await wait_until(
             lambda: (
                 d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
             ),
@@ -440,7 +432,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         # completed.  The lost-ack control below must not reuse this view.
         server.push(_completed_evidence())
         server.push(thread_status_changed("idle", thread_id=session_id))
-        await _wait_until(
+        await wait_until(
             lambda: (
                 d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
             ),
@@ -459,7 +451,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         io.gates[endpoint] = reconnect_gate
         server.fail("turn/start", RuntimeRequestTimeout())
         first = await d.controls.send(pid, caller_id="cli", prompt="unknown first")
-        await _wait_until(recovery_entered.is_set, what="automatic recovery reaching its gate")
+        await wait_until(recovery_entered.is_set, what="automatic recovery reaching its gate")
         queued = await d.controls.queue_followup(pid, caller_id="cli", prompt="must stay queued")
 
         stale_snapshot = await initial.snapshot()
@@ -531,7 +523,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
                 items=[{"id": "i-ambiguous", "type": "agentMessage", "text": "exact"}],
             )
         )
-        await _wait_until(
+        await wait_until(
             lambda: (
                 d.store.get_native_terminal_evidence(
                     participant_id=pid,
@@ -576,7 +568,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         # not this test, then advances the FIFO head once and only once.
         server.respond("turn/start", {"turn": {"id": "turn-queued", "status": "inProgress"}})
         server.push(thread_status_changed("idle", thread_id=session_id))
-        await _wait_until(
+        await wait_until(
             lambda: len(server.requested("turn/start")) == 3,
             what="the scheduled FIFO dispatch after authoritative idle",
         )
@@ -624,7 +616,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         # authoritative idle baseline that the cancelled write must discard.
         server.push(_completed_evidence())
         server.push(thread_status_changed("idle", thread_id=session_id))
-        await _wait_until(
+        await wait_until(
             lambda: (
                 d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
             ),
@@ -645,7 +637,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         cancelled = asyncio.create_task(
             d.controls.send(pid, caller_id="cli", prompt="cancelled after wire write")
         )
-        await _wait_until(
+        await wait_until(
             write_entered.is_set,
             what="the blocked physical turn/start write",
         )
@@ -678,7 +670,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         assert operation.delivery_result.value == "unknown"
         assert operation.execution_barrier is True
 
-        await _wait_until(recovery_entered.is_set, what="automatic recovery reaching its gate")
+        await wait_until(recovery_entered.is_set, what="automatic recovery reaching its gate")
         queued = await d.controls.queue_followup(pid, caller_id="cli", prompt="must wait")
         await asyncio.sleep(0.08)
         assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
@@ -729,7 +721,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         # Only later exact IDLE releases the unresolved execution boundary;
         # daemon-owned maintenance then starts the queued prompt once.
         server.push(thread_status_changed("idle", thread_id=session_id))
-        await _wait_until(
+        await wait_until(
             lambda: len(server.requested("turn/start")) == 3,
             what="the queued prompt after fresh authoritative idle",
         )
@@ -819,11 +811,11 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
         # No direct recovery call: the disconnected notification stream wakes
         # the composed manager, which reconnects the same generation/session.
         _disconnect(io, 0)
-        await _wait_until(
+        await wait_until(
             lambda: server.connect_count == 2,
             what="the automatic same-session reconnect",
         )
-        await _wait_until(
+        await wait_until(
             lambda: (
                 d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
             ),
@@ -832,7 +824,7 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
             what="the old exact Theater turn completing through paged recovery",
             timeout=40.0,
         )
-        await _wait_until(
+        await wait_until(
             lambda: len(server.requested("turn/start")) == 2,
             what="the deferred FIFO advancing without manual dispatch",
         )
@@ -916,7 +908,7 @@ async def test_history_interruption_only_cancels_its_original_followups(
         )
         after = await d.controls.queue_followup(pid, caller_id="cli", prompt="new intent")
         history_gate.set()
-        await _wait_until(
+        await wait_until(
             lambda: (
                 d.store.get_native_terminal_evidence(
                     participant_id=pid,
@@ -930,7 +922,7 @@ async def test_history_interruption_only_cancels_its_original_followups(
         )
         assert d.store.get_job(after.handle).state == JobState.RUNNING
         if before is not None:
-            await _wait_until(
+            await wait_until(
                 lambda: len(server.requested("turn/start")) == 2,
                 what="new intent progressing after the old interruption",
             )
@@ -949,7 +941,7 @@ async def test_history_interruption_only_cancels_its_original_followups(
                     },
                 )
             )
-            await _wait_until(
+            await wait_until(
                 lambda: d.store.get_job(after.handle).state == JobState.KILLED,
                 what="a current native-UI interruption cancelling the pending followup",
             )
@@ -1010,13 +1002,13 @@ async def test_notification_overflow_drains_evidence_then_recovers(
         # transport drains the buffered notification first, then raises.
         server.push(_completed_evidence())
         io.overflowing.add(endpoint)
-        await _wait_until(
+        await wait_until(
             lambda: (
                 d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
             ),
             what="the buffered exact outcome completing the job",
         )
-        await _wait_until(lambda: server.connect_count == 2, what="the overflow recovery reconnect")
+        await wait_until(lambda: server.connect_count == 2, what="the overflow recovery reconnect")
         assert len(server.requested("turn/start")) == 1, "no prompt is ever replayed"
         assert server.requested("thread/resume")[-1] == {
             "threadId": session_id,
@@ -1088,7 +1080,7 @@ async def test_blocked_reconnect_for_one_participant_does_not_block_another(
         _disconnect(io, 0)
         _disconnect(io, 1)
 
-        await _wait_until(
+        await wait_until(
             p2_connect_entered.is_set,
             what="p2's reconnect entering the blocked connect",
         )
@@ -1103,7 +1095,7 @@ async def test_blocked_reconnect_for_one_participant_does_not_block_another(
         assert server2.requested("turn/start") == p2_turn_starts
         assert server2.connect_count == 1
 
-        await _wait_until(lambda: server1.connect_count == 2, what="p1's unblocked recovery")
+        await wait_until(lambda: server1.connect_count == 2, what="p1's unblocked recovery")
         runtime1 = d.runtime_manager.get(pid1)
         assert runtime1 is not None
         snapshot1 = await runtime1.snapshot()
@@ -1115,7 +1107,7 @@ async def test_blocked_reconnect_for_one_participant_does_not_block_another(
         assert server2.connect_count == 1
 
         gate.set()
-        await _wait_until(lambda: server2.connect_count == 2, what="p2's recovery after the gate")
+        await wait_until(lambda: server2.connect_count == 2, what="p2's recovery after the gate")
         runtime2 = d.runtime_manager.get(pid2)
         assert runtime2 is not None
         snapshot2 = await runtime2.snapshot()
@@ -1234,7 +1226,7 @@ async def test_shutdown_revokes_recovery_blocked_in_session_open(
         assert registrations == route_changes == []
 
         release_open.set()
-        await _wait_until(
+        await wait_until(
             lambda: not d.runtime_manager._draining_monitors,
             what="the revoked recovery callback finishing",
         )
@@ -1312,7 +1304,7 @@ async def test_generation_replacement_during_open_never_registers_stale_recovery
         # Hold the recovery candidate's open_session at its connect.
         io.gates[wiring_mod.native_endpoint(pid)] = gate
         recovery_task = asyncio.create_task(recovery_mod.recover_live_runtime(d, pid, 1))
-        await _wait_until(
+        await wait_until(
             lambda: d.runtime_manager.get(pid) is not first, what="the candidate installing"
         )
         candidate = d.runtime_manager.get(pid)
@@ -1384,7 +1376,7 @@ async def test_failed_open_after_installation_retries_and_eventually_registers(
 
         # The monitor retries: at least two failed candidates connect
         # beyond the spawn handshake before the failure is cleared.
-        await _wait_until(lambda: server.connect_count >= 3, what="the bounded retry cadence")
+        await wait_until(lambda: server.connect_count >= 3, what="the bounded retry cadence")
         server.failures.pop("thread/resume", None)
 
         def _recovered() -> bool:
@@ -1396,7 +1388,7 @@ async def test_failed_open_after_installation_retries_and_eventually_registers(
                 and registration.live_source is runtime.live_source()
             )
 
-        await _wait_until(_recovered, what="the eventual registration")
+        await wait_until(_recovered, what="the eventual registration")
         runtime = d.runtime_manager.get(pid)
         assert isinstance(runtime, CodexRuntime)
         snapshot = await runtime.snapshot()
@@ -1415,7 +1407,7 @@ async def test_failed_open_after_installation_retries_and_eventually_registers(
             job = d.store.get_job(pid)
             return job is not None and job.state == JobState.DONE
 
-        await _wait_until(_job_done, what="the job completing after the retried recovery")
+        await wait_until(_job_done, what="the job completing after the retried recovery")
         assert d.store.get_job(pid).result == EXACT_RESULT
     finally:
         if pid is not None:
@@ -1494,7 +1486,7 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(  
         monkeypatch.setattr(d.observer.live, "register", register_spy)
 
         _disconnect(io, 0)
-        await _wait_until(lambda: registration_failures >= 1, what="the failed registration")
+        await wait_until(lambda: registration_failures >= 1, what="the failed registration")
         await asyncio.wait_for(failed_candidate_discarded.wait(), timeout=5.0)
 
         # The candidate that failed registration is still the manager's current runtime — discarded
@@ -1520,7 +1512,7 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(  
                 and registration.live_source is runtime.live_source()
             )
 
-        await _wait_until(
+        await wait_until(
             _registered_current, what="the eventual registration after the scripted failure"
         )
 
@@ -1561,7 +1553,7 @@ async def test_a_backend_that_exits_mid_turn_settles_its_open_job_as_crashed(
         await _await_reaped(binding.backend_pid)
         _disconnect(io, 0)
 
-        await _wait_until(
+        await wait_until(
             lambda: d.store.get_job(pid).state == JobState.CRASHED,
             what="the mid-flight job settling as crashed",
         )

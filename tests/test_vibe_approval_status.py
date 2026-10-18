@@ -8,8 +8,8 @@ import pytest
 
 from tests.support.paths import fixture
 from tests.support.shipped import VibeHarness
-from tests.test_vibe_unified_store import SESSION_ID, make_state, public_message
-from tests.test_vibe_unified_store import Store as VibeStore
+from tests.support.vibe_store import SESSION_ID, make_state, public_message
+from tests.support.vibe_store import Store as VibeStore
 from theater import paths
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.frontend import FrontendClient, StateSynchronizer

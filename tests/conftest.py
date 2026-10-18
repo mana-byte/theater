@@ -17,6 +17,8 @@ from theater.daemon.registry import Registry
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
 
+pytest_plugins = ["tests.support.fixtures"]
+
 
 @pytest.fixture
 def available_harness_binaries(monkeypatch, shipped_harnesses) -> None:

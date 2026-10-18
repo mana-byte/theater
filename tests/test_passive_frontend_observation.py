@@ -2,17 +2,17 @@
 
 import pytest
 
-from tests.test_hybrid_source import ScriptedSource, outcome
-from tests.test_pi_native_bridge import (
+from tests.support.hybrid_source import ScriptedSource, outcome
+from tests.support.pi_bridge import (
     GENERATION,
     PARTICIPANT,
     SESSION_A,
     SESSION_B,
-    PiFrontendRuntime,
     ScriptedPiPeer,
     bridge_snapshot,
 )
 from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
+from theater.harness.builtin.plugins.pi.runtime import PiFrontendRuntime
 from theater.harness.channels.composite import CompositeSource, EnrichmentBinding
 from theater.harness.channels.hybrid import HybridSource
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind

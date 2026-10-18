@@ -150,13 +150,6 @@ class Recorder:
 
 
 @pytest.fixture
-def workdir(tmp_path):
-    d = tmp_path / "work"
-    d.mkdir()
-    return d
-
-
-@pytest.fixture
 def rec(tmp_path, workdir):
     r = Recorder(tmp_path / "opencode-stable.db", "ses_one", str(workdir))
     yield r

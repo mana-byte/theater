@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.test_mcp_tools import resolved
+from tests.support.mcp_tools import resolved
 from theater.daemon.rpc.jobs import _job_to_dict
 from theater.mcp import tools
 from theater.models import Job

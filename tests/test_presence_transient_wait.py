@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from tests.test_rc10_provider_presence import Clock, Registry, TerminalService, binding, result
+from tests.support.provider_presence import Clock, Registry, TerminalService, binding, result
 from theater.constants.refusals import NEXT_FOCUS_EVENTS_OFF, NEXT_RETRY_ONCE
 from theater.daemon.presence import PresenceMonitor
 from theater.models import HumanPresent, Participant

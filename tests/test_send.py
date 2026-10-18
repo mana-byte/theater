@@ -16,8 +16,8 @@ import json
 
 import pytest
 
-from tests.support.paths import fixture
 from tests.support.presence import AbsentPresence, UnknownPresence
+from tests.support.send_target import ready_screen, send_target, trust_target
 from tests.support.shipped import VibeHarness
 from theater.daemon.jobs import JobState
 from theater.daemon.schema import jobs
@@ -25,8 +25,6 @@ from theater.harness import HARNESSES
 from theater.harness.source import Batch
 from theater.models import Status, Tier
 from theater.protocol import RemoteError
-
-SCREENS = fixture("screens")
 
 _JSON_SCHEMA_PREFIX = (
     "Return your final answer as a single bare JSON value (no code fences, no prose) "
@@ -51,29 +49,6 @@ def _json_prompt(schema: str, prompt: str) -> str:
     return f"{_JSON_SCHEMA_PREFIX.format(schema=schema)}\n\n{prompt}"
 
 
-def _trust(daemon, participant_id: str, *, provenance: str = "operator") -> None:
-    participant = daemon.registry.get(participant_id)
-    participant.session_id = f"session-{participant_id}"
-    participant.session_correlation = provenance
-    daemon.store.upsert_participant(participant)
-
-
-def _ready_screen(daemon, terminal_id: str, harness: str) -> None:
-    """Provider sends require a proven ready composer on screen."""
-    daemon._test_terminal_provider.screens[terminal_id] = (
-        SCREENS / f"{harness}_idle.txt"
-    ).read_text()
-
-
-async def _target(client, daemon, *, pane: str = "%1", harness: str = "vibe"):
-    del pane
-    target = await client.call("hello", harness=harness, pane=None, cwd="/tmp")
-    _trust(daemon, target["id"])
-    terminal_id = daemon._test_terminal_provider.bind(daemon, target["id"], command=harness)
-    _ready_screen(daemon, terminal_id, harness)
-    return target
-
-
 def _vibe_session(root, short: str, cwd, *, text: str = "hello"):
     d = root / f"session_20260816_191459_{short}"
     d.mkdir(parents=True)
@@ -93,7 +68,7 @@ def _vibe_session(root, short: str, cwd, *, text: str = "hello"):
 
 async def test_send_creates_a_running_job(client, terminal_provider, daemon):
     """send to an addressable target creates a job and delivers the prompt."""
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     job = await client.call("send", target=target["id"], prompt="do the thing")
     assert job["state"] == "running"
     assert job["kind"] == "send"
@@ -143,8 +118,8 @@ async def test_adopted_codex_with_proven_process_correlation_can_send(
     participant.tier = Tier.ADOPTED
     daemon.store.upsert_participant(participant)
     terminal_provider.bind(daemon, target["id"], command="codex", terminal_id="%7")
-    _ready_screen(daemon, "%7", "codex")
-    _trust(daemon, target["id"], provenance="proven")
+    ready_screen(daemon, "%7", "codex")
+    trust_target(daemon, target["id"], provenance="proven")
 
     job = await client.call("send", target=target["id"], prompt="do the thing")
 
@@ -157,7 +132,7 @@ async def test_known_spawned_ambiguity_refuses_send_until_binding_recovers(
 ):
     participant = daemon.registry.create_spawned(harness="codex", cwd="/tmp")
     codex_terminal = terminal_provider.bind(daemon, participant.id, command="codex")
-    _ready_screen(daemon, codex_terminal, "codex")
+    ready_screen(daemon, codex_terminal, "codex")
     daemon.observer._handle_source_error(
         participant.id,
         Batch(error_code="transcript_correlation_ambiguous", error="no trusted candidate"),
@@ -168,7 +143,7 @@ async def test_known_spawned_ambiguity_refuses_send_until_binding_recovers(
     assert daemon.store.running_jobs_for_target(participant.id) == []
     assert terminal_provider.deliveries == []
 
-    _trust(daemon, participant.id, provenance="proven")
+    trust_target(daemon, participant.id, provenance="proven")
     daemon.observer._failures.clear_source_errors(participant.id)
     job = await client.call("send", target=participant.id, prompt="now observable")
     assert job["state"] == "running"
@@ -178,7 +153,7 @@ async def test_known_spawned_ambiguity_refuses_send_until_binding_recovers(
 async def test_transcript_identity_lost_refuses_send_before_job_creation(
     client, terminal_provider, daemon
 ):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     daemon.observer.mark_transcript_identity_lost(target["id"], "positive watcher evidence")
 
     with pytest.raises(RemoteError) as exc:
@@ -211,7 +186,7 @@ async def test_adopted_vibe_send_and_history_work_after_operator_bind(
     participant.tier = Tier.ADOPTED
     daemon.store.upsert_participant(participant)
     terminal_provider.bind(daemon, target["id"], command="vibe", terminal_id="%1")
-    _ready_screen(daemon, "%1", "vibe")
+    ready_screen(daemon, "%1", "vibe")
 
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="before bind")
@@ -240,7 +215,7 @@ async def test_adopted_vibe_send_and_history_work_after_operator_bind(
 async def test_send_response_format_augments_prompt_and_survives_await_shape(
     client, terminal_provider, daemon
 ):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     serialized = '{"a":2,"b":1}'
     expected = _json_prompt(serialized, "do the thing")
 
@@ -277,7 +252,7 @@ async def test_send_strict_response_format_validates_and_fails_closed_off_native
     client, terminal_provider, daemon
 ):
     """A provider-terminal route has no exact turn to repair, so an invalid answer ends closed."""
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     job = await client.call(
         "send", target=target["id"], prompt="review it", response_format={"$theater": "review"}
     )
@@ -321,7 +296,7 @@ async def test_send_to_unaddressable_rejected(client, terminal_provider):
 
 async def test_send_to_busy_target_rejected(client, terminal_provider, daemon):
     """send to a target that already has a running send job is rejected."""
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     # First send succeeds
     await client.call("send", target=target["id"], prompt="first")
     # Second send to the same target is rejected
@@ -335,7 +310,7 @@ async def test_send_to_busy_target_rejected(client, terminal_provider, daemon):
 
 
 async def test_send_to_working_target_without_a_job_is_rejected(client, terminal_provider, daemon):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     daemon.registry.set_status(target["id"], Status.WORKING)
 
     with pytest.raises(RemoteError) as exc:
@@ -359,7 +334,7 @@ async def test_send_allowed_after_job_exceeds_ttl(client, terminal_provider, dae
     from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
     from theater.daemon.rpc.sending import SEND_CLAIM_TTL
 
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     job1 = await client.call("send", target=target["id"], prompt="first")
 
     # Drive the clock: the send handler computes `stale = now() - SEND_CLAIM_TTL`
@@ -393,7 +368,7 @@ async def test_send_ttl_reads_compatibility_facade(client, terminal_provider, da
     from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
     from theater.daemon import methods
 
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     old = await client.call("send", target=target["id"], prompt="first")
 
     real_now = sending_mod.now()
@@ -411,7 +386,7 @@ async def test_send_ttl_supersedes_every_expired_prompt_job(
     import theater.daemon.rpc.sending as sending_mod
     from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
 
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     for handle in ("expired-1", "expired-2"):
         daemon.jobs.create(
             handle=handle,
@@ -444,7 +419,7 @@ async def test_send_ttl_supersedes_expired_job_before_refusing_fresh_job(
     import theater.daemon.rpc.sending as sending_mod
     from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
 
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     expired = daemon.jobs.create(
         handle="expired",
         caller_id="cli",
@@ -489,7 +464,7 @@ async def test_send_ttl_leaves_expired_blank_prompt_job_running(
     import theater.daemon.rpc.sending as sending_mod
     from theater.daemon.rpc.sending import SEND_CLAIM_TTL
 
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     blank = daemon.jobs.create(
         handle="blank",
         caller_id="cli",
@@ -509,7 +484,7 @@ async def test_send_ttl_leaves_expired_blank_prompt_job_running(
 
 async def test_send_then_await_result(client, terminal_provider, daemon):
     """send → await → result: the full live-delivery loop."""
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     job = await client.call("send", target=target["id"], prompt="what is 2+2")
     handle = job["handle"]
 
@@ -524,7 +499,7 @@ async def test_send_then_await_result(client, terminal_provider, daemon):
 
 async def test_send_after_job_finishes_allows_resend(client, terminal_provider, daemon):
     """After a send job finishes, a new send to the same target works."""
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     job1 = await client.call("send", target=target["id"], prompt="first")
     daemon.jobs.finish(job1["handle"], state=JobState.DONE, result="done")
 
@@ -543,7 +518,7 @@ async def test_a_bare_spawn_leaves_nothing_running(client, terminal_provider, da
     child = await client.call("spawn", harness="vibe", prompt="", approval="manual", cwd="/tmp")
     assert daemon.jobs.get(child["handle"]).state == JobState.DONE
     child_terminal = daemon.store.terminal_bindings.get(child["id"])
-    _ready_screen(daemon, child_terminal.terminal_id, "vibe")
+    ready_screen(daemon, child_terminal.terminal_id, "vibe")
     job = await client.call("send", target=child["id"], prompt="now do something")
     assert job["state"] == "running"
 
@@ -561,7 +536,7 @@ async def test_a_spawn_that_asked_for_something_is_still_pending(client, termina
 
 async def test_send_bus_event(client, terminal_provider, daemon):
     """send creates an agent.send bus event."""
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     await client.call("send", target=target["id"], prompt="hi there")
 
     events = await client.call("bus.tail", limit=100)
@@ -573,7 +548,7 @@ async def test_send_bus_event(client, terminal_provider, daemon):
 
 
 async def test_unknown_provider_evidence_blocks_send(client, terminal_provider, daemon):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     daemon.presence = UnknownPresence()
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="go ahead", if_busy="refuse")
@@ -629,7 +604,7 @@ async def _install_native_runtime(daemon, pid: str):
 async def test_send_to_a_native_participant_delivers_through_the_runtime(
     client, daemon, terminal_provider
 ):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     state = await _install_native_runtime(daemon, target["id"])
 
     job = await client.call("send", target=target["id"], prompt="native prompt")
@@ -647,7 +622,7 @@ async def test_send_to_a_native_participant_delivers_through_the_runtime(
 async def test_second_native_send_while_busy_is_refused_and_counted(
     client, daemon, terminal_provider
 ):
-    target = await _target(client, daemon)
+    target = await send_target(client, daemon)
     state = await _install_native_runtime(daemon, target["id"])
 
     await client.call("send", target=target["id"], prompt="first")

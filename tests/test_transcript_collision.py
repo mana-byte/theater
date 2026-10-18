@@ -314,7 +314,7 @@ async def test_two_siblings_same_cwd_do_not_share_transcript(
     Neither participant may win a timing lottery. With no exact receipt, both
     cwd/time candidates are contested and fail closed.
     """
-    from tests.test_observer import until
+    from tests.support.waiting import until
 
     # Two participants in the same cwd, both with session_id None.
     # Registered as adopted (no pane, no birth-time floor) so the sessions
@@ -391,7 +391,7 @@ async def test_rejected_initial_attachment_still_tracks_screen_status(
     collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     observer.start()
     try:
-        from tests.test_observer import until
+        from tests.support.waiting import until
 
         assert await until(lambda: collision_registry.get(first.id).status is Status.WORKING)
         assert not observer._bound_transcripts
@@ -623,12 +623,13 @@ async def test_restored_trusted_location_attaches_after_restart(
 
     observer.start()
     try:
-        from tests.test_observer import kinds, until
+        from tests.support.observation import bus_kinds
+        from tests.support.waiting import until
 
-        assert await until(lambda: "agent.transcript" in kinds(collision_registry.store))
+        assert await until(lambda: "agent.transcript" in bus_kinds(collision_registry.store))
         with vibe_tree["transcript_b"].open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"role": "assistant", "content": str(provenance)}) + "\n")
-        assert await until(lambda: "agent.assistant" in kinds(collision_registry.store))
+        assert await until(lambda: "agent.assistant" in bus_kinds(collision_registry.store))
     finally:
         await observer.aclose()
 
@@ -1424,7 +1425,7 @@ async def test_observer_releases_binding_on_watcher_end(
     This ensures a new participant starting later in the same cwd can bind
     the path the previous one held.
     """
-    from tests.test_observer import until
+    from tests.support.waiting import until
 
     p_a = collision_registry.register(
         harness="vibe",

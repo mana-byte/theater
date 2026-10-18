@@ -9,7 +9,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from tests.test_pi_native_bridge import bridge_snapshot
+from tests.support.pi_bridge import bridge_snapshot
 from theater.daemon.server import Daemon
 from theater.daemon.spawning.models import SpawnRequest
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService

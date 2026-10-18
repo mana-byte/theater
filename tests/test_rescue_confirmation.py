@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.test_observer import age_job, poised
-from tests.test_vibe_unified_store import (
+from tests.support.observation import age_job, poised
+from tests.support.vibe_store import (
     A_ENDS,
     ANSWER_A,
     B_STARTS,
@@ -24,7 +24,7 @@ from tests.test_vibe_unified_store import (
     turn_doc,
     turn_record,
 )
-from tests.test_vibe_unified_store import Store as VibeStore
+from tests.support.vibe_store import Store as VibeStore
 from theater.constants.observation import (
     COMPLETION_UNVERIFIED_CODE,
     RESCUE_CODE,

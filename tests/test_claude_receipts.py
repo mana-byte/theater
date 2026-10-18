@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.shipped import ClaudeCodeHarness
+from tests.support.waiting import until
 from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient
@@ -58,15 +59,6 @@ async def _receipt(client, *, pid: str, token: str, session_id: str, transcript_
     )
 
 
-async def _until(predicate, timeout: float = 3.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        await asyncio.sleep(0.01)
-    return False
-
-
 @pytest.fixture
 async def claude_daemon(theater_home, tmp_path):
     root = tmp_path / "claude" / "projects"
@@ -102,7 +94,7 @@ async def test_claude_initial_receipt_records_exact_location(
         transcript_path=str(path),
     )
 
-    assert await _until(
+    assert await until(
         lambda: daemon.store.get_participant("p-claude").transcript_location == str(path.resolve())
     )
     got = daemon.store.get_participant("p-claude")
@@ -136,13 +128,13 @@ async def test_claude_initial_receipt_waits_for_first_message(
     )
 
     assert result["admission"] == "staged"
-    assert await _until(lambda: participant.id in daemon.observer._sources)
+    assert await until(lambda: participant.id in daemon.observer._sources)
     await asyncio.sleep(0.1)
     assert not daemon.observer.transcript_identity_lost(participant.id)
     assert daemon.store.get_participant(participant.id).transcript_location is None
 
     _transcript(root, session_id, cwd)
-    assert await _until(
+    assert await until(
         lambda: (
             daemon.store.get_participant(participant.id).transcript_location == str(path.resolve())
         )
@@ -169,7 +161,7 @@ async def test_claude_receipt_updates_after_compaction_rotation(
             transcript_path=str(path),
         )
 
-    assert await _until(
+    assert await until(
         lambda: (
             daemon.store.get_participant("p-claude").session_id == second.stem
             and daemon.store.get_participant("p-claude").transcript_location
@@ -194,7 +186,7 @@ async def test_claude_duplicate_receipt_is_idempotent(claude_daemon, claude_clie
             transcript_path=str(path),
         )
 
-    assert await _until(
+    assert await until(
         lambda: daemon.store.get_participant("p-claude").transcript_location == str(path.resolve())
     )
     got = daemon.store.get_participant("p-claude")
@@ -354,7 +346,7 @@ async def test_claude_receipt_rejects_cross_participant_location(
         session_id=path.stem,
         transcript_path=str(path),
     )
-    assert await _until(
+    assert await until(
         lambda: daemon.store.get_participant("first").transcript_location == str(path.resolve())
     )
     _spawn_claude(daemon, cwd, pid="second", token="two")
@@ -491,7 +483,7 @@ async def test_claude_resume_follows_exact_session_and_records_usage(
     assert result["admission"] == "staged"
 
     actual = _transcript(root, session_id, original_cwd, project="original-project")
-    assert await _until(
+    assert await until(
         lambda: (
             daemon.store.get_participant(participant.id).transcript_location
             == str(actual.resolve())
@@ -515,7 +507,7 @@ async def test_claude_resume_follows_exact_session_and_records_usage(
     with actual.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(usage_record) + "\n")
 
-    assert await _until(lambda: daemon.store.usage_totals()["input_tokens"] == 7)
+    assert await until(lambda: daemon.store.usage_totals()["input_tokens"] == 7)
     totals = daemon.store.usage_totals()
 
     assert totals["output_tokens"] == 3

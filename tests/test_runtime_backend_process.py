@@ -60,13 +60,6 @@ async def _launch(argv: list[str], participant: str, cwd: Path) -> DetachedBacke
     return await launch_detached_backend(_plan(argv), participant_id=participant, cwd=cwd)
 
 
-@pytest.fixture
-def workdir(tmp_path: Path) -> Path:
-    directory = tmp_path / "work"
-    directory.mkdir()
-    return directory
-
-
 async def test_launch_writes_plan_files_env_and_private_logs(workdir: Path) -> None:
     secret_path = paths.participant_dir("p-files") / "launch" / "secret.token"
     config_path = paths.participant_dir("p-files") / "launch" / "config.json"

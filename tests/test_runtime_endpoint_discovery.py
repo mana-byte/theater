@@ -79,13 +79,6 @@ async def _launch(plan: RuntimePlan, participant: str, cwd: Path):
     return await launch_detached_backend(plan, participant_id=participant, cwd=cwd)
 
 
-@pytest.fixture
-def workdir(tmp_path: Path) -> Path:
-    directory = tmp_path / "work"
-    directory.mkdir()
-    return directory
-
-
 def _read_log(participant: str) -> str:
     return (backend_artifacts_dir(participant) / "backend.stdout.log").read_text()
 

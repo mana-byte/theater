@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from tests.test_harness_plugins import install, write_plugin
+from tests.support.plugin_packages import install, write_plugin
 from theater.client import DaemonClient
 from theater.config import Config
 from theater.daemon.server import Daemon

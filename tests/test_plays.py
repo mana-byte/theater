@@ -9,11 +9,11 @@ import pytest
 from sqlalchemy import select
 
 from tests.support.fake_runtime import FakeRuntime, completed_outcome
+from tests.support.handoff_rig import handoff_source, pump
+from tests.support.mcp_tools import tool_payload
+from tests.support.native_rpc import install_runtime, native_pair
 from tests.support.paths import fixture
 from tests.support.presence import AbsentPresence
-from tests.test_control_rpc import _install_runtime, _native_pair
-from tests.test_handoff_send import _pump, _source
-from tests.test_mcp_server import _payload
 from theater import paths
 from theater.daemon.frontend.catalog_handlers import skills_load as frontend_skills_load
 from theater.daemon.gc import _delete_participant_row
@@ -222,7 +222,7 @@ async def test_whoami_lists_each_child_position_with_the_roles_that_fit_it(clien
     roles = ["hierarchy/debater", "hierarchy/reviewer", "hierarchy/worker"]
 
     async def whoami(participant) -> dict:
-        return _payload(await build(participant.id, "vibe").call_tool("whoami", {}))["play"]
+        return tool_payload(await build(participant.id, "vibe").call_tool("whoami", {}))["play"]
 
     play = {"play": "hierarchy", "master": master.id, "disposable": [MEMBER]}
     assert await whoami(master) == {
@@ -313,7 +313,7 @@ async def test_a_deferred_spawn_is_checked_again_when_it_launches(
     client, daemon, terminal_provider
 ):
     root = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
-    _, source = _source(daemon)
+    _, source = handoff_source(daemon)
     waiting = await _spawn(client, {"id": root.id}, after="Writer")
 
     assert (await _load(client, root.id))["state"] == "started"
@@ -347,8 +347,8 @@ def _sender(client, master):
 async def test_a_parents_send_assigns_a_position_only_once_delivered(
     client, daemon, absent, monkeypatch
 ):
-    master, child, state = await _native_pair(daemon)
-    _, source = _source(daemon)
+    master, child, state = await native_pair(daemon)
+    _, source = handoff_source(daemon)
     send = _sender(client, master)
 
     with pytest.raises(RemoteError, match=f"is in no live play, so no play can seat {LEAD}"):
@@ -367,7 +367,7 @@ async def test_a_parents_send_assigns_a_position_only_once_delivered(
     with pytest.raises(PlayRefused, match="holds no position"):
         daemon.plays.check_spawn(child.id, PlayPlan(names=(MEMBER,)))
     daemon.jobs.finish(source.handle, state=JobState.DONE, result="ready")
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
     assert len(state.sent) == 1 and daemon.plays.membership(child.id).position == "lead"
     assert daemon.plays.check_spawn(child.id, PlayPlan(names=(MEMBER,))).position == "member"
     with pytest.raises(RemoteError, match="already holds hierarchy/lead"):
@@ -376,14 +376,14 @@ async def test_a_parents_send_assigns_a_position_only_once_delivered(
     others = [daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)]
     others.append(daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id))
     for other in others:
-        await _install_runtime(daemon, other.id)
+        await install_runtime(daemon, other.id)
     grandchild = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=child.id)
-    await _install_runtime(daemon, grandchild.id)
+    await install_runtime(daemon, grandchild.id)
     with pytest.raises(RemoteError, match="can give its children only: hierarchy/member"):
         await send(grandchild, LEAD, caller=child)
     with pytest.raises(RemoteError, match="direct parent"):
         await send(others[0], LEAD, caller=child)
-    _source(daemon, name="Writer2")
+    handoff_source(daemon, name="Writer2")
     cancelled = await send(others[0], LEAD, after="Writer2")
     assert daemon.store.plays.assignment(cancelled["handle"]) is not None
     await _cancel(daemon, {"handle": cancelled["handle"], "caller_id": master.id})
@@ -403,20 +403,20 @@ async def test_a_parents_send_assigns_a_position_only_once_delivered(
 
 
 async def test_queued_play_messages_fail_unsent_once_their_play_ends(client, daemon, absent):
-    master, child, state = await _native_pair(daemon)
+    master, child, state = await native_pair(daemon)
     send = _sender(client, master)
     assert (await _load(client, master.id))["state"] == "started"
     await send(child, LEAD)
     late = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
-    late_state = await _install_runtime(daemon, late.id)
-    _, source = _source(daemon)
+    late_state = await install_runtime(daemon, late.id)
+    _, source = handoff_source(daemon)
     queued = [await send(late, LEAD, after="Writer")]
     queued.append(await send(child, "hierarchy/worker", after="Writer"))
 
     daemon.registry.mark_dead(master.id)
     daemon.jobs.finish(source.handle, state=JobState.DONE, result="ready")
-    await _pump(daemon, late, late_state)
-    await _pump(daemon, child, state)
+    await pump(daemon, late, late_state)
+    await pump(daemon, child, state)
 
     for message in queued:
         job = daemon.store.get_job(message["handle"])
@@ -462,7 +462,7 @@ async def test_an_unknown_native_delivery_is_proven_by_its_exact_turn_evidence(
 ):
     master = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=master.id)
-    state = await _install_runtime(daemon, child.id, cls=_UncertainSendRuntime)
+    state = await install_runtime(daemon, child.id, cls=_UncertainSendRuntime)
     await _load(client, master.id)
 
     sent = await _sender(client, master)(child, LEAD)
@@ -491,7 +491,7 @@ async def test_adoption_keeps_one_live_play_and_its_position_hierarchy(client, d
     inner = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=outsider.id)
     await _load(client, inner.id)
     for target in (lead_b, loose, outsider):
-        await _install_runtime(daemon, target.id)
+        await install_runtime(daemon, target.id)
 
     async def adopt(target, caller):
         return await client.call("participant.adopt", id=target.id, caller_id=caller.id)

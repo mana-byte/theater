@@ -56,10 +56,8 @@ def root(tmp_path) -> Path:
 
 
 @pytest.fixture
-def workdir(tmp_path) -> str:
-    d = tmp_path / "work"
-    d.mkdir()
-    return str(d)
+def workdir(workdir) -> str:
+    return str(workdir)
 
 
 def transcript(root: Path, name: str, cwd: str, *lines: str) -> Path:

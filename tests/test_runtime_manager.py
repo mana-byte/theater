@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.waiting import wait_until
 from theater.daemon.harness_runtime import manager as manager_mod
 from theater.daemon.harness_runtime.backend import DetachedBackendProcess
 from theater.daemon.harness_runtime.errors import (
@@ -471,15 +472,6 @@ async def test_adopt_backend_with_mismatched_identity_fails_closed(tmp_path: Pat
 # ---- same-runtime disconnect recovery monitors -------------------------------
 
 
-async def _wait_until(predicate, *, timeout: float = 3.0, message: str = "condition") -> None:
-    """Bounded wait for a predicate; a hang detector, never a sleep."""
-    deadline = asyncio.get_running_loop().time() + timeout
-    while not predicate():
-        if asyncio.get_running_loop().time() >= deadline:
-            raise AssertionError(f"timed out waiting for {message}")
-        await asyncio.sleep(0.005)
-
-
 async def test_disconnected_runtime_recovers_exactly_once_while_callback_runs(
     monkeypatch,
 ) -> None:
@@ -518,7 +510,7 @@ async def test_disconnected_runtime_recovers_exactly_once_while_callback_runs(
     assert calls == [("p1", 1)]
     release.set()
 
-    await _wait_until(lambda: manager.get("p1") is not original, message="the replacement runtime")
+    await wait_until(lambda: manager.get("p1") is not original, what="the replacement runtime")
     await asyncio.sleep(0.06)
     assert calls == [("p1", 1)], "a healthy replacement is not re-recovered"
     await manager.aclose()
@@ -540,7 +532,7 @@ async def test_failed_recovery_retries_on_a_bounded_cadence(monkeypatch) -> None
 
     manager.set_recovery_callback(callback)
     state.health = ConnectionHealth.DISCONNECTED
-    await _wait_until(lambda: len(timestamps) >= 2, message="the retry cadence")
+    await wait_until(lambda: len(timestamps) >= 2, what="the retry cadence")
     elapsed = asyncio.get_running_loop().time() - timestamps[0]
     # Bounded cadence, not a hot loop: with retry=0.05 and poll=0.01, the
     # first two attempts alone span at least one retry delay, and the count
@@ -577,7 +569,7 @@ async def test_replaced_generation_monitor_recovers_nothing(monkeypatch) -> None
     assert calls == [], "the stale (p1, generation 1) monitor must recover nothing"
 
     live_state.health = ConnectionHealth.DISCONNECTED
-    await _wait_until(lambda: calls, message="the live generation's recovery")
+    await wait_until(lambda: calls, what="the live generation's recovery")
     assert calls == [("p1", 2)], "only the replacement generation recovers"
     await manager.aclose()
 
@@ -622,7 +614,7 @@ async def test_replaced_generation_retains_cancellation_resistant_monitor(monkey
     assert not stale_monitor.done()
 
     release_snapshot.set()
-    await _wait_until(lambda: not manager._draining_monitors, message="stale monitor cleanup")
+    await wait_until(lambda: not manager._draining_monitors, what="stale monitor cleanup")
     assert stale_monitor.done()
     assert stale_monitor not in manager._draining_monitors
     await manager.aclose()
@@ -738,7 +730,7 @@ async def test_stop_recovery_rejects_snapshot_captured_before_shutdown(
     # of re-awaiting a monitor that already exceeded the drain deadline.
     await asyncio.wait_for(manager.aclose(), 0.25)
     release_snapshot.set()
-    await _wait_until(lambda: not manager._draining_monitors, message="deferred monitor drain")
+    await wait_until(lambda: not manager._draining_monitors, what="deferred monitor drain")
 
     assert calls == []
     assert route_changes == []
@@ -778,14 +770,14 @@ async def test_blocked_recovery_for_one_participant_does_not_block_another(
     for state in states.values():
         state.health = ConnectionHealth.DISCONNECTED
 
-    await _wait_until(lambda: "p2" in calls, message="p2's unblocked recovery")
+    await wait_until(lambda: "p2" in calls, what="p2's unblocked recovery")
     assert "p1" not in calls, "p1 stays blocked while it recovers"
     # Registry lookups stay responsive while p1's recovery is blocked.
     assert manager.get("p1") is not None
     assert manager.get("p2") is not None
 
     gate.set()
-    await _wait_until(lambda: "p1" in calls, message="p1's recovery after the gate")
+    await wait_until(lambda: "p1" in calls, what="p1's recovery after the gate")
     await manager.aclose()
 
 

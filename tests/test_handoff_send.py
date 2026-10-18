@@ -6,8 +6,9 @@ import asyncio
 
 import pytest
 
-from tests.support.presence import AbsentPresence, PresentPresence
-from tests.test_control_rpc import _native_pair
+from tests.support.handoff_rig import CANCELLED_BEFORE_DELIVERY, handoff_source, pump
+from tests.support.native_rpc import native_pair
+from tests.support.presence import PresentPresence
 from theater.daemon.awaiting import never_transmitted
 from theater.daemon.rpc.cancellation import _cancel
 from theater.daemon.rpc.jobs import _job_to_dict
@@ -15,38 +16,7 @@ from theater.harness.contracts.runtime import DeliveryResult
 from theater.models import BadRequest, JobState
 from theater.protocol import RemoteError
 
-#: Every writer of the shared ``cancelled`` code acts before delivery or launch.
-CANCELLED_BEFORE_DELIVERY = (
-    "Cancelled before delivery or launch; nothing reached the target. Request it again if needed."
-)
-
-
-@pytest.fixture(autouse=True)
-async def _absent_presence(daemon):
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
-        yield
-
-
-def _source(daemon, *, name: str = "Writer", prompt: str = "build the parser"):
-    participant = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", name=name)
-    job = daemon.jobs.create(
-        handle=f"{participant.id}#1",
-        caller_id="cli",
-        target_id=participant.id,
-        kind="send",
-        prompt=prompt,
-    )
-    return participant, job
-
-
-async def _pump(daemon, child, state) -> tuple[str, ...]:
-    """Let any scheduled dispatch run, then one explicit pass with the target idle."""
-    pending = [t for t in daemon.controls._dispatch_tasks.values() if not t.done()]
-    await asyncio.sleep(0)
-    await asyncio.gather(*pending, return_exceptions=True)
-    state.native_turn_id = None
-    return (await daemon.controls.dispatch_queue(child.id)).dispatched
+pytestmark = pytest.mark.usefixtures("absent_presence")
 
 
 def _heads(state) -> list[str]:
@@ -58,18 +28,18 @@ async def _send(client, child, caller, **extra) -> dict:
 
 
 async def test_send_after_queues_until_the_source_ends_then_delivers_one_card(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
 
     reply = await _send(client, child, parent, prompt="Review the result", after="Writer")
 
     assert reply["delivery"] == "queued" and reply["handoff"]["state"] == "waiting"
     assert reply["handoff"]["source"] == source_job.handle
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
     assert state.sent == []
 
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="PARSER-READY")
-    assert (await _pump(daemon, child, state)) in {(reply["handle"],), ()}
+    assert (await pump(daemon, child, state)) in {(reply["handle"],), ()}
     assert len(state.sent) == 1
     delivered = state.sent[0]
     assert delivered.startswith("Review the result")
@@ -79,14 +49,14 @@ async def test_send_after_queues_until_the_source_ends_then_delivers_one_card(cl
 
 
 async def test_send_after_trails_its_card_with_the_attached_skills(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
 
     reply = await _send(
         client, child, parent, prompt="Review the result", after="Writer", skills=["theater-debate"]
     )
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="PARSER-READY")
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
 
     (delivered,) = state.sent
     assert delivered.startswith("Review the result\n\n[Theater handoff")
@@ -95,8 +65,8 @@ async def test_send_after_trails_its_card_with_the_attached_skills(client, daemo
 
 
 async def test_source_that_already_ended_sends_with_its_card_at_once(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ALREADY-DONE")
 
     reply = await _send(client, child, parent, prompt="Take over", after="Writer")
@@ -106,62 +76,62 @@ async def test_source_that_already_ended_sends_with_its_card_at_once(client, dae
 
 
 async def test_failed_source_hands_off_a_labelled_failure(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
     reply = await _send(client, child, parent, prompt="Diagnose", after=source_job.handle)
 
     daemon.jobs.finish(
         source_job.handle, state=JobState.CRASHED, result="half a thought", error_code="crashed"
     )
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
 
     assert "FAILED source" in state.sent[0] and "crashed" in state.sent[0]
     assert daemon.store.get_job(reply["handle"]).state == JobState.RUNNING
 
 
 async def test_a_gated_message_blocks_only_its_own_lane(client, daemon):
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
-    _, source_job = _source(daemon)
+    _, source_job = handoff_source(daemon)
 
     first = await _send(client, child, parent, prompt="A", after=source_job.handle)
     second = await _send(client, child, parent, prompt="B")
     other = await _send(client, child, stranger, prompt="C")
     assert {r["delivery"] for r in (first, second, other)} == {"queued"}
 
-    await _pump(daemon, child, state)  # only the other lane moves
+    await pump(daemon, child, state)  # only the other lane moves
     assert _heads(state) == ["C"], "A waits on its source and B stays behind A"
     daemon.jobs.finish(other["handle"], state=JobState.DONE, result="c")
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
     assert _heads(state) == ["C"], "B must not overtake A"
 
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="s")
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
     assert _heads(state) == ["C", "A"]
     daemon.jobs.finish(first["handle"], state=JobState.DONE, result="a")
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
     assert _heads(state) == ["C", "A", "B"]
 
 
 async def test_presence_is_checked_fresh_at_dispatch_after_the_gate_opens(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
     reply = await _send(client, child, parent, prompt="later", after=source_job.handle)
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ok")
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(daemon, "presence", PresentPresence(), raising=False)
-        await _pump(daemon, child, state)
+        await pump(daemon, child, state)
     assert state.sent == []
     assert daemon.store.get_handoff_gate(reply["handle"]).state == "opened"
 
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
     assert len(state.sent) == 1
 
 
 async def test_cancel_withdraws_a_waiting_send_and_closes_its_gate(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
     reply = await _send(client, child, parent, prompt="later", after=source_job.handle)
 
     cancelled = await _cancel(daemon, {"handle": reply["handle"], "caller_id": parent.id})
@@ -173,18 +143,18 @@ async def test_cancel_withdraws_a_waiting_send_and_closes_its_gate(client, daemo
     assert row["result"].startswith("Cancelled by its requester before delivery")
     assert daemon.handoff.describe(reply["handle"])["error"] == "the task ended before it launched"
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ok")
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
     assert state.sent == []
 
 
 async def test_await_releases_a_protected_cancelled_send_whose_gate_had_opened(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
     reply = await _send(client, child, parent, prompt="later", after=source_job.handle)
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ok")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(daemon, "presence", PresentPresence(), raising=False)
-        await _pump(daemon, child, state)  # gate opens; presence keeps the message queued
+        await pump(daemon, child, state)  # gate opens; presence keeps the message queued
         assert daemon.store.get_handoff_gate(reply["handle"]).state == "opened"
         waiter = asyncio.create_task(
             client.call("jobs.await", handles=[reply["handle"]], max_wait=2, caller_id=parent.id)
@@ -213,7 +183,7 @@ async def _queued_plain_send_await(client, daemon, parent, child):
 
 
 async def test_await_releases_a_plain_send_cancelled_while_queued(client, daemon):
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(daemon, "presence", PresentPresence(), raising=False)
         reply, waiter = await _queued_plain_send_await(client, daemon, parent, child)
@@ -226,7 +196,7 @@ async def test_await_releases_a_plain_send_cancelled_while_queued(client, daemon
 
 
 async def test_await_releases_a_queued_send_cancelled_by_interrupt(client, daemon):
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(daemon, "presence", PresentPresence(), raising=False)
         reply, waiter = await _queued_plain_send_await(client, daemon, parent, child)
@@ -238,7 +208,7 @@ async def test_await_releases_a_queued_send_cancelled_by_interrupt(client, daemo
 
 
 async def test_await_releases_a_queued_send_failed_by_restart_recovery(client, daemon):
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(daemon, "presence", PresentPresence(), raising=False)
         reply, waiter = await _queued_plain_send_await(client, daemon, parent, child)
@@ -251,7 +221,7 @@ async def test_await_releases_a_queued_send_failed_by_restart_recovery(client, d
 
 
 async def test_restart_closes_a_cancelled_row_whose_job_never_finished_as_unsent(client, daemon):
-    parent, child, _ = await _native_pair(daemon)
+    parent, child, _ = await native_pair(daemon)
     reply = await _send(client, child, parent, prompt="hello")
     (op,) = daemon.store.control_operations_for_job(reply["handle"])
     daemon.store.settle_control_operation(  # crash between settlement and job finish
@@ -270,7 +240,7 @@ async def test_restart_closes_a_cancelled_row_whose_job_never_finished_as_unsent
 
 @pytest.mark.parametrize("shape", ["accepted", "dispatched", "turn", "barrier"])
 async def test_a_restart_crashed_send_that_may_have_transmitted_stays_held(client, daemon, shape):
-    parent, child, _ = await _native_pair(daemon)
+    parent, child, _ = await native_pair(daemon)
     reply = await _send(client, child, parent, prompt="hello")
     (op,) = daemon.store.control_operations_for_job(reply["handle"])
     store, rejected = daemon.store, DeliveryResult.REJECTED
@@ -301,11 +271,11 @@ async def test_a_restart_crashed_send_that_may_have_transmitted_stays_held(clien
 
 
 async def test_a_delivered_send_with_an_opened_gate_stays_held_by_presence(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
     reply = await _send(client, child, parent, prompt="later", after=source_job.handle)
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ok")
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
     assert len(state.sent) == 1
     daemon.jobs.finish(reply["handle"], state=JobState.KILLED, error_code="cancelled")
 
@@ -314,7 +284,7 @@ async def test_a_delivered_send_with_an_opened_gate_stays_held_by_presence(clien
 
 
 async def test_a_killed_send_with_a_dispatched_row_is_never_proven_unsent(client, daemon):
-    parent, child, _ = await _native_pair(daemon)
+    parent, child, _ = await native_pair(daemon)
     reply = await _send(client, child, parent, prompt="hello")
     (operation,) = daemon.store.control_operations_for_job(reply["handle"])
     daemon.store.mark_control_operation_dispatched(operation.operation_id, updated_at=1.0)
@@ -324,8 +294,8 @@ async def test_a_killed_send_with_a_dispatched_row_is_never_proven_unsent(client
 
 
 async def test_awaiting_a_gated_send_that_depends_on_you_is_a_cycle(client, daemon, monkeypatch):
-    parent, child, _ = await _native_pair(daemon)
-    source, source_job = _source(daemon)
+    parent, child, _ = await native_pair(daemon)
+    source, source_job = handoff_source(daemon)
     gated = await _send(client, child, parent, prompt="A", after=source_job.handle)
     behind = await _send(client, child, parent, prompt="B")
 
@@ -344,8 +314,8 @@ async def test_awaiting_a_gated_send_that_depends_on_you_is_a_cycle(client, daem
 async def test_restart_fails_a_queued_native_gate_closed_and_recover_keeps_a_live_one(
     client, daemon
 ):
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
     reply = await _send(client, child, parent, prompt="later", after=source_job.handle)
 
     daemon.jobs._events.clear()
@@ -358,7 +328,7 @@ async def test_restart_fails_a_queued_native_gate_closed_and_recover_keeps_a_liv
     assert (job.state, job.error_code) == (JobState.CRASHED, "daemon_restarted")
     assert daemon.store.get_handoff_gate(reply["handle"]).state == "cancelled"
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ok")
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
     assert state.sent == []
 
 
@@ -375,8 +345,8 @@ async def test_restart_fails_a_queued_native_gate_closed_and_recover_keeps_a_liv
 async def test_invalid_send_after_requests_are_refused_before_anything_is_queued(
     client, daemon, extra, message
 ):
-    parent, child, _ = await _native_pair(daemon)
-    _source(daemon)
+    parent, child, _ = await native_pair(daemon)
+    handoff_source(daemon)
     params = {"prompt": "x", "after": "Writer", **extra}
     with pytest.raises(RemoteError, match=message):
         await _send(client, child, parent, **params)
@@ -389,13 +359,13 @@ async def test_gate_transitions_emit_one_low_cardinality_signal(client, daemon, 
         "theater.daemon.handoff.service.timing.emit",
         lambda spec, ms, **fields: emitted.append(fields),
     )
-    parent, child, state = await _native_pair(daemon)
-    _, source_job = _source(daemon)
+    parent, child, state = await native_pair(daemon)
+    _, source_job = handoff_source(daemon)
     sent = await _send(client, child, parent, prompt="one", after=source_job.handle)
     cancelled = await _send(client, child, parent, prompt="two", after=source_job.handle)
     await _cancel(daemon, {"handle": cancelled["handle"], "caller_id": parent.id})
     daemon.jobs.finish(source_job.handle, state=JobState.DONE, result="ok")
-    await _pump(daemon, child, state)
+    await pump(daemon, child, state)
 
     assert sent["delivery"] == "queued"
     gate_signals = [e for e in emitted if "task_kind" in e]

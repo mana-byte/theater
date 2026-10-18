@@ -6,18 +6,12 @@ import asyncio
 
 import pytest
 
-from tests.support.presence import AbsentPresence
-from tests.test_control_rpc import _active_send, _native_pair, _pair
+from tests.support.native_rpc import active_send, native_pair, pair
 from theater.daemon.rpc import redirect
 from theater.models import Status
 from theater.protocol import RemoteError
 
-
-@pytest.fixture(autouse=True)
-async def _absent_presence(daemon):
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
-        yield
+pytestmark = pytest.mark.usefixtures("absent_presence")
 
 
 async def _send(client, child, caller, mode, **extra):
@@ -27,7 +21,7 @@ async def _send(client, child, caller, mode, **extra):
 
 
 async def test_idle_target_gets_a_plain_send_and_strangers_are_refused(client, daemon):
-    parent, child, _state = await _native_pair(daemon)
+    parent, child, _state = await native_pair(daemon)
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
 
     with pytest.raises(RemoteError) as raised:
@@ -40,8 +34,8 @@ async def test_idle_target_gets_a_plain_send_and_strangers_are_refused(client, d
 
 
 async def test_queue_and_amend_route_a_busy_native_child(client, daemon):
-    parent, child, state = await _native_pair(daemon)
-    active = await _active_send(client, parent, child)
+    parent, child, state = await native_pair(daemon)
+    active = await active_send(client, parent, child)
 
     with pytest.raises(RemoteError) as busy:
         await _send(client, child, parent, "refuse")
@@ -73,7 +67,7 @@ async def test_queue_and_amend_route_a_busy_native_child(client, daemon):
 async def test_amend_without_a_steer_route_falls_back_to_the_queue(
     client, daemon, terminal_provider
 ):
-    parent, child = _pair(daemon)
+    parent, child = pair(daemon)
     terminal_provider.bind(daemon, child.id)
     daemon.registry.set_status(child.id, Status.WORKING)
 
@@ -84,12 +78,12 @@ async def test_amend_without_a_steer_route_falls_back_to_the_queue(
 
 
 async def test_replace_interrupts_waits_for_idle_and_tells_the_child(client, daemon):
-    parent, child, state = await _native_pair(daemon)
+    parent, child, state = await native_pair(daemon)
     worker = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=child.id)
     launched = daemon.jobs.create(
         handle=worker.id, caller_id=child.id, target_id=worker.id, kind="spawn"
     )
-    active = await _active_send(client, parent, child)
+    active = await active_send(client, parent, child)
 
     async def observer_finishes_the_interrupted_job():
         while not state.interrupted:
@@ -112,8 +106,8 @@ async def test_replace_interrupts_waits_for_idle_and_tells_the_child(client, dae
 
 
 async def test_replace_times_out_without_sending(client, daemon, monkeypatch):
-    parent, child, state = await _native_pair(daemon)
-    await _active_send(client, parent, child)
+    parent, child, state = await native_pair(daemon)
+    await active_send(client, parent, child)
     sent_before = list(state.sent)
     monkeypatch.setattr(redirect, "REPLACE_IDLE_WAIT_SECONDS", 0.3)
 

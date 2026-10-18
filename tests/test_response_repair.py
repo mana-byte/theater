@@ -7,16 +7,15 @@ import threading
 
 import pytest
 
-from tests.support.fake_runtime import FakeRuntime
-from tests.test_control_service import (
+from tests.support.control_harness import (
     Harness,
-    drain,
     make_runtime,
     open_harness,
     state_of,
-    wait_until,
     wrap_runtime,
 )
+from tests.support.fake_runtime import FakeRuntime
+from tests.support.waiting import drain, wait_until
 from theater.constants.response_contract import REPAIR_DEADLINE_SECONDS, REPAIR_MAX_ATTEMPTS
 from theater.daemon.handoff.evidence import EvidencePinner
 from theater.daemon.handoff.models import GitFacts

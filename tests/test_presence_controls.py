@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from sqlalchemy import select
 
 from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from tests.support.paths import fixture
@@ -13,17 +12,16 @@ from tests.support.presence import (
     AbsentPresence,
     PresentPresence,
     UnknownPresence,
-    _BasePresence,
 )
+from tests.support.presence_rig import _OWNED_SERVICES, Rig, operation_rows
 from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED,
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     BUS_KIND_SEND_REFUSED,
 )
 from theater.daemon.controls import ControlGates, ControlService
-from theater.daemon.jobs import JobManager, JobState
+from theater.daemon.jobs import JobState
 from theater.daemon.presence import PresenceState
-from theater.daemon.schema import control_operations as control_operations_table
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     RuntimeCapability,
@@ -31,8 +29,6 @@ from theater.harness.contracts.runtime import (
 )
 from theater.models import HumanPresent, Status
 from theater.protocol import RemoteError
-
-_OWNED_SERVICES: list[ControlService] = []
 
 
 @pytest.fixture(autouse=True)
@@ -60,105 +56,9 @@ async def _close_owned_services():
 # ---- service-level rig ------------------------------------------------------
 
 
-class PresenceGates:
-    """A ControlGates presence seam with per-target scripted refusals."""
-
-    def __init__(self) -> None:
-        self.calls: dict[str, int] = {}
-        #: Targets whose presence gate always refuses.
-        self.refusals: set[str] = set()
-        #: Targets refused only after N passing calls (focus arrives mid-flight).
-        self.passes_before_refusal: dict[str, int] = {}
-        #: Real provider double; when set, it decides every check.
-        self.provider: _BasePresence | None = None
-        #: Optional exception send_preflight raises after signaling preflight_parked.
-        self.preflight_exception: Exception | None = None
-        self.preflight_parked = asyncio.Event()
-
-    async def require_absent(self, participant_id: str) -> None:
-        if self.provider is not None:
-            await self.provider.require_absent(participant_id)
-            return
-        self.check_absent(participant_id)
-
-    def check_absent(self, participant_id: str) -> None:
-        if self.provider is not None:
-            if self.provider.snapshot(participant_id).protected:
-                raise HumanPresent(f"human focus protects {participant_id!r}")
-            return
-        calls = self.calls.get(participant_id, 0) + 1
-        self.calls[participant_id] = calls
-        passes = self.passes_before_refusal.get(participant_id)
-        if participant_id in self.refusals or (passes is not None and calls > passes):
-            raise HumanPresent(f"human focus protects {participant_id!r}")
-
-    def gates(self) -> ControlGates:
-        async def noop(*args, **kwargs) -> None:
-            return None
-
-        return ControlGates(
-            authorize=lambda *args: None,
-            require_absent=self.require_absent,
-            check_absent=self.check_absent,
-            send_preflight=self._send_preflight,
-            legacy_copy_mode_check=noop,
-            legacy_busy_check=noop,
-            check_prompt=lambda prompt: None,
-            check_settings=lambda model, effort: None,
-            cwd_for=lambda participant_id: None,
-            legacy_deliver=noop,
-        )
-
-    async def _send_preflight(self, participant_id: str) -> None:
-        if self.preflight_exception is not None:
-            self.preflight_parked.set()
-            await asyncio.sleep(0)
-            raise self.preflight_exception
-
-
-class Rig:
-    """One control service over one store with per-participant fake runtimes."""
-
-    def __init__(self, store, *pids: str):
-        self.store = store
-        self.jobs = JobManager(store)
-        self.presence = PresenceGates()
-        self.runtimes = {}
-        for pid in pids:
-            state = FakeRuntimeState(participant_id=pid, backend_generation=1)
-            state.native_session_id = f"thread-{pid}"
-            state.backend_alive = True
-            context = RuntimeContext(
-                participant_id=pid,
-                cwd=None,
-                io=FakeRuntimeIO(state),
-                backend_generation=1,
-            )
-            self.runtimes[pid] = FakeRuntime(context)
-        self.service = ControlService(
-            store=store,
-            jobs=self.jobs,
-            runtime_for=self.runtimes.get,
-            gates=self.presence.gates(),
-        )
-        _OWNED_SERVICES.append(self.service)
-
-    def state(self, pid: str) -> FakeRuntimeState:
-        return self.runtimes[pid].state
-
-
-def _operation_rows(store, pid: str) -> list[dict]:
-    return [
-        dict(row._mapping)
-        for row in store.conn.execute(
-            select(control_operations_table).where(control_operations_table.c.participant_id == pid)
-        ).fetchall()
-    ]
-
-
 def _queue_payload(store, pid: str) -> str | None:
     """The payload of the first queued followup operation, if any."""
-    for row in _operation_rows(store, pid):
+    for row in operation_rows(store, pid):
         if row["kind"] == "queue_followup" and row["delivery_phase"] == "queued":
             return row["payload"]
     return None
@@ -189,7 +89,7 @@ async def test_send_refused_for_present_focus_mints_nothing(store):
     with pytest.raises(HumanPresent):
         await rig.service.send("p1", caller_id="caller", prompt="hi")
 
-    assert _operation_rows(store, "p1") == []
+    assert operation_rows(store, "p1") == []
     assert store.active_running_jobs_for_target("p1") == []
     assert rig.state("p1").sent == []
 
@@ -219,7 +119,7 @@ async def test_send_refused_when_focus_arrives_during_preparation(store):
     with pytest.raises(HumanPresent):
         await rig.service.send("p1", caller_id="caller", prompt="hi")
 
-    assert _operation_rows(store, "p1") == []
+    assert operation_rows(store, "p1") == []
     assert store.active_running_jobs_for_target("p1") == []
     assert rig.state("p1").sent == []
 
@@ -234,7 +134,7 @@ async def test_steer_refused_for_present_focus_leaves_the_job_untouched(store):
 
     assert store.get_job(job.handle).state == "running"
     assert rig.state("p1").steered == []
-    kinds = {row["kind"] for row in _operation_rows(store, "p1")}
+    kinds = {row["kind"] for row in operation_rows(store, "p1")}
     assert "steer" not in kinds
 
 
@@ -245,7 +145,7 @@ async def test_queue_admission_refused_for_present_focus(store):
     with pytest.raises(HumanPresent):
         await rig.service.queue_followup("p1", caller_id="caller", prompt="later")
 
-    assert _operation_rows(store, "p1") == []
+    assert operation_rows(store, "p1") == []
     assert store.active_running_jobs_for_target("p1") == []
 
 
@@ -270,7 +170,7 @@ async def test_settings_refused_for_present_focus(store):
     with pytest.raises(HumanPresent):
         await rig.service.update_settings("p1", caller_id="caller", model="some-model")
 
-    assert _operation_rows(store, "p1") == []
+    assert operation_rows(store, "p1") == []
 
 
 async def test_queue_defers_while_present_and_resumes_fifo(store):
@@ -299,7 +199,7 @@ async def test_native_dispatch_refusal_leaves_the_head_unchanged(store):
     (handle,) = await _queue_idle(rig, "p1", "later")
     head_phase_before = [
         row["delivery_phase"]
-        for row in _operation_rows(store, "p1")
+        for row in operation_rows(store, "p1")
         if row["kind"] == "queue_followup"
     ]
 
@@ -308,7 +208,7 @@ async def test_native_dispatch_refusal_leaves_the_head_unchanged(store):
 
     phases_after = [
         row["delivery_phase"]
-        for row in _operation_rows(store, "p1")
+        for row in operation_rows(store, "p1")
         if row["kind"] == "queue_followup"
     ]
     assert phases_after == head_phase_before
@@ -382,7 +282,7 @@ async def test_native_interrupt_mid_snapshot_preserves_the_queue(store):
         await interrupt
     assert store.get_job(queued).state == "running"
     assert store.queued_control_operation_count("p1") == 1
-    kinds = {row["kind"] for row in _operation_rows(store, "p1")}
+    kinds = {row["kind"] for row in operation_rows(store, "p1")}
     assert "interrupt" not in kinds
     assert rig.state("p1").interrupted == []
 
@@ -424,14 +324,14 @@ async def test_present_focus_never_clears_a_durable_barrier_on_send(store, monke
         await send
     assert rig.store.has_execution_barrier("p1") is True
     assert rig.state("p1").sent == []
-    assert len(_operation_rows(store, "p1")) == 1
+    assert len(operation_rows(store, "p1")) == 1
 
     # Departure lets the legitimate idle path clear the barrier and deliver.
     rig.presence.provider = AbsentPresence()
     await rig.service.send("p1", caller_id="caller", prompt="second")
     assert rig.store.has_execution_barrier("p1") is False
     assert rig.state("p1").sent == ["second"]
-    assert len(_operation_rows(store, "p1")) == 2
+    assert len(operation_rows(store, "p1")) == 2
 
 
 async def test_present_focus_never_clears_a_durable_barrier_on_settings(store, monkeypatch):
@@ -489,7 +389,7 @@ async def test_present_focus_retains_the_head_when_capabilities_fail(store):
     assert outcome.deferred is True
     assert store.queued_control_operation_count("p1") == 1
     assert store.get_job(handle).state == "running"
-    kinds = {row["kind"] for row in _operation_rows(store, "p1")}
+    kinds = {row["kind"] for row in operation_rows(store, "p1")}
     assert kinds == {"queue_followup"}
 
     # Departure classifies the capability failure; only then may the head fail.
@@ -779,6 +679,6 @@ async def test_focus_arriving_during_native_snapshot_refuses_send(
     with pytest.raises(RemoteError) as exc:
         await send
     assert exc.value.code == "human_present"
-    assert _operation_rows(daemon.store, child.id) == []
+    assert operation_rows(daemon.store, child.id) == []
     assert daemon.store.running_jobs_for_target(child.id) == []
     assert state.sent == []

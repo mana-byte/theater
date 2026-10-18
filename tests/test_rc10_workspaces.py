@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
-from tests.test_rc10_provider_controls import _online, _target
+from tests.support.provider_controls import online, provider_target
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.workspace_handlers import WORKSPACE_HANDLERS, workspaces_register
 from theater.daemon.operations import OperationService
@@ -326,8 +326,8 @@ async def test_dirty_cleanup_refusal_then_explicit_force(
 
 @pytest.mark.parametrize("contents", ["clean", "dirty", "unmerged", "moved", "shared", "in_use"])
 async def test_kill_cleans_only_unused_unique_workspaces(daemon, repository, monkeypatch, contents):
-    participant_id = _target(daemon)
-    _online(monkeypatch, daemon)
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
     reservation = await daemon.workspace_service.reserve(
         WorkspaceRequest(cwd=repository, worktree="shared" if contents == "shared" else True),
         reservation_id="kill-workspace",

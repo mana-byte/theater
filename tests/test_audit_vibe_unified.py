@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_vibe_unified_store import (
+
+from tests.support.vibe_store import (
     GEN1,
     GEN2,
     SESSION_ID,
@@ -25,7 +26,6 @@ from test_vibe_unified_store import (
     publish_default,
     sha256_json,
 )
-
 from theater.harness.builtin.plugins.vibe import unified_source, unified_store_io
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
 from theater.harness.builtin.plugins.vibe.unified_store import (
