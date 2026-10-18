@@ -26,7 +26,7 @@ from theater.models import now
 _DAY = 86400.0
 
 
-# ---- helpers (mirror test_gc.py's, kept local so this file is self-contained) ---
+# ---- helpers ---
 
 
 def _scratchpad_row(store) -> None:

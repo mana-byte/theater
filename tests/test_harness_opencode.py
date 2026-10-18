@@ -24,7 +24,7 @@ import os
 
 import pytest
 
-from tests.support import opencode_recorder
+from tests.support.opencode_recorder import rec as shared_rec
 from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
 from theater.harness import EventKind, TurnTerminal, theater_mcp_servers
 from theater.harness.builtin.plugins.opencode.constants import HISTORY_MESSAGE_BATCH
@@ -37,7 +37,7 @@ from theater.transcript_identity import (
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
-rec = opencode_recorder.rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture, under the name the tests ask for
 
 
 def source_for(rec, workdir, **kwargs):

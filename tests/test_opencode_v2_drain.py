@@ -6,19 +6,19 @@ import asyncio
 
 import pytest
 
-from tests.support import opencode_recorder_v2
 from tests.support.opencode_recorder_v2 import (
     attached,
     drain,
     text,
     tool,
 )
+from tests.support.opencode_recorder_v2 import rec as shared_rec
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.opencode import source_v2
 from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
 from theater.models import Status
 
-rec = opencode_recorder_v2.rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture, under the name the tests ask for
 
 
 def write_users(rec, first: int, count: int, at: int) -> None:

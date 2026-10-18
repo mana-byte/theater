@@ -15,7 +15,6 @@ from sqlalchemy import func, select, update
 
 from tests.support.handoff_rig import CANCELLED_BEFORE_DELIVERY
 from tests.support.native_rpc import native_pair
-from tests.support.presence import AbsentPresence
 from tests.support.waiting import wait_until
 from theater.constants.daemon import CONTROL_QUEUE_PEER_MAX_PENDING
 from theater.daemon.gc import _sweep_stale_running
@@ -786,13 +785,6 @@ async def test_the_parents_default_send_is_not_counted_against_the_peer_reserve(
 
 
 # ---- M2 round two: no Git on the loop, none for work that never started -----------------------
-
-
-@pytest.fixture
-async def absent_presence(daemon):
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
-        yield
 
 
 def _git_spy(monkeypatch) -> list[int]:

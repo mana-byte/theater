@@ -16,7 +16,6 @@ import sys
 
 import pytest
 
-from tests.support import opencode_recorder_v2
 from tests.support.opencode_recorder_v2 import (
     USAGE,
     attached,
@@ -24,6 +23,7 @@ from tests.support.opencode_recorder_v2 import (
     text,
     tool,
 )
+from tests.support.opencode_recorder_v2 import rec as shared_rec
 from tests.support.shipped import OpenCodeHarness
 from theater.harness import EventKind, TurnTerminal, theater_mcp_servers
 from theater.harness.base import EventPath
@@ -41,7 +41,7 @@ from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.models import BadRequest, Participant, Status
 
-rec = opencode_recorder_v2.rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture, under the name the tests ask for
 
 V2 = OpenCodeDialect.V2
 

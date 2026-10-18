@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 
-from tests.support import opencode_recorder_v2
 from tests.support.opencode_recorder_v2 import (
     USAGE,
     attached,
     text,
 )
+from tests.support.opencode_recorder_v2 import rec as shared_rec
 from theater.harness import EventKind
 
-rec = opencode_recorder_v2.rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture, under the name the tests ask for
 
 
 def _compaction(created: int, *, status: str = "completed", billed: bool = True) -> dict:
