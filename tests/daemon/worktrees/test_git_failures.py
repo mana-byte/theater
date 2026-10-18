@@ -18,12 +18,8 @@ def repo(tmp_path):
 
 
 def test_git_returns_failed_result_on_timeout(monkeypatch):
-    """_git() must not raise TimeoutExpired — it synthesizes a failed
-    CompletedProcess so callers' existing ``returncode != 0`` branching
-    handles the failure.  This is the fix for the incident: a stuck
-    ``git worktree remove`` blocked the event loop and the reaper retried
-    forever because TimeoutExpired propagated past retire().
-    """
+    """_git() synthesizes a failed CompletedProcess (rc 124) so a stuck git cannot hang callers."""
+
     import theater.daemon.worktree as wt_mod
 
     def fake_run(argv, **kwargs):

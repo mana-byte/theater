@@ -61,7 +61,7 @@ async def test_reconcile_promotes_a_migrated_named_workspace_from_exact_git_fact
     with store.write_unit() as unit:
         store.workspaces.create(
             WorkspaceRecord(
-                workspace_id="rc9-named-retained",
+                workspace_id="migrated-named-retained",
                 ownership_kind=WorkspaceOwnershipKind.THEATER.value,
                 owner_id="theater",
                 path=path,
@@ -84,8 +84,8 @@ async def test_reconcile_promotes_a_migrated_named_workspace_from_exact_git_fact
         return original(record)
 
     monkeypatch.setattr(WorkspaceService, "_verify_named_workspace", staticmethod(guarded))
-    assert await service.reconcile_retained_workspaces() == ("rc9-named-retained",)
-    reconciled = service.get("rc9-named-retained")
+    assert await service.reconcile_retained_workspaces() == ("migrated-named-retained",)
+    reconciled = service.get("migrated-named-retained")
     assert reconciled.state == WorkspaceState.ACTIVE.value
     assert reconciled.resolved_base_commit == git(path, "rev-parse", "HEAD")
 

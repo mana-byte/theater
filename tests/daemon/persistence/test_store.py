@@ -409,17 +409,18 @@ def test_list_participants_ids_subset_preserves_creation_order(store):
     assert [r.id for r in rows] == [ps[0].id, ps[2].id]
 
 
-def test_list_participants_ids_empty_returns_nothing(store):
-    """ids=[] is the trap: it must return [] not everything."""
-    _five_participants(store)
-    rows = store.list_participants(ids=[])
-    assert rows == []
-
-
-def test_list_participants_ids_unknown_silently_omitted(store):
-    """Unknown ids are dropped with no error."""
-    rows = store.list_participants(ids=["ghost-id"])
-    assert rows == []
+@pytest.mark.parametrize(
+    ("seeded", "ids"),
+    [
+        pytest.param(True, [], id="empty"),
+        pytest.param(False, ["ghost-id"], id="unknown"),
+    ],
+)
+def test_list_participants_ids_that_match_nothing_return_nothing(store, seeded, ids):
+    """ids=[] must return [] rather than everything, and unknown ids are dropped silently."""
+    if seeded:
+        _five_participants(store)
+    assert store.list_participants(ids=ids) == []
 
 
 def test_list_participants_ids_dead_excluded_without_include_dead(store):
