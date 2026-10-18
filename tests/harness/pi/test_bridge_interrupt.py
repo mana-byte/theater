@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
+import pytest
+
 from tests.support.pi_bridge import (
     SESSION_A,
     SESSION_B,
@@ -86,100 +88,82 @@ async def test_pi_interrupt_scope_is_the_bridges_atomic_check() -> None:
         await runtime.aclose()
 
 
-async def test_pi_interrupt_propagates_only_pre_mutation_rejections() -> None:
+_REJECTED = DeliveryResult.REJECTED
+_UNKNOWN = DeliveryResult.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("operation_id", "reply", "result", "error_code"),
+    [
+        pytest.param(
+            "interrupt-backoff",
+            RuntimeRequestError("not_cancellable", "Pi run is in retry backoff"),
+            _REJECTED,
+            "not_cancellable",
+            id="pre-mutation-rejection",
+        ),
+        pytest.param(
+            "interrupt-1",
+            RuntimeRequestError("stale_bridge", "the bridge generation is superseded"),
+            _REJECTED,
+            "stale_bridge",
+            id="superseded-bridge-epoch",
+        ),
+        # A timeout is unordered against the abort: the run may have died.
+        pytest.param(
+            "interrupt-lost",
+            TimeoutError("evidence window closed"),
+            _UNKNOWN,
+            None,
+            id="post-mutation-failure",
+        ),
+        pytest.param(
+            "interrupt-echo",
+            interrupt_result("interrupt-1", native_turn_id="turn-9"),
+            _UNKNOWN,
+            None,
+            id="turn-identity-mismatch",
+        ),
+        pytest.param(
+            "interrupt-echo",
+            interrupt_result("interrupt-other"),
+            _UNKNOWN,
+            "interrupt_unconfirmed",
+            id="echo-wrong-operation",
+        ),
+        pytest.param(
+            "interrupt-echo",
+            interrupt_result("interrupt-echo", session_id=SESSION_B),
+            _UNKNOWN,
+            "interrupt_unconfirmed",
+            id="echo-wrong-session",
+        ),
+        pytest.param(
+            "interrupt-echo",
+            {**interrupt_result("interrupt-echo"), "bridge_epoch": 3},
+            _UNKNOWN,
+            "interrupt_unconfirmed",
+            id="echo-wrong-epoch",
+        ),
+    ],
+)
+async def test_pi_interrupt_failures_are_classified_and_never_retried(
+    operation_id, reply, result, error_code
+) -> None:
     peer = ScriptedPiPeer(
         responses={
             "pi.snapshot": bridge_snapshot(execution_state="active", native_turn_id="turn-1"),
-            "pi.control.interrupt": RuntimeRequestError(
-                "not_cancellable", "Pi run is in retry backoff"
-            ),
+            "pi.control.interrupt": reply,
         }
     )
     runtime = make_runtime(peer)
     await runtime.attach()
     try:
-        receipt = await runtime.interrupt(operation_id="interrupt-backoff", native_turn_id="turn-1")
-        assert receipt.result is DeliveryResult.REJECTED
-        assert receipt.error_code == "not_cancellable"
+        receipt = await runtime.interrupt(operation_id=operation_id, native_turn_id="turn-1")
+        assert receipt.result is result
+        if error_code is not None:
+            assert receipt.error_code == error_code
         assert sum(method == "pi.control.interrupt" for method, _ in peer.requests) == 1
-    finally:
-        await runtime.aclose()
-
-
-async def test_pi_interrupt_post_mutation_failure_is_unknown_never_retried() -> None:
-    peer = ScriptedPiPeer(
-        responses={
-            "pi.snapshot": bridge_snapshot(execution_state="active", native_turn_id="turn-1"),
-            # A timeout is unordered against the abort: the run may have died.
-            "pi.control.interrupt": TimeoutError("evidence window closed"),
-        }
-    )
-    runtime = make_runtime(peer)
-    await runtime.attach()
-    try:
-        receipt = await runtime.interrupt(operation_id="interrupt-lost", native_turn_id="turn-1")
-        assert receipt.result is DeliveryResult.UNKNOWN
-        assert sum(method == "pi.control.interrupt" for method, _ in peer.requests) == 1
-    finally:
-        await runtime.aclose()
-
-
-async def test_pi_interrupt_turn_identity_mismatch_is_unknown() -> None:
-    peer = ScriptedPiPeer(
-        responses={
-            "pi.snapshot": bridge_snapshot(execution_state="active", native_turn_id="turn-1"),
-            "pi.control.interrupt": interrupt_result("interrupt-1", native_turn_id="turn-9"),
-        }
-    )
-    runtime = make_runtime(peer)
-    await runtime.attach()
-    try:
-        receipt = await runtime.interrupt(operation_id="interrupt-echo", native_turn_id="turn-1")
-        assert receipt.result is DeliveryResult.UNKNOWN
-        assert sum(method == "pi.control.interrupt" for method, _ in peer.requests) == 1
-    finally:
-        await runtime.aclose()
-
-
-async def test_pi_interrupt_echo_mismatches_close_unknown() -> None:
-    wrong_operation = interrupt_result("interrupt-other")
-    wrong_session = interrupt_result("interrupt-echo", session_id=SESSION_B)
-    wrong_epoch = {**interrupt_result("interrupt-echo"), "bridge_epoch": 3}
-    for reply in (wrong_operation, wrong_session, wrong_epoch):
-        peer = ScriptedPiPeer(
-            responses={
-                "pi.snapshot": bridge_snapshot(execution_state="active", native_turn_id="turn-1"),
-                "pi.control.interrupt": reply,
-            }
-        )
-        runtime = make_runtime(peer)
-        await runtime.attach()
-        try:
-            receipt = await runtime.interrupt(
-                operation_id="interrupt-echo", native_turn_id="turn-1"
-            )
-            assert receipt.result is DeliveryResult.UNKNOWN
-            assert receipt.error_code == "interrupt_unconfirmed"
-        finally:
-            await runtime.aclose()
-
-
-async def test_pi_interrupt_rejects_a_superseded_bridge_epoch() -> None:
-    peer = ScriptedPiPeer(
-        responses={
-            "pi.snapshot": bridge_snapshot(execution_state="active", native_turn_id="turn-1"),
-            "pi.control.interrupt": RuntimeRequestError(
-                "stale_bridge", "the bridge generation is superseded"
-            ),
-        }
-    )
-    runtime = make_runtime(peer)
-    await runtime.attach()
-    try:
-        receipt = await runtime.interrupt(operation_id="interrupt-1", native_turn_id="turn-1")
-        assert receipt.result is DeliveryResult.REJECTED
-        assert receipt.error_code == "stale_bridge"
-        assert sum(name == "pi.control.interrupt" for name, _ in peer.requests) == 1
     finally:
         await runtime.aclose()
 
