@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from functools import partial
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
+from tests.support.frontend_wire import exchange, handshake, request
 from tests.support.transcript_pages import StaticSource
 from tests.support.transcript_pages import page as transcript_page
-from theater import paths, protocol
 from theater.constants.daemon import (
     BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
     BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
@@ -23,7 +24,6 @@ from theater.daemon.frontend.handlers import PUBLIC_HANDLERS
 from theater.daemon.frontend.job_handlers import JOB_HANDLERS
 from theater.daemon.frontend.participant_read_handlers import PARTICIPANT_READ_HANDLERS
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
-from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
 from theater.frontend.dto.transcripts import TranscriptReadPage
 from theater.frontend.schemas import catalog as schema_catalog
 from theater.harness import HARNESSES
@@ -32,39 +32,7 @@ from theater.harness.contracts.source import TranscriptCandidate
 from theater.models import JobState, Status
 from theater.transcript_identity import canonical_location
 
-
-def _request(request_id: int, method: str, params: dict | None = None, **extra: object) -> bytes:
-    return protocol.encode({"id": request_id, "method": method, "params": params or {}, **extra})
-
-
-def _handshake() -> bytes:
-    return _request(
-        1,
-        "frontend.handshake",
-        {
-            "api": {"major": PUBLIC_API_MAJOR, "minor": PUBLIC_API_MINOR},
-            "client_id": "observation-api-test",
-            "role": "operator",
-            "channel": "rpc",
-            "required_capabilities": [],
-        },
-    )
-
-
-async def _exchange(frames: list[bytes]) -> list[dict]:
-    reader, writer = await asyncio.open_unix_connection(
-        str(paths.socket_path()), limit=max(protocol.MAX_MESSAGE_BYTES, 1024)
-    )
-    try:
-        responses: list[dict] = []
-        for frame in frames:
-            writer.write(frame)
-            await writer.drain()
-            responses.append(json.loads(await protocol.read_message(reader)))
-        return responses
-    finally:
-        writer.close()
-        await writer.wait_closed()
+_handshake = partial(handshake, "observation-api-test")
 
 
 @pytest.fixture
@@ -147,9 +115,7 @@ async def test_public_transcripts_preserve_outcomes_and_project_before_budgeting
         params = {"participant_id": participant.id, "max_bytes": 2000}
         if cursor is not None:
             params["cursor"] = cursor
-        responses = await _exchange(
-            [_handshake(), _request(2, "frontend.transcripts.read", params)]
-        )
+        responses = await exchange([_handshake(), request(2, "frontend.transcripts.read", params)])
         assert responses[1]["ok"] is True, responses[1]
         wire = responses[1]["result"]
         assert len(json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode()) <= 2000
@@ -214,14 +180,14 @@ async def test_participant_reads_page_history_and_missing_ids(
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp/child", parent_id=root.id)
     daemon.registry.set_status(child.id, Status.DEAD)
 
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.participants.list", {"limit": 1}),
-            _request(3, "frontend.participants.list", {"limit": 1, "cursor": root.id}),
-            _request(4, "frontend.participants.tree", {"participant_id": root.id}),
-            _request(5, "frontend.participants.get", {"participant_id": "missing-participant"}),
-            _request(6, "frontend.participants.list", {"cursor": "missing-participant"}),
+            request(2, "frontend.participants.list", {"limit": 1}),
+            request(3, "frontend.participants.list", {"limit": 1, "cursor": root.id}),
+            request(4, "frontend.participants.tree", {"participant_id": root.id}),
+            request(5, "frontend.participants.get", {"participant_id": "missing-participant"}),
+            request(6, "frontend.participants.list", {"cursor": "missing-participant"}),
         ]
     )
 
@@ -308,11 +274,11 @@ async def test_job_reads_keep_structured_results_and_shared_presence_waits(
     presence = _Presence(PresenceState.PRESENT)
     daemon.presence = presence
 
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.jobs.list", {"participant_id": target.id}),
-            _request(3, "frontend.jobs.await", {"job_handles": [job.handle], "wait_seconds": 0}),
+            request(2, "frontend.jobs.list", {"participant_id": target.id}),
+            request(3, "frontend.jobs.await", {"job_handles": [job.handle], "wait_seconds": 0}),
         ]
     )
 
@@ -323,12 +289,12 @@ async def test_job_reads_keep_structured_results_and_shared_presence_waits(
     assert responses[2]["result"]["jobs"][0]["await_reason"] == "timeout"
 
     presence.state = PresenceState.ABSENT
-    released = await _exchange(
+    released = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.jobs.await", {"job_handles": [job.handle], "wait_seconds": 0}),
-            _request(3, "frontend.jobs.get", {"job_handle": "missing-job"}),
-            _request(4, "frontend.jobs.await", {"job_handles": ["missing-job"], "wait_seconds": 0}),
+            request(2, "frontend.jobs.await", {"job_handles": [job.handle], "wait_seconds": 0}),
+            request(3, "frontend.jobs.get", {"job_handle": "missing-job"}),
+            request(4, "frontend.jobs.await", {"job_handles": ["missing-job"], "wait_seconds": 0}),
         ]
     )
 
@@ -347,29 +313,29 @@ async def test_transcript_binding_keeps_conflicts_and_cursor_bounds(
     owner = daemon.registry.register(harness="fixture", pane=None, cwd="/tmp/owner")
     other = daemon.registry.register(harness="fixture", pane=None, cwd="/tmp/other")
 
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.transcripts.candidates", {"participant_id": owner.id}),
-            _request(
+            request(2, "frontend.transcripts.candidates", {"participant_id": owner.id}),
+            request(
                 3,
                 "frontend.transcripts.bind",
                 {"participant_id": owner.id, "location": observer.location},
                 idempotency_key="bind-owner",
             ),
-            _request(
+            request(
                 4,
                 "frontend.transcripts.bind",
                 {"participant_id": owner.id, "location": observer.location},
                 idempotency_key="bind-owner",
             ),
-            _request(
+            request(
                 5,
                 "frontend.transcripts.bind",
                 {"participant_id": other.id, "location": observer.location},
                 idempotency_key="bind-other",
             ),
-            _request(
+            request(
                 6,
                 "frontend.transcripts.read",
                 {"participant_id": owner.id, "cursor": "x" * 4097},
@@ -432,10 +398,10 @@ async def test_transcript_candidates_bound_large_archives_without_hiding_bindabl
 
     monkeypatch.setattr(daemon.registry, "list", list_participants)
 
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(
+            request(
                 2,
                 "frontend.transcripts.candidates",
                 {"participant_id": participant.id},
@@ -495,10 +461,10 @@ async def test_transcript_bind_replay_repairs_observer_after_committed_failure(
         "prior_owner_id": prior_owner.id,
     }
 
-    first = await _exchange(
+    first = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.transcripts.bind", params, idempotency_key="repair-bind"),
+            request(2, "frontend.transcripts.bind", params, idempotency_key="repair-bind"),
         ]
     )
 
@@ -512,10 +478,10 @@ async def test_transcript_bind_replay_repairs_observer_after_committed_failure(
     assert durable_owner.transcript_location is None
 
     presence.state = PresenceState.PRESENT
-    replay = await _exchange(
+    replay = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.transcripts.bind", params, idempotency_key="repair-bind"),
+            request(2, "frontend.transcripts.bind", params, idempotency_key="repair-bind"),
         ]
     )
 
@@ -557,17 +523,17 @@ async def test_recall_adapters_page_domain_results(
     monkeypatch.setattr(observation_mod, "_recall_query", recall)
     monkeypatch.setattr("theater.daemon.recall_read.read_segment", read_segment)
 
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.recall.query", {"path": "src/example.py", "limit": 1}),
-            _request(
+            request(2, "frontend.recall.query", {"path": "src/example.py", "limit": 1}),
+            request(
                 3,
                 "frontend.recall.query",
                 {"path": "src/example.py", "cursor": "recall1:1", "limit": 1},
             ),
-            _request(4, "frontend.recall.read", {"segment_id": "job-a"}),
-            _request(5, "frontend.recall.query", {"path": "src/example.py", "cursor": "bad"}),
+            request(4, "frontend.recall.read", {"segment_id": "job-a"}),
+            request(5, "frontend.recall.query", {"path": "src/example.py", "cursor": "bad"}),
         ]
     )
 
@@ -584,20 +550,20 @@ async def test_trajectory_streams_keep_cursor_lifecycles_independent(
     first = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/first")
     second = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/second")
 
-    snapshots = await _exchange(
+    snapshots = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.trajectory.snapshot", {"participant_id": first.id}),
-            _request(3, "frontend.trajectory.snapshot", {"participant_id": second.id}),
+            request(2, "frontend.trajectory.snapshot", {"participant_id": first.id}),
+            request(3, "frontend.trajectory.snapshot", {"participant_id": second.id}),
         ]
     )
     first_page = snapshots[1]["result"]
     second_page = snapshots[2]["result"]
 
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(
+            request(
                 2,
                 "frontend.trajectory.follow",
                 {
@@ -606,8 +572,8 @@ async def test_trajectory_streams_keep_cursor_lifecycles_independent(
                     "wait_seconds": 0,
                 },
             ),
-            _request(3, "frontend.trajectory.close", {"stream_id": first_page["stream_id"]}),
-            _request(
+            request(3, "frontend.trajectory.close", {"stream_id": first_page["stream_id"]}),
+            request(
                 4,
                 "frontend.trajectory.follow",
                 {
@@ -616,7 +582,7 @@ async def test_trajectory_streams_keep_cursor_lifecycles_independent(
                     "wait_seconds": 0,
                 },
             ),
-            _request(
+            request(
                 5,
                 "frontend.trajectory.follow",
                 {
@@ -650,8 +616,8 @@ async def test_trajectory_result_is_validated_once_and_invalid_output_is_refused
     monkeypatch.setattr(schema_catalog, "validator_for", counted)
     monkeypatch.setattr(observation_mod, "validator_for", counted)
     participant = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/validation")
-    request = _request(2, "frontend.trajectory.snapshot", {"participant_id": participant.id})
-    responses = await _exchange([_handshake(), request])
+    frame = request(2, "frontend.trajectory.snapshot", {"participant_id": participant.id})
+    responses = await exchange([_handshake(), frame])
     assert responses[1]["ok"] is True
     assert len(validations) == 1
 
@@ -659,5 +625,5 @@ async def test_trajectory_result_is_validated_once_and_invalid_output_is_refused
         return SimpleNamespace(to_wire=lambda: {"invalid": {"not", "json"}})
 
     monkeypatch.setattr(daemon.trajectory, "snapshot", invalid)
-    responses = await _exchange([_handshake(), request])
+    responses = await exchange([_handshake(), frame])
     assert responses[1]["error"]["code"] == "internal"

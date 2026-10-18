@@ -2,57 +2,24 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
+from functools import partial
 
 import pytest
 
-from theater import paths, protocol
+from tests.support.frontend_wire import exchange, handshake, request
 from theater.daemon.frontend import router as router_mod
 from theater.daemon.frontend.catalog_handlers import CATALOG_HANDLERS
 from theater.daemon.frontend.handlers import PUBLIC_HANDLERS
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.frontend.capabilities import (
     METHOD_CATALOG,
-    PUBLIC_API_MAJOR,
-    PUBLIC_API_MINOR,
     TERMINAL_PROVIDER_CAPABILITY,
 )
 from theater.frontend.dto.catalogs import NativeCompatibility
 from theater.frontend.schemas import validator_for
 from theater.models import ProviderRecord, now
 
-
-def _request(request_id: int, method: str, params: dict | None = None) -> bytes:
-    return protocol.encode({"id": request_id, "method": method, "params": params or {}})
-
-
-def _handshake() -> bytes:
-    return _request(
-        1,
-        "frontend.handshake",
-        {
-            "api": {"major": PUBLIC_API_MAJOR, "minor": PUBLIC_API_MINOR},
-            "client_id": "catalog-api-test",
-            "role": "operator",
-            "channel": "rpc",
-            "required_capabilities": [],
-        },
-    )
-
-
-async def _exchange(frames: list[bytes]) -> list[dict]:
-    reader, writer = await asyncio.open_unix_connection(str(paths.socket_path()))
-    try:
-        responses = []
-        for frame in frames:
-            writer.write(frame)
-            await writer.drain()
-            responses.append(json.loads(await protocol.read_message(reader)))
-        return responses
-    finally:
-        writer.close()
-        await writer.wait_closed()
+_handshake = partial(handshake, "catalog-api-test")
 
 
 @pytest.fixture
@@ -101,7 +68,7 @@ async def test_harness_catalog_separates_installation_provider_readiness_and_nat
         ]
 
     monkeypatch.setattr("theater.daemon.frontend.catalog_handlers._harnesses", harnesses)
-    missing = (await _exchange([_handshake(), _request(2, "frontend.catalogs.harnesses")]))[1]
+    missing = (await exchange([_handshake(), request(2, "frontend.catalogs.harnesses")]))[1]
 
     _validate("frontend.catalogs.harnesses", missing)
     entry = missing["result"]["items"][0]
@@ -117,8 +84,8 @@ async def test_harness_catalog_separates_installation_provider_readiness_and_nat
     with daemon.store.write_unit() as unit:
         daemon.store.providers.register(_provider(capabilities=()), connection=unit.connection)
     incompatible = (
-        await _exchange(
-            [_handshake(), _request(2, "frontend.catalogs.harnesses", {"provider": "selected"})]
+        await exchange(
+            [_handshake(), request(2, "frontend.catalogs.harnesses", {"provider": "selected"})]
         )
     )[1]
 
@@ -145,8 +112,8 @@ async def test_harness_catalog_uses_a_live_compatible_selected_provider(
     )
 
     response = (
-        await _exchange(
-            [_handshake(), _request(2, "frontend.catalogs.harnesses", {"provider": "selected"})]
+        await exchange(
+            [_handshake(), request(2, "frontend.catalogs.harnesses", {"provider": "selected"})]
         )
     )[1]
 
@@ -160,11 +127,11 @@ async def test_harness_catalog_uses_a_live_compatible_selected_provider(
 
 async def test_model_and_skill_catalogs_reuse_daemon_owned_discovery(daemon, catalog_dispatch):
     del catalog_dispatch
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.catalogs.models"),
-            _request(3, "frontend.skills.list"),
+            request(2, "frontend.catalogs.models"),
+            request(3, "frontend.skills.list"),
         ]
     )
 
@@ -176,7 +143,7 @@ async def test_model_and_skill_catalogs_reuse_daemon_owned_discovery(daemon, cat
     skill_name = responses[2]["result"]["items"][0]["name"]
 
     loaded = (
-        await _exchange([_handshake(), _request(2, "frontend.skills.load", {"name": skill_name})])
+        await exchange([_handshake(), request(2, "frontend.skills.load", {"name": skill_name})])
     )[1]
     _validate("frontend.skills.load", loaded)
     assert loaded["result"]["name"] == skill_name

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.builders import make_bus_row, make_job, make_participant, make_touch
 from theater import paths
 from theater.config import RetentionSection
 from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
@@ -45,7 +46,6 @@ from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.launch import LaunchPlan
 from theater.models import (
     BadRequest,
-    Job,
     Participant,
     Status,
     Tier,
@@ -74,102 +74,6 @@ def _retention(**overrides) -> RetentionSection:
     }
     defaults.update(overrides)
     return RetentionSection(**defaults)
-
-
-def _participant(
-    store,
-    *,
-    pid: str = "p1",
-    harness: str = "vibe",
-    cwd: str = "/tmp",
-    parent_id: str | None = None,
-    workspace_id: str | None = None,
-    status: Status = Status.DEAD,
-) -> Participant:
-    p = Participant(
-        id=pid,
-        harness=harness,
-        tier=Tier.SPAWNED,
-        cwd=cwd,
-        parent_id=parent_id,
-        workspace_id=workspace_id,
-        status=status,
-    )
-    store.upsert_participant(p)
-    return p
-
-
-def _job(
-    store,
-    *,
-    handle: str,
-    caller_id: str = "cli",
-    target_id: str | None = "p1",
-    kind: str = "spawn",
-    prompt: str | None = "do the thing",
-    state: str = JobState.DONE,
-    result: str | None = "done",
-    error_code: str | None = None,
-    created_at: float | None = None,
-    finished_at: float | None = None,
-) -> None:
-    store.create_job(
-        Job(
-            handle=handle,
-            caller_id=caller_id,
-            target_id=target_id,
-            kind=kind,
-            prompt=prompt,
-            state=state,
-            result=result,
-            error_code=error_code,
-            created_at=created_at if created_at is not None else now(),
-            finished_at=finished_at,
-        )
-    )
-
-
-def _touch(
-    store,
-    *,
-    job_handle: str,
-    path: str = "src/main.py",
-    mode: str = "write",
-    sha_before: str | None = None,
-    sha_after: str | None = None,
-) -> None:
-    store.conn.execute(
-        touch.insert().values(
-            job_handle=job_handle,
-            path=path,
-            mode=mode,
-            sha_before=sha_before,
-            sha_after=sha_after,
-        )
-    )
-
-
-def _bus(
-    store,
-    *,
-    kind: str = "job.created",
-    ts: float | None = None,
-    from_id: str | None = None,
-    to_id: str | None = None,
-    payload: str | None = None,
-) -> int:
-    result = store.conn.execute(
-        bus.insert().values(
-            ts=ts if ts is not None else now(),
-            from_id=from_id,
-            to_id=to_id,
-            kind=kind,
-            payload=payload,
-        )
-    )
-    pk = result.inserted_primary_key
-    assert pk is not None
-    return pk[0]
 
 
 def _scratchpad_entry(
@@ -272,8 +176,8 @@ async def test_running_job_survives_sweep(store):
     asyncio.Event that await_sessions is blocked on. Deleting a running job
     row makes the caller hang until its own timeout with no explanation.
     """
-    _participant(store, pid="p1")
-    _job(
+    make_participant(store, pid="p1")
+    make_job(
         store,
         handle="job1",
         target_id="p1",
@@ -294,8 +198,8 @@ async def test_finish_still_works_after_sweep(store):
     If the sweep deleted the running job, finish() would find None and
     return None without setting the event, and the caller would hang.
     """
-    _participant(store, pid="p1")
-    _job(
+    make_participant(store, pid="p1")
+    make_job(
         store,
         handle="job1",
         target_id="p1",
@@ -327,8 +231,8 @@ async def test_stale_running_job_is_marked_crashed(store):
     """A running job older than stale_running_days is marked crashed/abandoned
     with a non-null finished_at — so the jobs phase can then delete it.
     """
-    _participant(store, pid="p1")
-    _job(
+    make_participant(store, pid="p1")
+    make_job(
         store,
         handle="stale",
         target_id="p1",
@@ -349,8 +253,8 @@ async def test_live_running_job_is_not_marked(store):
     """A stale running job whose handle is in live_handles is left alone —
     the running daemon's JobManager still holds an asyncio.Event for it.
     """
-    _participant(store, pid="p1")
-    _job(
+    make_participant(store, pid="p1")
+    make_job(
         store,
         handle="live",
         target_id="p1",
@@ -383,8 +287,8 @@ async def test_dead_participant_referenced_as_parent_is_kept(store):
     parent survives because the child's parent_id points at it, and the
     DELETE evaluates the subquery before removing any rows.
     """
-    _participant(store, pid="parent", parent_id=None)
-    _participant(store, pid="child", parent_id="parent")
+    make_participant(store, pid="parent", parent_id=None)
+    make_participant(store, pid="child", parent_id="parent")
 
     result = await sweep(store, _retention())
     # The child is dead and unreferenced — it goes. The parent is protected
@@ -400,8 +304,8 @@ async def test_dead_participant_becomes_eligible_when_child_gone(store):
     """Once the child is also dead and unreferenced, the parent becomes
     eligible for deletion in the same sweep.
     """
-    _participant(store, pid="parent", parent_id=None)
-    _participant(store, pid="child", parent_id="parent")
+    make_participant(store, pid="parent", parent_id=None)
+    make_participant(store, pid="child", parent_id="parent")
 
     # Delete the child's parent_id reference so parent is no longer a parent.
     store.conn.execute(
@@ -415,8 +319,8 @@ async def test_dead_participant_becomes_eligible_when_child_gone(store):
 
 
 async def test_dead_participant_referenced_as_target_id_is_kept(store):
-    _participant(store, pid="p1")
-    _job(
+    make_participant(store, pid="p1")
+    make_job(
         store,
         handle="j1",
         caller_id="cli",
@@ -441,9 +345,9 @@ async def test_dead_participant_referenced_as_caller_id_is_kept(store):
     through the jobs table; deleting a participant that is a caller would
     orphan those job rows from attribution.
     """
-    _participant(store, pid="caller")
+    make_participant(store, pid="caller")
     # A job that is NOT old enough to be swept — so the participant stays.
-    _job(
+    make_job(
         store,
         handle="j1",
         caller_id="caller",
@@ -475,7 +379,7 @@ async def test_active_workspace_usage_keeps_dead_participant_and_workspace(store
         holder_id="holder",
         acquired_at=timestamp,
     )
-    _participant(store, pid="holder", workspace_id=workspace.workspace_id)
+    make_participant(store, pid="holder", workspace_id=workspace.workspace_id)
     with store.write_unit() as unit:
         store.workspaces.create(workspace, connection=unit.connection)
         assert store.workspaces.acquire_usage(usage, connection=unit.connection)
@@ -488,7 +392,7 @@ async def test_active_workspace_usage_keeps_dead_participant_and_workspace(store
 
 
 async def test_tmux_restart_participant_waits_for_jobs_retention_after_termination(store):
-    participant = _participant(store, pid="restart")
+    participant = make_participant(store, pid="restart")
     participant.termination_reason = TMUX_RESTART_TERMINATION_REASON
     participant.termination_incident = "incident-123"
     participant.terminated_at = now()
@@ -506,8 +410,8 @@ async def test_tmux_restart_participant_waits_for_jobs_retention_after_terminati
 
 
 async def test_resume_predecessor_is_kept_until_its_successor_is_deleted(store):
-    predecessor = _participant(store, pid="predecessor")
-    successor = _participant(store, pid="successor", status=Status.IDLE)
+    predecessor = make_participant(store, pid="predecessor")
+    successor = make_participant(store, pid="successor", status=Status.IDLE)
     successor.resumed_from_id = predecessor.id
     store.upsert_participant(successor)
 
@@ -532,8 +436,8 @@ async def test_no_touch_row_survives_without_its_job(store):
     """After the sweep, no touch row survives whose job_handle no longer
     exists in jobs. The two must be deleted together.
     """
-    _participant(store, pid="p1")
-    _job(
+    make_participant(store, pid="p1")
+    make_job(
         store,
         handle="old",
         target_id="p1",
@@ -541,8 +445,8 @@ async def test_no_touch_row_survives_without_its_job(store):
         finished_at=now() - 90 * _DAY,
         created_at=now() - 90 * _DAY,
     )
-    _touch(store, job_handle="old", path="a.py")
-    _touch(store, job_handle="old", path="b.py")
+    make_touch(store, job_handle="old", path="a.py")
+    make_touch(store, job_handle="old", path="b.py")
 
     result = await sweep(store, _retention(jobs_days=60))
     assert result.jobs == 1
@@ -561,9 +465,9 @@ async def test_repair_and_audit_rows_go_with_their_job_and_contracts_with_their_
     """Repair attempts and the contract audit are keyed by job; custom contracts by creator."""
     from theater.daemon.persistence.repositories.job_repairs import RepairAttempt, RepairState
 
-    _participant(store, pid="p1")
+    make_participant(store, pid="p1")
     for handle, finished in (("old", now() - 90 * _DAY), ("recent", now())):
-        _job(
+        make_job(
             store,
             handle=handle,
             target_id="p1",
@@ -608,9 +512,11 @@ async def test_a_fenced_repair_keeps_its_job_until_its_context_is_provably_gone(
     from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
     from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
 
-    _participant(store, pid="p1", status=Status.IDLE)
+    make_participant(store, pid="p1", status=Status.IDLE)
     old = now() - 90 * _DAY
-    _job(store, handle="old", target_id="p1", state=JobState.DONE, finished_at=old, created_at=old)
+    make_job(
+        store, handle="old", target_id="p1", state=JobState.DONE, finished_at=old, created_at=old
+    )
     store.create_repair_attempt(
         RepairAttempt(
             attempt_id="old~repair1",
@@ -652,8 +558,8 @@ async def test_a_fenced_repair_keeps_its_job_until_its_context_is_provably_gone(
 
 async def test_touch_rows_for_surviving_jobs_are_kept(store):
     """Touch rows for a job that is NOT swept must survive."""
-    _participant(store, pid="p1")
-    _job(
+    make_participant(store, pid="p1")
+    make_job(
         store,
         handle="recent",
         target_id="p1",
@@ -661,7 +567,7 @@ async def test_touch_rows_for_surviving_jobs_are_kept(store):
         finished_at=now(),
         created_at=now(),
     )
-    _touch(store, job_handle="recent", path="c.py")
+    make_touch(store, job_handle="recent", path="c.py")
 
     result = await sweep(store, _retention(jobs_days=60))
     assert result.jobs == 0
@@ -674,8 +580,8 @@ async def test_touch_rows_for_surviving_jobs_are_kept(store):
 
 async def test_old_bus_rows_are_deleted(store):
     old_ts = now() - 30 * _DAY
-    _bus(store, kind="job.created", ts=old_ts)
-    _bus(store, kind="job.finished", ts=old_ts)
+    make_bus_row(store, kind="job.created", ts=old_ts)
+    make_bus_row(store, kind="job.finished", ts=old_ts)
 
     result = await sweep(store, _retention(bus_days=7))
     assert result.bus == 2
@@ -683,17 +589,17 @@ async def test_old_bus_rows_are_deleted(store):
 
 
 async def test_active_identity_loss_audit_survives_batched_bus_retention(store):
-    _participant(store, status=Status.IDLE)
+    make_participant(store, status=Status.IDLE)
     old_ts = now() - 30 * _DAY
-    loss_id = _bus(
+    loss_id = make_bus_row(
         store,
         kind="agent.observation_error",
         ts=old_ts,
         to_id="p1",
         payload=json.dumps({"code": TRANSCRIPT_IDENTITY_LOST_CODE}),
     )
-    _bus(store, kind="job.created", ts=old_ts)
-    _bus(store, kind="job.finished", ts=old_ts)
+    make_bus_row(store, kind="job.created", ts=old_ts)
+    make_bus_row(store, kind="job.finished", ts=old_ts)
 
     result = await sweep(store, _retention(bus_days=7, batch=1))
 
@@ -722,16 +628,16 @@ async def test_active_identity_loss_audit_survives_batched_bus_retention(store):
 async def test_identity_loss_audit_retention_follows_clearing_events(
     store, kind, payload, deleted, remaining
 ):
-    _participant(store, status=Status.IDLE)
+    make_participant(store, status=Status.IDLE)
     old_ts = now() - 30 * _DAY
-    _bus(
+    make_bus_row(
         store,
         kind="agent.observation_error",
         ts=old_ts,
         to_id="p1",
         payload=json.dumps({"code": TRANSCRIPT_IDENTITY_LOST_CODE}),
     )
-    _bus(store, kind=kind, ts=now(), to_id="p1", payload=payload)
+    make_bus_row(store, kind=kind, ts=now(), to_id="p1", payload=payload)
 
     result = await sweep(store, _retention(bus_days=7, batch=1))
 
@@ -744,7 +650,7 @@ async def test_send_refused_of_same_age_survives(store):
     from the age TTL.
     """
     old_ts = now() - 30 * _DAY
-    _bus(store, kind="send.refused", ts=old_ts)
+    make_bus_row(store, kind="send.refused", ts=old_ts)
 
     result = await sweep(store, _retention(bus_days=7))
     assert result.bus == 0
@@ -758,7 +664,7 @@ async def test_refused_cap_trims_oldest(store):
     cap = 3
     ids = []
     for i in range(5):
-        ids.append(_bus(store, kind="send.refused", ts=now() - (100 - i) * _DAY))
+        ids.append(make_bus_row(store, kind="send.refused", ts=now() - (100 - i) * _DAY))
     # ids are autoincrement, so ids[0] < ids[1] < ... < ids[4]
     # The newest `cap` should survive: ids[2], ids[3], ids[4].
 
@@ -782,9 +688,9 @@ async def test_batching_loops_until_all_deleted(store):
     """With batch set small and many rows to delete, the sweep still removes
     all of them — the loop repeats rather than doing one pass.
     """
-    _participant(store, pid="p1")
+    make_participant(store, pid="p1")
     for i in range(10):
-        _job(
+        make_job(
             store,
             handle=f"j{i}",
             target_id="p1",
@@ -792,7 +698,7 @@ async def test_batching_loops_until_all_deleted(store):
             finished_at=now() - 90 * _DAY,
             created_at=now() - 90 * _DAY,
         )
-        _touch(store, job_handle=f"j{i}", path=f"file{i}.py")
+        make_touch(store, job_handle=f"j{i}", path=f"file{i}.py")
 
     result = await sweep(store, _retention(jobs_days=60, batch=2))
     assert result.jobs == 10
@@ -803,7 +709,7 @@ async def test_batching_loops_until_all_deleted(store):
 
 async def test_participant_sweep_honours_small_batches(store):
     for index in range(5):
-        _participant(store, pid=f"dead-{index}")
+        make_participant(store, pid=f"dead-{index}")
 
     result = await sweep(store, _retention(batch=2))
     assert result.participants == 5
@@ -813,7 +719,7 @@ async def test_participant_sweep_honours_small_batches(store):
 async def test_invalid_artifact_owner_does_not_starve_later_participants(store):
     blocked_id = "000000000001"
     later_id = "000000000002"
-    _participant(store, pid=blocked_id)
+    make_participant(store, pid=blocked_id)
     store.conn.execute(
         participant_artifacts.insert().values(
             participant_id=blocked_id,
@@ -823,7 +729,7 @@ async def test_invalid_artifact_owner_does_not_starve_later_participants(store):
             kind="corrupt",
         )
     )
-    _participant(store, pid=later_id)
+    make_participant(store, pid=later_id)
 
     result = await sweep(store, _retention(batch=1))
 
@@ -836,13 +742,13 @@ async def test_invalid_artifact_owner_does_not_starve_later_participants(store):
 
 
 async def test_retained_dead_participant_keeps_nonsecret_artifacts(store):
-    participant = _participant(store, pid="abcdef123456", status=Status.IDLE)
+    participant = make_participant(store, pid="abcdef123456", status=Status.IDLE)
     artifact_paths = _materialize_participant_artifacts(store, participant)
     Registry(store).mark_dead(participant.id)
     observation = paths.participant_observation_dir(participant.id, participant.harness)
     assert not (observation / "receipt-token").exists()
     assert not (observation / "hook.token").exists()
-    _participant(store, pid="child", parent_id=participant.id, status=Status.IDLE)
+    make_participant(store, pid="child", parent_id=participant.id, status=Status.IDLE)
 
     result = await sweep(store, _retention())
 
@@ -855,10 +761,10 @@ async def test_retained_dead_participant_keeps_nonsecret_artifacts(store):
 
 
 async def test_retained_dead_row_cleans_secret_credentials_after_crash(store):
-    participant = _participant(store, pid="abcdef123456")
+    participant = make_participant(store, pid="abcdef123456")
     _materialize_participant_artifacts(store, participant)
     store.set_status(participant.id, Status.DEAD)
-    _participant(store, pid="child", parent_id=participant.id, status=Status.IDLE)
+    make_participant(store, pid="child", parent_id=participant.id, status=Status.IDLE)
 
     observation = paths.participant_observation_dir(participant.id, participant.harness)
     receipt = observation / "receipt-token"
@@ -876,7 +782,7 @@ async def test_retained_dead_row_cleans_secret_credentials_after_crash(store):
 
 
 async def test_eligible_participant_removes_all_owned_artifacts(store):
-    participant = _participant(store, pid="abcdef123456")
+    participant = make_participant(store, pid="abcdef123456")
     artifact_paths = _materialize_participant_artifacts(store, participant)
     global_state = paths.plugin_state_dir("alerts")
     global_state.mkdir()
@@ -976,7 +882,7 @@ async def test_secret_cleanup_refuses_external_paths_but_removes_metadata(store,
 
 
 async def test_failed_artifact_cleanup_keeps_ownership_for_retry(store, monkeypatch):
-    participant = _participant(store, pid="abcdef123456")
+    participant = make_participant(store, pid="abcdef123456")
     _materialize_participant_artifacts(store, participant)
     target = paths.participant_dir(participant.id).resolve(strict=False)
     original_remove = artifacts_module._remove_one
@@ -1030,7 +936,7 @@ async def test_orphan_cleanup_rechecks_owner_before_removal(store, monkeypatch):
     async def race_to_thread(fn, /, *args, label, **kwargs):
         result = await original_to_thread(fn, *args, label=label, **kwargs)
         if fn is gc_module.orphan_paths:
-            _participant(store, pid=owner_id, status=Status.IDLE)
+            make_participant(store, pid=owner_id, status=Status.IDLE)
         return result
 
     monkeypatch.setattr(gc_module.workers, "to_thread", race_to_thread)
@@ -1043,7 +949,7 @@ async def test_orphan_cleanup_rechecks_owner_before_removal(store, monkeypatch):
 
 async def test_participant_artifact_cleanup_honours_batches(store):
     for index in range(5):
-        participant = _participant(store, pid=f"{index + 1:012x}")
+        participant = make_participant(store, pid=f"{index + 1:012x}")
         _materialize_participant_artifacts(store, participant)
 
     result = await sweep(store, _retention(batch=2))
@@ -1129,10 +1035,10 @@ async def test_global_scratchpad_cleanup_is_batched(store):
 
 async def test_sweep_result_counts_match_all_tables(store):
     """SweepResult fields match actual deletions across all tables."""
-    _participant(store, pid="p1")
-    _participant(store, pid="p2")
+    make_participant(store, pid="p1")
+    make_participant(store, pid="p2")
 
-    _job(
+    make_job(
         store,
         handle="old1",
         target_id="p1",
@@ -1141,10 +1047,10 @@ async def test_sweep_result_counts_match_all_tables(store):
         finished_at=now() - 90 * _DAY,
         created_at=now() - 90 * _DAY,
     )
-    _touch(store, job_handle="old1", path="x.py")
+    make_touch(store, job_handle="old1", path="x.py")
 
-    _bus(store, kind="job.created", ts=now() - 30 * _DAY)
-    _bus(store, kind="send.refused", ts=now() - 30 * _DAY)
+    make_bus_row(store, kind="job.created", ts=now() - 30 * _DAY)
+    make_bus_row(store, kind="send.refused", ts=now() - 30 * _DAY)
 
     _scratchpad_entry(store, expires_at=now() - 1)
 

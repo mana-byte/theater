@@ -8,9 +8,11 @@ import pytest
 from sqlalchemy import select, update
 
 import theater.daemon.frontend.participant_mutation_handlers as mutation_handlers
+from tests.support.builders import operator_context
 from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from tests.support.presence import AbsentPresence, UnknownPresence
 from tests.support.provider_controls import online, provider_target
+from tests.support.waiting import settle_operations
 from theater.daemon.controls.routing import ControlRouteResolver
 from theater.daemon.frontend.control_handlers import (
     _error,
@@ -21,7 +23,6 @@ from theater.daemon.frontend.control_handlers import (
     controls_settings_update,
     controls_steer,
 )
-from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.operation_handlers import operations_reconcile
 from theater.daemon.frontend.participant_mutation_handlers import (
     participants_status,
@@ -37,7 +38,7 @@ from theater.daemon.persistence.repositories.runtime_bindings import Participant
 from theater.daemon.rpc import participants as participant_rpc
 from theater.daemon.schema import orchestration_events, terminal_bindings, workspaces
 from theater.daemon.terminals import CallbackOutcomeUnknown
-from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
+from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validate_callback_request, validator_for
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -71,17 +72,6 @@ from theater.models import (
 )
 
 
-def _context() -> ConnectionContext:
-    return ConnectionContext(
-        client_id="operator-a",
-        role=ConnectionRole.OPERATOR,
-        channel=ConnectionChannel.RPC,
-        api_major=1,
-        api_minor=0,
-        capabilities=frozenset({"orchestration.v1"}),
-    )
-
-
 async def _install_native_runtime(
     daemon, participant_id: str, *, generation: int, session_id: str
 ) -> tuple[FakeRuntime, FakeRuntimeState]:
@@ -109,13 +99,6 @@ async def _install_native_runtime(
     return runtime, state
 
 
-async def _settle(daemon) -> None:
-    await asyncio.sleep(0)
-    tasks = daemon.operation_service.owned_tasks
-    if tasks:
-        await asyncio.gather(*tasks)
-
-
 async def _control_for_public_operation(daemon, operation_id: str):
     for _ in range(20):
         operation = daemon.operation_service.get(operation_id)
@@ -131,7 +114,9 @@ def _accepted(method: str, value: object) -> None:
 
 async def _public_action_views(daemon, participant, *, actor: str):
     participant_value = await participant_to_wire(daemon, participant)
-    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    controls_value = await controls_get(
+        daemon, operator_context(), {"participant_id": participant.id}
+    )
     snapshot = daemon.state_service.snapshot(actor, page_size=500)
     snapshot_value = next(
         item for item in snapshot["participants"] if item["participant_id"] == participant.id
@@ -164,11 +149,15 @@ async def test_provider_send_links_one_public_operation_job_and_control(
         "prompt": "review this",
         "response_format": {"type": "object"},
     }
-    accepted = await controls_send(daemon, _context(), params, idempotency_key="provider-send-a")
-    duplicate = await controls_send(daemon, _context(), params, idempotency_key="provider-send-a")
+    accepted = await controls_send(
+        daemon, operator_context(), params, idempotency_key="provider-send-a"
+    )
+    duplicate = await controls_send(
+        daemon, operator_context(), params, idempotency_key="provider-send-a"
+    )
     _accepted("frontend.controls.send", accepted)
     assert duplicate == accepted
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.SUCCEEDED.value, operation.error
@@ -228,20 +217,20 @@ async def test_second_provider_send_is_refused_while_first_job_is_running(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
     first = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "first"},
         idempotency_key="provider-send-first",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     assert daemon.operation_service.get(first["operation_id"]).state == "succeeded"
 
     second = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "second"},
         idempotency_key="provider-send-second",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     refused = daemon.operation_service.get(second["operation_id"])
     assert refused.state == PublicOperationState.FAILED.value
@@ -266,13 +255,13 @@ async def test_public_send_acceptance_atomically_persists_job_control_and_operat
 
     accepted = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         params,
         idempotency_key="atomic-public-send",
     )
     duplicate = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         params,
         idempotency_key="atomic-public-send",
     )
@@ -325,11 +314,11 @@ async def test_provider_unknown_keeps_barrier_and_queued_followup(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", unknown)
     accepted = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "uncertain"},
         idempotency_key="provider-send-unknown",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.UNCERTAIN.value
     assert daemon.store.has_execution_barrier(participant_id)
@@ -339,7 +328,7 @@ async def test_provider_unknown_keeps_barrier_and_queued_followup(
     assert daemon.store.unresolved_prompt_delivery_operations(participant_id) == []
     reconciled = await operations_reconcile(
         daemon,
-        _context(),
+        operator_context(),
         {"operation_id": operation.operation_id},
     )
     assert reconciled["state"] == PublicOperationState.UNCERTAIN.value
@@ -347,11 +336,11 @@ async def test_provider_unknown_keeps_barrier_and_queued_followup(
 
     second = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "must not cross the barrier"},
         idempotency_key="provider-send-after-unknown",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     refused = daemon.operation_service.get(second["operation_id"])
     assert refused.state == PublicOperationState.FAILED.value
     assert refused.error is not None and refused.error["code"] == "busy"
@@ -359,7 +348,7 @@ async def test_provider_unknown_keeps_barrier_and_queued_followup(
 
     queued = await controls_queue_followup(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "later"},
         idempotency_key="provider-queue-a",
     )
@@ -425,15 +414,15 @@ async def test_provider_queue_waits_for_accepted_job_to_finish(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
     sent = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "start"},
         idempotency_key="provider-active-send",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     send_operation = daemon.operation_service.get(sent["operation_id"])
     queued = await controls_queue_followup(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "later"},
         idempotency_key="provider-active-queue",
     )
@@ -446,7 +435,7 @@ async def test_provider_queue_waits_for_accepted_job_to_finish(
 
     daemon.jobs.finish(send_operation.job_handle, state=JobState.DONE)
     await daemon.controls.dispatch_queue(participant_id)
-    await _settle(daemon)
+    await settle_operations(daemon)
     assert daemon.operation_service.get(queued["operation_id"]).state == "succeeded"
     assert requests == ["terminal.deliver", "terminal.deliver"]
 
@@ -478,14 +467,14 @@ async def test_public_provider_queue_reports_presence_refusal_on_its_original_op
     monkeypatch.setattr(daemon.terminal_service.connections, "request", deliver)
     sent = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "start"},
         idempotency_key="provider-public-start",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     queued = await controls_queue_followup(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "later"},
         idempotency_key="provider-public-queue-presence",
     )
@@ -493,7 +482,7 @@ async def test_public_provider_queue_reports_presence_refusal_on_its_original_op
     first_handle = daemon.operation_service.get(sent["operation_id"]).job_handle
     daemon.jobs.finish(first_handle, state=JobState.DONE)
     await daemon.controls.dispatch_queue(participant_id)
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     operation = daemon.operation_service.get(queued["operation_id"])
     assert operation.state == "failed" and operation.control_operation_id is not None
@@ -519,14 +508,14 @@ async def test_queued_public_operation_waiter_is_owned_and_drained_on_close(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
     sent = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "active"},
         idempotency_key="provider-owned-send",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     queued = await controls_queue_followup(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "held"},
         idempotency_key="provider-owned-queue",
     )
@@ -570,11 +559,11 @@ async def test_provider_rejection_is_definitive_and_provider_settings_stay_unsup
     monkeypatch.setattr(daemon.terminal_service.connections, "request", rejected)
     sent = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "refuse"},
         idempotency_key="provider-send-rejected",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     operation = daemon.operation_service.get(sent["operation_id"])
     assert operation.state == PublicOperationState.FAILED.value
     assert operation.control_operation_id is not None
@@ -583,12 +572,12 @@ async def test_provider_rejection_is_definitive_and_provider_settings_stay_unsup
 
     settings = await controls_settings_update(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "model": "gpt-5"},
         idempotency_key="provider-settings-refused",
     )
     _accepted("frontend.controls.settings.update", settings)
-    await _settle(daemon)
+    await settle_operations(daemon)
     settings_operation = daemon.operation_service.get(settings["operation_id"])
     assert settings_operation.state == PublicOperationState.FAILED.value
     assert settings_operation.control_operation_id is None
@@ -647,15 +636,15 @@ async def test_provider_steer_submits_with_enter_only_where_the_harness_declares
     participant_id = provider_target(daemon, harness=harness)
     await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "start"},
         idempotency_key="steer-enter-send",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     actions.clear()
     steer = controls_steer(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "adjust"},
         idempotency_key="steer-enter",
     )
@@ -665,7 +654,7 @@ async def test_provider_steer_submits_with_enter_only_where_the_harness_declares
         assert actions == []
         return
     _accepted("frontend.controls.steer", await steer)
-    await _settle(daemon)
+    await settle_operations(daemon)
     assert actions == ["submit_text"]  # Enter, never a bare paste
 
 
@@ -689,15 +678,15 @@ async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
     sent = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "start"},
         idempotency_key="provider-send-running",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     send_operation = daemon.operation_service.get(sent["operation_id"])
     steered = await controls_steer(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "adjust"},
         idempotency_key="provider-steer-a",
     )
@@ -706,12 +695,12 @@ async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(
     assert steer_reserved.state == PublicOperationState.ACCEPTED.value
     assert steer_reserved.job_handle == send_operation.job_handle
     assert daemon.store.get_control_operation(steer_reserved.control_operation_id) is not None
-    await _settle(daemon)
+    await settle_operations(daemon)
     steer_operation = daemon.operation_service.get(steered["operation_id"])
     assert steer_operation.job_handle == send_operation.job_handle
     interrupted = await controls_interrupt(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id},
         idempotency_key="provider-interrupt-a",
     )
@@ -720,12 +709,12 @@ async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(
     assert interrupt_reserved.state == PublicOperationState.ACCEPTED.value
     assert interrupt_reserved.control_operation_id is not None
     assert interrupt_reserved.job_handle is None
-    await _settle(daemon)
+    await settle_operations(daemon)
     assert daemon.operation_service.get(interrupted["operation_id"]).state == "succeeded"
     daemon.jobs.finish(send_operation.job_handle, state=JobState.DONE)
     queued = await controls_queue_followup(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "next"},
         idempotency_key="provider-queue-dispatch",
     )
@@ -734,7 +723,7 @@ async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(
     assert queue_reserved.state == PublicOperationState.ACCEPTED.value
     assert queue_reserved.control_operation_id is not None
     assert queued["job_handle"] == queue_reserved.job_handle
-    await _settle(daemon)
+    await settle_operations(daemon)
     assert daemon.operation_service.get(queued["operation_id"]).state == "succeeded"
     assert methods == [
         "terminal.deliver",
@@ -767,9 +756,12 @@ async def test_provider_interrupt_is_idle_noop_and_uses_each_harness_plan(
 
     monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
     idle = await controls_interrupt(
-        daemon, _context(), {"participant_id": participant_id}, idempotency_key="idle-interrupt"
+        daemon,
+        operator_context(),
+        {"participant_id": participant_id},
+        idempotency_key="idle-interrupt",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     operation = daemon.operation_service.get(idle["operation_id"])
     assert operation.state == "succeeded"
     assert operation.phase == "already_idle"
@@ -804,7 +796,7 @@ async def test_provider_identity_change_refuses_without_dispatch(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", request)
     accepted = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "fenced"},
         idempotency_key="provider-send-fenced",
     )
@@ -825,7 +817,7 @@ async def test_provider_identity_change_refuses_without_dispatch(
                 .where(terminal_bindings.c.participant_id == participant_id)
                 .values(terminal_incarnation="incarnation-b", updated_at=now())
             )
-    await _settle(daemon)
+    await settle_operations(daemon)
     assert not called
     assert daemon.operation_service.get(accepted["operation_id"]).state == "failed"
 
@@ -844,7 +836,7 @@ async def test_controls_projection_is_schema_valid_and_unknown_presence_blocks(
         raise AssertionError("unknown presence must block provider delivery")
 
     monkeypatch.setattr(daemon.terminal_service.connections, "request", request)
-    result = await controls_get(daemon, _context(), {"participant_id": participant_id})
+    result = await controls_get(daemon, operator_context(), {"participant_id": participant_id})
     validator_for(METHOD_CATALOG["frontend.controls.get"].result_schema_id).validate(result)
     assert result["actions"]["send"]["route_available"] is True
     assert result["actions"]["send"]["admissible"] is False
@@ -857,11 +849,11 @@ async def test_controls_projection_is_schema_valid_and_unknown_presence_blocks(
     assert result["human_presence"]["state"] == "unknown"
     accepted = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "blocked"},
         idempotency_key="provider-presence-blocked",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.FAILED.value
     control = daemon.store.get_control_operation(operation.control_operation_id)
@@ -966,7 +958,7 @@ async def test_production_reconciler_settles_exact_durable_control_evidence(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", forbidden_dispatch)
     reconciled = await operations_reconcile(
         daemon,
-        _context(),
+        operator_context(),
         {"operation_id": operation_id},
     )
 
@@ -1007,7 +999,7 @@ async def test_public_native_settings_reservation_precedes_detached_dispatch(
     monkeypatch.setattr(daemon.operation_service, "start", suppress_start)
     accepted = await controls_settings_update(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "model": "gpt-5"},
         idempotency_key="atomic-native-settings",
     )
@@ -1053,7 +1045,7 @@ async def test_cached_native_route_is_consistent_across_public_read_and_admissio
     with pytest.raises(StaleTarget, match=r"native runtime route.*unavailable"):
         await controls_settings_update(
             daemon,
-            _context(),
+            operator_context(),
             {"participant_id": participant_id, "model": "gpt-5"},
             idempotency_key="native-settings-before-snapshot",
         )
@@ -1073,7 +1065,9 @@ async def test_cached_native_route_is_consistent_across_public_read_and_admissio
         participant_id, RuntimeCapability.SETTINGS_UPDATE
     ).route_available
 
-    controls_value = await controls_get(daemon, _context(), {"participant_id": participant_id})
+    controls_value = await controls_get(
+        daemon, operator_context(), {"participant_id": participant_id}
+    )
     assert controls_value["actions"]["settings_update"]["route_available"] is True
     snapshot = daemon.state_service.snapshot("native-route-client", page_size=500)
     snapshot_value = next(
@@ -1091,7 +1085,7 @@ async def test_cached_native_route_is_consistent_across_public_read_and_admissio
     monkeypatch.setattr(daemon.operation_service, "start", suppress_start)
     admitted = await controls_settings_update(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "model": "gpt-5"},
         idempotency_key="native-settings-after-snapshot",
     )
@@ -1132,7 +1126,9 @@ async def test_native_capability_projection_is_consistent_across_public_reads(da
         CapabilityUnavailableReason.GATED_BY_BACKEND
     )
 
-    before_controls = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    before_controls = await controls_get(
+        daemon, operator_context(), {"participant_id": participant.id}
+    )
     before_snapshot = daemon.state_service.snapshot("native-capability-before", page_size=500)
     before_value = next(
         item for item in before_snapshot["participants"] if item["participant_id"] == participant.id
@@ -1145,7 +1141,9 @@ async def test_native_capability_projection_is_consistent_across_public_reads(da
     assert before_value["actions"]["send"]["reason"] == "not_determined"
 
     participant_value = await participant_to_wire(daemon, participant)
-    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    controls_value = await controls_get(
+        daemon, operator_context(), {"participant_id": participant.id}
+    )
     snapshot = daemon.state_service.snapshot("native-capability-client", page_size=500)
     snapshot_value = next(
         item for item in snapshot["participants"] if item["participant_id"] == participant.id
@@ -1194,7 +1192,9 @@ async def test_native_busy_admission_is_consistent_across_public_reads(daemon) -
     state.native_turn_id = "external-turn"
 
     participant_value = await participant_to_wire(daemon, participant)
-    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    controls_value = await controls_get(
+        daemon, operator_context(), {"participant_id": participant.id}
+    )
     snapshot = daemon.state_service.snapshot("native-busy-client", page_size=500)
     snapshot_value = next(
         item for item in snapshot["participants"] if item["participant_id"] == participant.id
@@ -1233,7 +1233,9 @@ async def test_native_settings_admission_requires_a_mutable_field(daemon) -> Non
     state.supported_settings.clear()
 
     participant_value = await participant_to_wire(daemon, participant)
-    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    controls_value = await controls_get(
+        daemon, operator_context(), {"participant_id": participant.id}
+    )
     snapshot = daemon.state_service.snapshot("native-settings-client", page_size=500)
     snapshot_value = next(
         item for item in snapshot["participants"] if item["participant_id"] == participant.id
@@ -1254,7 +1256,9 @@ async def test_unknown_presence_detail_is_consistent_across_public_reads(
     participant = daemon.registry.get(participant_id)
 
     participant_value = await participant_to_wire(daemon, participant)
-    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    controls_value = await controls_get(
+        daemon, operator_context(), {"participant_id": participant.id}
+    )
     snapshot = daemon.state_service.snapshot("unknown-presence-client", page_size=500)
     snapshot_value = next(
         item for item in snapshot["participants"] if item["participant_id"] == participant.id
@@ -1454,7 +1458,7 @@ async def test_public_admission_fences_the_exact_cached_native_session(
     with pytest.raises(StaleTarget, match=r"native runtime route.*unavailable"):
         await controls_settings_update(
             daemon,
-            _context(),
+            operator_context(),
             {"participant_id": participant_id, "model": "gpt-5"},
             idempotency_key="native-session-before-durable-bind",
         )
@@ -1475,7 +1479,7 @@ async def test_public_admission_fences_the_exact_cached_native_session(
     )
     admitted = await controls_settings_update(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "model": "gpt-5"},
         idempotency_key="native-session-cache-fence",
     )
@@ -1590,7 +1594,7 @@ async def test_production_reconciler_accepts_exact_native_terminal_evidence(daem
 
     reconciled = await operations_reconcile(
         daemon,
-        _context(),
+        operator_context(),
         {"operation_id": operation_id},
     )
 
@@ -1643,7 +1647,7 @@ async def test_production_reconciler_settles_proven_workspace_removal(daemon, tm
 
     unmatched = await operations_reconcile(
         daemon,
-        _context(),
+        operator_context(),
         {"operation_id": operation_id},
     )
     assert unmatched["state"] == PublicOperationState.UNCERTAIN.value
@@ -1656,7 +1660,7 @@ async def test_production_reconciler_settles_proven_workspace_removal(daemon, tm
         )
     reconciled = await operations_reconcile(
         daemon,
-        _context(),
+        operator_context(),
         {"operation_id": operation_id},
     )
 
@@ -1702,7 +1706,7 @@ async def test_production_reconciler_requires_structured_workspace_cleanup_evide
 
     reconciled = await operations_reconcile(
         daemon,
-        _context(),
+        operator_context(),
         {"operation_id": operation_id},
     )
 
@@ -1866,12 +1870,12 @@ async def test_verified_provider_termination_releases_usage_but_retains_workspac
     monkeypatch.setattr(participant_rpc, "_require_verified_backend_stop", backend_stopped)
     accepted = await participants_terminate(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id},
         idempotency_key="provider-terminate-a",
     )
     _accepted("frontend.participants.terminate", accepted)
-    await _settle(daemon)
+    await settle_operations(daemon)
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.SUCCEEDED.value, operation.error
     dispatch = operation_to_wire(operation)["dispatch_identity"]
@@ -1939,11 +1943,11 @@ async def test_unverified_native_stop_retains_provider_participant_job_and_usage
     monkeypatch.setattr(participant_rpc, "_require_verified_backend_stop", backend_unverified)
     accepted = await participants_terminate(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id},
         idempotency_key="provider-terminate-uncertain",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.UNCERTAIN.value
@@ -1976,14 +1980,14 @@ async def test_verified_termination_cancels_held_public_followup(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", request)
     sent = await controls_send(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "active"},
         idempotency_key="terminate-active-send",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     queued = await controls_queue_followup(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id, "prompt": "must not dispatch"},
         idempotency_key="terminate-held-queue",
     )
@@ -1993,11 +1997,11 @@ async def test_verified_termination_cancels_held_public_followup(
 
     terminated = await participants_terminate(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id},
         idempotency_key="terminate-with-held-queue",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     assert daemon.operation_service.get(terminated["operation_id"]).state == "succeeded"
     queued_after = daemon.operation_service.get(queued["operation_id"])
@@ -2065,11 +2069,11 @@ async def test_participant_termination_normalizes_pathological_error(
     monkeypatch.setattr(mutation_handlers, "terminate_participant", fail)
     accepted = await participants_terminate(
         daemon,
-        _context(),
+        operator_context(),
         {"participant_id": participant_id},
         idempotency_key="pathological-termination",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.FAILED.value
@@ -2088,7 +2092,7 @@ async def test_public_metadata_and_status_mutations_are_idempotent_and_schema_va
 ) -> None:
     participant_id = provider_target(daemon)
     online(monkeypatch, daemon)
-    context = _context()
+    context = operator_context()
     updated = await participants_update(
         daemon,
         context,

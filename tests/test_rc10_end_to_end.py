@@ -8,23 +8,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.frontend_wire import projection_wire
 from tests.support.paths import fixture
 from tests.support.provider_launcher import physical_events, provider_process, raw_register_provider
 from theater import paths
 from theater.daemon.spawning.models import Reservation
-from theater.frontend import FrontendClient, StateProjection, StateSynchronizer
+from theater.frontend import FrontendClient, StateSynchronizer
 from theater.harness.base import LaunchPlan
 from theater.models import PublicOperationRecord, now
-
-
-def _projection_wire(projection: StateProjection) -> dict[str, dict[str, object]]:
-    return {
-        "participants": {key: value.to_wire() for key, value in projection.participants.items()},
-        "operations": {key: value.to_wire() for key, value in projection.operations.items()},
-        "jobs": {key: value.to_wire() for key, value in projection.jobs.items()},
-        "providers": {key: value.to_wire() for key, value in projection.providers.items()},
-        "workspaces": {key: value.to_wire() for key, value in projection.workspaces.items()},
-    }
 
 
 def _install_test_launch_plan(daemon, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,7 +265,7 @@ async def test_independent_provider_root_child_adoption_workspace_and_state_flow
             assert followed.cursor.sequence > before.cursor.sequence
             expected = await synchronizer.refresh()
             assert followed.cursor == expected.cursor
-            assert _projection_wire(followed) == _projection_wire(expected)
+            assert projection_wire(followed) == projection_wire(expected)
         finally:
             await client.close()
 

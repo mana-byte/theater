@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.frontend_wire import read_request
 from theater.frontend import (
     CapabilityUnavailable,
     ClientStateError,
@@ -70,16 +71,6 @@ async def _fixture_server(handler: Handler) -> AsyncIterator[Path]:
             raise failures[0]
 
 
-async def _read_request(reader: asyncio.StreamReader) -> dict[str, object] | None:
-    frame = await reader.readline()
-    if not frame:
-        return None
-    assert frame.endswith(b"\n")
-    value = json.loads(frame)
-    assert isinstance(value, dict)
-    return value
-
-
 async def _send_response(writer: asyncio.StreamWriter, value: dict[str, object]) -> None:
     writer.write(json.dumps(value, separators=(",", ":")).encode("utf-8") + b"\n")
     await writer.drain()
@@ -93,7 +84,7 @@ async def _handshake(
     first: bool = True,
     minor: int = 1,
 ) -> dict[str, object]:
-    request = await _read_request(reader)
+    request = await read_request(reader)
     assert request is not None
     assert request["id"] == 1 or not first
     assert request["method"] == "frontend.handshake"
@@ -139,7 +130,7 @@ async def test_client_replaces_a_lane_the_daemon_hung_up_on() -> None:
         nonlocal connections
         connections += 1
         await _handshake(reader, writer, capabilities=["trajectory.v1"], first=False)
-        request = await _read_request(reader)
+        request = await read_request(reader)
         assert request is not None
         await _send_response(writer, {"id": request["id"], "ok": True, "result": {"records": []}})
 
@@ -162,7 +153,7 @@ async def test_bulk_response_validation_runs_off_loop_and_still_refuses_invalid_
 ):
     async def handler(reader, writer):
         await _handshake(reader, writer, capabilities=["trajectory.v1"])
-        request = await _read_request(reader)
+        request = await read_request(reader)
         assert request is not None
         await _send_response(
             writer,
@@ -223,7 +214,7 @@ async def test_sdk_uses_dedicated_lanes_and_preserves_future_values() -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handshake(reader, writer, capabilities=capabilities)
         methods: list[str] = []
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             method = request["method"]
             assert isinstance(method, str)
             methods.append(method)
@@ -335,7 +326,7 @@ async def test_sdk_enforces_local_catalog_rules_and_preserves_unknown_refusals()
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handshake(reader, writer, capabilities=["contract.v1"])
-        request = await _read_request(reader)
+        request = await read_request(reader)
         assert request is not None
         requests.append(str(request["method"]))
         await _send_response(
@@ -400,7 +391,7 @@ async def test_sdk_tolerates_unknown_owner_kinds_without_masking_bad_owner_value
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handshake(reader, writer, capabilities=["orchestration.v1"])
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             params = request["params"]
             assert isinstance(params, dict)
             participant_id = params["participant_id"]
@@ -433,7 +424,7 @@ async def test_recall_read_omits_optional_offsets_and_preserves_explicit_values(
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handshake(reader, writer, capabilities=["observation.v1"])
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             requests.append(request)
             await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
 
@@ -478,7 +469,7 @@ async def test_usage_by_participant_sends_filters_and_freezes_result() -> None:
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handshake(reader, writer, capabilities=["diagnostics.v1"])
-        request = await _read_request(reader)
+        request = await read_request(reader)
         assert request is not None
         requests.append(request)
         await _send_response(writer, {"id": request["id"], "ok": True, "result": result})
@@ -512,7 +503,7 @@ async def test_participant_spawn_omits_an_empty_prompt_from_the_wire() -> None:
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handshake(reader, writer, capabilities=["orchestration.v1"])
-        request = await _read_request(reader)
+        request = await read_request(reader)
         assert request is not None
         requests.append(request)
         await _send_response(
@@ -556,19 +547,19 @@ async def test_timeout_retires_only_the_operation_wait_lane_without_replay() -> 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal operation_calls
         await _handshake(reader, writer, capabilities=capabilities)
-        request = await _read_request(reader)
+        request = await read_request(reader)
         assert request is not None
         method = request["method"]
         assert isinstance(method, str)
         if method == "frontend.operations.await":
             operation_calls += 1
-            assert await _read_request(reader) is None
+            assert await read_request(reader) is None
             operation_closed.set()
             return
         assert method == "frontend.contract.get"
         interactive_methods.append(method)
         await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             assert request["method"] == "frontend.contract.get"
             interactive_methods.append("frontend.contract.get")
             await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
@@ -598,7 +589,7 @@ async def test_busy_ordinary_lane_does_not_cancel_the_request_already_in_flight(
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handshake(reader, writer, capabilities=["contract.v1"])
-        request = await _read_request(reader)
+        request = await read_request(reader)
         assert request is not None
         assert request["method"] == "frontend.contract.get"
         first_received.set()
@@ -623,7 +614,7 @@ async def test_an_older_minor_daemon_stays_usable_but_refuses_newer_methods_loca
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handshake(reader, writer, capabilities=["diagnostics.v1"], minor=0)
-        while (request := await _read_request(reader)) is not None:
+        while (request := await read_request(reader)) is not None:
             methods.append(request["method"])
             await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
 

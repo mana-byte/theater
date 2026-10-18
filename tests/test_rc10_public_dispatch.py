@@ -2,20 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 
-from theater import paths, protocol
+from tests.support.frontend_wire import exchange, handshake, request
+from theater import protocol
 from theater.daemon.frontend import validation as validation_mod
 from theater.daemon.frontend.validation import error_response, success_response
 from theater.daemon.operations import OperationService
 from theater.daemon.plugins.credentials import credential_verifier
-from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
 from theater.models import ProviderRecord, now
-
-
-def _request(request_id: int, method: str, params: dict | None = None, **extra) -> bytes:
-    return protocol.encode({"id": request_id, "method": method, "params": params or {}, **extra})
 
 
 def _handshake(
@@ -25,38 +20,16 @@ def _handshake(
     provider_id: str | None = None,
     credential: str | None = None,
 ) -> bytes:
-    params = {
-        "api": {"major": PUBLIC_API_MAJOR, "minor": PUBLIC_API_MINOR},
-        "client_id": "dispatch-test",
-        "role": role,
-        "channel": channel,
-        "required_capabilities": [],
-    }
+    identity = {} if provider_id is None else {"provider_id": provider_id}
     if provider_id is not None:
-        params.update(provider_id=provider_id, provider_credential=credential)
-    return _request(1, "frontend.handshake", params)
-
-
-async def _exchange(frames: list[bytes]) -> list[dict]:
-    reader, writer = await asyncio.open_unix_connection(
-        str(paths.socket_path()), limit=max(protocol.MAX_MESSAGE_BYTES, 1024)
-    )
-    try:
-        responses = []
-        for frame in frames:
-            writer.write(frame)
-            await writer.drain()
-            responses.append(json.loads(await protocol.read_message(reader)))
-        return responses
-    finally:
-        writer.close()
-        await writer.wait_closed()
+        identity["provider_credential"] = credential
+    return handshake("dispatch-test", role=role, channel=channel, **identity)
 
 
 async def test_connection_classification_is_permanent_both_directions(daemon):
-    private_then_public = await _exchange([protocol.request(1, "ping"), _handshake()])
-    public_then_private = await _exchange([_handshake(), protocol.request(2, "ping")])
-    unknown_then_public = await _exchange([protocol.request(1, "not-a-method"), _handshake()])
+    private_then_public = await exchange([protocol.request(1, "ping"), _handshake()])
+    public_then_private = await exchange([_handshake(), protocol.request(2, "ping")])
+    unknown_then_public = await exchange([protocol.request(1, "not-a-method"), _handshake()])
 
     assert private_then_public[0]["result"]["pong"] is True
     assert private_then_public[1]["error"]["code"] == "wrong_connection_role"
@@ -68,10 +41,10 @@ async def test_connection_classification_is_permanent_both_directions(daemon):
 
 
 async def test_public_validation_is_strict_and_curated(daemon):
-    unknown_field = _request(2, "frontend.health.get", {}, surprise=True)
-    private_forwarding_name = _request(3, "frontend.shutdown", {})
+    unknown_field = request(2, "frontend.health.get", {}, surprise=True)
+    private_forwarding_name = request(3, "frontend.shutdown", {})
     malformed = b'{"id":4,"method":"frontend.health.get","params":{oops}\n'
-    responses = await _exchange([_handshake(), unknown_field, private_forwarding_name, malformed])
+    responses = await exchange([_handshake(), unknown_field, private_forwarding_name, malformed])
 
     assert responses[1]["id"] == 2
     assert responses[1]["error"]["code"] == "bad_request"
@@ -83,13 +56,13 @@ async def test_public_validation_is_strict_and_curated(daemon):
 
 async def test_contract_schema_health_and_real_participant_read(daemon):
     participant = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/project")
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.contract.get"),
-            _request(3, "frontend.schemas.get"),
-            _request(4, "frontend.health.get"),
-            _request(5, "frontend.participants.get", {"participant_id": participant.id}),
+            request(2, "frontend.contract.get"),
+            request(3, "frontend.schemas.get"),
+            request(4, "frontend.health.get"),
+            request(5, "frontend.participants.get", {"participant_id": participant.id}),
         ]
     )
 
@@ -107,10 +80,10 @@ async def test_contract_schema_health_and_real_participant_read(daemon):
 
 async def test_operation_handlers_use_the_daemon_composition(daemon):
     assert isinstance(daemon.operation_service, OperationService)
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.operations.get", {"operation_id": "missing-operation"}),
+            request(2, "frontend.operations.get", {"operation_id": "missing-operation"}),
         ]
     )
 
@@ -140,13 +113,13 @@ async def test_provider_role_and_callback_channel_are_isolated(daemon):
             connection=unit.connection,
         )
 
-    provider_rpc = await _exchange(
+    provider_rpc = await exchange(
         [
             _handshake(role="provider", provider_id="provider-a", credential=credential),
-            _request(2, "frontend.participants.get", {"participant_id": "missing"}),
+            request(2, "frontend.participants.get", {"participant_id": "missing"}),
         ]
     )
-    callback = await _exchange(
+    callback = await exchange(
         [
             _handshake(
                 role="provider",
@@ -154,7 +127,7 @@ async def test_provider_role_and_callback_channel_are_isolated(daemon):
                 provider_id="provider-a",
                 credential=credential,
             ),
-            _request(2, "frontend.contract.get"),
+            request(2, "frontend.contract.get"),
         ]
     )
 
@@ -169,7 +142,7 @@ async def test_existing_private_client_still_uses_private_dispatch(client):
 
 async def test_complete_frame_limit_counts_the_newline(daemon, monkeypatch):
     monkeypatch.setattr(protocol, "MAX_MESSAGE_BYTES", 48)
-    response = (await _exchange([b" " * 48 + b"\n"]))[0]
+    response = (await exchange([b" " * 48 + b"\n"]))[0]
     assert response["id"] == 0
     assert response["error"]["code"] == "too_large"
 

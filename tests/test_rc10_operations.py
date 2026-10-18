@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
+from tests.support.clock import Clock
+from tests.support.operation_store import OperationStore
 from theater.daemon.frontend.operation_handlers import (
     operations_await,
     operations_get,
@@ -27,10 +29,7 @@ from theater.daemon.operations import (
     ReconcileEvidence,
     operation_to_wire,
 )
-from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories._json import decode_json
-from theater.daemon.persistence.repositories.journal import JournalRepository
-from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.schema import orchestration_events
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.dto import Operation
@@ -38,29 +37,8 @@ from theater.frontend.schemas import validator_for
 from theater.models import PublicOperationRecord
 
 
-class _Clock:
-    def __init__(self, value: float = 100.0) -> None:
-        self.value = value
-
-    def __call__(self) -> float:
-        return self.value
-
-
-class _Store:
-    def __init__(self, path: Path) -> None:
-        self.db = Database(path)
-        self.operations = OperationRepository(self.db)
-        self.journal = JournalRepository(self.db)
-
-    def write_unit(self):
-        return self.db.write_unit()
-
-    def close(self) -> None:
-        self.db.close()
-
-
 def _prepare(
-    clock: _Clock,
+    clock: Clock,
     *,
     participant_id: str = "participant-a",
     job_handle: str = "job-a",
@@ -92,7 +70,7 @@ def _prepare(
 
 def _accept(
     service: OperationService,
-    clock: _Clock,
+    clock: Clock,
     *,
     key: str = "send-a",
     participant_id: str = "participant-a",
@@ -176,8 +154,8 @@ def test_provider_target_projects_before_terminal_identity_is_known() -> None:
 async def test_detached_side_effect_survives_request_cancel_and_replays_handle(
     tmp_path: Path,
 ) -> None:
-    store = _Store(tmp_path / "detached.db")
-    clock = _Clock()
+    store = OperationStore(tmp_path / "detached.db")
+    clock = Clock()
     service = OperationService(store, clock=clock, id_factory=lambda: "operation-a")
     accepted = asyncio.Event()
     effect_started = asyncio.Event()
@@ -248,8 +226,8 @@ async def test_detached_side_effect_survives_request_cancel_and_replays_handle(
 
 
 def test_terminal_dispatch_requires_exact_identity_without_claiming_a_key(tmp_path: Path) -> None:
-    store = _Store(tmp_path / "dispatch-validation.db")
-    clock = _Clock()
+    store = OperationStore(tmp_path / "dispatch-validation.db")
+    clock = Clock()
     service = OperationService(store, clock=clock, id_factory=lambda: "operation-a")
 
     async def effect() -> OperationOutcome:
@@ -299,8 +277,8 @@ def test_terminal_dispatch_requires_exact_identity_without_claiming_a_key(tmp_pa
 
 @pytest.mark.asyncio
 async def test_wait_closes_race_and_timeout_never_changes_state(tmp_path: Path) -> None:
-    store = _Store(tmp_path / "wait.db")
-    clock = _Clock()
+    store = OperationStore(tmp_path / "wait.db")
+    clock = Clock()
     service: OperationService
 
     class RacingNotifier(OperationNotifier):
@@ -351,8 +329,8 @@ async def test_wait_closes_race_and_timeout_never_changes_state(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_lost_outcome_becomes_uncertain_and_dispatch_cannot_repeat(tmp_path: Path) -> None:
-    store = _Store(tmp_path / "lost-outcome.db")
-    clock = _Clock()
+    store = OperationStore(tmp_path / "lost-outcome.db")
+    clock = Clock()
     service = OperationService(store, clock=clock, id_factory=lambda: "operation-a")
     calls = 0
 
@@ -392,8 +370,8 @@ async def test_lost_outcome_becomes_uncertain_and_dispatch_cannot_repeat(tmp_pat
 async def test_operation_handlers_page_validate_and_reconcile_only_from_evidence(
     tmp_path: Path,
 ) -> None:
-    store = _Store(tmp_path / "handlers.db")
-    clock = _Clock()
+    store = OperationStore(tmp_path / "handlers.db")
+    clock = Clock()
     ids = iter(("operation-a", "operation-b"))
 
     async def reconcile(record: PublicOperationRecord) -> ReconcileEvidence:

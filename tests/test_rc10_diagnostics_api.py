@@ -2,49 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
+from functools import partial
 
 import pytest
 
-from theater import paths, protocol
+from tests.support.frontend_wire import exchange, handshake, request
 from theater.daemon.frontend import router as router_mod
 from theater.daemon.frontend.diagnostic_handlers import DIAGNOSTIC_HANDLERS
 from theater.daemon.frontend.handlers import PUBLIC_HANDLERS
-from theater.frontend.capabilities import METHOD_CATALOG, PUBLIC_API_MAJOR, PUBLIC_API_MINOR
+from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
 
-
-def _request(request_id: int, method: str, params: dict | None = None) -> bytes:
-    return protocol.encode({"id": request_id, "method": method, "params": params or {}})
-
-
-def _handshake() -> bytes:
-    return _request(
-        1,
-        "frontend.handshake",
-        {
-            "api": {"major": PUBLIC_API_MAJOR, "minor": PUBLIC_API_MINOR},
-            "client_id": "diagnostic-api-test",
-            "role": "operator",
-            "channel": "rpc",
-            "required_capabilities": [],
-        },
-    )
-
-
-async def _exchange(frames: list[bytes]) -> list[dict]:
-    reader, writer = await asyncio.open_unix_connection(str(paths.socket_path()))
-    try:
-        responses = []
-        for frame in frames:
-            writer.write(frame)
-            await writer.drain()
-            responses.append(json.loads(await protocol.read_message(reader)))
-        return responses
-    finally:
-        writer.close()
-        await writer.wait_closed()
+_handshake = partial(handshake, "diagnostic-api-test")
 
 
 @pytest.fixture
@@ -78,14 +47,14 @@ async def test_usage_adapters_keep_absolute_since_and_existing_summary_facts(
         cost_microcents=7,
     )
 
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.usage.totals", {"since": 99.0}),
-            _request(3, "frontend.usage.summary", {"since": 99.0}),
-            _request(4, "frontend.usage.by_harness", {"since": 99.0}),
-            _request(5, "frontend.usage.by_harness", {"detailed": True}),
-            _request(6, "frontend.usage.summary", {"since": None}),
+            request(2, "frontend.usage.totals", {"since": 99.0}),
+            request(3, "frontend.usage.summary", {"since": 99.0}),
+            request(4, "frontend.usage.by_harness", {"since": 99.0}),
+            request(5, "frontend.usage.by_harness", {"detailed": True}),
+            request(6, "frontend.usage.summary", {"since": None}),
         ]
     )
 
@@ -119,12 +88,12 @@ async def test_stats_and_bus_tail_are_bounded_public_pages(daemon, diagnostics_d
     first_id = daemon.store.bus_append("diagnostic.first", payload={"ordinal": 1})
     second_id = daemon.store.bus_append("diagnostic.second", payload={"ordinal": 2})
 
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(2, "frontend.stats.get"),
-            _request(3, "frontend.bus.tail", {"after_id": first_id, "limit": 1}),
-            _request(4, "frontend.bus.tail", {"limit": 501}),
+            request(2, "frontend.stats.get"),
+            request(3, "frontend.bus.tail", {"after_id": first_id, "limit": 1}),
+            request(4, "frontend.bus.tail", {"limit": 501}),
         ]
     )
 
@@ -168,15 +137,15 @@ async def test_usage_by_participant_filters_ids_and_since(daemon, diagnostics_di
             cost_microcents=input_tokens * 3,
         )
 
-    responses = await _exchange(
+    responses = await exchange(
         [
             _handshake(),
-            _request(
+            request(
                 2,
                 "frontend.usage.by_participant",
                 {"since": 15.0, "participant_ids": ["participant-a"]},
             ),
-            _request(3, "frontend.usage.by_participant", {"limit": 1}),
+            request(3, "frontend.usage.by_participant", {"limit": 1}),
         ]
     )
 

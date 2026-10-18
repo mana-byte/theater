@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.builders import alias_predecessor
 from tests.support.shipped import ClaudeCodeHarness
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
@@ -650,35 +651,6 @@ async def test_opencode_refuses_mismatched_domain(registry, monkeypatch):
 # ---- point 6: alias-stored harness resolves at all three canonical sites ----
 
 
-def _alias_predecessor(registry, *, alias, canonical, session_id, live=False, pane=None):
-    """Create a participant whose stored harness is an alias spelling.
-
-    ``registry.register`` normalizes the harness at line 243, so calling it
-    with ``harness="claude-code"`` stores ``"claude"`` and defeats the test.
-    To get a genuinely alias-stored row we register under the canonical name,
-    then mutate ``p.harness`` to the alias and re-upsert — bypassing the
-    normalizer. Assert the stored spelling is the alias before returning.
-    """
-    p = registry.register(
-        harness=canonical,
-        pane=pane,
-        cwd="/tmp",
-        session_id=session_id,
-    )
-    p.harness = alias
-    p.session_correlation = "exact"
-    registry.store.upsert_participant(p)
-    # Verify the alias spelling survived in the store.
-    stored = registry.store.get_participant(p.id)
-    assert stored.harness == alias, (
-        f"expected alias {alias!r} in store, got {stored.harness!r}; "
-        "registry.register normalized the harness and the test is hollow"
-    )
-    if not live:
-        registry.mark_dead(p.id)
-    return p
-
-
 async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch, terminal_provider):
     """Point 6: an alias-stored harness row resolves at _validate_resume_identity.
 
@@ -688,7 +660,7 @@ async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch,
     the alias-stored row is not found by raw comparison.
     """
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
-    _alias_predecessor(registry, alias="claude-code", canonical="claude", session_id="sess-alias-1")
+    alias_predecessor(registry, alias="claude-code", canonical="claude", session_id="sess-alias-1")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="claude",
@@ -724,7 +696,7 @@ async def test_alias_resolves_at_resume_state_peer_scan(registry, monkeypatch):
 
     # A live peer stored under alias "claude-code" should be found when
     # checking a dead row stored under canonical "claude".
-    _alias_predecessor(
+    alias_predecessor(
         registry,
         alias="claude-code",
         canonical="claude",
@@ -762,7 +734,7 @@ async def test_alias_resolves_at_resolve_resume_reference(registry, monkeypatch,
     alias-stored row's harness does not match the request by raw comparison.
     """
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
-    p = _alias_predecessor(
+    p = alias_predecessor(
         registry, alias="claude-code", canonical="claude", session_id="sess-alias-pid"
     )
     # Resume by participant id with the canonical name "claude".

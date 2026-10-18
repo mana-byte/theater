@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
+from tests.support.waiting import settle_operations
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.daemon.terminals import TerminalIdentityMismatch
 from theater.frontend.capabilities import METHOD_CATALOG
@@ -53,13 +52,6 @@ def _ready(daemon, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
 
 
-async def _settle(daemon) -> None:
-    await asyncio.sleep(0)
-    tasks = daemon.operation_service.owned_tasks
-    if tasks:
-        await asyncio.gather(*tasks)
-
-
 async def test_explicit_adoption_uses_fresh_inspect_and_binds_new_participant(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -87,7 +79,7 @@ async def test_explicit_adoption_uses_fresh_inspect_and_binds_new_participant(
         },
     )
     validator_for(METHOD_CATALOG["frontend.participants.adopt"].result_schema_id).validate(accepted)
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     participant_id = str(accepted["participant_id"])
     participant = daemon.registry.get(participant_id)
@@ -138,7 +130,7 @@ async def test_adoption_refuses_replaced_process_for_existing_external(
             "participant_id": external.id,
         },
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     operation = daemon.operation_service.get(str(accepted["operation_id"]))
     assert operation.state == "failed"
@@ -174,7 +166,7 @@ async def test_adoption_refuses_inspection_of_replaced_incarnation(
             "terminal_incarnation": "incarnation-a",
         },
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     operation = daemon.operation_service.get(str(accepted["operation_id"]))
     assert operation.state == "failed"
     assert operation.error_code == "terminal_identity_mismatch"
@@ -207,7 +199,7 @@ async def test_adoption_refuses_definitively_dead_occupant_and_retires_reservati
             "terminal_incarnation": "incarnation-a",
         },
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     operation = daemon.operation_service.get(str(accepted["operation_id"]))
     participant = daemon.registry.get(str(accepted["participant_id"]))

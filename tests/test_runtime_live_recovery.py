@@ -20,6 +20,12 @@ from tests.support.codex_server import (
     thread_status_changed,
 )
 from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.support.runtime_processes import (
+    NoTranscriptObserver,
+    await_reaped,
+    fake_create,
+    pid_alive,
+)
 from tests.support.waiting import wait_until
 from theater.daemon.harness_runtime import endpoint_to_path
 from theater.daemon.harness_runtime import manager as manager_mod
@@ -54,7 +60,6 @@ from theater.harness.contracts.runtime import (
     RuntimeRequestTimeout,
     SessionOpenMode,
 )
-from theater.harness.observation import TranscriptObserver
 from theater.models import JobState
 
 BIND_SLEEP_SNIPPET = """import socket, time
@@ -66,24 +71,6 @@ time.sleep(300)
 
 HARNESS_NAME = "codex"
 EXACT_RESULT = "exact final answer"
-
-
-def _pid_alive(pid: int | None) -> bool:
-    if pid is None:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-async def _await_reaped(pid: int | None, timeout: float = 5.0) -> None:
-    for _ in range(int(timeout / 0.02)):
-        if not _pid_alive(pid):
-            return
-        await asyncio.sleep(0.02)
-    raise AssertionError(f"pid {pid} is still alive; the backend was not terminated")
 
 
 async def _wait_for_runtime_snapshot(
@@ -100,24 +87,6 @@ async def _wait_for_runtime_snapshot(
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"timed out after {timeout}s waiting for {what}")
         await asyncio.sleep(0.01)
-
-
-class _Obs(TranscriptObserver):
-    """A transcript-less observer: the live source is the only wiring."""
-
-    has_transcript = False
-
-    def find_transcript(self, *, cwd, session_id=None, after=None):  # pragma: no cover
-        return None
-
-    def session_id(self, transcript):  # pragma: no cover
-        return None
-
-    def parse(self, line, index, *, clip_text=True):  # pragma: no cover
-        return []
-
-    def is_idle_screen(self, capture):  # pragma: no cover
-        return False
 
 
 class _OverflowCodexConnection(ScriptedCodexConnection):
@@ -180,7 +149,7 @@ class _CodexLiveHarness(Harness):
     resume_takes_prompt = True
 
     def __init__(self, io: _RoutingCodexIO) -> None:
-        self.observer = _Obs()
+        self.observer = NoTranscriptObserver()
         self.io = io
         self.runtime = self._manifest()
 
@@ -365,7 +334,7 @@ async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
         # No backend relaunch, no second UI, no prompt replay.
-        assert _pid_alive(backend_pid), "the live backend is reused, never relaunched"
+        assert pid_alive(backend_pid), "the live backend is reused, never relaunched"
         assert len(terminal_provider.creations) == 1, "no second UI may be launched"
         assert len(server.requested("turn/start")) == 1, "no prompt is ever replayed"
 
@@ -505,7 +474,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
             "excludeTurns": True,
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
-        assert _pid_alive(backend_pid), "recovery reuses the verified backend"
+        assert pid_alive(backend_pid), "recovery reuses the verified backend"
         assert len(terminal_provider.creations) == 1, "recovery launches no replacement UI"
         assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
             "do the wave",
@@ -711,7 +680,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         assert server.connect_count == 2, (
             "one coalesced reconnect replaces the disconnected runtime"
         )
-        assert _pid_alive(backend_pid), "recovery reuses the verified backend"
+        assert pid_alive(backend_pid), "recovery reuses the verified backend"
         assert len(terminal_provider.creations) == window_count, (
             "recovery launches no replacement UI"
         )
@@ -1142,7 +1111,7 @@ async def test_disconnect_then_teardown_performs_no_post_teardown_reconnect(
         await asyncio.sleep(0.35)  # past many patched poll/retry intervals
         assert server.connect_count == 1, "no reconnect may follow the teardown"
         assert d.runtime_manager._monitors == {}, "the owned monitor is cancelled"
-        await _await_reaped(binding.backend_pid)
+        await await_reaped(binding.backend_pid)
     finally:
         if pid is not None:
             with contextlib.suppress(Exception):
@@ -1167,7 +1136,7 @@ async def test_disconnect_then_daemon_close_performs_no_post_close_reconnect(
         await asyncio.sleep(0.35)  # past many patched poll/retry intervals
         assert server.connect_count == 1, "no reconnect may follow daemon shutdown"
         assert d.runtime_manager._monitors == {}, "every owned monitor is cancelled"
-        assert _pid_alive(binding.backend_pid), "the backend and its UI survive shutdown"
+        assert pid_alive(binding.backend_pid), "the backend and its UI survive shutdown"
     finally:
         if pid is not None:
             with contextlib.suppress(Exception):
@@ -1232,7 +1201,7 @@ async def test_shutdown_revokes_recovery_blocked_in_session_open(
         )
         assert registrations == route_changes == []
         assert (await candidate.snapshot()).health is ConnectionHealth.DISCONNECTED
-        assert _pid_alive(binding.backend_pid), "revocation disconnects but never kills the backend"
+        assert pid_alive(binding.backend_pid), "revocation disconnects but never kills the backend"
     finally:
         release_open.set()
         if pid is not None:
@@ -1256,13 +1225,6 @@ def _gen2_runtime(participant_id: str) -> FakeRuntime:
         endpoint="unix:///tmp/thtr-gen2.sock",
     )
     return FakeRuntime(context)
-
-
-def _fake_create(runtime):
-    async def create():
-        return runtime
-
-    return create
 
 
 def _register_gen2(daemon: Daemon, participant_id: str, runtime: FakeRuntime) -> None:
@@ -1319,7 +1281,7 @@ async def test_generation_replacement_during_open_never_registers_stale_recovery
         await d.runtime_manager.get_or_create(
             pid,
             backend_generation=2,
-            create=_fake_create(gen2),
+            create=fake_create(gen2),
         )
         _register_gen2(d, pid, gen2)
         registration_before = d.observer.live.registration_for(pid)
@@ -1396,7 +1358,7 @@ async def test_failed_open_after_installation_retries_and_eventually_registers(
         assert snapshot.native_session_id == session_id
         assert snapshot.backend_generation == 1
         # No relaunch, no second UI, no prompt replay across all attempts.
-        assert _pid_alive(binding.backend_pid)
+        assert pid_alive(binding.backend_pid)
         assert len(terminal_provider.creations) == 1
         assert len(server.requested("turn/start")) == 1
 
@@ -1550,7 +1512,7 @@ async def test_a_backend_that_exits_mid_turn_settles_its_open_job_as_crashed(
 
         # The backend process exits mid-turn, and its stream dies with it.
         os.kill(binding.backend_pid, signal.SIGKILL)
-        await _await_reaped(binding.backend_pid)
+        await await_reaped(binding.backend_pid)
         _disconnect(io, 0)
 
         await wait_until(

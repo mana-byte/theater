@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import socket
 import struct
 
 import pytest
 
-from theater import paths, protocol
+from tests.support.frontend_wire import exchange, handshake
+from theater import protocol
 from theater.daemon.runtime.socket import (
     PeerIdentityError,
     handle_connection,
@@ -18,48 +18,6 @@ from theater.daemon.runtime.socket import (
     verify_peer_uid,
 )
 from theater.frontend.capabilities import CAPABILITIES, PUBLIC_API_MAJOR, PUBLIC_API_MINOR
-
-
-def _handshake(
-    request_id: int = 1,
-    *,
-    major: int = PUBLIC_API_MAJOR,
-    minor: int = PUBLIC_API_MINOR,
-    required: list[str] | None = None,
-    role: str = "operator",
-    channel: str = "rpc",
-    **provider: str,
-) -> bytes:
-    return protocol.encode(
-        {
-            "id": request_id,
-            "method": "frontend.handshake",
-            "params": {
-                "api": {"major": major, "minor": minor},
-                "client_id": "test-client",
-                "role": role,
-                "channel": channel,
-                "required_capabilities": required or [],
-                **provider,
-            },
-        }
-    )
-
-
-async def _exchange(frames: list[bytes]) -> list[dict]:
-    reader, writer = await asyncio.open_unix_connection(
-        str(paths.socket_path()), limit=max(protocol.MAX_MESSAGE_BYTES, 1024)
-    )
-    try:
-        responses = []
-        for frame in frames:
-            writer.write(frame)
-            await writer.drain()
-            responses.append(json.loads(await protocol.read_message(reader)))
-        return responses
-    finally:
-        writer.close()
-        await writer.wait_closed()
 
 
 def test_linux_and_bsd_peer_uid_extraction_seams():
@@ -192,10 +150,8 @@ async def test_unclassified_connection_expires_without_read_or_dispatch():
 
 
 async def test_handshake_negotiates_minor_and_returns_durable_contract(daemon):
-    first = (await _exchange([_handshake(minor=PUBLIC_API_MINOR + 9, required=[CAPABILITIES[0]])]))[
-        0
-    ]
-    second = (await _exchange([_handshake()]))[0]
+    first = (await exchange([handshake(minor=PUBLIC_API_MINOR + 9, required=[CAPABILITIES[0]])]))[0]
+    second = (await exchange([handshake()]))[0]
 
     assert first["ok"] is True
     assert first["result"]["api"] == {"major": PUBLIC_API_MAJOR, "minor": PUBLIC_API_MINOR}
@@ -208,11 +164,11 @@ async def test_handshake_negotiates_minor_and_returns_durable_contract(daemon):
     ("frame", "code"),
     [
         (protocol.request(1, "frontend.health.get"), "handshake_required"),
-        (_handshake(major=PUBLIC_API_MAJOR + 1), "incompatible_api"),
-        (_handshake(required=["future.required.v1"]), "missing_capability"),
+        (handshake(major=PUBLIC_API_MAJOR + 1), "incompatible_api"),
+        (handshake(required=["future.required.v1"]), "missing_capability"),
     ],
 )
 async def test_handshake_order_and_compatibility_refusals(daemon, frame, code):
-    response = (await _exchange([frame]))[0]
+    response = (await exchange([frame]))[0]
     assert response["id"] == 1
     assert response["error"]["code"] == code

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.frontend_wire import read_request
 from theater.frontend import (
     FrontendClient,
     RequestUncertain,
@@ -68,23 +69,13 @@ async def _fixture_server(handler: Handler) -> AsyncIterator[Path]:
             raise failures[0]
 
 
-async def _read_request(reader: asyncio.StreamReader) -> dict[str, object] | None:
-    frame = await reader.readline()
-    if not frame:
-        return None
-    assert frame.endswith(b"\n")
-    value = json.loads(frame)
-    assert isinstance(value, dict)
-    return value
-
-
 async def _send(writer: asyncio.StreamWriter, value: dict[str, object]) -> None:
     writer.write(json.dumps(value, allow_nan=False, separators=(",", ":")).encode() + b"\n")
     await writer.drain()
 
 
 async def _handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    request = await _read_request(reader)
+    request = await read_request(reader)
     assert request is not None
     assert request["method"] == "frontend.handshake"
     request_id = request["id"]
@@ -272,7 +263,7 @@ async def test_snapshot_assembly_is_atomic_and_recovers_from_expiry() -> None:  
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         await _handshake(reader, writer)
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             method = request["method"]
             request_id = request["id"]
             assert type(request_id) is int
@@ -371,7 +362,7 @@ async def test_follow_applies_complete_groups_and_preserves_future_events() -> N
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal follow_calls, snapshots
         await _handshake(reader, writer)
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             method = request["method"]
             request_id = request["id"]
             assert type(request_id) is int
@@ -494,7 +485,7 @@ async def test_catalog_invalidations_are_coalesced_and_acknowledged() -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal follows
         await _handshake(reader, writer)
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             method = request["method"]
             request_id = request["id"]
             assert type(request_id) is int
@@ -636,7 +627,7 @@ async def test_follow_filters_terminal_entities_and_applies_complete_state_paylo
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal snapshots
         await _handshake(reader, writer)
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             method = request["method"]
             request_id = request["id"]
             assert type(request_id) is int
@@ -780,7 +771,7 @@ async def test_follow_resnapshots_for_cursor_gaps_and_public_resnapshot_signals(
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal snapshots, follows
         await _handshake(reader, writer)
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             method = request["method"]
             request_id = request["id"]
             assert type(request_id) is int
@@ -862,7 +853,7 @@ async def test_disconnect_keeps_the_projection_stale_then_resnapshots_on_reconne
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal follow_calls, snapshots
         await _handshake(reader, writer)
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             method = request["method"]
             request_id = request["id"]
             assert type(request_id) is int
@@ -957,7 +948,7 @@ async def test_operation_wait_cancellation_detaches_and_handle_survives_reconnec
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal operation_waits
         await _handshake(reader, writer)
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             method = request["method"]
             methods.append(str(method))
             request_id = request["id"]
@@ -966,7 +957,7 @@ async def test_operation_wait_cancellation_detaches_and_handle_survives_reconnec
                 operation_waits += 1
                 if operation_waits == 1:
                     first_wait_started.set()
-                    assert await _read_request(reader) is None
+                    assert await read_request(reader) is None
                     first_wait_closed.set()
                     return
                 if operation_waits == 2:
@@ -1044,7 +1035,7 @@ async def test_follow_batch_matches_separate_follows_and_mid_batch_gap() -> None
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal snapshots, follows
         await _handshake(reader, writer)
-        while request := await _read_request(reader):
+        while request := await read_request(reader):
             method = request["method"]
             request_id = request["id"]
             assert type(request_id) is int

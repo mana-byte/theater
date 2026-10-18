@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import insert
 
+from tests.support.frontend_wire import handshake, projection_wire, request
 from theater import paths, protocol
 from theater.daemon.events.publication import (
     next_revision,
@@ -28,8 +29,7 @@ from theater.daemon.plugins.credentials import credential_verifier
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.daemon.schema import orchestration_events
 from theater.daemon.store import Store
-from theater.frontend import FrontendClient, StateProjection, StateSynchronizer
-from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
+from theater.frontend import FrontendClient, StateSynchronizer
 from theater.frontend.dto import Participant as PublicParticipant
 from theater.frontend.dto import Provider as PublicProvider
 from theater.harness.contracts.runtime import (
@@ -50,29 +50,11 @@ from theater.models import (
 )
 
 
-def _request(request_id: int, method: str, params: dict[str, object] | None = None) -> bytes:
-    return protocol.encode({"id": request_id, "method": method, "params": params or {}})
-
-
-def _handshake(client_id: str) -> bytes:
-    return _request(
-        1,
-        "frontend.handshake",
-        {
-            "api": {"major": PUBLIC_API_MAJOR, "minor": PUBLIC_API_MINOR},
-            "client_id": client_id,
-            "role": "operator",
-            "channel": "rpc",
-            "required_capabilities": [],
-        },
-    )
-
-
 async def _public_connection(client_id: str) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     reader, writer = await asyncio.open_unix_connection(
         str(paths.socket_path()), limit=max(protocol.MAX_MESSAGE_BYTES, 1024)
     )
-    writer.write(_handshake(client_id))
+    writer.write(handshake(client_id))
     await writer.drain()
     response = json.loads(await protocol.read_message(reader))
     assert response["ok"] is True
@@ -88,16 +70,6 @@ async def _call(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, fram
 async def _close(writer: asyncio.StreamWriter) -> None:
     writer.close()
     await writer.wait_closed()
-
-
-def _projection_wire(projection: StateProjection) -> dict[str, dict[str, object]]:
-    return {
-        "participants": {key: value.to_wire() for key, value in projection.participants.items()},
-        "operations": {key: value.to_wire() for key, value in projection.operations.items()},
-        "jobs": {key: value.to_wire() for key, value in projection.jobs.items()},
-        "providers": {key: value.to_wire() for key, value in projection.providers.items()},
-        "workspaces": {key: value.to_wire() for key, value in projection.workspaces.items()},
-    }
 
 
 def _event(entity_id: str, revision: int = 1) -> JournalEventRecord:
@@ -223,7 +195,7 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
     reader, writer = await _public_connection("state-snapshot-client")
     try:
         snapshot_response = await _call(
-            reader, writer, _request(2, "frontend.state.snapshot", {"page_size": 1})
+            reader, writer, request(2, "frontend.state.snapshot", {"page_size": 1})
         )
         snapshot = snapshot_response["result"]
         assert snapshot_response["ok"] is True
@@ -239,7 +211,7 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         second_page = await _call(
             reader,
             writer,
-            _request(
+            request(
                 3,
                 "frontend.state.page",
                 {"snapshot_id": snapshot["snapshot_id"], "page": 1},
@@ -252,13 +224,13 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         released = await _call(
             reader,
             writer,
-            _request(4, "frontend.state.release", {"snapshot_id": snapshot["snapshot_id"]}),
+            request(4, "frontend.state.release", {"snapshot_id": snapshot["snapshot_id"]}),
         )
         assert released["result"] == {"released": True}
         expired = await _call(
             reader,
             writer,
-            _request(
+            request(
                 5,
                 "frontend.state.page",
                 {"snapshot_id": snapshot["snapshot_id"], "page": 0},
@@ -282,13 +254,13 @@ async def test_public_participant_events_equal_fresh_named_snapshots(daemon) -> 
         created = await _call(
             reader,
             writer,
-            _request(2, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
+            request(2, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
         )
         created_event = created["result"]["transactions"][0]["events"][0]
         created_snapshot = await _call(
             reader,
             writer,
-            _request(3, "frontend.state.snapshot", {"page_size": 500}),
+            request(3, "frontend.state.snapshot", {"page_size": 500}),
         )
         created_value = next(
             item
@@ -310,13 +282,13 @@ async def test_public_participant_events_equal_fresh_named_snapshots(daemon) -> 
         changed = await _call(
             reader,
             writer,
-            _request(4, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
+            request(4, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
         )
         changed_event = changed["result"]["transactions"][0]["events"][0]
         changed_snapshot = await _call(
             reader,
             writer,
-            _request(5, "frontend.state.snapshot", {"page_size": 500}),
+            request(5, "frontend.state.snapshot", {"page_size": 500}),
         )
         changed_value = next(
             item
@@ -360,7 +332,7 @@ async def test_public_provider_acquire_event_equals_fresh_health_snapshot(daemon
         followed = await _call(
             reader,
             writer,
-            _request(2, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
+            request(2, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
         )
         provider_event = next(
             event
@@ -371,7 +343,7 @@ async def test_public_provider_acquire_event_equals_fresh_health_snapshot(daemon
         snapshot = await _call(
             reader,
             writer,
-            _request(3, "frontend.state.snapshot", {"page_size": 500}),
+            request(3, "frontend.state.snapshot", {"page_size": 500}),
         )
         provider_value = next(
             item for item in snapshot["result"]["providers"] if item["provider_id"] == provider_id
@@ -396,7 +368,7 @@ async def test_sdk_follow_matches_fresh_snapshot_for_private_registry_and_jobs(d
         updated = await synchronizer.follow_once(wait_seconds=0)
         fresh = await synchronizer.refresh()
         assert updated.cursor == fresh.cursor
-        assert _projection_wire(updated) == _projection_wire(fresh)
+        assert projection_wire(updated) == projection_wire(fresh)
         assert updated.participants[participant.id].description == "updated privately"
 
         daemon.jobs.create(
@@ -408,7 +380,7 @@ async def test_sdk_follow_matches_fresh_snapshot_for_private_registry_and_jobs(d
         running = await synchronizer.follow_once(wait_seconds=0)
         fresh = await synchronizer.refresh()
         assert running.cursor == fresh.cursor
-        assert _projection_wire(running) == _projection_wire(fresh)
+        assert projection_wire(running) == projection_wire(fresh)
         assert running.jobs["state-sdk-private-job"].state == "running"
 
         daemon.jobs.finish("state-sdk-private-job", state="done", result="finished")
@@ -416,7 +388,7 @@ async def test_sdk_follow_matches_fresh_snapshot_for_private_registry_and_jobs(d
         terminal = await synchronizer.follow_once(wait_seconds=0)
         fresh = await synchronizer.refresh()
         assert terminal.cursor == fresh.cursor
-        assert _projection_wire(terminal) == _projection_wire(fresh)
+        assert projection_wire(terminal) == projection_wire(fresh)
         assert participant.id not in terminal.participants
         assert "state-sdk-private-job" not in terminal.jobs
     finally:
@@ -811,7 +783,7 @@ async def test_follow_keeps_groups_whole_and_closes_waiter_races(daemon) -> None
         empty = await _call(
             reader,
             writer,
-            _request(
+            request(
                 2,
                 "frontend.state.follow",
                 {"cursor": cursor, "wait_seconds": 0, "limit": 1},
@@ -828,7 +800,7 @@ async def test_follow_keeps_groups_whole_and_closes_waiter_races(daemon) -> None
         followed = await _call(
             reader,
             writer,
-            _request(3, "frontend.state.follow", {"cursor": cursor, "limit": 1}),
+            request(3, "frontend.state.follow", {"cursor": cursor, "limit": 1}),
         )
         transaction = followed["result"]["transactions"]
         assert len(transaction) == 1
@@ -838,14 +810,14 @@ async def test_follow_keeps_groups_whole_and_closes_waiter_races(daemon) -> None
         replay = await _call(
             reader,
             writer,
-            _request(4, "frontend.state.follow", {"cursor": cursor, "limit": 1}),
+            request(4, "frontend.state.follow", {"cursor": cursor, "limit": 1}),
         )
         assert replay["result"] == followed["result"]
 
         boundary_error = await _call(
             reader,
             writer,
-            _request(
+            request(
                 5,
                 "frontend.state.follow",
                 {"cursor": {"stream_id": stream_id, "sequence": 1}, "wait_seconds": 0},
@@ -856,7 +828,7 @@ async def test_follow_keeps_groups_whole_and_closes_waiter_races(daemon) -> None
         timeout = await _call(
             reader,
             writer,
-            _request(
+            request(
                 6,
                 "frontend.state.follow",
                 {"cursor": followed["result"]["cursor"], "wait_seconds": 0.01},
@@ -895,13 +867,13 @@ async def test_follow_keeps_groups_whole_and_closes_waiter_races(daemon) -> None
         retention = await _call(
             reader,
             writer,
-            _request(7, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
+            request(7, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
         )
         assert retention["error"]["code"] == "resnapshot_required"
         mismatch = await _call(
             reader,
             writer,
-            _request(
+            request(
                 8,
                 "frontend.state.follow",
                 {"cursor": {"stream_id": "replacement-stream", "sequence": 0}},

@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
+from tests.support.channel_fixtures import PrimarySource, launch_plan, primary_source, prompt_screen
 from theater.client import DaemonClient
 from theater.daemon.lock import DaemonLock
 from theater.daemon.persistence.store import Store
@@ -31,8 +32,6 @@ from theater.harness.contracts.callbacks import (
     HookDecodeContext,
     HookInstallContext,
     HookInstallOverlay,
-    LaunchContext,
-    ScreenContext,
 )
 from theater.harness.contracts.channels import (
     ChannelBounds,
@@ -54,8 +53,6 @@ from theater.harness.contracts.manifest import (
     ScreenManifest,
     SourceManifest,
 )
-from theater.harness.contracts.observation import ScreenConfidence, ScreenKind, ScreenReading
-from theater.harness.contracts.source import Batch, Source
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.loading.models import LoadedPlugin
 from theater.harness.manifests.compiler import compile_manifest
@@ -63,23 +60,6 @@ from theater.harness.manifests.validation import ManifestValidationError
 from theater.harness.registry import _PLUGINS, HARNESSES
 from theater.protocol import RemoteError
 from theater.trajectory.enums import TrajectoryKind
-
-
-class _Primary(Source):
-    async def read(self) -> Batch:
-        return Batch()
-
-
-def _primary(_context) -> Source:
-    return _Primary()
-
-
-def _screen(_context: ScreenContext) -> ScreenReading:
-    return ScreenReading(ScreenKind.PROMPT, ScreenConfidence.HIGH)
-
-
-def _plan(context: LaunchContext) -> LaunchPlan:
-    return LaunchPlan(argv=["acme", context.participant_id])
 
 
 def _correlation(context: HookCorrelationContext) -> str:
@@ -142,17 +122,17 @@ def _manifest(
         api_version=MANIFEST_API_VERSION,
         binary="acme",
         icon="A",
-        launch=LaunchManifest(planner=_plan, approvals=("manual",)),
+        launch=LaunchManifest(planner=launch_plan, approvals=("manual",)),
         observation=ObservationManifest(
             primary=(
                 SourceManifest(
-                    factory=_primary,
+                    factory=primary_source,
                     channel=ChannelDeclaration(id="primary", kind=ChannelKind.TRANSCRIPT),
                 )
                 if primary
                 else None
             ),
-            screen=ScreenManifest(classifier=_screen),
+            screen=ScreenManifest(classifier=prompt_screen),
             enrichments=(channel,),
         ),
     )
@@ -1043,7 +1023,7 @@ async def test_hook_source_requires_credential_and_allows_hook_only_manifest(
         harness="acme", cwd=str(tmp_path), pid="p-no-credential"
     )
     source = daemon.observer._open_source(participant.id, durable.observer)
-    assert isinstance(source, _Primary)
+    assert isinstance(source, PrimarySource)
     await source.aclose()
     await daemon.aclose()
 
@@ -1097,7 +1077,7 @@ async def test_primary_manifest_health_is_reported_without_active_enrichments(
             harness="acme", cwd=str(tmp_path), pid="p-primary-health"
         )
         source = daemon.observer._open_source(participant.id, harness.observer)
-        assert isinstance(source, _Primary)
+        assert isinstance(source, PrimarySource)
         daemon.observer._record_channel_health(participant.id, source)
 
         rows = await client.call("harnesses")

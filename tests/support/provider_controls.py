@@ -5,6 +5,12 @@ from __future__ import annotations
 import pytest
 
 from tests.support.paths import fixture
+from theater.daemon.persistence.repositories.control_operations import ControlOperation
+from theater.harness.contracts.runtime import (
+    ControlDeliveryPhase,
+    ControlKind,
+    ControlTransport,
+)
 from theater.models import (
     TerminalBindingRecord,
     now,
@@ -83,3 +89,39 @@ def online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
         }
 
     monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
+
+
+def queued_followup(
+    daemon, participant_id: str, suffix: str, *, dispatched: bool = False
+) -> tuple[str, str]:
+    handle = f"{participant_id}#{suffix}"
+    operation_id = f"public-{suffix}:control"
+    daemon.jobs.create(
+        handle=handle,
+        caller_id="cli",
+        target_id=participant_id,
+        kind="send",
+        prompt="queued",
+        actor_client_id="original-client",
+    )
+    timestamp = now()
+    daemon.store.reserve_control_operation(
+        ControlOperation(
+            operation_id=operation_id,
+            participant_id=participant_id,
+            kind=ControlKind.QUEUE_FOLLOWUP,
+            transport=ControlTransport.PROVIDER_TERMINAL,
+            delivery_phase=(
+                ControlDeliveryPhase.DISPATCHED if dispatched else ControlDeliveryPhase.QUEUED
+            ),
+            job_handle=handle,
+            provider_id="provider-a",
+            provider_generation=4,
+            terminal_id="terminal-a",
+            terminal_incarnation="incarnation-a",
+            queue_sequence=int(suffix),
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+    )
+    return operation_id, handle

@@ -2,26 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable
 
 import pytest
 
+from tests.support.builders import operator_context
+from tests.support.provider_controls import queued_followup
+from tests.support.waiting import settle_operations
 from theater.config import RailsSection
 from theater.daemon.control_ownership import ControlTransferService, OwnershipConflict
-from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.participant_mutation_handlers import participants_terminate
-from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.rails import BudgetExceeded, CycleDetected, DepthExceeded
 from theater.daemon.rpc import METHODS
 from theater.daemon.rpc.participants import _authorize_termination
 from theater.daemon.runtime import control_gates
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
-from theater.frontend.capabilities import ConnectionChannel, ConnectionRole
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
-    ControlKind,
-    ControlTransport,
 )
 from theater.models import (
     Busy,
@@ -36,44 +33,7 @@ from theater.models import (
     PublicOperationState,
     SelfAdopt,
     Status,
-    now,
 )
-
-
-def _queue(
-    daemon, participant_id: str, suffix: str, *, dispatched: bool = False
-) -> tuple[str, str]:
-    handle = f"{participant_id}#{suffix}"
-    operation_id = f"public-{suffix}:control"
-    daemon.jobs.create(
-        handle=handle,
-        caller_id="cli",
-        target_id=participant_id,
-        kind="send",
-        prompt="queued",
-        actor_client_id="original-client",
-    )
-    timestamp = now()
-    daemon.store.reserve_control_operation(
-        ControlOperation(
-            operation_id=operation_id,
-            participant_id=participant_id,
-            kind=ControlKind.QUEUE_FOLLOWUP,
-            transport=ControlTransport.PROVIDER_TERMINAL,
-            delivery_phase=(
-                ControlDeliveryPhase.DISPATCHED if dispatched else ControlDeliveryPhase.QUEUED
-            ),
-            job_handle=handle,
-            provider_id="provider-a",
-            provider_generation=4,
-            terminal_id="terminal-a",
-            terminal_incarnation="incarnation-a",
-            queue_sequence=int(suffix),
-            created_at=timestamp,
-            updated_at=timestamp,
-        )
-    )
-    return operation_id, handle
 
 
 def _adopt(daemon, target: str, caller: str) -> Awaitable[dict]:
@@ -84,24 +44,6 @@ def _spawn(daemon, **kwargs) -> Participant:
     return daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False, **kwargs)
 
 
-def _context() -> ConnectionContext:
-    return ConnectionContext(
-        client_id="operator-a",
-        role=ConnectionRole.OPERATOR,
-        channel=ConnectionChannel.RPC,
-        api_major=1,
-        api_minor=0,
-        capabilities=frozenset({"orchestration.v1"}),
-    )
-
-
-async def _settle(daemon) -> None:
-    await asyncio.sleep(0)
-    tasks = daemon.operation_service.owned_tasks
-    if tasks:
-        await asyncio.gather(*tasks)
-
-
 async def test_adoption_reparents_a_sibling_reowns_it_and_moves_the_gates(
     daemon, terminal_provider
 ) -> None:
@@ -110,8 +52,8 @@ async def test_adoption_reparents_a_sibling_reowns_it_and_moves_the_gates(
     target = _spawn(daemon, parent_id=parent.id)
     grandchild = _spawn(daemon, parent_id=target.id)
     terminal_provider.bind(daemon, target.id)
-    queued_id, queued_job = _queue(daemon, target.id, "1")
-    dispatched_id, dispatched_job = _queue(daemon, target.id, "2", dispatched=True)
+    queued_id, queued_job = queued_followup(daemon, target.id, "1")
+    dispatched_id, dispatched_job = queued_followup(daemon, target.id, "2", dispatched=True)
 
     record = await _adopt(daemon, target.id, adopter.id)
 
@@ -279,7 +221,7 @@ async def test_adoption_rolls_back_reparent_reown_queue_and_journal_together(
     adopter = _spawn(daemon, parent_id=parent.id)
     target = _spawn(daemon, parent_id=parent.id)
     terminal_provider.bind(daemon, target.id)
-    operation_id, handle = _queue(daemon, target.id, "1")
+    operation_id, handle = queued_followup(daemon, target.id, "1")
     before = daemon.store.journal.current_sequence()
 
     def fail_append(*_args, **_kwargs):
@@ -324,7 +266,7 @@ async def test_adoption_refuses_in_the_termination_acceptance_gap(
     terminal_provider.bind(daemon, target.id)
 
     accepted = await participants_terminate(
-        daemon, _context(), {"participant_id": target.id}, idempotency_key="adoption-gap-a"
+        daemon, operator_context(), {"participant_id": target.id}, idempotency_key="adoption-gap-a"
     )
     assert isinstance(accepted, dict)
     assert accepted["state"] == "accepted"  # the side effect has not started yet
@@ -332,7 +274,7 @@ async def test_adoption_refuses_in_the_termination_acceptance_gap(
         await _adopt(daemon, target.id, adopter.id)
     assert raised.value.details["next"] == "retry adoption once the termination settles"
 
-    await _settle(daemon)  # let the refused kill finish
+    await settle_operations(daemon)  # let the refused kill finish
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.SUCCEEDED.value
     killed = daemon.registry.get(target.id)
@@ -354,9 +296,12 @@ async def test_adoption_refuses_while_a_termination_is_uncertain(
 
     monkeypatch.setattr(daemon.controls, "terminate_provider", unverified)
     accepted = await participants_terminate(
-        daemon, _context(), {"participant_id": adopter.id}, idempotency_key="adoption-uncertain-a"
+        daemon,
+        operator_context(),
+        {"participant_id": adopter.id},
+        idempotency_key="adoption-uncertain-a",
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     assert isinstance(accepted, dict)
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.UNCERTAIN.value

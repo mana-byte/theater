@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.clock import Clock
 from theater.daemon.presence import PresenceMonitor, PresenceState
 from theater.models import Participant, TerminalBindingRecord
 
@@ -16,14 +17,6 @@ P1, T1 = "participant-a", "terminal-a"
 P2, T2 = "participant-b", "terminal-b"
 OCCUPANTS = {T1: "occupant-a", T2: "occupant-b"}
 PARTICIPANTS = {T1: P1, T2: P2}
-
-
-class Clock:
-    def __init__(self, value: float = 100.0) -> None:
-        self.value = value
-
-    def __call__(self) -> float:
-        return self.value
 
 
 def binding(terminal_id: str) -> TerminalBindingRecord:

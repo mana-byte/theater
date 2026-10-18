@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import func, insert, select
 
+from tests.support.clock import Clock
+from tests.support.operation_store import OperationStore
 from theater.daemon.operations import (
     IDEMPOTENCY_RETENTION_SECONDS,
     IdempotencyConflict,
@@ -16,36 +18,12 @@ from theater.daemon.operations import (
     PreparedOperation,
     request_digest,
 )
-from theater.daemon.persistence.database import Database
-from theater.daemon.persistence.repositories.journal import JournalRepository
-from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.schema import idempotency_records, meta, orchestration_events, public_operations
 from theater.models import PublicOperationRecord
 
 
-class _Clock:
-    def __init__(self, value: float = 100.0) -> None:
-        self.value = value
-
-    def __call__(self) -> float:
-        return self.value
-
-
-class _Store:
-    def __init__(self, path: Path) -> None:
-        self.db = Database(path)
-        self.operations = OperationRepository(self.db)
-        self.journal = JournalRepository(self.db)
-
-    def write_unit(self):
-        return self.db.write_unit()
-
-    def close(self) -> None:
-        self.db.close()
-
-
 def _prepare(
-    clock: _Clock,
+    clock: Clock,
     calls: list[str],
     *,
     participant_id: str = "participant-a",
@@ -79,8 +57,8 @@ def _prepare(
 
 def test_canonical_claim_replays_and_conflicts_without_side_effects(tmp_path: Path) -> None:
     database_path = tmp_path / "idempotency.db"
-    store = _Store(database_path)
-    clock = _Clock()
+    store = OperationStore(database_path)
+    clock = Clock()
     ids = iter(("operation-a", "operation-b"))
     service = OperationService(store, clock=clock, id_factory=lambda: next(ids))
     calls: list[str] = []
@@ -130,7 +108,7 @@ def test_canonical_claim_replays_and_conflicts_without_side_effects(tmp_path: Pa
     finally:
         store.close()
 
-    reopened = _Store(database_path)
+    reopened = OperationStore(database_path)
     try:
         durable = OperationService(reopened, clock=clock, id_factory=lambda: "operation-unused")
         replay = durable.accept_operation(
@@ -149,8 +127,8 @@ def test_canonical_claim_replays_and_conflicts_without_side_effects(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_concurrent_first_claims_converge_on_one_operation(tmp_path: Path) -> None:
-    store = _Store(tmp_path / "converge.db")
-    clock = _Clock()
+    store = OperationStore(tmp_path / "converge.db")
+    clock = Clock()
     ids = iter(("operation-a", "operation-b"))
     service = OperationService(store, clock=clock, id_factory=lambda: next(ids))
     calls: list[str] = []
@@ -175,8 +153,8 @@ async def test_concurrent_first_claims_converge_on_one_operation(tmp_path: Path)
 
 
 def test_failed_admission_claim_rolls_back_and_completed_results_retain(tmp_path: Path) -> None:
-    store = _Store(tmp_path / "rollback.db")
-    clock = _Clock()
+    store = OperationStore(tmp_path / "rollback.db")
+    clock = Clock()
     service = OperationService(store, clock=clock, id_factory=lambda: "operation-a")
 
     def rejected(_operation_id, unit):

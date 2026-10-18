@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.builders import alias_predecessor
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.harness.source import (
@@ -316,30 +317,9 @@ def test_stage_receipt_source_error_message_names_source_and_method(registry: Re
 # ---- D3: alias-stored participant rows --------------------------------------
 
 
-def _alias_predecessor(registry, *, alias, canonical, session_id, live=False, pane=None):
-    """Persist a participant under an alias spelling, bypassing registration."""
-    p = registry.register(
-        harness=canonical,
-        pane=pane,
-        cwd="/tmp",
-        session_id=session_id,
-    )
-    p.harness = alias
-    p.session_correlation = "exact"
-    registry.store.upsert_participant(p)
-    stored = registry.store.get_participant(p.id)
-    assert stored.harness == alias, (
-        f"expected alias {alias!r} in store, got {stored.harness!r}; "
-        "registry.register normalized the harness and the test is hollow"
-    )
-    if not live:
-        registry.mark_dead(p.id)
-    return p
-
-
 def test_alias_converges_on_reconnect(registry: Registry):
     """A claimed-id reconnect rewrites a stored alias to canonical form."""
-    p = _alias_predecessor(
+    p = alias_predecessor(
         registry, alias="claude-code", canonical="claude", session_id="sess-1", live=True
     )
     assert registry.store.get_participant(p.id).harness == "claude-code"
@@ -360,7 +340,7 @@ def test_alias_converges_on_reconnect(registry: Registry):
 
 def test_alias_converges_even_when_incoming_is_alias(registry: Registry):
     """A reconnect with an alias spelling still converges to canonical form."""
-    p = _alias_predecessor(
+    p = alias_predecessor(
         registry, alias="claude-code", canonical="claude", session_id="sess-1", live=True
     )
     registry.register(
@@ -378,7 +358,7 @@ def test_observer_has_cwd_competitor_finds_alias_peer(registry: Registry):
     """Cwd competitor lookup finds peers stored under a harness alias."""
     observer = _make_observer(registry)
     p1 = registry.register(harness="claude", pane=None, cwd="/tmp")
-    _alias_predecessor(
+    alias_predecessor(
         registry, alias="claude-code", canonical="claude", session_id="sess-2", live=True
     )
     assert observer._has_cwd_competitor(p1.id, collision_domain=None)
@@ -398,7 +378,7 @@ def test_observer_shares_transcript_location_finds_alias_peer(registry: Registry
     live.session_correlation = str(TranscriptProvenance.HEURISTIC)
     registry.store.upsert_participant(live)
 
-    dead = _alias_predecessor(
+    dead = alias_predecessor(
         registry, alias="claude-code", canonical="claude", session_id="sess-dead"
     )
     dead.transcript_location = canonical_loc
@@ -420,7 +400,7 @@ def test_methods_reject_cross_participant_receipt_finds_alias(registry: Registry
     f.write_text("[]")
     loc = str(f.resolve())
 
-    other = _alias_predecessor(
+    other = alias_predecessor(
         registry, alias="claude-code", canonical="claude", session_id="sess-other"
     )
     other.transcript_location = loc
@@ -449,7 +429,7 @@ def test_methods_receipt_clears_identity_loss_quarantine(registry: Registry, tmp
     from theater.harness.source import TranscriptCandidate
     from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
-    p = _alias_predecessor(
+    p = alias_predecessor(
         registry, alias="claude-code", canonical="claude", session_id="sess-1", live=True
     )
     registry.store.set_receipt_token(p.id, "tok")

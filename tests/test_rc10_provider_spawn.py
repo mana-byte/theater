@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 import subprocess
 import threading
@@ -12,6 +11,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import func, select
 
+from tests.support.waiting import settle_operations
 from theater.daemon.operations import OperationOutcome
 from theater.daemon.persistence.repositories._json import decode_json
 from theater.daemon.rpc.spawning import _spawn
@@ -124,13 +124,6 @@ def _make_launch_preparation(monkeypatch, daemon) -> None:
     monkeypatch.setattr(daemon.spawner, "prepare_provider_launch", prepare)
 
 
-async def _settle(daemon) -> None:
-    await asyncio.sleep(0)
-    tasks = daemon.operation_service.owned_tasks
-    if tasks:
-        await asyncio.gather(*tasks)
-
-
 async def test_provider_launch_pins_daemon_resolved_executable(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -186,7 +179,7 @@ async def test_provider_launch_pins_daemon_resolved_executable(
         idempotency_key="resolved-executable",
         params={"harness": "codex", "approval": "manual", "cwd": str(tmp_path)},
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     operation = daemon.operation_service.get(str(accepted["operation_id"]))
     launch = dispatched[0]["launch"]
@@ -251,7 +244,7 @@ async def test_root_and_child_spawn_use_reserved_ids_and_handoff_workspace(
             "cwd": str(tmp_path),
         },
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     child = await service.spawn(
         client_id="operator-a",
         idempotency_key="spawn-child",
@@ -263,7 +256,7 @@ async def test_root_and_child_spawn_use_reserved_ids_and_handoff_workspace(
             "initiating_participant_id": root["participant_id"],
         },
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     for accepted in (root, child):
         validator_for(METHOD_CATALOG["frontend.participants.spawn"].result_schema_id).validate(
@@ -320,7 +313,7 @@ async def test_private_spawn_uses_configured_default_provider(
             "cwd": str(tmp_path),
         },
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     assert dispatched == [("provider-configured", 1)]
     assert accepted["operation_state"] == "succeeded"
@@ -347,7 +340,7 @@ async def test_private_spawn_reports_unconfirmed_launch_without_replaying(
     wait = daemon.operation_service.wait
 
     async def wait_after_dispatch(operation_id):
-        await _settle(daemon)
+        await settle_operations(daemon)
         return await wait(operation_id, wait_seconds=0)
 
     monkeypatch.setattr(daemon.terminal_service, "dispatch_operation", dispatch)
@@ -449,7 +442,7 @@ async def test_pre_dispatch_failure_rolls_back_reserved_state(
             "cwd": str(tmp_path),
         },
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     operation = daemon.operation_service.get(str(accepted["operation_id"]))
     participant = daemon.registry.get(str(accepted["participant_id"]))
@@ -502,7 +495,7 @@ async def test_pre_dispatch_failure_removes_only_its_durable_unique_workspace(
     assert launch.workspace_usage_id is not None
     assert workspace.resolved_base_commit == _git(repository, "rev-parse", "HEAD")
 
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     workspace = daemon.store.workspaces.get(workspace.workspace_id)
     assert workspace is not None and workspace.state == "removed"
@@ -553,7 +546,7 @@ async def test_spawn_resolves_git_before_acceptance_and_skips_it_for_replay(
 
     assert replay == accepted
     assert calls == [False]
-    await _settle(daemon)
+    await settle_operations(daemon)
 
 
 async def test_definitive_create_rejection_rolls_back_after_persisting_target(
@@ -586,7 +579,7 @@ async def test_definitive_create_rejection_rolls_back_after_persisting_target(
             "cwd": str(tmp_path),
         },
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
 
     operation = daemon.operation_service.get(str(accepted["operation_id"]))
     participant = daemon.registry.get(str(accepted["participant_id"]))
@@ -634,7 +627,7 @@ async def test_lost_create_ack_stays_uncertain_and_retains_workspace(
         idempotency_key="lost-create",
         params=request,
     )
-    await _settle(daemon)
+    await settle_operations(daemon)
     replay = await service.spawn(
         client_id="operator-a", idempotency_key="lost-create", params=request
     )

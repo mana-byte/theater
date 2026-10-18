@@ -6,17 +6,15 @@ import asyncio
 
 import pytest
 
+from tests.support.provider_controls import queued_followup
 from theater.daemon.control_ownership import OwnershipConflict
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.participant_mutation_handlers import participants_transfer_control
-from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.runtime.recovery import reconcile_public_control_operations
 from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
-    ControlKind,
-    ControlTransport,
 )
 from theater.models import JobState, PublicOperationRecord, now
 
@@ -32,42 +30,6 @@ def _context() -> ConnectionContext:
     )
 
 
-def _queue(
-    daemon, participant_id: str, suffix: str, *, dispatched: bool = False
-) -> tuple[str, str]:
-    handle = f"{participant_id}#{suffix}"
-    operation_id = f"public-{suffix}:control"
-    daemon.jobs.create(
-        handle=handle,
-        caller_id="cli",
-        target_id=participant_id,
-        kind="send",
-        prompt="queued",
-        actor_client_id="original-client",
-    )
-    timestamp = now()
-    daemon.store.reserve_control_operation(
-        ControlOperation(
-            operation_id=operation_id,
-            participant_id=participant_id,
-            kind=ControlKind.QUEUE_FOLLOWUP,
-            transport=ControlTransport.PROVIDER_TERMINAL,
-            delivery_phase=(
-                ControlDeliveryPhase.DISPATCHED if dispatched else ControlDeliveryPhase.QUEUED
-            ),
-            job_handle=handle,
-            provider_id="provider-a",
-            provider_generation=4,
-            terminal_id="terminal-a",
-            terminal_incarnation="incarnation-a",
-            queue_sequence=int(suffix),
-            created_at=timestamp,
-            updated_at=timestamp,
-        )
-    )
-    return operation_id, handle
-
-
 async def test_transfer_is_atomic_preserves_lineage_and_cancels_only_queued(daemon) -> None:
     owner = daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False)
     target = daemon.registry.create_spawned(
@@ -78,8 +40,8 @@ async def test_transfer_is_atomic_preserves_lineage_and_cancels_only_queued(daem
         has_prompt=False,
     )
     successor = daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False)
-    queued_id, queued_job = _queue(daemon, target.id, "1")
-    dispatched_id, dispatched_job = _queue(daemon, target.id, "2", dispatched=True)
+    queued_id, queued_job = queued_followup(daemon, target.id, "1")
+    dispatched_id, dispatched_job = queued_followup(daemon, target.id, "2", dispatched=True)
     timestamp = now()
     with daemon.store.write_unit() as unit:
         daemon.store.operations.create(
@@ -210,7 +172,7 @@ def test_resume_lineage_does_not_implicitly_transfer_descendants(daemon) -> None
 
 async def test_transfer_rolls_back_state_queue_and_journal_together(daemon, monkeypatch) -> None:
     target = daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False)
-    _operation_id, handle = _queue(daemon, target.id, "3")
+    _operation_id, handle = queued_followup(daemon, target.id, "3")
     before = daemon.store.journal.current_sequence()
 
     def fail_append(*_args, **_kwargs):

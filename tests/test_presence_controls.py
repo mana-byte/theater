@@ -15,7 +15,6 @@ from tests.support.presence import (
 )
 from tests.support.presence_rig import _OWNED_SERVICES, Rig, operation_rows
 from theater.constants.daemon import (
-    BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED,
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     BUS_KIND_SEND_REFUSED,
 )
@@ -509,15 +508,6 @@ async def _native_child(client, daemon, terminal_provider, *, pane=None, pid=424
 
     await daemon.runtime_manager.get_or_create(child.id, backend_generation=1, create=create)
     return parent, daemon.registry.get(child.id), state
-
-
-def _interrupt_events(daemon) -> list[dict]:
-    """Interrupt-requested bus events, newest last."""
-    return [
-        event
-        for event in daemon.store.bus_tail(limit=100)
-        if event["kind"] == BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
-    ]
 
 
 async def test_composed_send_refused_while_present_and_recorded(client, daemon, terminal_provider):

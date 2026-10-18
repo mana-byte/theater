@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.channel_fixtures import PrimarySource, launch_plan, primary_source, prompt_screen
 from theater.constants.daemon import CHANNEL_OTEL_RECEIVER_PORT_META_KEY
 from theater.constants.harness import (
     HARNESS_CHANNEL_IDENTIFIER_MAX_CHARS,
@@ -42,12 +43,10 @@ from theater.harness.channels.otel.receiver import (
 )
 from theater.harness.contracts.callbacks import (
     HookInstallOverlay,
-    LaunchContext,
     OtelCorrelationContext,
     OtelDecodeContext,
     OtelInstallContext,
     OtelInstallOverlay,
-    ScreenContext,
 )
 from theater.harness.contracts.channels import (
     ChannelBounds,
@@ -75,8 +74,7 @@ from theater.harness.contracts.manifest import (
     ScreenManifest,
     SourceManifest,
 )
-from theater.harness.contracts.observation import ScreenConfidence, ScreenKind, ScreenReading
-from theater.harness.contracts.source import Batch, Source
+from theater.harness.contracts.source import Batch
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.loading.models import LoadedPlugin
 from theater.harness.manifests.compiler import compile_manifest
@@ -84,23 +82,6 @@ from theater.harness.manifests.validation import ManifestValidationError
 from theater.harness.registry.diagnostics import project_plugin
 from theater.models import BadRequest
 from theater.trajectory.enums import TrajectoryKind
-
-
-class _Primary(Source):
-    async def read(self) -> Batch:
-        return Batch()
-
-
-def _primary(_context) -> Source:
-    return _Primary()
-
-
-def _screen(_context: ScreenContext) -> ScreenReading:
-    return ScreenReading(ScreenKind.PROMPT, ScreenConfidence.HIGH)
-
-
-def _plan(context: LaunchContext) -> LaunchPlan:
-    return LaunchPlan(argv=["acme", context.participant_id])
 
 
 def _correlate(context: OtelCorrelationContext) -> str:
@@ -183,17 +164,17 @@ def _manifest(*, primary: bool = True, **kwargs) -> HarnessManifest:
         api_version=MANIFEST_API_VERSION,
         binary="acme",
         icon="A",
-        launch=LaunchManifest(planner=_plan, approvals=("manual",)),
+        launch=LaunchManifest(planner=launch_plan, approvals=("manual",)),
         observation=ObservationManifest(
             primary=(
                 SourceManifest(
-                    factory=_primary,
+                    factory=primary_source,
                     channel=ChannelDeclaration(id="primary", kind=ChannelKind.TRANSCRIPT),
                 )
                 if primary
                 else None
             ),
-            screen=ScreenManifest(classifier=_screen),
+            screen=ScreenManifest(classifier=prompt_screen),
             enrichments=(_channel(**kwargs),),
         ),
     )
@@ -1064,7 +1045,7 @@ async def test_native_otel_disabled_keeps_primary_source_exact(theater_home, tmp
     participant = daemon.registry.create_spawned(harness="acme", cwd=str(tmp_path), pid="disabled")
     try:
         source = daemon.observer._open_source(participant.id, harness.observer)
-        assert isinstance(source, _Primary)
+        assert isinstance(source, PrimarySource)
         assert await source.read() == Batch()
         await source.aclose()
     finally:

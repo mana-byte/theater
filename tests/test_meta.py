@@ -8,23 +8,7 @@ deleted jobs already used. Persisting it independently of jobs fixes that.
 
 from __future__ import annotations
 
-from theater.models import Job
-
-
-def _job(handle: str) -> Job:
-    return Job(
-        handle=handle,
-        caller_id="caller",
-        target_id="target",
-        kind="send",
-        prompt="hi",
-        state="running",
-        result=None,
-        error_code=None,
-        created_at=1.0,
-        finished_at=None,
-    )
-
+from tests.support.builders import running_send_job
 
 # ---- meta key/value ----------------------------------------------------------
 
@@ -74,7 +58,7 @@ def test_send_seq_survives_job_deletion(store):
     from theater.daemon.server import Daemon
 
     for i in range(1, 13):
-        store.create_job(_job(f"x#{i}"))
+        store.create_job(running_send_job(f"x#{i}"))
 
     # Simulate the daemon's normal start: _init_send_seq seeds the in-memory
     # counter from max(persisted meta, max_send_seq) and _next_send_seq

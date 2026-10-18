@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from theater.constants.daemon import BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
+from tests.support.native_rpc import interrupt_events
 from theater.models import Status
 from theater.protocol import RemoteError
 
@@ -19,14 +19,6 @@ async def _working_child(daemon, terminal_provider):
     return parent, daemon.registry.get(child.id)
 
 
-def _interrupt_events(daemon):
-    return [
-        event
-        for event in daemon.store.bus_tail(limit=100)
-        if event["kind"] == BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
-    ]
-
-
 async def test_interrupt_refuses_self_and_non_child_callers(client, daemon, terminal_provider):
     _parent, child = await _working_child(daemon, terminal_provider)
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
@@ -36,7 +28,7 @@ async def test_interrupt_refuses_self_and_non_child_callers(client, daemon, term
             await client.call("participant.interrupt", target=child.id, caller_id=caller_id)
         assert raised.value.code == "not_your_child"
 
-    assert _interrupt_events(daemon) == []
+    assert interrupt_events(daemon) == []
 
 
 # ---- native routing (Wave 4A) ---------------------------------------------
@@ -149,4 +141,4 @@ async def test_native_interrupt_authorizes_like_the_existing_gate(
         with pytest.raises(RemoteError) as raised:
             await client.call("participant.interrupt", target=child.id, caller_id=caller_id)
         assert raised.value.code == "not_your_child"
-    assert _interrupt_events(daemon) == []
+    assert interrupt_events(daemon) == []

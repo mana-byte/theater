@@ -32,3 +32,11 @@ async def drain() -> None:
     """Let scheduled dispatch tasks run through their first awaits."""
     for _ in range(4):
         await asyncio.sleep(0)
+
+
+async def settle_operations(daemon) -> None:
+    """Let the daemon's owned public-operation tasks run to completion."""
+    await asyncio.sleep(0)
+    tasks = daemon.operation_service.owned_tasks
+    if tasks:
+        await asyncio.gather(*tasks)

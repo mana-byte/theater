@@ -16,110 +16,17 @@ import json
 
 from sqlalchemy import func, select
 
+from tests.support.builders import make_bus_row, make_job, make_participant, make_touch
 from theater import cli
 from theater.cli.commands import maintenance as maintenance_mod
 from theater.daemon.jobs import JobState
 from theater.daemon.schema import bus, global_scratchpad, jobs, participants, touch
-from theater.models import Job, Participant, Status, Tier, now
+from theater.models import now
 
 _DAY = 86400.0
 
 
 # ---- helpers (mirror test_gc.py's, kept local so this file is self-contained) ---
-
-
-def _participant(
-    store,
-    *,
-    pid: str = "p1",
-    harness: str = "vibe",
-    cwd: str = "/tmp",
-    parent_id: str | None = None,
-    status: Status = Status.DEAD,
-) -> Participant:
-    p = Participant(
-        id=pid,
-        harness=harness,
-        tier=Tier.SPAWNED,
-        cwd=cwd,
-        parent_id=parent_id,
-        status=status,
-    )
-    store.upsert_participant(p)
-    return p
-
-
-def _job(
-    store,
-    *,
-    handle: str,
-    caller_id: str = "cli",
-    target_id: str | None = "p1",
-    kind: str = "spawn",
-    prompt: str | None = "do the thing",
-    state: str = JobState.DONE,
-    result: str | None = "done",
-    error_code: str | None = None,
-    created_at: float | None = None,
-    finished_at: float | None = None,
-) -> None:
-    store.create_job(
-        Job(
-            handle=handle,
-            caller_id=caller_id,
-            target_id=target_id,
-            kind=kind,
-            prompt=prompt,
-            state=state,
-            result=result,
-            error_code=error_code,
-            created_at=created_at if created_at is not None else now(),
-            finished_at=finished_at,
-        )
-    )
-
-
-def _touch(
-    store,
-    *,
-    job_handle: str,
-    path: str = "src/main.py",
-    mode: str = "write",
-    sha_before: str | None = None,
-    sha_after: str | None = None,
-) -> None:
-    store.conn.execute(
-        touch.insert().values(
-            job_handle=job_handle,
-            path=path,
-            mode=mode,
-            sha_before=sha_before,
-            sha_after=sha_after,
-        )
-    )
-
-
-def _bus(
-    store,
-    *,
-    kind: str = "job.created",
-    ts: float | None = None,
-    from_id: str | None = None,
-    to_id: str | None = None,
-    payload: str | None = None,
-) -> int:
-    result = store.conn.execute(
-        bus.insert().values(
-            ts=ts if ts is not None else now(),
-            from_id=from_id,
-            to_id=to_id,
-            kind=kind,
-            payload=payload,
-        )
-    )
-    pk = result.inserted_primary_key
-    assert pk is not None
-    return pk[0]
 
 
 def _scratchpad_row(store) -> None:
@@ -144,8 +51,8 @@ def _count(store, table) -> int:
 async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, terminal_provider):
     """The response must carry every documented key, and the counts must match
     what actually disappeared from the tables."""
-    _participant(daemon.store, pid="p1")
-    _job(
+    make_participant(daemon.store, pid="p1")
+    make_job(
         daemon.store,
         handle="old1",
         target_id="p1",
@@ -153,8 +60,8 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, term
         finished_at=now() - 90 * _DAY,
         created_at=now() - 90 * _DAY,
     )
-    _touch(daemon.store, job_handle="old1", path="x.py")
-    _bus(daemon.store, kind="job.created", ts=now() - 30 * _DAY)
+    make_touch(daemon.store, job_handle="old1", path="x.py")
+    make_bus_row(daemon.store, kind="job.created", ts=now() - 30 * _DAY)
     _scratchpad_row(daemon.store)
 
     before_jobs = _count(daemon.store, jobs)
@@ -205,8 +112,8 @@ async def test_gc_rpc_passes_live_handles(client, daemon, terminal_provider):
     Asserted against the database, not by inspecting arguments: the job row
     must still be ``running`` after the sweep.
     """
-    _participant(daemon.store, pid="p1")
-    _job(
+    make_participant(daemon.store, pid="p1")
+    make_job(
         daemon.store,
         handle="live-job",
         target_id="p1",
@@ -276,8 +183,8 @@ async def test_gc_rpc_sweeps_when_retention_disabled(client, daemon, terminal_pr
 
     daemon.config = Config(retention=RetentionSection(enabled=False))
 
-    _participant(daemon.store, pid="p1")
-    _job(
+    make_participant(daemon.store, pid="p1")
+    make_job(
         daemon.store,
         handle="old1",
         target_id="p1",

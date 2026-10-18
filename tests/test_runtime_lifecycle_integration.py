@@ -34,6 +34,12 @@ from tests.support.fake_runtime import (
     FakeRuntimeIO,
     FakeRuntimeState,
 )
+from tests.support.runtime_processes import (
+    NoTranscriptObserver,
+    await_reaped,
+    fake_create,
+    pid_alive,
+)
 from tests.support.waiting import wait_until
 from theater import paths
 from theater.daemon.controls.service import INTERRUPTED_ERROR_CODE
@@ -73,7 +79,6 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
     SessionOpenMode,
 )
-from theater.harness.observation import TranscriptObserver
 from theater.models import BadRequest, HumanPresent, JobState, Status, TheaterError
 from theater.provenance import TranscriptProvenance
 
@@ -88,25 +93,6 @@ s.bind({path!r})
 s.listen(1)
 time.sleep(300)
 """
-
-
-def _pid_alive(pid: int | None) -> bool:
-    if pid is None:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-async def _await_reaped(pid: int | None, timeout: float = 5.0) -> None:
-    """Wait until a terminated process is reaped and its pid is gone."""
-    for _ in range(int(timeout / 0.02)):
-        if not _pid_alive(pid):
-            return
-        await asyncio.sleep(0.02)
-    raise AssertionError(f"pid {pid} is still alive; the backend was not terminated")
 
 
 async def _await_event(harness: _Harness, tag: str, *, timeout: float = 5.0) -> None:
@@ -125,24 +111,6 @@ async def _await_flag(flag: asyncio.Event, *, what: str, timeout: float = 5.0) -
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"timed out after {timeout}s waiting for {what}")
         await asyncio.sleep(0.01)
-
-
-class _Obs(TranscriptObserver):
-    """A transcript-less observer; observation is disabled in these tests."""
-
-    has_transcript = False
-
-    def find_transcript(self, *, cwd, session_id=None, after=None):  # pragma: no cover
-        return None
-
-    def session_id(self, transcript):  # pragma: no cover
-        return None
-
-    def parse(self, line, index, *, clip_text=True):  # pragma: no cover
-        return []
-
-    def is_idle_screen(self, capture):  # pragma: no cover
-        return False
 
 
 class _RoutingIO(RuntimeIO):
@@ -229,7 +197,7 @@ class _Harness(Harness):
         with_runtime: bool = True,
         binds: bool = True,
     ):
-        self.observer = _Obs()
+        self.observer = NoTranscriptObserver()
         self.events: list = []
         #: Store handle for order assertions; wired by ``_daemon``.
         self.store = None
@@ -391,13 +359,6 @@ def _replacement_runtime(participant_id: str) -> FakeRuntime:
         endpoint="unix:///tmp/thtr-gen2.sock",
     )
     return FakeRuntime(context)
-
-
-def _fake_create(runtime):
-    async def create():
-        return runtime
-
-    return create
 
 
 async def _restart_daemon(io, harness, terminal_provider) -> Daemon:
@@ -599,7 +560,7 @@ async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in
 
         # The verified backend identity is persisted and the process is live.
         assert binding.backend_pid is not None
-        assert _pid_alive(binding.backend_pid)
+        assert pid_alive(binding.backend_pid)
 
         # The initial prompt went through the control service exactly once —
         # never pasted into the pane.
@@ -776,7 +737,7 @@ async def test_new_spawn_registers_live_wiring_and_teardown_unregisters(
 
         await recovery.teardown_participant_runtime(d, p.id, caller_id="cli")
         assert d.observer.live.registration_for(p.id) is None, "teardown unregisters"
-        await _await_reaped(binding.backend_pid)
+        await await_reaped(binding.backend_pid)
     finally:
         if p is not None and d.store.get_runtime_binding(p.id) is not None:
             with contextlib.suppress(Exception):
@@ -819,7 +780,7 @@ async def test_teardown_cancels_the_followup_queue_without_presence_gating(
         assert finished.state == JobState.KILLED.value
         assert finished.error_code == INTERRUPTED_ERROR_CODE
         assert d.store.get_runtime_binding(p.id) is None
-        await _await_reaped(binding.backend_pid)
+        await await_reaped(binding.backend_pid)
     finally:
         if p is not None and d.store.get_runtime_binding(p.id) is not None:
             with contextlib.suppress(Exception):
@@ -1022,7 +983,7 @@ async def test_endpoint_readiness_failure_falls_back_after_verified_cleanup(
         # independent readiness policy exists to reject a slow-but-conforming
         # backend inside the overall bound.
         assert budgets == [native_mod.NATIVE_LAUNCH_DEADLINE_SECONDS]
-        await _await_reaped(launched.get("pid"))
+        await await_reaped(launched.get("pid"))
         assert participant.status is not Status.DEAD
         assert d.store.get_runtime_binding(participant.id) is None
         assert _pinned(terminal_provider.creations[-1]["command"]) == [
@@ -1073,7 +1034,7 @@ async def test_cancelled_endpoint_wait_cannot_escape_backend_ownership(
         failed = participants[0]
         assert failed.status is not Status.DEAD
         assert d.store.get_runtime_binding(failed.id) is not None
-        assert _pid_alive(launched.get("pid"))
+        assert pid_alive(launched.get("pid"))
         assert terminal_provider.creations == []
         assert terminal_provider.deliveries == []
     finally:
@@ -1131,7 +1092,7 @@ async def test_teardown_failure_preserves_the_worktree_terminal_and_binding(
         assert participants[0].id == failed.id
         assert failed.status is Status.DEAD, "failed launch recorded; resources retained"
         assert d.store.get_runtime_binding(failed.id) is not None, "binding kept"
-        assert _pid_alive(launched["pid"]), "the backend was not signalled"
+        assert pid_alive(launched["pid"]), "the backend was not signalled"
         # The launch failed before pane creation. The terminal binding row and
         # the worktree directory are retired with the failed launch; the
         # preserved artifacts are the runtime binding row and the backend,
@@ -1148,11 +1109,11 @@ async def test_teardown_failure_preserves_the_worktree_terminal_and_binding(
             with contextlib.suppress(Exception):
                 await d.runtime_manager.teardown(rows[0].id, backend_generation=1)
         pid = launched.get("pid")
-        if pid is not None and _pid_alive(pid):
+        if pid is not None and pid_alive(pid):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
         if pid is not None:
-            await _await_reaped(pid)
+            await await_reaped(pid)
         await d.aclose()
 
 
@@ -1173,7 +1134,7 @@ async def test_shutdown_disconnects_clients_and_leaves_the_backend_alive(
     await d.aclose()
 
     assert runtime.state.connected is False, "the runtime client is disconnected"
-    assert _pid_alive(binding.backend_pid), "a healthy backend survives shutdown"
+    assert pid_alive(binding.backend_pid), "a healthy backend survives shutdown"
     assert terminal.terminal_id in terminal_provider.terminal_ids, "the UI survives shutdown"
     # Leave no process behind the test.
     await _teardown(d, p.id)
@@ -1190,7 +1151,7 @@ async def test_restart_reconnects_the_exact_session_without_a_second_ui(
     binding = d1.store.get_runtime_binding(p.id)
     windows_before = len(terminal_provider.creations)
     await d1.aclose()
-    assert _pid_alive(binding.backend_pid)
+    assert pid_alive(binding.backend_pid)
 
     # A fresh daemon over the same home reconciles before observation.
     d2 = Daemon(harnesses={})
@@ -1239,7 +1200,7 @@ async def test_restart_reconnect_registers_live_wiring_before_evidence_is_consum
     p = await _spawn(d1, _request(prompt=""))  # promptless: nothing queued
     binding = d1.store.get_runtime_binding(p.id)
     await d1.aclose()
-    assert _pid_alive(binding.backend_pid)
+    assert pid_alive(binding.backend_pid)
 
     d2 = Daemon(harnesses={})
     HARNESSES[rig.harness.name] = rig.harness
@@ -1273,9 +1234,9 @@ async def test_restart_reconnect_registers_live_wiring_before_evidence_is_consum
 
         await recovery.teardown_participant_runtime(d2, p.id, caller_id="cli")
         assert d2.observer.live.registration_for(p.id) is None
-        await _await_reaped(binding.backend_pid)
+        await await_reaped(binding.backend_pid)
     finally:
-        if _pid_alive(binding.backend_pid):
+        if pid_alive(binding.backend_pid):
             with contextlib.suppress(Exception):
                 await _teardown(d2, p.id)
             with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -1380,7 +1341,7 @@ async def test_live_backend_without_persisted_session_is_owned_but_not_attached(
         )
     )
     await d1.aclose()
-    assert _pid_alive(binding.backend_pid)
+    assert pid_alive(binding.backend_pid)
 
     d2 = Daemon(harnesses={})
     HARNESSES[rig.harness.name] = rig.harness
@@ -1397,7 +1358,7 @@ async def test_live_backend_without_persisted_session_is_owned_but_not_attached(
 
         # Ownership means termination: the teardown path can still stop it.
         await recovery.teardown_participant_runtime(d2, p.id, caller_id="cli")
-        await _await_reaped(binding.backend_pid)
+        await await_reaped(binding.backend_pid)
         assert d2.store.get_runtime_binding(p.id) is None
     finally:
         await d2.aclose()
@@ -1434,7 +1395,7 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
         assert backend_pid is not None
         windows_before = len(terminal_provider.creations)
         await d1.aclose()
-        assert _pid_alive(backend_pid)
+        assert pid_alive(backend_pid)
 
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.05)
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
@@ -1451,7 +1412,7 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
             "a candidate with no native session must not read CONNECTED"
         )
         assert d2.observer.live.registration_for(p.id) is None
-        assert _pid_alive(backend_pid), "the backend is never relaunched"
+        assert pid_alive(backend_pid), "the backend is never relaunched"
         assert len(terminal_provider.creations) == windows_before, "no second UI is launched"
         kinds = {row["kind"] for row in d2.store.bus_tail(limit=50)}
         assert "runtime.orphan" in kinds, "the failure stays diagnosed"
@@ -1491,17 +1452,17 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
         assert registration.native_session_id == binding.native_session_id
         assert registration.backend_generation == binding.backend_generation
         assert not any(event[0] == "send" for event in harness.events), "no prompt is ever replayed"
-        assert _pid_alive(backend_pid), "the same verified backend is reused"
+        assert pid_alive(backend_pid), "the same verified backend is reused"
         assert len(terminal_provider.creations) == windows_before
     finally:
         if d2 is not None:
             with contextlib.suppress(Exception):
                 await recovery.teardown_participant_runtime(d2, p.id, caller_id="cli")
             await d2.aclose()
-        if backend_pid is not None and _pid_alive(backend_pid):
+        if backend_pid is not None and pid_alive(backend_pid):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(backend_pid, signal.SIGKILL)
-            await _await_reaped(backend_pid)
+            await await_reaped(backend_pid)
 
 
 async def test_startup_registration_failure_is_fail_closed_and_monitor_registers(  # noqa: PLR0915
@@ -1541,7 +1502,7 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
         backend_pid = binding.backend_pid
         windows_before = len(terminal_provider.creations)
         await d1.aclose()
-        assert _pid_alive(backend_pid)
+        assert pid_alive(backend_pid)
 
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.05)
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
@@ -1576,17 +1537,17 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
         assert registration.live_source is runtime.live_source()
         assert registration.native_session_id == binding.native_session_id
         assert not any(event[0] == "send" for event in harness.events), "no prompt is ever replayed"
-        assert _pid_alive(backend_pid), "the same verified backend is reused"
+        assert pid_alive(backend_pid), "the same verified backend is reused"
         assert len(terminal_provider.creations) == windows_before, "no second UI is launched"
     finally:
         if d2 is not None:
             with contextlib.suppress(Exception):
                 await recovery.teardown_participant_runtime(d2, p.id, caller_id="cli")
             await d2.aclose()
-        if backend_pid is not None and _pid_alive(backend_pid):
+        if backend_pid is not None and pid_alive(backend_pid):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(backend_pid, signal.SIGKILL)
-            await _await_reaped(backend_pid)
+            await await_reaped(backend_pid)
 
 
 async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
@@ -1639,9 +1600,7 @@ async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
             replace(binding, backend_generation=2, native_session_id="gen-2-session")
         )
         gen2 = _replacement_runtime(p.id)
-        await d2.runtime_manager.get_or_create(
-            p.id, backend_generation=2, create=_fake_create(gen2)
-        )
+        await d2.runtime_manager.get_or_create(p.id, backend_generation=2, create=fake_create(gen2))
         d2.observer.live.register(
             LiveRegistration(
                 participant_id=p.id,
@@ -1728,9 +1687,7 @@ async def test_startup_success_race_never_registers_over_a_successor(  # noqa: P
             replace(binding, backend_generation=2, native_session_id="gen-2-session")
         )
         gen2 = _replacement_runtime(p.id)
-        await d2.runtime_manager.get_or_create(
-            p.id, backend_generation=2, create=_fake_create(gen2)
-        )
+        await d2.runtime_manager.get_or_create(p.id, backend_generation=2, create=fake_create(gen2))
         d2.observer.live.register(
             LiveRegistration(
                 participant_id=p.id,
@@ -1814,14 +1771,14 @@ async def test_startup_discarded_candidate_close_cancels_the_monitor(
         await asyncio.sleep(0.25)
         assert d2.runtime_manager.get(p.id) is None, "no runtime is reinstalled after close"
         assert d2.observer.live.registration_for(p.id) is None
-        assert _pid_alive(backend_pid), "the close never terminates the backend"
+        assert pid_alive(backend_pid), "the close never terminates the backend"
     finally:
         if d2 is not None:
             await d2.aclose()
-        if backend_pid is not None and _pid_alive(backend_pid):
+        if backend_pid is not None and pid_alive(backend_pid):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(backend_pid, signal.SIGKILL)
-            await _await_reaped(backend_pid)
+            await await_reaped(backend_pid)
 
 
 # ---- explicit kill and confirmed exit --------------------------------------------
@@ -1842,7 +1799,7 @@ async def test_explicit_kill_terminates_the_backend_before_worktree_cleanup(
         real_teardown = d.spawner.teardown
 
         async def teardown_spy(participant, **kwargs):
-            teardown_liveness.append(_pid_alive(binding.backend_pid))
+            teardown_liveness.append(pid_alive(binding.backend_pid))
             return await real_teardown(participant, **kwargs)
 
         monkeypatch.setattr(d.spawner, "teardown", teardown_spy)
@@ -1851,7 +1808,7 @@ async def test_explicit_kill_terminates_the_backend_before_worktree_cleanup(
         assert teardown_liveness == [False], "backend terminated before pane/worktree teardown"
         assert d.store.get_runtime_binding(p.id) is None
         assert d.registry.get(p.id).status is Status.DEAD
-        await _await_reaped(binding.backend_pid)
+        await await_reaped(binding.backend_pid)
         assert terminal.terminal_id not in terminal_provider.terminal_ids
     finally:
         if p is not None:
@@ -1874,7 +1831,7 @@ async def test_missing_provider_terminal_does_not_infer_native_backend_exit(
 
         assert d.registry.get(p.id).status is not Status.DEAD
         assert d.store.get_runtime_binding(p.id) is not None
-        assert _pid_alive(binding.backend_pid)
+        assert pid_alive(binding.backend_pid)
     finally:
         if p is not None:
             await _teardown(d, p.id)
@@ -1937,13 +1894,13 @@ async def test_definitive_terminal_rejection_tears_down_detached_native_backend(
         assert d.store.get_runtime_binding(participant.id) is None
         assert d.store.terminal_bindings.get(participant.id) is None
         assert d.runtime_manager.get(participant.id) is None
-        await _await_reaped(launched["pid"])
+        await await_reaped(launched["pid"])
     finally:
         pid = launched.get("pid")
-        if pid is not None and _pid_alive(pid):
+        if pid is not None and pid_alive(pid):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
-            await _await_reaped(pid)
+            await await_reaped(pid)
         await d.aclose()
 
 
@@ -1974,7 +1931,7 @@ async def test_unverified_native_stop_preserves_provider_and_workspace_state(
         assert kept.status is not Status.DEAD, "no retirement without a proven stop"
         assert d.store.get_runtime_binding(p.id) is not None, "binding kept"
         assert Path(kept.cwd).is_dir(), "the worktree is not retired"
-        assert _pid_alive(binding.backend_pid), "the backend was not signalled"
+        assert pid_alive(binding.backend_pid), "the backend was not signalled"
 
         # Missing provider evidence cannot make the later native reaper infer exit.
         refuse[0] = False
@@ -1982,7 +1939,7 @@ async def test_unverified_native_stop_preserves_provider_and_workspace_state(
         assert d.registry.get(p.id).status is not Status.DEAD
         assert d.store.get_runtime_binding(p.id) is not None
         assert Path(kept.cwd).is_dir(), "participant kill retains the worktree"
-        assert _pid_alive(binding.backend_pid)
+        assert pid_alive(binding.backend_pid)
     finally:
         refuse[0] = False
         if p is not None and d.store.get_runtime_binding(p.id) is not None:
@@ -2022,13 +1979,13 @@ async def test_missing_terminal_preserves_worktree_and_native_runtime(
         assert exited.status is not Status.DEAD
         assert d.store.get_runtime_binding(p.id) is not None, "binding kept"
         assert Path(exited.cwd).is_dir(), "the worktree is not retired"
-        assert _pid_alive(binding.backend_pid), "the backend was not signalled"
+        assert pid_alive(binding.backend_pid), "the backend was not signalled"
 
         refuse[0] = False
         await d._reap_once()
         assert d.store.get_runtime_binding(p.id) is not None
         assert Path(exited.cwd).is_dir(), "missing terminal retains the worktree"
-        assert _pid_alive(binding.backend_pid)
+        assert pid_alive(binding.backend_pid)
     finally:
         refuse[0] = False
         if p is not None and d.store.get_runtime_binding(p.id) is not None:

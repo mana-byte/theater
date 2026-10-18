@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from theater.constants.daemon import BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
 from theater.daemon.persistence.repositories.runtime_bindings import (
     ParticipantRuntimeBinding,
 )
@@ -64,3 +65,11 @@ async def active_send(client, parent, child) -> dict:
     job = await client.call("send", target=child.id, prompt="do the thing", caller_id=parent.id)
     assert isinstance(job, dict)
     return job
+
+
+def interrupt_events(daemon):
+    return [
+        event
+        for event in daemon.store.bus_tail(limit=100)
+        if event["kind"] == BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
+    ]
