@@ -1,12 +1,4 @@
-"""Hostile prompts stay one literal argv element in the claude, codex, and opencode plans.
-
-Every parser here routes an element starting with "-" as an option: commander
-(Claude, inferred; closed source), clap (Codex — `codex fork [OPTIONS]
-[SESSION_ID] [PROMPT]` positional, no allow_hyphen_values), yargs 18 (OpenCode
-1.x — a "-"-leading `--prompt` value is swallowed as a flag), and effect's CLI
-(OpenCode 2.x — only non-"-" elements lex as flag values). A leading newline
-defeats all four while costing the model one blank first line.
-"""
+"""Flag-shaped prompts reach every harness as literal text."""
 
 from __future__ import annotations
 

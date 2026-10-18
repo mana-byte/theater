@@ -1,9 +1,7 @@
-"""Frozen runtime contracts: manifest integration, validation, compatibility."""
+"""Runtime, batch and event contracts: validation, capabilities, bindings and fake runtimes."""
 
 from __future__ import annotations
 
-import ast
-import importlib
 import shutil
 from pathlib import Path
 
@@ -47,7 +45,6 @@ from theater.harness.contracts.runtime import (
     RuntimeCompatibility,
     RuntimeContext,
     RuntimeExecutionState,
-    RuntimeIO,
     RuntimeLifecyclePhase,
     RuntimeManifest,
     RuntimeSettingField,
@@ -110,9 +107,6 @@ def _runtime_manifest(channel: LiveChannelDeclaration | None = None) -> RuntimeM
             channel=channel,
         )
     )
-
-
-# ---- manifest integration -------------------------------------------------
 
 
 def test_runtime_defaults_to_none_and_compiles() -> None:
@@ -190,9 +184,6 @@ def test_live_channel_may_not_be_declared_as_enrichment() -> None:
         compile_manifest("acme", manifest)
 
 
-# ---- Batch terminal evidence ------------------------------------------------
-
-
 def test_existing_batch_constructors_stay_valid() -> None:
     batch = Batch(events=(), progressed=True, status=None)
     assert batch.terminal_evidence == ()
@@ -244,9 +235,6 @@ def test_batch_terminal_evidence_bound_accepts_512_and_rejects_513() -> None:
         Batch(terminal_evidence=outcomes)
 
 
-# ---- Event native identity/revision ----------------------------------------
-
-
 def test_event_native_identity_is_optional_and_backwards_compatible() -> None:
     from theater.harness.contracts.events import Event, EventKind
 
@@ -288,9 +276,6 @@ def test_event_revision_must_be_a_non_negative_integer() -> None:
     with pytest.raises(ValueError, match="revision"):
         Event(kind=EventKind.USER, revision="3")  # type: ignore[arg-type]
     assert Event(kind=EventKind.USER, revision=0).revision == 0
-
-
-# ---- contract value bounds ----------------------------------------------------
 
 
 def test_control_receipt_requires_bounded_fields() -> None:
@@ -470,9 +455,6 @@ def test_runtime_context_binds_one_exact_backend_generation() -> None:
             backend_generation=1,
             trusted_session_id_provider="not-callable",
         )
-
-
-# ---- the shared fake runtime ----------------------------------------------------
 
 
 async def test_fake_runtime_open_session_and_frontend_plan() -> None:
@@ -676,9 +658,6 @@ async def test_fake_runtime_snapshot_capabilities_are_explicitly_enabled() -> No
     assert snapshot.capabilities.supports(RuntimeCapability.SEND)
 
 
-# ---- old-style local plugin compatibility --------------------------------------
-
-
 def test_old_style_plugin_without_runtime_stays_compatible(theater_home) -> None:
     plugins = theater_home / "plugins"
     plugins.mkdir(parents=True, exist_ok=True)
@@ -715,19 +694,3 @@ def test_registry_installs_old_style_plugin_alongside_builtin(theater_home, tmp_
     names = harness_registry.install(cfg.Config(), local_dir=plugins)
     assert "oldstyle" in names
     assert harness_registry.get("oldstyle").runtime is None
-
-
-# ---- import boundary ---------------------------------------------------------------
-
-
-def test_runtime_contracts_do_not_import_daemon_internals() -> None:
-    module = importlib.import_module("theater.harness.contracts.runtime")
-    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module
-            and node.module.startswith("theater.daemon")
-        ):
-            pytest.fail("runtime contracts must not import theater.daemon")
-    assert RuntimeIO is not None

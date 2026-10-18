@@ -1,9 +1,4 @@
-"""The launch plans are pure data, so they can be asserted precisely.
-
-These tests are the guard on the one thing phase 1a cannot get wrong: the
-participant id must reach the MCP server through a channel the SDK's environment
-allowlist cannot strip.
-"""
+"""Launch plans per harness: id transport, MCP servers, models, reasoning and overlay funnel."""
 
 from __future__ import annotations
 
@@ -520,9 +515,6 @@ def test_unknown_harness_and_approval_are_rejected(tmp_path):
         plan_launch(
             "vibe", participant_id="a", prompt="", config_path=Path("/x"), approval="whatever"
         )
-
-
-# ---- reasoning effort reaches the harnesses that support it --------------
 
 
 def test_reasoning_effort_reaches_codex_via_config_override(tmp_path):

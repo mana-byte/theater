@@ -1,4 +1,4 @@
-"""Contract tests for the compiled ManifestHarnessObserver."""
+"""A compiled manifest observer forwards each optional callback, or defers to the base class."""
 
 from __future__ import annotations
 
@@ -82,9 +82,6 @@ def _observer(
     return ManifestHarnessObserver(observation, harness_name=harness_name)
 
 
-# --- native_children --------------------------------------------------------
-
-
 def test_native_children_forwards_exact_context_and_value() -> None:
     seen: list[NativeChildrenContext] = []
     expected = [NativeChild(session_id="child-1")]
@@ -125,9 +122,6 @@ def test_native_children_exception_propagates() -> None:
     with pytest.raises(RuntimeError) as raised:
         observer.native_children(Path("/work/t.jsonl"))
     assert raised.value is error
-
-
-# --- stream_floor -----------------------------------------------------------
 
 
 def test_stream_floor_forwards_exact_context_and_value() -> None:
@@ -181,9 +175,6 @@ def test_stream_floor_exception_propagates() -> None:
     assert raised.value is error
 
 
-# --- transcript_candidates -------------------------------------------------
-
-
 def test_transcript_candidates_forwards_exact_context_and_value() -> None:
     seen: list[TranscriptCandidatesContext] = []
     expected = [TranscriptCandidate(location="/work/t.jsonl", session_id="s1")]
@@ -224,9 +215,6 @@ def test_transcript_candidates_exception_propagates() -> None:
     with pytest.raises(RuntimeError) as raised:
         observer.transcript_candidates(cwd="/work")
     assert raised.value is error
-
-
-# --- validate_transcript_receipt --------------------------------------------
 
 
 def test_receipt_validator_forwards_exact_context_and_value() -> None:
@@ -300,9 +288,6 @@ def test_receipt_validator_exception_propagates() -> None:
     assert raised.value is error
 
 
-# --- admit_operator_candidate -----------------------------------------------
-
-
 def test_operator_admitter_forwards_exact_context_and_value() -> None:
     seen: list[OperatorCandidateContext] = []
     expected = TranscriptCandidate(location="/work/t.jsonl", session_id="s1")
@@ -350,9 +335,6 @@ def test_operator_admitter_exception_propagates() -> None:
     assert raised.value is error
 
 
-# --- trajectory_capabilities ------------------------------------------------
-
-
 def test_trajectory_capabilities_survive_compilation() -> None:
     caps = TrajectoryCapabilities()
     observation = ObservationManifest(
@@ -378,9 +360,6 @@ def test_default_trajectory_capabilities_match_observer_default() -> None:
         primary=SourceManifest(factory=_source, channel=_primary_channel()),
     )
     assert observer.trajectory_capabilities == HarnessObserver.trajectory_capabilities
-
-
-# --- absent callbacks preserve superclass defaults -------------------------
 
 
 def test_all_absent_optional_callbacks_preserve_superclass_behaviour() -> None:

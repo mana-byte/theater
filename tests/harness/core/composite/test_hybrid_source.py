@@ -1,12 +1,4 @@
-"""The first-class live/durable composition for native runtime wiring.
-
-``HybridSource`` is not a ``CompositeSource`` enrichment: the live channel
-has its own authority regime. These tests pin that regime — durable keeps
-attachment, identity, history, and the persisted cursor; live owns the
-current turn, healthy status, and exact terminal evidence — plus the
-evidence replay and fact-merge semantics that make delayed durable data
-enrich history without reopening terminal turns.
-"""
+"""The hybrid live-plus-durable source: status precedence, fact merge, evidence and health."""
 
 from __future__ import annotations
 
@@ -35,6 +27,8 @@ from theater.models import Status
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
 TRANSCRIPT = ChannelDeclaration(id="transcript", kind=ChannelKind.TRANSCRIPT)
+
+
 DATABASE = ChannelDeclaration(id="history-db", kind=ChannelKind.DATABASE)
 
 
@@ -89,9 +83,6 @@ def hybrid(
     )
 
 
-# ---- construction validation ---------------------------------------------
-
-
 def test_live_channel_must_be_live_kind():
     with pytest.raises(ValueError, match="kind"):
         hybrid(ScriptedSource(), ScriptedSource(), live_channel=LiveChannelDeclaration(TRANSCRIPT))
@@ -122,9 +113,6 @@ def test_live_read_timeout_must_be_positive_finite():
     for bad in (0, -1, float("inf")):
         with pytest.raises(HybridSourceError, match="live_read_timeout"):
             hybrid(ScriptedSource(), ScriptedSource(), live_read_timeout=bad)
-
-
-# ---- status authority -------------------------------------------------------
 
 
 async def test_live_status_wins_while_healthy():
@@ -180,9 +168,6 @@ async def test_live_read_exception_degrades_and_durable_flows():
     batch = await source.read()
 
     assert batch.status is Status.WORKING
-
-
-# ---- trajectory fact merge ----------------------------------------------------
 
 
 async def test_fact_merge_prefers_terminal_on_revision_tie():
@@ -248,9 +233,6 @@ async def test_plain_facts_pass_through_unmerged():
     batch = await source.read()
 
     assert [f.native_id for f in batch.trajectory] == ["i1", None]
-
-
-# ---- terminal evidence staging and replay -------------------------------------
 
 
 async def test_evidence_retained_until_delivered():
@@ -425,9 +407,6 @@ def event(
     return Event(kind=EventKind.ASSISTANT, text=text, native_id=native_id, revision=revision)
 
 
-# ---- live health authority ----------------------------------------------------
-
-
 async def test_unhealthy_live_health_relinquishes_remembered_status():
     for state in (ChannelHealthState.DEGRADED, ChannelHealthState.FAILED):
         durable = ScriptedSource(Batch(), Batch(status=Status.IDLE))
@@ -479,9 +458,6 @@ async def test_unhealthy_live_evidence_still_flows():
     # A degraded live channel loses status authority, never exact evidence.
     assert len(batch.terminal_evidence) == 1
     assert batch.status is Status.IDLE
-
-
-# ---- identified event dedupe ----------------------------------------------------
 
 
 async def test_identified_events_dedupe_by_native_id():
@@ -618,9 +594,6 @@ async def test_rollback_replays_event_even_when_same_read_completed_its_fact():
     # The terminal trajectory ledger remains irreversible; only the failed
     # control-event application was rolled back.
     assert (await source.read()).trajectory == ()
-
-
-# ---- refresh, health, wakeup, close ---------------------------------------------
 
 
 async def test_refresh_keeps_live_status_on_rotation_attach():

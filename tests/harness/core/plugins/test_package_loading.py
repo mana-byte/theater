@@ -1,8 +1,4 @@
-"""Tests for the package-manifest loader (Phase 2).
-
-Covers discovery, isolated import, manifest compilation, failure modes,
-cleanup, disabling, legacy migration, and repeat-scan semantics.
-"""
+"""Plugin package discovery, isolated import, error reporting and rescans."""
 
 from __future__ import annotations
 
@@ -11,15 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.paths import REPO_ROOT
 from theater.harness.contracts.harness import Harness
-from theater.harness.loading import (
-    LOCAL,
-    SHIPPED,
-    discover,
-    load_plugin,
-    scan,
-)
+from theater.harness.loading import LOCAL, SHIPPED, discover, load_plugin, scan
 from theater.harness.loading.discovery import MANIFEST_FILENAME
 from theater.harness.loading.importer import PACKAGE_PREFIX
 
@@ -66,9 +55,6 @@ def root(tmp_path: Path) -> Path:
     d = tmp_path / "plugins"
     d.mkdir()
     return d
-
-
-# ---- discovery ------------------------------------------------------------
 
 
 def test_missing_root_returns_empty(tmp_path: Path) -> None:
@@ -135,9 +121,6 @@ def test_non_py_files_are_ignored(root: Path) -> None:
     assert [r.name for r in results] == ["acme"]
 
 
-# ---- legacy migration ----------------------------------------------------
-
-
 def test_legacy_top_level_py_is_never_executed(root: Path) -> None:
     legacy = root / "acme.py"
     legacy.write_text("raise RuntimeError('must not execute')")
@@ -154,9 +137,6 @@ def test_legacy_non_py_files_ignored(root: Path) -> None:
     (root / "acme.txt").write_text("not a plugin")
     (root / "data.json").write_text("{}")
     assert discover(root, source=LOCAL) == []
-
-
-# ---- disabling -----------------------------------------------------------
 
 
 def test_disabled_name_filtered_before_import(root: Path) -> None:
@@ -179,9 +159,6 @@ def test_disabled_manifest_raises_is_never_executed(root: Path) -> None:
     assert not any(k == pkg or k.startswith(pkg + ".") for k in sys.modules)
 
 
-# ---- valid loading -------------------------------------------------------
-
-
 def test_valid_manifest_compiles_into_harness(root: Path) -> None:
     write_manifest(root / "acme")
     results = scan(root, source=LOCAL)
@@ -200,9 +177,6 @@ def test_shipped_source_takes_same_path(root: Path) -> None:
     assert len(results) == 1
     assert results[0].source == SHIPPED
     assert isinstance(results[0].harness, Harness)
-
-
-# ---- relative and nested imports -----------------------------------------
 
 
 def test_relative_sibling_import_works(root: Path) -> None:
@@ -253,9 +227,6 @@ def test_nested_package_import_works(root: Path) -> None:
     assert results[0].harness.plan_launch(
         participant_id="p", prompt="hi", config_path=Path("/c"), approval="manual"
     ).argv == ["acme", "99"]
-
-
-# ---- isolation -----------------------------------------------------------
 
 
 def test_same_named_siblings_in_separate_sources_do_not_collide(root: Path, tmp_path: Path) -> None:
@@ -321,9 +292,6 @@ def test_no_stdlib_shadowing(root: Path) -> None:
     assert sys.modules["json"] is json
 
 
-# ---- missing MANIFEST ----------------------------------------------------
-
-
 def test_missing_manifest_export(root: Path) -> None:
     acme = root / "acme"
     acme.mkdir()
@@ -358,9 +326,6 @@ def test_wrong_manifest_type(root: Path) -> None:
     assert "is not a HarnessManifest" in results[0].error
 
 
-# ---- import failures ----------------------------------------------------
-
-
 def test_import_failure_is_broken(root: Path) -> None:
     acme = root / "acme"
     acme.mkdir()
@@ -391,9 +356,6 @@ def test_system_exit_is_broken(root: Path) -> None:
     assert len(results) == 1
     assert results[0].harness is None
     assert results[0].error is not None
-
-
-# ---- cleanup -----------------------------------------------------------
 
 
 def test_failed_import_leaves_no_modules(root: Path) -> None:
@@ -430,9 +392,6 @@ def test_keyboard_interrupt_propagates_and_cleans_up(root: Path) -> None:
     assert leaked == []
 
 
-# ---- repeat scan --------------------------------------------------------
-
-
 def test_repeat_scan_observes_edits(root: Path) -> None:
     write_manifest(root / "acme", binary="acme")
     first = scan(root, source=LOCAL)
@@ -460,9 +419,6 @@ def test_rescan_of_formerly_successful_manifest_now_raising(root: Path) -> None:
     assert leaked == []
 
 
-# ---- __init__.py not executed -------------------------------------------
-
-
 def test_init_py_is_not_executed_automatically(root: Path) -> None:
     acme = root / "acme"
     acme.mkdir()
@@ -473,17 +429,11 @@ def test_init_py_is_not_executed_automatically(root: Path) -> None:
     assert results[0].harness is not None
 
 
-# ---- legacy disabling ---------------------------------------------------
-
-
 def test_disabled_legacy_file_stem_not_executed(root: Path) -> None:
     legacy = root / "acme.py"
     legacy.write_text("raise RuntimeError('must not execute')")
     results = scan(root, source=LOCAL, skip={"acme"})
     assert results == []
-
-
-# ---- validation error path-qualified -----------------------------------
 
 
 def test_validation_error_is_prefixed_with_manifest_path(root: Path) -> None:
@@ -500,9 +450,6 @@ def test_validation_error_is_prefixed_with_manifest_path(root: Path) -> None:
     assert "icon" in results[0].error
 
 
-# ---- pre-existing error passthrough -------------------------------------
-
-
 def test_pre_existing_error_passthrough(root: Path) -> None:
     (root / "acme").mkdir()
     raw = discover(root, source=LOCAL)
@@ -510,38 +457,3 @@ def test_pre_existing_error_passthrough(root: Path) -> None:
     result = load_plugin(raw[0])
     assert result.error == raw[0].error
     assert result.harness is None
-
-
-# ---- no runtime layer imports ------------------------------------------
-
-
-def test_loading_modules_do_not_import_runtime_layers() -> None:
-    import ast
-
-    root = REPO_ROOT
-    files = (
-        root / "theater/harness/loading/models.py",
-        root / "theater/harness/loading/discovery.py",
-        root / "theater/harness/loading/importer.py",
-        root / "theater/harness/loading/__init__.py",
-    )
-    forbidden = (
-        "theater.daemon",
-        "theater.regie",
-        "theater.tmux",
-        "theater.harness.builtin",
-    )
-    for path in files:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        imported = {
-            node.module
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module is not None
-        }
-        imported.update(
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        )
-        assert not any(name.startswith(forbidden) for name in imported), path

@@ -1,10 +1,4 @@
-"""Harness package-manifest plugins: registry, collision, and refusal behavior.
-
-Two directories, one loader: the adapters Theater ships and the ones a user
-drops in `$THEATER_HOME/plugins/`. The tests that matter here are the
-refusals, the precedence, and the collision guards — all using named package
-manifests, the sole plugin format.
-"""
+"""The plugin registry: install, override, aliases, binary claims and disabled harnesses."""
 
 from __future__ import annotations
 
@@ -12,43 +6,15 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.plugin_catalog_rig import local_dir as shared_local_dir
 from tests.support.plugin_packages import install, write_plugin
 from theater import cli, paths
 from theater import config as cfg
 from theater import harness as harness_registry
-from theater.constants.harness import (
-    HARNESS_DIAGNOSTICS_MAX_BINDINGS,
-    HARNESS_DIAGNOSTICS_MAX_CHANNELS,
-    HARNESS_DIAGNOSTICS_MAX_PARTICIPANTS,
-    HARNESS_DIAGNOSTICS_UNAVAILABLE_REASON_MAX_CHARS,
-)
-from theater.harness.contracts.channels import (
-    ChannelDeclaration,
-    ChannelHealth,
-    ChannelKind,
-    HookBinding,
-)
-from theater.harness.contracts.manifest import (
-    HarnessManifest,
-    HookChannelManifest,
-    LaunchManifest,
-    ObservationManifest,
-    ScreenManifest,
-    SourceManifest,
-    UnavailableChannelManifest,
-)
-from theater.harness.contracts.runtime import RuntimeCompatibility
 from theater.harness.loading.discovery import MANIFEST_FILENAME
-from theater.harness.loading.models import LoadedPlugin, PluginError
-from theater.harness.registry.diagnostics import project_plugin
+from theater.harness.loading.models import PluginError
 
-
-@pytest.fixture
-def local_dir(tmp_path) -> Path:
-    """Stand-in for `$THEATER_HOME/plugins`."""
-    d = tmp_path / "plugins"
-    d.mkdir()
-    return d
+local_dir = shared_local_dir  # the shared fixture, under the name the tests ask for
 
 
 @pytest.fixture
@@ -61,9 +27,6 @@ def shipped_dir(tmp_path) -> Path:
 
 def disabling(*names: str) -> cfg.Config:
     return cfg.Config(harness=cfg.HarnessSection(disabled=list(names)))
-
-
-# ---- loading and registry ------------------------------------------------
 
 
 def test_a_plugin_joins_the_registry(local_dir):
@@ -112,9 +75,6 @@ def test_installing_an_empty_directory_drops_the_plugin(local_dir, tmp_path):
     assert "acme" not in harness_registry.HARNESSES
 
 
-# ---- failures -----------------------------------------------------------
-
-
 def test_a_broken_local_plugin_does_not_stop_start_up(local_dir):
     pkg = local_dir / "broken"
     pkg.mkdir()
@@ -155,9 +115,6 @@ def test_disabling_a_plugin_stops_it_being_imported(local_dir, shipped_dir):
     (pkg / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
     write_plugin(shipped_dir, name="vibe", binary="vibe")
     assert install(local_dir, disabling("acme"), shipped_dir=shipped_dir) == ["vibe"]
-
-
-# ---- precedence ---------------------------------------------------------
 
 
 def test_a_local_plugin_overrides_a_shipped_one(local_dir):
@@ -249,9 +206,6 @@ def test_binary_collision_error_names_both_files(local_dir, shipped_dir):
     assert "first" in msg
 
 
-# ---- observation key collisions (tmux 15-char truncation) -----------------
-
-
 def test_two_long_binaries_sharing_first_15_chars_are_refused(local_dir, shipped_dir):
     write_plugin(shipped_dir, name="first", binary="very-long-binary")
     write_plugin(local_dir, name="second", binary="very-long-binary2")
@@ -286,9 +240,6 @@ def test_two_truncated_spellings_of_same_harness_are_accepted(local_dir, shipped
     assert "solo" in result
 
 
-# ---- disabling ----------------------------------------------------------
-
-
 def test_a_disabled_harness_is_absent(local_dir):
     assert install(local_dir, disabling("vibe")) == ["claude", "codex", "opencode", "pi"]
     assert "vibe" not in harness_registry.HARNESSES
@@ -312,9 +263,6 @@ def test_disabling_something_that_is_not_there_is_not_an_error(local_dir):
         "pi",
         "vibe",
     ]
-
-
-# ---- the rest of the system sees them -----------------------------------
 
 
 def test_the_cli_loads_plugins_from_theater_home(capsys):
@@ -344,166 +292,3 @@ def test_a_plugin_shows_up_in_describe(local_dir):
     assert rows["acme"]["package_path"] == str(local_dir / "acme")
     assert rows["acme"]["primary_channel"] is None
     assert rows["acme"]["runtime"] == {"state": "inactive", "participants": []}
-
-
-def test_native_compatibility_records_separate_version_and_route_support(local_dir):
-    install(local_dir)
-    supported = RuntimeCompatibility(
-        supported=True,
-        policy="test-policy",
-        native_version="2.1.248",
-    )
-    unsupported = RuntimeCompatibility(
-        supported=False,
-        policy="test-policy",
-        native_version="2.1.220",
-        reason="below floor",
-    )
-
-    assert (
-        harness_registry.native_compatibility_record(
-            harness_registry.HARNESSES["codex"], installed=True, result=supported
-        )["status"]
-        == "native-compatible"
-    )
-    assert harness_registry.native_compatibility_record(
-        harness_registry.HARNESSES["claude"], installed=True, result=unsupported
-    ) == {
-        "status": "legacy-only",
-        "installed_version": "2.1.220",
-        "qualified_range": None,
-        "policy": "test-policy",
-        "reason": "no native runtime; controls use the provider terminal",
-        "wiring": "legacy",
-        "routes": {
-            "send": "tmux",
-            "steer": "unavailable",  # claude has not declared that Enter steers
-            "queue_followup": "tmux",
-            "settings_update": "unavailable",
-            "interrupt": "tmux",
-        },
-    }
-    assert (
-        harness_registry.native_compatibility_record(
-            harness_registry.HARNESSES["claude"], installed=True, result=supported
-        )["status"]
-        == "legacy-only"
-    )
-    assert (
-        harness_registry.native_compatibility_record(
-            harness_registry.HARNESSES["vibe"], installed=True
-        )["status"]
-        == "legacy-only"
-    )
-
-
-def test_describe_projects_validated_manifest_channels_and_unavailability(local_dir):
-    install(local_dir)
-    row = {row["name"]: row for row in harness_registry.describe()}["vibe"]
-
-    assert row["manifest_path"].endswith("vibe/manifest.py")
-    assert row["approvals"] == ["manual", "edits", "yolo"]
-    assert row["primary_channel"] == {
-        "id": "transcript",
-        "kind": "transcript",
-        "availability": "declared",
-        "capabilities": [
-            {"signal": "identity", "ownership": "primary"},
-            {"signal": "content", "ownership": "primary"},
-            {"signal": "turn", "ownership": "primary"},
-            {"signal": "model", "ownership": "primary"},
-            {"signal": "tool", "ownership": "primary"},
-            {"signal": "timing", "ownership": "primary"},
-            {"signal": "usage", "ownership": "primary"},
-            {"signal": "lineage", "ownership": "primary"},
-        ],
-    }
-    unavailable = {
-        channel["id"]: channel for channel in row["channels"] if "unavailable_reason" in channel
-    }
-    assert unavailable["native-hooks"]["kind"] == "hook"
-    assert unavailable["native-hooks"]["unavailable_reason"]
-    assert unavailable["native-otel"]["protocol"] == "otlp_http_json"
-    assert unavailable["native-otel"]["unavailable_reason"]
-
-
-def test_diagnostics_projection_bounds_untrusted_manifest_output(tmp_path):
-    bindings = tuple(
-        HookBinding(
-            event=f"event-{index}",
-            signals=(),
-            decoder=lambda _context: (),
-            correlation=lambda _context: "native",
-        )
-        for index in range(HARNESS_DIAGNOSTICS_MAX_BINDINGS + 1)
-    )
-    hook = HookChannelManifest(
-        declaration=ChannelDeclaration(id="hooks", kind=ChannelKind.HOOK),
-        bindings=bindings,
-    )
-    unavailable = UnavailableChannelManifest(
-        declaration=ChannelDeclaration(id="unavailable", kind=ChannelKind.OTEL),
-        reason="unavailable " * (HARNESS_DIAGNOSTICS_UNAVAILABLE_REASON_MAX_CHARS + 1),
-    )
-    manifest = HarnessManifest(
-        api_version=1,
-        binary="acme",
-        icon="@",
-        launch=LaunchManifest(planner=lambda _context: None, approvals=()),
-        observation=ObservationManifest(
-            primary=SourceManifest(
-                factory=lambda _context: None,
-                channel=ChannelDeclaration(id="primary", kind=ChannelKind.TRANSCRIPT),
-            ),
-            screen=ScreenManifest(classifier=lambda _context: None),
-            enrichments=(
-                hook,
-                unavailable,
-                *tuple(
-                    ChannelDeclaration(id=f"channel-{index}", kind=ChannelKind.HOOK)
-                    for index in range(HARNESS_DIAGNOSTICS_MAX_CHANNELS)
-                ),
-            ),
-        ),
-    )
-    runtime_channel_ids = (
-        "primary",
-        "hooks",
-        *(f"channel-{index}" for index in range(HARNESS_DIAGNOSTICS_MAX_CHANNELS - 1)),
-        "foreign-channel",
-    )
-    runtime = {
-        "acme": {
-            f"participant-{index}": tuple(
-                ChannelHealth(channel_id=channel_id) for channel_id in runtime_channel_ids
-            )
-            for index in range(HARNESS_DIAGNOSTICS_MAX_PARTICIPANTS + 1)
-        }
-    }
-
-    row = project_plugin(
-        {"name": "acme"},
-        LoadedPlugin(path=tmp_path / "acme", source="local", name="acme", manifest=manifest),
-        runtime,
-    )
-
-    assert len(row["channels"]) == HARNESS_DIAGNOSTICS_MAX_CHANNELS
-    assert row["channels_omitted"] == 3
-    projected_hook = next(channel for channel in row["channels"] if channel["id"] == "hooks")
-    assert len(projected_hook["bindings"]) == HARNESS_DIAGNOSTICS_MAX_BINDINGS
-    assert projected_hook["bindings_omitted"] == 1
-    projected_unavailable = next(
-        channel for channel in row["channels"] if channel["id"] == "unavailable"
-    )
-    assert len(projected_unavailable["unavailable_reason"]) <= (
-        HARNESS_DIAGNOSTICS_UNAVAILABLE_REASON_MAX_CHARS
-    )
-    assert "chars omitted" in projected_unavailable["unavailable_reason"]
-    runtime_row = row["runtime"]
-    assert len(runtime_row["participants"]) == HARNESS_DIAGNOSTICS_MAX_PARTICIPANTS
-    assert runtime_row["participants_omitted"] == 1
-    assert len(runtime_row["participants"][0]["channels"]) == HARNESS_DIAGNOSTICS_MAX_CHANNELS
-    assert runtime_row["participants"][0]["channels_omitted"] == 1
-    assert all(
-        channel["id"] != "foreign-channel" for channel in runtime_row["participants"][0]["channels"]
-    )

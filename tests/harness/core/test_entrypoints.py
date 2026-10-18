@@ -1,4 +1,4 @@
-"""Public entrypoint contracts retained through the RC3 adapter split."""
+"""Shipped transcript observers keep their public parse and source entrypoint shapes."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Participant observation context and legacy source-factory dispatch."""
+"""Observation contexts are frozen and reach observers through context factories."""
 
 from __future__ import annotations
 

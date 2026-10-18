@@ -1,21 +1,4 @@
-"""Model discovery, per adapter.
-
-Discovery is an authoring aid: `theater models --discover` prints a config
-block a human edits and pastes. Nothing here is on the spawn path, which is
-what makes the failure mode acceptable — every one of these adapters is
-reading something it does not own (another tool's subcommand output, another
-tool's config file), and any of it can change under us.
-
-So the property under test is mostly negative: when the source is missing,
-unreadable, or shaped differently than expected, the adapter raises
-`NotImplementedError` and the command says "cannot be asked". It never
-invents a model name, and it never lets an exception out that the CLI would
-print as a crash.
-
-The two empty answers are deliberately distinct and both are asserted:
-  - `NotImplementedError` — there is no way to ask this CLI at all;
-  - `[]`                  — it was asked and genuinely has none.
-"""
+"""Per-harness model discovery: listing, aliases and refusal when nothing can be asked."""
 
 from __future__ import annotations
 
@@ -24,8 +7,6 @@ import subprocess
 import pytest
 
 from theater.harness import get as get_harness
-
-# ---- the adapters that cannot be asked ----------------------------------
 
 
 @pytest.mark.parametrize("name", ["claude", "codex"])
@@ -59,9 +40,6 @@ def test_the_base_class_refuses_by_default():
 
     with pytest.raises(NotImplementedError):
         Nova().discover_models()
-
-
-# ---- opencode: a subcommand ---------------------------------------------
 
 
 def fake_output(monkeypatch, text: str) -> None:
@@ -106,9 +84,6 @@ def test_opencode_that_exits_nonzero_cannot_be_asked(monkeypatch):
     fake_raise(monkeypatch, subprocess.CalledProcessError(1, "opencode"))
     with pytest.raises(NotImplementedError):
         get_harness("opencode").discover_models()
-
-
-# ---- vibe: another tool's config file -----------------------------------
 
 
 def write_vibe_config(monkeypatch, tmp_path, text: str):
