@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from tests.support.cli_fakes import parse
+from tests.support.cli_fakes import daemon_stub, parse
 from tests.support.config_file import write_config
 from theater import cli
 from theater.cli.commands import introspection as introspection_mod
@@ -123,29 +123,18 @@ def test_harnesses_never_starts_a_daemon(monkeypatch, capsys):
 def test_harnesses_prefers_the_running_daemons_answer(monkeypatch, capsys):
     """The daemon may know harnesses this process cannot import."""
 
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def call(self, method, **params):
-            assert method == "harnesses"
-            return [
-                {
-                    "name": "codex",
-                    "icon": "◇",
-                    "binary": "codex",
-                    "installed": True,
-                    "path": "/usr/bin/codex",
-                }
-            ]
-
-    monkeypatch.setattr(introspection_mod, "DaemonClient", FakeClient)
+    reply = [
+        {
+            "name": "codex",
+            "icon": "◇",
+            "binary": "codex",
+            "installed": True,
+            "path": "/usr/bin/codex",
+        }
+    ]
+    monkeypatch.setattr(
+        introspection_mod, "DaemonClient", daemon_stub(reply=reply, expect_method="harnesses")
+    )
     assert cli.cmd_harnesses(parse("harnesses")) == 0
     out = capsys.readouterr().out
     assert "codex" in out
@@ -159,38 +148,27 @@ def test_harnesses_icon_column_pads_by_display_width(monkeypatch, capsys):
     codepoint count — ``f"{icon:<2}"`` — pads the combining sequence to 2
     codepoints (no spaces), shifting every column after it left by one."""
 
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def call(self, method, **params):
-            assert method == "harnesses"
-            return [
-                {
-                    "name": "aaa",
-                    "icon": "\u273b",
-                    "binary": "aaa",
-                    "installed": True,
-                    "path": "/usr/bin/aaa",
-                    "source": "shipped",
-                },
-                {
-                    "name": "bbb",
-                    "icon": "e\u0301",
-                    "binary": "bbb",
-                    "installed": True,
-                    "path": "/usr/bin/bbb",
-                    "source": "shipped",
-                },
-            ]
-
-    monkeypatch.setattr(introspection_mod, "DaemonClient", FakeClient)
+    reply = [
+        {
+            "name": "aaa",
+            "icon": "\u273b",
+            "binary": "aaa",
+            "installed": True,
+            "path": "/usr/bin/aaa",
+            "source": "shipped",
+        },
+        {
+            "name": "bbb",
+            "icon": "e\u0301",
+            "binary": "bbb",
+            "installed": True,
+            "path": "/usr/bin/bbb",
+            "source": "shipped",
+        },
+    ]
+    monkeypatch.setattr(
+        introspection_mod, "DaemonClient", daemon_stub(reply=reply, expect_method="harnesses")
+    )
     assert cli.cmd_harnesses(parse("harnesses")) == 0
     out = capsys.readouterr().out
     lines = out.splitlines()
@@ -226,20 +204,8 @@ def test_harnesses_icon_column_pads_by_display_width(monkeypatch, capsys):
 def test_harnesses_falls_back_when_the_daemon_predates_the_method(monkeypatch, capsys):
     """Version skew: a daemon that old necessarily has the built-in registry."""
 
-    class OldDaemon:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def call(self, method, **params):
-            raise RemoteError("unknown_method", f"no method {method!r}")
-
-    monkeypatch.setattr(introspection_mod, "DaemonClient", OldDaemon)
+    stub = daemon_stub(raises=lambda method: RemoteError("unknown_method", f"no method {method!r}"))
+    monkeypatch.setattr(introspection_mod, "DaemonClient", stub)
     assert cli.cmd_harnesses(parse("harnesses")) == 0
     out = capsys.readouterr().out
     assert "predates this command" in out
@@ -250,20 +216,8 @@ def test_harnesses_falls_back_when_the_daemon_predates_the_method(monkeypatch, c
 def test_a_real_daemon_error_is_not_papered_over(monkeypatch):
     """Any other failure must surface, not become a plausible-looking list."""
 
-    class Broken:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def call(self, method, **params):
-            raise RemoteError("internal", "the registry blew up")
-
-    monkeypatch.setattr(introspection_mod, "DaemonClient", Broken)
+    stub = daemon_stub(raises=lambda _method: RemoteError("internal", "the registry blew up"))
+    monkeypatch.setattr(introspection_mod, "DaemonClient", stub)
     with pytest.raises(RemoteError):
         cli.cmd_harnesses(parse("harnesses"))
 

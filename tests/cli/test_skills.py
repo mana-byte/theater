@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from tests.support.cli_fakes import parse
+from tests.support.cli_fakes import daemon_stub, parse
 from theater import cli
 from theater.cli.commands import skills as skills_mod
 from theater.protocol import RemoteError
@@ -30,30 +30,16 @@ def test_skills_main_skips_harness_installation(monkeypatch):
 
 
 def test_skills_uses_the_running_daemon_and_renders_diagnostics(monkeypatch, capsys):
-    class FakeClient:
-        def __init__(self, *, autostart):
-            assert autostart is False
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def call(self, method, **params):
-            assert (method, params) == ("skills.list", {})
-            return {
-                "skills": [{"name": "alpha", "description": "An alpha skill.", "source": "user"}],
-                "rejections": [
-                    {
-                        "name": "broken",
-                        "path": "/tmp/skills/broken",
-                        "error": "invalid frontmatter",
-                    }
-                ],
-            }
-
-    monkeypatch.setattr(skills_mod, "DaemonClient", FakeClient)
+    reply = {
+        "skills": [{"name": "alpha", "description": "An alpha skill.", "source": "user"}],
+        "rejections": [
+            {"name": "broken", "path": "/tmp/skills/broken", "error": "invalid frontmatter"}
+        ],
+    }
+    stub = daemon_stub(
+        reply=reply, expect_kwargs={"autostart": False}, expect_call=("skills.list", {})
+    )
+    monkeypatch.setattr(skills_mod, "DaemonClient", stub)
     assert cli.cmd_skills(parse("skills")) == 0
     out = capsys.readouterr().out
     assert "alpha" in out and "An alpha skill." in out
@@ -64,20 +50,8 @@ def test_skills_uses_the_running_daemon_and_renders_diagnostics(monkeypatch, cap
 def test_skills_json_is_the_daemon_wire_object(monkeypatch, capsys):
     data = {"skills": [{"name": "alpha", "description": "A.", "source": "user"}], "rejections": []}
 
-    class FakeClient:
-        def __init__(self, **kwargs):
-            assert kwargs == {"autostart": False}
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def call(self, method, **params):
-            return data
-
-    monkeypatch.setattr(skills_mod, "DaemonClient", FakeClient)
+    stub = daemon_stub(reply=data, expect_kwargs={"autostart": False})
+    monkeypatch.setattr(skills_mod, "DaemonClient", stub)
     assert cli.cmd_skills(parse("skills", "--json")) == 0
     assert json.loads(capsys.readouterr().out) == data
 
@@ -114,36 +88,18 @@ def test_skills_human_output_removes_terminal_controls(monkeypatch, capsys):
 
 
 def test_skills_reports_an_unavailable_daemon_without_starting_one(monkeypatch, capsys):
-    class NoDaemon:
-        def __init__(self, **kwargs):
-            assert kwargs == {"autostart": False}
-
-        async def __aenter__(self):
-            raise FileNotFoundError
-
-        async def __aexit__(self, *exc):
-            return False
-
-    monkeypatch.setattr(skills_mod, "DaemonClient", NoDaemon)
+    stub = daemon_stub(enter_raises=FileNotFoundError(), expect_kwargs={"autostart": False})
+    monkeypatch.setattr(skills_mod, "DaemonClient", stub)
     assert cli.main(["skills"]) == 1
     assert "no daemon running" in capsys.readouterr().err
 
 
 def test_skills_reports_a_daemon_that_predates_the_rpc(monkeypatch, capsys):
-    class OldDaemon:
-        def __init__(self, **kwargs):
-            assert kwargs == {"autostart": False}
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def call(self, method, **params):
-            raise RemoteError("unknown_method", f"no method {method!r}")
-
-    monkeypatch.setattr(skills_mod, "DaemonClient", OldDaemon)
+    stub = daemon_stub(
+        raises=lambda method: RemoteError("unknown_method", f"no method {method!r}"),
+        expect_kwargs={"autostart": False},
+    )
+    monkeypatch.setattr(skills_mod, "DaemonClient", stub)
     assert cli.main(["skills"]) == 1
     error = capsys.readouterr().err
     assert "lacks skills support" in error
@@ -151,19 +107,7 @@ def test_skills_reports_a_daemon_that_predates_the_rpc(monkeypatch, capsys):
 
 
 def test_skills_preserves_other_daemon_errors(monkeypatch):
-    class BrokenDaemon:
-        def __init__(self, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def call(self, method, **params):
-            raise RemoteError("internal", "registry unavailable")
-
-    monkeypatch.setattr(skills_mod, "DaemonClient", BrokenDaemon)
+    stub = daemon_stub(raises=lambda _method: RemoteError("internal", "registry unavailable"))
+    monkeypatch.setattr(skills_mod, "DaemonClient", stub)
     with pytest.raises(RemoteError, match="registry unavailable"):
         cli.cmd_skills(parse("skills"))
