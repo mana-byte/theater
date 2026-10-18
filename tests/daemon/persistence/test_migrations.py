@@ -354,7 +354,7 @@ def test_bus_ids_are_never_reused(store):
 
 
 def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
-    """A v1.2 file keeps its rows and gains an alembic_version of BASELINE."""
+    """A legacy pre-Alembic file keeps its rows and gains an alembic_version of BASELINE."""
     path = paths.db_path()
     legacy = sqlite3.connect(path, isolation_level=None)
     legacy.executescript(
@@ -432,3 +432,79 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         assert job.structured_status is None
     finally:
         store.close()
+
+
+def test_migration_created_runtime_tables(store: Store) -> None:
+    tables = set(
+        store.conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").scalars()
+    )
+    assert {
+        "participant_runtime_bindings",
+        "control_operations",
+        "native_terminal_evidence",
+    } <= tables
+
+    binding_cols = {
+        row[1]
+        for row in store.conn.exec_driver_sql(
+            "PRAGMA table_info(participant_runtime_bindings)"
+        ).fetchall()
+    }
+    assert {
+        "participant_id",
+        "harness",
+        "wiring",
+        "backend_generation",
+        "lifecycle_phase",
+        "endpoint",
+        "backend_pid",
+        "backend_started_at",
+        "native_session_id",
+        "protocol",
+        "protocol_version",
+        "native_version",
+        "compatibility_policy",
+        "launch_policy",
+    } <= binding_cols
+
+    op_cols = {
+        row[1]
+        for row in store.conn.exec_driver_sql("PRAGMA table_info(control_operations)").fetchall()
+    }
+    assert {
+        "operation_id",
+        "participant_id",
+        "job_handle",
+        "kind",
+        "transport",
+        "delivery_phase",
+        "delivery_result",
+        "execution_barrier",
+        "backend_generation",
+        "native_session_id",
+        "native_turn_id",
+        "queue_sequence",
+        "payload",
+    } <= op_cols
+
+    evidence_cols = {
+        row[1]
+        for row in store.conn.exec_driver_sql(
+            "PRAGMA table_info(native_terminal_evidence)"
+        ).fetchall()
+    }
+    assert {
+        "participant_id",
+        "backend_generation",
+        "native_session_id",
+        "native_turn_id",
+        "terminal",
+        "result",
+        "result_completeness",
+        "result_provenance",
+        "error_code",
+        "error",
+        "recorded_at",
+        "from_history",
+        "completed_at",
+    } == evidence_cols

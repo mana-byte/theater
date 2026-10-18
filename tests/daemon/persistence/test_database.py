@@ -21,11 +21,7 @@ from theater.daemon.persistence.repositories.terminal_bindings import TerminalBi
 from theater.daemon.persistence.repositories.workspaces import WorkspaceRepository
 from theater.daemon.persistence.store import Store
 from theater.daemon.schema import global_scratchpad, orchestration_events
-from theater.harness.contracts.runtime import (
-    ControlDeliveryPhase,
-    ControlKind,
-    ControlTransport,
-)
+from theater.harness.contracts.runtime import ControlDeliveryPhase, ControlKind, ControlTransport
 from theater.models import (
     IdempotencyRecord,
     JournalEventRecord,
@@ -313,7 +309,7 @@ def test_generation_and_journal_sequence_survive_delete_and_reopen(tmp_path: Pat
         reopened.close()
 
 
-def test_global_scratchpad_schema_foundation_stores_expiry_and_audit(tmp_path: Path) -> None:
+def test_global_scratchpad_schema_stores_expiry_and_audit(tmp_path: Path) -> None:
     database = Database(tmp_path / "scratchpad.db")
     try:
         with database.write_unit() as unit:
@@ -321,7 +317,7 @@ def test_global_scratchpad_schema_foundation_stores_expiry_and_audit(tmp_path: P
                 global_scratchpad.insert().values(
                     namespace="shared",
                     key="note",
-                    value="foundation-only",
+                    value="schema-only",
                     updated_at=100.0,
                     expires_at=86_500.0,
                     actor_client_id="client-a",
@@ -332,7 +328,7 @@ def test_global_scratchpad_schema_foundation_stores_expiry_and_audit(tmp_path: P
         assert dict(row) == {
             "namespace": "shared",
             "key": "note",
-            "value": "foundation-only",
+            "value": "schema-only",
             "updated_at": 100.0,
             "expires_at": 86_500.0,
             "actor_client_id": "client-a",
