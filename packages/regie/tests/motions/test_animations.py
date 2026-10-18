@@ -1,10 +1,11 @@
-"""Keyed typing animation for the initial tree and agent-spawned leaves."""
+"""Leaf motion: keyed reveal and retirement, spinner and pulse frames, and counting values."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
 
+import pytest
 from regie.motions.footer import CountingValue
 from regie.motions.pulse import advance_pulse_frame, working_harness_style
 from regie.motions.retirement import LeafRetirementController
@@ -187,28 +188,31 @@ def test_animations_package_does_not_eagerly_import_back_into_render_glyphs():
     assert result.returncode == 0, result.stderr
 
 
-def test_advance_spinner_frame_wraps_at_cycle_length():
-    """Advancing past the last frame wraps to zero, matching the braille cycle."""
-    cycle = len(REGIE_SPINNER_FRAMES)
-    assert advance_spinner_frame(0) == 1
-    assert advance_spinner_frame(cycle - 1) == 0
+@pytest.mark.parametrize(
+    ("advance", "cycle", "same_after_a_cycle"),
+    [
+        (
+            advance_spinner_frame,
+            len(REGIE_SPINNER_FRAMES),
+            lambda cycle: spinner_frame(0) == spinner_frame(cycle),
+        ),
+        (
+            advance_pulse_frame,
+            len(REGIE_WORKING_HARNESS_STYLES),
+            lambda cycle: working_harness_style(0, 0) == working_harness_style(cycle, 0),
+        ),
+    ],
+    ids=["spinner", "pulse"],
+)
+def test_advance_frame_wraps_at_cycle_length(advance, cycle, same_after_a_cycle):
+    """Advancing past the last frame wraps to zero, matching the glyph or grayscale cycle."""
+    assert advance(0) == 1
+    assert advance(cycle - 1) == 0
     frame = 0
     for _ in range(cycle):
-        frame = advance_spinner_frame(frame)
+        frame = advance(frame)
     assert frame == 0
-    assert spinner_frame(0) == spinner_frame(cycle)
-
-
-def test_advance_pulse_frame_wraps_at_cycle_length():
-    """Advancing past the last pulse frame wraps to zero, matching the grayscale cycle."""
-    cycle = len(REGIE_WORKING_HARNESS_STYLES)
-    assert advance_pulse_frame(0) == 1
-    assert advance_pulse_frame(cycle - 1) == 0
-    frame = 0
-    for _ in range(cycle):
-        frame = advance_pulse_frame(frame)
-    assert frame == 0
-    assert working_harness_style(0, 0) == working_harness_style(cycle, 0)
+    assert same_after_a_cycle(cycle)
 
 
 def _cents(value: float) -> str:

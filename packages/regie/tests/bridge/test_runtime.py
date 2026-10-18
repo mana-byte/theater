@@ -380,26 +380,27 @@ def _scoped_bridge(tmp_path: Path, monkeypatch, panes: list[tuple[str, str | Non
     return bridge
 
 
-async def test_presence_report_scopes_to_changed_panes_and_drops_foreign_ones(
-    tmp_path: Path, monkeypatch
-) -> None:
-    bridge = _scoped_bridge(
-        tmp_path, monkeypatch, [("%1", "provider-a"), ("%2", None), ("%3", "provider-b")]
-    )
-    # %9 vanished: tmux cannot prove it foreign, so it stays in scope.
-    facts = await bridge._presence_facts(frozenset({"%1", "%2", "%3", "%9"}))
-    assert facts == {"presence_invalidated": True, "invalidated_terminals": ["%1", "%9"]}
-
-
-async def test_presence_report_wholesale_scope_omits_terminals(tmp_path: Path, monkeypatch) -> None:
-    bridge = _scoped_bridge(tmp_path, monkeypatch, [("%1", "provider-a")])
-    assert await bridge._presence_facts(None) == {"presence_invalidated": True}
-
-
-async def test_presence_report_empty_scope_reports_empty_list(tmp_path: Path, monkeypatch) -> None:
-    bridge = _scoped_bridge(tmp_path, monkeypatch, [])
-    facts = await bridge._presence_facts(frozenset())
-    assert facts == {"presence_invalidated": True, "invalidated_terminals": []}
+# %9 vanished from the scoped case: tmux cannot prove it foreign, so it stays in scope.
+@pytest.mark.parametrize(
+    ("panes", "scope", "expected"),
+    [
+        (
+            [("%1", "provider-a"), ("%2", None), ("%3", "provider-b")],
+            frozenset({"%1", "%2", "%3", "%9"}),
+            {"presence_invalidated": True, "invalidated_terminals": ["%1", "%9"]},
+        ),
+        ([("%1", "provider-a")], None, {"presence_invalidated": True}),
+        ([], frozenset(), {"presence_invalidated": True, "invalidated_terminals": []}),
+    ],
+    ids=[
+        "scopes_to_changed_panes_and_drops_foreign_ones",
+        "wholesale_scope_omits_terminals",
+        "empty_scope_reports_empty_list",
+    ],
+)
+async def test_presence_report_scope(tmp_path: Path, monkeypatch, panes, scope, expected) -> None:
+    bridge = _scoped_bridge(tmp_path, monkeypatch, panes)
+    assert await bridge._presence_facts(scope) == expected
 
 
 async def test_presence_report_falls_back_to_invalidate_all_when_tmux_unreadable(

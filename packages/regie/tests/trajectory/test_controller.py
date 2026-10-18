@@ -498,24 +498,22 @@ async def test_controller_uses_best_effort_close_hints_on_switch_lru_and_final_c
     assert query.closed and follow.closed
 
 
-@pytest.mark.asyncio
-async def test_follow_does_not_start_without_stream_and_cursor() -> None:
-    response = page("p1", "record") | {"cursor": None}
-    query = FakeClient(lambda _method, _params: response)
-    follow = FakeClient(lambda _method, _params: pytest.fail("follow should not run"))
-    controller = TrajectoryController(query, follow)
+def _page_without_stream_cursor() -> dict[str, object]:
+    return page("p1", "record") | {"cursor": None}
 
-    await controller.open("p1")
 
-    assert controller.follow_task is None
-    assert not await controller.start_follow("p1")
-    await controller.close()
+def _page_of_a_dead_participant() -> dict[str, object]:
+    return page("p1", "record") | {"panel_state": {"state": "ready", "participant_state": "dead"}}
 
 
 @pytest.mark.asyncio
-async def test_follow_does_not_start_for_a_dead_participant() -> None:
-    response = page("p1", "record")
-    response["panel_state"] = {"state": "ready", "participant_state": "dead"}
+@pytest.mark.parametrize(
+    "make_page",
+    [_page_without_stream_cursor, _page_of_a_dead_participant],
+    ids=["without_stream_and_cursor", "for_a_dead_participant"],
+)
+async def test_follow_does_not_start(make_page) -> None:
+    response = make_page()
     query = FakeClient(lambda _method, _params: response)
     follow = FakeClient(lambda _method, _params: pytest.fail("follow should not run"))
     controller = TrajectoryController(query, follow)
