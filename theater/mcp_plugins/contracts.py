@@ -32,6 +32,7 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 class PluginCapability(StrEnum):
     """A complete, stable capability granted to one MCP-server sidecar."""
 
+    PLAYS_READ = "plays.read"
     PARTICIPANTS_READ = "participants.read"
     PARTICIPANTS_METADATA_WRITE = "participants.metadata.write"
     CATALOG_READ = "catalog.read"
@@ -214,6 +215,8 @@ class McpServerManifest:
     launch: McpLaunchManifest
     config: McpConfigSchema = field(default_factory=McpConfigSchema)
     skills: tuple[str, ...] | Sequence[str] = ()
+    plays: tuple[str, ...] | Sequence[str] = ()
+    play_permissions: frozenset[str] = frozenset()
     _capabilities_were_frozen: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -228,6 +231,9 @@ class McpServerManifest:
             object.__setattr__(self, "config", McpConfigSchema(self.config))
         if not isinstance(self.skills, (str, bytes)) and isinstance(self.skills, Sequence):
             object.__setattr__(self, "skills", tuple(self.skills))
+        if not isinstance(self.plays, (str, bytes)) and isinstance(self.plays, Sequence):
+            object.__setattr__(self, "plays", tuple(self.plays))
+        object.__setattr__(self, "play_permissions", frozenset(self.play_permissions))
 
     @property
     def configuration(self) -> McpConfigSchema:
@@ -244,6 +250,7 @@ class CompiledMcpPlugin:
     capabilities: frozenset[PluginCapability]
     config: Mapping[str, object]
     launch: McpLaunchManifest = field(repr=False)
+    play_permissions: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or HARNESS_NAME.fullmatch(self.name) is None:

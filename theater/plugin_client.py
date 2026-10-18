@@ -73,6 +73,21 @@ class TheaterPluginClient:
     async def __aexit__(self, *exc) -> None:
         await self.aclose()
 
+    async def play_context(self) -> dict[str, Any]:
+        """Authenticated caller identity, effective plugin enablement and current play grants."""
+        return _dict_result(await self._call("plays.context"), "plays.context")
+
+    async def play_members(self) -> list[dict[str, Any]]:
+        """Live members of the caller's actual play instance."""
+        return _list_result(await self._call("plays.members"), "plays.members")
+
+    async def play_instances_status(self, instance_ids: Sequence[str]) -> list[dict[str, Any]]:
+        """Liveness of plugin-dependent instances for plugin-owned retention."""
+        return _list_result(
+            await self._call("plays.instances_status", instance_ids=list(instance_ids)),
+            "plays.instances_status",
+        )
+
     async def list_participants(
         self,
         *,
