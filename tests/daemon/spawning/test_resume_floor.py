@@ -1,8 +1,10 @@
-"""Tests for the resume floor encode/decode and authorisation logic."""
+"""Resume floor encoding, decoding and completion authorisation."""
 
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from theater.harness.source import StreamPoint
 from theater.resume_floor import (
@@ -70,35 +72,17 @@ def test_decode_partial_point():
     assert decoded.ino is None
 
 
-def test_floor_is_present_none_is_false():
-    """None means no floor (cold spawn)."""
-    assert not floor_is_present(None)
-
-
-def test_floor_is_present_unknown_is_true():
-    """The unknown sentinel is present."""
-    assert floor_is_present(UNKNOWN_FLOOR)
-
-
-def test_floor_is_present_structured_is_true():
-    """A structured floor is present."""
-    assert floor_is_present(encode_floor(StreamPoint(records=1)))
-
-
-def test_floor_is_unknown_none_is_false():
-    """None is not 'unknown' — it is cold spawn."""
-    assert not floor_is_unknown(None)
-
-
-def test_floor_is_unknown_sentinel_is_true():
-    assert floor_is_unknown(UNKNOWN_FLOOR)
-
-
-def test_floor_is_unknown_structured_is_false():
-    assert not floor_is_unknown(encode_floor(StreamPoint(records=1)))
-
-
-# ---- authorisation: basic guards ------------------------------------------
+@pytest.mark.parametrize(
+    ("raw", "present", "unknown"),
+    [
+        pytest.param(None, False, False, id="none_is_a_cold_spawn"),
+        pytest.param(UNKNOWN_FLOOR, True, True, id="unknown_sentinel"),
+        pytest.param(encode_floor(StreamPoint(records=1)), True, False, id="structured"),
+    ],
+)
+def test_floor_presence_and_unknownness(raw, present, unknown):
+    assert bool(floor_is_present(raw)) is present
+    assert bool(floor_is_unknown(raw)) is unknown
 
 
 def test_authorise_null_floor_allows():
@@ -119,171 +103,61 @@ def test_authorise_same_stream_beyond_floor():
     assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is True
 
 
-def test_authorise_different_dev_refuses():
-    """Different device -> not the same stream."""
-    floor = StreamPoint(records=5, size=100, dev=10, ino=20)
-    point = StreamPoint(records=10, size=200, dev=99, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_different_ino_refuses():
-    """Different inode -> not the same stream."""
-    floor = StreamPoint(records=5, size=100, dev=10, ino=20)
-    point = StreamPoint(records=10, size=200, dev=10, ino=99)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_shrunk_size_refuses():
-    """Size smaller than floor -> truncation."""
-    floor = StreamPoint(records=5, size=200, dev=10, ino=20)
-    point = StreamPoint(records=10, size=100, dev=10, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_equal_records_refuses():
-    """Records not strictly greater -> not beyond the floor."""
-    floor = StreamPoint(records=5, size=100, dev=10, ino=20)
-    point = StreamPoint(records=5, size=100, dev=10, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_fewer_records_refuses():
-    """Records fewer than floor -> not beyond."""
-    floor = StreamPoint(records=10, size=100, dev=10, ino=20)
-    point = StreamPoint(records=5, size=100, dev=10, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
 def test_authorise_none_point_refuses():
     """No point on the attachment -> no proof -> refuse."""
     floor = StreamPoint(records=5, size=100, dev=10, ino=20)
     assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=None) is False
 
 
-# ---- B1: fail-closed on missing facts -------------------------------------
+_FLOOR = {"records": 5, "size": 100, "dev": 10, "ino": 20}
+_POINT = {"records": 10, "size": 200, "dev": 10, "ino": 20}
 
 
-def test_authorise_missing_dev_on_floor_refuses():
-    """Floor without dev -> cannot prove identity -> refuse."""
-    floor = StreamPoint(records=5, size=100, dev=None, ino=20)
-    point = StreamPoint(records=10, size=200, dev=10, ino=20)
+@pytest.mark.parametrize(
+    ("floor_changes", "point_changes"),
+    [
+        pytest.param({}, {"dev": 99}, id="different_dev"),
+        pytest.param({}, {"ino": 99}, id="different_ino"),
+        pytest.param({"size": 200}, {"size": 100}, id="shrunk_size"),
+        pytest.param({}, {"records": 5}, id="equal_records"),
+        pytest.param({"records": 10}, {"records": 5, "size": 100}, id="fewer_records"),
+        pytest.param({"dev": None}, {}, id="missing_dev_on_floor"),
+        pytest.param({"ino": None}, {}, id="missing_ino_on_floor"),
+        pytest.param({"records": None}, {}, id="missing_records_on_floor"),
+        pytest.param({"size": None}, {}, id="missing_size_on_floor"),
+        pytest.param({}, {"dev": None}, id="missing_dev_on_point"),
+        pytest.param({}, {"ino": None}, id="missing_ino_on_point"),
+        pytest.param({}, {"records": None}, id="missing_records_on_point"),
+        pytest.param({}, {"size": None}, id="missing_size_on_point"),
+        pytest.param({"size": None}, {"size": None}, id="missing_size_on_both"),
+    ],
+)
+def test_authorise_refuses_what_cannot_be_proven_beyond_the_floor(floor_changes, point_changes):
+    """Different stream, truncation, no advance, or a missing fact: fail closed."""
+    floor = StreamPoint(**{**_FLOOR, **floor_changes})
+    point = StreamPoint(**{**_POINT, **point_changes})
     assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
 
 
-def test_authorise_missing_ino_on_floor_refuses():
-    """Floor without ino -> cannot prove identity -> refuse."""
-    floor = StreamPoint(records=5, size=100, dev=10, ino=None)
-    point = StreamPoint(records=10, size=200, dev=10, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_missing_records_on_floor_refuses():
-    """Floor without records -> cannot prove beyond -> refuse."""
-    floor = StreamPoint(records=None, size=100, dev=10, ino=20)
-    point = StreamPoint(records=10, size=200, dev=10, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_missing_size_on_floor_refuses():
-    """Floor without size -> cannot prove non-shrunk -> refuse."""
-    floor = StreamPoint(records=5, size=None, dev=10, ino=20)
-    point = StreamPoint(records=10, size=200, dev=10, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_missing_dev_on_point_refuses():
-    """Point without dev -> cannot prove identity -> refuse."""
-    floor = StreamPoint(records=5, size=100, dev=10, ino=20)
-    point = StreamPoint(records=10, size=200, dev=None, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_missing_ino_on_point_refuses():
-    """Point without ino -> cannot prove identity -> refuse."""
-    floor = StreamPoint(records=5, size=100, dev=10, ino=20)
-    point = StreamPoint(records=10, size=200, dev=10, ino=None)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_missing_records_on_point_refuses():
-    """Point without records -> cannot prove beyond -> refuse."""
-    floor = StreamPoint(records=5, size=100, dev=10, ino=20)
-    point = StreamPoint(records=None, size=200, dev=10, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_missing_size_on_point_refuses():
-    """Point without size -> cannot prove non-shrunk -> refuse."""
-    floor = StreamPoint(records=5, size=100, dev=10, ino=20)
-    point = StreamPoint(records=10, size=None, dev=10, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-def test_authorise_missing_size_on_both_refuses():
-    """Missing size on both floor and point: fail-closed, not authorised."""
-    floor = StreamPoint(records=5, size=None, dev=10, ino=20)
-    point = StreamPoint(records=10, size=None, dev=10, ino=20)
-    assert floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is False
-
-
-# ---- B1: corrupt numeric values -------------------------------------------
-
-
-def test_decode_rejects_bool_records():
-    """A JSON true in records is treated as missing, not 1."""
-    encoded = json.dumps({"records": True, "size": 100, "dev": 10, "ino": 20})
-    decoded = decode_floor(encoded)
+@pytest.mark.parametrize(
+    ("changes", "field", "kept"),
+    [
+        pytest.param({"records": True}, "records", {}, id="bool_records"),
+        pytest.param({"size": True}, "size", {}, id="bool_size"),
+        pytest.param({"records": -1}, "records", {}, id="negative_records"),
+        pytest.param({"size": -100}, "size", {}, id="negative_size"),
+        pytest.param({"dev": -10}, "dev", {}, id="negative_dev"),
+        pytest.param({"records": "five"}, "records", {"size": 100}, id="string_records"),
+        pytest.param({"records": 5.0}, "records", {}, id="float_records"),
+    ],
+)
+def test_decode_rejects_corrupt_numeric_values(changes, field, kept):
+    """Bools, negatives, strings and floats are treated as missing, not coerced."""
+    decoded = decode_floor(json.dumps({**_FLOOR, **changes}))
     assert decoded is not None
-    assert decoded.records is None
-
-
-def test_decode_rejects_bool_size():
-    """A JSON true in size is treated as missing."""
-    encoded = json.dumps({"records": 5, "size": True, "dev": 10, "ino": 20})
-    decoded = decode_floor(encoded)
-    assert decoded is not None
-    assert decoded.size is None
-
-
-def test_decode_rejects_negative_records():
-    """A negative record count is treated as missing."""
-    encoded = json.dumps({"records": -1, "size": 100, "dev": 10, "ino": 20})
-    decoded = decode_floor(encoded)
-    assert decoded is not None
-    assert decoded.records is None
-
-
-def test_decode_rejects_negative_size():
-    """A negative size is treated as missing."""
-    encoded = json.dumps({"records": 5, "size": -100, "dev": 10, "ino": 20})
-    decoded = decode_floor(encoded)
-    assert decoded is not None
-    assert decoded.size is None
-
-
-def test_decode_rejects_negative_dev():
-    """A negative dev is treated as missing."""
-    encoded = json.dumps({"records": 5, "size": 100, "dev": -10, "ino": 20})
-    decoded = decode_floor(encoded)
-    assert decoded is not None
-    assert decoded.dev is None
-
-
-def test_decode_rejects_string_records():
-    """A string in a numeric field is treated as missing."""
-    encoded = json.dumps({"records": "five", "size": 100, "dev": 10, "ino": 20})
-    decoded = decode_floor(encoded)
-    assert decoded is not None
-    assert decoded.records is None
-    assert decoded.size == 100
-
-
-def test_decode_rejects_float_records():
-    """A float in records is treated as missing — only int is valid."""
-    encoded = json.dumps({"records": 5.0, "size": 100, "dev": 10, "ino": 20})
-    decoded = decode_floor(encoded)
-    assert decoded is not None
-    assert decoded.records is None
+    assert getattr(decoded, field) is None
+    for name, value in kept.items():
+        assert getattr(decoded, name) == value
 
 
 def test_decode_zero_is_valid():
@@ -295,9 +169,6 @@ def test_decode_zero_is_valid():
     assert decoded.size == 0
     assert decoded.dev == 0
     assert decoded.ino == 0
-
-
-# ---- logical (mutable-store) floors -------------------------------------
 
 
 def _logical(stream_id: str = "sess-1", position: int = 5) -> StreamPoint:
