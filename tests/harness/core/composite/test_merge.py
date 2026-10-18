@@ -87,63 +87,47 @@ async def test_primary_events_untouched() -> None:
     await composite.aclose()
 
 
+@pytest.mark.parametrize(
+    ("primary_batch", "enrichment_batch", "field", "expected"),
+    [
+        pytest.param(
+            Batch(progressed=False),
+            Batch(trajectory=[make_fact("e", 0)]),
+            "progressed",
+            False,
+            id="progressed",
+        ),
+        pytest.param(
+            Batch(status=Status.IDLE),
+            Batch(status=Status.WORKING),
+            "status",
+            Status.IDLE,
+            id="status",
+        ),
+        pytest.param(Batch(waiting=False), Batch(waiting=True), "waiting", False, id="waiting"),
+        pytest.param(
+            Batch(),
+            Batch(attached=Attachment(location="/work/enrich.jsonl")),
+            "attached",
+            None,
+            id="attachment",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_no_false_progressed_from_enrichment() -> None:
+async def test_enrichment_never_changes_the_primary_control_field(
+    primary_batch, enrichment_batch, field, expected
+) -> None:
     primary = ControlledSource()
-    primary.set_batch(Batch(progressed=False))
+    primary.set_batch(primary_batch)
     enrich = ControlledSource()
-    enrich.set_batch(Batch(trajectory=[make_fact("e", 0)]))
+    enrich.set_batch(enrichment_batch)
     composite = CompositeSource(
         primary=primary,
         enrichments=[EnrichmentBinding(source=enrich, declaration=decl())],
     )
     batch = await composite.read()
-    assert batch.progressed is False
-    await composite.aclose()
-
-
-@pytest.mark.asyncio
-async def test_no_false_status_from_enrichment() -> None:
-    primary = ControlledSource()
-    primary.set_batch(Batch(status=Status.IDLE))
-    enrich = ControlledSource()
-    enrich.set_batch(Batch(status=Status.WORKING))
-    composite = CompositeSource(
-        primary=primary,
-        enrichments=[EnrichmentBinding(source=enrich, declaration=decl())],
-    )
-    batch = await composite.read()
-    assert batch.status is Status.IDLE
-    await composite.aclose()
-
-
-@pytest.mark.asyncio
-async def test_no_false_waiting_from_enrichment() -> None:
-    primary = ControlledSource()
-    primary.set_batch(Batch(waiting=False))
-    enrich = ControlledSource()
-    enrich.set_batch(Batch(waiting=True))
-    composite = CompositeSource(
-        primary=primary,
-        enrichments=[EnrichmentBinding(source=enrich, declaration=decl())],
-    )
-    batch = await composite.read()
-    assert batch.waiting is False
-    await composite.aclose()
-
-
-@pytest.mark.asyncio
-async def test_no_false_attachment_from_enrichment() -> None:
-    primary = ControlledSource()
-    primary.set_batch(Batch())
-    enrich = ControlledSource()
-    enrich.set_batch(Batch(attached=Attachment(location="/work/enrich.jsonl")))
-    composite = CompositeSource(
-        primary=primary,
-        enrichments=[EnrichmentBinding(source=enrich, declaration=decl())],
-    )
-    batch = await composite.read()
-    assert batch.attached is None
+    assert getattr(batch, field) is expected
     await composite.aclose()
 
 
