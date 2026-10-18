@@ -1,4 +1,4 @@
-"""Fixture daemon that hands a ProviderClient raw callback frames, plus frame builders."""
+"""Scripted provider callback handshake server and frame builders for provider tests."""
 
 from __future__ import annotations
 
