@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -11,9 +10,6 @@ import pytest
 
 from tests.support.approval_rig import native_evaluate, native_merge
 from theater.harness.builtin.plugins.opencode.native_plugin import render_native_plugin
-
-NODE = shutil.which("node")
-
 
 pytestmark = pytest.mark.usefixtures("available_harness_binaries")
 
@@ -91,11 +87,10 @@ def run_rendered_hook(tmp_path, rules, scenario):
     the SDK client is a mock that mirrors the native client's shape (error
     envelopes returned, not thrown — gen/client/client.gen.ts).
     """
-    assert NODE is not None, "run_rendered_hook requires node"
     (tmp_path / "plugin.mjs").write_text(render_native_plugin("p_1", Path("/dev/null"), rules))
     (tmp_path / "driver.mjs").write_text(HOOK_DRIVER)
     out = subprocess.run(
-        [NODE, str(tmp_path / "driver.mjs"), json.dumps(scenario)],
+        ["node", str(tmp_path / "driver.mjs"), json.dumps(scenario)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -104,7 +99,7 @@ def run_rendered_hook(tmp_path, rules, scenario):
     return json.loads(out.stdout)
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.requires_node
 def test_rendered_hook_enforces_once_on_success(tmp_path):
     """A successful append marks the session enforced; the next message on
     the same session makes no further call."""
@@ -120,7 +115,7 @@ def test_rendered_hook_enforces_once_on_success(tmp_path):
     }
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.requires_node
 def test_rendered_hook_fails_closed_on_a_returned_sdk_error(tmp_path):
     """The SDK client resolves error envelopes instead of throwing, so an
     HTTP 400 looks like a normal return. The hook must reject with an
@@ -141,7 +136,7 @@ def test_rendered_hook_fails_closed_on_a_returned_sdk_error(tmp_path):
         assert "400" in result["message"]
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.requires_node
 def test_rendered_hook_fails_closed_on_a_thrown_failure(tmp_path):
     """A rejected update Promise must not be swallowed: the hook rejects,
     the session is not marked enforced, and the next message retries."""
@@ -159,7 +154,7 @@ def test_rendered_hook_fails_closed_on_a_thrown_failure(tmp_path):
         assert "refusing to run this message unapproved" in result["message"]
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.requires_node
 def test_rendered_hook_retries_after_a_failure_then_enforces(tmp_path):
     """A failed append is not remembered as enforced: the next message
     retries the update and, on success, stops calling."""
@@ -174,7 +169,7 @@ def test_rendered_hook_retries_after_a_failure_then_enforces(tmp_path):
     assert [r["ok"] for r in out["results"]] == [False, True, True]
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.requires_node
 def test_rendered_hook_makes_one_call_for_concurrent_same_session_messages(tmp_path):
     """Two chat.message hook calls racing on one session share a single
     enforcement flight — one update, one append, both callers resolved."""
@@ -188,7 +183,7 @@ def test_rendered_hook_makes_one_call_for_concurrent_same_session_messages(tmp_p
     assert out == {"calls": 1, "results": [], "concurrentOk": True}
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.requires_node
 def test_rendered_hook_is_a_no_op_for_yolo(tmp_path):
     """Yolo carries no ruleset and --auto approves on its own; the hook must
     not touch the session at all."""
@@ -196,7 +191,7 @@ def test_rendered_hook_is_a_no_op_for_yolo(tmp_path):
     assert out == {"calls": 0, "results": [{"ok": True}] * 3, "concurrentOk": None}
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.requires_node
 def test_rendered_hook_fails_closed_when_the_update_is_ignored(tmp_path):
     """A 200 that did not apply the rules is as bad as a 400: some builds
     ignore session permission updates. The hook verifies the stored
@@ -216,7 +211,7 @@ def test_rendered_hook_fails_closed_when_the_update_is_ignored(tmp_path):
         assert "ignores session permission updates" in result["message"]
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.requires_node
 def test_rendered_hook_preserves_agent_and_session_denies(tmp_path):
     """Approval may tighten allows, but it must never turn an existing deny into ask/allow."""
     from theater.harness.builtin.plugins.opencode.constants import _APPROVAL_SESSION_RULES
@@ -249,7 +244,7 @@ def test_rendered_hook_preserves_agent_and_session_denies(tmp_path):
     assert native_evaluate(effective, "edit", "ordinary.py") == "allow"
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.requires_node
 def test_rendered_hook_fails_closed_when_effective_agent_cannot_be_verified(tmp_path):
     from theater.harness.builtin.plugins.opencode.constants import _APPROVAL_SESSION_RULES
 
