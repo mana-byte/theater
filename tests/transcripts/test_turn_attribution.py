@@ -1,27 +1,4 @@
-"""Whose turn was that, and therefore whose question it answers.
-
-Naming a turn (test_turn_identity.py) says *which* turn ended. This says who
-caused it, which is a different question with a worse failure mode.
-
-The bug: a human types into a pane that has a peer's job waiting on it. The
-harness writes an ordinary turn — user record, reply, boundary — the observer
-sees a boundary with a job running, and resolves the job. The peer receives
-the operator's private conversation as the answer to a question it asked, and
-its actual answer, when it arrives, resolves nothing at all.
-
-The fix rests on one empirical fact, and the fixtures in test_turn_identity
-are what establish it: all four harnesses echo an injected prompt back as a
-user record, verbatim, before the reply. So the user text a turn opens with
-identifies the turn. That is checked here against those same real captures,
-because the day a harness stops echoing is the day this gate starts hanging
-every send to that harness — a failure worth catching in CI rather than at
-2am with two agents deadlocked.
-
-The gate is deliberately one-sided: it withholds an answer only on positive
-evidence of somebody else's prompt. No user record at all means answer, which
-covers attaching mid-turn, screen-derived boundaries, and any harness that
-keeps no user record. See `answers_prompt`.
-"""
+"""A turn resolves a peer's job only when its opening user text echoes that job's prompt."""
 
 from __future__ import annotations
 
@@ -41,6 +18,10 @@ from theater.daemon.observer import (
 )
 from theater.harness.base import Event, EventKind, clip
 from theater.harness.source import Batch
+
+# A human typing into a pane with a peer's job waiting must not resolve that job. Every harness
+# echoes an injected prompt as a user record, so a turn's opening text identifies whose it is;
+# the gate withholds an answer only on positive evidence of somebody else's prompt.
 
 PROMPT = "please summarise the auth module"
 
@@ -73,7 +54,7 @@ def heard(text: str) -> Event:
     return Event(kind=EventKind.USER, text=text, turn_end=False)
 
 
-# ---- the bug this exists for -------------------------------------------
+# ---- a human typing in the pane never answers the waiting peer ----
 
 
 def test_a_human_typing_does_not_answer_the_waiting_peer(registry):

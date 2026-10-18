@@ -1,24 +1,4 @@
-"""Naming a turn, and answering it exactly once.
-
-Two halves, and the seam between them is `Event.turn_id`.
-
-Below the seam, each adapter reports what its harness already calls the turn.
-That is not inference: three of the four publish an id of their own, and the
-fixtures here are verbatim captures of one real injected round-trip per
-harness — `tests/fixtures/turn_*`, taken through the daemon against the live
-CLIs, not hand-written. A parser that stops agreeing with its harness fails
-here rather than in production, which is the whole reason the captures exist.
-
-Above the seam, the observer uses the id for one thing: answering a turn once.
-Claude splits a single message across several records and repeats
-`stop_reason` on each, so one reply used to finish two waiting jobs — the
-second caller receiving the first caller's answer, instantly, before its own
-prompt had even been read.
-
-The accumulator tests belong here too, because they are the same bug seen from
-the other side: a boundary is only as good as the text it can hand back, and
-batches are cut wherever the poll landed rather than where the turn did.
-"""
+"""Adapters report each turn's own id, and the observer answers a named turn exactly once."""
 
 from __future__ import annotations
 
@@ -38,6 +18,10 @@ from theater.daemon.observer import (
 )
 from theater.harness.base import Event, EventKind
 from theater.harness.source import Batch
+
+# tests/fixtures/turn_* are verbatim captures of one injected round-trip per harness. Claude splits
+# one message across records and repeats `stop_reason`, so the id keeps one reply from finishing
+# two waiting jobs.
 
 
 def events_for(observer, path: Path) -> list[Event]:

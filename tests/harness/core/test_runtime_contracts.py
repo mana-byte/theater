@@ -519,7 +519,7 @@ def test_native_request_ids_match_the_captured_type() -> None:
         validate_native_request_id,
     )
 
-    # Wave 0 fixture: the server request id is the integer 0.
+    # Fixture: the server request id is the integer 0.
     interaction = NativeHumanInteraction(
         kind=NativeInteractionKind.APPROVAL,
         native_request_id=0,

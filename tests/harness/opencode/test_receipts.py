@@ -494,7 +494,7 @@ def test_generic_receipts_disambiguate_concurrent_sessions_in_the_same_cwd(rec, 
     source_a = observer.open_source_for(
         participant_id="participant_a",
         cwd=str(workdir),
-        # Simulate the pre-fix daemon restarting with the wrong stored binding.
+        # Simulate a daemon restarting with the wrong stored binding.
         session_id="ses_two",
         after=0.0,
     )

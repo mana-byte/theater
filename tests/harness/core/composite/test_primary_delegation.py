@@ -114,17 +114,19 @@ async def test_no_primary_delegates_to_source_defaults() -> None:
     assert page == HistoryPage()
 
 
-@pytest.mark.asyncio
-async def test_no_primary_refuses_attachment_operations() -> None:
-    composite = CompositeSource()
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda c: c.commit_attachment(),
+        lambda c: c.discard_attachment(),
+        lambda c: c.revoke_attachment(),
+        lambda c: c.admit_exact_location(location="x", session_id="s"),
+    ],
+    ids=["commit", "discard", "revoke", "admit_exact_location"],
+)
+def test_no_primary_refuses_attachment_operations(operation) -> None:
     with pytest.raises(SourceContractError):
-        composite.commit_attachment()
-    with pytest.raises(SourceContractError):
-        composite.discard_attachment()
-    with pytest.raises(SourceContractError):
-        composite.revoke_attachment()
-    with pytest.raises(SourceContractError):
-        composite.admit_exact_location(location="x", session_id="s")
+        operation(CompositeSource())
 
 
 @pytest.mark.asyncio
@@ -140,32 +142,23 @@ async def test_no_primary_collision_domain_none() -> None:
     assert composite.collision_domain is None
 
 
+@pytest.mark.parametrize(
+    ("method", "flag", "read_first"),
+    [
+        ("commit_attachment", "committed", True),
+        ("discard_attachment", "discarded", False),
+        ("revoke_attachment", "revoked", False),
+    ],
+    ids=["commit", "discard", "revoke"],
+)
 @pytest.mark.asyncio
-async def test_commit_attachment_delegates_to_primary() -> None:
+async def test_attachment_calls_delegate_to_primary(method, flag, read_first) -> None:
     primary = _PrimaryWithAttachment()
     composite = CompositeSource(primary=primary)
-    batch = await composite.read()
-    assert batch.attached is not None
-    composite.commit_attachment()
-    assert primary.committed is True
-    await composite.aclose()
-
-
-@pytest.mark.asyncio
-async def test_discard_attachment_delegates_to_primary() -> None:
-    primary = _PrimaryWithAttachment()
-    composite = CompositeSource(primary=primary)
-    composite.discard_attachment()
-    assert primary.discarded is True
-    await composite.aclose()
-
-
-@pytest.mark.asyncio
-async def test_revoke_attachment_delegates_to_primary() -> None:
-    primary = _PrimaryWithAttachment()
-    composite = CompositeSource(primary=primary)
-    composite.revoke_attachment()
-    assert primary.revoked is True
+    if read_first:
+        assert (await composite.read()).attached is not None
+    getattr(composite, method)()
+    assert getattr(primary, flag) is True
     await composite.aclose()
 
 

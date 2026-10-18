@@ -1,4 +1,4 @@
-"""Focused tests for the generic GlobDiscovery strategy."""
+"""The generic GlobDiscovery strategy: candidates, operator admission, scans and reuse."""
 
 from __future__ import annotations
 

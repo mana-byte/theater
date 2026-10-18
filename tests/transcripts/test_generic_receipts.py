@@ -1,9 +1,4 @@
-"""Tests for the generic transcript receipt mechanism.
-
-These verify that a third-party (non-Claude) harness can use receipts end to
-end, that the base default refuses, that pre-flight validation rejects bad
-plans, and that core validates the returned candidate.
-"""
+"""Generic transcript receipts: a third-party harness works end to end and core validates it."""
 
 from __future__ import annotations
 
@@ -131,7 +126,7 @@ async def _fake_receipt(client, *, pid: str, token: str, session_id: str, path: 
     )
 
 
-# -- 1. Fake harness end-to-end receipt ---------------------------------------
+# -- A fake harness drives a receipt end to end -----------------------------
 
 
 async def test_fake_harness_receipt_drives_end_to_end(fake_daemon, fake_client, tmp_path):
@@ -166,7 +161,7 @@ async def test_fake_harness_receipt_drives_end_to_end(fake_daemon, fake_client, 
     assert got.transcript_location == str(transcript.resolve())
 
 
-# -- 2. Base default refuses with a message naming the harness -----------------
+# -- The base default refuses, naming the harness ---------------------------
 
 
 def test_base_default_validate_transcript_receipt_refuses():
@@ -179,7 +174,7 @@ def test_base_default_validate_transcript_receipt_refuses():
         bare.validate_transcript_receipt(payload={}, cwd=None, expected_session_id=None)
 
 
-# -- 3. Pre-flight rejects a plan with receipt_token_path against base default --
+# -- Pre-flight rejects a receipt plan against an observer that inherits the default --
 
 
 def test_preflight_rejects_receipt_plan_against_inheriting_observer(
@@ -224,7 +219,7 @@ def test_preflight_rejects_receipt_plan_against_inheriting_observer(
         Spawner(registry)._validate_receipt_plan(plan, participant)
 
 
-# -- 3b. Pre-flight refuses a plan that sets receipt_token (core owns the secret) --
+# -- Pre-flight rejects unsafe receipt plans --------------------------------
 
 
 def _token_path() -> Path:
@@ -292,7 +287,7 @@ def test_preflight_rejects_an_unsafe_receipt_plan(
         Spawner(registry)._validate_receipt_plan(plan, participant)
 
 
-# -- 5. Core rejects bad candidates -------------------------------------------
+# -- Core rejects bad candidates --------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -346,7 +341,7 @@ async def test_core_rejects_a_bad_candidate(fake_daemon, fake_client, tmp_path, 
         )
 
 
-# -- 6. Token deleted on death ------------------------------------------------
+# -- The token is deleted when the participant dies -------------------------
 
 
 def test_receipt_token_deleted_on_death(registry, tmp_path):
@@ -365,7 +360,7 @@ def test_receipt_token_deleted_on_death(registry, tmp_path):
     assert registry.store.get_meta(f"receipt_token:{p.id}") is None
 
 
-# -- 7. Re-receipt of already-owned opaque location with a live sibling -------
+# -- A re-receipt of an already-owned opaque location beside a live sibling --
 
 
 async def test_rereceipt_of_already_owned_location_allows_with_sibling(

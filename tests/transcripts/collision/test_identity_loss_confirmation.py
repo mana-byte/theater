@@ -132,7 +132,7 @@ async def test_identity_loss_confirmation_resets_when_location_changes(
 async def test_identity_loss_grace_sweep_crashes_job_after_grace_in_quarantine(
     collision_registry, vibe_tree, monkeypatch
 ):
-    """B1: a job that survives initial quarantine is crashed by the periodic sweep.
+    """a job that survives initial quarantine is crashed by the periodic sweep.
 
     The quarantine tick runs ``_sweep_identity_lost_grace`` on every iteration.
     A fresh job stays RUNNING initially, but after ``OBSERVATION_FAILURE_GRACE``
@@ -176,7 +176,7 @@ async def test_identity_loss_grace_sweep_crashes_job_after_grace_in_quarantine(
 async def test_identity_loss_grace_sweep_preserves_fresh_job_in_quarantine(
     collision_registry, vibe_tree, monkeypatch
 ):
-    """B1: a fresh job stays RUNNING in quarantine when grace is positive."""
+    """a fresh job stays RUNNING in quarantine when grace is positive."""
     harness = VibeHarness(root=vibe_tree["root"])
     harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
         ScreenKind.WORKING, ScreenConfidence.HIGH
@@ -213,7 +213,7 @@ async def test_identity_loss_grace_sweep_preserves_fresh_job_in_quarantine(
 async def test_identity_loss_grace_sweep_uses_persisted_failed_at_on_restart(
     collision_registry, vibe_tree, monkeypatch
 ):
-    """B1: restart replay uses the persisted bus timestamp, not now(), for failed_at."""
+    """restart replay uses the persisted bus timestamp, not now(), for failed_at."""
     jobs = JobManager(collision_registry.store)
 
     participant = collision_registry.register(
@@ -239,7 +239,7 @@ async def test_identity_loss_grace_sweep_uses_persisted_failed_at_on_restart(
 
 
 async def test_identity_loss_confirmation_appear_gap_appear_resets(collision_registry, tmp_path):
-    """B2: an evidence-free relocate window between two qualifying windows resets.
+    """an evidence-free relocate window between two qualifying windows resets.
 
     appear -> gap (no evidence) -> appear must NOT quarantine on the third window,
     because the gap broke the consecutive chain.
@@ -298,7 +298,7 @@ async def test_identity_loss_confirmation_appear_gap_appear_resets(collision_reg
 async def test_identity_loss_confirmation_working_nonworking_gap_resets(
     collision_registry, vibe_tree
 ):
-    """B2: a relocate window where the screen is not HIGH/WORKING resets."""
+    """a relocate window where the screen is not HIGH/WORKING resets."""
     harness = VibeHarness(root=vibe_tree["root"])
     reading = {"kind": ScreenKind.WORKING}
     harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
@@ -340,7 +340,7 @@ async def test_identity_loss_confirmation_working_nonworking_gap_resets(
 async def test_identity_loss_quarantine_with_empty_polls_between_windows(
     collision_registry, vibe_tree
 ):
-    """B3: empty polls between two qualifying relocate windows do not reset.
+    """empty polls between two qualifying relocate windows do not reset.
 
     Integration-style: simulates the real watch loop where normal polls return
     empty Batch() between relocate windows. The confirmation threshold must
@@ -385,7 +385,7 @@ async def test_identity_loss_quarantine_with_empty_polls_between_windows(
 
 
 async def test_identity_loss_actual_progress_resets_confirmation(collision_registry, vibe_tree):
-    """B3: actual source progress (events on the pinned transcript) resets."""
+    """actual source progress (events on the pinned transcript) resets."""
     from theater.harness.base import Event, EventKind
 
     harness = VibeHarness(root=vibe_tree["root"])
