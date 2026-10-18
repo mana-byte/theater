@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tomllib
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -15,7 +16,8 @@ import pytest
 from tests.support.paths import REPO_ROOT
 
 ROOT = REPO_ROOT
-VERSION = "1.0.0rc11"
+# Derived so a release bump needs no test edit.
+VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
 UV = shutil.which("uv")
 
 pytestmark = pytest.mark.integration

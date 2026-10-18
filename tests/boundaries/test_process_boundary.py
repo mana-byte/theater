@@ -1,4 +1,4 @@
-"""Static ownership checks for the Theater/Régie process boundary."""
+"""Static ownership checks for the Theater/Régie process boundary and the public API imports."""
 
 from __future__ import annotations
 
@@ -99,3 +99,14 @@ def test_daemon_has_no_tmux_subprocess_execution_path() -> None:
         if any(marker in path.read_text() for marker in forbidden)
     ]
     assert violations == []
+
+
+def test_frontend_contract_has_no_private_imports() -> None:
+    forbidden = ("theater.daemon", "theater.client", "theater.config", "theater.tmux", "textual")
+    imports = {name for path in (THEATER / "frontend").rglob("*.py") for name in _imports(path)}
+    assert not {name for name in imports if name.startswith(forbidden)}
+
+
+def test_raw_client_uses_only_stdlib_imports() -> None:
+    imports = set(_imports(ROOT / "tests" / "support" / "raw_client.py"))
+    assert not {name for name in imports if name.startswith(("theater", "jsonschema"))}
