@@ -1,4 +1,4 @@
-"""Focused tests for exact trajectory tool operation projections."""
+"""Exact trajectory tool operation projection: pairing, timing, links and wire form."""
 
 from __future__ import annotations
 

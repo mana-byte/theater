@@ -1,4 +1,4 @@
-"""read_transcript: forwarding, cursors and compact presentation that keeps transcript evidence."""
+"""read_transcript: forwarding, cursors and compact output that keeps transcript evidence."""
 
 from __future__ import annotations
 

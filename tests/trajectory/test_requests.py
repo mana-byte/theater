@@ -1,4 +1,4 @@
-"""Focused tests for canonical trajectory request projections."""
+"""Canonical trajectory request projection: identity, timing, usage and wire form."""
 
 from __future__ import annotations
 

@@ -97,20 +97,6 @@ def test_private_management_commands_use_the_shared_private_methods(answers, cap
     assert '"provider_id": "pr-1"' in capsys.readouterr().out
 
 
-def test_spawn_sends_the_model_it_was_given(answers):
-    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--model", "big-one"))
-    assert answers["calls"][0][1]["model"] == "big-one"
-
-
-def test_spawn_sends_no_model_when_none_was_named(answers):
-    """None, not absent: the daemon reads it with .get either way, but a
-    spawn that did not choose must be distinguishable from one that did."""
-    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual"))
-    assert answers["calls"][0][1]["model"] is None
-
-
 def test_spawn_json_prints_the_record_verbatim(answers, capsys):
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     assert cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--json")) == 0
@@ -125,40 +111,33 @@ def test_spawn_rejects_an_unknown_harness_by_name(monkeypatch):
     assert "--prompt" in str(exc.value), "the likely mistake is naming a prompt"
 
 
-def test_spawn_bare_worktree_flag_sends_true(answers):
-    """Bare --worktree sends True (unique isolated worktree)."""
+@pytest.mark.parametrize(
+    ("flags", "param", "expected"),
+    [
+        (["--model", "big-one"], "model", "big-one"),
+        # None, not absent: a spawn that did not choose must differ from one that did.
+        ([], "model", None),
+        (["--worktree"], "worktree", True),  # bare flag: a unique isolated worktree
+        (["--worktree", "shared"], "worktree", "shared"),  # a named shared worktree
+        ([], "worktree", False),
+        ([], "wiring", "auto"),
+        (["--wiring", "legacy"], "wiring", "legacy"),
+    ],
+    ids=[
+        "model-given",
+        "model-omitted",
+        "worktree-bare",
+        "worktree-named",
+        "worktree-omitted",
+        "wiring-default",
+        "wiring-legacy",
+    ],
+)
+def test_spawn_sends_the_flag_it_was_given(answers, flags, param, expected):
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--worktree"))
-    assert answers["calls"][0][1]["worktree"] is True
-
-
-def test_spawn_worktree_with_name_sends_string(answers):
-    """--worktree NAME sends the string (named shared worktree)."""
-    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--worktree", "shared"))
-    assert answers["calls"][0][1]["worktree"] == "shared"
-
-
-def test_spawn_without_worktree_sends_false(answers):
-    """Omitting --worktree sends False."""
-    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual"))
-    assert answers["calls"][0][1]["worktree"] is False
-
-
-def test_spawn_defaults_wiring_to_auto(answers):
-    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    assert cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual")) == 0
-    assert answers["calls"][0][1]["wiring"] == "auto"
-
-
-def test_spawn_passes_the_explicit_legacy_opt_out(answers):
-    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    assert (
-        cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--wiring", "legacy"))
-        == 0
-    )
-    assert answers["calls"][0][1]["wiring"] == "legacy"
+    assert cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", *flags)) == 0
+    sent = answers["calls"][0][1][param]
+    assert sent == expected and type(sent) is type(expected)
 
 
 def test_spawn_rejects_unknown_wiring_at_parse_time():

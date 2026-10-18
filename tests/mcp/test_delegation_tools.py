@@ -309,12 +309,6 @@ async def test_send_forwards_empty_response_format():
     assert s.client.params("send")["response_format"] is response_format
 
 
-async def test_send_identifies_first_or_the_reply_has_nowhere_to_go():
-    s = session(send={"handle": "p-you#1"})
-    await tools.send_prompt(s, target_id="p-you", prompt="hello")
-    assert s.client.methods == ["hello", "send"]
-
-
 async def test_scratchpad_write_identifies_and_forwards_exact_rpc_arguments():
     s = session(**{"scratchpad.write": {"namespace": "plan", "key": "abc123"}})
     got = await tools.scratchpad_write(s, value="p-you", namespace="plan")
@@ -419,12 +413,6 @@ async def test_update_session_settings_forwards_both_fields():
     }
 
 
-async def test_update_session_settings_identifies_first():
-    s = session(**{"participant.settings.update": {"applied": True}})
-    await tools.update_session_settings(s, target="p-child", model="opus-5")
-    assert s.client.methods == ["hello", "participant.settings.update"]
-
-
 @pytest.mark.parametrize("native_session", ["session", "different", None])
 async def test_get_session_controls_forwards_the_frozen_rpc_with_the_caller_named(native_session):
     controls = {
@@ -498,12 +486,6 @@ async def test_get_session_controls_forwards_the_frozen_rpc_with_the_caller_name
         "target": "p-child",
         "caller_id": "p-me",
     }
-
-
-async def test_get_session_controls_identifies_first():
-    s = session(**{"participant.controls": {}})
-    await tools.get_session_controls(s, target="p-child")
-    assert s.client.methods == ["hello", "participant.controls"]
 
 
 async def test_control_tools_return_daemon_reasons_verbatim():

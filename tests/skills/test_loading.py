@@ -1,4 +1,4 @@
-"""Focused tests for declarative skill loading and registry discovery."""
+"""Declarative skill loading and registry discovery."""
 
 from __future__ import annotations
 

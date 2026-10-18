@@ -1,7 +1,4 @@
-"""The daemon socket client: request/reply alignment, message-size limits and protocol contracts.
-
-Real unix sockets, not mocked streams: the failures live in bytes left in the kernel buffer after a
-cancelled or oversized read."""
+"""The daemon socket client: reply alignment, message-size limits and protocol contracts."""
 
 from __future__ import annotations
 

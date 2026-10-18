@@ -1,9 +1,4 @@
-"""Focused tests for the codex qualification evidence collector.
-
-The collector is evidence-only: these tests verify the deterministic helpers,
-the refusal rules, and the collector's independence from Theater production
-code — the allowlist can never be edited by collecting evidence.
-"""
+"""The Codex qualification evidence collector: deterministic helpers and evidence-only output."""
 
 from __future__ import annotations
 

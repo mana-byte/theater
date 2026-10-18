@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.support.mcp_tools import resolved, session
+from tests.support.mcp_tools import resolved
 from theater.mcp import tools
 
 
@@ -14,13 +14,6 @@ async def test_recall_passes_paths_and_depth_to_the_daemon():
     assert p["paths"] == ["src/main.py"]
     assert p["depth"] == 3
     assert p["caller_cwd"]  # the tool sends its own cwd
-
-
-async def test_recall_identifies_first_so_the_daemon_knows_the_caller():
-    """The caller_cwd is what the daemon uses for the privacy wall."""
-    s = session(recall={})
-    await tools.recall(s, paths=["x.py"])
-    assert s.client.methods == ["hello", "recall"]
 
 
 async def test_recall_omits_handle_when_segment_already_identifies_the_point():
@@ -57,9 +50,3 @@ async def test_recall_read_forwards_the_segment_id_verbatim():
     p = s.client.params("recall_read")
     assert p["segment_id"] == seg
     assert p["caller_cwd"]  # the git root for the privacy wall
-
-
-async def test_recall_read_identifies_first():
-    s = session(recall_read={})
-    await tools.recall_read(s, segment_id="codex-a41f")
-    assert s.client.methods == ["hello", "recall_read"]

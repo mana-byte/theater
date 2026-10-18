@@ -287,6 +287,7 @@ def _tmux_alive(socket: Path) -> bool:
     return done.returncode == 0
 
 
+@pytest.mark.tmux
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
 def test_sandbox_teardown_stops_what_it_owns_and_nothing_else() -> None:
     sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]

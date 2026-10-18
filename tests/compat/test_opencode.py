@@ -1,4 +1,4 @@
-"""MVP tests for the OpenCode 1.x harness-compat adapter: parser, bump, verdicts."""
+"""The OpenCode harness-compat adapter: parser, bump and verdicts."""
 
 from __future__ import annotations
 

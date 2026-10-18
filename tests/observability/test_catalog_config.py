@@ -113,32 +113,42 @@ def test_kill_harness_not_prose():
     run_rows((key, partial(check, key)) for key in ("KILL_PANE", "KILL_TEARDOWN"))
 
 
-def test_git_cwd_in_prose():
-    m = next(m for m in BY_KEY["GIT_COMMAND"].attrs if m.source == "cwd")
-    assert m.prose_key == "cwd"
-    assert m.log_transform == ValueTransform.STRING
-    assert m.trace_transform == ValueTransform.STRING
-
-
-def test_spawn_launch_harness_in_prose():
-    m = next(m for m in BY_KEY["SPAWN_LAUNCH"].attrs if m.source == "harness")
-    assert m.prose_key == "harness"
-
-
-def test_spawn_worktree_kind_source():
-    m = next(m for m in BY_KEY["SPAWN_WORKTREE"].attrs if m.source == "kind")
-    assert m.prose_key == "kind" and m.metric_key == "kind"
-    assert m.metric_transform == ValueTransform.WORKTREE_KIND
-
-
-def test_worker_label_no_prose():
-    m = next(m for m in BY_KEY["WORKER_TASK"].attrs if m.source == "label")
-    assert m.metric_key == "task" and m.prose_key is None
-
-
-def test_kill_pane_attempts_mapping():
-    m = next(m for m in BY_KEY["KILL_PANE"].attrs if m.source == "attempts")
-    assert m.prose_key == "attempts" and m.metric_key is None
+@pytest.mark.parametrize(
+    ("operation", "source", "expected"),
+    [
+        (
+            "GIT_COMMAND",
+            "cwd",
+            {
+                "prose_key": "cwd",
+                "log_transform": ValueTransform.STRING,
+                "trace_transform": ValueTransform.STRING,
+            },
+        ),
+        ("SPAWN_LAUNCH", "harness", {"prose_key": "harness"}),
+        (
+            "SPAWN_WORKTREE",
+            "kind",
+            {
+                "prose_key": "kind",
+                "metric_key": "kind",
+                "metric_transform": ValueTransform.WORKTREE_KIND,
+            },
+        ),
+        ("WORKER_TASK", "label", {"metric_key": "task", "prose_key": None}),
+        ("KILL_PANE", "attempts", {"prose_key": "attempts", "metric_key": None}),
+    ],
+    ids=[
+        "git-cwd",
+        "spawn-launch-harness",
+        "spawn-worktree-kind",
+        "worker-label",
+        "kill-pane-attempts",
+    ],
+)
+def test_an_operation_attribute_is_mapped_to_its_sinks(operation, source, expected):
+    mapping = next(m for m in BY_KEY[operation].attrs if m.source == source)
+    assert {field: getattr(mapping, field) for field in expected} == expected
 
 
 def test_worktree_kind():

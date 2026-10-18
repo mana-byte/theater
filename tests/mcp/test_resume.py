@@ -134,57 +134,47 @@ async def test_resume_state_no_session_id_spawn_refuses(mcp_daemon, pin_harnesse
         assert "harness session id" in exc.value.message
 
 
-async def test_resume_state_harness_cannot_resume_spawn_refuses(mcp_daemon, pin_harnesses):
-    """harness_cannot_resume => spawn(resume=session_id) refuses with 'does not support' message."""
+@pytest.mark.parametrize(
+    ("harness", "session_id", "correlation", "state", "message"),
+    [
+        (
+            "no-resume-pin-test",
+            "sess-noresume",
+            "operator",
+            "harness_cannot_resume",
+            "does not support resume",
+        ),
+        ("resume-pin-test", "sess-untrusted", "heuristic", "untrusted", "no trusted"),
+    ],
+    ids=["harness-cannot-resume", "untrusted"],
+)
+async def test_resume_state_unresumable_spawn_refuses(
+    mcp_daemon, pin_harnesses, harness, session_id, correlation, state, message
+):
+    """The dead row's state names why resume=session_id is refused, and the spawner agrees."""
     async with DaemonClient(autostart=False) as c:
-        p = await c.call("hello", harness="no-resume-pin-test", cwd="/tmp")
+        p = await c.call("hello", harness=harness, cwd="/tmp")
         pid = p["id"]
         part = mcp_daemon.registry.get(pid)
-        part.session_id = "sess-noresume"
-        part.session_correlation = "operator"
+        part.session_id = session_id
+        part.session_correlation = correlation
         mcp_daemon.store.upsert_participant(part)
         mcp_daemon.registry.mark_dead(pid)
         rows = await c.call("participants.list", include_dead=True)
         row = next(r for r in rows if r["id"] == pid)
-        assert row["resume_state"] == "harness_cannot_resume"
+        assert row["resume_state"] == state
         with pytest.raises(RemoteError) as exc:
             await c.call(
                 "spawn",
-                harness="no-resume-pin-test",
+                harness=harness,
                 prompt="",
                 approval="manual",
                 cwd="/tmp",
-                resume="sess-noresume",
+                resume=session_id,
             )
         assert exc.value.code == "bad_request"
-        assert "does not support resume" in exc.value.message
-
-
-async def test_resume_state_untrusted_spawn_refuses(mcp_daemon, pin_harnesses):
-    """untrusted => spawn(resume=session_id) refuses with 'no trusted ... binding' message."""
-    async with DaemonClient(autostart=False) as c:
-        p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        pid = p["id"]
-        part = mcp_daemon.registry.get(pid)
-        part.session_id = "sess-untrusted"
-        part.session_correlation = "heuristic"
-        mcp_daemon.store.upsert_participant(part)
-        mcp_daemon.registry.mark_dead(pid)
-        rows = await c.call("participants.list", include_dead=True)
-        row = next(r for r in rows if r["id"] == pid)
-        assert row["resume_state"] == "untrusted"
-        with pytest.raises(RemoteError) as exc:
-            await c.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume="sess-untrusted",
-            )
-        assert exc.value.code == "bad_request"
-        # The spawner reaches the "no trusted dead binding" gate, not the live-owner gate.
-        assert "no trusted" in exc.value.message
+        # An untrusted row must hit the "no trusted dead binding" gate, not the live-owner gate.
+        assert message in exc.value.message
 
 
 async def test_resume_state_resumable_spawn_succeeds(mcp_daemon, pin_harnesses):
@@ -295,75 +285,39 @@ async def test_concurrent_resume_claims_leave_one_live_successor(mcp_daemon, pin
     assert "live successor" in failures[0].message
 
 
-async def test_resume_state_owned_by_live_trusted_dead_spawn_refuses(mcp_daemon, pin_harnesses):
-    """owned_by_live, trusted dead + trusted live => 'trusted owner is still live' message."""
-    async with DaemonClient(autostart=False) as c:
-        # Live owner with trusted binding.
-        live_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        lo_id = live_p["id"]
-        live_part = mcp_daemon.registry.get(lo_id)
-        live_part.session_id = "sess-owned"
-        live_part.session_correlation = "operator"
-        mcp_daemon.store.upsert_participant(live_part)
+@pytest.mark.parametrize(
+    ("session_id", "dead_correlation"),
+    [("sess-owned", "operator"), ("sess-mixed", "heuristic")],
+    ids=["trusted-dead", "untrusted-dead"],
+)
+async def test_resume_state_owned_by_live_spawn_refuses(
+    mcp_daemon, pin_harnesses, session_id, dead_correlation
+):
+    """A trusted live peer dominates: even an untrusted dead row reports owned_by_live.
 
-        # Dead predecessor sharing the same session id (trusted provenance).
-        dead_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
-        dp_id = dead_p["id"]
-        dead_part = mcp_daemon.registry.get(dp_id)
-        dead_part.session_id = "sess-owned"
-        dead_part.session_correlation = "operator"
-        mcp_daemon.store.upsert_participant(dead_part)
-        mcp_daemon.registry.mark_dead(dp_id)
-
-        rows = await c.call("participants.list", include_dead=True)
-        dp_row = next(r for r in rows if r["id"] == dp_id)
-        assert dp_row["resume_state"] == "owned_by_live"
-
-        with pytest.raises(RemoteError) as exc:
-            await c.call(
-                "spawn",
-                harness="resume-pin-test",
-                prompt="",
-                approval="manual",
-                cwd="/tmp",
-                resume="sess-owned",
-            )
-        assert exc.value.code == "bad_request"
-        assert "still live" in exc.value.message
-        assert lo_id in exc.value.message
-
-
-async def test_resume_state_owned_by_live_untrusted_dead_spawn_refuses(mcp_daemon, pin_harnesses):
-    """owned_by_live wins even when the subject dead row is untrusted.
-
-    An untrusted dead row and a trusted live peer sharing a session id: the
-    spawner's _validate_resume_identity filters to trusted rows only, so the
-    untrusted dead row enters neither list and the live trusted peer triggers
-    the 'trusted owner is still live' gate.  resume_state must report
-    owned_by_live (not untrusted), and the spawner must refuse with the
-    'still live' message — proving the two implementations agree.
+    The spawner filters to trusted rows, so the live peer trips the 'trusted owner is
+    still live' gate, and resume_state agrees with it.
     """
     async with DaemonClient(autostart=False) as c:
         # Live owner with trusted binding.
         live_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
         lo_id = live_p["id"]
         live_part = mcp_daemon.registry.get(lo_id)
-        live_part.session_id = "sess-mixed"
+        live_part.session_id = session_id
         live_part.session_correlation = "operator"
         mcp_daemon.store.upsert_participant(live_part)
 
-        # Dead row sharing the session id but with UNTRUSTED provenance.
+        # Dead row sharing the session id, with trusted or untrusted provenance.
         dead_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
         dp_id = dead_p["id"]
         dead_part = mcp_daemon.registry.get(dp_id)
-        dead_part.session_id = "sess-mixed"
-        dead_part.session_correlation = "heuristic"  # untrusted
+        dead_part.session_id = session_id
+        dead_part.session_correlation = dead_correlation
         mcp_daemon.store.upsert_participant(dead_part)
         mcp_daemon.registry.mark_dead(dp_id)
 
         rows = await c.call("participants.list", include_dead=True)
         dp_row = next(r for r in rows if r["id"] == dp_id)
-        # Must be owned_by_live, not untrusted — the live peer dominates.
         assert dp_row["resume_state"] == "owned_by_live"
 
         with pytest.raises(RemoteError) as exc:
@@ -373,9 +327,8 @@ async def test_resume_state_owned_by_live_untrusted_dead_spawn_refuses(mcp_daemo
                 prompt="",
                 approval="manual",
                 cwd="/tmp",
-                resume="sess-mixed",
+                resume=session_id,
             )
         assert exc.value.code == "bad_request"
-        # Must hit the live-owner gate, not the untrusted gate.
         assert "still live" in exc.value.message
         assert lo_id in exc.value.message

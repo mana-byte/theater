@@ -1,4 +1,4 @@
-"""Focused tests for trajectory boundary parameter validation."""
+"""Trajectory RPC parameter validation: bounded strings, cursors, limits and waits."""
 
 from __future__ import annotations
 

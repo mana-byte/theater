@@ -165,30 +165,33 @@ def test_describe_reports_source_per_key():
     assert "regie.theme" not in rows
 
 
-def test_unknown_key_suggests_the_real_one():
-    write_config("[rails]\ndepth_capp = 5\n")
+@pytest.mark.parametrize(
+    ("text", "needles"),
+    [
+        ("[rails]\ndepth_capp = 5\n", ("depth_cap",)),
+        ("[skills]\ndisable = []\n", ("skills.disable", "disabled")),
+        ("[railz]\ndepth_cap = 5\n", ("railz", "rails")),
+        ("[rails\ndepth_cap = 5\n", ("not valid TOML",)),
+        ('[rails]\ndepth_cap = "three"\n', ("must be an integer",)),
+        ('rails = "yes"\n', ("must be a table",)),
+        ("[observer]\npoll_interval = inf\n", ("finite",)),
+    ],
+    ids=[
+        "unknown-key-suggests-the-real-one",
+        "unknown-skills-key-suggests-disabled",
+        "unknown-section-suggests-the-real-one",
+        "malformed-toml",
+        "wrong-type",
+        "section-must-be-a-table",
+        "infinite-interval",
+    ],
+)
+def test_a_bad_file_is_fatal_with_a_named_reason(text, needles):
+    write_config(text)
     with pytest.raises(cfg.ConfigError) as exc:
         cfg.load()
-    assert "depth_cap" in str(exc.value)
-
-
-def test_unknown_skills_key_is_fatal_and_suggests_disabled():
-    write_config("[skills]\ndisable = []\n")
-
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-
-    assert "skills.disable" in str(exc.value)
-    assert "disabled" in str(exc.value)
-
-
-def test_unknown_section_is_fatal_and_suggests():
-    write_config("[railz]\ndepth_cap = 5\n")
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    message = str(exc.value)
-    assert "railz" in message
-    assert "rails" in message
+    for needle in needles:
+        assert needle in str(exc.value)
 
 
 def test_error_names_the_file():
@@ -196,20 +199,6 @@ def test_error_names_the_file():
     with pytest.raises(cfg.ConfigError) as exc:
         cfg.load()
     assert str(paths.config_path()) in str(exc.value)
-
-
-def test_malformed_toml_is_fatal():
-    write_config("[rails\ndepth_cap = 5\n")
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "not valid TOML" in str(exc.value)
-
-
-def test_wrong_type_is_fatal():
-    write_config('[rails]\ndepth_cap = "three"\n')
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "must be an integer" in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -225,13 +214,6 @@ def test_a_wrongly_typed_number_is_rejected(text):
     write_config(text)
     with pytest.raises(cfg.ConfigError):
         cfg.load()
-
-
-def test_section_must_be_a_table():
-    write_config('rails = "yes"\n')
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "must be a table" in str(exc.value)
 
 
 def test_out_of_range_is_fatal():
@@ -251,13 +233,6 @@ def test_out_of_range_is_fatal():
             "[rails]\ndepth_cap = -1\n",
         ]
     )
-
-
-def test_infinite_interval_is_fatal():
-    write_config("[observer]\npoll_interval = inf\n")
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "finite" in str(exc.value)
 
 
 def test_depth_cap_zero_is_legal():

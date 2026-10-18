@@ -54,10 +54,18 @@ class _Instrument:
         self.calls.append((value, attributes))
 
 
-def test_registry_no_meter_noop():
-    reg = HistogramRegistry(meter=None)
-    reg.get_or_create("m", "d", "ms")
-    reg.record("m", 42.0)
+@pytest.mark.parametrize(
+    ("registry", "unit", "record"),
+    [
+        (HistogramRegistry, "ms", lambda reg: reg.record("m", 42.0)),
+        (CounterRegistry, "1", lambda reg: reg.add("m", 1)),
+    ],
+    ids=["histogram", "counter"],
+)
+def test_a_registry_without_a_meter_is_a_noop(registry, unit, record):
+    reg = registry(meter=None)
+    reg.get_or_create("m", "d", unit)
+    record(reg)
 
 
 def test_registry_conflict():
@@ -108,12 +116,6 @@ def test_counter_registry_add_rejects_negative_and_releases_lock():
     assert counter.calls == [(2, {"kind": "test"})]
     with pytest.raises(ValueError, match="negative"):
         reg.add("m", -1)
-
-
-def test_counter_registry_no_meter_noop():
-    reg = CounterRegistry(meter=None)
-    reg.get_or_create("m", "d", "1")
-    reg.add("m", 1)
 
 
 @pytest.mark.parametrize(
