@@ -86,7 +86,7 @@ async def test_identity_loss_restart_replay_applies_grace_to_job_destruction(
 
 @pytest.mark.asyncio
 async def test_identity_loss_grace_sweep_transitions_running_to_crashed(registry, monkeypatch):
-    """B1: a job that survives initial quarantine is crashed by the periodic sweep.
+    """A job that survives initial quarantine is crashed by the periodic sweep.
 
     Enter quarantine with positive grace (job stays RUNNING), then advance
     ``failed_at`` backwards so the next sweep tick sees the grace as elapsed
@@ -124,7 +124,7 @@ async def test_identity_loss_grace_sweep_transitions_running_to_crashed(registry
 async def test_identity_loss_grace_sweep_restart_uses_persisted_timestamp(
     registry, monkeypatch, vibe_tree
 ):
-    """B1: restart replay uses the persisted bus timestamp, not now(), for grace.
+    """Restart replay uses the persisted bus timestamp, not now(), for the grace window.
 
     A daemon restart must not grant endless fresh grace by resetting
     ``failed_at`` to ``now()``. The persisted observation-error timestamp

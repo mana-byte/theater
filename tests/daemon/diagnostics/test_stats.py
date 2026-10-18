@@ -1,16 +1,4 @@
-"""The rescue rate, and the refusals that never became jobs.
-
-The rescue path is the reason this file exists. When the observer never sees a
-turn end, it waits out the rescue timer and finishes the job with whatever the
-agent was last heard to say, tagged `turn_end_unseen`. The caller cannot tell
-that apart from a real answer, so a harness whose transcript format has drifted
-looks *slow*, not *broken*. Counting it is what turns that into a number
-someone can act on.
-
-The counts are derived from the jobs table rather than from live counters, so
-these tests write jobs and assert on what comes back out — no observer, no
-tmux, no time passing.
-"""
+"""The rescue rate, and the refusals that never became jobs."""
 
 from __future__ import annotations
 
@@ -25,6 +13,9 @@ from theater.models import Job, JobState, Participant, Tier, now
 from theater.protocol import RemoteError
 
 
+# A job finished by the rescue timer (`turn_end_unseen`) looks like a real answer, so a drifted
+# transcript format reads as slow, not broken. Counts come from the jobs table, so these tests
+# write jobs and assert on what comes back: no observer, no tmux, no time passing.
 def _turn(
     store,
     target: Participant,

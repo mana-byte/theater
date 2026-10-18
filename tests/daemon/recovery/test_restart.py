@@ -1,14 +1,4 @@
-"""Tests for daemon restart and reconciliation.
-
-The exit criteria: kill -9 the daemon mid-job. It restarts, the tree is
-intact, the orphaned job reports crashed to its caller.
-
-These tests simulate a restart by:
-  1. Creating a daemon, spawning a participant with a running job
-  2. Closing the daemon (simulating kill -9)
-  3. Creating a new daemon with the same store (simulating restart)
-  4. Checking that reconciliation marks dead participants and crashes jobs
-"""
+"""A daemon restarted over the same store reconciles dead participants and orphaned jobs."""
 
 from __future__ import annotations
 
@@ -24,6 +14,8 @@ from theater.daemon.observation.service import Observer
 from theater.daemon.server import Daemon
 
 
+# A restart is simulated by closing the daemon and creating a new one on the same store,
+# the closest an in-process test gets to kill -9 mid-job.
 def _repo(tmp_path: Path, name: str) -> Path:
     path = tmp_path / name
     path.mkdir()

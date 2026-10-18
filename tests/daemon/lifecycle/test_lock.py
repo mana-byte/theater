@@ -1,20 +1,4 @@
-"""Only one daemon, and a dying one takes nothing with it.
-
-Two bugs lived here, and both produced the same symptom for the user: after a
-`theater restart`, no socket on disk and two orphan daemons still alive.
-
-  1. Startup unlinked the socket by path after a failed probe. Two daemons
-     starting together could both pass the probe; the second deleted the
-     first's fresh socket and bound its own, leaving the first listening on an
-     unreachable inode.
-  2. Shutdown unlinked the socket and pidfile by path, unconditionally. A
-     daemon that took seconds to die therefore deleted its replacement's files.
-     Worse, a daemon that refused to start still ran that shutdown path, so
-     `theater daemon` typed twice removed the running daemon's socket.
-
-The tests below are written against those two behaviours rather than against
-the implementation, so they would survive swapping flock for something else.
-"""
+"""Only one daemon runs, and a dying daemon never removes its replacement's files."""
 
 from __future__ import annotations
 
@@ -34,6 +18,9 @@ from theater.daemon.server import Daemon
 # ---- the lock itself ---------------------------------------------------
 
 
+# Startup and shutdown must not unlink the socket or pidfile by path: two racing starts, or a
+# daemon that is slow to die, would delete a live daemon's files. Written against that
+# behaviour, not the lock implementation, so flock could be swapped for something else.
 def test_a_second_lock_on_the_same_file_is_refused(theater_home):
     first = DaemonLock()
     first.acquire()
