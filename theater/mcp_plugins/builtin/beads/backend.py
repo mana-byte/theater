@@ -50,7 +50,7 @@ class Board:
         home = self.state_dir / "home"
         home.mkdir(parents=True, exist_ok=True)
         return {
-            "PATH": os.defpath,
+            "PATH": os.environ.get("PATH", os.defpath),
             "HOME": str(home),
             "BEADS_DIR": str(self.path / ".beads"),
             "BD_NON_INTERACTIVE": "1",

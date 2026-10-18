@@ -20,6 +20,25 @@ _caller = contextvars.ContextVar("beads_test_caller", default="author")
 _instance = contextvars.ContextVar("beads_test_instance", default="instance-one")
 
 
+def test_npm_launcher_preserves_node_path_and_scrubs_routing(tmp_path: Path, monkeypatch) -> None:
+    executable_dir = tmp_path / "bin"
+    executable_dir.mkdir()
+    node = executable_dir / "node"
+    node.write_text('#!/bin/sh\nprintf "bd version 1.3.1\\n"\n')
+    node.chmod(0o755)
+    launcher = executable_dir / "bd"
+    launcher.write_text('#!/usr/bin/env node\nconsole.log("bd version 1.3.1");\n')
+    launcher.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable_dir))
+    monkeypatch.setenv("BEADS_DIR", "/other/board")
+    monkeypatch.setenv("BEADS_DOLT_SERVER_HOST", "external")
+    board = Board(tmp_path / "state", "instance-one", str(launcher))
+    board.path.mkdir(parents=True)
+    assert board._run("version", json_output=False) == "bd version 1.3.1"
+    assert board._env()["BEADS_DIR"] == str(board.path / ".beads")
+    assert "BEADS_DOLT_SERVER_HOST" not in board._env()
+
+
 class FakeClient:
     enabled = True
     permissions: ClassVar[list[str]] = ["read", "write"]
