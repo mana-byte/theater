@@ -1,4 +1,4 @@
-"""Live provider-generation reclaim after daemon database reopen."""
+"""A provider reconnect reclaims terminal bindings only from an exact, complete report."""
 
 from __future__ import annotations
 
@@ -8,6 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.provider_recovery import (
+    provider_record,
+    provider_service,
+    tmux_terminal_identity,
+)
+from theater.constants.daemon import (
+    BUS_KIND_TMUX_SERVER_RESTART,
+    TMUX_PROVIDER_IDENTITY_META_PREFIX,
+    TMUX_RESTART_TERMINATION_REASON,
+)
 from theater.daemon.jobs import JobManager
 from theater.daemon.operations import OperationService
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
@@ -15,7 +25,13 @@ from theater.daemon.persistence.store import Store
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.daemon.registry import Registry
 from theater.daemon.runtime.recovery import reconcile_public_control_operations
-from theater.daemon.terminals import StaleGeneration, TerminalProviderService
+from theater.daemon.terminals import (
+    ProviderUnavailable,
+    StaleGeneration,
+    TerminalProviderService,
+)
+from theater.daemon.terminals.bindings import ensure_terminal_unbound
+from theater.daemon.terminals.service import ProviderReportInvalid
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
@@ -30,6 +46,7 @@ from theater.models import (
     Participant,
     ProviderRecord,
     PublicOperationRecord,
+    Status,
     TerminalBindingRecord,
     WorkspaceOwnershipKind,
     WorkspaceRecord,
@@ -40,7 +57,166 @@ from theater.models import (
 )
 
 
-def _terminal(
+def test_complete_tmux_report_atomically_retires_previous_server_bindings(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "tmux-server-identity.db")
+    with store.write_unit() as unit:
+        store.providers.register(provider_record(kind="tmux"), connection=unit.connection)
+        store.upsert_participant(
+            Participant(id="participant-old", harness="codex"),
+            connection=unit.connection,
+        )
+        old_terminal = tmux_terminal_identity(
+            0,
+            server_identity="server-a",
+            participant_id="participant-old",
+            incarnation="incarnation-old",
+        )
+        store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id="participant-old",
+                provider_id="provider-a",
+                provider_generation=0,
+                terminal_id="%1",
+                terminal_incarnation="incarnation-old",
+                occupant_evidence=dict(old_terminal["occupant"]),
+                process_facts=dict(old_terminal["process"]),
+                health="reconciling",
+                report_revision=0,
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+    service = provider_service(store)
+    finalized: list[tuple[str, ...]] = []
+
+    def finalize(participants) -> None:
+        finalized.append(tuple(participant.id for participant in participants))
+        assert store.get_participant("participant-old").status is Status.DEAD
+
+    service.configure_tmux_restart_finalizer(finalize)
+    generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+    same_terminal = tmux_terminal_identity(
+        generation,
+        server_identity="server-a",
+        participant_id="participant-old",
+        incarnation="incarnation-old",
+    )
+    service.report(
+        "provider-a",
+        generation,
+        1,
+        {
+            "terminals": [same_terminal],
+            "complete": True,
+            "tmux_server_identity": "server-a",
+        },
+    )
+    service.connections.disconnect("provider-a", generation)
+    generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+    same_terminal["provider_generation"] = generation
+    service.report(
+        "provider-a",
+        generation,
+        1,
+        {
+            "terminals": [same_terminal],
+            "complete": True,
+            "tmux_server_identity": "server-a",
+        },
+    )
+    assert store.get_participant("participant-old").status is not Status.DEAD
+
+    with pytest.raises(ProviderReportInvalid, match="does not match"):
+        service.report(
+            "provider-a",
+            generation,
+            2,
+            {
+                "terminals": [same_terminal],
+                "complete": True,
+                "tmux_server_identity": "server-b",
+            },
+        )
+    meta_key = f"{TMUX_PROVIDER_IDENTITY_META_PREFIX}provider-a"
+    assert store.get_meta(meta_key) == "server-a"
+    assert store.providers.get("provider-a").last_report_revision == 1
+
+    replacement = tmux_terminal_identity(
+        generation,
+        server_identity="server-b",
+        participant_id="participant-new",
+        incarnation="incarnation-new",
+    )
+    service.report(
+        "provider-a",
+        generation,
+        2,
+        {
+            "terminals": [replacement],
+            "complete": True,
+            "tmux_server_identity": "server-b",
+        },
+    )
+
+    old = store.get_participant("participant-old")
+    assert old is not None
+    assert old.status is Status.DEAD
+    assert old.termination_reason == TMUX_RESTART_TERMINATION_REASON
+    assert old.termination_incident
+    assert store.get_meta(meta_key) == "server-b"
+    assert finalized == [("participant-old",)]
+    incidents = [row for row in store.bus_tail() if row["kind"] == BUS_KIND_TMUX_SERVER_RESTART]
+    assert len(incidents) == 1
+    assert incidents[0]["payload"]["provider_id"] == "provider-a"
+
+    with store.write_unit() as unit:
+        store.upsert_participant(
+            Participant(id="participant-new", harness="codex"),
+            connection=unit.connection,
+        )
+        binding = TerminalBindingRecord(
+            participant_id="participant-new",
+            provider_id="provider-a",
+            provider_generation=generation,
+            terminal_id="%1",
+            terminal_incarnation="incarnation-new",
+            occupant_evidence=dict(replacement["occupant"]),
+            process_facts=dict(replacement["process"]),
+            health="healthy",
+            report_revision=2,
+            created_at=2.0,
+            updated_at=2.0,
+        )
+        ensure_terminal_unbound(store, binding, unit.connection)
+        store.terminal_bindings.bind(binding, connection=unit.connection)
+    store.close()
+
+
+async def test_provider_generation_cannot_be_acquired_during_startup_recovery(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "provider-startup-gate.db")
+    with store.write_unit() as unit:
+        store.providers.register(provider_record(), connection=unit.connection)
+    service = provider_service(store)
+
+    service.begin_startup_recovery()
+    with pytest.raises(ProviderUnavailable, match="daemon_recovery_in_progress"):
+        service.authenticate_handshake("provider-a", "credential-a", callback=True)
+    assert store.providers.get("provider-a").generation == 0
+
+    service.finish_startup_recovery()
+    generation, token = service.authenticate_handshake("provider-a", "credential-a", callback=True)
+    assert generation == 1
+    assert token is not None
+    await service.aclose()
+    store.close()
+
+
+def inventory_terminal(
     generation: int,
     terminal_id: str,
     participant_id: str,
@@ -107,13 +283,13 @@ async def test_reconnect_requires_exact_inventory_and_historical_receipts(  # no
     control_participant = "participant-control"
     launch_operation = "operation-launch"
     control_operation = "operation-control"
-    launch_terminal = _terminal(
+    launch_terminal = inventory_terminal(
         old_generation,
         "terminal-launch",
         launch_participant,
         launch_id=launch_operation,
     )
-    control_terminal = _terminal(old_generation, "terminal-control", control_participant)
+    control_terminal = inventory_terminal(old_generation, "terminal-control", control_participant)
     control_occupant = control_terminal["occupant"]
     control_process = control_terminal["process"]
     assert isinstance(control_occupant, Mapping)
