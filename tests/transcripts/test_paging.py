@@ -1,9 +1,11 @@
-"""Transcript paging: bounded pages, cursors and oversized-event chunking."""
+"""Transcript history pages are bounded, cursor-bound and carry retained prompts."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,12 +13,15 @@ from tests.support.opencode_recorder import Recorder
 from tests.support.shipped import OpenCodeObserver
 from tests.support.transcript_pages import StaticSource, page, pager
 from theater.constants.daemon import TRANSCRIPT_READ_RESPONSE_MAX_BYTES
+from theater.daemon import methods as methods_mod
+from theater.daemon.rpc import transcripts as transcripts_mod
 from theater.daemon.rpc.transcript_paging import TranscriptCursorError, TranscriptPager
 from theater.harness import Event, EventKind
 from theater.harness.contracts.events import TokenUsage
 from theater.harness.contracts.source import HistoryPage
 from theater.harness.observation import TranscriptObserver
 from theater.harness.transcript.observer import open_participant_source
+from theater.models import BadRequest, Job, Tier
 
 
 async def test_newest_page_is_bounded_and_chronological() -> None:
@@ -461,3 +466,36 @@ async def test_huge_event_collapses_and_middle_cursor_stays_inside_it() -> None:
         middle.extend(chunk.text for chunk in current.events)
         cursor = current.next_cursor
     assert head + "".join(reversed(middle)) + tail == huge
+
+
+def _job(handle: str, target: str, kind: str, prompt: str | None, created_at: float) -> Job:
+    return Job(handle, "p-parent", target, kind, prompt, "done", None, None, created_at, created_at)
+
+
+async def test_newest_page_carries_retained_prompts_and_roles_are_validated(registry, monkeypatch):
+    child = registry.register(harness="vibe", pane=None, cwd="/tmp")
+    child = dataclasses.replace(child, tier=Tier.SPAWNED, resumed_from_id="p-old")
+    registry.store.upsert_participant(child)
+    registry.store.create_job(_job("spawn-1", child.id, "spawn", "", 1.0))
+    registry.store.create_job(_job("send-1", child.id, "send", "é" * 2000, 2.0))
+    registry.store.create_job(_job("send-2", child.id, "send", "again", 3.0))
+    calls: list[dict] = []
+
+    async def fake_page(daemon, **kwargs):
+        calls.append(kwargs)
+        return {"id": kwargs["participant_id"], "events": []}
+
+    monkeypatch.setattr(transcripts_mod, "read_transcript_page", fake_page)
+    daemon = SimpleNamespace(registry=registry)
+    read = methods_mod.METHODS["read_transcript"]
+
+    newest = await read(daemon, {"id": child.id, "roles": ["tool_result", "assistant"]})
+    older = await read(daemon, {"id": child.id, "cursor": "trc3.x"})
+
+    assert calls[0]["roles"] == ("assistant", "tool_result")
+    assert newest["first_prompt"] == "é" * 1024
+    assert newest["later_prompts"] == 1
+    assert newest["resumed_from"] == "p-old"
+    assert older == {"id": child.id, "events": []}
+    with pytest.raises(BadRequest, match="assistant"):
+        await read(daemon, {"id": child.id, "roles": ["error"]})

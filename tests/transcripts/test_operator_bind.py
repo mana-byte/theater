@@ -1,4 +1,4 @@
-"""Transcript recovery: candidate enumeration and bind admission."""
+"""Operator bind and candidate listing validate, persist and transfer transcript locations."""
 
 from __future__ import annotations
 
