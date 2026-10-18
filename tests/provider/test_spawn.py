@@ -735,59 +735,35 @@ async def test_adoption_refuses_replaced_process_for_existing_external(
     assert daemon.registry.get(external.id).termination_reason is None
 
 
-async def test_adoption_refuses_inspection_of_replaced_incarnation(
-    daemon, monkeypatch: pytest.MonkeyPatch
+def _replaced_incarnation_terminal() -> dict[str, object]:
+    return {**_terminal(), "terminal_incarnation": "replacement-incarnation"}
+
+
+@pytest.mark.parametrize(
+    ("terminal", "lifecycle"),
+    [
+        pytest.param(_replaced_incarnation_terminal(), {"alive": True}, id="replaced_incarnation"),
+        pytest.param(_terminal(), {"alive": False}, id="dead_occupant"),
+    ],
+)
+async def test_adoption_of_a_new_participant_is_refused_and_retires_its_reservation(
+    daemon, monkeypatch: pytest.MonkeyPatch, terminal: dict[str, object], lifecycle: dict
 ) -> None:
     online_provider(daemon, monkeypatch, "provider-a")
 
     async def inspect(*_args, **_kwargs):
-        terminal = _terminal()
-        terminal["terminal_incarnation"] = "replacement-incarnation"
         return {
             "provider_generation": 1,
             "report_revision": 2,
             "terminal": terminal,
             "presence": {"state": "absent", "revision": 1},
-            "lifecycle": {"alive": True},
+            "lifecycle": lifecycle,
         }
 
     monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
     accepted = ParticipantLaunchService(daemon).adopt(
         client_id="operator-a",
-        idempotency_key="adopt-stale",
-        params={
-            "provider_id": "provider-a",
-            "terminal_id": "terminal-a",
-            "terminal_incarnation": "incarnation-a",
-        },
-    )
-    await settle_operations(daemon)
-    operation = daemon.operation_service.get(str(accepted["operation_id"]))
-    assert operation.state == "failed"
-    assert operation.error_code == "terminal_identity_mismatch"
-    participant = daemon.registry.get(str(accepted["participant_id"]))
-    assert participant.status is Status.DEAD
-    assert participant.termination_reason == "adoption_failed"
-
-
-async def test_adoption_refuses_definitively_dead_occupant_and_retires_reservation(
-    daemon, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    online_provider(daemon, monkeypatch, "provider-a")
-
-    async def inspect(*_args, **_kwargs):
-        return {
-            "provider_generation": 1,
-            "report_revision": 2,
-            "terminal": _terminal(),
-            "presence": {"state": "absent", "revision": 1},
-            "lifecycle": {"alive": False},
-        }
-
-    monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
-    accepted = ParticipantLaunchService(daemon).adopt(
-        client_id="operator-a",
-        idempotency_key="adopt-dead",
+        idempotency_key="adopt-refused",
         params={
             "provider_id": "provider-a",
             "terminal_id": "terminal-a",
@@ -801,4 +777,5 @@ async def test_adoption_refuses_definitively_dead_occupant_and_retires_reservati
     assert operation.state == "failed"
     assert operation.error_code == TerminalIdentityMismatch.code
     assert participant.status is Status.DEAD
+    assert participant.termination_reason == "adoption_failed"
     assert daemon.store.terminal_bindings.get(participant.id) is None

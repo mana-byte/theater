@@ -58,7 +58,6 @@ from theater.harness.observation import TranscriptObserver
 from theater.models import Status
 
 
-@pytest.mark.asyncio
 async def test_frontend_requests_correlate_out_of_order_and_remote_errors():
     sent = asyncio.Queue()
 
@@ -85,7 +84,6 @@ async def test_frontend_requests_correlate_out_of_order_and_remote_errors():
     requests.close()
 
 
-@pytest.mark.asyncio
 async def test_frontend_request_timeout_discards_late_reply_without_replay():
     sent = []
 
@@ -101,7 +99,6 @@ async def test_frontend_request_timeout_discards_late_reply_without_replay():
     requests.close()
 
 
-@pytest.mark.asyncio
 async def test_frontend_close_fails_requests_on_old_peer():
     sent = asyncio.Queue()
 
@@ -119,7 +116,6 @@ async def test_frontend_close_fails_requests_on_old_peer():
     assert requests._pending == {}
 
 
-@pytest.mark.asyncio
 async def test_frontend_oversized_request_is_rejected_before_transmission():
     async def send(_payload):
         pytest.fail("oversized request must not reach the writer")

@@ -190,10 +190,17 @@ async def test_explicit_legacy_opts_out_of_native_wiring(
         await d.aclose()
 
 
-async def test_unsupported_manifest_falls_back_to_legacy_for_every_native_preference(
-    theater_home, terminal_provider, monkeypatch
+@pytest.mark.parametrize(
+    "harness_options",
+    [
+        pytest.param({"supported": False}, id="unsupported_manifest"),
+        pytest.param({"with_runtime": False}, id="no_runtime_manifest"),
+    ],
+)
+async def test_harness_without_native_runtime_support_is_legacy_for_every_native_preference(
+    theater_home, terminal_provider, monkeypatch, harness_options
 ):
-    harness = NativeFixtureHarness(supported=False)
+    harness = NativeFixtureHarness(**harness_options)
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
     d = await native_daemon(RoutingIO(), harness, terminal_provider)
     try:
@@ -210,24 +217,6 @@ async def test_unsupported_manifest_falls_back_to_legacy_for_every_native_prefer
             ("legacy_plan", "do the task"),
             ("legacy_plan", "explicit"),
         ]
-    finally:
-        await d.aclose()
-
-
-async def test_harness_without_runtime_manifest_is_legacy_by_construction(
-    theater_home, terminal_provider, monkeypatch
-):
-    harness = NativeFixtureHarness(with_runtime=False)
-    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    d = await native_daemon(RoutingIO(), harness, terminal_provider)
-    try:
-        p = await spawn_native(d, spawn_request())
-        assert d.store.get_runtime_binding(p.id) is None
-
-        explicit = await spawn_native(
-            d, spawn_request(prompt="explicit", wiring=RuntimeWiring.NATIVE)
-        )
-        assert d.store.get_runtime_binding(explicit.id) is None
     finally:
         await d.aclose()
 

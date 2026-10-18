@@ -70,7 +70,7 @@ def _physical_occupant_id(event: Mapping[str, object]) -> str:
 async def test_independent_provider_root_child_adoption_workspace_and_state_flow(  # noqa: PLR0915
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    credential = "s13-provider-credential"
+    credential = "e2e-provider-credential"
     provider_id = await raw_register_provider(paths.socket_path(), credential)
     plan = {
         "bind_requested_participant": True,
@@ -84,7 +84,7 @@ async def test_independent_provider_root_child_adoption_workspace_and_state_flow
         provider_credential=credential,
         plan=plan,
     ) as provider:
-        client = FrontendClient(paths.socket_path(), client_id="s13-operator")
+        client = FrontendClient(paths.socket_path(), client_id="e2e-operator")
         synchronizer = StateSynchronizer(client)
         try:
             await client.providers.terminals.list(provider_id, refresh=True)
@@ -93,7 +93,7 @@ async def test_independent_provider_root_child_adoption_workspace_and_state_flow
             workspace = (
                 await client.workspaces.register(
                     "borrowed",
-                    "s13-operator",
+                    "e2e-operator",
                     str(workspace_path),
                     idempotency_key="workspace-retained",
                 )
@@ -156,7 +156,7 @@ async def test_independent_provider_root_child_adoption_workspace_and_state_flow
                     PublicOperationRecord(
                         operation_id="external-terminal-create",
                         kind="fixture.create",
-                        actor_client_id="s13-fixture",
+                        actor_client_id="e2e-fixture",
                         actor_participant_id=None,
                         target_ids=(external.id,),
                         state="running",
@@ -231,7 +231,7 @@ async def test_independent_provider_root_child_adoption_workspace_and_state_flow
             disposable = (
                 await client.workspaces.register(
                     "frontend",
-                    "s13-operator",
+                    "e2e-operator",
                     str(disposable_path),
                     idempotency_key="workspace-disposable",
                 )
@@ -273,7 +273,7 @@ async def test_independent_provider_root_child_adoption_workspace_and_state_flow
 async def test_lost_create_ack_keeps_one_side_effect_and_reserved_resources(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    credential = "s13-lost-ack-credential"
+    credential = "e2e-lost-ack-credential"
     provider_id = await raw_register_provider(paths.socket_path(), credential)
     _install_test_launch_plan(daemon, monkeypatch)
 
@@ -286,7 +286,7 @@ async def test_lost_create_ack_keeps_one_side_effect_and_reserved_resources(
             "disconnect_after": ["terminal.create"],
         },
     ) as provider:
-        client = FrontendClient(paths.socket_path(), client_id="s13-lost-ack")
+        client = FrontendClient(paths.socket_path(), client_id="e2e-lost-ack")
         try:
             await client.providers.terminals.list(provider_id, refresh=True)
             workspace_path = tmp_path / "held-workspace"
@@ -294,7 +294,7 @@ async def test_lost_create_ack_keeps_one_side_effect_and_reserved_resources(
             workspace = (
                 await client.workspaces.register(
                     "borrowed",
-                    "s13-lost-ack",
+                    "e2e-lost-ack",
                     str(workspace_path),
                     idempotency_key="lost-workspace",
                 )
@@ -345,7 +345,7 @@ async def test_lost_create_ack_keeps_one_side_effect_and_reserved_resources(
 async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    credential = "s13-lost-input-credential"
+    credential = "e2e-lost-input-credential"
     provider_id = await raw_register_provider(paths.socket_path(), credential)
     _install_test_launch_plan(daemon, monkeypatch)
 
@@ -359,7 +359,7 @@ async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
             "screen": (fixture("screens", "codex_idle.txt")).read_text(),
         },
     ) as provider:
-        client = FrontendClient(paths.socket_path(), client_id="s13-lost-input")
+        client = FrontendClient(paths.socket_path(), client_id="e2e-lost-input")
         try:
             await client.providers.terminals.list(provider_id, refresh=True)
             accepted = (
