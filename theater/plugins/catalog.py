@@ -21,7 +21,7 @@ from theater.plugins.loading import (
     import_manifest,
     synthetic_package_name,
 )
-from theater.skills.loader import load_declared_skills
+from theater.skills.loader import load_declared_plays, load_declared_skills
 from theater.skills.models import SkillValidationError
 
 _PACKAGE_PREFIX = "theater_user_plugin_pkg_"
@@ -128,6 +128,7 @@ def _load(path: Path, name: str, source: str) -> LoadedPlugin | LoadedMcpPlugin 
     try:
         validate_manifest(name, manifest)
         skills = load_declared_skills(path / "skills", manifest.skills, provider=name)
+        plays = load_declared_plays(path / "skills", manifest.plays, provider=name)
     except KeyboardInterrupt:
         cleanup_package(package_name)
         raise
@@ -143,6 +144,7 @@ def _load(path: Path, name: str, source: str) -> LoadedPlugin | LoadedMcpPlugin 
         name=name,
         manifest=manifest,
         skills=skills,
+        plays=plays,
     )
 
 

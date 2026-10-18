@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from theater.daemon import lineage
 from theater.daemon.persistence.repositories.plays import PlayAssignment, PlayMembership
+from theater.daemon.plays.dependencies import require_plugins
 from theater.daemon.plays.models import NO_SEAT, PlayPlan, PlayRefused, SpawnSeat
 from theater.harness.contracts.runtime import (
     ControlKind,
@@ -116,6 +117,9 @@ class PlayService:
             below = next(self._memberships_in(caller_id, connection=unit.connection), None)
             if below is not None:
                 return _outcome(play, "not_started", reason=_contains(below))
+            require_plugins(
+                play.rules, store=self.store, participant_id=caller_id, connection=unit.connection
+            )
             self.store.plays.start(
                 caller_id, play.rules, created_at=now(), connection=unit.connection
             )
@@ -136,6 +140,12 @@ class PlayService:
         kept = None
         if resume_predecessor_id is not None:
             kept = self.membership(resume_predecessor_id, connection=connection)
+        if kept is not None:
+            require_plugins(kept.rules)
+        if governing is not None:
+            require_plugins(governing.rules)
+        if plan.start is not None:
+            require_plugins(plan.start)
         if kept is not None and not kept.is_master:
             return _resumed_seat(parent_id, governing, kept, plan)
         if governing is None:
@@ -215,6 +225,7 @@ class PlayService:
         if governing is None:
             raise PlayRefused(_unseated(f"{target_id} is in no live play", plan))
         rules = governing.rules
+        require_plugins(rules, store=self.store, participant_id=target_id)
         positions, roles, foreign = _members(plan.names, rules)
         if foreign:
             raise PlayRefused(
@@ -377,6 +388,17 @@ class PlayService:
         """Why a binding no longer holds, or None: its play lives and its position still fits."""
         if self.store.plays.live_master(pending.instance_id, connection=connection) is None:
             return "the play it was sent in has ended"
+        rules = self.store.plays.rules(pending.instance_id, connection=connection)
+        if rules is not None:
+            try:
+                require_plugins(
+                    rules,
+                    store=self.store,
+                    participant_id=pending.participant_id,
+                    connection=connection,
+                )
+            except PlayRefused as exc:
+                return str(exc)
         held = self.membership(pending.participant_id, connection=connection)
         if held is not None:
             if (held.instance_id, held.position) == (pending.instance_id, pending.position):

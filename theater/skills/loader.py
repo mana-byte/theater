@@ -113,7 +113,9 @@ def _holds_manifest(name: str, root_fd: int) -> bool:
     return True
 
 
-def _load_play(name: str, *, source: SkillSource, root: Path, root_fd: int) -> LoadedPlay:
+def _load_play(
+    name: str, *, source: SkillSource, root: Path, root_fd: int, provider: str | None = None
+) -> LoadedPlay:
     play_fd = _open_directory(name, "play package", dir_fd=root_fd)
     assert play_fd is not None
     try:
@@ -145,7 +147,9 @@ def _load_play(name: str, *, source: SkillSource, root: Path, root_fd: int) -> L
         skills: list[Skill] = []
         for member in sorted(members):
             try:
-                skill = _load_package(member, source=source, root=root / name, root_fd=play_fd)
+                skill = _load_package(
+                    member, source=source, root=root / name, root_fd=play_fd, provider=provider
+                )
             except SkillValidationError as exc:
                 raise SkillValidationError(f"member {member!r}: {exc}") from exc
             skills.append(replace(skill, name=rules.qualified(member), play=name))
@@ -157,6 +161,7 @@ def _load_play(name: str, *, source: SkillSource, root: Path, root_fd: int) -> L
         rules=rules,
         source=source,
         source_path=root / name / PLAY_MANIFEST_FILENAME,
+        provider=provider,
     )
     return LoadedPlay(play=play, skills=tuple(skills))
 
@@ -213,6 +218,25 @@ def _load_package(
         source_path=root / name / SKILL_FILENAME,
         provider=provider,
     )
+
+
+def load_declared_plays(
+    root: Path, names: Sequence[str], *, provider: str
+) -> tuple[LoadedPlay, ...]:
+    """Load only explicitly declared, data-only plugin plays."""
+    if not names:
+        return ()
+    root_fd = _open_directory(root, "MCP-plugin play root")
+    assert root_fd is not None
+    try:
+        return tuple(
+            _load_play(
+                name, source=SkillSource.MCP_PLUGIN, root=root, root_fd=root_fd, provider=provider
+            )
+            for name in names
+        )
+    finally:
+        _close_fd(root_fd)
 
 
 def load_declared_skills(

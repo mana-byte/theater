@@ -529,7 +529,7 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
         )
     )
 
-    def fake_discover(*, plugin_skills=(), disabled=()):
+    def fake_discover(*, plugin_skills=(), plugin_plays=(), disabled=()):
         assert tuple(plugin_skills) == (plugin_skill,)
         discoveries.append(tuple(disabled))
         return snapshot
@@ -538,7 +538,7 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
     monkeypatch.setattr(
         skills_rpc.mcp_registry,
         "catalog",
-        lambda: SimpleNamespace(registered_skills=(plugin_skill,)),
+        lambda: SimpleNamespace(registered_skills=(plugin_skill,), registered_plays=()),
     )
 
     assert await skills_rpc._skills_list(daemon, {"ignored": True}) == {

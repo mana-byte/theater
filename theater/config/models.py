@@ -102,8 +102,8 @@ class SkillsSection:
 class McpSection:
     """Raw MCP-server enablement and per-plugin tables pending manifest resolution."""
 
-    #: No sidecars run unless they are explicitly named here.
-    enabled: list[str] = field(default_factory=list)
+    #: Beads ships enabled; explicit lists remain authoritative.
+    enabled: list[str] = field(default_factory=lambda: ["beads"])
     #: Kept raw until an enabled package contributes its declarative schema.
     plugins: dict[str, dict[str, object]] = field(default_factory=dict)
 

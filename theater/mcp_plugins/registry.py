@@ -30,6 +30,7 @@ from theater.plugins.namespace import (
     PluginNameReservation,
     reject_cross_kind_collisions,
 )
+from theater.skills.loader import LoadedPlay
 from theater.skills.models import Skill
 
 if TYPE_CHECKING:
@@ -68,6 +69,7 @@ class McpPluginCatalog:
     _servers: Mapping[str, CompiledMcpPlugin]
     diagnostics: tuple[McpPluginDiagnostic, ...]
     registered_skills: tuple[Skill, ...] = ()
+    registered_plays: tuple[LoadedPlay, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -232,11 +234,13 @@ def install(
 def catalog() -> McpPluginCatalog:
     """Return the current independent registry as immutable values."""
     skills: list[Skill] = []
+    plays: list[LoadedPlay] = []
     for name in sorted(MCP_SERVERS):
         loaded = _PLUGINS.get(name)
         if loaded is not None:
             skills.extend(loaded.skills)
-    return McpPluginCatalog(dict(MCP_SERVERS), tuple(_DIAGNOSTICS), tuple(skills))
+            plays.extend(loaded.plays)
+    return McpPluginCatalog(dict(MCP_SERVERS), tuple(_DIAGNOSTICS), tuple(skills), tuple(plays))
 
 
 def get(name: str) -> CompiledMcpPlugin:

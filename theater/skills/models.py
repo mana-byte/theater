@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -53,10 +53,20 @@ class PlayRules:
     roles: Mapping[str, tuple[str, ...]]
     #: positions an agent may retire without asking the user
     disposable: tuple[str, ...] = ()
+    plugins: tuple[str, ...] = ()
+    plugin_permissions: Mapping[str, Mapping[str, tuple[str, ...]]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "positions", _frozen(self.positions))
         object.__setattr__(self, "roles", _frozen(self.roles))
+        object.__setattr__(self, "plugins", tuple(sorted(self.plugins)))
+        object.__setattr__(
+            self,
+            "plugin_permissions",
+            MappingProxyType(
+                {name: _frozen(grants) for name, grants in sorted(self.plugin_permissions.items())}
+            ),
+        )
 
     def qualified(self, member: str) -> str:
         return f"{self.play}{PLAY_SEPARATOR}{member}"
@@ -82,6 +92,13 @@ class PlayRules:
         if self.disposable:
             # Absent when empty, so rules pinned before the key existed keep their sha256.
             data["disposable"] = sorted(self.disposable)
+        if self.plugins:
+            data["plugins"] = list(self.plugins)
+        if self.plugin_permissions:
+            data["plugin_permissions"] = {
+                plugin: {position: sorted(grants) for position, grants in positions.items()}
+                for plugin, positions in self.plugin_permissions.items()
+            }
         return json.dumps(
             data,
             sort_keys=True,
@@ -101,6 +118,8 @@ class PlayRules:
             positions={key: tuple(value) for key, value in data["positions"].items()},
             roles={key: tuple(value) for key, value in data["roles"].items()},
             disposable=tuple(data.get("disposable", [])),
+            plugins=tuple(data.get("plugins", [])),
+            plugin_permissions=data.get("plugin_permissions", {}),
         )
 
 
@@ -113,6 +132,7 @@ class Play:
     rules: PlayRules
     source: SkillSource
     source_path: Path
+    provider: str | None = None
 
     @property
     def master_skill(self) -> str:

@@ -56,6 +56,14 @@ def validate_manifest(name: str, manifest: McpServerManifest) -> None:
     _validate_capabilities(name, manifest)
     _validate_config(name, manifest.config)
     _validate_skills(name, manifest.skills)
+    _validate_skills(name, manifest.plays)
+    if set(manifest.skills) & set(manifest.plays):
+        _fail(name, "plays", "a package cannot declare the same name as a skill and play")
+    if not isinstance(manifest.play_permissions, frozenset):
+        _fail(name, "play_permissions", "must be a frozenset of canonical permission names")
+    for permission in manifest.play_permissions:
+        if not isinstance(permission, str) or SKILL_NAME.fullmatch(permission) is None:
+            _fail(name, "play_permissions", "must contain canonical permission names")
     _validate_launch(name, manifest.launch)
 
 

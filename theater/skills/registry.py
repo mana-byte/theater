@@ -81,6 +81,7 @@ def discover(
     builtin_dir: Path | None = None,
     user_dir: Path | None = None,
     plugin_skills: Iterable[Skill] = (),
+    plugin_plays: Iterable[LoadedPlay] = (),
     disabled: Iterable[str] = (),
 ) -> SkillRegistry:
     """Build a fresh snapshot.
@@ -128,8 +129,68 @@ def discover(
             )
             continue
         _add(skills, plays, item)
-    _merge_plugin_skills(skills, rejections, plugin_skills, plays=plays)
+    incoming_skills = tuple(plugin_skills)
+    _merge_plugin_plays(skills, plays, rejections, plugin_plays, disabled_names, incoming_skills)
+    _merge_plugin_skills(skills, rejections, incoming_skills, plays=plays)
     return SkillRegistry(skills, tuple(rejections), plays)
+
+
+def _merge_plugin_plays(
+    skills: dict[str, Skill],
+    plays: dict[str, Play],
+    rejections: list[SkillRejection],
+    candidates: Iterable[LoadedPlay],
+    disabled: set[str],
+    plugin_skills: tuple[Skill, ...],
+) -> None:
+    groups: dict[str, list[LoadedPlay]] = {}
+    for candidate in candidates:
+        if (
+            not isinstance(candidate, LoadedPlay)
+            or candidate.play.source is not SkillSource.MCP_PLUGIN
+        ):
+            raise TypeError("plugin_plays must contain MCP-plugin LoadedPlay values")
+        groups.setdefault(candidate.play.name, []).append(candidate)
+    member_counts: dict[str, int] = {}
+    for group in groups.values():
+        for candidate in group:
+            for member in candidate.skills:
+                member_counts[member.name] = member_counts.get(member.name, 0) + 1
+    incoming_names = {skill.name for skill in plugin_skills}
+    for name, group in sorted(groups.items()):
+        for candidate in group:
+            if _shipped_plugin_play(candidate.play) and name in disabled:
+                continue
+            collision = (
+                name in plays
+                or name in skills
+                or any(
+                    member.name in skills
+                    or member.name in incoming_names
+                    or member_counts[member.name] > 1
+                    for member in candidate.skills
+                )
+            )
+            if len(group) > 1 or collision:
+                _append_rejection(
+                    rejections,
+                    _rejection(
+                        candidate.play.source,
+                        candidate.play.source_path,
+                        name,
+                        f"MCP-plugin play {name!r} conflicts with an existing play or skill; "
+                        "the entire plugin play is omitted",
+                        provider=candidate.play.provider,
+                    ),
+                )
+                continue
+            _add(skills, plays, candidate)
+
+
+def _shipped_plugin_play(play: Play) -> bool:
+    from theater.mcp_plugins.builtin import plugin_dir
+
+    return play.source_path.is_relative_to(plugin_dir())
 
 
 def _entry_name(item: Skill | LoadedPlay) -> str:

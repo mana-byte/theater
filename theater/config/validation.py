@@ -205,7 +205,7 @@ def _build_mcp(path: Path, raw: Any) -> tuple[McpSection, dict[str, str]]:
         if key not in known:
             _fail(path, f"unknown key '{MCP_SECTION}.{key}' ({_suggest(key, sorted(known))})")
 
-    enabled_raw = raw.get("enabled", [])
+    enabled_raw = raw.get("enabled", ["beads"])
     enabled = _check_str_list(enabled_raw)
     if enabled is None:
         _fail(

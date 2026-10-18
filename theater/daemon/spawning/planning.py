@@ -166,6 +166,14 @@ async def build_plan(
             mcp_servers=_mcp_servers(req, participant, sidecars),
         )
 
+    if registry is not None:
+        from theater.daemon.plays.dependencies import require_rendered_plugins
+
+        require_rendered_plugins(
+            participant.id,
+            store=registry.store,
+            rendered=[sidecar.plugin.name for sidecar in sidecars],
+        )
     if registry is not None and sidecars:
         plan = merge_sidecars(plan, sidecars)
     return plan
@@ -262,6 +270,9 @@ def install_runtime_mcp_plans(
     emit_registry_diagnostic_omissions(participant, store=store)
     if not supports_mcp_rendering(participant.harness):
         omit_unrenderable_sidecars(participant, store=store)
+        from theater.daemon.plays.dependencies import require_rendered_plugins
+
+        require_rendered_plugins(participant.id, store=store, rendered=())
         return overlay_backend_mcp(backend, participant), fallback
 
     sidecars = plan_sidecars(participant, cwd=participant.cwd or "", store=store)
@@ -306,8 +317,16 @@ def install_runtime_mcp_plans(
             store=store,
             reason=f"the runtime MCP overlay rejected sidecars: {type(exc).__name__}: {exc}",
         )
+        from theater.daemon.plays.dependencies import require_rendered_plugins
+
+        require_rendered_plugins(participant.id, store=store, rendered=())
         return overlay_backend_mcp(backend, participant), fallback
 
+    from theater.daemon.plays.dependencies import require_rendered_plugins
+
+    require_rendered_plugins(
+        participant.id, store=store, rendered=[sidecar.plugin.name for sidecar in sidecars]
+    )
     return merge_sidecars(rendered_backend, sidecars), (
         merge_sidecars(rendered_fallback, sidecars) if rendered_fallback is not None else None
     )

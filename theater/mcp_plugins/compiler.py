@@ -23,6 +23,7 @@ def compile_manifest(
         capabilities=manifest.capabilities,
         config=resolved,
         launch=manifest.launch,
+        play_permissions=manifest.play_permissions,
     )
 
 

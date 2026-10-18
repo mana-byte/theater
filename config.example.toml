@@ -217,7 +217,8 @@ disabled = []
 
 # Bundled skills to leave out of the registry, by name; a bundled play (such as
 # "hierarchy") is left out whole by its name. User-installed skills and skills
-# supplied by enabled MCP plugins are unaffected.
+# supplied by local MCP plugins are unaffected. The shipped Beads hierarchy
+# also honors disabled = ["hierarchy"].
 #
 # Disabled bundled skills are still validated when the registry is built, so a
 # broken Theater installation remains a fatal error rather than being hidden by
@@ -227,13 +228,21 @@ disabled = []
 
 [mcp]
 
-# MCP sidecars are local package plugins under $THEATER_HOME/plugins. They are
-# off unless named here; each enabled package may declare a flat config
+# Beads is a shipped MCP plugin, enabled by default. Local sidecars live under
+# $THEATER_HOME/plugins. Each enabled package may declare a flat config
 # table under [mcp.plugins.<name>]. Secrets there use exactly { env = "NAME" }
 # or { file = "/path" }, and are resolved once when Theater starts.
 # `theater plugins` inspects both harness and MCP-server packages locally and
 # redacts resolved config and secrets. Writing one: docs/mcp-server-plugins.md.
-enabled = []
+enabled = ["beads"]
+
+[mcp.plugins.beads]
+
+# Retain boards for seven days after their play is first observed inactive.
+board_ttl_seconds = 604800
+# Optional absolute bd executable path; otherwise use PATH. Install with
+# brew install beads or npm install -g @beads/bd.
+# bd_path = "/usr/local/bin/bd"
 
 
 [models]

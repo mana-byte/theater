@@ -36,8 +36,10 @@ def _rejection_diagnostic(rejection) -> dict[str, str | None]:
 
 
 def _snapshot(daemon):
+    catalog = mcp_registry.catalog()
     return registry.discover(
-        plugin_skills=mcp_registry.catalog().registered_skills,
+        plugin_skills=catalog.registered_skills,
+        plugin_plays=catalog.registered_plays,
         disabled=daemon.config.skills.disabled,
     )
 
@@ -66,6 +68,11 @@ def _play_view(play: Play, snapshot) -> dict[str, object]:
             for role in rules.roles
         ],
         "disposable": [rules.qualified(position) for position in rules.disposable],
+        "plugins": list(rules.plugins),
+        "plugin_permissions": {
+            plugin: {position: list(grants) for position, grants in positions.items()}
+            for plugin, positions in rules.plugin_permissions.items()
+        },
     }
 
 

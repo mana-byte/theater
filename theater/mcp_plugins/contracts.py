@@ -233,7 +233,8 @@ class McpServerManifest:
             object.__setattr__(self, "skills", tuple(self.skills))
         if not isinstance(self.plays, (str, bytes)) and isinstance(self.plays, Sequence):
             object.__setattr__(self, "plays", tuple(self.plays))
-        object.__setattr__(self, "play_permissions", frozenset(self.play_permissions))
+        if not isinstance(self.play_permissions, (str, bytes)):
+            object.__setattr__(self, "play_permissions", frozenset(self.play_permissions))
 
     @property
     def configuration(self) -> McpConfigSchema:

@@ -20,7 +20,7 @@ from theater.models import (
     PluginAuthenticationFailed,
 )
 
-OperationHandler = Callable[[object, dict[str, Any], str], Awaitable[Any]]
+OperationHandler = Callable[..., Awaitable[Any]]
 
 _IDENTITY_FIELDS = frozenset(
     {"actor", "actor_id", "caller", "caller_id", "from", "from_id", "parent", "parent_id"}
@@ -35,6 +35,7 @@ class PluginOperation:
     capability: PluginCapability
     handler: OperationHandler
     description: str
+    credential_scoped: bool = False
 
 
 def authenticate(daemon, credential: object) -> McpPluginCredentialRecord:
@@ -75,7 +76,7 @@ async def dispatch(
     return await spec.handler(
         daemon,
         _without_identity(params, preserve_parent_id=operation in _PARENT_FILTER_OPERATIONS),
-        record.participant_id,
+        record if spec.credential_scoped else record.participant_id,
     )
 
 
@@ -345,7 +346,24 @@ async def _sessions_kill(daemon, params: dict[str, Any], actor_id: str) -> Any:
 
 
 def _operations() -> Mapping[str, PluginOperation]:
+    from theater.daemon.plugins import play_context
+
     entries = {
+        "plays.context": PluginOperation(
+            PluginCapability.PLAYS_READ,
+            play_context.context,
+            "Read authenticated play context.",
+            True,
+        ),
+        "plays.members": PluginOperation(
+            PluginCapability.PLAYS_READ, play_context.members, "Read current play members.", True
+        ),
+        "plays.instances_status": PluginOperation(
+            PluginCapability.PLAYS_READ,
+            play_context.instances_status,
+            "Read plugin-dependent play liveness.",
+            True,
+        ),
         "participants.list": PluginOperation(
             PluginCapability.PARTICIPANTS_READ, _participants_list, "List participants."
         ),

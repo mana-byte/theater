@@ -179,6 +179,8 @@ def _loaded_mcp_row(row: dict[str, Any], plugin: LoadedMcpPlugin, config: Config
         description=compiled.description,
         capabilities=sorted(capability.value for capability in compiled.capabilities),
         skills=[skill.name for skill in loaded.skills],
+        plays=[play.play.name for play in loaded.plays],
+        play_permissions=sorted(compiled.play_permissions),
     )
     return row
 

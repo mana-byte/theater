@@ -84,6 +84,16 @@ class PlayRepository:
             rules=PlayRules.from_json(row.rules),
         )
 
+    def rules(self, instance_id: str, *, connection: Connection | None = None) -> PlayRules | None:
+        row = (
+            self._conn(connection)
+            .execute(
+                select(play_instances.c.rules).where(play_instances.c.instance_id == instance_id)
+            )
+            .first()
+        )
+        return None if row is None else PlayRules.from_json(row.rules)
+
     def live_master(self, instance_id: str, *, connection: Connection | None = None) -> str | None:
         """The master of a play instance that is still live, else None."""
         row = (
