@@ -1,4 +1,4 @@
-"""Codex rollout records projected into trajectory facts: calls, reasoning, usage, history and live seeding."""
+"""Codex rollouts projected into trajectory facts: calls, reasoning, usage, history, seeding."""
 
 from __future__ import annotations
 

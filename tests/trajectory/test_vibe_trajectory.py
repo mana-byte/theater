@@ -1,4 +1,4 @@
-"""Vibe transcript records projected into trajectory facts: tool results, retries, history seeds, MCP identity."""
+"""Vibe transcripts projected into trajectory facts: tool results, retries, history, MCP."""
 
 from __future__ import annotations
 
