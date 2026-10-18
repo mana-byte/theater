@@ -254,7 +254,7 @@ def test_assembled_record_cannot_claim_pass_without_all_gates() -> None:
     record: dict = harness.assemble_record(facts, passing, _outcome())
     assert record["result"] == (
         f"pass: idle send only (claude {_FLOOR_TEXT}; "
-        f"wire facts statically inspected at {harness.STATIC_INSPECTED_VERSION})"
+        f"wire facts statically inspected at {PINNED_STATIC})"
     )
     assert record["inspected"]["version"] == _FLOOR_TEXT
     assert record["inspected"]["sha256"] == facts.sha256

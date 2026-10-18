@@ -308,7 +308,7 @@ def test_yolo_takes_the_flag_only_where_it_exists(tmp_path, monkeypatch, version
 
 
 def test_edits_pins_accept_edits_on_every_version(tmp_path, monkeypatch):
-    pin_installed_vibe_version(monkeypatch, (2, 13, 9))
+    pin_installed_vibe_version(monkeypatch, _before(_YOLO_FLOOR))
     argv = _plan(tmp_path, "edits").argv
     assert argv[argv.index("--agent") + 1] == "accept-edits"
 
