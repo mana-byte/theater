@@ -1,3 +1,5 @@
+"""The state controller: stale display, re-snapshot and follow-yields-to-refresh behaviour."""
+
 from __future__ import annotations
 
 import asyncio

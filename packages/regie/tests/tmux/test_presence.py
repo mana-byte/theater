@@ -1,4 +1,4 @@
-"""RC9 presence parity and focus-wake fencing without live terminal input."""
+"""Presence parity, blur trust and focus-wake fencing without live terminal input."""
 
 from __future__ import annotations
 

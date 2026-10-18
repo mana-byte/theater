@@ -1,3 +1,5 @@
+"""The trajectory controller: generations, older pages, follow, resync and close hints."""
+
 from __future__ import annotations
 
 import asyncio

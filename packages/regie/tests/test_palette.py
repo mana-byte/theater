@@ -225,7 +225,7 @@ async def test_resume_provider_uses_the_public_catalog_icon() -> None:
     assert str(entry.display).startswith("◈ custom ")
 
 
-async def test_root_palette_keeps_rc9_spawn_resume_and_bus_commands() -> None:
+async def test_root_palette_lists_spawn_resume_and_bus_commands() -> None:
     app = _App()
     screen = _Screen(app)
     providers = (SpawnCommand(screen), ResumeSessionCommand(screen), ViewCommands(screen))  # type: ignore[arg-type]

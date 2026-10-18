@@ -210,7 +210,7 @@ async def test_staging_from_trajectory_retains_dashboard_after_unstage(key: str)
 
 
 @pytest.mark.asyncio
-async def test_stage_failure_uses_rc9_message_and_error_severity(
+async def test_stage_failure_notifies_the_failure_message_with_error_severity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, _client, _presentation = build_app()
@@ -411,7 +411,7 @@ async def test_terminated_trajectory_switches_immediately_when_refresh_fails(
         assert app.query_one("#trajectory-view").display is False
 
 
-def test_kill_binding_is_visible_with_the_rc9_label() -> None:
+def test_kill_binding_is_visible_with_the_kill_label() -> None:
     binding = next(binding for binding in RegieApp.BINDINGS if binding.key == "x")
 
     assert binding.action == "kill"

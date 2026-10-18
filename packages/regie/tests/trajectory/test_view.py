@@ -1,4 +1,4 @@
-"""The trajectory view: record projection, search, keys, export and live refresh."""
+"""The trajectory view: selection, search, filtering, keys, export and live refresh."""
 
 from __future__ import annotations
 

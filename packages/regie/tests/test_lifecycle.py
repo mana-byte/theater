@@ -1,3 +1,5 @@
+"""The Régie CLI lifecycle: daemon start, bridge start/stop/status, and the tmux entry paths."""
+
 from __future__ import annotations
 
 import asyncio

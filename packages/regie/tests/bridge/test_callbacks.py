@@ -1,3 +1,5 @@
+"""Bridge terminal callbacks: inspection, delivery fences, receipts and create recovery."""
+
 from __future__ import annotations
 
 import asyncio

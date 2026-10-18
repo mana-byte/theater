@@ -1,3 +1,5 @@
+"""Tree organization in the UI: reordering, separators, folding and heavy rails."""
+
 from __future__ import annotations
 
 from dataclasses import replace

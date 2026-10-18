@@ -1,3 +1,5 @@
+"""The operation controller and action reporting: waits, retries, receipts and notifications."""
+
 from __future__ import annotations
 
 import asyncio
@@ -591,7 +593,7 @@ def test_queue_success_requires_a_handle_or_acknowledged_delivery() -> None:
     )
 
 
-def test_controls_report_preserves_rc9_runtime_context_from_public_extras() -> None:
+def test_controls_report_preserves_runtime_context_from_public_extras() -> None:
     controls = PublicControls.from_wire(
         {
             "actions": {

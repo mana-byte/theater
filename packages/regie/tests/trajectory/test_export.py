@@ -1,3 +1,5 @@
+"""Trajectory export: round-trip serialization and private collision-free file pairs."""
+
 from __future__ import annotations
 
 import json

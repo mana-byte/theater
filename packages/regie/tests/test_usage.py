@@ -1,3 +1,5 @@
+"""Usage refresh, windowed totals, per-participant chunks and calendar-period boundaries."""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,5 @@
+"""The trajectory adapter: canonical pages and deltas, state indexes and SDK query adapters."""
+
 from __future__ import annotations
 
 import asyncio

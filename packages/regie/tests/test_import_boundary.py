@@ -1,3 +1,5 @@
+"""Régie production code imports only the public theater.frontend surface."""
+
 import ast
 from pathlib import Path
 

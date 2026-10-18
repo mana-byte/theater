@@ -1,3 +1,5 @@
+"""The tmux bridge runtime: registration, reconnect, server replacement and presence reports."""
+
 from __future__ import annotations
 
 import asyncio

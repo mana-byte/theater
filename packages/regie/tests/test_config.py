@@ -70,7 +70,7 @@ def test_the_example_loads_with_the_defaults_and_lists_every_shipped_ambience() 
     assert listed == {*load_catalog(Path("/nonexistent")).scenes, NO_AMBIENCE}
 
 
-def test_wave11_shared_contract_defaults_are_stable() -> None:
+def test_shared_contract_defaults_are_stable() -> None:
     config = BridgeConfig(theater_socket=Path("/tmp/theater.sock"), state_dir=Path("/tmp/regie"))
     target = PresentationTarget(
         provider_id="provider-a",

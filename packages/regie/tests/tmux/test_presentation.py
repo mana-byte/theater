@@ -1,3 +1,5 @@
+"""tmux presentation: identity rechecks, target windows, unmanaged panes and session restore."""
+
 from __future__ import annotations
 
 import hashlib

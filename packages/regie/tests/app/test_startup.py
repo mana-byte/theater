@@ -362,7 +362,7 @@ async def test_orphaned_agent_child_keeps_spawn_animation_provenance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_display_settings_report_rc9_config_guidance() -> None:
+async def test_invalid_display_settings_report_config_guidance() -> None:
     app, _client, _presentation = build_app()
     app.settings = replace(app.settings, theme="missing-theme", cost_window="fortnight")
     notes: list[tuple[str, dict[str, object]]] = []
