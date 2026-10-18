@@ -1,4 +1,4 @@
-"""MVP coverage for transactional RC10 event publication."""
+"""Orchestration events publish atomically with the state they describe."""
 
 from __future__ import annotations
 

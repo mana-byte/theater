@@ -1,10 +1,53 @@
-"""The daemon's public wire-method contract."""
+"""The daemon's RPC surface: its method set and the basic hello, ping and error replies."""
 
 from __future__ import annotations
 
 import json
 import subprocess
 import sys
+
+import pytest
+
+from theater.protocol import RemoteError
+
+
+async def test_ping(client):
+    assert (await client.call("ping"))["pong"] is True
+
+
+async def test_hello_then_list(client):
+    me = await client.call("hello", harness="vibe", cwd="/tmp")
+    assert me["tier"] == "external"
+    assert me["addressable"] is False
+
+    rows = await client.call("participants.list")
+    assert [r["id"] for r in rows] == [me["id"]]
+
+
+async def test_hello_is_idempotent_per_claimed_identity(client):
+    a = await client.call("hello", id="participant-a", harness="vibe", cwd="/tmp")
+    b = await client.call("hello", id="participant-a", harness="vibe", cwd="/tmp")
+    assert a["id"] == b["id"]
+    assert len(await client.call("participants.list")) == 1
+
+
+async def test_external_is_not_addressable(client):
+    me = await client.call("hello", harness="vibe", cwd="/tmp")
+    assert me["tier"] == "external"
+    assert me["addressable"] is False
+
+
+async def test_unknown_method_is_a_structured_error(client):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("nope")
+    assert exc.value.code == "unknown_method"
+
+
+async def test_get_missing_participant(client):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.get", id="ghost")
+    assert exc.value.code == "not_found"
+
 
 EXPECTED_RPC_METHODS = {
     "adopt",
@@ -65,6 +108,7 @@ EXPECTED_RPC_METHODS = {
     "workspaces.get",
     "workspaces.list",
 }
+
 
 _PROBE = "import json, theater.daemon.server as server; print(json.dumps(sorted(server.METHODS)))"
 

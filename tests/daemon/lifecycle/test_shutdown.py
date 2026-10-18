@@ -22,6 +22,39 @@ from theater.client import DaemonClient
 from theater.daemon import lock as lock_mod
 from theater.daemon.server import Daemon
 
+
+async def test_workers_shutdown_drains_before_returning(daemon):
+    """workers.shutdown() must drain in-flight workers before returning,
+    so a replacement daemon cannot acquire the lock while the old daemon's
+    git operations are still running."""
+    from theater.daemon import workers
+
+    workers._executor = None
+    executor = workers._get_executor()
+    started = asyncio.Event()
+    finished = False
+
+    def slow_task():
+        nonlocal finished
+        started.set()
+        import time
+
+        time.sleep(0.3)
+        finished = True
+        return "done"
+
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(executor, slow_task)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    await workers.shutdown()
+    assert finished, "shutdown must drain in-flight workers before returning"
+    assert workers._executor is None
+
+    result = await fut
+    assert result == "done"
+
+
 #: Generous next to the sub-millisecond real cost, tight enough that the hang
 #: this file exists for fails rather than stalls the suite.
 BUDGET = 5.0

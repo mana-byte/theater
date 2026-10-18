@@ -1,4 +1,4 @@
-"""RPC numeric and integer parameter validation."""
+"""RPC parameter validation: numeric params and missing arguments."""
 
 from __future__ import annotations
 
@@ -12,6 +12,12 @@ from theater.daemon.rpc import hooks as hooks_mod
 from theater.daemon.rpc.params import _finite_number_param, _integer_param
 from theater.models import BadRequest, Status
 from theater.protocol import RemoteError
+
+
+async def test_missing_parameter_is_a_structured_error(client):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.get")
+    assert exc.value.code == "bad_request"
 
 
 def test_integer_param_rejects_bool_and_other_types():
