@@ -23,7 +23,7 @@ from .constants import CODEX_BINARY
 #: First codex-cli release proved compatible; the native runtime is untested below it.
 CODEX_RUNTIME_QUALIFIED_FLOOR = (0, 148, 0)
 #: First release not yet proved; the daily compat pipeline moves it over an unbroken run of greens.
-CODEX_RUNTIME_QUALIFIED_CEILING = (0, 164, 0)
+CODEX_RUNTIME_QUALIFIED_CEILING = (0, 163, 1)
 #: Releases inside the range measured incompatible; each entry needs a comment naming the cause.
 CODEX_RUNTIME_QUALIFIED_EXCLUDED: tuple[tuple[int, int, int], ...] = ()
 
