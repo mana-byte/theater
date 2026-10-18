@@ -1,4 +1,4 @@
-"""RC10 atomic control transfer and queue cancellation."""
+"""Atomic control transfer: lineage, queue cancellation, cycle rejection and rollback."""
 
 from __future__ import annotations
 
@@ -13,9 +13,7 @@ from theater.daemon.frontend.participant_mutation_handlers import participants_t
 from theater.daemon.runtime.recovery import reconcile_public_control_operations
 from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
 from theater.frontend.schemas import validator_for
-from theater.harness.contracts.runtime import (
-    ControlDeliveryPhase,
-)
+from theater.harness.contracts.runtime import ControlDeliveryPhase
 from theater.models import JobState, PublicOperationRecord, now
 
 
