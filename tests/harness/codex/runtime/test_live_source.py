@@ -135,7 +135,7 @@ async def test_item_started_then_deltas_then_completed_emits_exactly_once() -> N
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
     source = runtime.live_source()
-    # The exact Wave 0 sequence: item/started → deltas → item/completed.
+    # The captured sequence: item/started, deltas, then item/completed.
     server.push(
         RuntimeNotification(
             method="item/started",

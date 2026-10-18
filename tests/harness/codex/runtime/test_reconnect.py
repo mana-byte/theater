@@ -476,7 +476,7 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store)
     rig = RolloutRaceRig(store)
     await rig.open()
     try:
-        # Phase 1: the first send hits the first-turn rollout race.
+        # The first send hits the first-turn rollout race.
         await rig.fail_resume_with_no_rollout()
         job = await rig.send()
         assert job.state == JobState.RUNNING.value
@@ -487,8 +487,8 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store)
         rig.server.failures.pop("thread/resume")
         rig.server.respond("thread/resume", completed_resume_response())
 
-        # Phase 2: repeated idle broadcasts must schedule exactly one
-        # concurrent recovery attempt — gate the request to hold it in flight.
+        # Repeated idle broadcasts must schedule exactly one concurrent recovery
+        # attempt; the gate holds the request in flight.
         gate = asyncio.Event()
         rig.server.request_gates["thread/resume"] = gate
         for _ in range(3):
@@ -506,8 +506,8 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store)
         await asyncio.sleep(0.05)
         assert len(rig.server.requested("thread/resume")) == 2
 
-        # Phase 3: the recovered subscription reconciled the completed turn;
-        # routing the source batch finishes the SAME job via terminal evidence.
+        # The recovered subscription reconciled the completed turn; routing the source
+        # batch finishes the SAME job via terminal evidence.
         source, registration = rig.live_registration()
         batch = await source.read()
         evidence = tuple(batch.terminal_evidence)

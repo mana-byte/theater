@@ -170,40 +170,38 @@ def test_hook_schema_rejects_invalid_identity_and_malformed_input() -> None:
         )
 
 
-def test_hook_schema_requires_a_current_trusted_identity() -> None:
+@pytest.mark.parametrize(
+    ("identity", "message"),
+    [
+        pytest.param(lambda payload: {}, "trusted transcript identity", id="no-trusted-identity"),
+        pytest.param(
+            lambda payload: {
+                "expected_session_id": payload["session_id"],
+                "expected_transcript_location": canonical_location(payload["transcript_path"]),
+                "expected_session_provenance": "heuristic",
+            },
+            "trusted transcript identity",
+            id="heuristic-provenance",
+        ),
+        pytest.param(
+            lambda payload: {"identity_lost": True, **_trusted_identity(payload)},
+            "quarantined",
+            id="identity-lost",
+        ),
+    ],
+)
+def test_hook_schema_requires_a_current_trusted_identity(identity, message) -> None:
     payload = captured_hooks()["pre_tool_use"]
     assert isinstance(payload, dict)
 
-    with pytest.raises(ValueError, match="trusted transcript identity"):
+    with pytest.raises(ValueError, match=message):
         correlate_tool_hook(
             HookCorrelationContext(
                 participant_id="participant",
                 channel_id=NATIVE_HOOK_CHANNEL,
                 event="PreToolUse",
                 payload=payload,
-            )
-        )
-    with pytest.raises(ValueError, match="trusted transcript identity"):
-        correlate_tool_hook(
-            HookCorrelationContext(
-                participant_id="participant",
-                channel_id=NATIVE_HOOK_CHANNEL,
-                event="PreToolUse",
-                payload=payload,
-                expected_session_id=payload["session_id"],
-                expected_transcript_location=canonical_location(payload["transcript_path"]),
-                expected_session_provenance="heuristic",
-            )
-        )
-    with pytest.raises(ValueError, match="quarantined"):
-        correlate_tool_hook(
-            HookCorrelationContext(
-                participant_id="participant",
-                channel_id=NATIVE_HOOK_CHANNEL,
-                event="PreToolUse",
-                payload=payload,
-                identity_lost=True,
-                **_trusted_identity(payload),
+                **identity(payload),
             )
         )
 

@@ -122,12 +122,10 @@ def _params_of(schema: dict, method: str) -> dict:
 
 @pytest.mark.parametrize("role", RETAINED_BUNDLES)
 class TestOfflineConformanceBundle:
-    """One item pinning every offline conformance rule of the installed release.
+    """One item pinning every offline conformance rule of a retained release bundle.
 
-    The labelled manifest below is one-for-one with the seventeen tests this
-    replaces: each label is the original test's name, and each row runs its
-    body verbatim — review the list when editing so no rule is silently
-    dropped.
+    Each labelled rule below is a separate check run in turn; review the list
+    when editing so no rule is silently dropped.
     """
 
     def test_offline_conformance_manifest(self, role: str) -> None:  # noqa: PLR0915 — a deliberate manifest

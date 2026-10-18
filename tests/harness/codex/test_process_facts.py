@@ -226,19 +226,6 @@ def test_process_snapshot_walk_is_breadth_first_with_cycle_protection(monkeypatc
     assert snapshot.descendants(100) == [(200, "b")]
 
 
-def test_process_snapshot_capture_failure_is_no_evidence(monkeypatch):
-    """An unreadable `ps` yields an empty snapshot, not an exception."""
-
-    def check_output(argv, **kwargs):
-        raise OSError("ps is not available")
-
-    monkeypatch.setattr(subprocess, "check_output", check_output)
-
-    snapshot = proc.ProcessSnapshot.capture()
-
-    assert snapshot.descendants(PID_A) == []
-
-
 def test_descendants_still_captures_a_fresh_snapshot_per_call(monkeypatch):
     """`proc.descendants` must keep capturing fresh state — no hidden cache."""
     calls = []

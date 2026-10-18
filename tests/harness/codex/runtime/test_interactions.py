@@ -38,8 +38,7 @@ async def test_approval_server_request_recorded_never_answered() -> None:
                 "reason": "Allow creating file?",
                 "command": "/bin/zsh -lc 'touch /repo/x'",
             },
-            # Wave 0 observed the server-assigned id as integer 0; the exact
-            # captured type must be retained.
+            # The server assigns the id as integer 0; the captured type must be retained.
             request_id=0,
         )
     )
