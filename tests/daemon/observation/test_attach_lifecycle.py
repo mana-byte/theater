@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +12,6 @@ from sqlalchemy import delete
 
 from tests.support.observation import bus_kinds
 from tests.support.shipped import VibeHarness
-from tests.support.vibe_transcripts import DONE, RESULT, USER, WORKING, append
 from tests.support.waiting import until
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.service import Observer
@@ -24,6 +24,22 @@ from theater.harness.source import Source
 from theater.models import (
     Status,
 )
+
+USER = {"role": "user", "content": "do the thing"}
+WORKING = {
+    "role": "assistant",
+    "content": "on it",
+    "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": "{}"}}],
+}
+RESULT = {"role": "tool", "content": "output", "name": "bash", "tool_call_id": "c1"}
+DONE = {"role": "assistant", "content": "finished"}
+
+
+def append(path: Path, *records: dict) -> None:
+    with path.open("a") as fh:
+        for record in records:
+            fh.write(json.dumps(record) + "\n")
+        fh.flush()
 
 
 def test_source_checkpoint_is_persisted_only_after_apply_succeeds(registry, monkeypatch):
