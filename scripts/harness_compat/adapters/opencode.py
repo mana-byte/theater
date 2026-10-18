@@ -27,8 +27,8 @@ from . import opencode_bump, opencode_pi_process, opencode_sandbox
 
 NPM_PACKAGE = "opencode-ai"
 
-_SERVER_PROOF = "tests/integration/test_opencode_server_proof.py"
-_STOCK_PROOF = "tests/integration/test_opencode_stock_ui.py"
+_SERVER_PROOF = "tests/integration/opencode/test_server_proof.py"
+_STOCK_PROOF = "tests/integration/opencode/test_stock_ui.py"
 
 _SERVER_PROOF_TESTS = (
     "test_port0_banner_and_basic_auth_reach_every_surface",
