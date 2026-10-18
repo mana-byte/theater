@@ -19,8 +19,7 @@
       "thread/status/changed",
       "thread/tokenUsage/updated",
       "turn/completed",
-      "turn/started",
-      "warning"
+      "turn/started"
     ],
     "native_ui_resume_before_first_turn_error": "Error: Failed to resume session from /private<run-root>/home/sessions/2026/09/30/rollout-2026-09-30T00-23-01-<uuid>.jsonl: thread/resume failed during TUI bootstrap: thread/resume failed: no rollout found for thread id <uuid> (code -32600)",
     "request": {

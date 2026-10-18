@@ -19,8 +19,7 @@
       "thread/status/changed",
       "thread/tokenUsage/updated",
       "turn/completed",
-      "turn/started",
-      "warning"
+      "turn/started"
     ],
     "native_ui_resume_before_first_turn_error": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"<tmp-dir>\" (codex_home: AbsolutePathBuf(\"<run-root>/home\"))\nError: Failed to resume session from <run-root>/home/sessions/<date>/rollout-<time>-<uuid>.jsonl: thread/resume failed during TUI bootstrap: thread/resume failed: no rollout found for thread id <uuid> (code -32600)",
     "request": {

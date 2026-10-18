@@ -160,6 +160,17 @@ def resolve_release_facts(codex_binary: str = "codex") -> ReleaseFacts:
     )
 
 
+#: Out-of-band advisories race with real notifications (and vary by install), so never evidence.
+ADVISORY_METHODS = frozenset({"warning"})
+
+
+def notification_methods(messages: list[dict]) -> list[str]:
+    """Methods of the observed notifications, in arrival order, without advisory noise."""
+    return [
+        m["method"] for m in messages if m.get("method") and m["method"] not in ADVISORY_METHODS
+    ]
+
+
 def normalize_json(value: object) -> str:
     """Sorted keys, fixed indent; arrays, descriptions, and enums untouched."""
     return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
@@ -603,7 +614,7 @@ def capture_thread_lifecycle(session: CaptureSession, *, tmux: bool) -> dict:
     mark = len(observer.notifications)
     run_turn(control, thread_id, "Reply with exactly: resume-observed")
     observer.drain(quiet=2.0)
-    seen = [m["method"] for m in observer.notifications[mark:] if m.get("method")]
+    seen = notification_methods(observer.notifications[mark:])
     facts["thread_resume"]["subscribes_second_connection"] = bool(seen)
     facts["thread_resume"]["live_notification_methods_seen_by_second_client"] = sorted(set(seen))
     observer.close()
@@ -657,9 +668,7 @@ def capture_turn_control(session: CaptureSession) -> dict:
     completed = control.wait_notification("turn/completed", timeout=300)
     steer_completed = completed["params"]["turn"]
     control.drain(quiet=1.0)
-    observed_sequence = [
-        m["method"] for m in control.notifications[sequence_mark:] if m.get("method")
-    ]
+    observed_sequence = notification_methods(control.notifications[sequence_mark:])
 
     stale = control.request(
         "turn/steer",

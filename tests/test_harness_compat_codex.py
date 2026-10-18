@@ -149,6 +149,14 @@ def test_collector_baseline_is_latest_and_masks_run_values(
         "tmp": 'helper binaries under temporary dir "<tmp-dir>" (x)',
         "cli": "v<release>",
     }
+    # Advisory warnings race with real notifications, so they never enter the evidence.
+    messages = [
+        {"method": "warning"},
+        {"method": "thread/started"},
+        {"id": 1},
+        {"method": "warning"},
+    ]
+    assert collector.notification_methods(messages) == ["thread/started"]
     (fixtures / "floor" / "protocol_schema" / "Unused.json").write_text("{}")
     assert collector.diff_bundle(fixtures / "floor", fixtures / "latest", committed_only=True) == []
     session = cast(

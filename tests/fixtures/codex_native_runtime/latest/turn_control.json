@@ -13,8 +13,6 @@
   },
   "turn_notification_sequence_observed": [
     "thread/started",
-    "warning",
-    "warning",
     "thread/status/changed",
     "turn/started",
     "item/started",
