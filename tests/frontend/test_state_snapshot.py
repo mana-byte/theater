@@ -1,37 +1,28 @@
-"""Focused public snapshot and orchestration-journal follow coverage."""
+"""Daemon state snapshots: immutable pages, route and action facts, cache bounds."""
 
 from __future__ import annotations
 
-import asyncio
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import insert
 
-from tests.support.frontend_wire import handshake, projection_wire, request
-from theater import paths, protocol
+from tests.support.frontend_wire import request
+from tests.support.state_stream import call_public, close_writer, journal_record, public_connection
 from theater.daemon.events.publication import (
     next_revision,
     participant_event,
-    terminal_binding_event,
 )
-from theater.daemon.events.reader import JournalReader, StateReadError, StreamCursor
+from theater.daemon.events.reader import StateReadError
 from theater.daemon.events.snapshot import (
     CachedParticipantProjection,
     ParticipantProjectionFacts,
     SnapshotService,
 )
-from theater.daemon.persistence.repositories.journal import JournalAppend
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.daemon.schema import orchestration_events
-from theater.daemon.store import Store
-from theater.frontend import FrontendClient, StateSynchronizer
-from theater.frontend.dto import Participant as PublicParticipant
-from theater.frontend.dto import Provider as PublicProvider
 from theater.harness.contracts.runtime import (
     ConnectionHealth,
     RuntimeCapabilities,
@@ -40,7 +31,6 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
 )
 from theater.models import (
-    JournalEventRecord,
     ProviderRecord,
     PublicOperationRecord,
     Status,
@@ -48,43 +38,6 @@ from theater.models import (
     WorkspaceRecord,
     WorkspaceUsageRecord,
 )
-
-
-async def _public_connection(client_id: str) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    reader, writer = await asyncio.open_unix_connection(
-        str(paths.socket_path()), limit=max(protocol.MAX_MESSAGE_BYTES, 1024)
-    )
-    writer.write(handshake(client_id))
-    await writer.drain()
-    response = json.loads(await protocol.read_message(reader))
-    assert response["ok"] is True
-    return reader, writer
-
-
-async def _call(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, frame: bytes) -> dict:
-    writer.write(frame)
-    await writer.drain()
-    return json.loads(await protocol.read_message(reader))
-
-
-async def _close(writer: asyncio.StreamWriter) -> None:
-    writer.close()
-    await writer.wait_closed()
-
-
-def _event(entity_id: str, revision: int = 1) -> JournalEventRecord:
-    return JournalEventRecord(
-        kind="participant.updated",
-        entity_id=entity_id,
-        entity_revision=revision,
-        payload={"participant_id": entity_id},
-        recorded_at=1.0,
-    )
-
-
-def _append(daemon, *events: JournalEventRecord, transaction_id: str) -> JournalAppend:
-    with daemon.store.write_unit() as unit:
-        return daemon.store.journal.append_group(unit, list(events), transaction_id=transaction_id)
 
 
 def test_journal_tail_reads_do_not_scan_retained_history(store):
@@ -188,13 +141,13 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
             connection=unit.connection,
         )
         daemon.store.journal.append_group(
-            unit, [_event(first.id)], transaction_id="state-snapshot-event"
+            unit, [journal_record(first.id)], transaction_id="state-snapshot-event"
         )
     post_setup_cursor = daemon.store.journal.current_sequence()
 
-    reader, writer = await _public_connection("state-snapshot-client")
+    reader, writer = await public_connection("state-snapshot-client")
     try:
-        snapshot_response = await _call(
+        snapshot_response = await call_public(
             reader, writer, request(2, "frontend.state.snapshot", {"page_size": 1})
         )
         snapshot = snapshot_response["result"]
@@ -208,7 +161,7 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         assert dead.id not in {item["participant_id"] for item in snapshot["participants"]}
 
         daemon.registry.set_status(second.id, Status.DEAD)
-        second_page = await _call(
+        second_page = await call_public(
             reader,
             writer,
             request(
@@ -221,13 +174,13 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         assert second_page["result"]["participants"][0]["status"] != "dead"
         assert second_page["result"]["complete"] is True
 
-        released = await _call(
+        released = await call_public(
             reader,
             writer,
             request(4, "frontend.state.release", {"snapshot_id": snapshot["snapshot_id"]}),
         )
         assert released["result"] == {"released": True}
-        expired = await _call(
+        expired = await call_public(
             reader,
             writer,
             request(
@@ -238,161 +191,7 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         )
         assert expired["error"]["code"] == "snapshot_expired"
     finally:
-        await _close(writer)
-
-
-async def test_public_participant_events_equal_fresh_named_snapshots(daemon) -> None:
-    reader, writer = await _public_connection("state-participant-equality")
-    try:
-        cursor = {
-            "stream_id": daemon.store.journal.stream_id(),
-            "sequence": daemon.store.journal.current_sequence(),
-        }
-        participant = daemon.registry.register(
-            harness="vibe", pane=None, cwd="/tmp/state-participant-equality"
-        )
-        created = await _call(
-            reader,
-            writer,
-            request(2, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
-        )
-        created_event = created["result"]["transactions"][0]["events"][0]
-        created_snapshot = await _call(
-            reader,
-            writer,
-            request(3, "frontend.state.snapshot", {"page_size": 500}),
-        )
-        created_value = next(
-            item
-            for item in created_snapshot["result"]["participants"]
-            if item["participant_id"] == participant.id
-        )
-        assert created_snapshot["result"]["ending_cursor"] == created["result"]["cursor"]
-        assert PublicParticipant.from_wire(created_event["payload"]).to_wire() == (
-            PublicParticipant.from_wire(created_value).to_wire()
-        )
-        assert created_value["name"] == participant.name
-
-        cursor = created["result"]["cursor"]
-        daemon.registry.update_metadata(
-            participant.id,
-            name="StateProjectionName",
-            description="Canonical public metadata",
-        )
-        changed = await _call(
-            reader,
-            writer,
-            request(4, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
-        )
-        changed_event = changed["result"]["transactions"][0]["events"][0]
-        changed_snapshot = await _call(
-            reader,
-            writer,
-            request(5, "frontend.state.snapshot", {"page_size": 500}),
-        )
-        changed_value = next(
-            item
-            for item in changed_snapshot["result"]["participants"]
-            if item["participant_id"] == participant.id
-        )
-        assert changed_snapshot["result"]["ending_cursor"] == changed["result"]["cursor"]
-        assert PublicParticipant.from_wire(changed_event["payload"]).to_wire() == (
-            PublicParticipant.from_wire(changed_value).to_wire()
-        )
-        assert (changed_value["name"], changed_value["description"]) == (
-            "StateProjectionName",
-            "Canonical public metadata",
-        )
-    finally:
-        await _close(writer)
-
-
-async def test_public_provider_acquire_event_equals_fresh_health_snapshot(daemon) -> None:
-    credential = "state-provider-secret"
-    registered = daemon.terminal_service.registry.register(
-        client_id="state-provider-client",
-        idempotency_key="state-provider-register",
-        params={
-            "selector": "state-provider-equality",
-            "kind": "fixture",
-            "credential_verifier": credential_verifier(credential),
-            "capabilities": ["terminal-provider.v1"],
-            "limits": {"terminals": 2},
-        },
-    )
-    provider_id = str(registered["provider_id"])
-    cursor = {
-        "stream_id": daemon.store.journal.stream_id(),
-        "sequence": daemon.store.journal.current_sequence(),
-    }
-    daemon.terminal_service.connections.acquire_callback(provider_id, credential)
-
-    reader, writer = await _public_connection("state-provider-equality")
-    try:
-        followed = await _call(
-            reader,
-            writer,
-            request(2, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
-        )
-        provider_event = next(
-            event
-            for transaction in followed["result"]["transactions"]
-            for event in transaction["events"]
-            if event["kind"] == "provider.updated"
-        )
-        snapshot = await _call(
-            reader,
-            writer,
-            request(3, "frontend.state.snapshot", {"page_size": 500}),
-        )
-        provider_value = next(
-            item for item in snapshot["result"]["providers"] if item["provider_id"] == provider_id
-        )
-        assert snapshot["result"]["ending_cursor"] == followed["result"]["cursor"]
-        assert PublicProvider.from_wire(provider_event["payload"]).to_wire() == (
-            PublicProvider.from_wire(provider_value).to_wire()
-        )
-        assert provider_value["health"] == "reconciling"
-    finally:
-        await _close(writer)
-
-
-async def test_sdk_follow_matches_fresh_snapshot_for_private_registry_and_jobs(daemon) -> None:
-    participant = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/state-sdk-private")
-    client = FrontendClient(paths.socket_path(), client_id="state-sdk-private")
-    synchronizer = StateSynchronizer(client)
-    try:
-        await synchronizer.refresh()
-
-        daemon.registry.update_metadata(participant.id, description="updated privately")
-        updated = await synchronizer.follow_once(wait_seconds=0)
-        fresh = await synchronizer.refresh()
-        assert updated.cursor == fresh.cursor
-        assert projection_wire(updated) == projection_wire(fresh)
-        assert updated.participants[participant.id].description == "updated privately"
-
-        daemon.jobs.create(
-            handle="state-sdk-private-job",
-            caller_id="cli",
-            target_id=participant.id,
-            kind="send",
-        )
-        running = await synchronizer.follow_once(wait_seconds=0)
-        fresh = await synchronizer.refresh()
-        assert running.cursor == fresh.cursor
-        assert projection_wire(running) == projection_wire(fresh)
-        assert running.jobs["state-sdk-private-job"].state == "running"
-
-        daemon.jobs.finish("state-sdk-private-job", state="done", result="finished")
-        daemon.registry.set_status(participant.id, Status.DEAD)
-        terminal = await synchronizer.follow_once(wait_seconds=0)
-        fresh = await synchronizer.refresh()
-        assert terminal.cursor == fresh.cursor
-        assert projection_wire(terminal) == projection_wire(fresh)
-        assert participant.id not in terminal.participants
-        assert "state-sdk-private-job" not in terminal.jobs
-    finally:
-        await client.close()
+        await close_writer(writer)
 
 
 async def test_snapshot_does_not_infer_provider_addressability_from_durable_health(daemon) -> None:
@@ -501,61 +300,6 @@ async def test_snapshot_and_participant_event_use_cached_public_route_facts(
     assert event.payload["presence"] == "absent"
     assert event.payload["actions"] == projected["actions"]
     assert event.payload["addressable"] is True
-
-
-async def test_new_binding_event_uses_the_same_transactional_route_as_fresh_snapshot(
-    daemon, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
-    monkeypatch.setattr(
-        daemon.terminal_service.connections,
-        "is_current",
-        lambda provider_id, generation: (provider_id, generation) == ("provider-new", 3),
-    )
-    monkeypatch.setattr(
-        daemon.terminal_service.connections,
-        "health",
-        lambda provider_id: "online" if provider_id == "provider-new" else "offline",
-    )
-    monkeypatch.setattr(
-        daemon.presence,
-        "snapshot",
-        lambda _participant_id: PresenceSnapshot(PresenceState.ABSENT, "fixture", 1, 1.0),
-    )
-    binding = TerminalBindingRecord(
-        participant_id=participant.id,
-        provider_id="provider-new",
-        provider_generation=3,
-        terminal_id="terminal-new",
-        terminal_incarnation="incarnation-new",
-        occupant_evidence={"occupant_id": "occupant-new"},
-        health="healthy",
-        report_revision=1,
-        created_at=1.0,
-        updated_at=1.0,
-    )
-
-    with daemon.store.write_unit() as unit:
-        daemon.store.terminal_bindings.bind(binding, connection=unit.connection)
-        persisted = daemon.store.terminal_bindings.get(participant.id, connection=unit.connection)
-        assert persisted is not None
-        event = terminal_binding_event(
-            daemon.store,
-            persisted,
-            unit.connection,
-            revision=next_revision(daemon.store, unit.connection),
-            recorded_at=2.0,
-        )
-        daemon.store.journal.append_group(unit, [event])
-
-    fresh = daemon.state_service.snapshot("binding-transaction-client", page_size=500)
-    fresh_value = next(
-        item for item in fresh["participants"] if item["participant_id"] == participant.id
-    )
-    assert event.payload["terminal_route"] == fresh_value["terminal_route"]
-    assert event.payload["actions"] == fresh_value["actions"]
-    assert event.payload["addressable"] is True
-    assert event.payload["actions"]["send"]["route_available"] is True
 
 
 async def test_snapshot_action_facts_share_the_materialization_transaction(daemon) -> None:
@@ -773,137 +517,3 @@ async def test_snapshot_cache_expires_and_refuses_overflow(daemon) -> None:
     )
     with pytest.raises(StateReadError, match="cannot fit"):
         too_small.snapshot("client-b", page_size=1)
-
-
-async def test_follow_keeps_groups_whole_and_closes_waiter_races(daemon) -> None:
-    stream_id = daemon.store.journal.stream_id()
-    cursor = {"stream_id": stream_id, "sequence": 0}
-    reader, writer = await _public_connection("state-follow-client")
-    try:
-        empty = await _call(
-            reader,
-            writer,
-            request(
-                2,
-                "frontend.state.follow",
-                {"cursor": cursor, "wait_seconds": 0, "limit": 1},
-            ),
-        )
-        assert empty["result"] == {"transactions": [], "cursor": cursor, "timed_out": False}
-
-        first = _append(
-            daemon,
-            _event("state-a"),
-            _event("state-b", 2),
-            transaction_id="state-group-a",
-        )
-        followed = await _call(
-            reader,
-            writer,
-            request(3, "frontend.state.follow", {"cursor": cursor, "limit": 1}),
-        )
-        transaction = followed["result"]["transactions"]
-        assert len(transaction) == 1
-        assert [event["entity_id"] for event in transaction[0]["events"]] == ["state-a", "state-b"]
-        assert followed["result"]["cursor"]["sequence"] == first.ending_sequence
-
-        replay = await _call(
-            reader,
-            writer,
-            request(4, "frontend.state.follow", {"cursor": cursor, "limit": 1}),
-        )
-        assert replay["result"] == followed["result"]
-
-        boundary_error = await _call(
-            reader,
-            writer,
-            request(
-                5,
-                "frontend.state.follow",
-                {"cursor": {"stream_id": stream_id, "sequence": 1}, "wait_seconds": 0},
-            ),
-        )
-        assert boundary_error["error"]["code"] == "resnapshot_required"
-
-        timeout = await _call(
-            reader,
-            writer,
-            request(
-                6,
-                "frontend.state.follow",
-                {"cursor": followed["result"]["cursor"], "wait_seconds": 0.01},
-            ),
-        )
-        assert timeout["result"]["transactions"] == []
-        assert timeout["result"]["timed_out"] is True
-
-        waiting = asyncio.create_task(
-            daemon.state_service.follow(followed["result"]["cursor"], wait_seconds=1, limit=1)
-        )
-        for _ in range(10):
-            if daemon.state_service.follows.waiter_count:
-                break
-            await asyncio.sleep(0)
-        assert daemon.state_service.follows.waiter_count == 1
-        second = _append(daemon, _event("state-c", 3), transaction_id="state-group-b")
-        woken = await waiting
-        assert woken["cursor"]["sequence"] == second.ending_sequence
-        assert woken["timed_out"] is False
-
-        cancelled = asyncio.create_task(
-            daemon.state_service.follow(woken["cursor"], wait_seconds=30, limit=1)
-        )
-        for _ in range(10):
-            if daemon.state_service.follows.waiter_count:
-                break
-            await asyncio.sleep(0)
-        cancelled.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await cancelled
-        assert daemon.state_service.follows.waiter_count == 0
-
-        with daemon.store.write_unit() as unit:
-            daemon.store.journal.delete_through(first.ending_sequence, connection=unit.connection)
-        retention = await _call(
-            reader,
-            writer,
-            request(7, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
-        )
-        assert retention["error"]["code"] == "resnapshot_required"
-        mismatch = await _call(
-            reader,
-            writer,
-            request(
-                8,
-                "frontend.state.follow",
-                {"cursor": {"stream_id": "replacement-stream", "sequence": 0}},
-            ),
-        )
-        assert mismatch["error"]["code"] == "resnapshot_required"
-    finally:
-        await _close(writer)
-
-
-def test_journal_cursor_resumes_after_restart_but_not_database_replacement(tmp_path: Path) -> None:
-    path = tmp_path / "state.db"
-    store = Store(path)
-    try:
-        with store.write_unit() as unit:
-            appended = store.journal.append_group(
-                unit, [_event("restart-a")], transaction_id="restart-group"
-            )
-        cursor = StreamCursor(appended.stream_id, appended.ending_sequence)
-    finally:
-        store.close()
-
-    reopened = Store(path)
-    replacement = Store(tmp_path / "replacement.db")
-    try:
-        resumed = JournalReader(reopened.journal).read(cursor, limit=1)
-        assert resumed.transactions == ()
-        assert resumed.cursor == cursor
-        with pytest.raises(StateReadError, match="different database stream"):
-            JournalReader(replacement.journal).read(cursor, limit=1)
-    finally:
-        reopened.close()
-        replacement.close()

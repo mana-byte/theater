@@ -1,20 +1,17 @@
-"""Focused independent checks for the RC10 public SDK lanes and decoding."""
+"""Public SDK lanes, decoding, timeouts and reconnects against a scripted daemon."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
-import shutil
 import tempfile
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 
 from tests.support.frontend_wire import read_request
+from tests.support.sdk_fixture_server import fixture_server, send_frame
+from tests.support.sdk_state_frames import operation_frame, state_handshake
 from theater.frontend import (
     CapabilityUnavailable,
     ClientStateError,
@@ -26,54 +23,7 @@ from theater.frontend import (
     RequestTimedOut,
     ResponseValidationError,
 )
-from theater.frontend.transport import TransportBusy
-
-Handler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
-
-
-@asynccontextmanager
-async def _fixture_server(handler: Handler) -> AsyncIterator[Path]:
-    root = Path(tempfile.mkdtemp(prefix="r10sdk-", dir="/tmp"))
-    path = root / "frontend.sock"
-    writers: set[asyncio.StreamWriter] = set()
-    tasks: set[asyncio.Task[None]] = set()
-    failures: list[BaseException] = []
-
-    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        task = asyncio.current_task()
-        assert task is not None
-        tasks.add(task)
-        writers.add(writer)
-        try:
-            await handler(reader, writer)
-        except BaseException as exc:
-            failures.append(exc)
-        finally:
-            writers.discard(writer)
-            tasks.discard(task)
-            writer.close()
-            with contextlib.suppress(OSError, ConnectionError):
-                await writer.wait_closed()
-
-    server = await asyncio.start_unix_server(serve, path=str(path))
-    try:
-        yield path
-    finally:
-        server.close()
-        await server.wait_closed()
-        for writer in tuple(writers):
-            writer.close()
-        if tasks:
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
-        path.unlink(missing_ok=True)
-        shutil.rmtree(root)
-        if failures:
-            raise failures[0]
-
-
-async def _send_response(writer: asyncio.StreamWriter, value: dict[str, object]) -> None:
-    writer.write(json.dumps(value, separators=(",", ":")).encode("utf-8") + b"\n")
-    await writer.drain()
+from theater.frontend.transport import FrontendTransport, TransportBusy
 
 
 async def _handshake(
@@ -91,7 +41,7 @@ async def _handshake(
     params = request["params"]
     assert isinstance(params, dict)
     assert params["api"] == {"major": 1, "minor": 1}
-    await _send_response(
+    await send_frame(
         writer,
         {
             "id": request["id"],
@@ -99,7 +49,7 @@ async def _handshake(
             "result": {
                 "api": {"major": 1, "minor": minor},
                 "daemon_instance_id": "fixture-daemon",
-                "package_version": "1.0.0rc10",
+                "package_version": "0.0.0-test",
                 "capabilities": capabilities,
                 "limits": {"max_frame_bytes": 67_108_864, "max_in_flight": 1},
                 "future_handshake_field": {"kept": True},
@@ -132,10 +82,10 @@ async def test_client_replaces_a_lane_the_daemon_hung_up_on() -> None:
         await _handshake(reader, writer, capabilities=["trajectory.v1"], first=False)
         request = await read_request(reader)
         assert request is not None
-        await _send_response(writer, {"id": request["id"], "ok": True, "result": {"records": []}})
+        await send_frame(writer, {"id": request["id"], "ok": True, "result": {"records": []}})
 
     async with (
-        _fixture_server(serve_once) as socket_path,
+        fixture_server(serve_once) as socket_path,
         FrontendClient(socket_path, client_id="sdk-reconnect") as client,
     ):
         await client.trajectory.snapshot("p")
@@ -155,7 +105,7 @@ async def test_bulk_response_validation_runs_off_loop_and_still_refuses_invalid_
         await _handshake(reader, writer, capabilities=["trajectory.v1"])
         request = await read_request(reader)
         assert request is not None
-        await _send_response(
+        await send_frame(
             writer,
             {
                 "id": request["id"],
@@ -180,7 +130,7 @@ async def test_bulk_response_validation_runs_off_loop_and_still_refuses_invalid_
 
     monkeypatch.setattr(FrontendClient, "_decode_response", decoded)
     async with (
-        _fixture_server(handler) as socket_path,
+        fixture_server(handler) as socket_path,
         FrontendClient(socket_path, client_id="sdk-bulk") as client,
     ):
         pending = asyncio.create_task(client.trajectory.snapshot("p"))
@@ -206,7 +156,6 @@ async def test_bulk_response_validation_runs_off_loop_and_still_refuses_invalid_
     assert len(threads) == 1 and threads[0] != loop_thread
 
 
-@pytest.mark.asyncio
 async def test_sdk_uses_dedicated_lanes_and_preserves_future_values() -> None:
     sessions: list[list[str]] = []
     capabilities = ["contract.v1", "orchestration.v1", "state.follow.v1"]
@@ -221,7 +170,7 @@ async def test_sdk_uses_dedicated_lanes_and_preserves_future_values() -> None:
             request_id = request["id"]
             assert isinstance(request_id, int)
             if method == "frontend.participants.get":
-                await _send_response(
+                await send_frame(
                     writer,
                     {
                         "id": request_id,
@@ -241,7 +190,7 @@ async def test_sdk_uses_dedicated_lanes_and_preserves_future_values() -> None:
                     },
                 )
             elif method == "frontend.operations.await":
-                await _send_response(
+                await send_frame(
                     writer,
                     {
                         "id": request_id,
@@ -261,7 +210,7 @@ async def test_sdk_uses_dedicated_lanes_and_preserves_future_values() -> None:
                     },
                 )
             elif method == "frontend.state.follow":
-                await _send_response(
+                await send_frame(
                     writer,
                     {
                         "id": request_id,
@@ -291,7 +240,7 @@ async def test_sdk_uses_dedicated_lanes_and_preserves_future_values() -> None:
                 raise AssertionError(f"unexpected SDK method {method}")
         sessions.append(methods)
 
-    async with _fixture_server(handler) as socket_path:
+    async with fixture_server(handler) as socket_path:
         client = FrontendClient(
             socket_path,
             client_id="sdk-a",
@@ -320,7 +269,6 @@ async def test_sdk_uses_dedicated_lanes_and_preserves_future_values() -> None:
     ]
 
 
-@pytest.mark.asyncio
 async def test_sdk_enforces_local_catalog_rules_and_preserves_unknown_refusals() -> None:
     requests: list[str] = []
 
@@ -329,7 +277,7 @@ async def test_sdk_enforces_local_catalog_rules_and_preserves_unknown_refusals()
         request = await read_request(reader)
         assert request is not None
         requests.append(str(request["method"]))
-        await _send_response(
+        await send_frame(
             writer,
             {
                 "id": request["id"],
@@ -343,7 +291,7 @@ async def test_sdk_enforces_local_catalog_rules_and_preserves_unknown_refusals()
             },
         )
 
-    async with _fixture_server(handler) as socket_path:
+    async with fixture_server(handler) as socket_path:
         invalid_handshake = FrontendClient(
             socket_path,
             client_id="sdk-invalid-handshake",
@@ -381,7 +329,6 @@ async def test_sdk_enforces_local_catalog_rules_and_preserves_unknown_refusals()
     assert requests == ["frontend.contract.get"]
 
 
-@pytest.mark.asyncio
 async def test_sdk_tolerates_unknown_owner_kinds_without_masking_bad_owner_values() -> None:
     owners = {
         "future-owner": {"kind": "future_delegate", "participant_id": "owner-x", "revision": 1},
@@ -396,7 +343,7 @@ async def test_sdk_tolerates_unknown_owner_kinds_without_masking_bad_owner_value
             assert isinstance(params, dict)
             participant_id = params["participant_id"]
             assert isinstance(participant_id, str)
-            await _send_response(
+            await send_frame(
                 writer,
                 {
                     "id": request["id"],
@@ -405,7 +352,7 @@ async def test_sdk_tolerates_unknown_owner_kinds_without_masking_bad_owner_value
                 },
             )
 
-    async with _fixture_server(handler) as socket_path:
+    async with fixture_server(handler) as socket_path:
         client = FrontendClient(socket_path, client_id="sdk-future-owner")
         with_participant = await client.participants.get("future-owner")
         without_participant = await client.participants.get("future-owner-without-participant")
@@ -418,7 +365,6 @@ async def test_sdk_tolerates_unknown_owner_kinds_without_masking_bad_owner_value
         await client.close()
 
 
-@pytest.mark.asyncio
 async def test_recall_read_omits_optional_offsets_and_preserves_explicit_values() -> None:
     requests: list[dict[str, object]] = []
 
@@ -426,9 +372,9 @@ async def test_recall_read_omits_optional_offsets_and_preserves_explicit_values(
         await _handshake(reader, writer, capabilities=["observation.v1"])
         while request := await read_request(reader):
             requests.append(request)
-            await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
+            await send_frame(writer, {"id": request["id"], "ok": True, "result": {}})
 
-    async with _fixture_server(handler) as socket_path:
+    async with fixture_server(handler) as socket_path:
         client = FrontendClient(socket_path, client_id="sdk-recall")
         assert (await client.recall.read("segment-default")).value == {}
         assert (await client.recall.read("segment-explicit", offset=4, max_bytes=128)).value == {}
@@ -444,7 +390,6 @@ async def test_recall_read_omits_optional_offsets_and_preserves_explicit_values(
     ]
 
 
-@pytest.mark.asyncio
 async def test_usage_by_participant_sends_filters_and_freezes_result() -> None:
     requests: list[dict[str, object]] = []
     result = {
@@ -472,9 +417,9 @@ async def test_usage_by_participant_sends_filters_and_freezes_result() -> None:
         request = await read_request(reader)
         assert request is not None
         requests.append(request)
-        await _send_response(writer, {"id": request["id"], "ok": True, "result": result})
+        await send_frame(writer, {"id": request["id"], "ok": True, "result": result})
 
-    async with _fixture_server(handler) as socket_path:
+    async with fixture_server(handler) as socket_path:
         client = FrontendClient(socket_path, client_id="sdk-usage")
         response = await client.usage.by_participant(
             since=10.0,
@@ -497,7 +442,6 @@ async def test_usage_by_participant_sends_filters_and_freezes_result() -> None:
     assert response.value["participants"][0]["models"] == ("gpt-5",)
 
 
-@pytest.mark.asyncio
 async def test_participant_spawn_omits_an_empty_prompt_from_the_wire() -> None:
     requests: list[dict[str, object]] = []
 
@@ -506,7 +450,7 @@ async def test_participant_spawn_omits_an_empty_prompt_from_the_wire() -> None:
         request = await read_request(reader)
         assert request is not None
         requests.append(request)
-        await _send_response(
+        await send_frame(
             writer,
             {
                 "id": request["id"],
@@ -520,7 +464,7 @@ async def test_participant_spawn_omits_an_empty_prompt_from_the_wire() -> None:
             },
         )
 
-    async with _fixture_server(handler) as socket_path:
+    async with fixture_server(handler) as socket_path:
         client = FrontendClient(socket_path, client_id="sdk-promptless-spawn")
         await client.participants.spawn(
             "codex",
@@ -537,7 +481,6 @@ async def test_participant_spawn_omits_an_empty_prompt_from_the_wire() -> None:
     assert "prompt" not in params
 
 
-@pytest.mark.asyncio
 async def test_timeout_retires_only_the_operation_wait_lane_without_replay() -> None:
     operation_closed = asyncio.Event()
     interactive_methods: list[str] = []
@@ -558,13 +501,13 @@ async def test_timeout_retires_only_the_operation_wait_lane_without_replay() -> 
             return
         assert method == "frontend.contract.get"
         interactive_methods.append(method)
-        await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
+        await send_frame(writer, {"id": request["id"], "ok": True, "result": {}})
         while request := await read_request(reader):
             assert request["method"] == "frontend.contract.get"
             interactive_methods.append("frontend.contract.get")
-            await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
+            await send_frame(writer, {"id": request["id"], "ok": True, "result": {}})
 
-    async with _fixture_server(handler) as socket_path:
+    async with fixture_server(handler) as socket_path:
         client = FrontendClient(
             socket_path,
             client_id="sdk-timeout",
@@ -582,7 +525,6 @@ async def test_timeout_retires_only_the_operation_wait_lane_without_replay() -> 
     assert interactive_methods == ["frontend.contract.get", "frontend.contract.get"]
 
 
-@pytest.mark.asyncio
 async def test_busy_ordinary_lane_does_not_cancel_the_request_already_in_flight() -> None:
     first_received = asyncio.Event()
     release_first = asyncio.Event()
@@ -594,9 +536,9 @@ async def test_busy_ordinary_lane_does_not_cancel_the_request_already_in_flight(
         assert request["method"] == "frontend.contract.get"
         first_received.set()
         await release_first.wait()
-        await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
+        await send_frame(writer, {"id": request["id"], "ok": True, "result": {}})
 
-    async with _fixture_server(handler) as socket_path:
+    async with fixture_server(handler) as socket_path:
         client = FrontendClient(socket_path, client_id="sdk-busy")
         first = asyncio.create_task(client.contract.get())
         await asyncio.wait_for(first_received.wait(), timeout=1)
@@ -607,7 +549,6 @@ async def test_busy_ordinary_lane_does_not_cancel_the_request_already_in_flight(
         await client.close()
 
 
-@pytest.mark.asyncio
 async def test_an_older_minor_daemon_stays_usable_but_refuses_newer_methods_locally() -> None:
     """A 1.0 daemon serves 1.0 methods; 1.1-only methods fail before any frame is sent."""
     methods: list[object] = []
@@ -616,9 +557,9 @@ async def test_an_older_minor_daemon_stays_usable_but_refuses_newer_methods_loca
         await _handshake(reader, writer, capabilities=["diagnostics.v1"], minor=0)
         while (request := await read_request(reader)) is not None:
             methods.append(request["method"])
-            await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
+            await send_frame(writer, {"id": request["id"], "ok": True, "result": {}})
 
-    async with _fixture_server(handler) as socket_path:
+    async with fixture_server(handler) as socket_path:
         client = FrontendClient(socket_path, client_id="sdk-older-minor")
         assert (await client.usage.totals()).value == {}
         with pytest.raises(CapabilityUnavailable, match=r"requires public API 1\.1"):
@@ -626,3 +567,96 @@ async def test_an_older_minor_daemon_stays_usable_but_refuses_newer_methods_loca
         await client.close()
 
     assert methods == ["frontend.usage.totals"]
+
+
+async def test_operation_wait_cancellation_detaches_and_handle_survives_reconnect() -> None:
+    first_wait_started = asyncio.Event()
+    first_wait_closed = asyncio.Event()
+    operation_waits = 0
+    methods: list[str] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal operation_waits
+        await state_handshake(reader, writer)
+        while request := await read_request(reader):
+            method = request["method"]
+            methods.append(str(method))
+            request_id = request["id"]
+            assert type(request_id) is int
+            if method == "frontend.operations.await":
+                operation_waits += 1
+                if operation_waits == 1:
+                    first_wait_started.set()
+                    assert await read_request(reader) is None
+                    first_wait_closed.set()
+                    return
+                if operation_waits == 2:
+                    result = {
+                        "operation": operation_frame("running", "delivering"),
+                        "timed_out": True,
+                    }
+                else:
+                    result = {
+                        "operation": operation_frame("succeeded", "settled"),
+                        "timed_out": False,
+                    }
+                await send_frame(writer, {"id": request_id, "ok": True, "result": result})
+            elif method == "frontend.operations.get":
+                await send_frame(
+                    writer,
+                    {
+                        "id": request_id,
+                        "ok": True,
+                        "result": operation_frame("running", "delivering"),
+                    },
+                )
+            else:
+                raise AssertionError(f"unexpected method {method!r}")
+
+    async with fixture_server(handler) as socket_path:
+        client = FrontendClient(socket_path, client_id="sdk-follow")
+        waiting = asyncio.create_task(client.operations.wait("operation-a", wait_seconds=30))
+        await asyncio.wait_for(first_wait_started.wait(), timeout=1)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        await asyncio.wait_for(first_wait_closed.wait(), timeout=1)
+
+        observed = await client.operations.get("operation-a")
+        assert observed.value.state == "running"
+        assert observed.value.job_handle == "job-a"
+
+        timed_out = await client.operations.wait("operation-a", wait_seconds=0)
+        assert timed_out.value.timed_out is True
+        assert timed_out.value.operation.state == "running"
+
+        settled = await client.operations.wait("operation-a", wait_seconds=0)
+        assert settled.value.timed_out is False
+        assert settled.value.operation.state == "succeeded"
+        assert settled.value.operation.job_handle == "job-a"
+        await client.close()
+
+    assert methods.count("frontend.operations.await") == 3
+    assert "frontend.jobs.await" not in methods
+
+
+async def test_transport_is_disconnected_once_the_peer_hangs_up():
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        path = Path(directory) / "daemon.sock"
+
+        async def hang_up(_reader, writer):
+            writer.close()
+
+        server = await asyncio.start_unix_server(hang_up, path)
+        transport = FrontendTransport(path)
+        try:
+            await transport.connect()
+            for _ in range(100):
+                if not transport.connected:
+                    break
+                await asyncio.sleep(0.01)
+            assert not transport.connected
+        finally:
+            transport.abort()
+            server.close()
+            await server.wait_closed()

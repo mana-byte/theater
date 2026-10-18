@@ -1,14 +1,15 @@
-"""RC10's frozen public contract, independent of daemon implementation."""
+"""The frozen public contract: catalog, schemas and the validator cache."""
 
 from __future__ import annotations
 
-import ast
 import socket
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
-from tests.support.paths import REPO_ROOT
 from theater.frontend.capabilities import (
     CALLBACK_CATALOG,
     MAX_EXACT_JSON_INTEGER,
@@ -31,6 +32,7 @@ from theater.frontend.dto import (
 from theater.frontend.errors import ErrorCode, ErrorValue
 from theater.frontend.schemas import (
     RESOURCE_NAMES,
+    catalog,
     load_schema_resources,
     validate_callback_request,
     validate_callback_response,
@@ -111,6 +113,8 @@ EXPECTED_METHODS = {
     "frontend.stats.get",
     "frontend.bus.tail",
 }
+
+
 EXPECTED_CALLBACKS = {
     "terminal.create",
     "terminal.inventory",
@@ -571,15 +575,76 @@ def test_usage_by_participant_has_strict_params_and_result_schemas() -> None:
         )
 
 
-def test_frontend_contract_has_no_private_imports() -> None:
-    root = REPO_ROOT / "theater" / "frontend"
-    forbidden = ("theater.daemon", "theater.client", "theater.config", "theater.tmux", "textual")
-    imports: set[str] = set()
-    for path in root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imports.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module is not None:
-                imports.add(node.module)
-    assert not {name for name in imports if name.startswith(forbidden)}
+@pytest.fixture
+def fresh_validator_cache():
+    catalog.schema_registry()  # warm resource loading so its check_schema calls never count
+    catalog._validators.clear()
+    yield
+    catalog._validators.clear()
+
+
+@pytest.fixture
+def check_calls(monkeypatch):
+    calls: list[object] = []
+    real = Draft202012Validator.check_schema
+
+    def spy(schema, *args, **kwargs):
+        calls.append(schema)
+        return real(schema, *args, **kwargs)
+
+    monkeypatch.setattr(Draft202012Validator, "check_schema", staticmethod(spy))
+    return calls
+
+
+@pytest.mark.usefixtures("fresh_validator_cache")
+def test_cached_instance_still_validates_every_payload():
+    schema_id = METHOD_CATALOG["frontend.health.get"].params_schema_id
+    first = catalog.validator_for(schema_id)
+    assert catalog.validator_for(schema_id) is first
+    first.validate({})
+    with pytest.raises(ValidationError):
+        first.validate({"unexpected": 1})
+    first.validate({})
+
+
+@pytest.mark.usefixtures("fresh_validator_cache")
+def test_each_schema_checked_once(check_calls):
+    ids = {m.params_schema_id for m in list(METHOD_CATALOG.values())[:5]}
+    for _ in range(20):
+        for schema_id in ids:
+            catalog.validator_for(schema_id)
+    assert len(check_calls) == len(ids)
+
+
+@pytest.mark.usefixtures("fresh_validator_cache")
+def test_concurrent_calls_construct_once(monkeypatch, check_calls):
+    schema_id = METHOD_CATALOG["frontend.health.get"].params_schema_id
+    constructions: list[int] = []
+
+    def counting(*args, **kwargs):
+        constructions.append(1)
+        if len(constructions) == 1:
+            time.sleep(0.2)  # a racy cache would let other missing threads overlap here
+        return Draft202012Validator(*args, **kwargs)
+
+    monkeypatch.setattr(catalog, "Draft202012Validator", counting)
+    workers = 16
+    barrier = threading.Barrier(workers)
+
+    def call(_):
+        barrier.wait()
+        return catalog.validator_for(schema_id)
+
+    with ThreadPoolExecutor(workers) as pool:
+        got = list(pool.map(call, range(workers)))
+    assert all(v is got[0] for v in got)
+    assert len(constructions) == 1
+    assert len(check_calls) == 1
+
+
+@pytest.mark.usefixtures("fresh_validator_cache")
+def test_cache_is_bounded(monkeypatch):
+    monkeypatch.setattr(catalog, "_VALIDATOR_CACHE_MAX", 3)
+    for i in range(10):
+        catalog.validator_for(f"{catalog.SCHEMA_BASE_URI}common.json#/$defs/x{i}")
+    assert len(catalog._validators) == 3

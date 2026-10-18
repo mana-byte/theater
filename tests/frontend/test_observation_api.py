@@ -1,4 +1,4 @@
-"""Focused RC10 public observation adapters through the real socket dispatcher."""
+"""Public observation adapters (transcripts, recall, trajectory) through the real socket."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ class _Presence:
 
 
 class _TranscriptObserver:
-    location = "/tmp/rc10-observation-fixture.jsonl"
+    location = "/tmp/observation-fixture.jsonl"
 
     def __init__(self) -> None:
         self.bind_cwds: list[str | None] = []

@@ -1,4 +1,4 @@
-"""Wave-12 private CLI adapters share the public services, not a second projection."""
+"""Private CLI adapters share the public services instead of a second projection."""
 
 from __future__ import annotations
 

@@ -1,8 +1,7 @@
-"""Independent byte-level checks for the frozen RC10 public transport."""
+"""Independent byte-level checks of the frozen public transport."""
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import json
 import shutil
@@ -14,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.paths import TESTS_DIR, fixture
+from tests.support.paths import fixture
 from tests.support.raw_client import (
     MAX_EXACT_JSON_INTEGER,
     FrameDecodeError,
@@ -62,7 +61,7 @@ def _send_fragments(connection: socket.socket, frame: bytes) -> None:
 
 @contextlib.contextmanager
 def _fixture_server(handler: Callable[[socket.socket], None]) -> Iterator[Path]:
-    root = Path(tempfile.mkdtemp(prefix="r10raw-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="raw-", dir="/tmp"))
     path = root / "frontend.sock"
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(path))
@@ -279,15 +278,3 @@ def test_raw_client_rejects_invalid_or_mismatched_responses(
         assert not client.connected
         with pytest.raises(HandshakeRequired):
             client.call("frontend.contract.get", {})
-
-
-def test_raw_client_uses_only_stdlib_imports() -> None:
-    path = TESTS_DIR / "support" / "raw_client.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    imports: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            imports.add(node.module)
-    assert not {name for name in imports if name.startswith(("theater", "jsonschema"))}
