@@ -38,18 +38,6 @@ def test_claude_turn_parses_to_the_expected_event_sequence():
     assert events[5].usage.output_tokens == 3081
 
 
-def test_claude_records_carry_their_own_timestamp():
-    events = events_for(ClaudeCodeObserver(), FIXTURES / "claude_code.jsonl")
-    assert all(e.ts is not None for e in events)
-    # ISO-8601 with a Z suffix, parsed as UTC rather than local time.
-    assert events[0].ts == pytest.approx(1782325575.348, abs=0.01)
-
-
-def test_claude_raw_index_tracks_the_source_record():
-    events = events_for(ClaudeCodeObserver(), FIXTURES / "claude_code.jsonl")
-    assert [e.raw_index for e in events] == [0, 1, 2, 3, 4, 5, 6]
-
-
 def test_a_thinking_only_record_never_ends_the_turn():
     """Its text half may follow in the same message; the empty half proves nothing."""
     record = {

@@ -53,35 +53,35 @@ def fake_raise(monkeypatch, exc: Exception) -> None:
     monkeypatch.setattr(subprocess, "check_output", boom)
 
 
-def test_opencode_ignores_blank_lines(monkeypatch):
-    fake_output(monkeypatch, "\nanthropic/claude-x\n\n  \nopenai/gpt-y\n")
-    assert get_harness("opencode").discover_models() == [
-        "anthropic/claude-x",
-        "openai/gpt-y",
-    ]
+@pytest.mark.parametrize(
+    ("text", "models"),
+    [
+        pytest.param(
+            "\nanthropic/claude-x\n\n  \nopenai/gpt-y\n",
+            ["anthropic/claude-x", "openai/gpt-y"],
+            id="ignores_blank_lines",
+        ),
+        # Asked and answered: none. Not the same as cannot be asked.
+        pytest.param("", [], id="no_output_reports_none_found"),
+    ],
+)
+def test_opencode_lists_the_models_it_prints(monkeypatch, text, models):
+    fake_output(monkeypatch, text)
+    assert get_harness("opencode").discover_models() == models
 
 
-def test_opencode_with_no_output_reports_none_found(monkeypatch):
-    """Asked and answered: none. Not the same as cannot be asked."""
-    fake_output(monkeypatch, "")
-    assert get_harness("opencode").discover_models() == []
-
-
-def test_opencode_that_is_not_installed_cannot_be_asked(monkeypatch):
-    fake_raise(monkeypatch, FileNotFoundError("opencode"))
-    with pytest.raises(NotImplementedError):
-        get_harness("opencode").discover_models()
-
-
-def test_opencode_that_hangs_cannot_be_asked(monkeypatch):
-    """The call reaches the network; a human is waiting on it."""
-    fake_raise(monkeypatch, subprocess.TimeoutExpired("opencode", 20))
-    with pytest.raises(NotImplementedError):
-        get_harness("opencode").discover_models()
-
-
-def test_opencode_that_exits_nonzero_cannot_be_asked(monkeypatch):
-    fake_raise(monkeypatch, subprocess.CalledProcessError(1, "opencode"))
+@pytest.mark.parametrize(
+    "failure",
+    [
+        FileNotFoundError("opencode"),
+        # The call reaches the network; a human is waiting on it.
+        subprocess.TimeoutExpired("opencode", 20),
+        subprocess.CalledProcessError(1, "opencode"),
+    ],
+    ids=["not_installed", "hangs", "exits_nonzero"],
+)
+def test_opencode_that_cannot_answer_cannot_be_asked(monkeypatch, failure):
+    fake_raise(monkeypatch, failure)
     with pytest.raises(NotImplementedError):
         get_harness("opencode").discover_models()
 
@@ -91,46 +91,44 @@ def write_vibe_config(monkeypatch, tmp_path, text: str):
     (tmp_path / "config.toml").write_text(text, encoding="utf-8")
 
 
-def test_vibe_returns_both_spellings(monkeypatch, tmp_path):
-    """`VIBE_ACTIVE_MODEL` takes either, so both are worth offering."""
-    write_vibe_config(
-        monkeypatch,
-        tmp_path,
-        '[[models]]\nname = "claude-opus-5"\nalias = "opus-5"\n',
-    )
-    assert get_harness("vibe").discover_models() == ["claude-opus-5", "opus-5"]
+@pytest.mark.parametrize(
+    ("config", "models"),
+    [
+        # `VIBE_ACTIVE_MODEL` takes either spelling, so both are worth offering.
+        pytest.param(
+            '[[models]]\nname = "claude-opus-5"\nalias = "opus-5"\n',
+            ["claude-opus-5", "opus-5"],
+            id="returns_both_spellings",
+        ),
+        pytest.param(
+            '[[models]]\nname = "solo"\nalias = "solo"\n',
+            ["solo"],
+            id="does_not_repeat_a_name_used_as_its_own_alias",
+        ),
+        pytest.param('[[models]]\nname = "solo"\n', ["solo"], id="keeps_an_entry_with_only_a_name"),
+        # Shape drift degrades to "found nothing", never to a wrong name.
+        pytest.param('[[models]]\nprovider = "acme"\n', [], id="skips_an_entry_that_names_nothing"),
+    ],
+)
+def test_vibe_lists_the_models_in_its_config(monkeypatch, tmp_path, config, models):
+    write_vibe_config(monkeypatch, tmp_path, config)
+    assert get_harness("vibe").discover_models() == models
 
 
-def test_vibe_does_not_repeat_a_name_used_as_its_own_alias(monkeypatch, tmp_path):
-    write_vibe_config(monkeypatch, tmp_path, '[[models]]\nname = "solo"\nalias = "solo"\n')
-    assert get_harness("vibe").discover_models() == ["solo"]
-
-
-def test_vibe_keeps_an_entry_that_has_only_a_name(monkeypatch, tmp_path):
-    write_vibe_config(monkeypatch, tmp_path, '[[models]]\nname = "solo"\n')
-    assert get_harness("vibe").discover_models() == ["solo"]
-
-
-def test_vibe_with_no_config_file_cannot_be_asked(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+@pytest.mark.parametrize(
+    "config",
+    [
+        None,
+        # A vibe release could ship anything here; it must not crash Theater.
+        "[[models\n",
+        '[ui]\ntheme = "dark"\n',
+    ],
+    ids=["no_config_file", "broken_config", "no_models_table"],
+)
+def test_vibe_without_a_usable_config_cannot_be_asked(monkeypatch, tmp_path, config):
+    if config is None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    else:
+        write_vibe_config(monkeypatch, tmp_path, config)
     with pytest.raises(NotImplementedError):
         get_harness("vibe").discover_models()
-
-
-def test_vibe_with_a_broken_config_cannot_be_asked(monkeypatch, tmp_path):
-    """A vibe release could ship anything here; it must not crash Theater."""
-    write_vibe_config(monkeypatch, tmp_path, "[[models\n")
-    with pytest.raises(NotImplementedError):
-        get_harness("vibe").discover_models()
-
-
-def test_vibe_with_no_models_table_cannot_be_asked(monkeypatch, tmp_path):
-    write_vibe_config(monkeypatch, tmp_path, '[ui]\ntheme = "dark"\n')
-    with pytest.raises(NotImplementedError):
-        get_harness("vibe").discover_models()
-
-
-def test_vibe_skips_an_entry_that_names_nothing(monkeypatch, tmp_path):
-    """Shape drift degrades to "found nothing", never to a wrong name."""
-    write_vibe_config(monkeypatch, tmp_path, '[[models]]\nprovider = "acme"\n')
-    assert get_harness("vibe").discover_models() == []

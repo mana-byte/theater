@@ -18,10 +18,8 @@ from theater.harness.source import History
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
 
-vibe_tree = shared_vibe_tree  # the shared fixture, under the name the tests ask for
-collision_registry = (
-    shared_collision_registry  # the shared fixture, under the name the tests ask for
-)
+vibe_tree = shared_vibe_tree  # the shared fixture
+collision_registry = shared_collision_registry  # the shared fixture
 
 
 async def test_restored_heuristic_location_is_rejudged_after_restart(collision_registry, vibe_tree):

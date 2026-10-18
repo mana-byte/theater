@@ -17,7 +17,7 @@ from theater.harness.builtin.plugins.opencode.mcp import plugin_path
 from theater.harness.manifests.compiler import ManifestHarnessObserver
 from theater.models import BadRequest, Participant
 
-rec = shared_rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture
 
 
 @pytest.fixture

@@ -6,8 +6,8 @@ from tests.support.transcript_source_rig import record, source, transcript
 from tests.support.transcript_source_rig import root as shared_root
 from tests.support.transcript_source_rig import workdir as shared_workdir
 
-root = shared_root  # the shared fixture, under the name the tests ask for
-workdir = shared_workdir  # the shared fixture, under the name the tests ask for
+root = shared_root  # the shared fixture
+workdir = shared_workdir  # the shared fixture
 
 
 async def test_attachment_carries_stream_point_with_dev_ino(root, workdir):

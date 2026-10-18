@@ -23,13 +23,9 @@ from theater.harness.source import History
 from theater.models import BadRequest, Status, TranscriptIdentityLost
 from theater.provenance import TranscriptProvenance
 
-vibe_tree = shared_vibe_tree  # the shared fixture, under the name the tests ask for
-collision_registry = (
-    shared_collision_registry  # the shared fixture, under the name the tests ask for
-)
-collision_observer = (
-    shared_collision_observer  # the shared fixture, under the name the tests ask for
-)
+vibe_tree = shared_vibe_tree  # the shared fixture
+collision_registry = shared_collision_registry  # the shared fixture
+collision_observer = shared_collision_observer  # the shared fixture
 
 
 async def test_two_siblings_same_cwd_do_not_share_transcript(

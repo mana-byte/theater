@@ -341,21 +341,6 @@ def test_empty_prompt_yields_no_positional(tmp_path):
     assert all(argument.startswith("-") for argument in plan.argv[1:])
 
 
-@pytest.mark.parametrize(
-    "approval,expected",
-    [("yolo", "--yolo"), ("edits", "accept-edits")],
-)
-def test_vibe_approval_modes(tmp_path, approval, expected):
-    plan = plan_launch(
-        "vibe",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval=approval,
-    )
-    assert expected in plan.argv
-
-
 def test_model_reaches_every_harness_by_its_own_lever(tmp_path, available_harness_binaries):
     """Three CLIs take a flag, one takes an environment variable.
 

@@ -479,7 +479,7 @@ def test_source_rejects_a_mismatched_exact_location(tmp_path):
         source.admit_exact_location(location="other://ses-one", session_id="ses-one")
 
 
-rec = shared_rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture
 
 
 def test_generic_receipts_disambiguate_concurrent_sessions_in_the_same_cwd(rec, workdir):

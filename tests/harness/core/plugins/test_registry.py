@@ -14,7 +14,7 @@ from theater import harness as harness_registry
 from theater.harness.loading.discovery import MANIFEST_FILENAME
 from theater.harness.loading.models import PluginError
 
-local_dir = shared_local_dir  # the shared fixture, under the name the tests ask for
+local_dir = shared_local_dir  # the shared fixture
 
 
 @pytest.fixture
@@ -75,37 +75,27 @@ def test_installing_an_empty_directory_drops_the_plugin(local_dir, tmp_path):
     assert "acme" not in harness_registry.HARNESSES
 
 
-def test_a_broken_local_plugin_does_not_stop_start_up(local_dir):
+@pytest.mark.parametrize(
+    "body", ["raise ValueError('boom')", "import sys; sys.exit(1)"], ids=["raises", "sys_exit"]
+)
+def test_a_broken_local_plugin_does_not_stop_start_up(local_dir, body):
     pkg = local_dir / "broken"
     pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
+    (pkg / MANIFEST_FILENAME).write_text(body)
     write_plugin(local_dir)
     assert install(local_dir) == ["acme", "claude", "codex", "opencode", "pi", "vibe"]
 
 
-def test_a_broken_shipped_plugin_is_fatal(local_dir, shipped_dir):
-    pkg = shipped_dir / "acme"
-    pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
-    with pytest.raises(PluginError, match=r"acme"):
-        install(local_dir, shipped_dir=shipped_dir)
-
-
-def test_a_broken_shipped_plugin_names_the_escape_hatch(local_dir, shipped_dir):
+@pytest.mark.parametrize(
+    "fragment", ["acme", 'disabled = ["acme"]'], ids=["names_it", "names_the_escape_hatch"]
+)
+def test_a_broken_shipped_plugin_is_fatal(local_dir, shipped_dir, fragment):
     pkg = shipped_dir / "acme"
     pkg.mkdir()
     (pkg / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
     with pytest.raises(PluginError) as exc:
         install(local_dir, shipped_dir=shipped_dir)
-    assert 'disabled = ["acme"]' in str(exc.value)
-
-
-def test_a_local_manifest_that_calls_sys_exit_does_not_stop_start_up(local_dir):
-    pkg = local_dir / "quitter"
-    pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("import sys; sys.exit(1)")
-    write_plugin(local_dir)
-    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "pi", "vibe"]
+    assert fragment in str(exc.value)
 
 
 def test_disabling_a_plugin_stops_it_being_imported(local_dir, shipped_dir):
@@ -137,37 +127,42 @@ def test_a_plugin_alias_normalizes(local_dir):
     assert harness_registry.normalize("acme-cli") == "acme"
 
 
-def test_a_plugin_alias_cannot_shadow_another_harness(local_dir):
-    write_plugin(local_dir, aliases='("mistral-vibe",)')
-    with pytest.raises(harness_registry.ConfigError, match="already resolves"):
-        install(local_dir)
-
-
-def test_a_plugin_alias_cannot_be_another_harness_name(local_dir):
-    write_plugin(local_dir, aliases='("claude",)')
-    with pytest.raises(harness_registry.ConfigError, match="name of another"):
-        install(local_dir)
-
-
-def test_a_plugin_name_cannot_shadow_an_existing_alias(local_dir, shipped_dir):
-    write_plugin(shipped_dir, name="vibe", binary="vibe", aliases='("mistral-vibe",)')
-    write_plugin(local_dir, name="mistral-vibe", binary="mv")
-    with pytest.raises(harness_registry.ConfigError, match="already an alias of"):
-        install(local_dir, shipped_dir=shipped_dir)
-
-
-def test_a_plugin_alias_cannot_shadow_an_existing_name(local_dir, shipped_dir):
-    write_plugin(shipped_dir, name="mistral-vibe", binary="mv")
-    write_plugin(local_dir, name="vibe", binary="vibe", aliases='("mistral-vibe",)')
-    with pytest.raises(harness_registry.ConfigError, match="name of another"):
-        install(local_dir, shipped_dir=shipped_dir)
-
-
-def test_two_plugins_cannot_claim_the_same_binary(local_dir, shipped_dir):
-    write_plugin(shipped_dir, name="first", binary="nova")
-    write_plugin(local_dir, name="second", binary="nova")
-    with pytest.raises(harness_registry.ConfigError, match="already claimed by"):
-        install(local_dir, shipped_dir=shipped_dir)
+@pytest.mark.parametrize(
+    ("shipped", "local", "match"),
+    [
+        pytest.param(
+            [],
+            [{"aliases": '("mistral-vibe",)'}],
+            "already resolves",
+            id="alias_cannot_shadow_another_harness",
+        ),
+        pytest.param(
+            [], [{"aliases": '("claude",)'}], "name of another", id="alias_cannot_be_a_harness_name"
+        ),
+        pytest.param(
+            [{"name": "vibe", "binary": "vibe", "aliases": '("mistral-vibe",)'}],
+            [{"name": "mistral-vibe", "binary": "mv"}],
+            "already an alias of",
+            id="name_cannot_shadow_an_alias",
+        ),
+        pytest.param(
+            [{"name": "mistral-vibe", "binary": "mv"}],
+            [{"name": "vibe", "binary": "vibe", "aliases": '("mistral-vibe",)'}],
+            "name of another",
+            id="alias_cannot_shadow_a_name",
+        ),
+    ],
+)
+def test_a_plugin_cannot_shadow_another_name_or_alias(
+    local_dir, shipped_dir, shipped, local, match
+):
+    for spec in shipped:
+        write_plugin(shipped_dir, **spec)
+    for spec in local:
+        write_plugin(local_dir, **spec)
+    kwargs = {"shipped_dir": shipped_dir} if shipped else {}
+    with pytest.raises(harness_registry.ConfigError, match=match):
+        install(local_dir, **kwargs)
 
 
 def test_two_plugins_cannot_claim_the_same_extra_binary(local_dir, shipped_dir):
@@ -199,31 +194,26 @@ def test_a_local_override_releases_the_shipped_binary_claims(local_dir, shipped_
 def test_binary_collision_error_names_both_files(local_dir, shipped_dir):
     write_plugin(shipped_dir, name="first", binary="nova")
     write_plugin(local_dir, name="second", binary="nova")
-    with pytest.raises(harness_registry.ConfigError) as exc:
+    with pytest.raises(harness_registry.ConfigError, match="already claimed by") as exc:
         install(local_dir, shipped_dir=shipped_dir)
     msg = str(exc.value)
     assert "second" in msg
     assert "first" in msg
 
 
-def test_two_long_binaries_sharing_first_15_chars_are_refused(local_dir, shipped_dir):
-    write_plugin(shipped_dir, name="first", binary="very-long-binary")
-    write_plugin(local_dir, name="second", binary="very-long-binary2")
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("very-long-binary", "very-long-binary2"), ("exactly15chars", "exactly15chars2")],
+    ids=["shared_first_15_chars", "exact_15_chars_against_the_truncated_form"],
+)
+def test_binaries_sharing_an_observation_key_are_refused(local_dir, shipped_dir, first, second):
+    write_plugin(shipped_dir, name="first", binary=first)
+    write_plugin(local_dir, name="second", binary=second)
     with pytest.raises(harness_registry.ConfigError) as exc:
         install(local_dir, shipped_dir=shipped_dir)
     msg = str(exc.value)
     assert "observation key" in msg
-    assert "very-long-binary" in msg
-
-
-def test_exact_15_char_binary_collides_with_truncated_form(local_dir, shipped_dir):
-    write_plugin(shipped_dir, name="first", binary="exactly15chars")
-    write_plugin(local_dir, name="second", binary="exactly15chars2")
-    with pytest.raises(harness_registry.ConfigError) as exc:
-        install(local_dir, shipped_dir=shipped_dir)
-    msg = str(exc.value)
-    assert "observation key" in msg
-    assert "exactly15chars" in msg
+    assert first in msg
 
 
 def test_two_truncated_spellings_of_same_harness_are_accepted(local_dir, shipped_dir):

@@ -9,7 +9,7 @@ from tests.support.opencode_storage import a_turn_with_a_tool, drain, source_for
 from theater.harness import EventKind, TurnTerminal
 from theater.harness.builtin.plugins.opencode.constants import HISTORY_MESSAGE_BATCH
 
-rec = shared_rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture
 
 
 def test_history_rebuilds_the_conversation_from_stored_state(rec, workdir):

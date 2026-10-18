@@ -128,31 +128,33 @@ def test_harness_base_class_runtime_annotation_defaults_none() -> None:
     assert Harness.runtime is None
 
 
-def test_runtime_must_be_runtime_manifest() -> None:
-    with pytest.raises(ManifestValidationError, match=r"manifest 'acme'\.runtime"):
-        compile_manifest("acme", _base_manifest(runtime=object()))
-
-
-def test_runtime_probe_must_be_callable() -> None:
-    runtime = RuntimeManifest(
-        probe=None,  # type: ignore[arg-type]
-        plan=fake_runtime_manifest().plan,
-        factory=fake_runtime_manifest().factory,
-        channel=_live_channel(),
+def _invalid_runtime(kind: str) -> object:
+    if kind == "not_a_runtime_manifest":
+        return object()
+    base = fake_runtime_manifest()
+    return RuntimeManifest(
+        probe=None if kind == "probe_not_callable" else base.probe,  # type: ignore[arg-type]
+        plan=base.plan,
+        factory=base.factory,
+        channel=(
+            ChannelDeclaration(id="live", kind=ChannelKind.LIVE)  # type: ignore[arg-type]
+            if kind == "channel_not_a_live_declaration"
+            else _live_channel()
+        ),
     )
-    with pytest.raises(ManifestValidationError, match=r"runtime\.probe"):
-        compile_manifest("acme", _base_manifest(runtime=runtime))
 
 
-def test_runtime_channel_must_be_live_channel_declaration() -> None:
-    runtime = RuntimeManifest(
-        probe=fake_runtime_manifest().probe,
-        plan=fake_runtime_manifest().plan,
-        factory=fake_runtime_manifest().factory,
-        channel=ChannelDeclaration(id="live", kind=ChannelKind.LIVE),  # type: ignore[arg-type]
-    )
-    with pytest.raises(ManifestValidationError, match=r"runtime\.channel"):
-        compile_manifest("acme", _base_manifest(runtime=runtime))
+@pytest.mark.parametrize(
+    ("kind", "match"),
+    [
+        pytest.param("not_a_runtime_manifest", r"manifest 'acme'\.runtime", id="runtime_type"),
+        pytest.param("probe_not_callable", r"runtime\.probe", id="probe_callable"),
+        pytest.param("channel_not_a_live_declaration", r"runtime\.channel", id="live_channel"),
+    ],
+)
+def test_runtime_manifest_is_validated(kind: str, match: str) -> None:
+    with pytest.raises(ManifestValidationError, match=match):
+        compile_manifest("acme", _base_manifest(runtime=_invalid_runtime(kind)))
 
 
 def test_runtime_channel_id_may_not_duplicate_observation_channel() -> None:

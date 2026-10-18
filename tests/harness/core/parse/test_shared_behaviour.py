@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+from tests.support.parse_rig import events_for
+from tests.support.paths import FIXTURES
 from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from theater.harness import EventKind
 from theater.harness.base import MAX_TEXT, Event
@@ -17,6 +19,32 @@ def test_event_positional_constructor_keeps_tool_name_position():
     assert event.text == "calling"
     assert event.tool_name == "Read"
     assert event.raw_text is None
+
+
+@pytest.mark.parametrize(
+    ("observer", "fixture", "first_ts"),
+    [
+        pytest.param(ClaudeCodeObserver(), "claude_code.jsonl", 1782325575.348, id="claude"),
+        pytest.param(CodexObserver(), "codex.jsonl", 1786534852.2, id="codex"),
+    ],
+)
+def test_records_carry_their_own_timestamp(observer, fixture, first_ts):
+    events = events_for(observer, FIXTURES / fixture)
+    assert all(e.ts is not None for e in events)
+    # ISO-8601 with a Z suffix, parsed as UTC rather than local time.
+    assert events[0].ts == pytest.approx(first_ts, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    ("observer", "fixture", "raw_indexes"),
+    [
+        pytest.param(ClaudeCodeObserver(), "claude_code.jsonl", [0, 1, 2, 3, 4, 5, 6], id="claude"),
+        pytest.param(CodexObserver(), "codex.jsonl", [2, 3, 4, 5, 7, 10], id="codex"),
+    ],
+)
+def test_raw_index_tracks_the_source_record(observer, fixture, raw_indexes):
+    events = events_for(observer, FIXTURES / fixture)
+    assert [e.raw_index for e in events] == raw_indexes
 
 
 @pytest.mark.parametrize("observer", [ClaudeCodeObserver(), CodexObserver()])

@@ -26,10 +26,8 @@ from theater.daemon.rpc import transcripts as transcripts_mod
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.models import Status
 
-vibe_tree = shared_vibe_tree  # the shared fixture, under the name the tests ask for
-collision_registry = (
-    shared_collision_registry  # the shared fixture, under the name the tests ask for
-)
+vibe_tree = shared_vibe_tree  # the shared fixture
+collision_registry = shared_collision_registry  # the shared fixture
 
 
 def _make_claude_transcript(root: Path, sid: str, cwd: str, *, text: str) -> Path:

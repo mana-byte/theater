@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from tests.support.parse_rig import events_for, read_screen
 from tests.support.paths import FIXTURES
 from tests.support.shipped import CodexObserver
@@ -30,18 +28,6 @@ def test_codex_turn_parses_to_the_expected_event_sequence():
     assert events[2].tool_name == "exec"
     assert events[-1].turn_end is True
     assert [e.turn_end for e in events[:-1]] == [False] * 5
-
-
-def test_codex_raw_index_tracks_the_source_record():
-    events = events_for(CodexObserver(), FIXTURES / "codex.jsonl")
-    assert [e.raw_index for e in events] == [2, 3, 4, 5, 7, 10]
-
-
-def test_codex_records_carry_their_own_timestamp():
-    events = events_for(CodexObserver(), FIXTURES / "codex.jsonl")
-    assert all(e.ts is not None for e in events)
-    # ISO-8601 with a Z suffix, parsed as UTC rather than local time.
-    assert events[0].ts == pytest.approx(1786534852.2, abs=0.01)
 
 
 def test_codex_usage_is_normalized_and_stably_keyed():

@@ -14,8 +14,8 @@ from theater.transcript_identity import (
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
-root = shared_root  # the shared fixture, under the name the tests ask for
-workdir = shared_workdir  # the shared fixture, under the name the tests ask for
+root = shared_root  # the shared fixture
+workdir = shared_workdir  # the shared fixture
 
 
 async def test_waiting_until_the_agent_writes_its_first_record(root, workdir):

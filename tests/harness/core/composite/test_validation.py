@@ -45,18 +45,18 @@ def test_enrichment_source_must_implement_source() -> None:
         )
 
 
-def test_duplicate_channel_ids_rejected() -> None:
-    primary = ControlledSource()
-    binding = EnrichmentBinding(source=ControlledSource(), declaration=decl("primary"))
-    with pytest.raises(CompositeSourceError, match="duplicates channel id"):
-        CompositeSource(primary=primary, enrichments=[binding])
-
-
-def test_duplicate_enrichment_ids_rejected() -> None:
-    b1 = EnrichmentBinding(source=ControlledSource(), declaration=decl("same"))
-    b2 = EnrichmentBinding(source=ControlledSource(), declaration=decl("same"))
-    with pytest.raises(CompositeSourceError, match="duplicates"):
-        CompositeSource(enrichments=[b1, b2])
+@pytest.mark.parametrize(
+    ("with_primary", "ids", "match"),
+    [
+        pytest.param(True, ["primary"], "duplicates channel id", id="enrichment_reuses_primary_id"),
+        pytest.param(False, ["same", "same"], "duplicates", id="two_enrichments_share_an_id"),
+    ],
+)
+def test_duplicate_channel_ids_rejected(with_primary: bool, ids: list[str], match: str) -> None:
+    bindings = [EnrichmentBinding(source=ControlledSource(), declaration=decl(i)) for i in ids]
+    primary = ControlledSource() if with_primary else None
+    with pytest.raises(CompositeSourceError, match=match):
+        CompositeSource(primary=primary, enrichments=bindings)
 
 
 def test_durable_enrichment_rejected() -> None:
@@ -79,28 +79,29 @@ def test_invalid_enrichment_timeout_rejected(bad_timeout: object) -> None:
         CompositeSource(enrichment_timeout=bad_timeout)  # type: ignore[arg-type]
 
 
-def test_enrichment_primary_ownership_rejected() -> None:
-    cap = ChannelCapability(SignalKind.CONTENT, SignalOwnership.PRIMARY)
+@pytest.mark.parametrize(
+    ("signal", "channel", "fragments"),
+    [
+        pytest.param(SignalKind.CONTENT, "hook", ["primary ownership"], id="rejected"),
+        pytest.param(
+            SignalKind.TIMING,
+            "otel",
+            ["enrichments[0]", "otel", "timing"],
+            id="message_names_index_channel_signal",
+        ),
+    ],
+)
+def test_enrichment_primary_ownership_rejected(
+    signal: SignalKind, channel: str, fragments: list[str]
+) -> None:
+    cap = ChannelCapability(signal, SignalOwnership.PRIMARY)
     binding = EnrichmentBinding(
         source=ControlledSource(),
-        declaration=decl("hook", capabilities=(cap,)),
-    )
-    with pytest.raises(CompositeSourceError, match="primary ownership"):
-        CompositeSource(enrichments=[binding])
-
-
-def test_enrichment_primary_ownership_message_names_index_channel_signal() -> None:
-    cap = ChannelCapability(SignalKind.TIMING, SignalOwnership.PRIMARY)
-    binding = EnrichmentBinding(
-        source=ControlledSource(),
-        declaration=decl("otel", capabilities=(cap,)),
+        declaration=decl(channel, capabilities=(cap,)),
     )
     with pytest.raises(CompositeSourceError) as exc:
         CompositeSource(enrichments=[binding])
-    msg = str(exc.value)
-    assert "enrichments[0]" in msg
-    assert "otel" in msg
-    assert "timing" in msg
+    assert all(fragment in str(exc.value) for fragment in fragments)
 
 
 def test_duplicate_fallback_for_same_signal_rejected() -> None:
@@ -114,22 +115,7 @@ def test_duplicate_fallback_for_same_signal_rejected() -> None:
         source=ControlledSource(),
         declaration=decl("otel", capabilities=(cap_b,)),
     )
-    with pytest.raises(CompositeSourceError, match="ambiguous fallback"):
-        CompositeSource(enrichments=[a, b])
-
-
-def test_duplicate_fallback_message_names_both_channels_and_signal() -> None:
-    cap_a = ChannelCapability(SignalKind.CONTENT, SignalOwnership.FALLBACK)
-    cap_b = ChannelCapability(SignalKind.CONTENT, SignalOwnership.FALLBACK)
-    a = EnrichmentBinding(
-        source=ControlledSource(),
-        declaration=decl("hook", capabilities=(cap_a,)),
-    )
-    b = EnrichmentBinding(
-        source=ControlledSource(),
-        declaration=decl("otel", capabilities=(cap_b,)),
-    )
-    with pytest.raises(CompositeSourceError) as exc:
+    with pytest.raises(CompositeSourceError, match="ambiguous fallback") as exc:
         CompositeSource(enrichments=[a, b])
     msg = str(exc.value)
     assert "hook" in msg
@@ -137,41 +123,26 @@ def test_duplicate_fallback_message_names_both_channels_and_signal() -> None:
     assert "content" in msg
 
 
-def test_single_fallback_accepted() -> None:
-    cap = ChannelCapability(SignalKind.CONTENT, SignalOwnership.FALLBACK)
-    binding = EnrichmentBinding(
-        source=ControlledSource(),
-        declaration=decl("hook", capabilities=(cap,)),
-    )
-    composite = CompositeSource(enrichments=[binding])
-    assert composite is not None
-
-
-def test_overlapping_enrichment_ownership_accepted() -> None:
-    cap_a = ChannelCapability(SignalKind.CONTENT, SignalOwnership.ENRICHMENT)
-    cap_b = ChannelCapability(SignalKind.CONTENT, SignalOwnership.ENRICHMENT)
-    a = EnrichmentBinding(
-        source=ControlledSource(),
-        declaration=decl("hook", capabilities=(cap_a,)),
-    )
-    b = EnrichmentBinding(
-        source=ControlledSource(),
-        declaration=decl("otel", capabilities=(cap_b,)),
-    )
-    composite = CompositeSource(enrichments=[a, b])
-    assert composite is not None
-
-
-def test_mixed_enrichment_and_single_fallback_accepted() -> None:
-    cap_a = ChannelCapability(SignalKind.CONTENT, SignalOwnership.ENRICHMENT)
-    cap_b = ChannelCapability(SignalKind.CONTENT, SignalOwnership.FALLBACK)
-    a = EnrichmentBinding(
-        source=ControlledSource(),
-        declaration=decl("hook", capabilities=(cap_a,)),
-    )
-    b = EnrichmentBinding(
-        source=ControlledSource(),
-        declaration=decl("otel", capabilities=(cap_b,)),
-    )
-    composite = CompositeSource(enrichments=[a, b])
-    assert composite is not None
+@pytest.mark.parametrize(
+    "ownerships",
+    [
+        pytest.param([SignalOwnership.FALLBACK], id="single_fallback"),
+        pytest.param(
+            [SignalOwnership.ENRICHMENT, SignalOwnership.ENRICHMENT], id="overlapping_enrichment"
+        ),
+        pytest.param(
+            [SignalOwnership.ENRICHMENT, SignalOwnership.FALLBACK], id="enrichment_and_one_fallback"
+        ),
+    ],
+)
+def test_valid_signal_ownership_is_accepted(ownerships: list[SignalOwnership]) -> None:
+    bindings = [
+        EnrichmentBinding(
+            source=ControlledSource(),
+            declaration=decl(
+                name, capabilities=(ChannelCapability(SignalKind.CONTENT, ownership),)
+            ),
+        )
+        for name, ownership in zip(("hook", "otel"), ownerships, strict=False)
+    ]
+    assert CompositeSource(enrichments=bindings) is not None

@@ -252,72 +252,47 @@ def test_stage_receipt_source_canonicalises_binding_key(registry: Registry, tmp_
     assert raw not in observer._binding_correlation
 
 
-def test_stage_receipt_source_rejects_none(registry: Registry, tmp_path):
-    """A source returning None from admission raises SourceContractError."""
+@pytest.mark.parametrize("admit_result", [None, "bogus"], ids=["none", "bogus_string"])
+def test_stage_receipt_source_rejects_a_contract_violating_admission(
+    registry: Registry, tmp_path, admit_result
+):
+    """The error names the source class and method and tells a plugin author what to return."""
     observer = _make_observer(registry)
     p = _register_participant(registry, pid="p1")
     f = tmp_path / "t.jsonl"
     f.write_text("[]")
-    source = _FakeSource(admit_result=None, known_location=str(f))  # type: ignore[arg-type]
+    source = _FakeSource(admit_result=admit_result, known_location=str(f))  # type: ignore[arg-type]
     observer._register_source(p.id, source)
 
-    with pytest.raises(SourceContractError, match="admit_exact_location"):
+    with pytest.raises(SourceContractError, match="admit_exact_location") as exc_info:
         observer._stage_receipt_source(p.id, source, location=str(f), session_id="sess-1")
 
+    msg = str(exc_info.value)
+    assert "_FakeSource" in msg
+    assert "accepted" in msg
+    assert "staged" in msg
     assert not observer._bound_transcripts
     assert not observer._binding_correlation
     assert not observer._binding_sessions
 
 
-def test_stage_receipt_source_rejects_bogus_string(registry: Registry, tmp_path):
-    """A source returning an unknown admission raises SourceContractError."""
-    observer = _make_observer(registry)
-    p = _register_participant(registry, pid="p1")
-    f = tmp_path / "t.jsonl"
-    f.write_text("[]")
-    source = _FakeSource(admit_result="bogus", known_location=str(f))  # type: ignore[arg-type]
-    observer._register_source(p.id, source)
-
-    with pytest.raises(SourceContractError, match="admit_exact_location"):
-        observer._stage_receipt_source(p.id, source, location=str(f), session_id="sess-1")
-
-    assert not observer._bound_transcripts
-    assert not observer._binding_correlation
-
-
-def test_stage_receipt_source_error_message_names_source_and_method(registry: Registry, tmp_path):
-    """The error message must name the source class and the method, and tell
-    a plugin author what to return instead.
-    """
-    observer = _make_observer(registry)
-    p = _register_participant(registry, pid="p1")
-    f = tmp_path / "t.jsonl"
-    f.write_text("[]")
-    source = _FakeSource(admit_result=None, known_location=str(f))  # type: ignore[arg-type]
-    observer._register_source(p.id, source)
-
-    with pytest.raises(SourceContractError) as exc_info:
-        observer._stage_receipt_source(p.id, source, location=str(f), session_id="sess-1")
-
-    msg = str(exc_info.value)
-    assert "_FakeSource" in msg
-    assert "admit_exact_location" in msg
-    assert "accepted" in msg
-    assert "staged" in msg
-
-
-def test_alias_converges_on_reconnect(registry: Registry):
-    """A claimed-id reconnect rewrites a stored alias to canonical form."""
+@pytest.mark.parametrize(
+    ("incoming", "session_id"),
+    [("claude", "sess-1-updated"), ("claude-code", "sess-1")],
+    ids=["canonical_incoming", "alias_incoming"],
+)
+def test_alias_converges_on_reconnect(registry: Registry, incoming, session_id):
+    """A claimed-id reconnect rewrites a stored alias to canonical form, whatever it is spelled."""
     p = alias_predecessor(
         registry, alias="claude-code", canonical="claude", session_id="sess-1", live=True
     )
     assert registry.store.get_participant(p.id).harness == "claude-code"
 
     registry.register(
-        harness="claude",
+        harness=incoming,
         pane=None,
         cwd="/tmp",
-        session_id="sess-1-updated",
+        session_id=session_id,
         claimed_id=p.id,
     )
 
@@ -325,22 +300,6 @@ def test_alias_converges_on_reconnect(registry: Registry):
     assert stored.harness == "claude", (
         f"alias did not converge on reconnect; stored harness is {stored.harness!r}"
     )
-
-
-def test_alias_converges_even_when_incoming_is_alias(registry: Registry):
-    """A reconnect with an alias spelling still converges to canonical form."""
-    p = alias_predecessor(
-        registry, alias="claude-code", canonical="claude", session_id="sess-1", live=True
-    )
-    registry.register(
-        harness="claude-code",
-        pane=None,
-        cwd="/tmp",
-        session_id="sess-1",
-        claimed_id=p.id,
-    )
-    stored = registry.store.get_participant(p.id)
-    assert stored.harness == "claude"
 
 
 def test_observer_has_cwd_competitor_finds_alias_peer(registry: Registry):
@@ -538,11 +497,11 @@ async def test_register_source_contract_error_logs_retirement(registry: Registry
     assert source.closed
 
 
-def test_different_harness_does_not_overwrite(registry: Registry):
-    """A different harness cannot overwrite the stored harness on reconnect."""
+@pytest.mark.parametrize("incoming", ["codex", "typo-harness"], ids=["different", "unknown"])
+def test_another_harness_does_not_overwrite_the_stored_one(registry: Registry, incoming):
     p = registry.register(harness="claude", pane=None, cwd="/tmp", session_id="sess-1")
     registry.register(
-        harness="codex",
+        harness=incoming,
         pane=None,
         cwd="/tmp",
         session_id="sess-1",
@@ -550,22 +509,8 @@ def test_different_harness_does_not_overwrite(registry: Registry):
     )
     stored = registry.store.get_participant(p.id)
     assert stored.harness == "claude", (
-        f"different harness overwrote the row; got {stored.harness!r}"
+        f"{incoming} harness overwrote the row; got {stored.harness!r}"
     )
-
-
-def test_unknown_harness_does_not_overwrite(registry: Registry):
-    """An unknown harness cannot overwrite the stored harness on reconnect."""
-    p = registry.register(harness="claude", pane=None, cwd="/tmp", session_id="sess-1")
-    registry.register(
-        harness="typo-harness",
-        pane=None,
-        cwd="/tmp",
-        session_id="sess-1",
-        claimed_id=p.id,
-    )
-    stored = registry.store.get_participant(p.id)
-    assert stored.harness == "claude"
 
 
 def test_confirm_identity_loss_counts_path_alias_as_same(registry: Registry, tmp_path):
@@ -625,93 +570,68 @@ def test_on_attach_converges_non_canonical_stored_location(registry: Registry, t
     )
 
 
-def test_is_opaque_location_recognises_rfc3986_schemes():
-    assert is_opaque_location("opencode://ses-abc")
-    assert is_opaque_location("nova://abc123")
-    assert is_opaque_location("file:///tmp/transcript.jsonl")
-    assert is_opaque_location("a+b-c.1://session")
+@pytest.mark.parametrize(
+    ("location", "opaque"),
+    [
+        pytest.param("opencode://ses-abc", True, id="opencode_scheme"),
+        pytest.param("nova://abc123", True, id="custom_scheme"),
+        pytest.param("file:///tmp/transcript.jsonl", True, id="file_scheme"),
+        pytest.param("a+b-c.1://session", True, id="rfc3986_scheme_characters"),
+        pytest.param("/tmp/transcript.jsonl", False, id="absolute_path"),
+        pytest.param("relative/transcript.jsonl", False, id="relative_path"),
+        pytest.param("transcript.jsonl", False, id="bare_filename"),
+        # A colon without `://` is still a path, e.g. a tmpdir whose name contains a colon.
+        pytest.param("/tmp/weird:name.jsonl", False, id="path_with_colon"),
+        pytest.param("opencode:/ses-abc", False, id="scheme_with_single_slash"),
+        pytest.param("mailto:foo@bar", False, id="scheme_without_slashes"),
+        pytest.param("nova:abc123", False, id="scheme_without_double_slash"),
+        pytest.param("1abc://session", False, id="scheme_must_start_with_a_letter"),
+        # `a://b` is a legal relative path (directory `a:` holding `b`) that the scheme rule
+        # treats as opaque: the accepted collision documented at `_OPAQUE_SCHEME_RE`.
+        pytest.param("a://b", True, id="accepted_colon_directory_false_positive"),
+    ],
+)
+def test_is_opaque_location(location, opaque):
+    assert is_opaque_location(location) is opaque
 
 
-def test_is_opaque_location_rejects_path_shaped_locations():
-    assert not is_opaque_location("/tmp/transcript.jsonl")
-    assert not is_opaque_location("relative/transcript.jsonl")
-    assert not is_opaque_location("transcript.jsonl")
-    # A path with a colon but no ``://`` is still a path — e.g. a tmpdir
-    # whose name contains a colon on a system that allows it.
-    assert not is_opaque_location("/tmp/weird:name.jsonl")
+# core interprets no scheme, `file://` included; file-URI support belongs to the adapter.
+@pytest.mark.parametrize(
+    "location",
+    ["nova://abc123", "opencode://ses-xyz", "file:///tmp/transcript.jsonl"],
+    ids=["custom_scheme", "opencode_scheme", "file_scheme"],
+)
+def test_canonical_location_returns_opaque_verbatim(location):
+    assert canonical_location(location) == location
 
 
-def test_is_opaque_location_rejects_scheme_without_double_slash():
-    assert not is_opaque_location("opencode:/ses-abc")
-    assert not is_opaque_location("mailto:foo@bar")
-    assert not is_opaque_location("nova:abc123")
-
-
-def test_is_opaque_location_rejects_scheme_starting_with_digit():
-    # RFC 3986: scheme must begin with a letter.
-    assert not is_opaque_location("1abc://session")
-
-
-def test_is_opaque_location_colon_suffixed_relative_path_is_accepted_false_positive():
-    # ``a://b`` is a legal relative POSIX path (a directory called ``a:``
-    # containing ``b``), but the scheme-detection rule treats it as opaque.
-    # This is the accepted collision documented in ``_OPAQUE_SCHEME_RE``'s
-    # comment — pinning it here so it is a deliberate decision, not a surprise.
-    assert is_opaque_location("a://b")
-
-
-def test_canonical_location_returns_opaque_verbatim():
-    assert canonical_location("nova://abc123") == "nova://abc123"
-    assert canonical_location("opencode://ses-xyz") == "opencode://ses-xyz"
-
-
-def test_canonical_location_resolves_path(tmp_path):
-    f = tmp_path / "transcript.jsonl"
+@pytest.mark.parametrize(
+    "name", ["transcript.jsonl", "weird:name.jsonl"], ids=["plain", "colon_in_path_segment"]
+)
+def test_canonical_location_resolves_path(tmp_path, name):
+    f = tmp_path / name
     f.write_text("[]")
-    resolved = canonical_location(str(f))
-    assert resolved == str(f.resolve())
+    assert canonical_location(str(f)) == str(f.resolve())
 
 
-def test_canonical_location_path_with_colon_not_treated_as_opaque(tmp_path):
-    # A colon in a path segment must not trigger the opaque shortcut.
-    f = tmp_path / "weird:name.jsonl"
-    f.write_text("[]")
-    resolved = canonical_location(str(f))
-    assert resolved == str(f.resolve())
-
-
-def test_canonical_location_file_scheme_is_opaque_verbatim():
-    # file:// names a file but is deliberately opaque — core interprets no
-    # scheme. If file-URI support is ever wanted, conversion happens in the
-    # adapter, not here.
-    assert canonical_location("file:///tmp/transcript.jsonl") == "file:///tmp/transcript.jsonl"
-
-
-def test_same_location_opaque_matches_itself():
-    assert same_location("nova://abc123", "nova://abc123")
-
-
-def test_same_location_opaque_does_not_match_different_session():
-    assert not same_location("nova://abc123", "nova://def456")
-
-
-def test_same_location_opaque_does_not_match_path():
-    assert not same_location("nova://abc123", "/tmp/transcript.jsonl")
-    assert not same_location("/tmp/transcript.jsonl", "nova://abc123")
-
-
-def test_same_location_file_scheme_does_not_match_equivalent_path():
-    # file:// is deliberately opaque like any other scheme; core interprets no
-    # scheme, so a file URI and the path it names are different locations.
-    # This is the assertion that blocks the tempting special-case.
-    assert not same_location("file:///tmp/x.jsonl", "/tmp/x.jsonl")
-    assert not same_location("/tmp/x.jsonl", "file:///tmp/x.jsonl")
-
-
-def test_same_location_opencode_regression_guard():
-    # opencode:// must keep working exactly as before.
-    assert same_location("opencode://ses-1", "opencode://ses-1")
-    assert not same_location("opencode://ses-1", "opencode://ses-2")
+# `file://` is opaque like any scheme, so a file URI and the path it names are different locations.
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [
+        pytest.param("nova://abc123", "nova://abc123", True, id="opaque_matches_itself"),
+        pytest.param("nova://abc123", "nova://def456", False, id="opaque_different_session"),
+        pytest.param("nova://abc123", "/tmp/transcript.jsonl", False, id="opaque_vs_path"),
+        pytest.param("/tmp/transcript.jsonl", "nova://abc123", False, id="path_vs_opaque"),
+        pytest.param("file:///tmp/x.jsonl", "/tmp/x.jsonl", False, id="file_uri_vs_path"),
+        pytest.param("/tmp/x.jsonl", "file:///tmp/x.jsonl", False, id="path_vs_file_uri"),
+        pytest.param("opencode://ses-1", "opencode://ses-1", True, id="opencode_same_session"),
+        pytest.param("opencode://ses-1", "opencode://ses-2", False, id="opencode_other_session"),
+        pytest.param(None, "nova://abc123", False, id="none_vs_opaque"),
+        pytest.param(None, "/tmp/transcript.jsonl", False, id="none_vs_path"),
+    ],
+)
+def test_same_location_compares_opaque_and_missing_locations(a, b, same):
+    assert same_location(a, b) is same
 
 
 def test_same_location_paths_resolve(tmp_path):
@@ -722,11 +642,6 @@ def test_same_location_paths_resolve(tmp_path):
     other = f"{tmp_path}/./a.jsonl"
     assert str(a) != other
     assert same_location(str(a), other)
-
-
-def test_same_location_none_is_false():
-    assert not same_location(None, "nova://abc123")
-    assert not same_location(None, "/tmp/transcript.jsonl")
 
 
 def test_same_location_expanduser_matches_resolved(tmp_path, monkeypatch):

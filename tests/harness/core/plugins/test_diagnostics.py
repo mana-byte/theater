@@ -39,7 +39,7 @@ from theater.mcp_plugins import registry as mcp_registry
 from theater.plugins.catalog import scan
 from theater.plugins.diagnostics import describe
 
-local_dir = shared_local_dir  # the shared fixture, under the name the tests ask for
+local_dir = shared_local_dir  # the shared fixture
 
 
 SECRET = "sentinel-plugin-secret"

@@ -227,195 +227,117 @@ def test_preflight_rejects_receipt_plan_against_inheriting_observer(
 # -- 3b. Pre-flight refuses a plan that sets receipt_token (core owns the secret) --
 
 
-def test_preflight_refuses_plan_that_sets_receipt_token(registry, tmp_path, monkeypatch):
-    """Core mints the token; a plugin that sets receipt_token is refused."""
-    harness = FakeHarness()
-    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
-
+def _token_path() -> Path:
     token_path = paths.participant_observation_dir("p-x", "fake") / "receipt-token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    plan = LaunchPlan(
-        argv=["fake"],
-        receipt_token="plugin-supplied-secret",
-        receipt_token_path=token_path,
+    return token_path
+
+
+def _plan_where_the_plugin_sets_the_token(tmp_path):
+    return LaunchPlan(
+        argv=["fake"], receipt_token="plugin-supplied-secret", receipt_token_path=_token_path()
     )
-    participant = registry.create_spawned(harness="fake", cwd=str(tmp_path), pid="p-x")
-
-    with pytest.raises(BadRequest, match="core owns the receipt secret"):
-        Spawner(registry)._validate_receipt_plan(plan, participant)
 
 
-# -- 4. Receipt path validation: outside observation_dir, collision, symlink ----
-
-
-def test_preflight_rejects_receipt_path_outside_observation_dir(registry, tmp_path, monkeypatch):
-    harness = FakeHarness()
-    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
-
+def _plan_with_a_token_outside_the_observation_dir(tmp_path):
     outside = tmp_path / "elsewhere" / "token"
     outside.parent.mkdir(parents=True, exist_ok=True)
-    plan = LaunchPlan(
-        argv=["fake"],
-        receipt_token_path=outside,
-    )
-    participant = registry.create_spawned(harness="fake", cwd=str(tmp_path), pid="p-x")
-
-    with pytest.raises(BadRequest, match="must resolve under"):
-        Spawner(registry)._validate_receipt_plan(plan, participant)
+    return LaunchPlan(argv=["fake"], receipt_token_path=outside)
 
 
-def test_preflight_rejects_receipt_path_colliding_with_plan_files(registry, tmp_path, monkeypatch):
-    harness = FakeHarness()
-    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
-
-    token_path = paths.participant_observation_dir("p-x", "fake") / "receipt-token"
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    plan = LaunchPlan(
-        argv=["fake"],
-        files={token_path: "config\n"},
-        receipt_token_path=token_path,
-    )
-    participant = registry.create_spawned(harness="fake", cwd=str(tmp_path), pid="p-x")
-
-    with pytest.raises(BadRequest, match="collides"):
-        Spawner(registry)._validate_receipt_plan(plan, participant)
+def _plan_whose_files_collide_with_the_token(tmp_path):
+    token_path = _token_path()
+    return LaunchPlan(argv=["fake"], files={token_path: "config\n"}, receipt_token_path=token_path)
 
 
-def test_preflight_rejects_existing_symlink_at_receipt_path(registry, tmp_path, monkeypatch):
-    harness = FakeHarness()
-    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
-
-    token_path = paths.participant_observation_dir("p-x", "fake") / "receipt-token"
-    token_path.parent.mkdir(parents=True, exist_ok=True)
+def _plan_with_a_symlinked_token(tmp_path):
+    token_path = _token_path()
     target = tmp_path / "attacker"
     target.write_text("pwned")
     token_path.symlink_to(target)
-    plan = LaunchPlan(
-        argv=["fake"],
-        receipt_token_path=token_path,
-    )
+    return LaunchPlan(argv=["fake"], receipt_token_path=token_path)
+
+
+@pytest.mark.parametrize(
+    ("build_plan", "match"),
+    [
+        # Core mints the token; a plugin that sets receipt_token is refused.
+        pytest.param(
+            _plan_where_the_plugin_sets_the_token,
+            "core owns the receipt secret",
+            id="plugin_sets_the_token",
+        ),
+        pytest.param(
+            _plan_with_a_token_outside_the_observation_dir,
+            "must resolve under",
+            id="path_outside_the_observation_dir",
+        ),
+        pytest.param(
+            _plan_whose_files_collide_with_the_token,
+            "collides",
+            id="colliding_with_plan_files",
+        ),
+        pytest.param(_plan_with_a_symlinked_token, "symlink", id="existing_symlink_at_the_path"),
+    ],
+)
+def test_preflight_rejects_an_unsafe_receipt_plan(
+    registry, tmp_path, monkeypatch, build_plan, match
+):
+    harness = FakeHarness()
+    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
+    plan = build_plan(tmp_path)
     participant = registry.create_spawned(harness="fake", cwd=str(tmp_path), pid="p-x")
 
-    with pytest.raises(BadRequest, match="symlink"):
+    with pytest.raises(BadRequest, match=match):
         Spawner(registry)._validate_receipt_plan(plan, participant)
 
 
 # -- 5. Core rejects bad candidates -------------------------------------------
 
 
-async def test_core_rejects_candidate_with_empty_location(fake_daemon, fake_client, tmp_path):
+@pytest.mark.parametrize(
+    ("candidate", "match"),
+    [
+        pytest.param(
+            lambda: TranscriptCandidate(location="", session_id="ok"),
+            "empty location",
+            id="empty_location",
+        ),
+        pytest.param(
+            lambda: TranscriptCandidate(location="/tmp/x.jsonl", session_id=None),
+            "empty session_id",
+            id="missing_session_id",
+        ),
+        pytest.param(
+            lambda: TranscriptCandidate(
+                location="/tmp/x.jsonl", session_id="ok", rejection_reason="bad"
+            ),
+            "rejection",
+            id="rejection_reason",
+        ),
+        pytest.param(lambda: None, "TranscriptCandidate", id="none"),
+        pytest.param(
+            lambda: {"location": "/tmp/x.jsonl", "session_id": "ok"},
+            "TranscriptCandidate",
+            id="not_a_candidate",
+        ),
+        pytest.param(
+            lambda: TranscriptCandidate(location=Path("/tmp/x.jsonl"), session_id="ok"),
+            "empty location",
+            id="path_location",
+        ),
+    ],
+)
+async def test_core_rejects_a_bad_candidate(fake_daemon, fake_client, tmp_path, candidate, match):
     daemon, _root = fake_daemon
     cwd = tmp_path / "repo"
     cwd.mkdir()
     _spawn_fake(daemon, cwd, pid="p-fake", token="secret")
+    daemon.observer.harnesses["fake"].observer.validate_transcript_receipt = lambda **kwargs: (
+        candidate()
+    )
 
-    # Monkeypatch the observer to return a candidate with empty location
-    def returning_empty(**kwargs):
-        return TranscriptCandidate(location="", session_id="ok")
-
-    daemon.observer.harnesses["fake"].observer.validate_transcript_receipt = returning_empty
-
-    with pytest.raises(RemoteError, match="empty location"):
-        await fake_client.call(
-            "transcript.receipt",
-            id="p-fake",
-            token="secret",
-            payload={"session_id": "ok", "path": "/tmp/x.jsonl"},
-        )
-
-
-async def test_core_rejects_candidate_with_missing_session_id(fake_daemon, fake_client, tmp_path):
-    daemon, _root = fake_daemon
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    _spawn_fake(daemon, cwd, pid="p-fake", token="secret")
-
-    def returning_none(**kwargs):
-        return TranscriptCandidate(location="/tmp/x.jsonl", session_id=None)
-
-    daemon.observer.harnesses["fake"].observer.validate_transcript_receipt = returning_none
-
-    with pytest.raises(RemoteError, match="empty session_id"):
-        await fake_client.call(
-            "transcript.receipt",
-            id="p-fake",
-            token="secret",
-            payload={"session_id": "ok", "path": "/tmp/x.jsonl"},
-        )
-
-
-async def test_core_rejects_candidate_with_rejection_reason(fake_daemon, fake_client, tmp_path):
-    daemon, _root = fake_daemon
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    _spawn_fake(daemon, cwd, pid="p-fake", token="secret")
-
-    def returning_rejected(**kwargs):
-        return TranscriptCandidate(location="/tmp/x.jsonl", session_id="ok", rejection_reason="bad")
-
-    daemon.observer.harnesses["fake"].observer.validate_transcript_receipt = returning_rejected
-
-    with pytest.raises(RemoteError, match="rejection"):
-        await fake_client.call(
-            "transcript.receipt",
-            id="p-fake",
-            token="secret",
-            payload={"session_id": "ok", "path": "/tmp/x.jsonl"},
-        )
-
-
-async def test_core_rejects_candidate_that_is_none(fake_daemon, fake_client, tmp_path):
-    daemon, _root = fake_daemon
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    _spawn_fake(daemon, cwd, pid="p-fake", token="secret")
-
-    def returning_none(**kwargs):
-        return None
-
-    daemon.observer.harnesses["fake"].observer.validate_transcript_receipt = returning_none
-
-    with pytest.raises(RemoteError, match="TranscriptCandidate"):
-        await fake_client.call(
-            "transcript.receipt",
-            id="p-fake",
-            token="secret",
-            payload={"session_id": "ok", "path": "/tmp/x.jsonl"},
-        )
-
-
-async def test_core_rejects_candidate_that_is_not_a_candidate(fake_daemon, fake_client, tmp_path):
-    daemon, _root = fake_daemon
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    _spawn_fake(daemon, cwd, pid="p-fake", token="secret")
-
-    def returning_dict(**kwargs):
-        return {"location": "/tmp/x.jsonl", "session_id": "ok"}
-
-    daemon.observer.harnesses["fake"].observer.validate_transcript_receipt = returning_dict
-
-    with pytest.raises(RemoteError, match="TranscriptCandidate"):
-        await fake_client.call(
-            "transcript.receipt",
-            id="p-fake",
-            token="secret",
-            payload={"session_id": "ok", "path": "/tmp/x.jsonl"},
-        )
-
-
-async def test_core_rejects_candidate_with_path_location(fake_daemon, fake_client, tmp_path):
-    daemon, _root = fake_daemon
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    _spawn_fake(daemon, cwd, pid="p-fake", token="secret")
-
-    def returning_path_location(**kwargs):
-        return TranscriptCandidate(location=Path("/tmp/x.jsonl"), session_id="ok")
-
-    daemon.observer.harnesses["fake"].observer.validate_transcript_receipt = returning_path_location
-
-    with pytest.raises(RemoteError, match="empty location"):
+    with pytest.raises(RemoteError, match=match):
         await fake_client.call(
             "transcript.receipt",
             id="p-fake",

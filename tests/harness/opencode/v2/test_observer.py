@@ -20,7 +20,7 @@ from theater.harness.builtin.plugins.opencode import source_v2
 from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
 from theater.models import Status
 
-rec = shared_rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture
 
 
 def a_turn_with_a_tool(rec, workdir) -> None:

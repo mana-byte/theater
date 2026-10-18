@@ -20,8 +20,8 @@ from theater.harness.channels import filesystem
 from theater.harness.source import Batch, TranscriptSource
 from theater.harness.transcript import source as transcript_source
 
-root = shared_root  # the shared fixture, under the name the tests ask for
-workdir = shared_workdir  # the shared fixture, under the name the tests ask for
+root = shared_root  # the shared fixture
+workdir = shared_workdir  # the shared fixture
 
 
 def _append(path: Path, lines: list[str]) -> None:

@@ -14,7 +14,7 @@ from theater.transcript_identity import (
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
-rec = shared_rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture
 
 
 def test_a_missing_database_is_ordinary_waiting(tmp_path, workdir):

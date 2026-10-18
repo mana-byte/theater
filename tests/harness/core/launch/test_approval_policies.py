@@ -58,39 +58,31 @@ def test_an_unknown_approval_is_refused_before_a_pane_opens(tmp_path, launch):
     assert "approval must be one of" in str(exc.value)
 
 
-def test_claude_manual_pins_the_default_permission_mode(tmp_path):
-    """`default` is claude's Manual permission mode; passing it explicitly
-    means the launch cannot inherit a permissive `permissions.defaultMode`
-    from the user's settings."""
-    argv = claude_launch(tmp_path, "manual").argv
-    assert argv[argv.index("--permission-mode") + 1] == "default"
-    assert "--dangerously-skip-permissions" not in argv
+# `default` is claude's Manual mode: pinning it keeps a launch from inheriting a permissive
+# `permissions.defaultMode`. Only yolo may bypass permissions, and it pins no mode.
+@pytest.mark.parametrize(
+    ("approval", "resume", "mode", "skips_permissions"),
+    [
+        pytest.param("manual", None, "default", False, id="manual_pins_default"),
+        pytest.param("edits", None, "acceptEdits", False, id="edits_pins_accept_edits"),
+        pytest.param("yolo", None, None, True, id="yolo_skips_and_pins_no_mode"),
+        pytest.param("manual", "old-session", "default", False, id="manual_survives_a_resume"),
+    ],
+)
+def test_claude_approval_pins_its_native_mode(tmp_path, approval, resume, mode, skips_permissions):
+    argv = claude_launch(tmp_path, approval, resume=resume).argv
+    if mode is None:
+        assert "--permission-mode" not in argv
+    else:
+        assert argv[argv.index("--permission-mode") + 1] == mode
+    assert ("--dangerously-skip-permissions" in argv) is skips_permissions
 
 
-def test_claude_edits_pins_accept_edits(tmp_path):
-    argv = claude_launch(tmp_path, "edits").argv
-    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
-    assert "--dangerously-skip-permissions" not in argv
-
-
-def test_claude_yolo_skips_permissions_and_pins_no_mode(tmp_path):
-    """yolo is the only choice that may bypass claude's permission system,
-    and it does not also pin a permission mode."""
-    argv = claude_launch(tmp_path, "yolo").argv
-    assert "--dangerously-skip-permissions" in argv
-    assert "--permission-mode" not in argv
-
-
-def test_claude_manual_survives_a_resume(tmp_path):
-    argv = claude_launch(tmp_path, "manual", resume="old-session").argv
-    assert argv[argv.index("--permission-mode") + 1] == "default"
-
-
-def test_vibe_manual_pins_the_ask_agent(tmp_path):
-    """vibe falls back to the user-configurable `default_agent` — accept-edits
-    by default — whenever no `--agent` flag is passed, so manual must name the
-    builtin `ask` profile explicitly."""
-    argv = vibe_launch(tmp_path, "manual").argv
+# vibe falls back to the user-configurable `default_agent` (accept-edits by default) when no
+# `--agent` is passed, so manual names the builtin `ask` profile explicitly.
+@pytest.mark.parametrize("resume", [None, "s1"], ids=["new", "resume"])
+def test_vibe_manual_pins_the_ask_agent(tmp_path, resume):
+    argv = vibe_launch(tmp_path, "manual", resume=resume).argv
     assert "--agent=ask" in argv
     assert "--yolo" not in argv
     assert "--auto-approve" not in argv
@@ -108,12 +100,6 @@ def test_vibe_yolo_auto_approves_and_names_no_agent(tmp_path):
     argv = vibe_launch(tmp_path, "yolo").argv
     assert "--yolo" in argv
     assert "--agent" not in argv
-
-
-def test_vibe_manual_survives_a_resume(tmp_path):
-    argv = vibe_launch(tmp_path, "manual", resume="s1").argv
-    assert "--agent=ask" in argv
-    assert "--yolo" not in argv
 
 
 def opencode_server_plugin_source(approval):

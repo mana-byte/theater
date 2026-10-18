@@ -24,13 +24,9 @@ from theater.harness.source import Attachment, Batch, Source
 from theater.models import TranscriptIdentityLost
 from theater.provenance import TranscriptProvenance
 
-vibe_tree = shared_vibe_tree  # the shared fixture, under the name the tests ask for
-collision_registry = (
-    shared_collision_registry  # the shared fixture, under the name the tests ask for
-)
-collision_observer = (
-    shared_collision_observer  # the shared fixture, under the name the tests ask for
-)
+vibe_tree = shared_vibe_tree  # the shared fixture
+collision_registry = shared_collision_registry  # the shared fixture
+collision_observer = shared_collision_observer  # the shared fixture
 
 
 class _StagedSource(Source):

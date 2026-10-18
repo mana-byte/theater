@@ -26,7 +26,7 @@ from theater.harness.builtin.plugins.opencode.runtime_plan import parse_opencode
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.models import BadRequest, Participant
 
-rec = shared_rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture
 
 
 V2 = OpenCodeDialect.V2

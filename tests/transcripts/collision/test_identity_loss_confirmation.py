@@ -14,10 +14,8 @@ from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.harness.source import Batch
 
-vibe_tree = shared_vibe_tree  # the shared fixture, under the name the tests ask for
-collision_registry = (
-    shared_collision_registry  # the shared fixture, under the name the tests ask for
-)
+vibe_tree = shared_vibe_tree  # the shared fixture
+collision_registry = shared_collision_registry  # the shared fixture
 
 
 async def test_identity_loss_confirmation_requires_two_windows_with_same_location(

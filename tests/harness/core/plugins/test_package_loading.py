@@ -57,11 +57,11 @@ def root(tmp_path: Path) -> Path:
     return d
 
 
-def test_missing_root_returns_empty(tmp_path: Path) -> None:
-    assert discover(tmp_path / "nope", source=LOCAL) == []
-
-
-def test_empty_root_returns_empty(root: Path) -> None:
+@pytest.mark.parametrize("layout", ["missing", "empty"])
+def test_a_root_without_plugins_discovers_nothing(tmp_path: Path, layout: str) -> None:
+    root = tmp_path / "plugins"
+    if layout == "empty":
+        root.mkdir()
     assert discover(root, source=LOCAL) == []
 
 
@@ -73,15 +73,9 @@ def test_deterministic_directory_name_order(root: Path) -> None:
     assert [r.name for r in results] == ["alpha", "mid", "zeta"]
 
 
-def test_hidden_directories_are_ignored(root: Path) -> None:
-    write_manifest(root / ".hidden")
-    write_manifest(root / "acme")
-    results = discover(root, source=LOCAL)
-    assert [r.name for r in results] == ["acme"]
-
-
-def test_underscored_directories_are_ignored(root: Path) -> None:
-    write_manifest(root / "_internal")
+@pytest.mark.parametrize("name", [".hidden", "_internal"], ids=["hidden", "underscored"])
+def test_hidden_and_underscored_directories_are_ignored(root: Path, name: str) -> None:
+    write_manifest(root / name)
     write_manifest(root / "acme")
     results = discover(root, source=LOCAL)
     assert [r.name for r in results] == ["acme"]
@@ -179,20 +173,31 @@ def test_shipped_source_takes_same_path(root: Path) -> None:
     assert isinstance(results[0].harness, Harness)
 
 
-def test_relative_sibling_import_works(root: Path) -> None:
+@pytest.mark.parametrize(
+    ("import_line", "support_files", "value"),
+    [
+        pytest.param(
+            "from .parser import VALUE", {"parser.py": "VALUE = 42\n"}, "42", id="relative_sibling"
+        ),
+        pytest.param(
+            "from .helpers.util import VALUE",
+            {"helpers/__init__.py": "", "helpers/util.py": "VALUE = 99\n"},
+            "99",
+            id="nested_package",
+        ),
+    ],
+)
+def test_manifests_import_their_own_siblings(
+    root: Path, import_line: str, support_files: dict[str, str], value: str
+) -> None:
     acme = root / "acme"
-    acme.mkdir()
-    (acme / "parser.py").write_text("VALUE = 42\n")
+    for relative, content in support_files.items():
+        (acme / relative).parent.mkdir(parents=True, exist_ok=True)
+        (acme / relative).write_text(content)
     (acme / MANIFEST_FILENAME).write_text(
         MANIFEST_BODY.format(binary="acme")
-        .replace(
-            "def _plan(context):",
-            "from .parser import VALUE\ndef _plan(context):",
-        )
-        .replace(
-            'argv=["acme", context.participant_id]',
-            'argv=["acme", str(VALUE)]',
-        ),
+        .replace("def _plan(context):", f"{import_line}\ndef _plan(context):")
+        .replace('argv=["acme", context.participant_id]', 'argv=["acme", str(VALUE)]'),
         encoding="utf-8",
     )
     results = scan(root, source=LOCAL)
@@ -200,33 +205,7 @@ def test_relative_sibling_import_works(root: Path) -> None:
     assert results[0].harness is not None
     assert results[0].harness.plan_launch(
         participant_id="p", prompt="hi", config_path=Path("/c"), approval="manual"
-    ).argv == ["acme", "42"]
-
-
-def test_nested_package_import_works(root: Path) -> None:
-    acme = root / "acme"
-    acme.mkdir()
-    (acme / "helpers").mkdir()
-    (acme / "helpers" / "__init__.py").write_text("")
-    (acme / "helpers" / "util.py").write_text("VALUE = 99\n")
-    (acme / MANIFEST_FILENAME).write_text(
-        MANIFEST_BODY.format(binary="acme")
-        .replace(
-            "def _plan(context):",
-            "from .helpers.util import VALUE\ndef _plan(context):",
-        )
-        .replace(
-            'argv=["acme", context.participant_id]',
-            'argv=["acme", str(VALUE)]',
-        ),
-        encoding="utf-8",
-    )
-    results = scan(root, source=LOCAL)
-    assert len(results) == 1
-    assert results[0].harness is not None
-    assert results[0].harness.plan_launch(
-        participant_id="p", prompt="hi", config_path=Path("/c"), approval="manual"
-    ).argv == ["acme", "99"]
+    ).argv == ["acme", value]
 
 
 def test_same_named_siblings_in_separate_sources_do_not_collide(root: Path, tmp_path: Path) -> None:
@@ -292,70 +271,50 @@ def test_no_stdlib_shadowing(root: Path) -> None:
     assert sys.modules["json"] is json
 
 
-def test_missing_manifest_export(root: Path) -> None:
+@pytest.mark.parametrize(
+    ("body", "fragments"),
+    [
+        pytest.param("x = 1\n", ["no MANIFEST", MANIFEST_FILENAME], id="missing_export"),
+        pytest.param(
+            "from theater.harness.contracts.manifest import HarnessManifest\n"
+            "MANIFEST = HarnessManifest\n",
+            ["not an instance"],
+            id="class_instead_of_instance",
+        ),
+        pytest.param("MANIFEST = 'a string'\n", ["is not a HarnessManifest"], id="wrong_type"),
+    ],
+)
+def test_a_module_without_a_manifest_instance_is_broken(
+    root: Path, body: str, fragments: list[str]
+) -> None:
     acme = root / "acme"
     acme.mkdir()
-    (acme / MANIFEST_FILENAME).write_text("x = 1\n")
+    (acme / MANIFEST_FILENAME).write_text(body)
     results = scan(root, source=LOCAL)
     assert len(results) == 1
     assert results[0].harness is None
-    assert "no MANIFEST" in results[0].error
-    assert MANIFEST_FILENAME in results[0].error
+    assert all(fragment in results[0].error for fragment in fragments)
 
 
-def test_exporting_class_instead_of_instance(root: Path) -> None:
+@pytest.mark.parametrize(
+    ("body", "fragments"),
+    [
+        pytest.param("raise ValueError('boom')", ["boom", MANIFEST_FILENAME], id="import_failure"),
+        pytest.param("def (:", [MANIFEST_FILENAME], id="syntax_error"),
+        pytest.param("import sys; sys.exit(1)", [], id="system_exit"),
+    ],
+)
+def test_a_manifest_that_fails_to_import_is_broken(
+    root: Path, body: str, fragments: list[str]
+) -> None:
     acme = root / "acme"
     acme.mkdir()
-    (acme / MANIFEST_FILENAME).write_text(
-        "from theater.harness.contracts.manifest import HarnessManifest\n"
-        "MANIFEST = HarnessManifest\n"
-    )
-    results = scan(root, source=LOCAL)
-    assert len(results) == 1
-    assert results[0].harness is None
-    assert "not an instance" in results[0].error
-
-
-def test_wrong_manifest_type(root: Path) -> None:
-    acme = root / "acme"
-    acme.mkdir()
-    (acme / MANIFEST_FILENAME).write_text("MANIFEST = 'a string'\n")
-    results = scan(root, source=LOCAL)
-    assert len(results) == 1
-    assert results[0].harness is None
-    assert "is not a HarnessManifest" in results[0].error
-
-
-def test_import_failure_is_broken(root: Path) -> None:
-    acme = root / "acme"
-    acme.mkdir()
-    (acme / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
-    results = scan(root, source=LOCAL)
-    assert len(results) == 1
-    assert results[0].harness is None
-    assert "boom" in results[0].error
-    assert MANIFEST_FILENAME in results[0].error
-
-
-def test_syntax_error_is_broken(root: Path) -> None:
-    acme = root / "acme"
-    acme.mkdir()
-    (acme / MANIFEST_FILENAME).write_text("def (:")
+    (acme / MANIFEST_FILENAME).write_text(body)
     results = scan(root, source=LOCAL)
     assert len(results) == 1
     assert results[0].harness is None
     assert results[0].error is not None
-    assert MANIFEST_FILENAME in results[0].error
-
-
-def test_system_exit_is_broken(root: Path) -> None:
-    acme = root / "acme"
-    acme.mkdir()
-    (acme / MANIFEST_FILENAME).write_text("import sys; sys.exit(1)")
-    results = scan(root, source=LOCAL)
-    assert len(results) == 1
-    assert results[0].harness is None
-    assert results[0].error is not None
+    assert all(fragment in results[0].error for fragment in fragments)
 
 
 def test_failed_import_leaves_no_modules(root: Path) -> None:

@@ -11,8 +11,8 @@ from tests.support.transcript_source_rig import root as shared_root
 from tests.support.transcript_source_rig import workdir as shared_workdir
 from theater.harness.source import History
 
-root = shared_root  # the shared fixture, under the name the tests ask for
-workdir = shared_workdir  # the shared fixture, under the name the tests ask for
+root = shared_root  # the shared fixture
+workdir = shared_workdir  # the shared fixture
 
 
 async def test_history_works_on_a_source_that_never_polled(root, workdir):

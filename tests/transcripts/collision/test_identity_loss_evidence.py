@@ -13,10 +13,8 @@ from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
-vibe_tree = shared_vibe_tree  # the shared fixture, under the name the tests ask for
-collision_registry = (
-    shared_collision_registry  # the shared fixture, under the name the tests ask for
-)
+vibe_tree = shared_vibe_tree  # the shared fixture
+collision_registry = shared_collision_registry  # the shared fixture
 
 
 async def test_identity_loss_evidence_bound_to_another_live_participant_is_rejected(

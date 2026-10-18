@@ -1,4 +1,4 @@
-"""Local and shipped plugin directories with a disabling helper for the plugin tests."""
+"""The local plugin directory fixture shared by the plugin registry and diagnostics tests."""
 
 from __future__ import annotations
 

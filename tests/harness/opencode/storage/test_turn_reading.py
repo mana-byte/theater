@@ -9,7 +9,7 @@ from tests.support.opencode_storage import a_turn_with_a_tool, drain
 from tests.support.shipped import OpenCodeObserver
 from theater.harness import EventKind
 
-rec = shared_rec  # the shared fixture, under the name the tests ask for
+rec = shared_rec  # the shared fixture
 
 
 def test_a_turn_reads_as_one_user_one_tool_pair_and_one_reply(rec, workdir):
