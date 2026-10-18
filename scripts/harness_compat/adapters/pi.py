@@ -12,7 +12,7 @@ from typing import Any
 
 from .. import framework, github
 from ..contract import Check, InstallFailed, Result, Sandbox, VerifiedSet, verdict_from_checks
-from . import opencode_pi_process, pi_bump
+from . import opencode_pi_process, pi_bump, pi_pins
 
 _PACKAGE = "@earendil-works/pi-coding-agent"
 
@@ -43,29 +43,7 @@ class PiAdapter:
         return pi_bump.verified(root)
 
     def install(self, sb: Sandbox, version: str) -> Path:
-        command = (
-            "npm",
-            "install",
-            "--prefix",
-            str(sb.bin_dir),
-            "--no-save",
-            "--ignore-scripts",
-            "--no-audit",
-            "--no-fund",
-            f"{_PACKAGE}@{version}",
-        )
-        try:
-            completed = opencode_pi_process.run_group(
-                command,
-                env=dict(sb.env),
-                timeout=300,
-            )
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            raise InstallFailed(f"npm could not install Pi {version}: {exc}") from exc
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout).strip()[-500:]
-            raise InstallFailed(f"npm could not install Pi {version}: {detail}")
-
+        self._npm_install(sb, version, (f"{_PACKAGE}@{version}",))
         package_root = sb.bin_dir / "node_modules" / "@earendil-works" / "pi-coding-agent"
         try:
             document: dict[str, Any] = json.loads(
@@ -80,12 +58,36 @@ class PiAdapter:
                 f"installed Pi {version} has no valid pi package bin: {exc}"
             ) from exc
 
+        # npm resolves carets to the newest release; the proofs need upstream's own set.
+        if pins := pi_pins.pinned_specs(document.get("dependencies")):
+            self._npm_install(sb, version, (f"{_PACKAGE}@{version}", *pins))
+
         binary = sb.bin_dir / "pi"
         try:
             binary.symlink_to(target)
         except OSError as exc:
             raise InstallFailed(f"could not expose installed Pi {version} binary: {exc}") from exc
         return binary
+
+    def _npm_install(self, sb: Sandbox, version: str, specs: Sequence[str]) -> None:
+        command = (
+            "npm",
+            "install",
+            "--prefix",
+            str(sb.bin_dir),
+            "--no-save",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            *specs,
+        )
+        try:
+            completed = opencode_pi_process.run_group(command, env=dict(sb.env), timeout=300)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            raise InstallFailed(f"npm could not install Pi {version}: {exc}") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()[-500:]
+            raise InstallFailed(f"npm could not install Pi {version}: {detail}")
 
     def version_line(self, version: str) -> str:
         return version

@@ -74,4 +74,4 @@ remain cache-only and never produce a PR.
 To add a harness, implement the frozen `Adapter` in
 `scripts/harness_compat/adapters/<name>.py`, export `ADAPTER`, and register its name in
 `adapters/__init__.py`. Add its real-binary tests, expected model routes, and gate files,
-then add it to the workflow matrix. Keep installs and CLI invocations inside `make_sandbox`.
+then add it to the workflow matrix. Keep installs and CLI invocations inside `make_sandbox`. Pi's install pins its `@earendil-works/*` dependencies to the range floor upstream shipped, since npm would otherwise resolve carets to a newer, incompatible sibling.

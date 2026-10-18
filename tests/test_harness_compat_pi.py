@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.adapters import pi, pi_bump
+from scripts.harness_compat.adapters import pi, pi_bump, pi_pins
 from scripts.harness_compat.contract import Check, InstallFailed, version_key
 from scripts.harness_compat.probe import _probe
 from scripts.harness_compat.sandbox import make_sandbox
@@ -145,3 +145,25 @@ def test_install_failure_raises_install_failed(
         pytest.raises(InstallFailed, match="fake npm failure"),
     ):
         pi.ADAPTER.install(sandbox, _current_upper(Path(__file__).parents[1]))
+
+
+def test_pinned_specs_pin_own_scope_simple_ranges_only() -> None:
+    dependencies = {
+        "@earendil-works/caret": "^2.3.4",
+        "@earendil-works/tilde": "~5.6.7",
+        "@earendil-works/exact": "9.9.9",
+        "@earendil-works/span": ">=1 <2",
+        "@earendil-works/any": "*",
+        "@earendil-works/local": "workspace:*",
+        "@earendil-works/remote": "git+https://example.invalid/x.git",
+        "@earendil-works/loose": "^2.3",
+        "other-scope": "^1.2.3",
+        "@elsewhere/pkg": "~1.2.3",
+        "@earendil-works/number": 4,
+    }
+    assert pi_pins.pinned_specs(dependencies) == [
+        "@earendil-works/caret@2.3.4",
+        "@earendil-works/tilde@5.6.7",
+    ]
+    for odd in (None, [], "text", {}):
+        assert pi_pins.pinned_specs(odd) == []

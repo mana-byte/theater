@@ -5,16 +5,8 @@ import re
 PI_FRONTEND_QUALIFIED_FLOOR = (0, 80, 8)
 PI_FRONTEND_QUALIFIED_MAX = (1, 3, 0)
 # Broken published artifacts inside [FLOOR, MAX]: 0.85.0 crashes at import
-# (no ModelRuntime/agent_settled); 1.0.1-1.1.0 import a codemode symbol that
-# @earendil-works/pi-codemode 1.2.0 removed, so codemode fails to load.
-PI_FRONTEND_QUALIFIED_EXCLUDED = (
-    (0, 85, 0),
-    (1, 0, 1),
-    (1, 0, 2),
-    (1, 0, 3),
-    (1, 0, 4),
-    (1, 1, 0),
-)
+# (no ModelRuntime/agent_settled).
+PI_FRONTEND_QUALIFIED_EXCLUDED = ((0, 85, 0),)
 
 
 def pi_version_text(version: tuple[int, int, int]) -> str:

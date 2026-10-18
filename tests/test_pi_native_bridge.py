@@ -755,14 +755,23 @@ _QUALIFIED_PI_VERSIONS = (
     "0.84.2",
     "0.84.3",
     "0.84.4",
-    "0.85.1",  # first release after the excluded 0.85.0.
     "0.86.0",
     "0.86.1",
     "0.87.0",
     "0.87.1",
     "0.99.2",
-    "1.0.0",  # last release before the excluded 1.0.1-1.1.0 band.
     pi_version_text(PI_FRONTEND_QUALIFIED_MAX),
+    # Immediate neighbours of every excluded release stay accepted.
+    *(
+        pi_version_text((major, minor, patch + offset))
+        for major, minor, patch in PI_FRONTEND_QUALIFIED_EXCLUDED
+        for offset in (-1, 1)
+        if patch + offset >= 0
+        and (major, minor, patch + offset) not in PI_FRONTEND_QUALIFIED_EXCLUDED
+        and PI_FRONTEND_QUALIFIED_FLOOR
+        <= (major, minor, patch + offset)
+        <= PI_FRONTEND_QUALIFIED_MAX
+    ),
 )
 
 
@@ -799,7 +808,7 @@ def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> N
                 PI_FRONTEND_QUALIFIED_FLOOR[2] - 1,
             )
         ),
-        # Every excluded broken release: 0.85.0 and the 1.0.1-1.1.0 band.
+        # Every excluded broken release.
         *(pi_version_text(entry) for entry in PI_FRONTEND_QUALIFIED_EXCLUDED),
         pi_version_text(
             (
