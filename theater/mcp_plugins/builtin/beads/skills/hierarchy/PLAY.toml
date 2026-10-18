@@ -1,0 +1,19 @@
+description = "Deliver mid to large work: the master interviews the user, picks a light track (up to 3 independent units) or a heavy track (contracts, leads), debates on either track when a design question is open, and builds in parallel with cross-model review. Not for a single change."
+master = "master"
+disposable = ["member"]
+plugins = ["beads"]
+
+[positions]
+master = ["lead", "member"]
+lead = ["member"]
+member = []
+
+[roles]
+worker = ["lead", "member"]
+reviewer = ["member"]
+debater = ["member"]
+
+[plugin_permissions.beads]
+master = ["read", "write"]
+lead = ["read", "write"]
+member = ["read", "write"]
