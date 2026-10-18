@@ -16,18 +16,9 @@ from tests.support.paths import fixture
 from theater import config, paths
 from theater.mcp_plugins import registry
 
+pytestmark = pytest.mark.usefixtures("clean_mcp_registry")
+
 FIXTURES = fixture("mcp_plugins")
-
-
-@pytest.fixture(autouse=True)
-def clean_registry():
-    registry.MCP_SERVERS.clear()
-    registry._PLUGINS.clear()
-    registry._DIAGNOSTICS.clear()
-    yield
-    registry.MCP_SERVERS.clear()
-    registry._PLUGINS.clear()
-    registry._DIAGNOSTICS.clear()
 
 
 async def _tool_call(

@@ -30,6 +30,8 @@ from theater.mcp_plugins import (
 )
 from theater.mcp_plugins.loading import LOCAL, discover, load_plugin
 
+pytestmark = pytest.mark.usefixtures("clean_mcp_registry")
+
 MANIFEST = """
 from pathlib import Path
 from theater.mcp_plugins import (
@@ -107,17 +109,6 @@ def table_list_schema(*, max_items: int | None = 2) -> McpConfigSchema:
             )
         }
     )
-
-
-@pytest.fixture(autouse=True)
-def clean_mcp_registry():
-    registry.MCP_SERVERS.clear()
-    registry._PLUGINS.clear()
-    registry._DIAGNOSTICS.clear()
-    yield
-    registry.MCP_SERVERS.clear()
-    registry._PLUGINS.clear()
-    registry._DIAGNOSTICS.clear()
 
 
 def test_enabled_plugin_resolves_immutable_config_once_and_redacts(tmp_path, monkeypatch):
