@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from tests.support.trajectory_service import (
+    FakeBusStore,
+    FakeObserver,
+    FakeRegistry,
+    FakeSource,
+    history_page,
+    trajectory_participant,
+)
 from theater.constants.daemon import (
     BUS_KIND_AGENT_ASSISTANT,
     BUS_KIND_AGENT_TOOL_CALL,
@@ -17,6 +25,8 @@ from theater.daemon.trajectory.observed_timing import (
     observation_points,
     observation_points_for_history,
 )
+from theater.daemon.trajectory.service import TrajectoryService
+from theater.harness.contracts.events import Event, EventKind
 from theater.trajectory import (
     Timing,
     TimingProvenance,
@@ -54,7 +64,7 @@ def _record(
     )
 
 
-class _Store:
+class _RowStore:
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
 
@@ -126,7 +136,7 @@ def test_historical_observations_require_latest_matching_attachment() -> None:
             "payload": {"index": 2},
         },
     ]
-    store = _Store(rows)
+    store = _RowStore(rows)
 
     assert observation_points_for_history(store, "p", "/tmp/old.jsonl") == ()
     assert observation_points_for_history(store, "p", "/tmp/current.jsonl") == (
@@ -178,3 +188,55 @@ def test_live_observation_retains_first_point_and_closes_mutable_record() -> Non
         duration_ms=2_000.0,
         provenance=TimingProvenance.OBSERVED,
     )
+
+
+async def test_snapshot_recovers_observed_timing_for_matching_transcript(source_opener):
+    participant = trajectory_participant("p")
+    store = FakeBusStore()
+    store.rows.extend(
+        (
+            {
+                "id": 1,
+                "ts": 1.0,
+                "from_id": None,
+                "to_id": participant.id,
+                "kind": BUS_KIND_AGENT_TRANSCRIPT,
+                "payload": {"path": participant.transcript_location},
+            },
+            {
+                "id": 2,
+                "ts": 10.0,
+                "from_id": participant.id,
+                "to_id": None,
+                "kind": BUS_KIND_AGENT_TOOL_CALL,
+                "payload": {"index": 1},
+            },
+            {
+                "id": 3,
+                "ts": 12.0,
+                "from_id": participant.id,
+                "to_id": None,
+                "kind": BUS_KIND_AGENT_TOOL_RESULT,
+                "payload": {"index": 2},
+            },
+        )
+    )
+    source_opener[participant.id] = FakeSource(
+        history_page(
+            Event(kind=EventKind.TOOL_CALL, tool_name="read", raw_index=1),
+            Event(kind=EventKind.TOOL_RESULT, text="done", raw_index=2),
+            location=participant.transcript_location,
+        )
+    )
+    service = TrajectoryService(store, FakeRegistry([participant]), FakeObserver())
+
+    page = await service.snapshot(participant.id)
+    by_kind = {record.kind: record for record in page.records}
+
+    assert by_kind[TrajectoryKind.TOOL_CALL].timing is not None
+    assert by_kind[TrajectoryKind.TOOL_CALL].timing.start == 10.0
+    assert by_kind[TrajectoryKind.TOOL_CALL].timing.provenance is TimingProvenance.OBSERVED
+    assert by_kind[TrajectoryKind.TOOL_RESULT].timing is not None
+    assert by_kind[TrajectoryKind.TOOL_RESULT].timing.end == 12.0
+    assert by_kind[TrajectoryKind.TOOL_RESULT].timing.provenance is TimingProvenance.OBSERVED
+    await service.aclose()

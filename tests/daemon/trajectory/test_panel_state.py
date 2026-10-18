@@ -1,4 +1,4 @@
-"""Live trajectory follow: panel state transitions and stream recovery."""
+"""Panel state: initial derivation from history and liveness, and live follow transitions."""
 
 from __future__ import annotations
 
@@ -7,11 +7,19 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
-from theater.daemon.trajectory import history as history_module
+from tests.support.trajectory_service import (
+    FakeBusStore,
+    FakeObserver,
+    FakeRegistry,
+    assistant_event,
+    trajectory_participant,
+)
+from theater.daemon.trajectory.history import HistoryLoad
+from theater.daemon.trajectory.panel import initial_panel_state, participant_state
 from theater.daemon.trajectory.service import TrajectoryService
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.source import Batch, HistoryPage, Source
-from theater.models import NotFound, Participant, Status, Tier
+from theater.models import Participant, Status, Tier
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
@@ -22,52 +30,178 @@ from theater.trajectory import (
     TrajectorySupport,
     TrajectoryValidationError,
 )
+from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 
-class Store:
-    def __init__(self) -> None:
-        self.listeners: list = []
-        self.rows: list[dict] = []
-
-    def register_bus_listener(self, listener) -> None:
-        if listener not in self.listeners:
-            self.listeners.append(listener)
-
-    def unregister_bus_listener(self, listener) -> None:
-        if listener in self.listeners:
-            self.listeners.remove(listener)
-
-    def bus_page_for_participant(self, participant_id, *, before_id=None, limit, kinds):
-        return []
+def _participant(*, status: Status = Status.IDLE, tier: Tier = Tier.ADOPTED) -> Participant:
+    return Participant(id="p", harness="fake", status=status, tier=tier)
 
 
-class Registry:
-    def __init__(self, participant: Participant) -> None:
-        self.participants = {participant.id: participant}
+@pytest.mark.parametrize(
+    ("status", "tier", "expected"),
+    [
+        (Status.IDLE, Tier.ADOPTED, TrajectoryParticipantState.LIVE),
+        (Status.DEAD, Tier.ADOPTED, TrajectoryParticipantState.DEAD),
+        (Status.IDLE, Tier.EXTERNAL, TrajectoryParticipantState.EXTERNAL),
+    ],
+)
+def test_participant_state_is_pure(
+    status: Status, tier: Tier, expected: TrajectoryParticipantState
+) -> None:
+    assert participant_state(_participant(status=status, tier=tier)) is expected
 
-    def resolve(self, token: str) -> Participant:
-        return self.get(token)
 
-    def get(self, participant_id: str) -> Participant:
-        participant = self.participants.get(participant_id)
-        if participant is None:
-            raise NotFound(f"no participant {participant_id!r}")
-        return participant
+def test_initial_panel_is_ready_for_trusted_history() -> None:
+    result = HistoryLoad(
+        HistoryPage(location="/tmp/p", events=(Event(kind=EventKind.ASSISTANT, text="ok"),)),
+        source_epoch="epoch",
+        trusted=True,
+        message="loaded",
+    )
+
+    panel = initial_panel_state(
+        _participant(),
+        current_participant_state=TrajectoryParticipantState.LIVE,
+        result=result,
+        has_transcript=False,
+        live_allowed=False,
+    )
+
+    assert panel == PanelStateInfo(PanelState.READY, "loaded", TrajectoryParticipantState.LIVE)
 
 
-class Observer:
-    def __init__(self) -> None:
-        self.capture = None
-        self.harnesses = {"fake": SimpleNamespace(observer=object())}
+def test_initial_panel_waits_for_an_empty_trusted_history() -> None:
+    result = HistoryLoad(HistoryPage(), source_epoch="epoch", trusted=True)
 
-    def set_trajectory_capture(self, callback) -> None:
-        self.capture = callback
+    panel = initial_panel_state(
+        _participant(),
+        current_participant_state=TrajectoryParticipantState.LIVE,
+        result=result,
+        has_transcript=False,
+        live_allowed=False,
+    )
 
-    def transcript_identity_lost(self, _participant_id: str) -> bool:
-        return False
+    assert panel == PanelStateInfo(
+        PanelState.WAITING,
+        "the transcript source is waiting for its first record",
+        TrajectoryParticipantState.LIVE,
+    )
 
-    def history_is_ambiguous(self, _participant_id: str, _history) -> bool:
-        return False
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(Status.IDLE, PanelState.UNTRUSTED), (Status.DEAD, PanelState.UNAVAILABLE)],
+)
+def test_initial_panel_handles_lost_identity_by_participant_liveness(
+    status: Status, expected: PanelState
+) -> None:
+    result = HistoryLoad(
+        HistoryPage(error_code=TRANSCRIPT_IDENTITY_LOST_CODE),
+        source_epoch=None,
+        trusted=False,
+        message="rebind transcript",
+    )
+
+    panel = initial_panel_state(
+        _participant(status=status),
+        current_participant_state=TrajectoryParticipantState.LIVE,
+        result=result,
+        has_transcript=False,
+        live_allowed=False,
+    )
+
+    assert panel == PanelStateInfo(expected, "rebind transcript", TrajectoryParticipantState.LIVE)
+
+
+def test_initial_panel_rejects_untrusted_provenance() -> None:
+    result = HistoryLoad(
+        HistoryPage(provenance="heuristic"),
+        source_epoch=None,
+        trusted=False,
+    )
+
+    panel = initial_panel_state(
+        _participant(),
+        current_participant_state=TrajectoryParticipantState.LIVE,
+        result=result,
+        has_transcript=False,
+        live_allowed=False,
+    )
+
+    assert panel == PanelStateInfo(
+        PanelState.UNTRUSTED,
+        "transcript identity is not trusted",
+        TrajectoryParticipantState.LIVE,
+    )
+
+
+def test_initial_panel_rejects_ambiguous_history() -> None:
+    result = HistoryLoad(
+        HistoryPage(provenance="operator"),
+        source_epoch=None,
+        trusted=False,
+        ambiguous=True,
+        message="bind the session",
+    )
+
+    panel = initial_panel_state(
+        _participant(),
+        current_participant_state=TrajectoryParticipantState.LIVE,
+        result=result,
+        has_transcript=False,
+        live_allowed=False,
+    )
+
+    assert panel == PanelStateInfo(
+        PanelState.UNTRUSTED,
+        "bind the session",
+        TrajectoryParticipantState.LIVE,
+    )
+
+
+def test_initial_panel_retains_cached_transcript_records_after_failure() -> None:
+    result = HistoryLoad(
+        HistoryPage(error_code="source_failed", error="reader closed"),
+        source_epoch=None,
+        trusted=False,
+        message="reader closed",
+    )
+
+    panel = initial_panel_state(
+        _participant(),
+        current_participant_state=TrajectoryParticipantState.LIVE,
+        result=result,
+        has_transcript=True,
+        live_allowed=False,
+    )
+
+    assert panel == PanelStateInfo(
+        PanelState.STALE,
+        "transcript history is unavailable; cached records remain (reader closed)",
+        TrajectoryParticipantState.LIVE,
+    )
+
+
+def test_initial_panel_is_unavailable_without_history_or_cache() -> None:
+    result = HistoryLoad(
+        HistoryPage(error_code="source_failed"),
+        source_epoch=None,
+        trusted=False,
+    )
+
+    panel = initial_panel_state(
+        _participant(),
+        current_participant_state=TrajectoryParticipantState.LIVE,
+        result=result,
+        has_transcript=False,
+        live_allowed=False,
+    )
+
+    assert panel == PanelStateInfo(
+        PanelState.UNAVAILABLE,
+        "trajectory history is unavailable",
+        TrajectoryParticipantState.LIVE,
+    )
 
 
 class SourcePage(Source):
@@ -83,19 +217,6 @@ class SourcePage(Source):
         return self.pages[before]
 
 
-def participant() -> Participant:
-    return Participant(
-        id="p",
-        harness="fake",
-        tier=Tier.ADOPTED,
-        status=Status.IDLE,
-        cwd="/tmp/project",
-        session_id="session-p",
-        session_correlation="operator",
-        transcript_location="/tmp/p.jsonl",
-    )
-
-
 def page(*events: Event, provenance: str = "operator", **kwargs) -> HistoryPage:
     return HistoryPage(
         location=kwargs.pop("location", "/tmp/p"),
@@ -104,21 +225,6 @@ def page(*events: Event, provenance: str = "operator", **kwargs) -> HistoryPage:
         provenance=provenance,
         **kwargs,
     )
-
-
-def event(text: str, index: int) -> Event:
-    return Event(kind=EventKind.ASSISTANT, text=text, raw_index=index)
-
-
-@pytest.fixture
-def source_opener(monkeypatch):
-    sources: dict[str, SourcePage] = {}
-
-    def open_source(_observer, **kwargs):
-        return sources[kwargs["participant_id"]]
-
-    monkeypatch.setattr(history_module, "open_participant_source", open_source)
-    return sources
 
 
 def test_delta_panel_state_wire_is_optional_and_validated() -> None:
@@ -134,10 +240,10 @@ def test_delta_panel_state_wire_is_optional_and_validated() -> None:
 
 
 async def test_follow_reports_waiting_to_ready_and_state_only_stale_delta(source_opener) -> None:
-    current = participant()
+    current = trajectory_participant()
     source_opener[current.id] = SourcePage({None: page(location=None)})
-    observer = Observer()
-    service = TrajectoryService(Store(), Registry(current), observer)
+    observer = FakeObserver()
+    service = TrajectoryService(FakeBusStore(), FakeRegistry([current]), observer)
 
     initial = await service.snapshot(current.id)
     assert initial.panel_state.state is PanelState.WAITING
@@ -146,7 +252,7 @@ async def test_follow_reports_waiting_to_ready_and_state_only_stale_delta(source
     assert initial.overview.scope_complete
 
     assert observer.capture is not None
-    observer.capture(current.id, Batch(events=(event("live", 1),)))
+    observer.capture(current.id, Batch(events=(assistant_event("live", 1),)))
     ready = await service.follow(
         current.id,
         stream_id=initial.stream_id,
@@ -178,10 +284,10 @@ async def test_follow_reports_waiting_to_ready_and_state_only_stale_delta(source
 
 
 async def test_empty_live_batch_does_not_observe_live_trajectory_updates(source_opener) -> None:
-    current = participant()
+    current = trajectory_participant()
     source_opener[current.id] = SourcePage({None: page(location=None)})
-    observer = Observer()
-    service = TrajectoryService(Store(), Registry(current), observer)
+    observer = FakeObserver()
+    service = TrajectoryService(FakeBusStore(), FakeRegistry([current]), observer)
 
     initial = await service.snapshot(current.id)
     assert initial.cursor is not None and initial.stream_id is not None
@@ -201,9 +307,9 @@ async def test_empty_live_batch_does_not_observe_live_trajectory_updates(source_
 
 
 async def test_capability_declaration_accepts_mapping_harness_registries(source_opener) -> None:
-    current = participant()
+    current = trajectory_participant()
     source_opener[current.id] = SourcePage({None: page(location=None)})
-    observer = Observer()
+    observer = FakeObserver()
     observer.harnesses = MappingProxyType(
         {
             "fake": SimpleNamespace(
@@ -215,7 +321,7 @@ async def test_capability_declaration_accepts_mapping_harness_registries(source_
             )
         }
     )
-    service = TrajectoryService(Store(), Registry(current), observer)
+    service = TrajectoryService(FakeBusStore(), FakeRegistry([current]), observer)
 
     snapshot = await service.snapshot(current.id)
 
@@ -245,10 +351,10 @@ async def test_capability_declaration_accepts_mapping_harness_registries(source_
 async def test_follow_stops_for_terminal_or_non_addressable_participant(
     source_opener, change, expected
 ) -> None:
-    current = participant()
+    current = trajectory_participant()
     source_opener[current.id] = SourcePage({None: page(location=None)})
-    registry = Registry(current)
-    service = TrajectoryService(Store(), registry, Observer())
+    registry = FakeRegistry([current])
+    service = TrajectoryService(FakeBusStore(), registry, FakeObserver())
     initial = await service.snapshot(current.id)
     assert initial.cursor is not None and initial.stream_id is not None
 
@@ -270,19 +376,19 @@ async def test_follow_stops_for_terminal_or_non_addressable_participant(
 
 
 async def test_fresh_snapshot_recovers_an_untrusted_stream(source_opener) -> None:
-    current = participant()
+    current = trajectory_participant()
     source = SourcePage(
         {
-            None: page(event("untrusted", 1), provenance="heuristic"),
+            None: page(assistant_event("untrusted", 1), provenance="heuristic"),
         }
     )
     source_opener[current.id] = source
-    service = TrajectoryService(Store(), Registry(current), Observer())
+    service = TrajectoryService(FakeBusStore(), FakeRegistry([current]), FakeObserver())
 
     first = await service.snapshot(current.id)
     assert first.panel_state.state is PanelState.UNTRUSTED
 
-    source.pages[None] = page(event("trusted", 2))
+    source.pages[None] = page(assistant_event("trusted", 2))
     recovered = await service.snapshot(current.id)
     assert recovered.panel_state.state is PanelState.READY
     assert [record.summary for record in recovered.records] == ["trusted"]
@@ -290,15 +396,15 @@ async def test_fresh_snapshot_recovers_an_untrusted_stream(source_opener) -> Non
 
 
 async def test_older_failure_keeps_its_cursor_and_warm_records_retryable(source_opener) -> None:
-    current = participant()
+    current = trajectory_participant()
     source = SourcePage(
         {
-            None: page(event("latest", 1), older_cursor="older", has_older=True),
+            None: page(assistant_event("latest", 1), older_cursor="older", has_older=True),
             "older": HistoryPage(error_code="source_failed", error="try again"),
         }
     )
     source_opener[current.id] = source
-    service = TrajectoryService(Store(), Registry(current), Observer())
+    service = TrajectoryService(FakeBusStore(), FakeRegistry([current]), FakeObserver())
 
     first = await service.snapshot(current.id, limit=2)
     assert first.older_cursor is not None
