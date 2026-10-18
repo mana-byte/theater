@@ -1,4 +1,4 @@
-"""Behavior tests for observability phase 2A daemon/client bootstrap."""
+"""Daemon and client observability bootstrap: lock, generation file, options and shutdown."""
 
 from __future__ import annotations
 

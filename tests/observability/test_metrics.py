@@ -1,13 +1,17 @@
-"""Metrics: registry, thread cache, GaugeSampler, callbacks, bridge API."""
+"""Metrics: registry, gauge cache and sampler, bridge API, store counts, gauge lifecycle."""
 
 from __future__ import annotations
 
 import asyncio
 import threading
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from theater.daemon.jobs import JobManager
+from theater.models import Job, JobState, Participant, Status, Tier, now
 from theater.observability.catalog import OperationSpec
+from theater.observability.engine import set_metric_bridge
 from theater.observability.metrics import (
     CounterRegistry,
     GaugeCache,
@@ -301,3 +305,160 @@ def test_create_active_none_no_bridge():
     from theater.observability.metrics import create_active_gauge_sampler
 
     assert create_active_gauge_sampler(1.0, {}) is None
+
+
+def test_participant_counts_match_domain_semantics(store, registry):
+    spawned = Participant(harness="vibe", tier=Tier.SPAWNED, tmux_pane="%1", cwd="/tmp")
+    adopted = Participant(harness="vibe", tier=Tier.ADOPTED, tmux_pane="%2", cwd="/tmp")
+    external_with_pane = Participant(harness="vibe", tier=Tier.EXTERNAL, tmux_pane="%3", cwd="/tmp")
+    spawned_no_pane = Participant(harness="vibe", tier=Tier.SPAWNED, cwd="/tmp")
+    dead_spawned = Participant(harness="vibe", tier=Tier.SPAWNED, cwd="/tmp")
+    for p in (spawned, adopted, external_with_pane, spawned_no_pane, dead_spawned):
+        store.upsert_participant(p)
+    store.set_status(dead_spawned.id, Status.DEAD)
+
+    all_rows = store.list_participants(include_dead=True)
+    assert store.live_count() == sum(1 for p in all_rows if p.status is not Status.DEAD)
+    assert store.addressable_count() == sum(1 for p in all_rows if p.addressable)
+    assert store.live_count() == 4
+    assert store.addressable_count() == 0
+    assert registry.live_count() == store.live_count()
+    registry.configure_addressability(lambda participant_id: participant_id == spawned.id)
+    assert registry.addressable_count() == 1
+
+
+def test_job_active_count_covers_all_states_and_forwards(store):
+    for handle, state in (
+        ("r1", JobState.RUNNING),
+        ("r2", JobState.RUNNING),
+        ("d1", JobState.DONE),
+        ("c1", JobState.CRASHED),
+        ("k1", JobState.KILLED),
+    ):
+        store.create_job(
+            Job(
+                handle=handle,
+                caller_id="cli",
+                target_id="t",
+                kind="send",
+                prompt=None,
+                state=state,
+                result=None,
+                error_code=None,
+                created_at=now(),
+                finished_at=now() if state is not JobState.RUNNING else None,
+            )
+        )
+    assert store.active_job_count() == 2
+
+    jm = JobManager(store)
+    assert jm.active_count() == 2
+    jm.finish("r1", state=JobState.DONE, result="ok")
+    assert jm.active_count() == 1
+    jm.finish("r2", state=JobState.KILLED, error_code="killed")
+    assert jm.active_count() == 0
+    assert store.active_job_count() == 0
+
+
+def test_counts_zero_on_empty_store(store):
+    assert store.live_count() == 0
+    assert store.addressable_count() == 0
+    assert store.active_job_count() == 0
+
+
+def _fake_daemon(*, with_sampler=False):
+    daemon = MagicMock()
+    daemon.config.observability.gauge_interval_s = 1.0
+    daemon.registry.live_count = MagicMock(return_value=3)
+    daemon.registry.addressable_count = MagicMock(return_value=2)
+    daemon.jobs.active_count = MagicMock(return_value=1)
+    daemon._gauge_sampler = MagicMock() if with_sampler else None
+    return daemon
+
+
+async def test_gauge_sampler_absent_bridge_creates_nothing():
+    from theater.daemon.runtime.lifecycle import _start_gauge_sampler
+
+    set_metric_bridge(None)
+    try:
+        daemon = _fake_daemon()
+        await _start_gauge_sampler(daemon)
+    finally:
+        set_metric_bridge(None)
+
+    assert not hasattr(daemon, "_gauge_sampler") or daemon._gauge_sampler is None
+    daemon.registry.live_count.assert_not_called()
+    daemon.registry.addressable_count.assert_not_called()
+    daemon.jobs.active_count.assert_not_called()
+
+
+async def test_gauge_sampler_starts_after_reconcile_with_active_bridge():
+    from theater.daemon.runtime.lifecycle import _start_gauge_sampler
+
+    reg = HistogramRegistry(meter=None)
+    bridge = MetricBridge(reg)
+    cache = GaugeCache()
+    bridge.set_gauge_cache(cache)
+    set_metric_bridge(bridge)
+    try:
+        daemon = _fake_daemon()
+        await _start_gauge_sampler(daemon)
+        assert daemon._gauge_sampler is not None
+        assert cache.get("theater.participants.live") == 3
+        assert cache.get("theater.participants.addressable") == 2
+        assert cache.get("theater.jobs.active") == 1
+        await daemon._gauge_sampler.stop()
+    finally:
+        set_metric_bridge(None)
+
+
+async def test_aclose_stops_sampler_before_store_close():
+    from theater.daemon.runtime.lifecycle import aclose
+
+    calls: list[str] = []
+
+    store_close = MagicMock(side_effect=lambda: calls.append("store"))
+    sampler_stop = AsyncMock(side_effect=lambda: calls.append("sampler"))
+    controls_close = AsyncMock(side_effect=lambda: calls.append("controls"))
+    observer_close = AsyncMock(side_effect=lambda: calls.append("observer"))
+    runtime_recovery_stop = AsyncMock(side_effect=lambda: calls.append("runtime_recovery"))
+    runtime_manager_close = AsyncMock(side_effect=lambda: calls.append("runtime_manager"))
+    daemon = MagicMock()
+    daemon._server = None
+    daemon._reaper = None
+    daemon._gc = None
+    daemon._lag = None
+    daemon._conns = set()
+    daemon.store.close = store_close
+    daemon._gauge_sampler = MagicMock()
+    daemon._gauge_sampler.stop = sampler_stop
+    daemon._release_files = MagicMock()
+    daemon.controls = MagicMock()
+    daemon.controls.aclose = controls_close
+    daemon.observer = MagicMock()
+    daemon.observer.aclose = observer_close
+    daemon.runtime_manager = MagicMock()
+    daemon.runtime_manager.stop_recovery = runtime_recovery_stop
+    daemon.runtime_manager.aclose = runtime_manager_close
+    daemon.otel_runtime = MagicMock()
+    daemon.otel_runtime.aclose = AsyncMock()
+    daemon.hook_runtime = MagicMock()
+    daemon.hook_runtime.aclose = AsyncMock()
+
+    await aclose(daemon, close_timeout=1.0, shutdown_workers=AsyncMock())
+
+    assert calls == [
+        "runtime_recovery",
+        "controls",
+        "observer",
+        "runtime_manager",
+        "sampler",
+        "store",
+    ]
+    assert daemon._gauge_sampler is None
+    daemon.controls.aclose.assert_awaited_once_with()
+    daemon.observer.aclose.assert_awaited_once_with()
+    daemon.runtime_manager.stop_recovery.assert_awaited_once_with()
+    daemon.runtime_manager.aclose.assert_awaited_once_with()
+    daemon.otel_runtime.aclose.assert_awaited_once_with()
+    daemon.hook_runtime.aclose.assert_awaited_once_with()
