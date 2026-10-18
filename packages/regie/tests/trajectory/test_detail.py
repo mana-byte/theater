@@ -1,13 +1,29 @@
+"""The span detail sheet: content rendering, folding, copying and participant links."""
+
 from __future__ import annotations
 
 import json
 
 import pytest
+from regie.trajectory.rich.enums import FocusRegion
 from regie.trajectory.rich.inspection.content import Palette, lenient_json, render_content
 from regie.trajectory.rich.inspection.links import participant_link_from_meta
 from regie.trajectory.rich.inspection.sheet import build_sheet
+from regie.trajectory.rich.navigation import (
+    TrajectoryNavigationHistory,
+    TrajectoryNavigationTarget,
+)
 from regie.trajectory.rich.render.tools import build_tool_index
-from regie.trajectory.rich.widgets.span_detail import SpanDetailCopyRequested, SpanDetailPanel
+from regie.trajectory.rich.view import (
+    TrajectoryBackRequested,
+    TrajectoryParticipantSelected,
+    TrajectoryView,
+)
+from regie.trajectory.rich.widgets.span_detail import (
+    SpanDetailCopyRequested,
+    SpanDetailPanel,
+    SpanDetailParticipantLinkClicked,
+)
 from regie.trajectory.ui_constants import TRAJECTORY_DETAIL_FOLD_LINES
 from rich.console import Console
 from textual.app import App, ComposeResult
@@ -15,8 +31,13 @@ from textual.widgets import RichLog
 
 from theater.frontend.trajectory import (
     ContentFormat,
+    PanelState,
+    PanelStateInfo,
     ParticipantLink,
+    TrajectoryKind,
+    TrajectoryLane,
     TrajectoryRecord,
+    TrajectoryStatus,
     requests_for_records,
 )
 
@@ -219,7 +240,7 @@ def test_participant_links_keep_their_exact_target_in_clickable_metadata() -> No
     assert participant_link_from_meta(metas[0]) == link
 
 
-class _Host(App):
+class _DetailHost(App):
     def compose(self) -> ComposeResult:
         yield SpanDetailPanel(id="panel")
 
@@ -234,7 +255,7 @@ async def test_canvas_navigates_folds_and_copies_sections_on_any_theme(theme: st
         "res2", "tool_result", "tools", call_id="c1", details={"result": ("text", long_result)}
     )
     tool = build_tool_index((call, result)).ordered[0]
-    app = _Host()
+    app = _DetailHost()
     app.theme = theme
     async with app.run_test(size=(100, 60)) as pilot:
         panel = app.query_one(SpanDetailPanel)
@@ -276,7 +297,7 @@ async def test_long_data_branches_are_folded_items_the_cursor_can_open() -> None
         "res2", "tool_result", "tools", call_id="c1", details={"result": ("json", data)}
     )
     tool = build_tool_index((call, result)).ordered[0]
-    async with _Host().run_test(size=(100, 60)) as pilot:
+    async with _DetailHost().run_test(size=(100, 60)) as pilot:
         panel = pilot.app.query_one(SpanDetailPanel)
         panel.set_span(call, tool=tool)
         await pilot.pause()
@@ -333,7 +354,7 @@ async def test_clicking_more_lines_expands_the_section() -> None:
         "res2", "tool_result", "tools", call_id="c1", details={"result": ("text", long_result)}
     )
     tool = build_tool_index((call, result)).ordered[0]
-    async with _Host().run_test(size=(100, 60)) as pilot:
+    async with _DetailHost().run_test(size=(100, 60)) as pilot:
         panel = pilot.app.query_one(SpanDetailPanel)
         panel.set_span(call, tool=tool)
         await pilot.pause()
@@ -407,7 +428,7 @@ async def test_hovering_a_section_bar_tints_it_like_the_cursor() -> None:
         "call1", "tool_call", "tools", call_id="c1", details={"arguments": ("json", '{"n": 1}')}
     )
     tool = build_tool_index((call,)).ordered[0]
-    async with _Host().run_test(size=(80, 30)) as pilot:
+    async with _DetailHost().run_test(size=(80, 30)) as pilot:
         panel = pilot.app.query_one(SpanDetailPanel)
         panel.set_span(call, tool=tool)
         await pilot.pause()
@@ -427,3 +448,117 @@ async def test_hovering_a_section_bar_tints_it_like_the_cursor() -> None:
 
         assert hovered != resting
         assert tint() == resting  # moving off the bar restores it
+
+
+def _link_record(
+    record_id: str,
+    index: int,
+    *,
+    lane: TrajectoryLane = TrajectoryLane.MODEL,
+    kind: TrajectoryKind = TrajectoryKind.ASSISTANT,
+    status: TrajectoryStatus = TrajectoryStatus.COMPLETED,
+    call_id: str | None = None,
+    links: tuple[ParticipantLink, ...] = (),
+) -> TrajectoryRecord:
+    return TrajectoryRecord(
+        record_id=record_id,
+        revision=1,
+        participant_id="p1",
+        source_epoch="epoch",
+        lane=lane,
+        kind=kind,
+        source="codex",
+        summary=record_id,
+        status=status,
+        raw_index=index,
+        call_id=call_id,
+        links=links,
+    )
+
+
+class _NavigationHost(App):
+    def __init__(self) -> None:
+        super().__init__()
+        self.selected: list[TrajectoryParticipantSelected] = []
+        self.back: list[TrajectoryBackRequested] = []
+
+    def compose(self) -> ComposeResult:
+        yield TrajectoryView("p1", id="trajectory")
+
+    def on_trajectory_participant_selected(self, message: TrajectoryParticipantSelected) -> None:
+        self.selected.append(message)
+
+    def on_trajectory_back_requested(self, message: TrajectoryBackRequested) -> None:
+        self.back.append(message)
+
+
+def test_navigation_history_is_bounded_and_skips_adjacent_duplicates() -> None:
+    history = TrajectoryNavigationHistory(limit=2)
+
+    assert history.push("p1", "r1")
+    assert not history.push("p1", "r1")
+    assert history.push("p2", "r2")
+    assert history.push("p3", "r3")
+    assert history.entries == (
+        TrajectoryNavigationTarget("p2", "r2"),
+        TrajectoryNavigationTarget("p3", "r3"),
+    )
+    assert history.back() == TrajectoryNavigationTarget("p3", "r3")
+    assert history.back() == TrajectoryNavigationTarget("p2", "r2")
+    assert history.back() is None
+
+
+async def test_exact_links_request_target_selection_and_back_is_keyboard_accessible() -> None:
+    link = ParticipantLink("p2", "child", target_record_id="target")
+    source = _link_record("source", 1, links=(link,))
+    app = _NavigationHost()
+    async with app.run_test(size=(80, 40)) as pilot:
+        view = app.query_one(TrajectoryView)
+        view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
+        view.state.upsert((source,))
+        view.state.select("source")
+        view._refresh()
+
+        view.on_span_detail_participant_link_clicked(
+            SpanDetailParticipantLinkClicked(link, exact=True, unresolved=False)
+        )
+        await pilot.pause()
+
+        assert app.selected[-1].participant_id == "p2"
+        assert app.selected[-1].target_record_id == "target"
+        assert app.selected[-1].exact
+        assert app.selected[-1].link == link
+
+        await pilot.press("b")
+
+        assert len(app.back) == 1
+
+
+async def test_select_and_reveal_focuses_the_anchor_record_details() -> None:
+    call = _link_record(
+        "call",
+        1,
+        lane=TrajectoryLane.TOOLS,
+        kind=TrajectoryKind.TOOL_CALL,
+        call_id="tool",
+    )
+    result = _link_record(
+        "result",
+        2,
+        lane=TrajectoryLane.TOOLS,
+        kind=TrajectoryKind.TOOL_RESULT,
+        call_id="tool",
+    )
+    later = _link_record("later", 3)
+    app = _NavigationHost()
+    async with app.run_test(size=(100, 30)):
+        view = app.query_one(TrajectoryView)
+        view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
+        view.state.upsert((call, result, later))
+        view._refresh()
+
+        assert view.select_and_reveal_record("result")
+        assert view.state.selected_id == "call"  # a tool result anchors to its call
+        assert view.state.focus_region is FocusRegion.DETAIL
+        assert not view.state.follow_tail
+        assert not view.select_and_reveal_record("missing")
