@@ -1,7 +1,4 @@
-"""Detached backend process ownership: launch, verified identity, termination and adoption.
-
-Real python subprocesses and signals; any identity mismatch fails closed without signalling.
-"""
+"""Detached backend process ownership: launch, verified identity, termination, adoption."""
 
 from __future__ import annotations
 

@@ -1,8 +1,4 @@
-"""Stdout endpoint discovery and secret-env resolution for detached backends.
-
-The core owns the bounds (deadline, bytes, line length, loopback shape); every failure
-reaps the just-launched child and fails closed.
-"""
+"""Stdout endpoint discovery and secret-env resolution for detached backends."""
 
 from __future__ import annotations
 

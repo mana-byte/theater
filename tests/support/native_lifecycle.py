@@ -202,12 +202,9 @@ def spawn_request(**kwargs) -> SpawnRequest:
 
 
 async def spawn_native(daemon: Daemon, req: SpawnRequest):
-    """Spawn through the actual spawn RPC — the composition users hit.
+    """Spawn through the actual spawn RPC, the composition users hit.
 
-    The RPC creates the spawn job (its handle is the participant id) between
-    reserve and launch and owns the pre-launch reservation cleanup, so this
-    exercises the real native dispatch and failure control flow. Returns the
-    registry's live participant row.
+    The RPC owns the spawn job and the pre-launch reservation cleanup; returns the live row.
     """
     from theater.daemon.rpc import spawning as spawning_rpc
 

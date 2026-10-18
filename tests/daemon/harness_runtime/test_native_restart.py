@@ -53,12 +53,9 @@ pytestmark = pytest.mark.usefixtures("native_harness_binary")
 
 
 class _ScriptedResumeRuntime(RecordingRuntime):
-    """An exact-session re-adoption scripted by the harness under test.
+    """A scripted exact-session re-adoption.
 
-    A RECONNECT open parks on the harness's ``resume_gate`` while one is set
-    (a deterministic await boundary for replacement races) and then fails
-    while ``resume_fails`` is set, simulating a transient native resume
-    failure; every attempt is recorded for retry-count assertions.
+    A RECONNECT open parks on `resume_gate` while set, then fails while `resume_fails` is set.
     """
 
     def __init__(
@@ -82,10 +79,7 @@ class _ScriptedResumeRuntime(RecordingRuntime):
 class _ScriptedResumeHarness(NativeFixtureHarness):
     """The lifecycle harness whose restart re-adoption the test scripts.
 
-    While ``resume_fails`` is set, every runtime the manifest creates fails
-    its RECONNECT session open, so the startup reconciliation installs a
-    candidate whose exact-session re-adoption fails. The test clears the
-    flag and the production health monitor retries.
+    While `resume_fails` is set, runtimes fail their RECONNECT open until the test clears it.
     """
 
     def __init__(self) -> None:
@@ -386,13 +380,8 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
 ):
     """A failed startup re-adoption must never read CONNECTED forever.
 
-    The daemon-composed restart installs the persisted binding's runtime
-    candidate and its exact-session open fails. The unusable candidate must
-    be discarded in place — fail-closed and retryable — so the production
-    health monitor retries the exact persisted session on its bounded
-    cadence and, once the transient failure clears, reconnects and
-    registers without relaunching the backend, launching a second UI, or
-    replaying a prompt.
+    The candidate is discarded in place; the monitor retries the exact session without a
+    relaunch, second UI or replayed prompt.
     """
     io = RoutingIO()
     harness = _ScriptedResumeHarness()
@@ -484,10 +473,7 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
 ):
     """A failed startup live registration must not leave a connected dead wire.
 
-    The exact-session open succeeds but the live registration fails; the
-    candidate must be discarded in place so the production monitor retries,
-    and the eventual attempt registers the exact runtime/session — no
-    relaunch, no replay.
+    The candidate is discarded so the monitor retries and registers the exact session.
     """
     io = RoutingIO()
     harness = _ScriptedResumeHarness()
@@ -703,10 +689,7 @@ async def test_startup_discarded_candidate_close_cancels_the_monitor(
 ):
     """Daemon shutdown cancels the retry monitor: no post-close recovery.
 
-    The startup re-adoption failed and the candidate reads DISCONNECTED; a
-    daemon close must cancel and await the owned monitor so no recovery
-    attempt reconnects anything after shutdown begins, while the verified
-    backend survives the close.
+    The verified backend survives the close.
     """
     io = RoutingIO()
     harness = _ScriptedResumeHarness()

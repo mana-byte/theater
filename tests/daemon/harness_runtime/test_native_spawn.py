@@ -154,11 +154,9 @@ async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in
 async def test_auto_selection_rollback_keeps_every_spawn_legacy(
     theater_home, terminal_provider, monkeypatch
 ):
-    """The rollback path: the gate constant flipped back to ``False``.
+    """The rollback path: the gate constant flipped back to `False`.
 
-    With the verified auto rollout enabled in production, this pins the
-    rollback contract — future ``auto`` spawns select legacy — instead of
-    the pre-rollout default.
+    Pins the rollback contract: `auto` spawns select legacy.
     """
     harness = NativeFixtureHarness()
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", False)
@@ -305,11 +303,8 @@ async def test_teardown_cancels_the_followup_queue_without_presence_gating(
 ):
     """Queue cancellation at teardown is Theater-owned: no presence refresh.
 
-    Every caller reaches the backend teardown with the pane already gone (the
-    kill confirmed it, exits observed it, the reaper only sees dead rows), so a
-    presence-gated interrupt there can only refuse on wake churn — a kill
-    fires after-kill-pane and window-unlinked wakes itself — or pass on stale
-    pre-kill facts. The queue must cancel regardless.
+    Callers reach teardown with the pane gone, so a gated interrupt would only refuse on
+    wake churn or pass on stale facts; the queue must cancel regardless.
     """
     d = await native_daemon(native_rig.io, native_rig.harness, terminal_provider)
     p = None
@@ -447,10 +442,7 @@ async def test_no_runtime_connection_before_endpoint_readiness(
 ):
     """frontend_plan/open_session cannot begin before the endpoint accepts.
 
-    The fake backend binds immediately, but the readiness wait is gated by
-    the test: while the gate is closed, the launch is provably parked before
-    any runtime was created and before anything connected — and the recorded
-    order shows the connect path running strictly after the probe accepted.
+    While the test holds the readiness gate closed, nothing connected; the order is probe, connect.
     """
     d = await native_daemon(native_rig.io, native_rig.harness, terminal_provider)
     gate = asyncio.Event()
@@ -506,12 +498,8 @@ async def test_endpoint_readiness_failure_falls_back_after_verified_cleanup(
 ):
     """A backend that never binds fails at the readiness probe, pre-dispatch-clean.
 
-    The probe's production budget is the one startup deadline — there is no
-    separate readiness subdeadline, and the existing outer asyncio.wait_for
-    still enforces the whole-sequence bound (proven by the startup-timeout
-    test). Only the probe's own deadline is compressed here, so the real
-    probe still produces its own diagnostic and the ordinary pre-dispatch
-    cleanup before the ordinary fallback launch.
+    Only the probe's deadline is compressed, so the real probe still diagnoses and the
+    ordinary pre-dispatch cleanup precedes the ordinary fallback launch.
     """
     io = RoutingIO()
     harness = NativeFixtureHarness(binds=False)
@@ -551,12 +539,8 @@ async def test_cancelled_endpoint_wait_cannot_escape_backend_ownership(
 ):
     """Cancelling the spawn inside the readiness wait still cleans the backend.
 
-    The backend is a detached process the daemon alone owns; a cancellation
-    delivered while the launch is parked on endpoint readiness follows the
-    pre-dispatch cleanup path — the backend is terminated, the pane and
-    binding go with it — instead of leaking an owned process. The probe
-    really runs with the single startup deadline; the cancellation lands
-    well inside it.
+    The daemon alone owns the detached backend: cancellation follows the pre-dispatch
+    cleanup (backend, pane and binding go) instead of leaking a process.
     """
     io = RoutingIO()
     harness = NativeFixtureHarness(binds=False)

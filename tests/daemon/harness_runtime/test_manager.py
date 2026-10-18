@@ -1,8 +1,4 @@
-"""Daemon runtime manager: lifecycle, native-route cache, adoption and recovery monitors.
-
-Concurrency assertions use deterministic barriers (events released only after every
-caller has arrived), never timing.
-"""
+"""Daemon runtime manager: lifecycle, route cache, adoption and recovery monitors."""
 
 from __future__ import annotations
 
@@ -341,10 +337,7 @@ async def test_get_or_create_retries_when_teardown_removed_its_entry(
 ) -> None:
     """A teardown that empties an entry must not strand a queued creator.
 
-    The participant lock is held by the test so both contenders park on it in
-    a deterministic order: teardown first (it removes the now-empty entry),
-    then get_or_create, which must notice the removal, retry, and register on
-    a fresh entry instead of building an unreachable orphan.
+    Teardown parks first, then get_or_create; it must notice the removal and re-register.
     """
     manager = HarnessRuntimeManager()
     entry = await manager._entry("p1")
@@ -477,9 +470,7 @@ async def test_disconnected_runtime_recovers_exactly_once_while_callback_runs(
 ) -> None:
     """Coalesced recovery: one monitor, one in-flight attempt per generation.
 
-    The recovery callback runs inline in the monitor, so no second attempt
-    can start while the first is in flight — and the same-generation
-    replacement runtime is watched by the same monitor.
+    The callback runs inline in the monitor, so no second attempt can start meanwhile.
     """
     monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
     monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.01)
@@ -741,9 +732,7 @@ async def test_blocked_recovery_for_one_participant_does_not_block_another(
 ) -> None:
     """One participant's blocked recovery never blocks the other's.
 
-    The monitor holds no lock while the callback runs, so a blocked
-    recovery for p1 leaves p2's recovery, and every registry lookup,
-    responsive.
+    The monitor holds no lock while the callback runs, so lookups stay responsive.
     """
     monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
     monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.01)
