@@ -193,6 +193,26 @@ def test_tool_sheet_puts_input_above_result_with_the_command_in_the_header() -> 
     assert sheet.sections[-1].folded
 
 
+def test_tool_sheet_keeps_a_detail_field_no_section_claims() -> None:
+    call = _record(
+        "call1",
+        "tool_call",
+        "tools",
+        call_id="c1",
+        details={
+            "tool": ("text", "bash"),
+            "arguments": ("json", '{"command": "ls"}'),
+            "exit_code": ("text", "127"),
+        },
+    )
+    tool = build_tool_index((call,)).ordered[0]
+
+    sheet = build_sheet(call, Palette(), tool=tool)
+
+    other = next(section for section in sheet.sections if section.key.startswith("field:"))
+    assert (other.key, other.title, other.copy_text) == ("field:2", "exit_code", "127")
+
+
 def test_model_sheet_leads_with_usage_and_folds_the_request_reasoning() -> None:
     usage = {
         "model": "claude",
