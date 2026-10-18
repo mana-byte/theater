@@ -1,22 +1,10 @@
-"""EventPath extraction from Claude Code transcripts.
-
-The recall index is built from ``Event.paths`` that the observer populates
-during parse. These tests cover the claude adapter's extraction of file paths
-from tool_use blocks: which tools yield paths, which mode (read/write) they
-get, and the guarantee that every path is repo-relative.
-
-The shipped fixture (``claude_code.jsonl``) scrubs tool inputs to
-``{"scrubbed": true}``, so it exercises the parse pipeline but cannot exercise
-path extraction. The tests here use synthetic records that carry the real
-Claude Code tool input shapes (``file_path``, ``notebook_path``) alongside a
-``cwd`` field, as every real record does.
-"""
+"""EventPath extraction from Claude Code transcripts."""
 
 from __future__ import annotations
 
 import json
 
-from tests.support.shipped import ClaudeCodeHarness, ClaudeCodeObserver
+from tests.support.shipped import ClaudeCodeObserver
 from theater.harness.base import EventKind
 
 
@@ -50,9 +38,6 @@ def _tool_use_record(
 
 def _parse_one(line: str) -> list:
     return ClaudeCodeObserver().parse(line, 0)
-
-
-# ---- write tools ----------------------------------------------------------
 
 
 def test_write_yields_a_write_path():
@@ -97,17 +82,11 @@ def test_notebookedit_yields_a_write_path():
     assert event.paths[0].path == "nb.ipynb"
 
 
-# ---- read tools -----------------------------------------------------------
-
-
 def test_read_yields_a_read_path():
     record = _tool_use_record("Read", {"file_path": "/home/ada/repo/README.md"})
     (event,) = _parse_one(record)
     assert event.paths[0].mode == "read"
     assert event.paths[0].path == "README.md"
-
-
-# ---- no-path tools --------------------------------------------------------
 
 
 def test_bash_yields_no_paths():
@@ -147,9 +126,6 @@ def test_tool_use_with_scrubbed_input_yields_no_paths():
     (event,) = _parse_one(record)
     assert event.tool_name == "Read"
     assert event.paths == ()
-
-
-# ---- repo-relative guarantee ---------------------------------------------
 
 
 def test_path_outside_cwd_is_dropped():
@@ -202,32 +178,3 @@ def test_cwd_with_trailing_slash_relativises_correctly():
     )
     (event,) = _parse_one(record)
     assert event.paths[0].path == "x.py"
-
-
-# ---- resume support -------------------------------------------------------
-
-
-def test_plan_launch_with_resume_forks_to_a_fresh_session(tmp_path):
-    plan = ClaudeCodeHarness().plan_launch(
-        participant_id="p-abc",
-        prompt="continue",
-        config_path=tmp_path / "mcp.json",
-        approval="manual",
-        resume="session-uuid-123",
-    )
-    assert "--resume=session-uuid-123" in plan.argv
-    assert "--fork-session" in plan.argv
-    assert f"--session-id={plan.session_id}" in plan.argv
-    assert plan.session_id != "session-uuid-123"
-    assert plan.argv[-1] == "continue"
-
-
-def test_plan_launch_without_resume_adds_no_resume_flag(tmp_path):
-    plan = ClaudeCodeHarness().plan_launch(
-        participant_id="p-abc",
-        prompt="hello",
-        config_path=tmp_path / "mcp.json",
-        approval="manual",
-    )
-    assert not any(arg.startswith("--resume") for arg in plan.argv)
-    assert "--fork-session" not in plan.argv

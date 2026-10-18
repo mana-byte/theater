@@ -1,4 +1,4 @@
-"""Pi frontend bridge interrupt targets the exact run and treats post-mutation failure as unknown."""
+"""Pi frontend bridge interrupt targets the exact run; post-mutation failure is unknown."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Vibe unified session store: format minors, chunk reassembly, golden store and fail-closed reads."""
+"""Vibe unified store format: minors, chunk reassembly, golden store and fail-closed reads."""
 
 from __future__ import annotations
 

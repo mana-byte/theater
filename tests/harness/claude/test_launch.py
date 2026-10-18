@@ -1,191 +1,222 @@
-"""Claude Code's file layout, as opposed to its record format.
-
-The record format is covered in test_parse.py against a scrubbed real
-transcript. What is left, and what these tests are about, is everything the
-adapter does with the *directory*: choosing which of ~/.claude/projects/*/*.jsonl
-belongs to a participant, and reading Task sidechains out of it.
-
-Picking the wrong file is the expensive mistake. Claude names each transcript
-after its session id and files it under a slug of the working directory, so
-two agents in one repo differ only by a uuid nobody has yet. The adapter
-therefore reads `cwd` out of each candidate's own records rather than trusting
-the slug — and gives up, rather than guessing, when it cannot.
-"""
+"""Claude launch planning: argv, MCP config, resume fork, hook settings and thinking defaults."""
 
 from __future__ import annotations
 
 import json
-import time
+import shlex
 from pathlib import Path
 
 import pytest
 
-from tests.support.shipped import ClaudeCodeHarness, ClaudeCodeObserver
+from tests.support.shipped import ClaudeCodeHarness
+from theater import paths
+from theater.daemon.spawning.planning import install_hook_plan
 from theater.harness import theater_mcp_servers
-
-SESSION = "b67b4276-f8b8-43ed-9987-0b5b3828c8cd"
-
-
-def write(path: Path, records: list[dict | str]) -> Path:
-    """A transcript file, with raw strings passed through unencoded."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [r if isinstance(r, str) else json.dumps(r) for r in records]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
-
-
-@pytest.fixture
-def root(tmp_path) -> Path:
-    d = tmp_path / "projects"
-    d.mkdir()
-    return d
-
-
-@pytest.fixture
-def observer(root) -> ClaudeCodeObserver:
-    return ClaudeCodeObserver(root=root)
-
-
-# ---- finding the transcript ----------------------------------------------
+from theater.harness.builtin.plugins.claude.constants import (
+    CLAUDE_RECEIPT_EVENTS,
+    CLAUDE_THINKING_SUMMARIES_KEY,
+)
+from theater.harness.builtin.plugins.claude.hooks import (
+    NATIVE_HOOK_CHANNEL,
+    install_native_hooks,
+    native_hook_settings,
+    native_hook_token_path,
+)
+from theater.harness.builtin.plugins.claude.launch import (
+    plan_launch,
+)
+from theater.harness.builtin.plugins.claude.manifest import MANIFEST
+from theater.harness.contracts.callbacks import (
+    HookInstallContext,
+    LaunchContext,
+)
+from theater.harness.contracts.channels import ChannelKind
+from theater.harness.manifests.compiler import compile_manifest
+from theater.models import Participant
 
 
-def test_a_missing_projects_directory_is_not_an_error(tmp_path):
-    """Claude may simply not be installed; that is a None, not a crash."""
-    observer = ClaudeCodeObserver(root=tmp_path / "never-created")
-    assert observer.find_transcript(cwd="/tmp/x") is None
+def test_plan_env_pins_config_dir_only_when_configured(tmp_path, monkeypatch) -> None:
+    def context() -> LaunchContext:
+        return LaunchContext(
+            participant_id="abc123",
+            prompt="hi",
+            config_path=tmp_path / "mcp.json",
+            approval="manual",
+        )
+
+    config = tmp_path / "claude-config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    plan = plan_launch(context())
+    assert plan.env["CLAUDE_CONFIG_DIR"] == str(config)
+
+    # A relative value is pinned absolute: the child's cwd is not the daemon's.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "claude-work")
+    plan = plan_launch(context())
+    assert plan.env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-work")
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    plan = plan_launch(context())
+    assert "CLAUDE_CONFIG_DIR" not in plan.env
+    # Past the 340 s tool timeout, so a long await is never moved to the background.
+    assert plan.env["CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"] == "360000"
 
 
-def test_a_known_session_id_is_found_by_filename_without_reading_anything(root, observer):
-    """The stem *is* the session id, so this needs no scan and no cwd guess."""
-    want = write(root / "-tmp-x" / f"{SESSION}.jsonl", [{"cwd": "/somewhere/else"}])
-    assert observer.find_transcript(cwd="/tmp/x", session_id=SESSION) == want
-
-
-def test_an_unknown_session_id_falls_back_to_the_cwd_scan(root, observer):
-    """A stale id must not shadow a transcript that is really there."""
-    want = write(root / "-tmp-x" / "aaa.jsonl", [{"cwd": "/tmp/x"}])
-    assert observer.find_transcript(cwd="/tmp/x", session_id="not-on-disk") == want
-
-
-def test_without_a_cwd_there_is_nothing_to_match_on(observer):
-    assert observer.find_transcript(cwd="") is None
-
-
-def test_the_newest_transcript_wins_among_several_in_one_directory(root, observer):
-    """Two agents in one repo differ only by mtime until one of them speaks."""
-    old = write(root / "-tmp-x" / "old.jsonl", [{"cwd": "/tmp/x"}])
-    new = write(root / "-tmp-x" / "new.jsonl", [{"cwd": "/tmp/x"}])
-    import os
-
-    os.utime(old, (1000, 1000))
-    os.utime(new, (2000, 2000))
-    assert observer.find_transcript(cwd="/tmp/x") == new
-
-
-def test_a_transcript_older_than_the_participant_is_not_theirs(root, observer):
-    """Without this, a respawn in the same repo re-attaches to the dead session."""
-    write(root / "-tmp-x" / "aaa.jsonl", [{"cwd": "/tmp/x"}])
-    assert observer.find_transcript(cwd="/tmp/x", after=0) is not None
-    assert observer.find_transcript(cwd="/tmp/x", after=time.time() + 3600) is None
-
-
-def test_a_transcript_for_another_directory_is_ignored(root, observer):
-    write(root / "-tmp-y" / "aaa.jsonl", [{"cwd": "/tmp/y"}])
-    assert observer.find_transcript(cwd="/tmp/x") is None
-
-
-def test_the_cwd_is_resolved_before_it_is_compared(root, observer, tmp_path):
-    """`/tmp` is a symlink to `/private/tmp` on macOS; the two must still match."""
-    real = tmp_path / "repo"
-    real.mkdir()
-    write(root / "-repo" / "aaa.jsonl", [{"cwd": str(real)}])
-    assert observer.find_transcript(cwd=f"{real}/.") is not None
-
-
-def test_a_malformed_line_does_not_hide_the_cwd_on_the_next_one(root, observer):
-    """Claude writes partial lines while flushing; one is not a reason to give up."""
-    want = write(root / "-tmp-x" / "aaa.jsonl", ['{"cwd": "/tmp/x"', {"cwd": "/tmp/x"}])
-    assert observer.find_transcript(cwd="/tmp/x") == want
-
-
-def test_the_cwd_probe_gives_up_rather_than_read_a_whole_transcript(root, observer):
-    """A transcript can be megabytes; the cwd is in the first records or nowhere."""
-    filler: list[dict | str] = [{"type": "system"} for _ in range(25)]
-    write(root / "-tmp-x" / "aaa.jsonl", [*filler, {"cwd": "/tmp/x"}])
-    assert observer.find_transcript(cwd="/tmp/x") is None
-
-
-def test_a_transcript_that_cannot_be_read_is_skipped_not_fatal(root, observer, monkeypatch):
-    write(root / "-tmp-x" / "aaa.jsonl", [{"cwd": "/tmp/x"}])
-    original = Path.open
-
-    def deny(self, *a, **kw):
-        if self.suffix == ".jsonl":
-            raise OSError("permission denied")
-        return original(self, *a, **kw)
-
-    monkeypatch.setattr(Path, "open", deny)
-    assert observer.find_transcript(cwd="/tmp/x") is None
-
-
-def test_the_session_id_is_read_off_the_filename(observer):
-    assert observer.session_id(Path(f"/x/{SESSION}.jsonl")) == SESSION
-
-
-# ---- Task sidechains ------------------------------------------------------
-
-
-def test_each_sidechain_is_reported_once_however_many_records_it_has(root, observer):
-    """A Task subagent writes a whole conversation; it is still one child."""
-    path = write(
-        root / "-tmp-x" / "aaa.jsonl",
-        [
-            {"isSidechain": False, "uuid": "main-1"},
-            {"isSidechain": True, "uuid": "task-1", "parentUuid": None},
-            {"isSidechain": True, "uuid": "task-2", "parentUuid": "task-1"},
-            {"isSidechain": True, "uuid": "task-3", "parentUuid": "task-1"},
-        ],
+def test_plan_launch_with_resume_forks_to_a_fresh_session(tmp_path):
+    plan = ClaudeCodeHarness().plan_launch(
+        participant_id="p-abc",
+        prompt="continue",
+        config_path=tmp_path / "mcp.json",
+        approval="manual",
+        resume="session-uuid-123",
     )
-    children = observer.native_children(path)
-    assert [(c.session_id, c.agent) for c in children] == [("task-1", "task")]
+    assert "--resume=session-uuid-123" in plan.argv
+    assert "--fork-session" in plan.argv
+    assert f"--session-id={plan.session_id}" in plan.argv
+    assert plan.session_id != "session-uuid-123"
+    assert plan.argv[-1] == "continue"
 
 
-def test_two_separate_tasks_are_two_children(root, observer):
-    path = write(
-        root / "-tmp-x" / "aaa.jsonl",
-        [
-            {"isSidechain": True, "uuid": "task-a", "parentUuid": None},
-            {"isSidechain": True, "uuid": "task-b", "parentUuid": None},
-        ],
+def test_plan_launch_without_resume_adds_no_resume_flag(tmp_path):
+    plan = ClaudeCodeHarness().plan_launch(
+        participant_id="p-abc",
+        prompt="hello",
+        config_path=tmp_path / "mcp.json",
+        approval="manual",
     )
-    assert [c.session_id for c in observer.native_children(path)] == ["task-a", "task-b"]
+    assert not any(arg.startswith("--resume") for arg in plan.argv)
+    assert "--fork-session" not in plan.argv
 
 
-def test_a_transcript_with_no_sidechains_has_no_children(root, observer):
-    path = write(root / "-tmp-x" / "aaa.jsonl", [{"isSidechain": False, "uuid": "main-1"}])
-    assert observer.native_children(path) == []
-
-
-def test_blank_and_malformed_lines_are_skipped_while_scanning_for_children(root, observer):
-    path = write(
-        root / "-tmp-x" / "aaa.jsonl",
-        ["", "not json", "[1, 2]", {"isSidechain": True, "uuid": "task-1"}],
+def test_launch_composes_receipt_and_async_native_hook_settings(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    participant_id = "claude-hooks"
+    plan = plan_launch(
+        LaunchContext(
+            participant_id=participant_id,
+            prompt="",
+            config_path=tmp_path / "mcp.json",
+            approval="manual",
+        )
     )
-    assert [c.session_id for c in observer.native_children(path)] == ["task-1"]
+    settings_path = next(path for path in plan.files if path.name == "claude.settings.json")
+    native = native_hook_settings(participant_id)["hooks"]
+    assert not set(native).intersection(json.loads(plan.files[settings_path])["hooks"])
+    harness = compile_manifest("claude", MANIFEST)
+    installed = install_hook_plan(
+        plan,
+        Participant(id=participant_id, harness="claude"),
+        harness.observer,
+        enabled_channels=frozenset({NATIVE_HOOK_CHANNEL}),
+    )
+    settings = json.loads(installed.files[settings_path])
+    assert settings[CLAUDE_THINKING_SUMMARIES_KEY] is True
+    assert isinstance(native, dict)
+    for event, entries in native.items():
+        assert settings["hooks"][event] == entries
+        [entry] = entries
+        [hook] = entry["hooks"]
+        assert hook["type"] == "command"
+        assert hook["async"] is True
+        assert "--strict-exit" not in hook["command"]
+        assert shlex.split(hook["command"])[1:3] == ["harness-event", event]
+
+    [credential] = installed.channel_credentials
+    assert credential.kind is ChannelKind.HOOK
+    assert credential.channel_id == NATIVE_HOOK_CHANNEL
+    assert credential.token_path == native_hook_token_path(participant_id)
+    assert credential.token_path == (
+        paths.participant_observation_dir(participant_id, "claude") / "hook-native-hooks.token"
+    )
 
 
-def test_a_sidechain_with_no_uuid_at_all_is_not_a_child(root, observer):
-    """Nothing to name it by; inventing one would create a phantom in the tree."""
-    path = write(root / "-tmp-x" / "aaa.jsonl", [{"isSidechain": True}])
-    assert observer.native_children(path) == []
+@pytest.mark.parametrize(
+    ("user_settings", "expected", "resume"),
+    [
+        pytest.param(None, True, None, id="absent"),
+        pytest.param('{"showThinkingSummaries": false}', None, None, id="false"),
+        pytest.param('{"showThinkingSummaries": true}', None, None, id="true"),
+        pytest.param("{malformed", True, "prior-session", id="malformed-resume"),
+        pytest.param("[]", True, None, id="non-object"),
+    ],
+)
+def test_launch_defaults_thinking_summaries_only_without_a_user_choice(
+    tmp_path,
+    monkeypatch,
+    user_settings: str | None,
+    expected: bool | None,
+    resume: str | None,
+) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    settings_path = tmp_path / "home" / ".claude" / "settings.json"
+    if user_settings is not None:
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(user_settings, encoding="utf-8")
+
+    plan = plan_launch(
+        LaunchContext("claude-thinking", "", tmp_path / "mcp.json", "manual", resume=resume)
+    )
+    launch_settings_path = next(path for path in plan.files if path.name == "claude.settings.json")
+    launch_settings = json.loads(plan.files[launch_settings_path])
+
+    assert launch_settings.get(CLAUDE_THINKING_SUMMARIES_KEY) is expected
+    assert set(launch_settings["hooks"]) == set(CLAUDE_RECEIPT_EVENTS)
+    if resume is not None:
+        assert [f"--resume={resume}", "--fork-session"] == plan.argv[4:6]
 
 
-def test_children_of_a_transcript_that_is_gone_is_empty_not_an_error(tmp_path, observer):
-    """The pane can die between the observer's decision to read and the read."""
-    assert observer.native_children(tmp_path / "never-written.jsonl") == []
+def test_launch_uses_nonempty_claude_config_dir_for_the_user_choice(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config_dir = tmp_path / "custom-claude"
+    config_dir.mkdir()
+    (config_dir / "settings.json").write_text(
+        json.dumps({CLAUDE_THINKING_SUMMARIES_KEY: False}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+    plan = plan_launch(LaunchContext("claude-thinking", "", tmp_path / "mcp.json", "manual"))
+    launch_settings_path = next(path for path in plan.files if path.name == "claude.settings.json")
+
+    assert CLAUDE_THINKING_SUMMARIES_KEY not in json.loads(plan.files[launch_settings_path])
 
 
-# ---- launch ---------------------------------------------------------------
+def test_unreadable_user_settings_do_not_block_the_launch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    settings_path = tmp_path / "home" / ".claude" / "settings.json"
+    original_read_text = Path.read_text
+
+    def unreadable(path: Path, *args, **kwargs) -> str:
+        if path == settings_path:
+            raise PermissionError("denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    plan = plan_launch(LaunchContext("claude-thinking", "", tmp_path / "mcp.json", "manual"))
+    launch_settings_path = next(path for path in plan.files if path.name == "claude.settings.json")
+
+    assert json.loads(plan.files[launch_settings_path])[CLAUDE_THINKING_SUMMARIES_KEY] is True
+
+
+def test_native_hook_installer_refuses_a_token_path_other_than_its_command_path(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    with pytest.raises(ValueError, match="does not match"):
+        install_native_hooks(
+            HookInstallContext(
+                participant_id="claude-hooks",
+                channel_id=NATIVE_HOOK_CHANNEL,
+                token_file=tmp_path / "wrong-token",
+                theater_executable="theater",
+            )
+        )
 
 
 def _argv(approval: str, tmp_path: Path) -> list[str]:
@@ -237,9 +268,6 @@ def test_the_config_written_alongside_names_this_participant(tmp_path):
         "control",
     ]
     assert config["mcpServers"]["theater_wait"]["args"][-1] == "wait"
-
-
-# ---- timestamps -----------------------------------------------------------
 
 
 def test_a_timestamp_claude_did_not_write_leaves_the_event_unstamped(observer):

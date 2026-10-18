@@ -1,12 +1,4 @@
-"""Claude Code native-control Phase 0 proof: the messaging-socket gates.
-
-The shipped manifest stays fail-closed until a stock binary >= 2.1.248 passes
-every executable gate in docs/native-interaction/claude.md. The pinned fixture
-records the honest no-go; a live proof writes a fresh record outside the
-fixture tree, and copying that into the fixture stays a separate reviewed
-action. The FakeInbox tests below are harness self-tests on a model receiver,
-never stock evidence.
-"""
+"""Claude native-control messaging gates: pinned no-go record, wire facts and self-tests."""
 
 from __future__ import annotations
 
@@ -22,31 +14,39 @@ from pathlib import Path
 import pytest
 
 from tests.native import claude_messaging_client as harness
-from tests.support.paths import fixture
+from tests.support.claude_native_control import RECORD
 from theater.harness.builtin.plugins.claude.manifest import MANIFEST, manifest_for_root
 from theater.harness.contracts.manifest import InterruptPlan
 
-pytestmark = pytest.mark.integration
-
-FIXTURES = fixture("claude_native_control")
-RECORD = FIXTURES / "messaging_conformance.json"
-PROOF_ENV = harness.PROOF_ENV
-PROBE_ENABLED = os.environ.get(PROOF_ENV) == "1" and bool(shutil.which("claude"))
 PINNED_INSTALLED = "2.1.272"
+
+
 PINNED_STATIC = "2.1.248"
+
+
 PINNED_STATIC_SHA = "8c9482ad0510ad5e3c88f0ebe6f035ec148f73e2"
+
+
 PINNED_BINARY_SHA = "195e24e8e1f9bf46f1eaee72d434a33e18f9f5796f29a6348a00d16c5f8aee75"
+
+
 PINNED_RESULT = (
     "no-go: required subcases unclassified: failure_taxonomy; "
     "failing gates: auth, session_rotation, stale_credentials"
 )
+
+
 GATE_NAMES = harness.REQUIRED_GATE_NAMES
+
+
 PROVEN_IDLE_SEND = {
     "frameProven": True,
     "admissionReply": "transcript-user-record",
     "turnIdField": "uuid",
     "duplicateSemantics": "duplicate-suppressed",
 }
+
+
 PINNED_GATE_STATUSES = {
     "admission_fact": "pass",
     "auth": "fail",
@@ -565,19 +565,3 @@ def test_capture_privacy_invariants_are_enforced(tmp_path: Path) -> None:
     link.symlink_to(good)
     with pytest.raises(harness.ConformanceError, match="symlink"):
         harness.verify_capture_artifact(link)
-
-
-@pytest.mark.skipif(not PROBE_ENABLED, reason=f"set {PROOF_ENV}=1 with a stock claude")
-def test_live_conformance_writes_a_fresh_record_outside_the_fixture_tree(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> None:
-    facts = harness.binary_facts()
-    if facts is None or not facts.qualified:
-        pytest.skip(f"no qualified stock binary at the {harness.SAME_MACHINE_FLOOR} floor")
-        return
-    before = RECORD.read_bytes()
-    out = tmp_path_factory.mktemp("claude-proof") / "messaging_conformance.json"
-    record = harness.run_conformance(facts.resolved, out_path=out)
-    assert record["result"].startswith(harness.PASS_RESULT_PREFIX)
-    assert out.exists()
-    assert RECORD.read_bytes() == before, "fixture updates are a separate reviewed action"
