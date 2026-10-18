@@ -1,30 +1,15 @@
-"""RC10 transactional persistence and guarded-upgrade coverage."""
+"""Database pragmas, journaled write units and the repositories composed over them."""
 
 from __future__ import annotations
 
-import os
-import sqlite3
-import stat
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from tests.support.paths import REPO_ROOT
 from theater.daemon.persistence import database as database_module
-from theater.daemon.persistence.database import (
-    HEAD,
-    MIGRATIONS,
-    Database,
-    RC9UpgradeBlocked,
-    RC9UpgradeLockHeld,
-    exclusive_upgrade_lock,
-)
+from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.control_operations import (
     ControlOperation,
     ControlOperationRepository,
@@ -35,7 +20,7 @@ from theater.daemon.persistence.repositories.providers import ProviderRepository
 from theater.daemon.persistence.repositories.terminal_bindings import TerminalBindingRepository
 from theater.daemon.persistence.repositories.workspaces import WorkspaceRepository
 from theater.daemon.persistence.store import Store
-from theater.daemon.schema import global_scratchpad, orchestration_events, tree_kv
+from theater.daemon.schema import global_scratchpad, orchestration_events
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
@@ -50,47 +35,6 @@ from theater.models import (
     WorkspaceRecord,
     WorkspaceUsageRecord,
 )
-
-
-def _upgrade(path: Path, revision: str) -> None:
-    engine = create_engine(f"sqlite:///{path}")
-    try:
-        with engine.begin() as connection:
-            config = Config()
-            config.set_main_option("script_location", str(MIGRATIONS))
-            config.attributes["connection"] = connection
-            command.upgrade(config, revision)
-    finally:
-        engine.dispose()
-
-
-def _rc9_database(path: Path, *, live_participant: bool = False, running_job: bool = False) -> None:
-    _upgrade(path, "0031")
-    connection = sqlite3.connect(path)
-    try:
-        if live_participant:
-            connection.execute(
-                "INSERT INTO participants "
-                "(id, harness, tier, status, last_activity, created_at) "
-                "VALUES ('external-live', 'codex', 'external', 'idle', 1.0, 1.0)"
-            )
-        if running_job:
-            connection.execute(
-                "INSERT INTO jobs "
-                "(handle, caller_id, kind, state, created_at) "
-                "VALUES ('job-running', 'cli', 'send', 'running', 1.0)"
-            )
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def _logical_dump(path: Path) -> tuple[str, ...]:
-    connection = sqlite3.connect(path)
-    try:
-        return tuple(connection.iterdump())
-    finally:
-        connection.close()
 
 
 def _provider(provider_id: str = "provider-a", selector: str = "tmux") -> ProviderRecord:
@@ -119,76 +63,6 @@ def _event(entity_id: str, revision: int = 1) -> JournalEventRecord:
     )
 
 
-def test_fresh_and_drained_rc9_databases_migrate(tmp_path: Path) -> None:
-    fresh = Database(tmp_path / "fresh.db")
-    assert (
-        fresh.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == HEAD
-    )
-    assert {
-        "global_scratchpad",
-        "orchestration_events",
-        "providers",
-        "public_operations",
-        "workspaces",
-    } <= set(
-        fresh.conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").scalars()
-    )
-    fresh.close()
-
-    path = tmp_path / "drained.db"
-    _rc9_database(path)
-    legacy = sqlite3.connect(path)
-    try:
-        legacy.execute(
-            "INSERT INTO participants "
-            "(id, harness, tier, parent_id, status, last_activity, created_at) "
-            "VALUES ('child', 'codex', 'spawned', 'parent', 'dead', 1.0, 1.0)"
-        )
-        legacy.execute(
-            "INSERT INTO participants "
-            "(id, harness, tier, status, last_activity, created_at) "
-            "VALUES ('root', 'vibe', 'external', 'dead', 1.0, 1.0)"
-        )
-        legacy.execute(
-            "INSERT INTO jobs (handle, caller_id, kind, state, created_at, finished_at) "
-            "VALUES ('job-old', 'parent', 'send', 'done', 1.0, 2.0)"
-        )
-        legacy.execute(
-            "INSERT INTO tree_kv "
-            "(tree_root_id, repo_root, namespace, key, value, updated_at, updated_by) "
-            "VALUES ('parent', '/repo', 'notes', 'key', 'discard-me', 1.0, 'parent')"
-        )
-        legacy.execute(
-            "INSERT INTO named_worktrees (repo_root, name, branch, path, created_at) "
-            "VALUES ('/repo', 'shared', 'theater/shared', '/repo/shared', 1.0)"
-        )
-        legacy.commit()
-    finally:
-        legacy.close()
-
-    migrated = Database(path)
-    try:
-        participants = migrated.conn.exec_driver_sql(
-            "SELECT id, origin, control_owner_kind, control_owner_id FROM participants ORDER BY id"
-        ).all()
-        assert participants == [
-            ("child", "spawned", "participant", "parent"),
-            ("root", "external", "local_operator", None),
-        ]
-        assert migrated.conn.execute(select(tree_kv)).fetchall() == []
-        assert migrated.conn.execute(select(global_scratchpad)).fetchall() == []
-        workspace = migrated.conn.exec_driver_sql(
-            "SELECT ownership_kind, path, state FROM workspaces"
-        ).one()
-        assert workspace == ("theater", "/repo/shared", "reconcile")
-        job = migrated.conn.exec_driver_sql(
-            "SELECT caller_id, actor_client_id, actor_participant_id FROM jobs"
-        ).one()
-        assert job == ("parent", None, None)
-    finally:
-        migrated.close()
-
-
 def test_database_pragmas_are_tuned(tmp_path: Path) -> None:
     """Performance pragmas apply to long-lived and fresh connections."""
     db = Database(tmp_path / "pragmas.db")
@@ -204,97 +78,7 @@ def test_database_pragmas_are_tuned(tmp_path: Path) -> None:
         db.close()
 
 
-def test_database_startup_refuses_live_rc9_without_touching_file(tmp_path: Path) -> None:
-    path = tmp_path / "live.db"
-    _rc9_database(path, live_participant=True)
-    path.chmod(0o640)
-    before = path.read_bytes()
-    mode = stat.S_IMODE(path.stat().st_mode)
-
-    with pytest.raises(RC9UpgradeBlocked, match="external-live"):
-        Database(path)
-
-    assert path.read_bytes() == before
-    assert stat.S_IMODE(path.stat().st_mode) == mode
-
-
-def test_upgrade_lock_rejects_a_racing_database_before_rc9_preflight(tmp_path: Path) -> None:
-    path = tmp_path / "race.db"
-    _rc9_database(path, live_participant=True)
-    before = path.read_bytes()
-
-    with exclusive_upgrade_lock(path), pytest.raises(RC9UpgradeLockHeld):
-        Database(path)
-
-    assert path.read_bytes() == before
-
-
-def test_direct_alembic_refuses_running_rc9_without_logical_changes(tmp_path: Path) -> None:
-    path = tmp_path / "running.db"
-    _rc9_database(path, running_job=True)
-    path.chmod(0o640)
-    before_bytes = path.read_bytes()
-    before_mode = stat.S_IMODE(path.stat().st_mode)
-    before = _logical_dump(path)
-
-    with pytest.raises(RC9UpgradeBlocked, match="job-running"):
-        _upgrade(path, "head")
-
-    assert _logical_dump(path) == before
-    assert path.read_bytes() == before_bytes
-    assert stat.S_IMODE(path.stat().st_mode) == before_mode
-
-
-def test_direct_alembic_respects_rc9_pidfile_flock_without_truncating(
-    tmp_path: Path, theater_home: Path
-) -> None:
-    path = tmp_path / "rc9-daemon-race.db"
-    _rc9_database(path)
-    before_database = path.read_bytes()
-    script = """
-from theater import paths
-from theater.daemon.lock import DaemonLock
-
-lock = DaemonLock()
-lock.acquire()
-print(paths.pidfile_path().read_text().strip(), flush=True)
-input()
-lock.release()
-"""
-    holder = subprocess.Popen(
-        [sys.executable, "-c", script],
-        cwd=REPO_ROOT,
-        env={**os.environ, "THEATER_HOME": str(theater_home)},
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        assert holder.stdout is not None
-        pid_contents = holder.stdout.readline().strip()
-        assert pid_contents == str(holder.pid)
-        pidfile = database_module.paths.pidfile_path()
-        assert pidfile.read_text() == f"{holder.pid}\n"
-
-        with pytest.raises(RC9UpgradeLockHeld):
-            _upgrade(path, "head")
-
-        assert pidfile.read_text() == f"{holder.pid}\n"
-        assert path.read_bytes() == before_database
-    finally:
-        if holder.stdin is not None:
-            holder.stdin.write("\n")
-            holder.stdin.flush()
-        try:
-            holder.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            holder.terminate()
-            holder.wait(timeout=5)
-    assert holder.returncode == 0
-
-
-def test_live_rc10_database_bypasses_drain_guard_when_head_advances(
+def test_live_database_bypasses_drain_guard_when_head_advances(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "rc10-live.db"
@@ -601,7 +385,7 @@ def test_control_dispatch_persists_exact_provider_terminal_target(tmp_path: Path
         database.close()
 
 
-def test_store_composes_rc10_repositories_and_provider_dispatch(tmp_path: Path) -> None:
+def test_store_composes_repositories_and_provider_dispatch(tmp_path: Path) -> None:
     store = Store(tmp_path / "composed.db")
     try:
         assert isinstance(store.providers, ProviderRepository)
