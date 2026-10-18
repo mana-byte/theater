@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import os
 import signal
+from contextlib import asynccontextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -562,27 +564,22 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
             await await_reaped(backend_pid)
 
 
-async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
-    theater_home, terminal_provider, monkeypatch
-):
-    """A startup completion that lost its generation may not touch the successor.
+@asynccontextmanager
+async def _startup_parked_behind_a_successor(terminal_provider, monkeypatch):
+    """Restart a daemon whose startup re-adoption parks on a gate, then replace its generation.
 
-    The startup candidate's exact-session open parks on a gate; while it
-    waits, generation 2 replaces the persisted binding and the manager's
-    runtime and registers its own live source, exactly as a replacement
-    lifecycle does. The stale startup completion must fail closed without
-    closing the successor runtime, unregistering its live source, or
-    rewriting the persisted binding.
+    While the generation-1 open waits, generation 2 replaces the persisted binding and the
+    manager's runtime and registers its own live source, as a replacement lifecycle does.
     """
     io = RoutingIO()
     harness = _ScriptedResumeHarness()
     d1 = await native_daemon(io, harness, terminal_provider)
     d2 = None
-    p = None
     try:
         p = await spawn_native(d1, spawn_request(prompt=""))
         binding = d1.store.get_runtime_binding(p.id)
         assert binding is not None
+        assert binding.native_session_id is not None
         assert binding.backend_pid is not None
         await d1.aclose()
 
@@ -603,10 +600,8 @@ async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
             what="the startup re-adoption parking on the gate",
         )
 
-        # Generation 2 replaces the participant while the startup open
-        # waits: teardown the generation-1 backend/runtime, bump the
-        # persisted binding, install the generation-2 runtime, and register
-        # its source exactly as the replacement generation's lifecycle does.
+        # Teardown the generation-1 backend/runtime, bump the persisted binding, install the
+        # generation-2 runtime, and register its source exactly as its lifecycle does.
         await d2.runtime_manager.teardown(p.id, backend_generation=1)
         d2.store.upsert_runtime_binding(
             replace(binding, backend_generation=2, native_session_id="gen-2-session")
@@ -626,122 +621,81 @@ async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
         )
         registration_before = d2.observer.live.registration_for(p.id)
         assert registration_before is not None
-
-        harness.resume_gate.set()
-        await asyncio.wait_for(start_task, 5.0)
-
-        # The stale startup completion failed closed and touched nothing the
-        # successor owns.
-        assert d2.runtime_manager.get(p.id) is gen2, "generation 2 remains current"
-        assert gen2.state.closed is False, "the successor runtime is never closed"
-        snapshot = await gen2.snapshot()
-        assert snapshot.health is ConnectionHealth.CONNECTED
-        registration = d2.observer.live.registration_for(p.id)
-        assert registration is registration_before, "the successor's wiring is never replaced"
-        assert registration.backend_generation == 2
-        assert registration.native_session_id == "gen-2-session"
-        current = d2.store.get_runtime_binding(p.id)
-        assert current is not None
-        assert current.backend_generation == 2, "the stale path never rewrites the binding"
-        assert current.native_session_id == "gen-2-session"
+        yield SimpleNamespace(
+            d2=d2,
+            p=p,
+            harness=harness,
+            gen2=gen2,
+            registration_before=registration_before,
+            start_task=start_task,
+        )
     finally:
         harness.resume_gate = None
+        harness.resume_fails = False
         if d2 is not None:
             await d2.aclose()
 
 
-async def test_startup_success_race_never_registers_over_a_successor(  # noqa: PLR0915
+async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
+    theater_home, terminal_provider, monkeypatch
+):
+    """A startup completion that lost its generation may not touch the successor.
+
+    The stale startup completion must fail closed without closing the successor runtime,
+    unregistering its live source, or rewriting the persisted binding.
+    """
+    async with _startup_parked_behind_a_successor(terminal_provider, monkeypatch) as race:
+        race.harness.resume_gate.set()
+        await asyncio.wait_for(race.start_task, 5.0)
+
+        # The stale startup completion failed closed and touched nothing the
+        # successor owns.
+        assert race.d2.runtime_manager.get(race.p.id) is race.gen2, "generation 2 remains current"
+        assert race.gen2.state.closed is False, "the successor runtime is never closed"
+        snapshot = await race.gen2.snapshot()
+        assert snapshot.health is ConnectionHealth.CONNECTED
+        registration = race.d2.observer.live.registration_for(race.p.id)
+        assert registration is race.registration_before, "the successor's wiring is never replaced"
+        assert registration.backend_generation == 2
+        assert registration.native_session_id == "gen-2-session"
+        current = race.d2.store.get_runtime_binding(race.p.id)
+        assert current is not None
+        assert current.backend_generation == 2, "the stale path never rewrites the binding"
+        assert current.native_session_id == "gen-2-session"
+
+
+async def test_startup_success_race_never_registers_over_a_successor(
     theater_home, terminal_provider, monkeypatch
 ):
     """A successful stale re-adoption must not overwrite the successor.
 
-    The startup candidate's exact-session open parks on a gate and then
-    SUCCEEDS after generation 2 already replaced the persisted binding, the
-    manager's runtime, and the live registration. The stale success must
-    revalidate to nothing and return without registering its source —
-    the generation-2 runtime, registration, persisted binding, and health
-    stay exactly what the replacement lifecycle installed.
+    The parked generation-1 open SUCCEEDS after generation 2 replaced the binding, runtime
+    and live registration: the stale success must revalidate to nothing and register nothing.
     """
-    io = RoutingIO()
-    harness = _ScriptedResumeHarness()
-    d1 = await native_daemon(io, harness, terminal_provider)
-    d2 = None
-    p = None
-    try:
-        p = await spawn_native(d1, spawn_request(prompt=""))
-        binding = d1.store.get_runtime_binding(p.id)
-        assert binding is not None
-        assert binding.native_session_id is not None
-        assert binding.backend_pid is not None
-        await d1.aclose()
-
-        # A quiet monitor: the race is driven through the real startup
-        # reconciliation; the monitor's automatic retry is proven in the
-        # retry tests above.
-        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 3600.0)
-        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
-        d2 = Daemon(harnesses={})
-        HARNESSES[harness.name] = harness
-        d2.runtime_io = io
-        d2.spawner.runtime_io = io
-        harness.store = d2.store
-        harness.resume_gate = asyncio.Event()
-        start_task = asyncio.create_task(d2.start())
-        await wait_until(
-            lambda: any(event[0] == "open_parked" for event in harness.events),
-            what="the startup re-adoption parking on the gate",
-        )
-
-        # Generation 2 replaces the participant while the startup open is
-        # still parked, exactly as a replacement lifecycle does.
-        await d2.runtime_manager.teardown(p.id, backend_generation=1)
-        d2.store.upsert_runtime_binding(
-            replace(binding, backend_generation=2, native_session_id="gen-2-session")
-        )
-        gen2 = _replacement_runtime(p.id)
-        await d2.runtime_manager.get_or_create(p.id, backend_generation=2, create=fake_create(gen2))
-        d2.observer.live.register(
-            LiveRegistration(
-                participant_id=p.id,
-                live_source=gen2.live_source(),
-                channel=harness.runtime.channel,
-                backend_generation=2,
-                native_session_id="gen-2-session",
-                evidence_sink=d2.controls.record_terminal_evidence,
-                active_job_for_turn=d2.controls.active_job_for_native_turn,
-            )
-        )
-        registration_before = d2.observer.live.registration_for(p.id)
-        assert registration_before is not None
-
+    async with _startup_parked_behind_a_successor(terminal_provider, monkeypatch) as race:
         # The parked generation-1 open now SUCCEEDS — after the replacement.
-        harness.resume_fails = False
-        harness.resume_gate.set()
-        await asyncio.wait_for(start_task, 5.0)
+        race.harness.resume_fails = False
+        race.harness.resume_gate.set()
+        await asyncio.wait_for(race.start_task, 5.0)
         assert any(
             event[0] == "open_session" and event[1] is SessionOpenMode.RECONNECT
-            for event in harness.events
+            for event in race.harness.events
         ), "the parked generation-1 open completed successfully"
 
         # The stale success registered nothing over the successor.
-        assert d2.runtime_manager.get(p.id) is gen2, "generation 2 remains current"
-        assert gen2.state.closed is False, "the successor runtime is never closed"
-        snapshot = await gen2.snapshot()
+        assert race.d2.runtime_manager.get(race.p.id) is race.gen2, "generation 2 remains current"
+        assert race.gen2.state.closed is False, "the successor runtime is never closed"
+        snapshot = await race.gen2.snapshot()
         assert snapshot.health is ConnectionHealth.CONNECTED
-        registration = d2.observer.live.registration_for(p.id)
-        assert registration is registration_before, "no stale source is registered"
-        assert registration.live_source is gen2.live_source()
+        registration = race.d2.observer.live.registration_for(race.p.id)
+        assert registration is race.registration_before, "no stale source is registered"
+        assert registration.live_source is race.gen2.live_source()
         assert registration.backend_generation == 2
         assert registration.native_session_id == "gen-2-session"
-        current = d2.store.get_runtime_binding(p.id)
+        current = race.d2.store.get_runtime_binding(race.p.id)
         assert current is not None
         assert current.backend_generation == 2, "the stale success never rewrites the binding"
         assert current.native_session_id == "gen-2-session"
-    finally:
-        harness.resume_gate = None
-        harness.resume_fails = False
-        if d2 is not None:
-            await d2.aclose()
 
 
 async def test_startup_discarded_candidate_close_cancels_the_monitor(

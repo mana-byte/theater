@@ -234,17 +234,47 @@ async def test_handshake_sends_upgrade_and_roundtrips_a_request(
     assert await task == {"turn": "turn-1"}
 
 
-async def test_rejected_upgrade_raises_typed_handshake_error(socket_path: Path) -> None:
-    async def refuse(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+@pytest.mark.parametrize(
+    ("reply", "match"),
+    [
+        pytest.param(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+            "refused the websocket upgrade",
+            id="rejected_upgrade",
+        ),
+        pytest.param(
+            b"HTTP/1.1 101 Switching Protocols\r\n"
+            b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Accept: c29tZXRoaW5nLWVsc2U=\r\n\r\n",
+            "wrong Sec-WebSocket-Accept",
+            id="wrong_accept_token",
+        ),
+        pytest.param(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\n\r\n",
+            "did not confirm the websocket upgrade",
+            id="upgrade_without_websocket_header",
+        ),
+        pytest.param(
+            b"HTTP/1.1 101 Switching Protocols\r\n"
+            b"Upgrade: websocket\r\nConnection: keep-alive\r\n\r\n",
+            r"does not.*include the Upgrade token",
+            id="connection_header_without_upgrade_token",
+        ),
+    ],
+)
+async def test_invalid_upgrade_reply_raises_typed_handshake_error(
+    socket_path: Path, reply: bytes, match: str
+) -> None:
+    async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readuntil(b"\r\n\r\n")
-        writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+        writer.write(reply)
         await writer.drain()
         writer.close()
 
-    server = WsTestServer(socket_path, handler=refuse)
+    server = WsTestServer(socket_path, handler=respond)
     await server.start()
     io = WebSocketRuntimeIO()
-    with pytest.raises(RuntimeHandshakeError, match="refused the websocket upgrade"):
+    with pytest.raises(RuntimeHandshakeError, match=match):
         await io.connect(f"unix://{socket_path}", timeout=5.0)
     await server.stop()
 
@@ -275,60 +305,6 @@ async def test_handshake_failure_is_not_masked_by_close_errors(
     finally:
         monkeypatch.undo()
         await server.stop()
-
-
-async def test_wrong_accept_token_is_refused(socket_path: Path) -> None:
-    async def liar(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await reader.readuntil(b"\r\n\r\n")
-        writer.write(
-            b"HTTP/1.1 101 Switching Protocols\r\n"
-            b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
-            b"Sec-WebSocket-Accept: c29tZXRoaW5nLWVsc2U=\r\n\r\n"
-        )
-        await writer.drain()
-        writer.close()
-
-    server = WsTestServer(socket_path, handler=liar)
-    await server.start()
-    io = WebSocketRuntimeIO()
-    with pytest.raises(RuntimeHandshakeError, match="wrong Sec-WebSocket-Accept"):
-        await io.connect(f"unix://{socket_path}", timeout=5.0)
-    await server.stop()
-
-
-async def test_upgrade_without_websocket_header_is_refused(socket_path: Path) -> None:
-    async def wrong_upgrade(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await reader.readuntil(b"\r\n\r\n")
-        writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\n\r\n")
-        await writer.drain()
-        writer.close()
-
-    server = WsTestServer(socket_path, handler=wrong_upgrade)
-    await server.start()
-    io = WebSocketRuntimeIO()
-    with pytest.raises(RuntimeHandshakeError, match="did not confirm the websocket upgrade"):
-        await io.connect(f"unix://{socket_path}", timeout=5.0)
-    await server.stop()
-
-
-async def test_connection_header_without_upgrade_token_is_refused(
-    socket_path: Path,
-) -> None:
-    async def keep_alive_only(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await reader.readuntil(b"\r\n\r\n")
-        writer.write(
-            b"HTTP/1.1 101 Switching Protocols\r\n"
-            b"Upgrade: websocket\r\nConnection: keep-alive\r\n\r\n"
-        )
-        await writer.drain()
-        writer.close()
-
-    server = WsTestServer(socket_path, handler=keep_alive_only)
-    await server.start()
-    io = WebSocketRuntimeIO()
-    with pytest.raises(RuntimeHandshakeError, match=r"does not.*include the Upgrade token"):
-        await io.connect(f"unix://{socket_path}", timeout=5.0)
-    await server.stop()
 
 
 async def test_upgrade_header_tokens_match_case_insensitively(socket_path: Path) -> None:
