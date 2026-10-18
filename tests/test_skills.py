@@ -30,10 +30,6 @@ from theater.skills import (
 from theater.skills import loader as skills_loader
 
 STANDALONE = ["theater-configure", "theater-debate", "theater-delegate", "theater-recover-tmux"]
-HIERARCHY = [
-    f"hierarchy/{member}"
-    for member in ("debater", "lead", "master", "member", "reviewer", "worker")
-]
 PAIR = [f"pair/{member}" for member in ("builder", "reviewer")]
 
 
@@ -59,7 +55,7 @@ def write_raw(root: Path, name: str, content: str | bytes) -> Path:
 def test_shipped_skills_are_discovered_with_their_exact_content(tmp_path):
     registry = discover(user_dir=tmp_path)
 
-    assert [skill.name for skill in registry.skills] == [*HIERARCHY, *PAIR, *STANDALONE]
+    assert [skill.name for skill in registry.skills] == [*PAIR, *STANDALONE]
     skill = registry.load("theater-debate")
     assert skill.source is SkillSource.BUILTIN
     assert skill.content == skill.source_path.read_text(encoding="utf-8")
@@ -69,7 +65,6 @@ def test_disabled_builtin_is_absent_from_the_registry(tmp_path):
     registry = discover(user_dir=tmp_path, disabled=("theater-debate",))
 
     assert [skill.name for skill in registry.skills] == [
-        *HIERARCHY,
         *PAIR,
         "theater-configure",
         "theater-delegate",
@@ -82,7 +77,7 @@ def test_disabled_builtin_is_absent_from_the_registry(tmp_path):
 def test_unknown_disabled_builtin_name_is_tolerated(tmp_path):
     registry = discover(user_dir=tmp_path, disabled=("not-a-bundled-skill",))
 
-    assert [skill.name for skill in registry.skills] == [*HIERARCHY, *PAIR, *STANDALONE]
+    assert [skill.name for skill in registry.skills] == [*PAIR, *STANDALONE]
 
 
 def test_shipped_tmux_recovery_skill_has_exact_data_only_package(tmp_path):
@@ -104,7 +99,6 @@ def test_valid_user_skill_is_loadable_in_deterministic_name_order(tmp_path):
 
     assert [skill.name for skill in registry.skills] == [
         "alpha",
-        *HIERARCHY,
         *PAIR,
         *STANDALONE,
         "zebra",
@@ -376,7 +370,7 @@ def test_invalid_user_skill_is_diagnostic_but_invalid_builtin_is_fatal(tmp_path)
 def test_empty_user_root_is_allowed(tmp_path):
     registry = discover(user_dir=tmp_path / "missing")
 
-    assert [skill.name for skill in registry.skills] == [*HIERARCHY, *PAIR, *STANDALONE]
+    assert [skill.name for skill in registry.skills] == [*PAIR, *STANDALONE]
     assert registry.rejections == ()
 
 

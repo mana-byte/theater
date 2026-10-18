@@ -19,11 +19,13 @@ from theater.daemon.frontend.catalog_handlers import skills_load as frontend_ski
 from theater.daemon.gc import _delete_participant_row
 from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.plays import PlayPlan, PlayRefused
+from theater.daemon.plugins.credentials import mint_credential
 from theater.daemon.plugins.dispatch import _skills_load as plugin_skills_load
 from theater.daemon.rpc.cancellation import _cancel
 from theater.daemon.schema import play_members
 from theater.harness.contracts.runtime import ControlReceipt, DeliveryResult
 from theater.mcp.server import build
+from theater.mcp_plugins import MANIFEST_API_VERSION, PluginCapability
 from theater.models import JobState, now
 from theater.protocol import RemoteError
 from theater.skills import PlayRules, SkillValidationError, UnknownSkill, discover
@@ -44,6 +46,32 @@ lead = []
 [roles]
 scout = ["lead"]
 """
+
+
+@pytest.fixture(autouse=True)
+async def direct_participant_attachments(daemon, monkeypatch):
+    create = daemon.registry.create_spawned
+
+    def attached(*args, **kwargs):
+        participant = create(*args, **kwargs)
+        _attach_beads(daemon, participant.id, connection=kwargs.get("connection"))
+        return participant
+
+    monkeypatch.setattr(daemon.registry, "create_spawned", attached)
+
+
+def _attach_beads(daemon, participant_id: str, *, connection=None) -> None:
+    material = mint_credential()
+    daemon.store.set_mcp_plugin_credential(
+        participant_id,
+        plugin_name="beads",
+        api_version=MANIFEST_API_VERSION,
+        credential_id=material.credential_id,
+        credential_verifier=material.verifier,
+        grants={PluginCapability.PLAYS_READ},
+        connection=connection,
+        credential_path=str(paths.participant_dir(participant_id) / "plugins/beads/credential"),
+    )
 
 
 @pytest.fixture
@@ -494,6 +522,7 @@ async def test_gc_deletes_only_each_participants_own_play_rows(client, daemon):
     assert _delete_participant_row(daemon.store, master.id, now()) == 1
     assert _play_rows(daemon, member.id) == 1, "a master's GC leaves its members' rows alone"
     await client.call("hello", id=master.id, harness="vibe", cwd="/tmp")
+    _attach_beads(daemon, master.id)
     assert (await _load(client, master.id))["state"] == "started"
     assert daemon.plays.membership(member.id) is None, "a re-created master id revives no one"
 

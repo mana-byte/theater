@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import fcntl
 import hashlib
 import json
-import os
 from collections.abc import Callable
-from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Literal
 
 from theater.plugin_client import TheaterPluginClient
 
 from .backend import BeadsError, Board
+from .context import _assignee, _assignment, _context, _members, _reassign
+from .lifecycle import _reopen_args
+from .locking import board_lock, drain_cancelled_worker
+from .projection import _detail, _edges, _summary
 
 
 def _text(value: str, field: str, maximum: int, *, required: bool = False) -> str:
@@ -24,204 +25,6 @@ def _text(value: str, field: str, maximum: int, *, required: bool = False) -> st
     if required and not value.strip():
         raise BeadsError(f"{field} is required")
     return value
-
-
-@asynccontextmanager
-async def board_lock(state_dir: Path, instance_id: str):
-    lock_dir = state_dir / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    path = lock_dir / f"{instance_id}.lock"
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                await asyncio.sleep(0.05)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-async def drain_cancelled_worker(worker: asyncio.Task[Any]) -> None:
-    while not worker.done():
-        with suppress(asyncio.CancelledError, Exception):
-            await asyncio.shield(worker)
-    with suppress(asyncio.CancelledError):
-        worker.exception()
-
-
-def _context(raw: dict[str, Any], permission: str) -> tuple[str, str]:
-    play = raw.get("play")
-    if not raw.get("enabled") or raw.get("plugin_name") != "beads":
-        raise BeadsError("Beads is not enabled for this participant")
-    if not isinstance(play, dict) or not isinstance(raw.get("participant_id"), str):
-        raise BeadsError("caller is not an actual member of a play")
-    if "beads" not in play.get("plugins", ()) or permission not in play.get("permissions", ()):
-        raise BeadsError(f"this play position has no Beads {permission} grant")
-    if not isinstance(play.get("position"), str) or not isinstance(play.get("instance_id"), str):
-        raise BeadsError("play context is incomplete")
-    return raw["participant_id"], play["instance_id"]
-
-
-def _members(raw: list[dict[str, Any]]) -> tuple[set[str], dict[str, str]]:
-    ids: set[str] = set()
-    names: dict[str, str] = {}
-    for member in raw:
-        identifier = member.get("participant_id")
-        if isinstance(identifier, str):
-            ids.add(identifier)
-            name = member.get("name")
-            if isinstance(name, str) and name:
-                names[name] = identifier
-    return ids, names
-
-
-def _assignee(value: str, members: tuple[set[str], dict[str, str]]) -> str:
-    ids, names = members
-    if value in ids:
-        return value
-    if value in names:
-        return names[value]
-    raise BeadsError("assignee must be a live member ID or name in this play")
-
-
-def _assignment(
-    row: dict[str, Any], value: str, members: tuple[set[str], dict[str, str]]
-) -> tuple[str, bool]:
-    assigned = _assignee(value, members) if value else ""
-    force = row.get("status") == "in_progress" and row.get("assignee") not in (
-        None,
-        "",
-        assigned,
-    )
-    return assigned, force
-
-
-def _reassign(board: Board, task_id: str, actor: str, assigned: str) -> None:
-    row = board.rows()[task_id]
-    args = ["update", task_id, "--assignee", assigned]
-    if row.get("status") == "in_progress" and row.get("assignee") not in (None, "", assigned):
-        args.append("--force")
-    board.command(*args, actor=actor)
-
-
-def _edges(board: Board, rows: dict[str, dict[str, Any]], task_id: str) -> list[str]:
-    deps = rows[task_id].get("dependencies") or []
-    return sorted(
-        {
-            edge["depends_on_id"]
-            for edge in deps
-            if isinstance(edge, dict)
-            and edge.get("type") == "blocks"
-            and isinstance(edge.get("depends_on_id"), str)
-            and board.local_id(edge["depends_on_id"])
-            and edge["depends_on_id"] in rows
-        }
-    )
-
-
-def _closed_reopen_obstacles(
-    board: Board, rows: dict[str, dict[str, Any]], task_id: str
-) -> list[str]:
-    visited: set[str] = {task_id}
-    parent = rows[task_id].get("parent")
-    while isinstance(parent, str) and parent in rows and parent not in visited:
-        visited.add(parent)
-        parent = rows[parent].get("parent")
-    pending = [task_id]
-    dependent_seen = {task_id}
-    while pending:
-        current = pending.pop()
-        for dependent in rows:
-            if current in _edges(board, rows, dependent) and dependent not in dependent_seen:
-                dependent_seen.add(dependent)
-                visited.add(dependent)
-                pending.append(dependent)
-    return sorted(key for key in visited - {task_id} if rows[key].get("status") == "closed")
-
-
-def _reopen_args(
-    board: Board, rows: dict[str, dict[str, Any]], task_id: str, status: str | None
-) -> list[str]:
-    if status is None or rows[task_id].get("status") != "closed":
-        return []
-    closed = _closed_reopen_obstacles(board, rows, task_id)
-    if closed:
-        raise BeadsError("reopen closed parents and dependent tasks first: " + ", ".join(closed))
-    metadata = rows[task_id].get("metadata") or {}
-    if not isinstance(metadata, dict) or not metadata.get("theater_outcome"):
-        return []
-    history = metadata.get("theater_outcome_history") or []
-    if isinstance(history, str):
-        try:
-            history = json.loads(history)
-        except json.JSONDecodeError:
-            history = []
-    if not isinstance(history, list):
-        history = []
-    history = [*history, metadata["theater_outcome"]][-50:]
-    return [
-        "--set-metadata",
-        "theater_outcome_history=" + json.dumps(history),
-        "--unset-metadata",
-        "theater_outcome",
-    ]
-
-
-def _summary(
-    board: Board, row: dict[str, Any], rows: dict[str, dict[str, Any]], ready: set[str]
-) -> dict[str, Any]:
-    parent = row.get("parent")
-    return {
-        "id": row["id"],
-        "title": str(row.get("title", ""))[:500],
-        "kind": row.get("issue_type"),
-        "status": row.get("status"),
-        "priority": row.get("priority"),
-        "assignee": str(row["assignee"])[:128] if row.get("assignee") else None,
-        "parent_id": parent
-        if isinstance(parent, str) and board.local_id(parent) and parent in rows
-        else None,
-        "ready": row["id"] in ready,
-    }
-
-
-def _detail(
-    board: Board, task_id: str, rows: dict[str, dict[str, Any]], ready: set[str]
-) -> dict[str, Any]:
-    row = rows[task_id]
-    deps = _edges(board, rows, task_id)
-    children = sorted(key for key, value in rows.items() if value.get("parent") == task_id)
-    blockers = [key for key in deps if rows[key].get("status") != "closed"]
-    blockers.extend(key for key in children if rows[key].get("status") != "closed")
-    metadata = row.get("metadata") or {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    history = metadata.get("theater_outcome_history") or []
-    if isinstance(history, str):
-        try:
-            history = json.loads(history)
-        except json.JSONDecodeError:
-            history = []
-    if not isinstance(history, list):
-        history = []
-    return {
-        "play_instance_id": board.instance_id,
-        **_summary(board, row, rows, ready),
-        "description": str(row.get("description") or "")[:16000],
-        "deps": deps[:200],
-        "blockers": sorted(set(blockers))[:200],
-        "children": children[:200],
-        "notes": str(row.get("notes") or "")[:16000],
-        "outcome": str(metadata["theater_outcome"])[:4000]
-        if row.get("status") == "closed" and metadata.get("theater_outcome")
-        else None,
-        "outcome_history": [str(item)[:4000] for item in history[:50]],
-        "truncated": len(deps) > 200 or len(blockers) > 200 or len(children) > 200,
-    }
 
 
 class BeadsService:

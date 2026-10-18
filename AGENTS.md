@@ -100,7 +100,7 @@ theater/
 ├── resume_floor.py     persisted pre-launch stream-position fact for resume
 ├── plugin_client.py    typed async client for participant-scoped plugin sidecars
 ├── plugins/            shared plugin catalog, loading, and diagnostics (both kinds)
-├── mcp_plugins/        MCP-server plugin contracts, registry, runner, validation
+├── mcp_plugins/        MCP-server plugin contracts, registry, runner, validation; builtin Beads
 ├── pricing/            token cost estimation from usage records
 ├── daemon/             orchestration authority and sole SQLite writer
 │   ├── observation/    status policy, job completion, rescue, identity, screen, turns
@@ -148,7 +148,7 @@ theater/
 │   └── plugins.py      generic loader compatibility facade
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
 │   ├── plays.py        PLAY.toml parsing into immutable play rules
-│   └── builtin/        theater-configure · theater-debate · theater-delegate · theater-recover-tmux · hierarchy · pair (plays)
+│   └── builtin/        theater-configure · theater-debate · theater-delegate · theater-recover-tmux · pair (play)
 └── mcp/                server.py (21 agent tools) · session.py · toolsets/
 │   ├── toolsets/       delegation, participants, recall, transcripts, skills
 │   ├── server.py       composition surface — registers @mcp.tool entries
@@ -323,8 +323,12 @@ A sender can also attach skills to another agent's task with `skills=[...]` on
 
 A **play** is `skills/<play>/PLAY.toml` (data only: description, master,
 `[positions]`, `[roles]`) plus exactly one `<member>/SKILL.md` per declared
-position and role, referenced as `<play>/<member>`. Plays are user or built-in
-only (not MCP-plugin). Membership lives in `daemon/plays/`: loading the master
+position and role, referenced as `<play>/<member>`. Plays may be user, built-in,
+or MCP-plugin packages. Plugin manifests declare `plays` and supported `play_permissions`;
+`PLAY.toml` may declare `plugins` and per-position `[plugin_permissions.<plugin>]`
+grants. The daemon checks dependencies and attachments; the plugin enforces its
+tool policy using authenticated play context. Beads ships the default hierarchy
+play under `mcp_plugins/builtin/beads/skills/`. Membership lives in `daemon/plays/`: loading the master
 skill starts a play with pinned rules, and every spawn below a live master is
 checked inside the spawn's accepting transaction — keep new spawn entry points
 on `ParticipantLaunchService` so none bypass it. A queued send carrying play

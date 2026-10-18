@@ -266,13 +266,25 @@ A play is a skill directory holding `PLAY.toml` beside one member package per
 position and task role; members are named `<play>/<member>` and a bare play
 name is never a skill. `PLAY.toml` is data only (`theater/skills/plays.py`): a
 description, the master position, which positions each position may give, and
-which positions each task role fits, plus an optional `disposable` list of
+which positions each task role fits, plus optional `plugins` dependencies,
+per-position `[plugin_permissions.<plugin>]` grants, and a `disposable` list of
 non-master positions. Disposable is a declaration, not a gate: `terminate_session`
 consent stays prose, and the list only tells agents (through `whoami` and
 `list_skills`) which positions they may retire without asking the user. The rules
 JSON omits an empty list, so rules pinned before it keep their digest. A play is
 disabled by its name. The MCP `list_skills` asks for `grouped` output and an
 optional `play`; the CLI and frontend keep the flat list.
+
+MCP plugins may declare data-only `plays` alongside standalone `skills`.
+Discovery admits all members together or rejects the entire colliding play.
+Dependencies and grants are pinned with the rules; empty fields preserve historical
+digests. Admission requires enabled dependencies and participant attachments,
+launch planning checks rendered sidecars, and queued play assignments recheck both.
+The `PLAYS_READ` capability supplies authenticated `plays.context`, `plays.members`,
+and `plays.instances_status`; plugin tools enforce their own position permissions.
+Beads provides the default hierarchy play and owns one isolated board per instance,
+including serialization and TTL retention. Theater's orchestration SQLite remains
+daemon-owned. See [MCP-server plugins](mcp-server-plugins.md#plays).
 
 Membership is daemon state (`daemon/plays/`, tables `play_instances`,
 `play_members`, `play_assignments`). An agent's own `skills.load` of a master
@@ -1299,7 +1311,7 @@ theater/
 │   ├── base.py · observation.py · source.py   compatibility facades
 │   └── plugins.py      generic loader compatibility facade
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
-│   └── builtin/        theater-configure · theater-debate · theater-delegate · theater-recover-tmux · hierarchy · pair
+│   └── builtin/        theater-configure · theater-debate · theater-delegate · theater-recover-tmux · pair
 ├── mcp/                theater + theater_wait server composition, session, toolsets
 ├── frontend/           public SDK, schemas, DTOs, state synchronizer and provider client
 └── tmux/               legacy compatibility/client facts; terminal execution belongs to a provider

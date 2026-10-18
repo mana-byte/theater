@@ -185,7 +185,7 @@ custom skills, so a workflow written once works from any of your agents.
 - `theater-configure` — set up or personalize Theater.
 - `theater-recover-tmux` — recover sessions after a tmux restart.
 - `theater-delegate` — hand a task to a builder and reviewer pair and keep chatting.
-- `hierarchy` — a play: a master runs a light track (members) or a heavy track (contracts, leads), with a debate on either when a design question is open.
+- `hierarchy` — a play shipped by the default Beads plugin: a master delegates to members or leads, with a shared task board for milestones, progress, and outcomes.
 - `pair` — a play: a builder and an independent reviewer debate to agreement in a shared worktree.
 
 **Hand a skill to another agent.** Name it in `skills=[...]` on `spawn_session`
@@ -209,6 +209,15 @@ now, each with the task roles that fit it. A play may list positions as
 `disposable` (`hierarchy/member`): an agent may retire a finished child holding
 one without asking the user, while terminating any other child still needs the
 user's explicit yes.
+
+**Track play progress.** Install Beads with `brew install beads` or
+`npm install -g @beads/bd`. The default `beads` MCP plugin exposes seven task
+tools, usable only by authorized positions in a play declaring `plugins = ["beads"]`.
+Each play instance gets its own board; agents select it through their membership.
+Boards expire seven days after Theater observes the play ended; configure
+`[mcp.plugins.beads] board_ttl_seconds` to change retention. Remove `beads` from
+`[mcp] enabled` to disable the plugin and its hierarchy play, then restart the daemon
+and start new agent sessions. See [plugin configuration and tools](docs/mcp-server-plugins.md#beads).
 
 **Make Theater yours.** Turn any workflow you repeat into a custom skill—your
 preferred harnesses, models, roles, worktrees, checks, and handoffs. Add it at

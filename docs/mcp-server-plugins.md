@@ -40,9 +40,56 @@ plugin invalid. Disabled plugins contribute no skills and their skill files are
 not read. The `[skills] disabled` list in `config.toml` filters only bundled
 skills — plugin-registered skills are unaffected by it. Registration needs no
 `PluginCapability`; `SKILLS_READ` only lets a
-running sidecar consume Theater's skill catalog. A plugin registers standalone
-skills only: plays (`PLAY.toml` with `<play>/<member>` skills) come from the
-bundled or user skill roots.
+running sidecar consume Theater's skill catalog. Plugins may also register plays.
+
+## Plays
+
+Declare `plays=("acme-play",)` in the manifest and place `PLAY.toml` plus one
+`<member>/SKILL.md` per position and role under `skills/acme-play/`.
+Discovery validates the complete data-only package. A collision omits the whole
+play; no subset of its member skills is registered.
+
+Plays may require enabled plugins and grant permissions per position:
+
+```toml
+description = "A tracked team"
+master = "master"
+plugins = ["beads"]
+
+[positions]
+master = ["member"]
+member = []
+
+[plugin_permissions.beads]
+master = ["read", "write"]
+member = ["read"]
+```
+
+The dependency and permission tables are pinned when the play starts. Each
+plugin declares supported grant names through `play_permissions`; unknown names
+are refused. Starting or joining requires enabled, rendered plugin attachments,
+and queued assignments are checked again at delivery. An omitted position grants
+no permission, including the master. Roles do not change position grants.
+
+With `PluginCapability.PLAYS_READ`, `TheaterPluginClient` exposes:
+
+| Method | Input | Output |
+| --- | --- | --- |
+| `play_context()` | None | Authenticated `participant_id`, `plugin_name`, `enabled`, and `play` or null |
+| `play_members()` | None | Live current-play members: `participant_id`, `name`, `position` |
+| `play_instances_status(instance_ids)` | At most 100 instance IDs | `instance_id`, `active` per instance |
+
+Context's `play` contains `instance_id`, `master_id`, `name`, bare `position`,
+`plugins`, and the calling plugin's pinned `permissions`. Identity comes from
+the participant credential. Missing instances report inactive; inspecting an
+existing instance without the plugin dependency is refused. These APIs supply
+facts; each plugin owns its tool access policy and may support use outside plays.
+
+The shipped hierarchy play belongs to Beads. Its existing
+`[skills] disabled = ["hierarchy"]` opt-out is preserved; local plugin plays
+remain unaffected by the bundled-skill denylist.
+
+## Configuration
 
 Enable a sidecar explicitly:
 
@@ -158,3 +205,68 @@ package may not share a canonical directory name. Classification reserves every
 package name, including MCP packages that are not enabled. A name in
 `[harness].disabled` is skipped before import unless `[mcp].enabled` also names
 it. Rename or remove either package; `theater plugins` marks the conflict.
+
+## Beads
+
+The bundled Beads plugin is enabled by default and provides `hierarchy`.
+Install its CLI separately using the [official installation methods](https://github.com/gastownhall/beads/blob/v1.3.1/README.md):
+
+```sh
+brew install beads
+# Or:
+npm install -g @beads/bd
+```
+
+The adapter is qualified against Beads v1.3.1. Tools and schemas load without
+`bd`; an authorized board operation reports installation errors if it is missing.
+Theater never downloads or installs the runtime.
+
+```toml
+[mcp]
+enabled = ["beads"] # Default; [] disables all MCP plugins.
+
+[mcp.plugins.beads]
+board_ttl_seconds = 604800 # Seven days; minimum 0.
+# bd_path = "/opt/homebrew/bin/bd" # Otherwise use PATH.
+```
+
+Explicit enablement lists are authoritative. Apply changes by restarting the
+daemon and starting new agent sessions. Tools attach statically; each call checks
+current membership and its pinned position grants. Loading a role or having an
+ancestor in a play grants no access. Hierarchy grants `read` and `write` to its
+master, lead, and member positions.
+
+| Tool | Input | Output |
+| --- | --- | --- |
+| `list_tasks` | `view` (all/ready/mine), optional `status`, `kind`, `cursor`; `limit` 1–100 | `play_instance_id`, task summaries, `next_cursor` |
+| `get_task` | `task_id` | Detailed task with `play_instance_id` |
+| `create_task` | `title`, optional `description`, `kind`, `priority`, `parent_id`, `assignee`, `dependencies` | Created detailed task |
+| `update_task` | `task_id`, optional title/description/kind/priority/status/assignee/parent/note | Updated detailed task |
+| `set_dependency` | `task_id`, `prerequisite_id`, `add` (default true) | Play instance, both IDs, edge `present` |
+| `claim_task` | `task_id` | Task assigned to authenticated caller, in progress |
+| `close_task` | `task_id`, required `outcome` text | Closed detailed task |
+
+`read` permits list/get; `write` permits the five mutations. Tasks have kinds
+`task`, `milestone`, `epic`, priorities 0–4, and statuses `open`, `in_progress`,
+`blocked`, `closed`. Detailed tasks report ownership, readiness, dependencies,
+blockers, children, notes, and outcomes. Empty `assignee` or `parent_id` in an
+update clears that field; omitted fields stay unchanged.
+
+Writers may edit any task on their own board. Assignees must be live members of
+the same play; claims require ready tasks unassigned or assigned to the caller.
+Recover dead assignees by explicit reassignment. Only `close_task` closes work;
+every closed prerequisite resolves its dependency, including failure or
+cancellation. Reopen with `update_task(status="open")`, reopening closed parents
+and dependent tasks first. Previous outcomes remain in history. Use separate
+implementation and review tasks, both required by their milestone.
+
+Each play instance gets one lazily initialized embedded board at
+`$THEATER_HOME/var/state/plugins/beads/plays/<instance_id>/`, shared across its
+members' worktrees. Tools accept no board selector or cross-board references.
+Operations serialize across sidecars and recheck authorization under the lock.
+
+Master death ends access. Cleanup records the first authoritative inactive
+observation and deletes the board after its TTL. It sweeps at sidecar startup
+and periodically, preserves live boards, and skips deletion if Theater cannot
+verify liveness. Offline cleanup waits for the next sidecar startup. Closing a
+root task records the outcome without ending membership or starting retention.

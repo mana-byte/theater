@@ -12,7 +12,7 @@ from pathlib import Path
 from theater.plugin_client import TheaterPluginClient
 
 from .backend import Board
-from .service import board_lock, drain_cancelled_worker
+from .locking import board_lock, drain_cancelled_worker
 
 
 class BoardRetention:
