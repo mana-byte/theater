@@ -17,7 +17,7 @@ from regie.widgets import ParticipantTree
 from regie.widgets.animation_clock import AnimationClock, animation_clock
 from regie.widgets.leaf import AgentLeaf
 
-from packages.regie.tests.app.test_ui import _app, _participant, _projection
+from packages.regie.tests.support.app_fakes import build_app, make_participant, make_projection
 from packages.regie.tests.support.waiting import wait_until
 
 
@@ -114,11 +114,13 @@ def test_clock_preserves_each_cadence_and_sleeps_when_idle() -> None:
 
 async def test_working_leaves_share_one_timer_and_unmount_drains_it(tmp_path: Path) -> None:
     working = {
-        f"worker-{index}": _participant(f"worker-{index}", name=f"worker-{index}", status="working")
+        f"worker-{index}": make_participant(
+            f"worker-{index}", name=f"worker-{index}", status="working"
+        )
         for index in range(5)
     }
-    projection = replace(_projection(), participants=MappingProxyType(working))
-    app, _client, _presentation = _app(
+    projection = replace(make_projection(), participants=MappingProxyType(working))
+    app, _client, _presentation = build_app(
         tree_layout_path=tmp_path / "tree-layout.json", projection=projection
     )
 
@@ -149,9 +151,9 @@ async def _counting_leaf(app, pilot, tree):
 
 async def test_visible_cost_count_up_completes_and_releases_the_clock(tmp_path: Path) -> None:
     projection = replace(
-        _projection(), participants=MappingProxyType({"a": _participant("a", name="a")})
+        make_projection(), participants=MappingProxyType({"a": make_participant("a", name="a")})
     )
-    app, _client, _presentation = _app(
+    app, _client, _presentation = build_app(
         tree_layout_path=tmp_path / "tree-layout.json", projection=projection
     )
     async with app.run_test() as pilot:
@@ -166,9 +168,9 @@ async def test_visible_cost_count_up_completes_and_releases_the_clock(tmp_path: 
 
 async def test_hidden_cost_count_up_settles_without_waking_the_clock(tmp_path: Path) -> None:
     projection = replace(
-        _projection(), participants=MappingProxyType({"a": _participant("a", name="a")})
+        make_projection(), participants=MappingProxyType({"a": make_participant("a", name="a")})
     )
-    app, _client, _presentation = _app(
+    app, _client, _presentation = build_app(
         tree_layout_path=tmp_path / "tree-layout.json", projection=projection
     )
     async with app.run_test() as pilot:

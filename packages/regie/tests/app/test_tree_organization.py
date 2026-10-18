@@ -16,13 +16,13 @@ from regie.widgets.name_editor import NameEditor
 from regie.widgets.separator import SeparatorRow
 from textual.geometry import Offset
 
-from packages.regie.tests.app.test_ui import _app, _participant, _projection
+from packages.regie.tests.support.app_fakes import build_app, make_participant, make_projection
 from packages.regie.tests.support.waiting import wait_until
 
 
 async def test_jk_reorders_roots_and_stays_out_of_the_usage_footer(tmp_path: Path) -> None:
     path = tmp_path / "tree-layout.json"
-    app, _client, _presentation = _app(tree_layout_path=path)
+    app, _client, _presentation = build_app(tree_layout_path=path)
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
@@ -43,17 +43,17 @@ async def test_jk_reorders_roots_and_stays_out_of_the_usage_footer(tmp_path: Pat
 
 
 async def test_jk_on_a_child_stays_within_its_parent(tmp_path: Path) -> None:
-    root = _participant("participant-1", name="root")
-    first = _participant("participant-2", name="first", parent_id=root.participant_id)
-    second = _participant("participant-3", name="second", parent_id=root.participant_id)
-    other = _participant("participant-4", name="other")
+    root = make_participant("participant-1", name="root")
+    first = make_participant("participant-2", name="first", parent_id=root.participant_id)
+    second = make_participant("participant-3", name="second", parent_id=root.participant_id)
+    other = make_participant("participant-4", name="other")
     projection = replace(
-        _projection(),
+        make_projection(),
         participants=MappingProxyType(
             {item.participant_id: item for item in (root, first, second, other)}
         ),
     )
-    app, _client, _presentation = _app(
+    app, _client, _presentation = build_app(
         tree_layout_path=tmp_path / "tree-layout.json",
         projection=projection,
     )
@@ -82,7 +82,7 @@ async def test_add_separator_names_it_in_place_then_persists_across_reload(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "tree-layout.json"
-    app, _client, _presentation = _app(tree_layout_path=path)
+    app, _client, _presentation = build_app(tree_layout_path=path)
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
@@ -128,7 +128,7 @@ async def test_add_separator_names_it_in_place_then_persists_across_reload(
     assert warning is None
     assert loaded.separators[separator_key[1]] == {"name": renamed}
 
-    fresh, _client, _presentation = _app(tree_layout_path=path)
+    fresh, _client, _presentation = build_app(tree_layout_path=path)
     async with fresh.run_test() as pilot:
         tree = fresh.query_one(ParticipantTree)
         await wait_until(pilot, lambda: separator_key in tree.selectable_keys)
@@ -141,7 +141,7 @@ async def test_separator_actions_do_not_control_participants_and_x_deletes(tmp_p
         orders={"": [separator_id, "participant-1", "participant-2"]},
         separators={separator_id: {"name": "Backend"}},
     ).save(path)
-    app, client, presentation = _app(tree_layout_path=path)
+    app, client, presentation = build_app(tree_layout_path=path)
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
@@ -175,7 +175,7 @@ async def test_a_separator_counts_its_section_and_enter_folds_it(tmp_path: Path)
         orders={"": [separator_id, "participant-1", "participant-2"]},
         separators={separator_id: {"name": "Backend"}},
     ).save(path)
-    app, _client, _presentation = _app(tree_layout_path=path)
+    app, _client, _presentation = build_app(tree_layout_path=path)
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
@@ -208,7 +208,7 @@ async def test_a_separator_counts_its_section_and_enter_folds_it(tmp_path: Path)
         "name": "Backend",
         "collapsed": True,
     }
-    reopened, _client, _presentation = _app(tree_layout_path=path)
+    reopened, _client, _presentation = build_app(tree_layout_path=path)
     async with reopened.run_test() as pilot:
         tree = reopened.query_one(ParticipantTree)
         await wait_until(pilot, lambda: ("s", separator_id) in tree.selectable_keys)
@@ -222,7 +222,7 @@ async def test_a_fold_hiding_the_staged_agent_carries_its_stage_bar(tmp_path: Pa
         orders={"": [separator_id, "participant-1", "participant-2"]},
         separators={separator_id: {"name": "Backend"}},
     ).save(path)
-    app, _client, presentation = _app(tree_layout_path=path)
+    app, _client, presentation = build_app(tree_layout_path=path)
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
@@ -251,7 +251,7 @@ async def test_x_on_a_folded_separator_kills_the_agents_it_hides(tmp_path: Path)
         orders={"": ["participant-1", separator_id, "participant-2"]},
         separators={separator_id: {"name": "Backend", "collapsed": True}},
     ).save(path)
-    app, client, _presentation = _app(tree_layout_path=path)
+    app, client, _presentation = build_app(tree_layout_path=path)
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
@@ -279,11 +279,11 @@ def test_a_folded_heading_shows_the_strongest_status_it_hides(statuses, glyph) -
 
     separator_id = "sep:1234abcd"
     agents = [
-        _participant(f"participant-{index}", name=f"a{index}", status=status)
+        make_participant(f"participant-{index}", name=f"a{index}", status=status)
         for index, status in enumerate(statuses)
     ]
     projection = replace(
-        _projection(),
+        make_projection(),
         participants=MappingProxyType({agent.participant_id: agent for agent in agents}),
     )
     order = [separator_id, *(agent.participant_id for agent in agents)]
@@ -310,7 +310,7 @@ async def test_a_hovered_or_selected_separator_draws_heavy_rails_to_what_it_can_
         orders={"": ["participant-1", separator_id, "participant-2"]},
         separators={separator_id: {"name": "Backend"}},
     ).save(path)
-    app, _client, _presentation = _app(tree_layout_path=path)
+    app, _client, _presentation = build_app(tree_layout_path=path)
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)

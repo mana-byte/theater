@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -10,7 +9,7 @@ from typing import cast
 
 import pytest
 from regie.app import RegieApp
-from regie.contracts import PresentationTarget, RegieSettings, UnmanagedPane
+from regie.contracts import UnmanagedPane
 from regie.controllers.actions import ActionRecord, ActionState
 from regie.controllers.staging import StageOutcome, StageResult
 from regie.controllers.surface import SurfaceMode
@@ -26,6 +25,14 @@ from regie.widgets.name_editor import DirectoryEditor, NameEditor
 from textual.command import CommandInput, CommandPalette
 from textual.geometry import Offset
 
+from packages.regie.tests.support.app_fakes import (
+    FakeClient,
+    FakePresentation,
+    FakeState,
+    build_app,
+    make_participant,
+    make_projection,
+)
 from packages.regie.tests.support.waiting import wait_until
 from theater.frontend import (
     AcceptedOperation,
@@ -34,8 +41,6 @@ from theater.frontend import (
     FrontendClient,
     FrontendResponseError,
     FrontendTransportError,
-    Participant,
-    Provider,
     ResponseValidationError,
     StateProjection,
     TranscriptBindResult,
@@ -46,525 +51,11 @@ from theater.frontend.dto import Response
 from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
 
-def _capability() -> dict[str, object]:
-    return {"supported": True, "route_available": True, "admissible": True}
-
-
-def _participant(
-    participant_id: str,
-    *,
-    name: str,
-    status: str = "idle",
-    cwd: str | None = None,
-    description: str | None = None,
-    parent_id: str | None = None,
-    trusted_identity: dict[str, str] | None = None,
-    transcript_identity: dict[str, str | None] | None = None,
-) -> Participant:
-    return Participant.from_wire(
-        {
-            "participant_id": participant_id,
-            "origin": "spawned",
-            "harness": "codex",
-            "status": status,
-            "owner": {"kind": "local_operator", "revision": 1},
-            "name": name,
-            "cwd": cwd,
-            "description": description,
-            "parent_id": parent_id,
-            "addressable": True,
-            "presence": "absent",
-            "actions": {
-                "send": _capability(),
-                "steer": _capability(),
-                "queue_followup": _capability(),
-                "interrupt": _capability(),
-                "settings_update": _capability(),
-            },
-            "terminal_route": {
-                "identity": {
-                    "provider_id": "provider-a",
-                    "provider_generation": 1,
-                    "terminal_id": f"%{participant_id[-1]}",
-                    "terminal_incarnation": f"incarnation-{participant_id}",
-                    "occupant": {"harness": "codex"},
-                    "process": None,
-                },
-                "health": "healthy",
-            },
-            "trusted_identity": trusted_identity,
-            "transcript_identity": transcript_identity,
-        }
-    )
-
-
-def _projection() -> StateProjection:
-    first = _participant("participant-1", name="first")
-    second = _participant("participant-2", name="second")
-    provider = Provider.from_wire(
-        {
-            "provider_id": "provider-a",
-            "selector": "tmux",
-            "kind": "tmux",
-            "generation": 1,
-            "health": "healthy",
-            "capabilities": [],
-        }
-    )
-    return StateProjection(
-        cursor=EventCursor("stream-a", 1),
-        participants=MappingProxyType({first.participant_id: first, second.participant_id: second}),
-        operations=MappingProxyType({}),
-        jobs=MappingProxyType({}),
-        providers=MappingProxyType({provider.provider_id: provider}),
-        workspaces=MappingProxyType({}),
-    )
-
-
-class _State:
-    def __init__(self, projection: StateProjection) -> None:
-        self.projection: StateProjection | None = projection
-        self.initialize_calls = 0
-        self.catalog_acknowledgements: list[int] = []
-
-    async def initialize(self) -> StateProjection:
-        self.initialize_calls += 1
-        assert self.projection is not None
-        return self.projection
-
-    async def synchronize(self) -> StateProjection:
-        assert self.projection is not None
-        return self.projection
-
-    async def follow(self) -> StateProjection:
-        await asyncio.Future()
-
-    def acknowledge_catalogs(self, generation: int) -> bool:
-        self.catalog_acknowledgements.append(generation)
-        assert self.projection is not None
-        if not self.projection.catalog_dirty or generation != self.projection.catalog_generation:
-            return False
-        self.projection = replace(self.projection, catalog_dirty=False)
-        return True
-
-
-class _Catalogs:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def harnesses(self) -> object:
-        self.calls += 1
-        entry = HarnessCatalogEntry.from_wire(
-            {
-                "name": "codex",
-                "binary": "codex",
-                "icon": "◈",
-                "installed": True,
-                "compatible": True,
-                "supported_wiring": ["tmux"],
-                "requires_terminal": True,
-                "provider_ready": True,
-                "launch_available": True,
-                "approvals": ["manual", "edits", "yolo"],
-                "reason": None,
-                "detail": None,
-            }
-        )
-        return SimpleNamespace(value=SimpleNamespace(items=(entry,)))
-
-
-class _Usage:
-    def __init__(self) -> None:
-        self.by_harness_calls: list[dict[str, object]] = []
-        self.by_participant_calls: list[dict[str, object]] = []
-        self.participant_cost_microcents = 42_000_000
-
-    async def totals(self, *, since: float) -> object:
-        del since
-        return SimpleNamespace(value={"tokens": 1})
-
-    async def summary(self, *, since: float) -> object:
-        del since
-        return SimpleNamespace(value={})
-
-    async def by_harness(
-        self,
-        *,
-        since: float | None,
-        detailed: bool = False,
-    ) -> object:
-        self.by_harness_calls.append({"since": since, "detailed": detailed})
-        period = {
-            "input_tokens": 12,
-            "output_tokens": 8,
-            "reasoning_output_tokens": 2,
-            "cache_read_input_tokens": 4,
-            "cache_creation_input_tokens": 1,
-            "cost_microcents": 50_000_000,
-            "active_days": 1,
-        }
-        row: dict[str, object] = {
-            "harness": "codex",
-            "today": period,
-            "week": period,
-            "month": period,
-        }
-        if detailed:
-            row["models"] = [{"model": "fixture-model", **row}]
-            value = {
-                "harnesses": [row],
-                "totals": {"today": period, "week": period, "month": period},
-            }
-        else:
-            value = {"harnesses": [row]}
-        return SimpleNamespace(value=value)
-
-    async def by_participant(
-        self,
-        *,
-        since: float | None,
-        participant_ids: tuple[str, ...] | None = None,
-        limit: int,
-    ) -> object:
-        self.by_participant_calls.append(
-            {"since": since, "participant_ids": participant_ids, "limit": limit}
-        )
-        return SimpleNamespace(
-            value={
-                "since": since,
-                "truncated": False,
-                "participants": [
-                    {
-                        "participant_id": "participant-1",
-                        "harness": "codex",
-                        "models": ["fixture-model"],
-                        "input_tokens": 12,
-                        "output_tokens": 8,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                        "reasoning_output_tokens": 0,
-                        "cost_microcents": self.participant_cost_microcents,
-                        "first_at": 1.0,
-                        "last_at": 2.0,
-                    }
-                ],
-            }
-        )
-
-
-class _Diagnostics:
-    def __init__(self) -> None:
-        self.rows: list[dict[str, object]] = []
-        self.calls: list[dict[str, int]] = []
-
-    async def bus_tail(self, *, after_id: int, limit: int, wait_seconds: float = 0) -> object:
-        self.calls.append({"after_id": after_id, "limit": limit})
-        items = tuple(row for row in self.rows if int(row["id"]) > after_id)[:limit]
-        if wait_seconds and not items:
-            await asyncio.sleep(0.01)  # stands in for the daemon-side block
-        return SimpleNamespace(value=SimpleNamespace(items=items))
-
-
-class _Controls:
-    def __init__(self) -> None:
-        self.requests: list[tuple[str, str, str | None]] = []
-
-    async def send(self, participant_id: str, prompt: str, *, idempotency_key: str) -> object:
-        self.requests.append(("send", participant_id, prompt))
-        return _accepted(participant_id)
-
-    async def steer(self, participant_id: str, prompt: str, *, idempotency_key: str) -> object:
-        self.requests.append(("steer", participant_id, prompt))
-        return _accepted(participant_id)
-
-    async def queue_followup(
-        self,
-        participant_id: str,
-        prompt: str,
-        *,
-        idempotency_key: str,
-    ) -> object:
-        self.requests.append(("queue_followup", participant_id, prompt))
-        return _accepted(participant_id)
-
-    async def interrupt(self, participant_id: str, *, idempotency_key: str) -> object:
-        self.requests.append(("interrupt", participant_id, None))
-        return _accepted(participant_id)
-
-    async def get(self, participant_id: str) -> object:
-        return SimpleNamespace(value={"participant_id": participant_id})
-
-
-class _Participants:
-    def __init__(self) -> None:
-        self.terminated: list[str] = []
-        self.spawned: list[tuple[str, str | None, str]] = []
-        self.spawn_options: list[dict[str, object]] = []
-        self.resume_calls: list[dict[str, object]] = []
-        self.dead_rows: tuple[PublicResumeCandidate, ...] = ()
-        self.renames: list[dict[str, object]] = []
-        self.rename_error: FrontendResponseError | None = None
-
-    async def terminate(self, participant_id: str, *, idempotency_key: str) -> object:
-        self.terminated.append(participant_id)
-        return _accepted(participant_id)
-
-    async def update(
-        self,
-        participant_id: str,
-        *,
-        idempotency_key: str,
-        name: object = None,
-        description: object = None,
-    ) -> object:
-        del description
-        self.renames.append(
-            {"participant_id": participant_id, "name": name, "idempotency_key": idempotency_key}
-        )
-        if self.rename_error is not None:
-            raise self.rename_error
-        return SimpleNamespace(value=SimpleNamespace(participant_id=participant_id))
-
-    async def spawn(
-        self,
-        harness: str,
-        prompt: str | None,
-        approval: str,
-        *,
-        idempotency_key: str,
-        cwd: str | None = None,
-        resume: str | None = None,
-    ) -> object:
-        self.spawned.append((harness, prompt, approval))
-        self.spawn_options.append(
-            {"cwd": cwd, "resume": resume, "idempotency_key": idempotency_key}
-        )
-        return _accepted("participant-spawned")
-
-    async def resume_candidates(self, **params: object) -> object:
-        self.resume_calls.append(params)
-        return SimpleNamespace(value=SimpleNamespace(items=self.dead_rows, next_cursor=None))
-
-
-class _Transcripts:
-    def __init__(self) -> None:
-        self.candidate_rows: tuple[TranscriptCandidate, ...] = ()
-        self.candidate_calls: list[str] = []
-        self.bind_calls: list[dict[str, object]] = []
-        self.bind_outcomes: list[object] = []
-
-    async def candidates(self, participant_id: str) -> object:
-        self.candidate_calls.append(participant_id)
-        return SimpleNamespace(value=SimpleNamespace(items=self.candidate_rows))
-
-    async def bind(
-        self,
-        participant_id: str,
-        location: str,
-        *,
-        idempotency_key: str,
-        prior_owner_id: str | None = None,
-    ) -> object:
-        self.bind_calls.append(
-            {
-                "participant_id": participant_id,
-                "location": location,
-                "prior_owner_id": prior_owner_id,
-                "idempotency_key": idempotency_key,
-            }
-        )
-        if self.bind_outcomes:
-            outcome = self.bind_outcomes.pop(0)
-            if isinstance(outcome, BaseException):
-                raise outcome
-            return outcome
-        return SimpleNamespace(
-            value=TranscriptBindResult(
-                participant_id,
-                location,
-                prior_owner_id=prior_owner_id,
-            )
-        )
-
-
-class _Trajectory:
-    def __init__(self) -> None:
-        self.closed: list[str] = []
-        self.snapshot_limits: list[int] = []
-
-    async def snapshot(
-        self,
-        participant_id: str,
-        *,
-        limit: int,
-        before: str | None = None,
-    ) -> object:
-        del before
-        self.snapshot_limits.append(limit)
-        return SimpleNamespace(
-            value={
-                "panel_state": {"state": "ready", "participant_state": "live"},
-                "stream_id": "trajectory-a",
-                "cursor": "cursor-a",
-                "older_cursor": None,
-                "has_older": False,
-                "records": [
-                    {
-                        "record_id": "record-a",
-                        "participant_id": participant_id,
-                        "revision": 1,
-                        "source_epoch": "epoch-a",
-                        "lane": "model",
-                        "kind": "assistant",
-                        "source": "claude",
-                        "summary": "public trajectory record",
-                        "status": "completed",
-                        "turn_id": "turn-a",
-                    },
-                    {
-                        "record_id": "record-b",
-                        "participant_id": participant_id,
-                        "revision": 2,
-                        "source_epoch": "epoch-a",
-                        "lane": "model",
-                        "kind": "assistant",
-                        "source": "claude",
-                        "summary": "second public trajectory record",
-                        "status": "completed",
-                        "turn_id": "turn-b",
-                    },
-                ],
-                "groups": [],
-            }
-        )
-
-    async def follow(self, stream_id: str, cursor: str, *, wait_seconds: int) -> object:
-        del stream_id, cursor, wait_seconds
-        return SimpleNamespace(value={"stream_id": "trajectory-a", "upserts": []})
-
-    async def search(self, participant_id: str, query: str, *, limit: int) -> object:
-        del participant_id, query, limit
-        return SimpleNamespace(value=SimpleNamespace(items=()))
-
-    async def close(self, stream_id: str) -> object:
-        self.closed.append(stream_id)
-        return SimpleNamespace(value={"released": True})
-
-
-class _Client:
-    def __init__(self) -> None:
-        self.catalogs = _Catalogs()
-        self.usage = _Usage()
-        self.controls = _Controls()
-        self.participants = _Participants()
-        self.transcripts = _Transcripts()
-        self.trajectory = _Trajectory()
-        self.diagnostics = _Diagnostics()
-        self.closed = False
-
-    async def close(self) -> None:
-        self.closed = True
-
-
-class _Presentation:
-    def __init__(self) -> None:
-        self.staged: list[PresentationTarget] = []
-        self.focused: list[PresentationTarget] = []
-        self.target_window_calls = 0
-        self.unmanaged: tuple[UnmanagedPane, ...] = ()
-        self.copied: list[str] = []
-        self.terminals_exist = True
-
-    async def open(self) -> None:
-        return None
-
-    async def close(self) -> None:
-        return None
-
-    def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]:
-        return True, None
-
-    def retain(self, terminals: Iterable[str]) -> None:
-        del terminals
-
-    async def target_window(self) -> str:
-        self.target_window_calls += 1
-        return "@regie"
-
-    async def terminal_exists(self, target: PresentationTarget) -> bool:
-        return self.terminals_exist
-
-    async def stage_terminal(self, target: PresentationTarget, *, target_window: str) -> None:
-        assert target_window == "@regie"
-        self.staged.append(target)
-
-    async def unstage_terminal(self, target: PresentationTarget) -> None:
-        self.staged.remove(target)
-
-    async def focus_terminal(self, target: PresentationTarget) -> None:
-        self.focused.append(target)
-
-    async def resize_regie(self, *, width: int) -> None:
-        del width
-
-    async def resize_pane(
-        self,
-        pane_id: str,
-        *,
-        width: int | None = None,
-        height: int | None = None,
-    ) -> None:
-        del pane_id, width, height
-
-    async def copy_text(self, text: str) -> None:
-        self.copied.append(text)
-
-    async def unmanaged_panes(
-        self, *, harness_commands: Mapping[str, tuple[str, ...]]
-    ) -> tuple[UnmanagedPane, ...]:
-        assert "codex" in harness_commands
-        return self.unmanaged
-
-
-def _accepted(participant_id: str) -> object:
-    return SimpleNamespace(
-        value=AcceptedOperation(
-            operation_id=f"operation-{participant_id}",
-            state="succeeded",
-            participant_id=participant_id,
-        )
-    )
-
-
-def _app(
-    *,
-    usage_visible: bool = True,
-    tree_layout_path: Path | None = None,
-    projection: StateProjection | None = None,
-) -> tuple[RegieApp, _Client, _Presentation]:
-    """Most UI tests exercise the footer, so they opt into showing it."""
-    client = _Client()
-    presentation = _Presentation()
-    app = RegieApp(
-        client=cast(FrontendClient, client),
-        settings=RegieSettings(
-            tree_interval=60,
-            bus_interval=60,
-            startup_reveal=False,
-            usage_visible=usage_visible,
-        ),
-        presentation=presentation,
-        tree_layout_path=tree_layout_path,
-    )
-    app._state = cast(StateController, _State(projection or _projection()))
-    return app, client, presentation
-
-
 async def test_startup_reveals_state_before_catalog_discovery_and_usage(  # noqa: PLR0915
     monkeypatch,
     caplog,
 ) -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     app.settings = replace(app.settings, startup_reveal=True)
     caplog.set_level("INFO", logger="regie.latency")
     catalog_release = asyncio.Event()
@@ -645,13 +136,13 @@ async def test_startup_reveals_state_before_catalog_discovery_and_usage(  # noqa
 
 @pytest.mark.parametrize("reader", ["follow", "action"])
 async def test_late_projection_work_renders_the_latest_installed_state(monkeypatch, reader):
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     async with app.run_test() as pilot:
         await pilot.pause()
         fresh = replace(app._state.projection, cursor=EventCursor("stream-a", 2))
         shown = []
 
-        async def auxiliary_read(_projection, **_kwargs):
+        async def auxiliary_read(make_projection, **_kwargs):
             app._state.projection = fresh
 
         monkeypatch.setattr(app, "_refresh_unmanaged", auxiliary_read)
@@ -668,7 +159,7 @@ async def test_late_projection_work_renders_the_latest_installed_state(monkeypat
 
 
 async def test_unchanged_projection_skips_redundant_tree_render(monkeypatch):
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._startup_task is not None
@@ -683,7 +174,7 @@ async def test_unchanged_projection_skips_redundant_tree_render(monkeypatch):
             return real_show(*args, **kwargs)
 
         monkeypatch.setattr(tree, "show_projection", counted_show)
-        state = cast(_State, app._state)
+        state = cast(FakeState, app._state)
         assert state.projection is not None
         installed = state.projection
 
@@ -727,7 +218,7 @@ async def test_unchanged_projection_skips_redundant_tree_render(monkeypatch):
 
 @pytest.mark.parametrize("reader", ["state", "usage", "bus"])
 async def test_late_reader_does_not_paint_after_shutdown(monkeypatch, reader):
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     started = asyncio.Event()
     release = asyncio.Event()
     async with app.run_test() as pilot:
@@ -757,7 +248,7 @@ async def test_late_reader_does_not_paint_after_shutdown(monkeypatch, reader):
 
 @pytest.mark.parametrize("before_start", [False, True])
 async def test_quit_joins_startup_before_restoring_presentation(monkeypatch, before_start) -> None:
-    app, client, presentation = _app()
+    app, client, presentation = build_app()
     started = asyncio.Event()
     events: list[str] = []
 
@@ -786,9 +277,9 @@ async def test_quit_joins_startup_before_restoring_presentation(monkeypatch, bef
 
 
 async def test_initial_snapshot_failure_leaves_navigation_and_refresh_recoverable(monkeypatch):
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     initialize = app._state.initialize
-    state = cast(_State, app._state)
+    state = cast(FakeState, app._state)
     projection = state.projection
     state.projection = None  # type: ignore[assignment]
 
@@ -811,7 +302,7 @@ async def test_initial_snapshot_failure_leaves_navigation_and_refresh_recoverabl
 
 @pytest.mark.asyncio
 async def test_public_catalog_icon_reaches_the_participant_tree() -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -821,7 +312,7 @@ async def test_public_catalog_icon_reaches_the_participant_tree() -> None:
 
 
 async def test_slow_stage_keeps_navigation_responsive_and_captures_queued_targets(monkeypatch):
-    app, _client, presentation = _app()
+    app, _client, presentation = build_app()
     entered, release = asyncio.Event(), asyncio.Event()
     stage = presentation.stage_terminal
     seen = []
@@ -853,7 +344,7 @@ async def test_slow_stage_keeps_navigation_responsive_and_captures_queued_target
 
 @pytest.mark.asyncio
 async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None:
-    app, client, presentation = _app()
+    app, client, presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -900,8 +391,8 @@ async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing", ["route", "provider"])
 async def test_stage_recovers_missing_route_or_provider_from_snapshot(monkeypatch, missing) -> None:
-    app, _client, presentation = _app()
-    state = cast(_State, app._state)
+    app, _client, presentation = build_app()
+    state = cast(FakeState, app._state)
     fresh = state.projection
     if missing == "route":
         participant = replace(fresh.participants["participant-1"], terminal_route=None)
@@ -933,8 +424,8 @@ async def test_stage_recovers_missing_route_or_provider_from_snapshot(monkeypatc
 
 @pytest.mark.asyncio
 async def test_focused_trajectory_without_a_selection_warns() -> None:
-    app, _client, _presentation = _app()
-    state = cast(_State, app._state)
+    app, _client, _presentation = build_app()
+    state = cast(FakeState, app._state)
     state.projection = replace(state.projection, participants=MappingProxyType({}))
     messages: list[str] = []
     app.notify = lambda message, **_kwargs: messages.append(str(message))  # type: ignore[method-assign]
@@ -948,7 +439,7 @@ async def test_focused_trajectory_without_a_selection_warns() -> None:
 
 @pytest.mark.asyncio
 async def test_focused_trajectory_keeps_its_keys_and_leaves_on_return_signal() -> None:
-    app, _client, presentation = _app()
+    app, _client, presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -973,7 +464,7 @@ async def test_focused_trajectory_keeps_its_keys_and_leaves_on_return_signal() -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["l", "shift+l"])
 async def test_staging_from_trajectory_retains_dashboard_after_unstage(key: str) -> None:
-    app, _client, presentation = _app()
+    app, _client, presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1003,7 +494,7 @@ async def test_staging_from_trajectory_retains_dashboard_after_unstage(key: str)
 async def test_stage_failure_uses_rc9_message_and_error_severity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     notes: list[tuple[str, str]] = []
 
     async with app.run_test() as pilot:
@@ -1022,7 +513,7 @@ async def test_stage_failure_uses_rc9_message_and_error_severity(
 
 @pytest.mark.asyncio
 async def test_missing_staged_terminal_is_reconciled_on_the_tmux_poll() -> None:
-    app, _client, presentation = _app()
+    app, _client, presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1040,7 +531,7 @@ async def test_missing_staged_terminal_is_reconciled_on_the_tmux_poll() -> None:
 
 @pytest.mark.asyncio
 async def test_unmanaged_selection_can_stage_but_never_becomes_a_control_target() -> None:
-    app, client, presentation = _app()
+    app, client, presentation = build_app()
     presentation.unmanaged = (
         UnmanagedPane("%1", "codex", "/already-managed"),
         UnmanagedPane("%9", "zsh", "/workspace/shell"),
@@ -1068,7 +559,7 @@ async def test_unmanaged_selection_can_stage_but_never_becomes_a_control_target(
 
 @pytest.mark.asyncio
 async def test_textual_prompts_kill_bus_and_safe_quit() -> None:
-    app, client, presentation = _app()
+    app, client, presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1126,7 +617,7 @@ async def test_spawn_palette_accepts_a_completed_explicit_directory(
     target = tmp_path / "project with spaces"
     target.mkdir()
     monkeypatch.chdir(tmp_path)
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.press("ctrl+p")
@@ -1167,9 +658,9 @@ async def test_spawn_palette_accepts_a_completed_explicit_directory(
 
 @pytest.mark.asyncio
 async def test_textual_refetches_and_acknowledges_coalesced_catalog_invalidations() -> None:
-    app, client, _presentation = _app()
-    dirty = replace(_projection(), catalog_dirty=True, catalog_generation=7)
-    state = _State(dirty)
+    app, client, _presentation = build_app()
+    dirty = replace(make_projection(), catalog_dirty=True, catalog_generation=7)
+    state = FakeState(dirty)
     app._state = cast(StateController, state)
 
     async with app.run_test() as pilot:
@@ -1187,7 +678,7 @@ async def test_textual_refetches_and_acknowledges_coalesced_catalog_invalidation
 async def test_malformed_remote_catalog_falls_back_to_local_harnesses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     fallback = HarnessCatalogEntry.from_wire(
         {
             "name": "claude",
@@ -1212,7 +703,7 @@ async def test_malformed_remote_catalog_falls_back_to_local_harnesses(
     monkeypatch.setattr(client.catalogs, "harnesses", malformed_catalog)
     monkeypatch.setattr("regie.app_parts.startup.local_harness_catalog", lambda: (fallback,))
     monkeypatch.setattr(
-        _Presentation,
+        FakePresentation,
         "unmanaged_panes",
         lambda *_args, **_kwargs: _async_value(()),
     )
@@ -1225,12 +716,12 @@ async def test_malformed_remote_catalog_falls_back_to_local_harnesses(
 
 @pytest.mark.asyncio
 async def test_projection_keeps_the_nearest_row_selected_when_one_disappears() -> None:
-    app, _client, _presentation = _app()
-    first = _participant("participant-1", name="first")
-    second = _participant("participant-2", name="second")
-    third = _participant("participant-3", name="third")
+    app, _client, _presentation = build_app()
+    first = make_participant("participant-1", name="first")
+    second = make_participant("participant-2", name="second")
+    third = make_participant("participant-3", name="third")
     initial = replace(
-        _projection(),
+        make_projection(),
         participants=MappingProxyType(
             {
                 first.participant_id: first,
@@ -1239,7 +730,7 @@ async def test_projection_keeps_the_nearest_row_selected_when_one_disappears() -
             }
         ),
     )
-    state = _State(initial)
+    state = FakeState(initial)
     app._state = cast(StateController, state)
 
     async with app.run_test() as pilot:
@@ -1263,7 +754,7 @@ async def test_state_refresh_failures_only_notify_when_initially_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     initialized: bool,
 ) -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     messages: list[str] = []
     monkeypatch.setattr(app, "notify", lambda message, **_kwargs: messages.append(str(message)))
     if not initialized:
@@ -1286,7 +777,7 @@ async def test_state_refresh_failures_only_notify_when_initially_unavailable(
     ],
 )
 def test_action_notifications_are_actionable_and_not_duplicated(monkeypatch, state, severity):
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     notes: list[str] = []
     monkeypatch.setattr(app, "notify", lambda _message, **kwargs: notes.append(kwargs["severity"]))
     monkeypatch.setattr(app._action_presentation, "begin_reconciliation", lambda _record: False)
@@ -1301,7 +792,7 @@ def test_action_notifications_are_actionable_and_not_duplicated(monkeypatch, sta
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [False, True])
 async def test_staged_termination_releases_focus_before_requesting_kill(monkeypatch, failure):
-    app, client, presentation = _app()
+    app, client, presentation = build_app()
     terminate = client.participants.terminate
 
     async def checked_terminate(participant_id, *, idempotency_key):
@@ -1330,8 +821,8 @@ async def test_staged_termination_releases_focus_before_requesting_kill(monkeypa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("same_pane", [False, True])
 async def test_termination_never_unstages_another_terminal_identity(same_pane):
-    app, _client, presentation = _app()
-    projection = _projection()
+    app, _client, presentation = build_app()
+    projection = make_projection()
     participant = projection.participants["participant-1"]
     await app._staging.stage(participant, projection.providers)
     target = app._staging.staged_target
@@ -1353,7 +844,7 @@ async def test_termination_never_unstages_another_terminal_identity(same_pane):
 
 @pytest.mark.asyncio
 async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_context() -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     resumable = PublicResumeCandidate.from_wire(
         {
             "participant_id": "dead-resumable",
@@ -1407,7 +898,7 @@ async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_con
 
 @pytest.mark.asyncio
 async def test_rejected_transcript_candidate_is_never_bound() -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     candidate = TranscriptCandidate(
         "/tmp/rejected.jsonl",
         session_id="session-rejected",
@@ -1425,8 +916,8 @@ async def test_rejected_transcript_candidate_is_never_bound() -> None:
 
 @pytest.mark.asyncio
 async def test_transcript_recovery_hides_for_trusted_identity_and_filters_rejections() -> None:
-    app, client, _presentation = _app()
-    trusted = _participant(
+    app, client, _presentation = build_app()
+    trusted = make_participant(
         "participant-1",
         name="first",
         transcript_identity={
@@ -1438,13 +929,13 @@ async def test_transcript_recovery_hides_for_trusted_identity_and_filters_reject
             "detail": None,
         },
     )
-    state = _State(
+    state = FakeState(
         replace(
-            _projection(),
+            make_projection(),
             participants=MappingProxyType(
                 {
                     trusted.participant_id: trusted,
-                    "participant-2": _participant("participant-2", name="second"),
+                    "participant-2": make_participant("participant-2", name="second"),
                 }
             ),
         )
@@ -1472,7 +963,7 @@ async def test_transcript_recovery_hides_for_trusted_identity_and_filters_reject
 
 @pytest.mark.asyncio
 async def test_transcript_recovery_palette_preserves_target_through_selection_and_cancel() -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     candidate = TranscriptCandidate(
         "/tmp/accepted.jsonl",
         session_id="accepted",
@@ -1514,7 +1005,7 @@ async def _async_value(value: object) -> object:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner_field", ["owner_id", "tombstone_id"])
 async def test_an_owned_transcript_is_never_transferred_from_the_ui(owner_field: str) -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     candidate = TranscriptCandidate(
         "/tmp/transfer.jsonl", session_id="session-transfer", **{owner_field: "prior-owner"}
     )
@@ -1541,8 +1032,8 @@ async def test_an_owned_transcript_is_never_transferred_from_the_ui(owner_field:
 async def test_uncertain_transcript_bind_retries_original_parameters_and_key(
     first_error: Exception,
 ) -> None:
-    client = _Client()
-    bind_client = _Client()
+    client = FakeClient()
+    bind_client = FakeClient()
     bind_client.transcripts.bind_outcomes = [
         first_error,
         SimpleNamespace(
@@ -1585,11 +1076,11 @@ async def test_uncertain_transcript_bind_retries_original_parameters_and_key(
 
 @pytest.mark.asyncio
 async def test_concurrent_transcript_binds_receive_independent_clients() -> None:
-    root = _Client()
-    created: list[_Client] = []
+    root = FakeClient()
+    created: list[FakeClient] = []
 
     def factory() -> FrontendClient:
-        client = _Client()
+        client = FakeClient()
         created.append(client)
         return cast(FrontendClient, client)
 
@@ -1613,7 +1104,7 @@ async def test_concurrent_transcript_binds_receive_independent_clients() -> None
 async def test_terminated_trajectory_switches_immediately_when_refresh_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1642,12 +1133,12 @@ async def test_terminated_trajectory_switches_immediately_when_refresh_fails(
 @pytest.mark.asyncio
 async def test_completed_spawn_is_selected_staged_and_focused(caplog) -> None:
     caplog.set_level("INFO", logger="regie")
-    app, _client, presentation = _app()
+    app, _client, presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        state = cast(_State, app._state)
-        spawned = _participant("participant-3", name="spawned")
+        state = cast(FakeState, app._state)
+        spawned = make_participant("participant-3", name="spawned")
         state.projection = replace(
             state.projection,
             participants=MappingProxyType(
@@ -1695,7 +1186,7 @@ async def test_completed_spawn_is_selected_staged_and_focused(caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_successful_durable_action_automatically_reconciles_the_tree(monkeypatch) -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     finished = asyncio.Event()
 
     async def spawn(*args, **kwargs):
@@ -1718,9 +1209,9 @@ async def test_successful_durable_action_automatically_reconciles_the_tree(monke
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        state = cast(_State, app._state)
+        state = cast(FakeState, app._state)
         initial_snapshots = state.initialize_calls
-        spawned = _participant("participant-spawned", name="spawned")
+        spawned = make_participant("participant-spawned", name="spawned")
         state.projection = replace(
             state.projection,
             participants=MappingProxyType(
@@ -1744,9 +1235,9 @@ async def test_successful_durable_action_automatically_reconciles_the_tree(monke
 
 @pytest.mark.asyncio
 async def test_explicit_kill_removes_an_already_retiring_child() -> None:
-    app, _client, _presentation = _app()
-    child = _participant("participant-3", name="child", parent_id="participant-1")
-    state = cast(_State, app._state)
+    app, _client, _presentation = build_app()
+    child = make_participant("participant-3", name="child", parent_id="participant-1")
+    state = cast(FakeState, app._state)
     state.projection = replace(
         state.projection, participants=MappingProxyType({child.participant_id: child})
     )
@@ -1767,13 +1258,13 @@ async def test_explicit_kill_removes_an_already_retiring_child() -> None:
 
 @pytest.mark.asyncio
 async def test_completed_action_retries_reconciliation_after_a_refresh_failure() -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._startup_task is not None
         await app._startup_task
-        state = cast(_State, app._state)
+        state = cast(FakeState, app._state)
         attempts = 0
 
         async def initialize() -> StateProjection:
@@ -1807,11 +1298,11 @@ async def test_completed_action_retries_reconciliation_after_a_refresh_failure()
 
 @pytest.mark.asyncio
 async def test_orphaned_agent_child_keeps_spawn_animation_provenance() -> None:
-    app, _client, _presentation = _app()
-    orphan = _participant("participant-3", name="orphan", parent_id="missing-parent")
-    state = _State(
+    app, _client, _presentation = build_app()
+    orphan = make_participant("participant-3", name="orphan", parent_id="missing-parent")
+    state = FakeState(
         replace(
-            _projection(),
+            make_projection(),
             participants=MappingProxyType({orphan.participant_id: orphan}),
         )
     )
@@ -1835,7 +1326,7 @@ def test_kill_binding_is_visible_with_the_rc9_label() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_display_settings_report_rc9_config_guidance() -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     app.settings = replace(app.settings, theme="missing-theme", cost_window="fortnight")
     notes: list[tuple[str, dict[str, object]]] = []
     app.notify = (  # type: ignore[method-assign]
@@ -1857,20 +1348,20 @@ async def test_invalid_display_settings_report_rc9_config_guidance() -> None:
 
 @pytest.mark.asyncio
 async def test_rich_leaves_reconcile_animations_and_pointer_actions() -> None:
-    app, _client, presentation = _app()
-    first = _participant(
+    app, _client, presentation = build_app()
+    first = make_participant(
         "participant-1",
         name="first",
         status="working",
         cwd="/workspace/first",
         description="a deliberately long participant description " * 4,
     )
-    second = _participant("participant-2", name="second", cwd="/workspace/second")
+    second = make_participant("participant-2", name="second", cwd="/workspace/second")
     projection = replace(
-        _projection(),
+        make_projection(),
         participants=MappingProxyType({first.participant_id: first, second.participant_id: second}),
     )
-    state = _State(projection)
+    state = FakeState(projection)
     app._state = cast(StateController, state)
 
     async with app.run_test(size=(100, 36)) as pilot:
@@ -1886,7 +1377,7 @@ async def test_rich_leaves_reconcile_animations_and_pointer_actions() -> None:
         first_leaf._tick()
         assert str(first_leaf.render()) != previous_frame
 
-        updated_first = _participant(
+        updated_first = make_participant(
             first.participant_id,
             name="renamed",
             status="idle",
@@ -1921,7 +1412,7 @@ async def test_rich_leaves_reconcile_animations_and_pointer_actions() -> None:
 
 @pytest.mark.asyncio
 async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
 
     async with app.run_test(size=(100, 36)) as pilot:
         await pilot.pause()
@@ -1957,7 +1448,7 @@ async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> 
 
 @pytest.mark.asyncio
 async def test_usage_footer_starts_hidden_and_dollar_toggles_only_the_footer() -> None:
-    app, _client, _presentation = _app(usage_visible=False)
+    app, _client, _presentation = build_app(usage_visible=False)
     footers = ("#usage-period", "#stats-footer", "#price-footer")
 
     async with app.run_test(size=(100, 36)) as pilot:
@@ -1980,7 +1471,7 @@ async def test_usage_footer_starts_hidden_and_dollar_toggles_only_the_footer() -
 
 @pytest.mark.asyncio
 async def test_agent_cost_shows_on_the_selected_row_only_even_with_the_footer_hidden() -> None:
-    app, client, _presentation = _app(usage_visible=False)
+    app, client, _presentation = build_app(usage_visible=False)
 
     async with app.run_test(size=(100, 36)) as pilot:
         tree = app.query_one(ParticipantTree)
@@ -2003,7 +1494,7 @@ async def test_agent_cost_shows_on_the_selected_row_only_even_with_the_footer_hi
         assert "$0.42" not in row("participant-1")
 
 
-class _LateState(_State):
+class _LateState(FakeState):
     """Like the real controller: no projection until the initial snapshot lands."""
 
     def __init__(self, projection: StateProjection) -> None:
@@ -2019,8 +1510,8 @@ class _LateState(_State):
 
 @pytest.mark.asyncio
 async def test_startup_usage_waits_for_participants_so_costs_appear_immediately() -> None:
-    app, client, _presentation = _app(usage_visible=False)
-    app._state = cast(StateController, _LateState(_projection()))
+    app, client, _presentation = build_app(usage_visible=False)
+    app._state = cast(StateController, _LateState(make_projection()))
 
     async with app.run_test(size=(100, 36)) as pilot:
         tree = app.query_one(ParticipantTree)
@@ -2039,7 +1530,7 @@ async def test_startup_usage_waits_for_participants_so_costs_appear_immediately(
 
 @pytest.mark.asyncio
 async def test_hovering_an_unselected_agent_shows_its_cost_until_the_pointer_leaves() -> None:
-    app, _client, _presentation = _app(usage_visible=False)
+    app, _client, _presentation = build_app(usage_visible=False)
 
     async with app.run_test(size=(100, 36)) as pilot:
         tree = app.query_one(ParticipantTree)
@@ -2066,7 +1557,7 @@ async def test_hovering_an_unselected_agent_shows_its_cost_until_the_pointer_lea
 
 @pytest.mark.asyncio
 async def test_selected_agent_cost_counts_up_like_the_footer_and_others_just_update() -> None:
-    app, client, _presentation = _app(usage_visible=False)
+    app, client, _presentation = build_app(usage_visible=False)
 
     async with app.run_test(size=(100, 36)) as pilot:
         tree = app.query_one(ParticipantTree)
@@ -2110,7 +1601,7 @@ async def test_usage_footer_poll_failure_does_not_contaminate_overlay_cache(
     monkeypatch: pytest.MonkeyPatch,
     error: Exception,
 ) -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -2133,7 +1624,7 @@ async def test_usage_footer_poll_failure_does_not_contaminate_overlay_cache(
 async def test_configured_usage_period_survives_an_initial_refresh_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     app.settings = replace(app.settings, cost_window="month")
 
     async def fail_refresh(*, window: str, participant_ids: tuple[str, ...]) -> object:
@@ -2152,7 +1643,7 @@ async def test_malformed_bus_pages_are_contained_by_both_pollers(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     messages: list[str] = []
     caplog.set_level("DEBUG", logger="regie")
 
@@ -2175,7 +1666,7 @@ async def test_malformed_bus_pages_are_contained_by_both_pollers(
 
 @pytest.mark.asyncio
 async def test_hidden_bus_has_an_independent_route_and_await_animation_cursor() -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -2229,7 +1720,7 @@ async def test_hidden_bus_has_an_independent_route_and_await_animation_cursor() 
 async def test_repeated_palette_and_inspection_reads_serialize_each_sdk_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     active = dict.fromkeys(("catalog", "controls", "resume", "transcripts"), 0)
     maximum = dict(active)
 
@@ -2294,7 +1785,7 @@ async def test_repeated_palette_and_inspection_reads_serialize_each_sdk_lane(
 async def test_harnesses_without_an_executable_are_not_offered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     installed = (await client.catalogs.harnesses()).value.items[0]
     missing = HarnessCatalogEntry.from_wire(
         {
@@ -2327,7 +1818,7 @@ async def test_harnesses_without_an_executable_are_not_offered(
 
 
 async def test_rename_key_edits_the_selected_alias_and_submits_once() -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("r")
@@ -2349,7 +1840,7 @@ async def test_rename_key_edits_the_selected_alias_and_submits_once() -> None:
 
 
 async def test_rename_escape_or_a_click_elsewhere_cancels_without_a_call() -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("r")
@@ -2369,7 +1860,7 @@ async def test_rename_escape_or_a_click_elsewhere_cancels_without_a_call() -> No
 async def test_refused_rename_surfaces_the_daemon_message_and_keeps_the_old_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     client.participants.rename_error = FrontendResponseError(
         Response(
             request_id=1,
@@ -2398,7 +1889,7 @@ async def test_refused_rename_surfaces_the_daemon_message_and_keeps_the_old_name
 
 
 async def test_clicking_the_name_opens_the_editor_and_adjacent_cells_do_not() -> None:
-    app, client, _presentation = _app()
+    app, client, _presentation = build_app()
     async with app.run_test() as pilot:
         await pilot.pause()
         tree = app.query_one(ParticipantTree)
@@ -2417,8 +1908,8 @@ async def test_clicking_the_name_opens_the_editor_and_adjacent_cells_do_not() ->
 
 
 async def test_rename_editor_survives_a_projection_refresh() -> None:
-    app, _client, _presentation = _app()
-    state = cast(_State, app._state)
+    app, _client, _presentation = build_app()
+    state = cast(FakeState, app._state)
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("r")
@@ -2454,7 +1945,7 @@ def test_partially_revealed_name_has_no_span_until_clipped_in() -> None:
 
 
 async def test_bus_loop_follows_panel_visibility() -> None:
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._animation_loop.running and not app._bus_loop.running

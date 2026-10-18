@@ -17,7 +17,7 @@ from regie.widgets import ParticipantTree
 from regie.widgets.ambience_band import AmbienceBand
 from textual import events
 
-from packages.regie.tests.app.test_ui import _app
+from packages.regie.tests.support.app_fakes import build_app
 from packages.regie.tests.support.waiting import wait_until
 
 SHIPPED = load_catalog(Path("/nonexistent")).scenes
@@ -137,7 +137,7 @@ async def test_the_band_plays_under_the_tree_when_its_setting_says(
 ) -> None:
     """The default, away, plays while a staged surface has focus; tree plays on the tree."""
     monkeypatch.setattr("regie.app_parts.ambience.scene_for", lambda _name: _Sticky)
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     app.settings = replace(app.settings, tree_ambience_when=when)
     app._ambience_cooldown = 0.0  # the rest after leaving it is tested on its own below
     on_tree = when == "tree"
@@ -164,7 +164,7 @@ async def test_after_you_leave_it_the_band_rests_before_it_plays_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("regie.app_parts.ambience.scene_for", lambda _name: _Sticky)
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     app._ambience_cooldown = 1.0  # ten seconds in use; shortened to keep the test quick
     async with app.run_test(size=(80, 30)) as pilot:
         band = app.query_one(AmbienceBand)
@@ -181,7 +181,7 @@ async def test_after_you_leave_it_the_band_rests_before_it_plays_again(
 
 async def test_a_tree_without_free_rows_plays_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("regie.app_parts.ambience.scene_for", lambda _name: _Sticky)
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     async with app.run_test(size=(80, 7)) as pilot:  # two leaves already overflow the tree
         await wait_until(pilot, lambda: app._ambience is not None)
         await _set_app_focus(pilot, False)  # away: the band would play if it fit
@@ -194,7 +194,7 @@ async def test_a_tick_serves_the_band_from_cache_and_never_queries_the_dom(
 ) -> None:
     """A tick reads cached refs and free band; a sync, a resize, or a row leaving re-measures."""
     monkeypatch.setattr("regie.app_parts.ambience.scene_for", lambda _name: _Sticky)
-    app, _client, _presentation = _app()
+    app, _client, _presentation = build_app()
     async with app.run_test(size=(80, 30)) as pilot:
         await wait_until(pilot, lambda: app._ambience is not None)
         await _set_app_focus(pilot, False)  # away: the band plays
