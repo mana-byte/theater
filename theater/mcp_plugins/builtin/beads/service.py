@@ -82,7 +82,8 @@ class BeadsService:
                 def complete(board: Board, actor: str, members: Any) -> dict[str, Any]:
                     return finish(board, actor, members, context, facts)
 
-                return await self._run_locked(board, actor, members, complete)
+                # Same board and lock as the plan phase; it is already ensured.
+                return await self._run_locked(board, actor, members, complete, ensure=False)
 
     async def _run_locked(
         self,
@@ -90,9 +91,12 @@ class BeadsService:
         actor: str,
         members: tuple[set[str], dict[str, str]],
         action: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
+        ensure: bool = True,
     ) -> Any:
         """One shielded worker run; cancellation waits for bd to finish first."""
-        worker = asyncio.create_task(asyncio.to_thread(self._run, board, actor, members, action))
+        worker = asyncio.create_task(
+            asyncio.to_thread(self._run, board, actor, members, action, ensure)
+        )
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
@@ -105,8 +109,10 @@ class BeadsService:
         actor: str,
         members: tuple[set[str], dict[str, str]],
         action: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
+        ensure: bool = True,
     ) -> Any:
-        board.ensure()
+        if ensure:
+            board.ensure()
         return action(board, actor, members)
 
     @staticmethod

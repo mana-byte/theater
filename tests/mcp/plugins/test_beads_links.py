@@ -140,7 +140,7 @@ async def test_link_requires_dispatched_play_proofs(adapter: BeadsService, tmp_p
             fact(
                 "work-b", play={"instance_id": "instance-one", "caller_seated_at_creation": False}
             ),
-            "seated in this play",
+            "is not proven; link refused",
         ),
         (fact("work-b", created_at=None), "no usable creation time"),
     ]
@@ -324,6 +324,88 @@ async def test_closed_guard_and_repair_reopen_link(adapter: BeadsService, tmp_pa
     await adapter.update_task(task_id, status="open")
     FakeClient.facts = {"repair-1": fact("repair-1")}
     assert (await adapter.link_task_job(task_id, "repair-1", "work"))["generation"] == 1
+
+
+async def test_closed_task_accepts_older_work_and_reviews(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    task_id = await make_task(adapter)
+    await adapter.close_task(task_id, "cycle done")
+    # work created at or before the close links while the task stays closed
+    FakeClient.facts = {"old-work": fact("old-work", created_at=1000.0)}
+    linked = await adapter.link_task_job(task_id, "old-work", "work")
+    assert linked["duplicate"] is False
+    # a review of that work links to the closed task too
+    FakeClient.facts["review-1"] = fact(
+        "review-1",
+        created_at=2000.0,
+        contract_preset="review",
+        review_verdict="approve",
+        target_id="target-two",
+    )
+    reviewed = await adapter.link_task_job(task_id, "review-1", "review", "old-work")
+    assert reviewed["duplicate"] is False
+
+    # an unknown close time still refuses work but accepts reviews
+    other = await make_task(adapter)
+    FakeClient.facts = {"work-x": fact("work-x", created_at=1000.0)}
+    await adapter.link_task_job(other, "work-x", "work")
+    await adapter.close_task(other, "cycle done")
+
+    def strip_close(row: dict[str, Any]) -> None:
+        row.pop("closed_at", None)
+        row["metadata"].pop("theater_closed_at", None)
+
+    edit_row(tmp_path, other, strip_close)
+    FakeClient.facts["work-y"] = fact("work-y", created_at=1500.0)
+    with pytest.raises(BeadsError, match="close time is unknown"):
+        await adapter.link_task_job(other, "work-y", "work")
+    FakeClient.facts["review-x"] = fact(
+        "review-x",
+        created_at=2000.0,
+        contract_preset="review",
+        review_verdict="approve",
+        target_id="target-two",
+    )
+    accepted = await adapter.link_task_job(other, "review-x", "review", "work-x")
+    assert accepted["duplicate"] is False
+
+
+async def test_ambiguous_work_tie_leaves_review_unverified(adapter: BeadsService) -> None:
+    # a tie the selection cannot break proves nothing about the review's artifact
+    task_id = (await adapter.create_task("Tie"))["id"]
+    review_fact = fact(
+        "review-1",
+        created_at=6000.0,
+        contract_preset="review",
+        review_verdict="approve",
+        target_id="target-two",
+    )
+    FakeClient.facts = {
+        "work-a": fact("work-a", created_at=5000.0),
+        "work-b": fact("work-b", created_at=5000.0),
+        "review-1": review_fact,
+    }
+    await adapter.link_task_job(task_id, "work-a", "work")
+    await adapter.link_task_job(task_id, "work-b", "work")
+    await adapter.link_task_job(task_id, "review-1", "review", "work-a")
+    tied = await adapter.get_task(task_id, view="progress")
+    assert tied["current_work"]["ambiguous"] is True
+    assert tied["latest_review"]["artifact_relation"] == "unverified"
+
+    # a determinate newer different work still makes the old-source review stale
+    task2 = (await adapter.create_task("Superseded"))["id"]
+    FakeClient.facts = {
+        "work-a": fact("work-a", created_at=5000.0),
+        "work-b": fact("work-b", created_at=7000.0),
+        "review-1": review_fact,
+    }
+    await adapter.link_task_job(task2, "work-a", "work")
+    await adapter.link_task_job(task2, "work-b", "work")
+    await adapter.link_task_job(task2, "review-1", "review", "work-a")
+    stale = await adapter.get_task(task2, view="progress")
+    assert stale["current_work"]["handle"] == "work-b"
+    assert stale["latest_review"]["artifact_relation"] == "stale"
 
 
 async def test_selection_prefers_newest_and_reports_ties(
@@ -679,6 +761,8 @@ async def test_corrupt_stored_links_fail_closed(adapter: BeadsService, tmp_path:
         stored_link(created_at=None),
         stored_link(generation=-1),
         stored_link(handle="x" * 257),
+        stored_link(role="review", review_of=5),  # non-string review_of is corrupt
+        stored_link(version=True),  # True == 1 must not pass as a version
         "not an object",
     ]
     for record in bad_shapes:
@@ -726,6 +810,7 @@ async def test_corrupt_generation_metadata_blocks_reads_and_reopen(
         ("theater_generation", "soon", True, True),  # else reopen revives generation 0
         ("theater_boundary", "NaN", True, False),  # reopen rewrites the boundary wholesale
         ("theater_boundary_fallback", "yes", True, False),
+        ("theater_boundary_fallback", True, True, False),  # a bool flag is not a set fallback
         ("theater_closed_at", "banana", False, True),  # progress never reads the close time
     )
     for key, value, blocks_progress, blocks_reopen in cases:

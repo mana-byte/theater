@@ -89,15 +89,18 @@ With `PluginCapability.JOBS_READ`, `TheaterPluginClient` additionally exposes:
 
 | Method | Input | Output |
 | --- | --- | --- |
-| `get_job_facts(handles)` | At most 50 exact job handles, each 1–256 nonblank characters | One fact row per handle, order and duplicates preserved |
+| `get_job_facts(handles)` | At most 50 exact job handles, each 1–256 nonblank characters; an empty input is allowed and returns no rows | One fact row per handle, order and duplicates preserved |
 
 A row reports `handle` and either `available: false` for a missing or
 garbage-collected job, or its facts: `state`, `error_code`, `kind`, `caller_id`,
 `target_id`, `created_at`, `finished_at`, `contract_preset`,
-`structured_status`, `delegate_status`, `review_verdict`, `git`, `handoff`,
-and with `PLAYS_READ` also `play` (`instance_id`,
-`caller_seated_at_creation`). Facts stay readable after the job's caller
-retires.
+`structured_status`, `delegate_status`, `review_verdict`, `git` (null or
+`pin_state`, `commit_sha`, `dirty_entries`, `clean`), `handoff` (null or
+`source_handle`, `task_kind`), and with `PLAYS_READ` also `play` (`instance_id`,
+`caller_seated_at_creation`) — only while the job also carries a current
+plugin-dependent play binding; `caller_seated_at_creation: false` means
+membership is unproven, not proven absent. Facts stay readable after the job's
+caller retires.
 
 The shipped hierarchy play belongs to Beads. Its existing
 `[skills] disabled = ["hierarchy"]` opt-out is preserved; local plugin plays
@@ -261,7 +264,7 @@ master, lead, and member positions.
 | `close_task` | `task_id`, required `outcome` text | Closed detailed task |
 | `link_task_job` | `task_id`, `handle`, `role` (work/review), optional `review_of` | `duplicate`, `generation`, `links_total` |
 
-`read` permits list/get; `write` permits the five mutations. Tasks have kinds
+`read` permits list/get; `write` permits the six mutations. Tasks have kinds
 `task`, `milestone`, `epic`, priorities 0–4, and statuses `open`, `in_progress`,
 `blocked`, `closed`. Detailed tasks report ownership, readiness, dependencies,
 blockers, children, notes, and outcomes. Empty `assignee` or `parent_id` in an
@@ -283,9 +286,12 @@ one of the task's work links in `review_of`; a work link names none. An
 identical stored link is a no-op duplicate, safe to retry after a transport
 failure and costing no facts read, while changing a stored link is refused. A
 task keeps at most 100 links. Closing and reopening a task starts a new
-generation bounded by the close time — the native `closed_at`, or the reopen
-moment when that is unknown: jobs created before the boundary are stale and
-refused, and a closed task accepts no new work links until reopened. Links,
+generation bounded by the recorded close time (`theater_closed_at`), then bd's
+native `closed_at`, or the reopen moment with `boundary_fallback` set when
+neither is known: jobs created before the boundary are stale and refused. Work
+created after the task closed — or any work link while the close time is
+unknown — needs the task reopened first; work created at or before the close
+and reviews still link to a closed task. Links,
 generations and boundaries persist in task metadata only. Corrupt or unsupported
 stored link metadata — an unknown record version, an over-cap list, an unusable time or
 generation — fails closed: linking, the progress view and reopening refuse rather
@@ -293,8 +299,9 @@ than normalize, rewrite or evict it.
 
 `get_task(view="progress")` adds the compact link view: generation, boundary and
 whether it fell back, the current work and latest review with their states and
-evidence (`matched`, `stale`, `unverified`, `unavailable`), and bounded linked
-job states. Facts are read in batches of 50, blockers are capped at 200 with
+evidence (`artifact_relation` of `matched`, `stale`, `unverified`, `unavailable`
+plus the review's `source_basis` of `handoff` or `declared`), and bounded linked
+job states. An ambiguous current-work tie leaves the review `unverified`. Facts are read in batches of 50, blockers are capped at 200 with
 `truncated` reported, and the default `detail` view never reads job facts.
 
 Each play instance gets one lazily initialized embedded board at

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -251,10 +252,12 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
 
         work_handle = "tb-xzg-work-job-1"
         review_handle = "tb-xzg-review-job-1"
+        now = time.time()
         FakeClient.facts = {
-            work_handle: fact(work_handle),
+            work_handle: fact(work_handle, created_at=now + 100, finished_at=now + 200),
             review_handle: fact(
                 review_handle,
+                created_at=now + 300,
                 contract_preset="review",
                 review_verdict="approve",
                 target_id="target-two",
@@ -303,7 +306,10 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
             await adapter.get_task(child_id, view="brief")  # type: ignore[arg-type]
 
         await adapter.close_task(child_id, "second outcome; links retained")
-        FakeClient.facts = {"tb-xzg-repair-job": fact("tb-xzg-repair-job")}
+        closed_at = time.time()
+        FakeClient.facts = {
+            "tb-xzg-repair-job": fact("tb-xzg-repair-job", created_at=closed_at + 100)
+        }
         FakeClient.facts_calls = 0
         with pytest.raises(BeadsError, match="after this task closed"):
             await adapter.link_task_job(child_id, "tb-xzg-repair-job", "work")
@@ -357,6 +363,8 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
         with pytest.raises(BeadsError, match="unsupported or corrupt"):
             await adapter.link_task_job(corrupt["id"], "tb-xzg-legacy-job", "work")
         assert FakeClient.facts_calls == 0  # refused before any facts read
+        raw = Board(tmp_path, "instance-one", binary).rows()[corrupt["id"]]
+        assert len(raw["metadata"]["theater_links"]) == 1  # never rewritten or dropped
 
         milestone = await adapter.create_task("Review milestone", kind="milestone")
         milestone_child = await adapter.create_task("Review", parent_id=milestone["id"])

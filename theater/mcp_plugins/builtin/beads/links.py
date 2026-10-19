@@ -106,8 +106,9 @@ def _link_records(metadata: dict[str, Any], task_id: object) -> list[dict[str, A
 def _validated_record(item: dict[str, Any], task_id: object, index: int) -> dict[str, Any]:
     """One stored record checked field by field; untrusted data fails closed."""
     label = f"{LINKS_KEY} record {index}"
-    if item.get("version") != LINK_VERSION:
-        raise _corrupt(task_id, f"{label} has version {item.get('version')!r}")
+    version = item.get("version")
+    if type(version) is not int or version != LINK_VERSION:
+        raise _corrupt(task_id, f"{label} has version {version!r}")
     handle, role, review_of = item.get("handle"), item.get("role"), item.get("review_of")
     if not isinstance(handle, str) or not handle.strip() or len(handle) > MAX_HANDLE_CHARS:
         raise _corrupt(task_id, f"{label} has an unusable handle")
@@ -115,7 +116,9 @@ def _validated_record(item: dict[str, Any], task_id: object, index: int) -> dict
         raise _corrupt(task_id, f"{label} has role {role!r}")
     if (role == "work") != (review_of is None):
         raise _corrupt(task_id, f"{label} has an incompatible review_of")
-    if review_of is not None and (not review_of.strip() or len(review_of) > MAX_HANDLE_CHARS):
+    if review_of is not None and (
+        not isinstance(review_of, str) or not review_of.strip() or len(review_of) > MAX_HANDLE_CHARS
+    ):
         raise _corrupt(task_id, f"{label} has an unusable review_of")
     created_at = _number(item.get("created_at"))
     if created_at is None:
@@ -150,7 +153,8 @@ def task_state(row: dict[str, Any]) -> dict[str, Any]:
             raise _corrupt(task_id, f"{BOUNDARY_KEY} is unusable")
     fallback = False
     if BOUNDARY_FALLBACK_KEY in metadata:
-        if metadata[BOUNDARY_FALLBACK_KEY] not in (1, "1"):
+        flag = metadata[BOUNDARY_FALLBACK_KEY]
+        if isinstance(flag, bool) or flag not in (1, "1"):
             raise _corrupt(task_id, f"{BOUNDARY_FALLBACK_KEY} is unusable")
         fallback = True
     return {
@@ -201,7 +205,10 @@ def plan_link(
     ):
         raise BeadsError("review_of must name a work job already linked to this task")
     if len(links) >= MAX_LINKS:
-        raise BeadsError(f"a task keeps at most {MAX_LINKS} job links; link fewer jobs to it")
+        raise BeadsError(
+            f"a task keeps at most {MAX_LINKS} job links; existing links cannot be evicted; "
+            "track further work on another task"
+        )
     return {"duplicate": False, "state": state}
 
 
@@ -214,7 +221,8 @@ def authorize_new_link(fact: object, instance_id: str, handle: str) -> int | flo
         raise BeadsError(f"job {handle} carries no play proof for this play instance; link refused")
     if not _flag(play.get("caller_seated_at_creation")):
         raise BeadsError(
-            f"job {handle} was not issued by a member seated in this play; link refused"
+            f"job {handle}: membership of the issuing caller in this play at creation "
+            "is not proven; link refused"
         )
     created_at = _number(fact.get("created_at"))
     if created_at is None:
@@ -362,12 +370,16 @@ def artifact_relation(
     review_fact: dict[str, Any],
     work_fact: dict[str, Any] | None,
     current_work_handle: str | None,
+    current_work_ambiguous: bool = False,
 ) -> str:
     """matched / stale / unverified / unavailable for the current review's evidence."""
     if not _flag(review_fact.get("available")) or work_fact is None:
         return "unavailable"
     if not _flag(work_fact.get("available")):
         return "unavailable"
+    if current_work_ambiguous:
+        # An undetermined current work neither supersedes nor matches this review.
+        return "unverified"
     if review["review_of"] != current_work_handle:
         return "stale"
     review_ok = (
@@ -424,6 +436,7 @@ def _review_entry(
     selected: dict[str, Any] | None,
     facts: dict[str, dict[str, Any]],
     current_work_handle: str | None,
+    current_work_ambiguous: bool = False,
 ) -> dict[str, Any] | None:
     if selected is None:
         return None
@@ -438,7 +451,9 @@ def _review_entry(
         return entry
     entry["source_basis"] = _source_basis(fact)
     work_fact = facts.get(selected["review_of"]) if selected["review_of"] else None
-    entry["artifact_relation"] = artifact_relation(selected, fact, work_fact, current_work_handle)
+    entry["artifact_relation"] = artifact_relation(
+        selected, fact, work_fact, current_work_handle, current_work_ambiguous
+    )
     return entry
 
 
@@ -455,7 +470,8 @@ def progress_view(
     _deps, _children, blockers = _blockers(board, rows, task_id)
     generation = state["generation"]
     current_work = _selection(state["links"], generation, "work")
-    if current_work is not None and not current_work.get("ambiguous"):
+    work_ambiguous = current_work is not None and bool(current_work.get("ambiguous"))
+    if current_work is not None and not work_ambiguous:
         work_handle: str | None = current_work["handle"]
     else:
         work_handle = None
@@ -480,7 +496,7 @@ def progress_view(
         "boundary": state["boundary"],
         "boundary_fallback": state["boundary_fallback"],
         "current_work": _work_entry(current_work, facts),
-        "latest_review": _review_entry(latest_review, facts, work_handle),
+        "latest_review": _review_entry(latest_review, facts, work_handle, work_ambiguous),
         "job_links": entries,
         "truncated": len(blockers) > 200,
     }
