@@ -1,8 +1,4 @@
-"""Participant RPC handlers: hello, list, get, tree, status, rename, kill, adopt, unmanaged.
-
-Also owns ``_resume_state``, the generic resume pre-flight verdict used by
-``participants.list`` and ``participants.recent_dead``.
-"""
+"""Participant RPC handlers: hello, list, get, tree, status, rename, kill, adopt, unmanaged."""
 
 from __future__ import annotations
 
@@ -22,11 +18,11 @@ from theater.constants.refusals import (
 from theater.daemon.events.publication import next_revision, participant_event
 from theater.daemon.forgetting import forget_participant, forget_refusal
 from theater.daemon.operations.termination import terminate_with_operation
+from theater.daemon.participants.resume import resume_state
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
 from theater.daemon.worktrees.retirement import cleanup_killed_workspace
-from theater.harness import HARNESSES, normalize, supports_resume
 from theater.harness.contracts.runtime import RuntimeCapability
 from theater.models import (
     BadRequest,
@@ -42,7 +38,8 @@ from theater.models import (
     now,
 )
 from theater.observability.catalog import LIFECYCLE_STAGE
-from theater.provenance import is_trusted_provenance
+
+_resume_state = resume_state
 
 
 def _with_presence(daemon, record: dict, *, self_view: bool = False) -> dict:
@@ -169,37 +166,6 @@ def persist_participant_status(daemon, participant_id: str, *, status: Status, u
     return updated
 
 
-def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
-    """Derive the point-in-time resume verdict for one participant without extra DB queries.
-
-    Gate order as spawn_session: live, no_session_id, harness_cannot_resume, owned_by_live
-    (``live_peers``), untrusted, harness_resume_rejected, else resumable.
-    """
-    if p.status is not Status.DEAD:
-        return "live"
-    if any(other.resumed_from_id == p.id for other in live_peers):
-        return "owned_by_live"
-    if not p.session_id:
-        return "no_session_id"
-    harness = HARNESSES.get(normalize(p.harness))
-    if harness is None or not supports_resume(harness):
-        return "harness_cannot_resume"
-    for other in live_peers:
-        if (
-            normalize(other.harness) == normalize(p.harness)
-            and other.session_id == p.session_id
-            and is_trusted_provenance(other.session_correlation)
-        ):
-            return "owned_by_live"
-    if not is_trusted_provenance(p.session_correlation):
-        return "untrusted"
-    try:
-        harness.resume_preflight(predecessor=p)
-    except BadRequest:
-        return "harness_resume_rejected"
-    return "resumable"
-
-
 def _pagination(
     daemon,
     params: dict,
@@ -302,7 +268,7 @@ async def _list(daemon, params: dict) -> list[dict]:
     result = []
     for p in page:
         d = _with_presence(daemon, p.to_dict())
-        d["resume_state"] = _resume_state(p, live_peers)
+        d["resume_state"] = resume_state(p, live_peers)
         result.append(d)
     return result
 
@@ -320,7 +286,7 @@ async def _recent_dead(daemon, params: dict) -> list[dict]:
     result = []
     for p in rows:
         record = p.to_dict()
-        record["resume_state"] = _resume_state(p, live_peers)
+        record["resume_state"] = resume_state(p, live_peers)
         record["spawn_prompt"] = prompts.get(p.id)
         result.append(record)
     return result

@@ -13,6 +13,7 @@ from theater.daemon.control_projection import project_control_action
 from theater.daemon.events.reader import JournalReader, StateReadError, StreamCursor
 from theater.daemon.job_results import structured_job_result
 from theater.daemon.operations import UNSETTLED_STATES, operation_to_wire
+from theater.daemon.participants.resume import resume_state
 from theater.daemon.schema import (
     jobs,
     participant_runtime_bindings,
@@ -694,18 +695,15 @@ def _participant_projection(
     if facts is not None and facts.transcript_identity is not None:
         transcript_identity = dict(facts.transcript_identity)
     if participant.status is Status.DEAD:
-        # Import lazily: participants RPC publishes through this module.
-        from theater.daemon.rpc.participants import _resume_state
-
         live_peers = [
             Participant.from_row(row._mapping)
             for row in connection.execute(
                 select(participants).where(participants.c.status != Status.DEAD.value)
             )
         ]
-        resume_state = _resume_state(participant, live_peers)
+        participant_resume_state = resume_state(participant, live_peers)
     else:
-        resume_state = "live"
+        participant_resume_state = "live"
     return {
         "participant_id": participant.id,
         "origin": (
@@ -725,7 +723,7 @@ def _participant_projection(
         "native_route": native_route,
         "trusted_identity": trusted_identity,
         "transcript_identity": transcript_identity,
-        "resume_state": resume_state,
+        "resume_state": participant_resume_state,
         "created_at": participant.created_at,
         "last_activity": participant.last_activity,
         "actions": (

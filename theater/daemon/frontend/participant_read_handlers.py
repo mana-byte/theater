@@ -9,8 +9,8 @@ from sqlalchemy import and_, or_, select
 
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.validation import PublicRequestError
+from theater.daemon.participants.resume import resume_state
 from theater.daemon.presence import access as presence_access
-from theater.daemon.rpc.participants import _resume_state
 from theater.daemon.schema import participants
 from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.frontend.capabilities import METHOD_CATALOG
@@ -239,7 +239,7 @@ async def participant_to_wire(
         "native_route": native_route,
         "trusted_identity": trusted_identity,
         "transcript_identity": _transcript_identity(daemon, participant),
-        "resume_state": _resume_state(participant, peers),
+        "resume_state": resume_state(participant, peers),
         "created_at": participant.created_at,
         "last_activity": participant.last_activity,
         "actions": actions,
@@ -375,7 +375,7 @@ async def participants_resume_candidates(
             "description": row.description,
             "last_activity": row.last_activity,
             "spawn_prompt": prompts.get(row.id) or None,
-            "resume_state": _resume_state(row, live_peers),
+            "resume_state": resume_state(row, live_peers),
             "transcript_identity": _transcript_identity(daemon, row),
         }
         for row in rows
