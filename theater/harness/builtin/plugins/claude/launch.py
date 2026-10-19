@@ -14,7 +14,6 @@ from pathlib import Path
 
 from theater import paths
 from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
-from theater.constants.harness import CLAUDE_MCP_AUTO_BACKGROUND_ENV, CLAUDE_MCP_AUTO_BACKGROUND_MS
 from theater.harness.base import (
     APPROVALS,
     LaunchPlan,
@@ -27,7 +26,12 @@ from theater.harness.normalization import literal_prompt_argument
 from theater.harness.transcript.discovery import root_domain_overlay
 
 from .config_root import claude_config_env, claude_config_root, claude_projects_root
-from .constants import CLAUDE_RECEIPT_EVENTS, CLAUDE_THINKING_SUMMARIES_KEY
+from .constants import (
+    CLAUDE_MCP_AUTO_BACKGROUND_ENV,
+    CLAUDE_MCP_AUTO_BACKGROUND_MS,
+    CLAUDE_RECEIPT_EVENTS,
+    CLAUDE_THINKING_SUMMARIES_KEY,
+)
 from .hooks import ClaudeHook, ClaudeHookEntry, ClaudeSettings
 
 

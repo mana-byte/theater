@@ -25,6 +25,7 @@ from theater.harness.contracts.launch import (
 )
 from theater.harness.contracts.manifest import (
     LaunchManifest,
+    McpForegroundWait,
     McpRenderingManifest,
     ModelDiscoveryManifest,
     ObservationManifest,
@@ -391,4 +392,36 @@ def test_compiled_overlay_mcp_without_a_renderer_returns_the_plan_unchanged(
             mcp_servers=(),
         )
         is plan
+    )
+
+
+def test_compilation_forwards_the_declared_foreground_wait() -> None:
+    wait = McpForegroundWait(env="ACME_MCP_BACKGROUND_MS", default_ms=30_000, margin_seconds=2.5)
+    declared = compile_manifest(
+        "acme",
+        replace(
+            manifest(),
+            mcp=McpRenderingManifest(
+                renderer=lambda _context: McpRenderOverlay(), foreground_wait=wait
+            ),
+        ),
+    )
+
+    assert declared.mcp_foreground_wait is wait
+    assert compile_manifest("acme", manifest()).mcp_foreground_wait is None
+    # a zero margin and plain integers stay valid declarations
+    assert (
+        compile_manifest(
+            "acme",
+            replace(
+                manifest(),
+                mcp=McpRenderingManifest(
+                    renderer=lambda _context: McpRenderOverlay(),
+                    foreground_wait=McpForegroundWait(
+                        env="ACME_MS", default_ms=1, margin_seconds=0
+                    ),
+                ),
+            ),
+        ).mcp_foreground_wait
+        is not None
     )

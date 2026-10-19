@@ -4,8 +4,19 @@ from __future__ import annotations
 
 from typing import Final
 
+from theater.constants.harness import HARNESS_MCP_TOOL_TIMEOUT_SECONDS
+
 CLAUDE_RECEIPT_EVENTS = ("SessionStart", "PreCompact")
 CLAUDE_THINKING_SUMMARIES_KEY: Final = "showThinkingSummaries"
+
+#: Claude moves MCP calls past this many ms to the background (default 120000, 0 disables).
+CLAUDE_MCP_AUTO_BACKGROUND_ENV: Final = "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"
+#: Launch value: past the tool timeout, so a full-length await stays in the foreground.
+CLAUDE_MCP_AUTO_BACKGROUND_MS: Final = int((HARNESS_MCP_TOOL_TIMEOUT_SECONDS + 20) * 1000)
+#: Claude's own default when the variable is unset.
+CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS: Final = 120_000
+#: Seconds an await stays under Claude's backgrounding threshold.
+CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS: Final = 10.0
 
 IDLE_PROMPTS = (">", "> ")
 APPROVAL_MARKER = "Esc to cancel"

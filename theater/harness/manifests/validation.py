@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections import defaultdict
 from typing import NoReturn
@@ -46,6 +47,7 @@ from theater.harness.contracts.manifest import (
     InterruptPlan,
     LaunchManifest,
     LineageManifest,
+    McpForegroundWait,
     McpRenderingManifest,
     ModelDiscoveryManifest,
     NativeCompatibilityManifest,
@@ -257,6 +259,33 @@ def _validate_mcp(name: str, mcp: object) -> None:
         _fail(name, "mcp", f"expected McpRenderingManifest or null, got {type(mcp).__name__}")
     if not callable(mcp.renderer):
         _fail(name, "mcp.renderer", "must be callable")
+    _validate_foreground_wait(name, mcp.foreground_wait)
+
+
+def _validate_foreground_wait(name: str, wait: object) -> None:
+    if wait is None:
+        return
+    if not isinstance(wait, McpForegroundWait):
+        _fail(
+            name,
+            "mcp.foreground_wait",
+            f"expected McpForegroundWait or null, got {type(wait).__name__}",
+        )
+    _validate_text(name, "mcp.foreground_wait.env", wait.env)
+    _validate_finite_number(name, "mcp.foreground_wait.default_ms", wait.default_ms, positive=True)
+    _validate_finite_number(
+        name, "mcp.foreground_wait.margin_seconds", wait.margin_seconds, positive=False
+    )
+
+
+def _validate_finite_number(name: str, path: str, value: object, *, positive: bool) -> None:
+    """A finite int or float; booleans are not numbers here."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        _fail(name, path, "must be a finite number")
+    if positive and value <= 0:
+        _fail(name, path, "must be greater than zero")
+    if not positive and value < 0:
+        _fail(name, path, "must not be negative")
 
 
 def _validate_resume_options(name: str, launch: LaunchManifest) -> None:

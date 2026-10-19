@@ -1,4 +1,4 @@
-"""Harness contract, compiler, loading and channel modules never import runtime layers."""
+"""Harness contract, compiler, loading, channel and MCP-policy modules import no runtime layer."""
 
 from __future__ import annotations
 
@@ -34,6 +34,10 @@ _MODULES = {
         "theater/harness/channels/__init__.py",
         "theater/harness/channels/composite.py",
         "theater/harness/channels/health.py",
+    ),
+    "mcp_policy": (
+        "theater/harness/registry/mcp.py",
+        "theater/mcp/server.py",
     ),
 }
 
