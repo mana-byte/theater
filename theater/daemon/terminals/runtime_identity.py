@@ -67,13 +67,15 @@ def usable_binding_identity(
         return None
 
 
-def binding_identity_duty(evidence: Iterable[Mapping[str, object]]) -> tuple[bool, bool]:
-    """Key presence retains the duty even when historical values are unusable."""
+def binding_identity_duty(
+    evidence: Iterable[Mapping[str, object]], provider_kind: str
+) -> tuple[bool, bool]:
+    """Retain duties from stored keys only when that provider can fulfill them."""
     generic = False
     legacy = False
     for occupant in evidence:
         generic |= "runtime_identity" in occupant
-        legacy |= "tmux_server_identity" in occupant
+        legacy |= provider_kind == "tmux" and "tmux_server_identity" in occupant
     return generic, legacy
 
 

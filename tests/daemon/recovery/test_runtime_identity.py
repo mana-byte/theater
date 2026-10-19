@@ -457,12 +457,15 @@ def test_invalid_stored_identity_retains_duty_without_authorizing_retirement(
         wrong_kind = _register(service, "wrong-kind")
         wrong_generation, _ = service.connections.acquire_callback(wrong_kind, "credential")
         wrong = _terminal(wrong_kind, wrong_generation, "wrong", "runtime-a")
+        del wrong["occupant"]["runtime_identity"]
         wrong["occupant"]["tmux_server_identity"] = "runtime-a"
         _bind(store, wrong)
         service.report(wrong_kind, wrong_generation, 1, {"presence_invalidated": True})
-        with pytest.raises(ProviderReportInvalid, match=r"only tmux|requires facts"):
-            _report(service, wrong_kind, wrong_generation, 2, "runtime-b", [])
+        with pytest.raises(ProviderReportInvalid, match="wrong provider kind"):
+            _report(service, wrong_kind, wrong_generation, 2, "runtime-b", [wrong])
+        _report(service, wrong_kind, wrong_generation, 2, "runtime-b", [])
         assert store.get_participant("wrong").status is not Status.DEAD
+        assert store.providers.get(wrong_kind).last_report_revision == 2
     finally:
         store.close()
 

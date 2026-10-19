@@ -732,7 +732,7 @@ class TerminalProviderService:
         if needs_duty:
             bindings = self.bindings.list(provider.provider_id)
             binding_generic, binding_legacy = binding_identity_duty(
-                binding.occupant_evidence for binding in bindings
+                (binding.occupant_evidence for binding in bindings), provider.kind
             )
             generic_key = terminal_runtime_identity_meta_key(provider.provider_id, legacy=False)
             legacy_key = terminal_runtime_identity_meta_key(provider.provider_id, legacy=True)
