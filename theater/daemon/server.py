@@ -31,7 +31,7 @@ from theater.daemon import (  # noqa: F401
 )
 from theater.daemon.controls.service import ControlService
 from theater.daemon.events import BusTailWaiter, StateService
-from theater.daemon.events.snapshot import (
+from theater.daemon.events.projection import (
     CachedParticipantProjection,
     configure_participant_projection,
 )
