@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -332,10 +333,13 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
     await run("send-keys", "-t", terminal_id, "-X", "cancel")
 
     await deliver_action(terminal_id, {"kind": "submit_text", "text": "literal! ~input"})
+    # The child creates the file before json.dump finishes writing it, so exists() is too early.
+    result = None
     async with asyncio.timeout(5):
-        while not result_path.exists():  # noqa: ASYNC110
+        while result is None:
+            with contextlib.suppress(FileNotFoundError, json.JSONDecodeError):
+                result = json.loads(result_path.read_text())
             await asyncio.sleep(0.02)
-    result = json.loads(result_path.read_text())
     assert result == {
         "argv": exact_arguments,
         "environment": exact_environment,
