@@ -8,8 +8,8 @@ description: Lead one stream in a hierarchy play. Own a disjoint set of paths, b
 Track your stream in the shared Beads board. Claim your assigned task when ready, record
 progress and blockers as notes, and close it with the verified outcome. Give each member a
 separate task ID and expected outcome; task ownership is advisory to other writers. Link each
-member's finished job to its task with `link_task_job(role="work")`; reviews are the master's
-to link. On a closed task, a new work link requires reopening when its job was created
+member's finished job to its task with `link_task_job(role="work")`; the master normally
+links reviews. On a closed task, a new work link requires reopening when its job was created
 after the known close, or the close time is unknown. Work created at or before a known
 close and review links remain allowed under the other validation rules; verified
 duplicates stay no-ops.

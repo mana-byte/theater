@@ -275,18 +275,12 @@ def reopen_generation_args(row: dict[str, Any], now: float | None = None) -> lis
     The boundary is the previous close when it is known, else this reopen time
     with the fallback exposed. Called from the same bd command that reopens.
     """
+    state = task_state(row)
     previous_close = close_epoch(row)
     fallback = previous_close is None
     if fallback:
         previous_close = time.time() if now is None else now
-    generation = 0
-    metadata = _metadata(row)
-    if GENERATION_KEY in metadata:
-        stored = _integer(metadata[GENERATION_KEY])
-        if stored is None or stored < 0:
-            raise _corrupt(row.get("id"), f"{GENERATION_KEY} is unusable")
-        generation = stored
-    generation += 1
+    generation = state["generation"] + 1
     args = [
         "--set-metadata",
         f"{GENERATION_KEY}={generation}",
@@ -373,15 +367,17 @@ def artifact_relation(
     current_work_ambiguous: bool = False,
 ) -> str:
     """matched / stale / unverified / unavailable for the current review's evidence."""
-    if not _flag(review_fact.get("available")) or work_fact is None:
-        return "unavailable"
-    if not _flag(work_fact.get("available")):
+    if not _flag(review_fact.get("available")):
         return "unavailable"
     if current_work_ambiguous:
         # An undetermined current work neither supersedes nor matches this review.
         return "unverified"
     if review["review_of"] != current_work_handle:
+        # The immutable association proves supersession, whatever became of the
+        # old source's facts.
         return "stale"
+    if work_fact is None or not _flag(work_fact.get("available")):
+        return "unavailable"
     review_ok = (
         review_fact.get("state") == "done"
         and review_fact.get("error_code") is None

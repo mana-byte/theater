@@ -407,6 +407,27 @@ async def test_ambiguous_work_tie_leaves_review_unverified(adapter: BeadsService
     assert stale["current_work"]["handle"] == "work-b"
     assert stale["latest_review"]["artifact_relation"] == "stale"
 
+    # a determinate supersession stays stale even when the old source's facts
+    # are gone; missing review evidence alone stays honestly unavailable
+    for old_source, review_payload, expected in (
+        (fact("work-a", available=False), review_fact, "stale"),  # garbage-collected
+        (None, review_fact, "stale"),  # omitted entirely
+        (
+            fact("work-a", available=False),
+            variant(review_fact, available=False),
+            "unavailable",  # the review's own evidence is missing
+        ),
+    ):
+        FakeClient.facts = {
+            "work-b": fact("work-b", created_at=7000.0),
+            "review-1": review_payload,
+        }
+        if old_source is not None:
+            FakeClient.facts["work-a"] = old_source
+        view = await adapter.get_task(task2, view="progress")
+        assert view["current_work"]["handle"] == "work-b"
+        assert view["latest_review"]["artifact_relation"] == expected
+
 
 async def test_selection_prefers_newest_and_reports_ties(
     adapter: BeadsService, tmp_path: Path
@@ -808,9 +829,9 @@ async def test_corrupt_generation_metadata_blocks_reads_and_reopen(
     cases = (
         # key, value, progress refuses, reopen refuses
         ("theater_generation", "soon", True, True),  # else reopen revives generation 0
-        ("theater_boundary", "NaN", True, False),  # reopen rewrites the boundary wholesale
-        ("theater_boundary_fallback", "yes", True, False),
-        ("theater_boundary_fallback", True, True, False),  # a bool flag is not a set fallback
+        ("theater_boundary", "NaN", True, True),  # reopening never repairs stored corruption
+        ("theater_boundary_fallback", "yes", True, True),
+        ("theater_boundary_fallback", True, True, True),  # a bool flag is not a set fallback
         ("theater_closed_at", "banana", False, True),  # progress never reads the close time
     )
     for key, value, blocks_progress, blocks_reopen in cases:
@@ -840,3 +861,31 @@ async def test_corrupt_generation_metadata_blocks_reads_and_reopen(
     result = await adapter.link_task_job(task_id, "work-c", "work")
     assert result["generation"] == 1 and result["duplicate"] is False
     assert raw_row(tmp_path, task_id)["metadata"]["theater_links"][0]["handle"] == "work-a"
+
+
+async def test_corrupt_links_refuse_reopen_without_native_mutation(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    for corrupt in (
+        [stored_link(version=999)],  # an unknown version is unsupported
+        [stored_link(f"h-{i:03}") for i in range(101)],  # over the cap
+    ):
+        task_id = await make_task(adapter)
+        seed_raw_links(tmp_path, task_id, corrupt)
+        await adapter.close_task(task_id, "closed with corrupt links")
+        with pytest.raises(BeadsError, match="unsupported or corrupt"):
+            await adapter.update_task(task_id, status="open")
+        raw = raw_row(tmp_path, task_id)
+        assert raw["status"] == "closed"  # no native mutation happened
+        assert len(raw["metadata"]["theater_links"]) == len(corrupt)
+
+    # a valid list over fifty links still reopens and advances
+    task_id = await make_task(adapter)
+    seed_links(tmp_path, task_id, count=60)
+    await adapter.close_task(task_id, "many valid links")
+    FakeClient.facts = {}
+    reopened = await adapter.update_task(task_id, status="open")
+    assert reopened["outcome"] is None
+    metadata = raw_row(tmp_path, task_id)["metadata"]
+    assert metadata["theater_generation"] == 1
+    assert len(metadata["theater_links"]) == 60
