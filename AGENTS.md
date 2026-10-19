@@ -2,7 +2,8 @@
 
 Guidance for AI agents working in this repository. Human-facing usage lives in
 [`README.md`](README.md); the deep rationale lives in [`docs/architecture.md`](docs/architecture.md).
-When this file and the code disagree, the code wins — tell the user.
+Code establishes current behaviour; documented invariants establish intended constraints.
+Investigate and report disagreements instead of treating an invariant violation as a convention.
 
 ## What this is
 
@@ -19,8 +20,7 @@ independent clients:
 - **Régie** — a separately packaged Textual frontend and persistent tmux terminal
   provider; both roles use only Theater's public frontend API.
 
-Python 3.12+, ~120,800 lines in Theater and ~21,500 in Régie, 266 test modules.
-`theater` is the CLI entry point (`theater.cli:main`).
+Python 3.12+. CLI entry point: `theater.cli:main`.
 
 ## The one constraint
 
@@ -47,10 +47,10 @@ make test                     # full suite, parallel across cores (pytest-xdist)
 make test-unit                # inner dev loop: -m "not integration" (real-binary proofs excluded)
 make test-serial              # full suite in one process (flake debugging)
 uv run pytest tests/daemon/controls # one area (see tests/README.md)
-uv run pytest --cov           # coverage gate (fail_under = 80); NOT in addopts
+PYTEST_ADDOPTS=--cov make test # full suite with the 80% coverage gate
 uv run ruff check             # lint
-uv run ruff format            # format (line-length = 100)
-uv run mypy                   # type check (theater/ only, lenient — no --strict)
+uv run ruff format --check    # verify formatting; omit --check to format
+uv run mypy                   # Theater, Régie, compat scripts; no --strict
 make compat HARNESS=vibe       # dry-run: qualify new upstream CLI releases (docs/harness-compat.md)
 ```
 
@@ -69,139 +69,68 @@ in a sandbox without it. Verify tmux-facing changes by hand or under
 
 ## Layout
 
-```
-theater/
-├── cli/                entry point, parser, commands, render
-│   └── commands/       bus, identity, introspection, maintenance, participants, process
-├── config/             config loading, models, validation, describe
-├── constants/          immutable values split by domain (cli, core, daemon, harness, …)
-│   └── observability.py  numeric/string constants, configurable defaults, timing thresholds
-├── observability/      one package, one process-level lifecycle — see §13 of architecture.md
-│   ├── catalog.py        immutable operation/attribute specs (frozen, slotted data)
-│   ├── engine.py         timing context, prose rendering, log extras, metric bridge
-│   ├── metrics.py        histogram registry, views, cached gauges, GaugeSampler
-│   ├── tracing.py        span lifecycle, explicit W3C inject/extract
-│   ├── signals.py        direct structured-log and completed-span transport
-│   ├── logging.py        owned handlers, rotation, stderr-generation pruning
-│   └── runtime.py        process-level composition and RuntimeHandle shutdown
-├── timing.py           compatibility facade — re-exports observability engine, preserves old API
-├── trajectory/         bounded harness-neutral records, requests, tools, causality, wire values
-├── models.py           Tier, Status, Participant, Job, error codes
-├── client.py           DaemonClient (NDJSON over Unix socket, autostarts the daemon)
-├── protocol.py         NDJSON framing, PROTOCOL_VERSION = 1 (NOT JSON-RPC)
-├── paths.py            $THEATER_HOME layout
-├── formatting.py       shared CLI rendering — imports neither rich nor textual
-├── frontend/           public SDK, DTOs, wire client, schemas, state-follow controller
-│   └── trajectory.py   trajectory values frontends decode responses with (re-exports)
-├── proc.py             process facts from `ps` / `/proc` / `lsof`: descendants, open files
-├── names.py            live participant names, kept across restarts (recyclable masks)
-├── provenance.py       transcript-provenance predicates (trusted vs untrusted)
-├── transcript_identity.py  shared transcript identity and location canonicalisation
-├── resume_floor.py     persisted pre-launch stream-position fact for resume
-├── plugin_client.py    typed async client for participant-scoped plugin sidecars
-├── plugins/            shared plugin catalog, loading, and diagnostics (both kinds)
-├── mcp_plugins/        MCP-server plugin contracts, registry, runner, validation; builtin Beads
-├── pricing/            token cost estimation from usage records
-├── daemon/             orchestration authority and sole SQLite writer
-│   ├── observation/    status policy, job completion, rescue, identity, screen, turns
-│   │   ├── service.py  Observer: the watch loop, composed from concern mixins beside it
-│   │   └── reducer.py  QuietClock — the three quiet timers live here
-│   ├── controls/       durable control state machine; ControlService composed from
-│   │                   send, steer, followup, dispatch, repairs, settings, interrupt… mixins
-│   ├── persistence/    Store (per-domain mixins in store_parts/), database, repositories
-│   ├── presence/       shared contracts, pure classification, monitor, provider access
-│   ├── terminals/      provider registry, leases, callbacks, binding reconciliation
-│   ├── rpc/            handler modules registered via @method into METHODS
-│   ├── response_contracts/  strict response_format: admission, presets, whole-answer validation, audit
-│   ├── runtime/        socket dispatch, maintenance loops, lifecycle
-│   ├── handoff/        `after` handoffs: source resolution, completion evidence, cards, gates
-│   ├── plays/          play membership: start by load, spawn seats, assignment on delivery
-│   ├── spawning/       launch planning, resume, service
-│   ├── worktrees/      unique and named shared worktree paths and repos
-│   ├── trajectory/     canonical projection, ingestion, cache, telemetry, responses
-│   ├── observer.py     compatibility facade — re-exports the observation package
-│   ├── store.py        compatibility facade — re-exports the persistence package
-│   ├── methods.py      compatibility facade — re-exports the rpc package
-│   ├── server.py       lifecycle only: socket, pidfile, wiring (composition surface)
-│   ├── spawner.py / worktree.py   compatibility facades for spawning/worktrees
-│   ├── registry.py     tier assignment, pane eviction, lineage
-│   ├── awaiting.py     presence-aware await coordination (jobs.await)
-│   ├── jobs.py         JobManager, one asyncio.Event per handle
-│   ├── gc.py           retention sweep: bus, jobs+touch, dead participants
-│   ├── artifacts.py    validated participant-owned files and GC cleanup
-│   ├── rails.py        depth / cycle / budget guards
-│   ├── recall.py / recall_read.py  path-touch history + segment reader (v2)
-│   ├── schema.py       the one place table columns are declared
-│   └── migrations/     alembic env + versions/
-├── harness/            package-manifest plugins + generic channels (no privileged built-in tier)
-│   ├── contracts/       immutable manifests, typed callbacks, Harness, Source, observation facts
-│   ├── manifests/       manifest compiler, validation, reusable strategies
-│   ├── loading/         named-directory discovery and isolated package imports
-│   ├── channels/        CompositeSource plus generic hook and inbound native-OTel channels
-│   ├── normalization/   shared bounded value and timestamp conversion
-│   ├── registry/       plugin lookup, install, capabilities, claims
-│   ├── transcript/     transcript-file source, observer, attachment, bounded history
-│   ├── builtin/plugins/   claude/, codex/, opencode/, pi/, vibe/ package manifests and all native code
-│   ├── base.py         compatibility facade — re-exports contracts
-│   ├── observation.py  compatibility facade — re-exports contracts + transcript
-│   ├── source.py       compatibility facade — re-exports contracts + transcript
-│   └── plugins.py      generic loader compatibility facade
-├── skills/             declarative SKILL.md validation, discovery, immutable registry
-│   ├── plays.py        PLAY.toml parsing into immutable play rules
-│   └── builtin/        theater-configure · theater-debate · theater-delegate · theater-recover-tmux · pair (play)
-└── mcp/                server.py (21 agent tools) · session.py · toolsets/
-│   ├── toolsets/       delegation, participants, recall, transcripts, skills
-│   ├── server.py       composition surface — registers @mcp.tool entries
-│   └── tools.py        compatibility facade — re-exports toolsets + session
+- `theater/daemon/` — orchestration policy, SQLite persistence, controls, observation.
+- `theater/mcp/`, `theater/cli/` — agent and human entry points.
+- `theater/frontend/` — public SDK, DTOs, wire protocol, schemas.
+- `theater/harness/` — contracts, loading, channels, normalization, transcript sources.
+- `theater/harness/builtin/plugins/<harness>/` — all shipped harness-specific code.
+- `theater/trajectory/` — bounded harness-neutral records and values.
+- `theater/observability/` — process-level logging, metrics, tracing.
+- `theater/skills/`, `theater/mcp_plugins/` — declarative skills and MCP plugins.
+- `packages/regie/src/regie/` — Textual frontend and tmux terminal provider.
 
-packages/regie/src/regie/
-├── bridge/             persistent public-API terminal-provider lifecycle
-├── tmux/               tmux execution, identity, presence, and presentation
-├── controllers/        navigation, state-follow, staging, and usage
-├── render/             layout, glyphs, and routing
-├── widgets/            Textual chrome, tree, and usage widgets
-├── trajectory/         timeline over span details; decodes via theater.frontend.trajectory
-├── app_parts/          RegieApp's concern mixins (staging, trajectory, spawn, usage, …)
-└── app.py              standalone Textual application composition root
-```
+See the [module map](docs/architecture.md#11-module-map) for detail and
+[tests/README.md](tests/README.md) for test placement.
+
+## Code quality
+
+- **Search before writing.** Look for existing implementations, helpers, contracts,
+  and tests before adding code. Reuse or extend the existing owner when its
+  semantics fit; avoid borrowing another entry point's private helpers.
+- **Keep one source of truth.** Do not duplicate domain rules, validation, parsing,
+  or constants. Shared logic belongs in its owning package, behind a supported
+  interface. Share only when semantics match; check callers, inheritance, dispatch,
+  and compatibility before merging implementations or deleting redundant wrappers.
+- **Keep responsibilities focused.** Each module, class, and function has a clear
+  purpose. Separate decisions from I/O where practical. Split when responsibilities
+  or dependencies diverge; avoid arbitrary size limits and unnecessary fragmentation.
+- **Choose the simplest clear implementation.** Avoid speculative abstractions,
+  unnecessary wrappers, and configuration without a concrete requirement. Reuse
+  must reduce complexity; similar-looking code alone does not justify coupling
+  independent concerns. Keep compatibility facades as thin re-exports.
+- **Be concise and readable.** Use precise domain names, straightforward control
+  flow, and focused functions. Avoid boilerplate, redundant state, and clever
+  compression that makes code harder to understand.
+- **Comments explain why.** Keep comments and docstrings short; one line is the
+  target. Document invariants, surprising decisions, and necessary tradeoffs.
+  Do not narrate obvious code or repeat names and types. Preserve essential
+  correctness explanations.
+- **Review your own diff.** Remove duplication, dead code, and unnecessary
+  abstractions introduced by the change. Keep unrelated cleanup separate.
+  Verify changed behaviour with focused checks and report what was checked.
 
 ## Conventions
 
-- **Style is French-flavoured on purpose**: "régie", "théâtre", em-dashes in
-  prose. `ruff` rules RUF001–003 (homoglyph checks) are disabled for this reason —
-  don't "fix" the accents.
-- **Error class names are the CamelCase of their wire code**: `Busy` ⇒ `busy`,
-  `HumanPresent` ⇒ `human_present` (`models.py`). Renaming one desyncs the code
-  agents branch on. `N818` (Error-suffix rule) is disabled for this.
-- **Long, inline error messages are deliberate** — every error tells the caller
-  what to do about it (`TRY003` disabled). Keep that when adding errors.
-- **Imports inside functions are intentional** (`PLC0415` disabled): harness
-  plugins load lazily and the Theater CLI stays independent of Régie's Textual
-  dependency.
-- Line length 100. Type annotations are checked where present; unannotated code is
-  left alone (the target bug class is `None`-attribute access).
-- **Code must be modular**: each module and package has its own purpose and
-  scope — one concern per module, small focused units over god-files. New logic
-  with a distinct concern gets its own module; keep compatibility facades as
-  thin re-exports.
-- **Split a god-class into concern mixins**, one module each, moving methods
-  verbatim; a typing-only host (`_host.py` / `RegieHost`) declares the shared state
-  for mypy. `RegieApp`, `ControlService`, `Observer`, and `Store` follow this.
-- **Régie imports only `theater.frontend`** (a boundary test enforces it); when it
-  needs a Theater value, publish it through the frontend SDK rather than copying it.
-- **Comments and docstrings: four lines grand max** — avoid verbosity; say
-  why, not what, one line is the target. This applies to new code: don't churn
-  existing files just to shorten their comments. Long inline *error messages*
-  are the separate rule above — those stay deliberate.
-- **UI tests wait for conditions, not fixed sleeps** (`packages/regie/tests/support/waiting.py`):
-  CI runners are slower than a laptop, and Textual schedules tasks eagerly.
-- **Shared test helpers live in `tests/support/`** and are imported as
-  `from tests.support.<module> import ...` — one style, and test modules never import each
-  other. Régie-only helpers live in `packages/regie/tests/support/`.
-- **Only MVP tests are kept**: the minimal set that verifies the behaviour —
-  one focused test beats several overlapping ones; if two prove the same
-  thing, keep one. Don't grow sprawling suites beside a passing test (the 80%
-  coverage gate still applies).
+- Preserve French accents and em-dashes (`RUF001–003` disabled).
+- Error classes match their wire codes: `Busy` ⇒ `busy`, `HumanPresent` ⇒
+  `human_present` (`N818` disabled). Renaming one changes the caller's contract.
+- Long inline errors are deliberate: tell the caller what to do (`TRY003` disabled).
+- Function-local imports support lazy harness loading and keep Theater independent
+  of Régie's Textual dependency (`PLC0415` disabled).
+- Line length 100. Mypy checks annotated code; unannotated code is left alone.
+- Existing large hosts (`RegieApp`, `ControlService`, `Observer`, `Store`) use
+  concern mixins and a typing-only host (`_host.py` / `RegieHost`). Preserve that
+  pattern when extending them; use explicit collaborators for independent lifecycles.
+- **Régie imports only `theater.frontend`**, including in tests. Publish needed
+  Theater values through the SDK; do not copy them or import internals.
+- UI tests wait for conditions, not fixed sleeps
+  (`packages/regie/tests/support/waiting.py`).
+- Shared test helpers belong in `tests/support/`; import as
+  `from tests.support.<module> import ...`. Test modules never import each other.
+  Régie helpers belong in `packages/regie/tests/support/`.
+- Keep the smallest test set that proves the behaviour. Remove overlapping
+  coverage, but preserve distinct failure, rollback, cancellation, and recovery
+  scenarios relevant to the change. The 80% coverage gate still applies.
 
 ## Invariants — do not break these
 
