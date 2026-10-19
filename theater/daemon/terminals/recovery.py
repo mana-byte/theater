@@ -22,6 +22,7 @@ from theater.daemon.operations.service import IDEMPOTENCY_RETENTION_SECONDS
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.schema import launch_reservations
 from theater.daemon.terminals.bindings import TerminalIdentityMismatch, ensure_terminal_unbound
+from theater.frontend.capabilities import MAX_ERROR_CODE_CHARS, MAX_ERROR_MESSAGE_CHARS
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
 from theater.models import (
@@ -794,7 +795,10 @@ class ProviderReceiptReconciler:
             code = value.get("code")
             message = value.get("message")
             if isinstance(code, str) and code and isinstance(message, str):
-                return {"code": code[:512], "message": message[:8192]}
+                return {
+                    "code": code[:MAX_ERROR_CODE_CHARS],
+                    "message": message[:MAX_ERROR_MESSAGE_CHARS],
+                }
         return {
             "code": "provider_unavailable",
             "message": "provider receipt proves the terminal request was rejected",

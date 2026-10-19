@@ -6,6 +6,8 @@ import json
 import math
 from collections.abc import Mapping
 
+from theater.frontend.capabilities import MAX_ERROR_CODE_CHARS, MAX_ERROR_MESSAGE_CHARS
+
 
 def operation_error(
     exc: Exception,
@@ -22,7 +24,10 @@ def operation_error(
         message = str(exc)
     except Exception:
         message = type(exc).__name__
-    error: dict[str, object] = {"code": code[:512], "message": message[:8192]}
+    error: dict[str, object] = {
+        "code": code[:MAX_ERROR_CODE_CHARS],
+        "message": message[:MAX_ERROR_MESSAGE_CHARS],
+    }
     try:
         details = getattr(exc, "details", None)
     except Exception:

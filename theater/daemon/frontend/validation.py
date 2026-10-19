@@ -10,7 +10,12 @@ from typing import Any, NoReturn
 from jsonschema.exceptions import ValidationError
 
 from theater import protocol
-from theater.frontend.capabilities import MAX_EXACT_JSON_INTEGER, MAX_FRAME_BYTES
+from theater.frontend.capabilities import (
+    MAX_ERROR_CODE_CHARS,
+    MAX_ERROR_MESSAGE_CHARS,
+    MAX_EXACT_JSON_INTEGER,
+    MAX_FRAME_BYTES,
+)
 from theater.frontend.schemas import validate_public_request, validate_public_response
 
 
@@ -92,8 +97,8 @@ def error_response(
 ) -> bytes:
     """Encode one bounded error without recursively producing another error."""
     request_id = correlated_id(request_id)
-    bounded_message = message[:8192]
-    bounded_code = code[:512] or "internal"
+    bounded_message = message[:MAX_ERROR_MESSAGE_CHARS]
+    bounded_code = code[:MAX_ERROR_CODE_CHARS] or "internal"
     error: dict[str, object] = {"code": bounded_code, "message": bounded_message}
     if details is not None:
         error["details"] = dict(details)

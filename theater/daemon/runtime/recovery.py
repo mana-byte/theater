@@ -25,6 +25,7 @@ from theater.daemon.spawning.frontend import (
     restore_frontend_listener,
 )
 from theater.daemon.spawning.runtime_identity import validate_runtime_binding
+from theater.frontend.capabilities import MAX_ERROR_CODE_CHARS, MAX_ERROR_MESSAGE_CHARS
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -325,8 +326,10 @@ def _settle_public_from_control(daemon, operation_id: str, *, accepted: bool, co
         operation_id,
         phase="delivery_recovered",
         error={
-            "code": (control.error_code or "dispatch_failed")[:512],
-            "message": (control.error or "the control was rejected before restart")[:8192],
+            "code": (control.error_code or "dispatch_failed")[:MAX_ERROR_CODE_CHARS],
+            "message": (control.error or "the control was rejected before restart")[
+                :MAX_ERROR_MESSAGE_CHARS
+            ],
         },
     )
 
@@ -346,15 +349,17 @@ async def _wait_for_recovered_control(daemon, control_id: str) -> OperationOutco
         return OperationOutcome.failed(
             phase="delivery_recovered",
             error={
-                "code": (control.error_code or "dispatch_failed")[:512],
-                "message": (control.error or "the control was rejected")[:8192],
+                "code": (control.error_code or "dispatch_failed")[:MAX_ERROR_CODE_CHARS],
+                "message": (control.error or "the control was rejected")[:MAX_ERROR_MESSAGE_CHARS],
             },
         )
     return OperationOutcome.uncertain(
         phase="delivery_recovery_pending",
         error={
-            "code": (control.error_code or "delivery_unknown")[:512],
-            "message": (control.error or "the delivery outcome remains unknown")[:8192],
+            "code": (control.error_code or "delivery_unknown")[:MAX_ERROR_CODE_CHARS],
+            "message": (control.error or "the delivery outcome remains unknown")[
+                :MAX_ERROR_MESSAGE_CHARS
+            ],
         },
     )
 
