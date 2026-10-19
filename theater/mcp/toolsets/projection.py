@@ -22,7 +22,6 @@ _JOB_ECHO = frozenset(
         "prompt",
         "result",
         "caller_id",
-        "target_id",
         "kind",
         "created_at",
         "response_format",

@@ -206,7 +206,7 @@ custom skills, so a workflow written once works from any of your agents.
 - `theater-debate` — challenge a decision with a second model.
 - `theater-configure` — set up or personalize Theater.
 - `theater-recover-tmux` — recover sessions after a tmux restart.
-- `theater-delegate` — hand a task to a builder and reviewer pair and keep chatting.
+- `theater-delegate` — hand a task to an existing peer or a builder and reviewer pair.
 - `hierarchy` — a play shipped by the default Beads plugin: a master delegates to members or leads, with a shared task board for milestones, progress, and outcomes.
 - `pair` — a play: a builder and an independent reviewer debate to agreement in a shared worktree.
 
@@ -217,7 +217,8 @@ and attached skills stay under 16 KiB combined.
 
 **Run a play.** A play is a team structure: `skills/<play>/PLAY.toml` plus one
 skill per member, named `<play>/<member>` (`hierarchy/lead`). An agent that
-loads the master skill (`hierarchy/master`) becomes the play's master, and a
+loads the master skill (`hierarchy/master`) becomes the play's master. Use
+`load_skill(name="hierarchy/master", preview=true)` to read it without starting a play. A
 spawn that attaches it starts a new master. While the master lives, every spawn
 below it attaches exactly one position its spawner may give, plus at most one
 task role (`hierarchy/worker`, `hierarchy/reviewer`, `hierarchy/debater`); outside a live
@@ -233,7 +234,7 @@ one without asking the user, while terminating any other child still needs the
 user's explicit yes.
 
 **Track play progress.** Install Beads with `brew install beads` or
-`npm install -g @beads/bd`. The default `beads` MCP plugin exposes seven task
+`npm install -g @beads/bd`. The default `beads` MCP plugin exposes eight task
 tools, usable only by authorized positions in a play declaring `plugins = ["beads"]`.
 Each play instance gets its own board; agents select it through their membership.
 Boards expire seven days after Theater observes the play ended; configure

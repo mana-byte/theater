@@ -118,6 +118,9 @@ async def _skills_list(daemon, params: dict) -> dict:
 @method("skills.load")
 async def _skills_load(daemon, params: dict) -> dict:
     """Read one skill; an identified participant loading a play's master skill starts it."""
+    preview = params.get("preview", False)
+    if not isinstance(preview, bool):
+        raise BadRequest("skills.load parameter 'preview' must be a boolean")
     try:
         name = _string_param(params, "name", method_name="skills.load")
     except BadRequest as exc:
@@ -141,6 +144,12 @@ async def _skills_load(daemon, params: dict) -> dict:
     # Only an agent's own load names a caller; frontend and CLI reads never start a play.
     caller_id = params.get("caller_id")
     play = snapshot.play(skill.play) if skill.play is not None else None
-    if isinstance(caller_id, str) and caller_id and play and play.master_skill == skill.name:
+    if (
+        not preview
+        and isinstance(caller_id, str)
+        and caller_id
+        and play
+        and play.master_skill == skill.name
+    ):
         loaded["play_start"] = daemon.plays.start_by_load(caller_id, play)
     return loaded

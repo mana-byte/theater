@@ -39,53 +39,22 @@ from theater.mcp.refusals import refusal_envelope, refusal_result
 from theater.mcp.result_delivery import with_structured_object
 from theater.mcp.tools import Session
 
-#: `spawn_session`'s description — harness list from local registry (hint); daemon is authoritative.
-INSTRUCTIONS = """Theater makes the other agents on this machine addressable,
-so you can hand work to them and collect it back.
+#: Shared guidance stays short; each tool describes its own contracts.
+INSTRUCTIONS = """Theater connects coding agents across harnesses. Use send for an existing peer,
+spawn_session for a new child, and await_sessions for results. Keep each returned exact job
+handle. Use live names for participants, retained IDs for resume, and handles for jobs.
 
-spawn_session starts a child; send gives an agent that is already running more work.
-Each returns one handle, and await_sessions waits for it and returns the answer. Theater
-queues a message for a busy peer and delivers it when that is safe, so you never poll or
-retry; cancel_job withdraws work that has not started.
+Pass after="Writer" to hand off already-started work; queued work needs its exact send handle.
+Ask for response_format when acting on an answer. A finished turn is not proof of correctness:
+check the code or an independent review. Give concurrent writers disjoint paths.
+read_transcript and get_session_controls diagnose a stuck, failed or surprising child.
 
-To pass one agent's result to the next, name it: after="Writer" on spawn_session or send.
-Theater waits for that work, then adds the facts (outcome, pinned commit, the answer) to the
-task you wrote, so you copy no path, hash or handle. A name means the work that agent has
-already started (its running job, else its latest), never a message still queued for it: if
-your send returned delivery="queued", pass that send's handle instead. For a review that must
-not inherit the author's conclusions, spawn_session(task_kind="independent_review",
-worktree=true, after=...) gives the reviewer the facts, not the verdict, in a worktree at the
-exact commit.
+If Theater gave you a task, your final message ends that job. Put the answer there; sending
+it to your parent queues another task. Wait with await_sessions and follow refused calls' next.
 
-Ask for a structured answer with response_format when you will act on it; await_sessions
-returns validated JSON in structured_result. A child's "done" is the end of its turn, not a
-verdict on its work: check the repo or a review before you rely on it.
-read_transcript and get_session_controls diagnose a stuck, failed or surprising child;
-they are not how you read answers.
-
-Children that share a file do not run in parallel, they produce a conflict; split the
-work so each owns files no sibling touches.
-
-Address participants by name. Every `target` accepts a live name, and names are
-unique among live participants, so you never need to look up or memorize an id
-to talk to a live agent. Keep ids only for dead participants and resume.
-
-If Theater gave you a task, your final message ends that job and is the answer your
-requester's await returns (about 2,000 chars unless it set response_format). Put the result
-there; do not send it to your parent, which only queues a new prompt in its terminal.
-
-Wait with await_sessions, never a shell sleep or poll loop. A refused call
-returns a code, and `next` when known: follow it instead of retrying unchanged.
-Only ask the user to kill a child once its work is merged or abandoned. Children in a
-position your play lists as disposable need no ask.
-
-When the user's request names a workflow (a debate, a delegation, a review, Theater setup
-or recovery), call list_skills before building it from raw tools: a skill usually encodes
-the safe choreography, and its description says when it applies. Then load_skill that exact
-skill. To give another agent a skill, name it in skills=[...] on spawn_session or send;
-Theater attaches it after your task, and a child never inherits skills it was not given.
-A play is a team structure named in list_skills; loading its master skill starts it. While
-its master lives, every spawn below it attaches one position the spawner may give.
+For a play, debate or recovery workflow, list_skills then load the selected skill. A simple
+existing-peer handoff needs no new play. Attach child skills with skills=[...]; they are not
+inherited. Follow the active play's positions and retirement rules.
 """
 
 _TOOLSETS = frozenset({"all", "control", "wait"})
@@ -110,7 +79,8 @@ A spawned child's id is also its spawn job's handle, and a job handle wins over 
 participant-id reading: awaiting the child's id returns that first task, not later sends.
 Await each send's own handle.
 
-Each entry carries handle, state (running/done/crashed/killed), participant_status
+Each entry carries handle, target_id (the participant when known), state
+(running/done/crashed/killed), participant_status
 (observed independently, possibly working after departure) and await_reason; error_code,
 error (what happened and what to do) and finished_at appear once set; running entries
 carry quiet_s, seconds of output silence.
@@ -129,16 +99,19 @@ Re-await a pending or timed-out entry only while its job or presence can still c
 max_wait=0 returns current state without blocking (running entries read await_reason=timeout):
 use it for status sweeps.
 
-A spawn or send given `after` shows `handoff` (state, source, ...) and stays running while it
-waits for its source; if it never launched (cancelled, refused), its terminal state alone
-releases the await.
+The spawn/send receipt's `handoff.source` identifies the exact work resolved by `after`.
+Await entries include `handoff` while a stored gate exists; an immediately opened send may
+have none. Gated work stays running until its source ends; work proven never dispatched
+(cancelled, refused) needs only its terminal state to release the await.
 
 Done means the turn ended, not that its work is correct. `result` is a bounded preview of the
 child's final message (about 2,000 chars): its claim, not evidence; check the repo.
 With response_format, a spawned or sent job returns its final answer as a native JSON value
 in structured_result instead of result. structured_status is "parsed"; "unavailable" when completion
 failed, output was missing, or a hint-only answer was not JSON; or "unable_to_parse" when a strict
-contract never produced a valid answer (the job is done; its result holds the last answer read).
+contract never produced a valid answer. Its bounded structured_error gives a reason and
+field/limit issues when recorded; legacy failures may have no issues. Read these before
+retrying; result previews may be clipped and are not the validated whole answer.
 A finished job also carries changes: either
 {"evidence":"none"}, or {"evidence":"tool_paths","modified":[first 20 paths],
 "modified_count":int,"read_count":int}; evidence "none" means Theater saw no file paths, not
@@ -724,19 +697,21 @@ def build(
         return await tools.list_skills(session, play=play)
 
     @mcp_tool()
-    async def load_skill(name: str) -> dict:
+    async def load_skill(name: str, preview: bool = False) -> dict:
         """Load the full instructions for one exact skill selected from list_skills.
 
         Loading returns the complete validated SKILL.md content and consumes
         context, so list metadata first and load only the selected exact skill.
-        Loading a play's master skill starts that play with you as master
+        Use preview=true to read without identifying yourself or starting a play.
+        Omitted or false preserves normal loading: a play's master skill starts it
+        with you as master
         (play_start reports it) and commits you to it: it lasts as long as you
         live, and every spawn you make attaches one position your own position
         may give (whoami: play.spawn_options). Load a master skill only when the
         user asked for that play. Inside a live play, or above one, it returns the text without
         starting anything.
         """
-        return await tools.load_skill(session, name=name)
+        return await tools.load_skill(session, name=name, preview=preview)
 
     @mcp_tool(description=_spawn_description())
     async def spawn_session(

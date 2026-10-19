@@ -4,20 +4,23 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests.support.mcp_tools import tool_payload
 from theater.mcp import tools as mcp_tools
 from theater.mcp.server import build
 
 
-async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch):
+@pytest.mark.parametrize("preview", [False, True])
+async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch, preview):
     calls = []
 
     async def fake_list_skills(session, *, play=None) -> dict:
         calls.append(("list", session, play))
         return {"skills": [], "rejections": []}
 
-    async def fake_load_skill(session, *, name: str) -> dict:
-        calls.append(("load", session, name))
+    async def fake_load_skill(session, *, name: str, preview: bool) -> dict:
+        calls.append(("load", session, name, preview))
         return {"name": name, "content": "# Alpha\n"}
 
     monkeypatch.setattr(mcp_tools, "list_skills", fake_list_skills)
@@ -25,12 +28,13 @@ async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch):
 
     mcp = build("p1", "vibe")
     assert tool_payload(await mcp.call_tool("list_skills", {})) == {"skills": [], "rejections": []}
-    assert tool_payload(await mcp.call_tool("load_skill", {"name": "alpha"})) == {
+    args = {"name": "alpha", **({"preview": True} if preview else {})}
+    assert tool_payload(await mcp.call_tool("load_skill", args)) == {
         "name": "alpha",
         "content": "# Alpha\n",
     }
     assert [call[0] for call in calls] == ["list", "load"]
-    assert calls[1][2] == "alpha"
+    assert calls[1][2:] == ("alpha", preview)
 
 
 async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):

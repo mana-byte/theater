@@ -263,7 +263,7 @@ master, lead, and member positions.
 | `update_task` | `task_id`, optional title/description/kind/priority/status/assignee/parent/note | Updated detailed task |
 | `set_dependency` | `task_id`, `prerequisite_id`, `add` (default true) | Play instance, both IDs, edge `present` |
 | `claim_task` | `task_id` | Task assigned to authenticated caller, in progress |
-| `close_task` | `task_id`, required `outcome` text | Closed detailed task |
+| `close_task` | `task_id`, required `outcome` text, optional `outcome_status` (succeeded/failed/cancelled) | Closed detailed task |
 | `link_task_job` | `task_id`, `handle`, `role` (work/review), optional `review_of` | `duplicate`, `generation`, `links_total` |
 
 `read` permits list/get; `write` permits the six mutations. Tasks have kinds
@@ -273,11 +273,18 @@ blockers, children, notes, and outcomes. Empty `assignee` or `parent_id` in an
 update clears that field; omitted fields stay unchanged.
 
 Writers may edit any task on their own board. Assignees must be live members of
-the same play; claims require ready tasks unassigned or assigned to the caller.
+the same play, named by ID or a case-insensitive, unambiguous live name; claims
+require ready tasks unassigned or assigned to the caller.
 Recover dead assignees by explicit reassignment. Only `close_task` closes work;
 every closed prerequisite resolves its dependency, including failure or
 cancellation. Reopen with `update_task(status="open")`, reopening closed parents
-and dependent tasks first. Previous outcomes remain in history. Use separate
+and dependent tasks first. `outcome_status` is explicit: omitted or legacy
+values are unknown, never assumed successful. Detail and progress views list
+closed failed or cancelled direct dependencies and required children in
+`failed_prerequisites` (up to 200 IDs with their outcome status). This is advisory;
+native readiness still treats every closed prerequisite as resolved.
+Previous outcomes remain in `outcome_history`, with aligned nullable
+`outcome_status_history`, retaining the latest 50 entries. Use separate
 implementation and review tasks, both required by their milestone.
 
 `link_task_job` records that this play dispatched a job as a task's work or

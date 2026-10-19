@@ -167,8 +167,7 @@ async def test_await_clamps_max_wait_to_the_clients_ceiling():
 
 
 async def test_await_keeps_only_what_the_caller_acts_on():
-    """Echoes of the caller's own ids, prompt and schema, and empty fields, cost context
-    on every poll; state, outcome and the parsed structured answer (not its raw text) stay."""
+    """Keep the authoritative participant id alongside its exact job handle."""
     job = {
         "handle": "h#1",
         "caller_id": "p-me",
@@ -190,6 +189,7 @@ async def test_await_keeps_only_what_the_caller_acts_on():
     assert jobs == [
         {
             "handle": "h#1",
+            "target_id": "p-you",
             "state": "done",
             "structured_result": {"answer": 42},
             "structured_status": "parsed",
@@ -270,14 +270,16 @@ async def test_await_shows_presence_only_while_it_is_not_a_plain_absence():
     }
     assert entries[1] == {
         "handle": "p-idle",
+        "target_id": "p-idle",
         "participant_status": "idle",
         "await_reason": "already_absent",
     }
 
 
 async def test_send_names_the_caller_so_the_reply_comes_back():
-    s = resolved(send={"handle": "p-you#1"})
-    await tools.send_prompt(s, target_id="p-you", prompt="hello")
+    s = resolved(send={"handle": "opaque-job", "target_id": "p-you"})
+    result = await tools.send_prompt(s, target_id="p-you", prompt="hello")
+    assert result == {"handle": "opaque-job", "target_id": "p-you"}
     p = s.client.params("send")
     assert (p["target"], p["prompt"], p["caller_id"]) == ("p-you", "hello", "p-me")
 

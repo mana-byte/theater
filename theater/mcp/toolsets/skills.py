@@ -11,10 +11,15 @@ async def list_skills(session: Session, *, play: str | None = None) -> dict:
     return result
 
 
-async def load_skill(session: Session, *, name: str) -> dict:
-    """Loading a play's master skill starts that play for this agent, so it is identified first."""
-    if not session._resolved:
-        await session.identify()
-    result = await session.client.call("skills.load", name=name, caller_id=session.participant_id)
+async def load_skill(session: Session, *, name: str, preview: bool = False) -> dict:
+    """Preview omits identity so even an older daemon cannot start a play."""
+    if preview:
+        result = await session.client.call("skills.load", name=name, preview=True)
+    else:
+        if not session._resolved:
+            await session.identify()
+        result = await session.client.call(
+            "skills.load", name=name, caller_id=session.participant_id
+        )
     assert isinstance(result, dict)
     return result

@@ -197,6 +197,28 @@ async def test_loading_the_master_skill_starts_one_play_for_that_agent_only(clie
     assert "play" not in await client.call("participants.get", id=child.id)
 
 
+@pytest.mark.parametrize("name", [MASTER, MEMBER, "theater-debate"])
+async def test_preview_never_starts_a_play_even_with_a_caller(client, daemon, name):
+    participant = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+
+    loaded = await client.call("skills.load", name=name, caller_id=participant.id, preview=True)
+
+    assert loaded["name"] == name and loaded["content"]
+    assert "play_start" not in loaded
+    assert daemon.plays.membership(participant.id) is None
+    assert (await _load(client, participant.id))["state"] == "started"
+
+
+@pytest.mark.parametrize("preview", [None, 1, "false"])
+async def test_skill_preview_rejects_non_booleans_before_starting(client, daemon, preview):
+    participant = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+
+    with pytest.raises(RemoteError, match=r"preview.*boolean"):
+        await client.call("skills.load", name=MASTER, caller_id=participant.id, preview=preview)
+
+    assert daemon.plays.membership(participant.id) is None
+
+
 async def test_a_play_cannot_start_above_a_live_master(client, daemon):
     parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)

@@ -132,6 +132,16 @@ async def test_skill_tools_group_listing_and_identify_the_loader():
     assert s.client.params("skills.load") == {"name": "alpha", "caller_id": "p-me"}
 
 
+@pytest.mark.parametrize("make_session", [session, resolved])
+async def test_skill_preview_omits_identity_even_for_an_identified_session(make_session):
+    loaded = {"name": "hierarchy/master", "content": "# Master\n"}
+    s = make_session(**{"skills.load": loaded})
+
+    assert await tools.load_skill(s, name="hierarchy/master", preview=True) == loaded
+    assert s.client.methods == ["skills.load"]
+    assert s.client.params("skills.load") == {"name": "hierarchy/master", "preview": True}
+
+
 async def test_update_participant_identifies_and_forwards_metadata():
     s = session(**{"participant.update": {**RECORD, "description": "Updated"}})
     updated = await tools.update_participant(
