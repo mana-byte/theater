@@ -22,7 +22,7 @@ from theater.daemon.handoff.models import GitFacts
 from theater.daemon.persistence.repositories.job_repairs import RepairState
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.persistence.store import Store
-from theater.daemon.response_contracts import resolve_response_format
+from theater.daemon.response_contracts import audit, resolve_response_format
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     NativeTurnOutcome,
@@ -150,6 +150,11 @@ async def test_repairs_are_bounded_and_the_caller_sees_only_unable_to_parse(stor
     assert len(state_of(harness, "p1").sent) == 1 + REPAIR_MAX_ATTEMPTS
     assert not store.repair_fence_active("p1")
     assert audit_events(store, job.handle)[-1] == "repair_exhausted"
+    assert audit.project(store, job.handle) == {
+        "event": "repair_exhausted",
+        "reason": "not_json",
+        "issues": [{"path": "/", "keyword": "json", "position": 0}],
+    }
 
 
 # ---- the fence, priority, and presence --------------------------------------------
@@ -404,6 +409,7 @@ async def test_a_repair_that_never_reached_the_wire_ends_at_the_deadline_and_lif
 
     assert store.get_job(job.handle).structured_status == "unable_to_parse"
     assert audit_events(store, job.handle)[-1] == "repair_timeout"
+    assert audit.project(store, job.handle)["reason"] == "not_json"
     assert len(state_of(harness, "p1").sent) == 1  # nothing was typed into the protected terminal
     assert not store.repair_fence_active("p1")  # nothing was sent, so nothing can still run
 

@@ -8,7 +8,7 @@ from functools import lru_cache
 from itertools import islice
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
+from jsonschema.exceptions import SchemaError, ValidationError
 
 from theater.constants.response_contract import (
     CONTRACT_ANSWER_MAX_CHARS,
@@ -16,6 +16,8 @@ from theater.constants.response_contract import (
     CONTRACT_DETAIL_MAX_CHARS,
     CONTRACT_DRAFT_URI,
     CONTRACT_ERRORS_MAX,
+    CONTRACT_ISSUE_PATH_MAX_CHARS,
+    CONTRACT_MEASURED_KEYWORDS,
     CONTRACT_PRESET_ANSWER_MAX_CHARS,
     CONTRACT_PRESET_NAMES,
     CONTRACT_SCHEMA_MAX_BYTES,
@@ -46,6 +48,27 @@ class Verdict:
     ok: bool
     reason: str = ""
     detail: str = ""
+    issues: tuple[dict[str, str | int | float], ...] = ()
+    truncated: bool = False
+
+
+def _schema_issue(error: ValidationError) -> tuple[dict[str, str | int | float], bool]:
+    """Keep only a path, keyword and safe size measurements from validator errors."""
+    parts = list(error.absolute_path)
+    if error.validator == "required" and isinstance(error.instance, dict):
+        missing = next((key for key in error.validator_value if key not in error.instance), None)
+        if isinstance(missing, str):
+            parts.append(missing)
+    path = "/" + "/".join(str(part).replace("~", "~0").replace("/", "~1") for part in parts)
+    clipped = len(path) > CONTRACT_ISSUE_PATH_MAX_CHARS
+    issue: dict[str, str | int | float] = {
+        "path": _clip(path, CONTRACT_ISSUE_PATH_MAX_CHARS),
+        "keyword": str(error.validator)[:32],
+    }
+    if error.validator in CONTRACT_MEASURED_KEYWORDS and isinstance(error.validator_value, int):
+        issue["limit"] = error.validator_value
+        issue["actual"] = len(error.instance)
+    return issue, clipped
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,28 +110,53 @@ class StrictContract:
                 f"the stored schema cannot be evaluated: {compiled}",
             )
         if text is None or not text.strip():
-            return Verdict(False, "empty", "the final answer was empty")
+            return Verdict(
+                False,
+                "empty",
+                "the final answer was empty",
+                ({"path": "/", "keyword": "nonempty"},),
+            )
         if len(text) > self.answer_cap:
             return Verdict(
                 False,
                 "too_large",
                 f"the final answer exceeds {self.answer_cap} characters; shorten it",
+                (
+                    {
+                        "path": "/",
+                        "keyword": "maxLength",
+                        "limit": self.answer_cap,
+                        "actual": len(text),
+                    },
+                ),
             )
         try:
             value = json.loads(text, parse_constant=_reject_constant)
         except (ValueError, RecursionError) as exc:
             detail = f"the final answer is not a single bare JSON value: {_clip(str(exc), 200)}"
-            return Verdict(False, "not_json", detail)
+            issue: dict[str, str | int | float] = {"path": "/", "keyword": "json"}
+            if isinstance(exc, json.JSONDecodeError):
+                issue["position"] = exc.pos
+            return Verdict(False, "not_json", detail, (issue,))
         try:
             if not finite_json_value(value):
                 return Verdict(False, "not_json", "the final answer contains a non-finite number")
         except RecursionError:
             return Verdict(False, "not_json", "the final answer is nested too deeply")
-        if value_count(value, CONTRACT_ANSWER_MAX_VALUES) > CONTRACT_ANSWER_MAX_VALUES:
+        count = value_count(value, CONTRACT_ANSWER_MAX_VALUES)
+        if count > CONTRACT_ANSWER_MAX_VALUES:
             return Verdict(
                 False,
                 "too_large",
                 f"the final answer holds more than {CONTRACT_ANSWER_MAX_VALUES} values; shorten it",
+                (
+                    {
+                        "path": "/",
+                        "keyword": "maxValues",
+                        "limit": CONTRACT_ANSWER_MAX_VALUES,
+                        "actual": count,
+                    },
+                ),
             )
         try:
             found = list(islice(compiled.iter_errors(value), _ERRORS_SCANNED))
@@ -124,7 +172,14 @@ class StrictContract:
             f"{_clip(error.message, 200)}"
             for error in errors[:CONTRACT_ERRORS_MAX]
         )
-        return Verdict(False, "schema", _clip(listed, CONTRACT_DETAIL_MAX_CHARS))
+        issues = tuple(_schema_issue(error) for error in errors[:CONTRACT_ERRORS_MAX])
+        return Verdict(
+            False,
+            "schema",
+            _clip(listed, CONTRACT_DETAIL_MAX_CHARS),
+            tuple(issue for issue, _ in issues),
+            len(found) > CONTRACT_ERRORS_MAX or any(clipped for _, clipped in issues),
+        )
 
 
 def _reject_constant(value: str) -> None:

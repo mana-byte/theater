@@ -60,6 +60,9 @@ class ContractFailure:
 
     event: str
     detail: str | None = None
+    reason: str | None = None
+    issues: tuple[dict[str, str | int | float], ...] = ()
+    truncated: bool = False
 
 
 class StagingIncomplete(RuntimeError):
@@ -561,7 +564,15 @@ class JobManager:
             evidence=evidence,
         )
         if failure is not None:
-            audit.record(self.store, job, failure.event, failure.detail)
+            audit.record(
+                self.store,
+                job,
+                failure.event,
+                failure.detail,
+                reason=failure.reason,
+                issues=failure.issues,
+                truncated=failure.truncated,
+            )
 
         self._accumulators.pop(handle, None)
 
@@ -611,7 +622,16 @@ class JobManager:
             failure=contract_failure,
         )
         if failure is not None:
-            audit.record(self.store, job, failure.event, failure.detail, connection=connection)
+            audit.record(
+                self.store,
+                job,
+                failure.event,
+                failure.detail,
+                reason=failure.reason,
+                issues=failure.issues,
+                truncated=failure.truncated,
+                connection=connection,
+            )
         self._write_finish(
             connection,
             handle,
@@ -706,6 +726,9 @@ class JobManager:
                     verdict.detail
                     if verdict.reason == "contract_unavailable"
                     else f"{verdict.reason}: no exact turn correlation to repair; {verdict.detail}",
+                    verdict.reason,
+                    verdict.issues,
+                    verdict.truncated,
                 )
             return None, STRUCTURED_UNABLE_TO_PARSE, failure
         valid, _ = decode_finite_json(candidate)

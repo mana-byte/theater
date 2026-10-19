@@ -109,6 +109,35 @@ def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> Non
     assert all(fact.status is TrajectoryStatus.COMPLETED for fact in terminal.trajectory)
 
 
+@pytest.mark.parametrize("final", ['{"status":"done"}', ""])
+@pytest.mark.parametrize("with_usage", [False, True])
+def test_pi_stop_marks_its_own_final_answer_after_narration(tmp_path, final, with_usage):
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(
+        json.dumps(message_record("user-1", {"role": "user", "content": "do it"})), 1
+    )
+    narration = observer.parse_record(
+        json.dumps(
+            message_record(
+                "assistant-1",
+                {"role": "assistant", "content": "Working on it.", "stopReason": "toolUse"},
+            )
+        ),
+        2,
+    )
+    message = {"role": "assistant", "content": final, "stopReason": "stop"}
+    if with_usage:
+        message["usage"] = {"input": 7, "output": 4}
+    terminal = observer.parse_record(json.dumps(message_record("assistant-2", message)), 3)
+
+    assert not any(event.turn_end for event in narration.events)
+    assert len(terminal.events) == 1
+    assert terminal.events[0].answer_final is True
+    assert terminal.events[0].turn_end is True
+    assert terminal.events[0].raw_text == final
+    assert (terminal.events[0].usage is not None) is with_usage
+
+
 @pytest.mark.parametrize(
     ("exit_code", "cancelled"),
     [(0, False), (1, False), (None, True)],

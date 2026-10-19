@@ -251,6 +251,99 @@ def test_custom_contracts_keep_the_larger_answer_cap(store):
     assert custom.validate('"' + "x" * 70_000 + '"').reason == "too_large"
 
 
+def test_validation_issues_measure_lengths_without_answer_values(store):
+    contract = parse_stored(
+        resolve(
+            store,
+            {
+                "$theater": "custom",
+                "name": "summary",
+                "schema": {
+                    "type": "object",
+                    "properties": {"summary": {"type": "string", "maxLength": 1500}},
+                },
+            },
+        )
+    )
+    verdict = contract.validate(json.dumps({"summary": "SECRET" + "x" * 1516}))
+    assert verdict.reason == "schema"
+    assert verdict.issues == (
+        {"path": "/summary", "keyword": "maxLength", "limit": 1500, "actual": 1522},
+    )
+    assert "SECRET" in verdict.detail  # retained only for the private repair prompt
+
+    malformed = contract.validate('{"summary": "SECRET",}')
+    assert malformed.issues[0]["keyword"] == "json"
+    assert isinstance(malformed.issues[0]["position"], int)
+
+    numeric = parse_stored(
+        resolve(
+            store,
+            {"$theater": "custom", "name": "numeric", "schema": {"type": "number", "minimum": 200}},
+        )
+    )
+    assert numeric.validate("123").issues == ({"path": "/", "keyword": "minimum"},)
+
+
+def test_failure_audit_is_bounded_json_and_omits_values_and_legacy_detail(store):
+    from theater.daemon.response_contracts import audit
+
+    jobs = JobManager(store)
+    schema = {
+        "type": "object",
+        "properties": {f"field_{i}_{'p' * 80}": {"const": "allowed"} for i in range(5)},
+    }
+    fmt = resolve(store, {"$theater": "custom", "name": "bounded", "schema": schema})
+    answer = dict.fromkeys(schema["properties"], "SECRET-ANSWER")
+    _job(store, jobs, "p1#bounded", fmt)
+    jobs.finish("p1#bounded", state=JobState.DONE, result=json.dumps(answer))
+    event, detail = store.contract_audit_for_job("p1#bounded")[0]
+    stored = json.loads(detail)
+    assert event == "unsupported_route"
+    assert len(detail) <= 500
+    assert len(stored["issues"]) <= 5
+    assert stored["truncated"] is True
+    assert "SECRET-ANSWER" not in detail and "allowed" not in detail
+    assert audit.project(store, "p1#bounded") == {
+        key: value for key, value in stored.items() if key != "v"
+    }
+
+    store.record_contract_audit(
+        "legacy", "p1", audit.REPAIR_TIMEOUT, "SECRET-LEGACY: old exception", at=now()
+    )
+    assert audit.project(store, "legacy") == {
+        "event": "repair_timeout",
+        "reason": None,
+        "issues": [],
+    }
+    assert json.loads(audit.diagnostic(audit.REPAIR_TIMEOUT, "mystery"))["reason"] is None
+
+
+@pytest.mark.parametrize("bad_reason", [[], {}])
+def test_legacy_json_with_malformed_reason_is_never_projected(store, bad_reason):
+    from theater.daemon.response_contracts import audit
+
+    store.record_contract_audit(
+        "legacy",
+        "p1",
+        audit.REPAIR_TIMEOUT,
+        json.dumps(
+            {
+                "v": 1,
+                "event": audit.REPAIR_TIMEOUT,
+                "reason": bad_reason,
+                "issues": [{"path": "/secret", "keyword": "maxLength", "actual": 42}],
+            }
+        ),
+        at=now(),
+    )
+    assert audit.project(store, "legacy") == {
+        "event": "repair_timeout",
+        "reason": None,
+        "issues": [],
+    }
+
+
 def test_strict_guidance_follows_the_task_so_prompt_needles_differ(store):
     strict = resolve(store, {"$theater": "delegate"})
     first = _prompt_with_response_format("Audit module A for races in dispatch", strict)

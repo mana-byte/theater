@@ -33,6 +33,44 @@ CONTRACT_PRESET_ANSWER_MAX_CHARS = 16_384
 CONTRACT_ERRORS_MAX = 5
 CONTRACT_DETAIL_MAX_CHARS = 1_000
 CONTRACT_AUDIT_DETAIL_MAX_CHARS = 500
+CONTRACT_ISSUE_PATH_MAX_CHARS = 120
+CONTRACT_MEASURED_KEYWORDS = frozenset(
+    {
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "minProperties",
+        "maxProperties",
+        "maxValues",
+    }
+)
+CONTRACT_ISSUE_KEYWORDS = frozenset(
+    {
+        "nonempty",
+        "json",
+        "maxValues",
+        "type",
+        "enum",
+        "const",
+        "required",
+        "additionalProperties",
+        "minItems",
+        "maxItems",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minProperties",
+        "maxProperties",
+    }
+)
+CONTRACT_FAILURE_REASONS = frozenset(
+    {"empty", "too_large", "not_json", "schema", "incomplete", "contract_unavailable"}
+)
 
 #: Repair prompts sent per public job before it ends ``unable_to_parse``.
 REPAIR_MAX_ATTEMPTS = 2
@@ -92,8 +130,12 @@ __all__ = [
     "CONTRACT_DETAIL_MAX_CHARS",
     "CONTRACT_DRAFT_URI",
     "CONTRACT_ERRORS_MAX",
+    "CONTRACT_FAILURE_REASONS",
+    "CONTRACT_ISSUE_KEYWORDS",
+    "CONTRACT_ISSUE_PATH_MAX_CHARS",
     "CONTRACT_KIND_CUSTOM",
     "CONTRACT_MAX_CUSTOM_PER_CREATOR",
+    "CONTRACT_MEASURED_KEYWORDS",
     "CONTRACT_NAME",
     "CONTRACT_PRESET_ANSWER_MAX_CHARS",
     "CONTRACT_PRESET_NAMES",
