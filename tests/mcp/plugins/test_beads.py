@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import threading
 from dataclasses import replace
@@ -326,6 +327,36 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
         replay2 = await adapter.link_task_job(child_id, "tb-xzg-repair-job", "work")
         assert replay2["duplicate"] is True and replay2["links_total"] == 3
         assert FakeClient.facts_calls == 0
+
+        # a stored link with an unknown version fails closed through real bd too
+        corrupt = await adapter.create_task("Corrupt links")
+        Board(tmp_path, "instance-one", binary).command(
+            "update",
+            corrupt["id"],
+            "--metadata",
+            json.dumps(
+                {
+                    "theater_links": [
+                        {
+                            "version": 999,
+                            "handle": "tb-xzg-legacy-job",
+                            "role": "work",
+                            "review_of": None,
+                            "generation": 0,
+                            "created_at": 123.0,
+                        }
+                    ]
+                }
+            ),
+            actor="author",
+        )
+        with pytest.raises(BeadsError, match="unsupported or corrupt"):
+            await adapter.get_task(corrupt["id"], view="progress")
+        FakeClient.facts = {"tb-xzg-legacy-job": fact("tb-xzg-legacy-job")}
+        FakeClient.facts_calls = 0
+        with pytest.raises(BeadsError, match="unsupported or corrupt"):
+            await adapter.link_task_job(corrupt["id"], "tb-xzg-legacy-job", "work")
+        assert FakeClient.facts_calls == 0  # refused before any facts read
 
         milestone = await adapter.create_task("Review milestone", kind="milestone")
         milestone_child = await adapter.create_task("Review", parent_id=milestone["id"])

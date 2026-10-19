@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -367,7 +368,7 @@ async def test_selection_prefers_newest_and_reports_ties(
             "handle": "work-other-gen",
             "role": "work",
             "review_of": None,
-            "generation": -1,
+            "generation": 7,
             "created_at": 900.0,
         },
     ]
@@ -586,3 +587,171 @@ async def test_links_preserve_foreign_metadata(adapter: BeadsService, tmp_path: 
     assert len(metadata["theater_links"]) == 1
     assert metadata["theater_generation"] == 1
     assert isinstance(metadata["theater_boundary"], float)
+
+
+def stored_link(handle: str = "work-a", **overrides: Any) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "version": 1,
+        "handle": handle,
+        "role": "work",
+        "review_of": None,
+        "generation": 0,
+        "created_at": 1000.0,
+    }
+    record.update(overrides)
+    return record
+
+
+def seed_raw_links(tmp_path: Path, task_id: str, records: object) -> None:
+    FakeBoard(tmp_path, "instance-one").command(
+        "update", task_id, "--metadata", json.dumps({"theater_links": records}), actor="author"
+    )
+
+
+async def test_malformed_handoff_never_matches(adapter: BeadsService) -> None:
+    work_fact = fact("work-1", finished_at=1000.0)
+    review_fact = fact(
+        "review-1",
+        created_at=2000.0,
+        contract_preset="review",
+        review_verdict="approve",
+        target_id="target-two",
+    )
+
+    # A present but unusable handoff never takes the declared-timing branch.
+    for handoff in ("malformed", 5, [1, 2]):
+        progress = await review_progress(adapter, work_fact, variant(review_fact, handoff=handoff))
+        assert progress["latest_review"]["artifact_relation"] == "unverified"
+        assert progress["latest_review"]["source_basis"] is None
+        assert progress["job_links"][1]["source_basis"] is None
+
+    # A gate object without a source never matches either, and says which basis ran.
+    progress = await review_progress(
+        adapter, work_fact, variant(review_fact, handoff={"task_kind": "independent_review"})
+    )
+    assert progress["latest_review"]["artifact_relation"] == "unverified"
+    assert progress["latest_review"]["source_basis"] == "handoff"
+
+
+async def test_nonfinite_times_are_unusable(adapter: BeadsService) -> None:
+    work_fact = fact("work-1", finished_at=1000.0)
+    review_fact = fact(
+        "review-1",
+        created_at=2000.0,
+        contract_preset="review",
+        review_verdict="approve",
+        target_id="target-two",
+    )
+
+    # Linking needs a usable creation time; drift the fact afterwards to hit the
+    # relation, where a nonfinite time must not pass the declared comparison.
+    for created_at in (math.nan, math.inf, -math.inf, "NaN", "Infinity"):
+        task_id = (await adapter.create_task("Reviewed"))["id"]
+        FakeClient.facts = {"work-1": work_fact, "review-1": review_fact}
+        await adapter.link_task_job(task_id, "work-1", "work")
+        await adapter.link_task_job(task_id, "review-1", "review", "work-1")
+        FakeClient.facts["review-1"] = variant(review_fact, created_at=created_at)
+        progress = await adapter.get_task(task_id, view="progress")
+        assert progress["latest_review"]["artifact_relation"] == "unverified"
+
+    for finished_at in (math.nan, math.inf, "NaN"):
+        task_id = (await adapter.create_task("Reviewed"))["id"]
+        FakeClient.facts = {"work-1": work_fact, "review-1": review_fact}
+        await adapter.link_task_job(task_id, "work-1", "work")
+        await adapter.link_task_job(task_id, "review-1", "review", "work-1")
+        FakeClient.facts["work-1"] = variant(work_fact, finished_at=finished_at)
+        progress = await adapter.get_task(task_id, view="progress")
+        assert progress["latest_review"]["artifact_relation"] == "unverified"
+
+    task_id = await make_task(adapter)
+    for created_at in (math.nan, math.inf, "NaN", "Infinity"):
+        FakeClient.facts = {"work-a": fact("work-a", created_at=created_at)}
+        with pytest.raises(BeadsError, match="no usable creation time"):
+            await adapter.link_task_job(task_id, "work-a", "work")
+
+
+async def test_corrupt_stored_links_fail_closed(adapter: BeadsService, tmp_path: Path) -> None:
+    bad_shapes = [
+        stored_link(version=999),  # an unknown version is not a verified duplicate
+        stored_link(role="audit"),
+        stored_link(review_of="work-b"),  # work record naming review_of
+        stored_link(created_at=math.nan),  # a malformed time drops no newest work
+        stored_link(created_at=None),
+        stored_link(generation=-1),
+        stored_link(handle="x" * 257),
+        "not an object",
+    ]
+    for record in bad_shapes:
+        task_id = await make_task(adapter)
+        seed_raw_links(tmp_path, task_id, [record])
+        calls = FakeClient.facts_calls
+        with pytest.raises(BeadsError, match="unsupported or corrupt"):
+            await adapter.get_task(task_id, view="progress")
+        FakeClient.facts = {"work-b": fact("work-b")}
+        with pytest.raises(BeadsError, match="unsupported or corrupt"):
+            await adapter.link_task_job(task_id, "work-b", "work")
+        assert FakeClient.facts_calls == calls  # refused before any facts read
+        # the corrupt record is never rewritten or dropped
+        assert len(raw_row(tmp_path, task_id)["metadata"]["theater_links"]) == 1
+
+    # an over-cap list refuses instead of evicting or spilling fact batches
+    task_id = await make_task(adapter)
+    seed_raw_links(tmp_path, task_id, [stored_link(f"h-{i:03}") for i in range(101)])
+    with pytest.raises(BeadsError, match="over the cap of 100"):
+        await adapter.get_task(task_id, view="progress")
+    with pytest.raises(BeadsError, match="over the cap of 100"):
+        await adapter.link_task_job(task_id, "work-b", "work")
+
+    for payload in ({"handle": "work-a"}, "not json ]"):
+        task_id = await make_task(adapter)
+
+        def stash(row: dict[str, Any], value: object = payload) -> None:
+            row["metadata"]["theater_links"] = value
+
+        edit_row(tmp_path, task_id, stash)
+        with pytest.raises(BeadsError, match="unsupported or corrupt"):
+            await adapter.get_task(task_id, view="progress")
+
+
+async def test_corrupt_generation_metadata_blocks_reads_and_reopen(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    task_id = await make_task(adapter)
+    FakeClient.facts = {"work-a": fact("work-a")}
+    await adapter.link_task_job(task_id, "work-a", "work")
+    await adapter.close_task(task_id, "done; corrupting the bookkeeping")
+
+    cases = (
+        # key, value, progress refuses, reopen refuses
+        ("theater_generation", "soon", True, True),  # else reopen revives generation 0
+        ("theater_boundary", "NaN", True, False),  # reopen rewrites the boundary wholesale
+        ("theater_boundary_fallback", "yes", True, False),
+        ("theater_closed_at", "banana", False, True),  # progress never reads the close time
+    )
+    for key, value, blocks_progress, blocks_reopen in cases:
+
+        def stash(row: dict[str, Any], k: str = key, v: object = value) -> None:
+            row["metadata"][k] = v
+
+        edit_row(tmp_path, task_id, stash)
+        if blocks_progress:
+            with pytest.raises(BeadsError, match="unsupported or corrupt"):
+                await adapter.get_task(task_id, view="progress")
+        FakeClient.facts = {"work-b": fact("work-b")}
+        with pytest.raises(BeadsError, match="unsupported or corrupt"):
+            await adapter.link_task_job(task_id, "work-b", "work")
+        if blocks_reopen:
+            with pytest.raises(BeadsError, match="unsupported or corrupt"):
+                await adapter.update_task(task_id, status="open")
+
+        def restore(row: dict[str, Any], k: str = key) -> None:
+            row["metadata"].pop(k, None)
+
+        edit_row(tmp_path, task_id, restore)
+
+    # the untouched task still reopens, advances and links
+    await adapter.update_task(task_id, status="open")
+    FakeClient.facts = {"work-c": fact("work-c")}
+    result = await adapter.link_task_job(task_id, "work-c", "work")
+    assert result["generation"] == 1 and result["duplicate"] is False
+    assert raw_row(tmp_path, task_id)["metadata"]["theater_links"][0]["handle"] == "work-a"

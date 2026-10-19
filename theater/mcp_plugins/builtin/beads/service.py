@@ -47,53 +47,19 @@ class BeadsService:
     async def _operate(
         self,
         permission: str,
-        action: Callable[[Board, str, tuple[set[str], dict[str, str]]], dict[str, Any]],
-    ) -> dict[str, Any]:
-        async with TheaterPluginClient() as client:
-            actor, instance_id = _context(await client.play_context(), permission)
-            board = Board(self.state_dir, instance_id, self.bd_path)
-            async with board_lock(self.state_dir, instance_id):
-                fresh_actor, fresh_id = _context(await client.play_context(), permission)
-                if (fresh_actor, fresh_id) != (actor, instance_id):
-                    raise BeadsError("play membership changed while waiting for the board")
-                members = (
-                    _members(await client.play_members()) if permission == "write" else (set(), {})
-                )
-                worker = asyncio.create_task(
-                    asyncio.to_thread(self._run, board, actor, members, action)
-                )
-                try:
-                    return await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    await drain_cancelled_worker(worker)
-                    raise
-
-    @staticmethod
-    def _run(
-        board: Board,
-        actor: str,
-        members: tuple[set[str], dict[str, str]],
-        action: Callable[[Board, str, tuple[set[str], dict[str, str]]], dict[str, Any]],
-    ) -> dict[str, Any]:
-        board.ensure()
-        return action(board, actor, members)
-
-    async def _operate_phased(
-        self,
-        permission: str,
-        plan: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
+        action: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
         finish: Callable[
             [Board, str, tuple[set[str], dict[str, str]], Any, dict[str, dict[str, Any]]],
             dict[str, Any],
-        ],
+        ]
+        | None = None,
     ) -> dict[str, Any]:
-        """Locked board work in phases, with one bounded facts read between them.
+        """Board work under one lock, with an optional job-facts phase in the middle.
 
-        The plan runs first under the same freshness, lock and cancellation
-        guarantees as _operate. It either returns a final result or asks for
-        job facts, which are read outside the worker thread; the finish phase
-        then re-enters the thread holding the same board lock, so the board it
-        validated is still current.
+        A plan returns _NeedsFacts to fetch one bounded facts read between two
+        worker runs on the same locked board, so the finish validates what the
+        plan saw; cancellation always drains the worker, never abandoning bd
+        mid-write.
         """
         async with TheaterPluginClient() as client:
             actor, instance_id = _context(await client.play_context(), permission)
@@ -105,30 +71,43 @@ class BeadsService:
                 members = (
                     _members(await client.play_members()) if permission == "write" else (set(), {})
                 )
-                outcome = await self._phase(board, actor, members, plan)
+                outcome = await self._run_locked(board, actor, members, action)
                 if not isinstance(outcome, _NeedsFacts):
                     return outcome
+                if finish is None:
+                    raise BeadsError("a job-facts request needs a finish phase")
                 facts = await self._fetch_facts(client, outcome.handles)
                 context = outcome.context
 
                 def complete(board: Board, actor: str, members: Any) -> dict[str, Any]:
                     return finish(board, actor, members, context, facts)
 
-                return await self._phase(board, actor, members, complete)
+                return await self._run_locked(board, actor, members, complete)
 
-    async def _phase(
+    async def _run_locked(
         self,
         board: Board,
         actor: str,
         members: tuple[set[str], dict[str, str]],
         action: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
     ) -> Any:
+        """One shielded worker run; cancellation waits for bd to finish first."""
         worker = asyncio.create_task(asyncio.to_thread(self._run, board, actor, members, action))
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
             await drain_cancelled_worker(worker)
             raise
+
+    @staticmethod
+    def _run(
+        board: Board,
+        actor: str,
+        members: tuple[set[str], dict[str, str]],
+        action: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
+    ) -> Any:
+        board.ensure()
+        return action(board, actor, members)
 
     @staticmethod
     async def _fetch_facts(
@@ -224,7 +203,7 @@ class BeadsService:
                 board, task_id, context["row"], context["rows"], context["ready"], facts
             )
 
-        return await self._operate_phased("read", plan, finish)
+        return await self._operate("read", plan, finish)
 
     async def link_task_job(
         self,
@@ -281,7 +260,7 @@ class BeadsService:
                 board, task_id, handle, record, False, len(context["state"]["links"]) + 1
             )
 
-        return await self._operate_phased("write", plan, finish)
+        return await self._operate("write", plan, finish)
 
     @staticmethod
     def _link_result(

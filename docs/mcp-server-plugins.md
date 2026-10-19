@@ -286,7 +286,10 @@ task keeps at most 100 links. Closing and reopening a task starts a new
 generation bounded by the close time — the native `closed_at`, or the reopen
 moment when that is unknown: jobs created before the boundary are stale and
 refused, and a closed task accepts no new work links until reopened. Links,
-generations and boundaries persist in task metadata only.
+generations and boundaries persist in task metadata only. Corrupt or unsupported
+stored link metadata — an unknown record version, an over-cap list, an unusable time or
+generation — fails closed: linking, the progress view and reopening refuse rather
+than normalize, rewrite or evict it.
 
 `get_task(view="progress")` adds the compact link view: generation, boundary and
 whether it fell back, the current work and latest review with their states and

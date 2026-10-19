@@ -13,6 +13,8 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+from theater.json_values import decode_finite_json, finite_json_value
+
 from .backend import BeadsError, Board
 from .projection import _blockers, _summary
 
@@ -51,19 +53,15 @@ def _metadata(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _number(value: object) -> int | float | None:
-    """A JSON number; bd parses scalar metadata but keeps complex values as text."""
+    """A finite JSON number; bd parses scalar metadata but keeps complex values as text."""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return value
+        return value if finite_json_value(value) else None
     if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except ValueError:
-            return None
-        if isinstance(parsed, bool) or not isinstance(parsed, (int, float)):
-            return None
-        return parsed
+        ok, parsed = decode_finite_json(value)
+        if ok and not isinstance(parsed, bool) and isinstance(parsed, (int, float)):
+            return parsed
     return None
 
 
@@ -75,62 +73,101 @@ def _integer(value: object) -> int | None:
     return None
 
 
-def _link_records(metadata: dict[str, Any]) -> list[dict[str, Any]]:
-    """Stored links in stored order; malformed entries never reach selection."""
-    raw = metadata.get(LINKS_KEY) or []
+def _corrupt(task_id: object, detail: str) -> BeadsError:
+    """Fail closed on stored metadata we cannot trust; never normalize it away."""
+    return BeadsError(
+        f"task {task_id} stores unsupported or corrupt job-link metadata ({detail}); "
+        "refusing to read or change its links"
+    )
+
+
+def _link_records(metadata: dict[str, Any], task_id: object) -> list[dict[str, Any]]:
+    """Stored links in stored order; any record we cannot trust fails closed."""
+    if LINKS_KEY not in metadata:
+        return []
+    raw = metadata[LINKS_KEY]
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
-        except ValueError:
-            raw = []
+        except ValueError as exc:
+            raise _corrupt(task_id, f"{LINKS_KEY} is not valid JSON") from exc
     if not isinstance(raw, list):
-        return []
+        raise _corrupt(task_id, f"{LINKS_KEY} is not a list")
+    if len(raw) > MAX_LINKS:
+        raise _corrupt(task_id, f"{LINKS_KEY} holds {len(raw)} records over the cap of {MAX_LINKS}")
     records: list[dict[str, Any]] = []
-    for item in raw:
+    for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            continue
-        handle, role = item.get("handle"), item.get("role")
-        created_at = _number(item.get("created_at"))
-        generation = _integer(item.get("generation"))
-        review_of = item.get("review_of")
-        if (
-            not isinstance(handle, str)
-            or not handle
-            or role not in ROLES
-            or created_at is None
-            or generation is None
-            or not (review_of is None or (isinstance(review_of, str) and review_of))
-        ):
-            continue
-        records.append(
-            {
-                "version": LINK_VERSION,
-                "handle": handle,
-                "role": role,
-                "review_of": review_of,
-                "generation": generation,
-                "created_at": created_at,
-            }
-        )
+            raise _corrupt(task_id, f"{LINKS_KEY} record {index} is not an object")
+        records.append(_validated_record(item, task_id, index))
     return records
+
+
+def _validated_record(item: dict[str, Any], task_id: object, index: int) -> dict[str, Any]:
+    """One stored record checked field by field; untrusted data fails closed."""
+    label = f"{LINKS_KEY} record {index}"
+    if item.get("version") != LINK_VERSION:
+        raise _corrupt(task_id, f"{label} has version {item.get('version')!r}")
+    handle, role, review_of = item.get("handle"), item.get("role"), item.get("review_of")
+    if not isinstance(handle, str) or not handle.strip() or len(handle) > MAX_HANDLE_CHARS:
+        raise _corrupt(task_id, f"{label} has an unusable handle")
+    if role not in ROLES:
+        raise _corrupt(task_id, f"{label} has role {role!r}")
+    if (role == "work") != (review_of is None):
+        raise _corrupt(task_id, f"{label} has an incompatible review_of")
+    if review_of is not None and (not review_of.strip() or len(review_of) > MAX_HANDLE_CHARS):
+        raise _corrupt(task_id, f"{label} has an unusable review_of")
+    created_at = _number(item.get("created_at"))
+    if created_at is None:
+        raise _corrupt(task_id, f"{label} has an unusable creation time")
+    generation = _integer(item.get("generation"))
+    if generation is None or generation < 0:
+        raise _corrupt(task_id, f"{label} has an unusable generation")
+    return {
+        "version": LINK_VERSION,
+        "handle": handle,
+        "role": role,
+        "review_of": review_of,
+        "generation": generation,
+        "created_at": created_at,
+    }
 
 
 def task_state(row: dict[str, Any]) -> dict[str, Any]:
     """Links plus the generation bookkeeping carried in this task's metadata."""
     metadata = _metadata(row)
+    task_id = row.get("id")
+    generation = 0
+    if GENERATION_KEY in metadata:
+        stored = _integer(metadata[GENERATION_KEY])
+        if stored is None or stored < 0:
+            raise _corrupt(task_id, f"{GENERATION_KEY} is unusable")
+        generation = stored
+    boundary = None
+    if BOUNDARY_KEY in metadata:
+        boundary = _number(metadata[BOUNDARY_KEY])
+        if boundary is None:
+            raise _corrupt(task_id, f"{BOUNDARY_KEY} is unusable")
+    fallback = False
+    if BOUNDARY_FALLBACK_KEY in metadata:
+        if metadata[BOUNDARY_FALLBACK_KEY] not in (1, "1"):
+            raise _corrupt(task_id, f"{BOUNDARY_FALLBACK_KEY} is unusable")
+        fallback = True
     return {
-        "links": _link_records(metadata),
-        "generation": _integer(metadata.get(GENERATION_KEY)) or 0,
-        "boundary": _number(metadata.get(BOUNDARY_KEY)),
-        "boundary_fallback": metadata.get(BOUNDARY_FALLBACK_KEY) in (1, "1"),
-        "closed_at": _number(metadata.get(CLOSED_AT_KEY)),
+        "links": _link_records(metadata, task_id),
+        "generation": generation,
+        "boundary": boundary,
+        "boundary_fallback": fallback,
     }
 
 
 def close_epoch(row: dict[str, Any]) -> int | float | None:
     """When this task closed: recorded first, bd's native closed_at second."""
-    recorded = _number(_metadata(row).get(CLOSED_AT_KEY))
-    if recorded is not None:
+    metadata = _metadata(row)
+    if CLOSED_AT_KEY in metadata:
+        recorded = _number(metadata[CLOSED_AT_KEY])
+        if recorded is None:
+            raise _corrupt(row.get("id"), f"{CLOSED_AT_KEY} is unusable")
         return recorded
     native = row.get("closed_at")
     if not isinstance(native, str) or not native:
@@ -234,7 +271,14 @@ def reopen_generation_args(row: dict[str, Any], now: float | None = None) -> lis
     fallback = previous_close is None
     if fallback:
         previous_close = time.time() if now is None else now
-    generation = (_integer(_metadata(row).get(GENERATION_KEY)) or 0) + 1
+    generation = 0
+    metadata = _metadata(row)
+    if GENERATION_KEY in metadata:
+        stored = _integer(metadata[GENERATION_KEY])
+        if stored is None or stored < 0:
+            raise _corrupt(row.get("id"), f"{GENERATION_KEY} is unusable")
+        generation = stored
+    generation += 1
     args = [
         "--set-metadata",
         f"{GENERATION_KEY}={generation}",
@@ -337,15 +381,15 @@ def artifact_relation(
     if not review_ok or not work_ok:
         return "unverified"
     handoff = review_fact.get("handoff")
-    if isinstance(handoff, dict):
-        if handoff.get("source_handle") != review["review_of"]:
-            return "unverified"
-    else:
+    if handoff is None:
         # No gate: the declared basis needs the review to start after the work ended.
         work_finished = _number(work_fact.get("finished_at"))
         review_created = _number(review_fact.get("created_at"))
         if work_finished is None or review_created is None or review_created <= work_finished:
             return "unverified"
+    elif not isinstance(handoff, dict) or handoff.get("source_handle") != review["review_of"]:
+        # A gate that is present but unusable or mismatched never matches.
+        return "unverified"
     review_git = _pinned_clean(review_fact)
     work_git = _pinned_clean(work_fact)
     if review_git is None or work_git is None or review_git["commit_sha"] != work_git["commit_sha"]:
@@ -356,6 +400,14 @@ def artifact_relation(
     if review_target == work_target:
         return "unverified"
     return "matched"
+
+
+def _source_basis(fact: dict[str, Any]) -> str | None:
+    """Which provenance basis the review ran on; an unusable handoff reports none."""
+    handoff = fact.get("handoff")
+    if handoff is None:
+        return "declared"
+    return "handoff" if isinstance(handoff, dict) else None
 
 
 def _work_entry(
@@ -384,7 +436,7 @@ def _review_entry(
         entry["source_basis"] = None
         entry["artifact_relation"] = "unavailable"
         return entry
-    entry["source_basis"] = "handoff" if fact.get("handoff") is not None else "declared"
+    entry["source_basis"] = _source_basis(fact)
     work_fact = facts.get(selected["review_of"]) if selected["review_of"] else None
     entry["artifact_relation"] = artifact_relation(selected, fact, work_fact, current_work_handle)
     return entry
@@ -416,7 +468,7 @@ def progress_view(
         entry["review_of"] = record["review_of"]
         if record["role"] == "review":
             if isinstance(fact, dict) and _flag(fact.get("available")):
-                entry["source_basis"] = "handoff" if fact.get("handoff") is not None else "declared"
+                entry["source_basis"] = _source_basis(fact)
             else:
                 entry["source_basis"] = None
         entries.append(entry)
@@ -437,30 +489,3 @@ def progress_view(
 def facts_handles(links: list[dict[str, Any]]) -> list[str]:
     """Every stored handle in stored order: at most two facts batches per view."""
     return [record["handle"] for record in links]
-
-
-__all__ = [
-    "BOUNDARY_FALLBACK_KEY",
-    "BOUNDARY_KEY",
-    "CLOSED_AT_KEY",
-    "FACTS_BATCH",
-    "GENERATION_KEY",
-    "HISTORY_KEY",
-    "LINKS_KEY",
-    "LINK_VERSION",
-    "MAX_HANDLE_CHARS",
-    "MAX_LINKS",
-    "OUTCOME_KEY",
-    "ROLES",
-    "artifact_relation",
-    "authorize_new_link",
-    "close_epoch",
-    "facts_handles",
-    "guard_new_link",
-    "handle_text",
-    "persist_link",
-    "plan_link",
-    "progress_view",
-    "reopen_generation_args",
-    "task_state",
-]
