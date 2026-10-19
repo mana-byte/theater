@@ -8,7 +8,7 @@ app-server binary. It is a sibling of the fixed-sequence bootstrap mock in
 the same upstream shape (``app-server/tests/common/mock_model_server.rs`` +
 ``core/tests/common/responses.rs``).
 
-Observed against codex-cli 0.154.0 (see docs/native-interaction/codex.md):
+Observed against codex-cli 0.154.0 (qualification: docs/harness-compat.md):
 
 - ``turn/steer`` does not abort the in-flight model request: the steer text is
   queued and a new request whose *last* user message is the steer text is

@@ -1084,9 +1084,9 @@ documented, not solved.
 
 ### Tested Codex compatibility boundaries
 
-The shipped Codex runtime is verified against exactly what its Wave 0 native
-proof exercised: compatibility policy `codex-appserver-<floor>-compatible`, a range
-of releases the compat pipeline proved without a gap (`CODEX_RUNTIME_QUALIFIED_FLOOR` up to the
+The shipped Codex runtime uses compatibility policy `codex-appserver-<floor>-compatible`
+for releases the [compatibility pipeline](harness-compat.md) proved without a gap
+(`CODEX_RUNTIME_QUALIFIED_FLOOR` up to the
 exclusive `CODEX_RUNTIME_QUALIFIED_CEILING`, minus the excluded tuple). The probe runs
 `codex --version` and refuses any release outside the range. Within that boundary, the tested facts are: one detached
 `codex app-server --listen unix://<private-socket>` backend per participant
@@ -1099,9 +1099,8 @@ after abrupt daemon death.
 
 Vendor documentation labels the WebSocket transport experimental. Theater's
 verification covers the qualified releases above under the tested policy — it is
-not a claim of universal transport stability across Codex versions. With the
-Wave 5 release gate passed, `auto` on a new Codex spawn selects native only
-inside that verified boundary — codex-cli 0.148.0 through 0.159.1. Outside it, `auto` and
+not a claim of universal transport stability across Codex versions. On a new Codex
+spawn, `auto` selects native only inside the qualified range. Outside it, `auto` and
 `native` retain the ordinary launch with the recorded compatibility reason.
 
 ### Legacy opt-out and recovery
@@ -1165,6 +1164,30 @@ Runtime host and control routes are persisted at launch. A disconnected frontend
 fails closed for native-routed capabilities; only manifest-declared legacy
 fallbacks retain pane controls. Native requests with an uncertain outcome are
 never replayed, and recovering a frontend listener does not replace its stock UI.
+
+### OpenCode release dialects
+
+One plugin supports OpenCode 1.x and 2.x; [dialect.py](../theater/harness/builtin/plugins/opencode/dialect.py)
+selects their protocol and CLI shapes. `THEATER_OPENCODE_VERSION` can pin the release
+when a wrapper hides the version banner. Unknown major versions are refused.
+
+OpenCode 2.x uses a lineage-owned `observations/opencode/opencode-v2.db`, because
+opening a 1.x database migrates it and clears its event log. Resumes keep the same
+lineage database; resumes between 1.x and 2.x are refused. Its `session_message` rows
+are projected onto the parser's shared shapes, with live reads following `time_updated`.
+
+Approval enforcement requires proof that the exact generated plugin is active on the
+selected server before user input or a capable UI starts. OpenCode can continue after
+a plugin-load failure, so a successful launch alone is insufficient. The
+[approval plugin](../theater/harness/builtin/plugins/opencode/approval_v2.py) preserves
+native denies and tightens allows, including saved approvals, into asks for `manual`
+and `edits`. Qualified release gates remain in the implementation.
+
+Both native and guarded legacy launches use a private server and the lineage database.
+Native sends carry a client-minted message ID; interrupt retains its terminal route.
+Native 2.x resumes and forks are refused before backend mutation, so supported resumes
+use the legacy route. See [launch.py](../theater/harness/builtin/plugins/opencode/launch.py)
+for argv, configuration, and credential ownership.
 
 ## Offline authoring checks
 

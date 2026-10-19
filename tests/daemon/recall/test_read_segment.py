@@ -302,10 +302,7 @@ async def test_job_segment_missing_transcript_still_returns_metadata(registry, t
     database still remembers, with an explicit marker that the
     transcript is unavailable.
 
-    This is the missing-transcript path from the design
-    (docs/v2_recall.md line 538): 3 of 147 recorded transcript paths
-    are gone from disk. It must NOT raise, and it must NOT return an
-    empty dict.
+    It must not raise or return an empty dict when recorded paths are gone.
     """
     # Point the vibe observer at a root that has no sessions at all,
     # so find_transcript returns None and history() comes back empty.

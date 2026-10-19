@@ -272,5 +272,5 @@ binding no longer holds; sends without play skills never touch that gate.
 - [`docs/architecture.md`](docs/architecture.md) — why every piece is shaped this way (the authoritative doc)
 - [`docs/harness-plugins.md`](docs/harness-plugins.md) — writing an adapter
 - [`docs/harness-compat.md`](docs/harness-compat.md) — the daily pipeline that qualifies new upstream harness CLI releases (`scripts/harness_compat/`)
+- [`docs/mcp-server-plugins.md`](docs/mcp-server-plugins.md) — MCP sidecars, skills, and plays
 - [`config.example.toml`](config.example.toml) — every setting at its default
-- `docs/v2_*.md` — where the project is heading (recall, régie)

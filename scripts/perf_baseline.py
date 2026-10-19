@@ -9,7 +9,7 @@ Not part of the test suite. Run from the repo root:
 
 Spawn mode builds a throwaway THEATER_HOME and tmux server (TMUX_TMPDIR), puts a tmux shim on
 PATH to count every tmux fork, starts Régie inside a detached pane, then measures each scenario.
-Metric names are the shared contract with docs/perf-baseline.md — keep them stable.
+Keep metric names stable so generated reports remain comparable.
 """
 
 from __future__ import annotations

@@ -65,6 +65,21 @@ remain cache-only and never produce a PR.
   is not green makes the result `tooling`, never an upstream red.
 - Failed rows carry the first failing test id and the cause of the failure, trimmed.
 
+## Native qualification evidence
+
+Codex qualification runs the unmodified stock binary against a
+[scripted local model provider](../tests/native/codex_mock_provider.py). It exercises
+turn identity, steer and interrupt, concurrent submissions, approval ownership,
+settings and queue gates, and stock-TUI attachment. Held streams keep active-turn
+checks deterministic; matching the last user message avoids replaying earlier prompts.
+
+The [capture tool](../tests/native/codex_qualify_runtime.py) records schema and behavior
+evidence, marking mock captures with `"provider": "mock"` in `installed_release.json`.
+These proofs establish protocol compatibility, not real-model refusal behavior,
+multi-tool reasoning, or realistic latency. Use `make compat HARNESS=codex VERSION=X.Y.Z`
+to qualify a candidate before changing its gate; refresh the retained fixture only when
+the evidence changes.
+
 ## Requirements and limits
 
 - A run needs network (npm, PyPI, GitHub release downloads), `tmux`, Node.js 22 with npm, and `uv`.
