@@ -22,6 +22,12 @@ from theater.harness.contracts.manifest import InterruptPlan
 from theater.models import BadRequest
 
 
+@pytest.fixture(autouse=True)
+def isolated_vibe_launch(monkeypatch, shipped_harnesses) -> None:
+    """Unit plans must not probe the host CLI or personal profiles."""
+    pin_installed_vibe_version(monkeypatch, None)
+
+
 def test_vibe_resume_uses_resume_flag(tmp_path):
     plan = plan_launch(
         "vibe",
