@@ -12,6 +12,7 @@ from theater.constants.daemon import BUS_KIND_SEND_REFUSED
 # Definition re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
 from theater.constants.refusals import NEXT_HUMAN_PRESENT
+from theater.daemon.controls import preflight
 from theater.daemon.rpc.params import (
     _require,
     _serialized_response_format,
@@ -19,7 +20,6 @@ from theater.daemon.rpc.params import (
 from theater.daemon.rpc.router import method
 from theater.daemon.rpc.skill_attachments import attach_skills
 from theater.daemon.skill_cards import compose_prompt
-from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
@@ -31,15 +31,7 @@ from theater.models import (
     HumanPresent,
     JobState,
     TheaterError,
-    Tier,
-    TranscriptIdentityLost,
-    TranscriptUntrusted,
     now,  # noqa: F401 — compatibility clock used by send-claim gates
-)
-from theater.provenance import is_trusted_provenance
-from theater.transcript_identity import (
-    TRANSCRIPT_IDENTITY_LOST_CODE,
-    transcript_identity_recovery_message,
 )
 
 
@@ -51,10 +43,9 @@ def _send_claim_ttl() -> float:
 
 logger = logging.getLogger(__name__)
 
-
-def _transcript_identity_lost(daemon, pid: str) -> bool:
-    checker = getattr(daemon.observer, "transcript_identity_lost", None)
-    return bool(checker(pid)) if callable(checker) else False
+_transcript_identity_lost = preflight._transcript_identity_lost
+_transcript_send_failure = preflight.transcript_send_failure
+_check_transcript_send_preflight = preflight.check_transcript_send_preflight
 
 
 def _refuse_send(
@@ -81,44 +72,6 @@ async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) 
 async def _check_approval_modal(daemon, target, refuse: Callable[..., NoReturn]) -> None:
     """Retained compatibility seam; providers perform the terminal recheck."""
     del daemon, target, refuse
-
-
-def _transcript_send_failure(daemon, target) -> tuple[TheaterError, str] | None:
-    """Describe a transcript attribution refusal without recording it."""
-    if _transcript_identity_lost(daemon, target.id):
-        return (
-            TranscriptIdentityLost(transcript_identity_recovery_message(target.id)),
-            TRANSCRIPT_IDENTITY_LOST_CODE,
-        )
-    if is_trusted_provenance(target.session_correlation):
-        return None
-    ambiguity = getattr(daemon.observer, "transcript_correlation_ambiguous", None)
-    if target.tier is not Tier.ADOPTED and not (callable(ambiguity) and ambiguity(target.id)):
-        return None
-    harness = HARNESSES.get(normalize(target.harness))
-    if harness is None or not harness.observer.has_transcript:
-        return None
-    pid = target.id
-    return (
-        TranscriptUntrusted(
-            f"participant {pid!r} has no trusted transcript identity: attribution is not yet "
-            "operator/proven/exact. Screen-only status observation remains live, but "
-            "Theater will not create a send job until attribution is trusted. Run "
-            f"`theater candidates {pid}` to inspect candidates, then "
-            f"`theater bind {pid} <candidate> --confirm-id {pid}` for the candidate "
-            "you verified. If no candidates are listed yet, retry after the next "
-            "observation poll before binding."
-        ),
-        "transcript_untrusted",
-    )
-
-
-def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoReturn]) -> None:
-    """Refuse untrusted adoption, observed ambiguity, or identity loss before job creation."""
-    failure = _transcript_send_failure(daemon, target)
-    if failure is not None:
-        exc, reason = failure
-        refuse(exc, reason=reason)
 
 
 def _publish_send_event(
