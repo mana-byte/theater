@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.workspace_services import make_repository
 from theater.client import DaemonClient
 from theater.constants.observation import OBSERVATION_FAILURE_GRACE
 from theater.daemon.observation.service import Observer
@@ -196,12 +197,6 @@ async def test_restart_identity_loss_replay_respects_grace(
         await d2.aclose()
 
 
-def _committed_repo(tmp_path: Path, name: str) -> Path:
-    path = _repo(tmp_path, name)
-    subprocess.run(["git", "commit", "--allow-empty", "-qm", "init"], cwd=path, check=True)
-    return path
-
-
 async def test_tmux_restart_releases_the_named_worktree_usage(
     theater_home, terminal_provider, tmp_path
 ):
@@ -210,12 +205,12 @@ async def test_tmux_restart_releases_the_named_worktree_usage(
     from theater.daemon.worktrees.service import WorkspaceRequest
     from theater.models import WorkspaceUsageHolderKind
 
-    repo = _committed_repo(tmp_path, "proj")
+    repo = make_repository(tmp_path)
     d = Daemon(harnesses={})
     await d.start()
     try:
         reservation = await d.workspace_service.reserve(
-            WorkspaceRequest(cwd=str(repo), worktree="pair-x"), reservation_id="r-builder"
+            WorkspaceRequest(cwd=repo, worktree="pair-x"), reservation_id="r-builder"
         )
         participant = d.registry.create_spawned(
             harness="vibe",
