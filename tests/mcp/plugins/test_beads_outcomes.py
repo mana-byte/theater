@@ -291,6 +291,92 @@ async def test_summaries_carry_own_status_without_graph_scans(
     assert all("failed_prerequisites" not in row for row in listing["tasks"])
 
 
+async def test_oversized_history_displays_the_latest_fifty(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    task_id = await make_task(adapter)
+    entries = [f"legacy {i}" for i in range(60)]
+    FakeBoard(tmp_path, "instance-one").command(
+        "update",
+        task_id,
+        "--set-metadata",
+        "theater_outcome_history="
+        + json.dumps([*entries, {"outcome": "typed", "status": "failed"}]),
+        actor="author",
+    )
+    detail = await adapter.get_task(task_id)
+    assert detail["outcome_history"] == [*entries[11:], "typed"]
+    assert detail["outcome_status_history"] == [None] * 49 + ["failed"]
+
+
+async def test_malformed_history_objects_never_publish_a_status(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    task_id = await make_task(adapter)
+    edit_row(
+        tmp_path,
+        task_id,
+        lambda row: row["metadata"].update(
+            {
+                "theater_outcome_history": json.dumps(
+                    [
+                        {"status": "succeeded"},  # no outcome at all
+                        {"outcome": "", "status": "failed"},  # empty outcome
+                        {"outcome": 5, "status": "cancelled"},  # non-string outcome
+                        {"outcome": "real", "status": "succeeded"},  # well-formed
+                        {"outcome": "bad", "status": "SUCCEEDED"},  # unknown status
+                    ]
+                )
+            }
+        ),
+    )
+    detail = await adapter.get_task(task_id)
+    assert detail["outcome_history"] == ["None", "", "5", "real", "bad"]
+    assert detail["outcome_status_history"] == [None, None, None, "succeeded", None]
+
+
+async def test_stray_status_without_outcome_stays_unknown(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    stray = await make_task(adapter, "Status without outcome")
+    edit_row(
+        tmp_path,
+        stray,
+        lambda row: row["metadata"].update({"theater_outcome_status": "succeeded"}),
+    )
+    FakeBoard(tmp_path, "instance-one").command(
+        "update", stray, "--status", "closed", actor="author"
+    )
+    parent = await make_task(adapter, "Watcher")
+    await adapter.set_dependency(parent, stray, True)
+    detail = await adapter.get_task(stray)
+    assert detail["outcome"] is None
+    assert detail["outcome_status"] is None
+    watcher = await adapter.get_task(parent)
+    assert watcher["blockers"] == []  # closed natively: no longer blocking
+    assert watcher["failed_prerequisites"] == []  # a stray status is not a known failure
+
+
+async def test_suggestions_bound_each_member_string(adapter: BeadsService, tmp_path: Path) -> None:
+    long_name = "N" * 300
+    long_id = "i" * 300
+    FakeClient.members = [{"participant_id": long_id, "name": long_name}]
+    with pytest.raises(BeadsError) as refused:
+        await adapter.create_task("Ghost", assignee="Ghost")
+    text = str(refused.value)
+    assert long_name not in text and long_id not in text
+    assert f"{long_name[:128]} ({long_id[:128]})" in text
+
+
+async def test_malformed_member_entries_resolve_nothing(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    FakeClient.members = ["not-a-member", 5, {"participant_id": "author", "name": "Author"}]
+    assert (await adapter.create_task("Resilient", assignee="AUTHor"))["assignee"] == "author"
+    with pytest.raises(BeadsError, match="must be a live member ID or name"):
+        await adapter.create_task("Ghost", assignee="Ghost")
+
+
 async def test_assignee_resolves_names_case_insensitively(
     adapter: BeadsService, tmp_path: Path
 ) -> None:

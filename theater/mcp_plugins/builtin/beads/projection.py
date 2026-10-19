@@ -25,19 +25,26 @@ def _history_items(metadata: dict[str, Any]) -> list[Any]:
 
 
 def _history_item(item: Any) -> tuple[str, str | None]:
-    """One stored entry as (text, status): strings mean unknown, objects carry a type."""
+    """One stored entry as (text, status); a status needs a valid outcome string."""
     if isinstance(item, dict):
+        outcome = item.get("outcome")
         status = item.get("status")
-        return str(item.get("outcome"))[:4000], status if status in OUTCOME_STATUSES else None
+        valid = isinstance(outcome, str) and bool(outcome) and status in OUTCOME_STATUSES
+        return str(outcome)[:4000], status if valid else None
     return str(item)[:4000], None
 
 
 def _outcome_status(row: dict[str, Any]) -> str | None:
-    """The typed outcome, only while closed; unreadable stays unknown, never success."""
+    """The typed outcome while closed; without a valid outcome it stays unknown."""
     if row.get("status") != "closed":
         return None
     metadata = row.get("metadata") or {}
-    value = metadata.get(OUTCOME_STATUS_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(metadata, dict):
+        return None
+    outcome = metadata.get(OUTCOME_KEY)
+    if not isinstance(outcome, str) or not outcome:
+        return None
+    value = metadata.get(OUTCOME_STATUS_KEY)
     return value if isinstance(value, str) and value in OUTCOME_STATUSES else None
 
 
@@ -89,12 +96,7 @@ def _blockers(
 def _failed_prerequisites(
     rows: dict[str, dict[str, Any]], deps: list[str], children: list[str]
 ) -> list[dict[str, str]]:
-    """Advisory: prerequisites that closed as failed or cancelled, sorted, never gated on.
-
-    A closed prerequisite with unknown status is never taken for success; it just
-    stays outside this list, which names known failures only. Native readiness
-    and close guards are unaffected by it.
-    """
+    """Advisory: closed prerequisites that failed or cancelled; unknown is never success."""
     statuses: dict[str, str] = {}
     for task_id in [*deps, *children]:
         row = rows.get(task_id)
@@ -113,7 +115,7 @@ def _detail(
     metadata = row.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
-    history = [_history_item(item) for item in _history_items(metadata)[:50]]
+    history = [_history_item(item) for item in _history_items(metadata)[-50:]]
     return {
         "play_instance_id": board.instance_id,
         **_summary(board, row, rows, ready),

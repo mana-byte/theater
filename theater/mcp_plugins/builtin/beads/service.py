@@ -455,11 +455,7 @@ class BeadsService:
         outcome: str,
         outcome_status: Literal["succeeded", "failed", "cancelled"] | None = None,
     ) -> dict[str, Any]:
-        """Close with the required free-text outcome; a typed status is never inferred.
-
-        An omitted or null outcome_status stays unknown: closing, a native done
-        state, or the outcome text alone never count as success.
-        """
+        """Close with the required outcome; an omitted status stays unknown, never success."""
         outcome = _text(outcome, "outcome", 4000, required=True)
         if outcome_status is not None and outcome_status not in OUTCOME_STATUSES:
             raise BeadsError(

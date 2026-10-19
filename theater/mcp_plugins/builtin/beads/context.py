@@ -11,6 +11,7 @@ from .backend import BeadsError, Board
 MemberSnapshot = tuple[set[str], dict[str, str | None], list[tuple[str, str]]]
 
 MAX_SUGGESTIONS = 20
+MAX_SUGGESTION_CHARS = 128
 
 
 def _context(raw: dict[str, Any], permission: str) -> tuple[str, str]:
@@ -32,6 +33,8 @@ def _members(raw: list[dict[str, Any]]) -> MemberSnapshot:
     aliases: dict[str, str | None] = {}
     roster: list[tuple[str, str]] = []
     for member in raw:
+        if not isinstance(member, dict):
+            continue  # a malformed entry resolves nothing; it never breaks the rest
         identifier = member.get("participant_id")
         if not isinstance(identifier, str):
             continue
@@ -50,7 +53,10 @@ def _members(raw: list[dict[str, Any]]) -> MemberSnapshot:
 def _known_members(roster: list[tuple[str, str]]) -> str:
     """Deterministic bounded guidance so a refusal can name the real choices."""
     shown = sorted(roster)[:MAX_SUGGESTIONS]
-    hint = ", ".join(f"{name} ({identifier})" for name, identifier in shown)
+    hint = ", ".join(
+        f"{name[:MAX_SUGGESTION_CHARS]} ({identifier[:MAX_SUGGESTION_CHARS]})"
+        for name, identifier in shown
+    )
     if not hint:
         return ""
     suffix = f"; known members: {hint}"
