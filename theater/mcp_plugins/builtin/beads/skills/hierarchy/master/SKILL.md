@@ -11,7 +11,7 @@ delegate its task ID and expected outcome; make review tasks depend on implement
 and milestones depend on both. Link each finished job with `link_task_job`: the work job and its review
 job both to the same implementation task — work as `work`, a review as `review` naming the
 reviewed work job in `review_of`; the separate review task records only its own lifecycle and
-outcome, and `review_of` on it is always refused. An identical link is a no-op duplicate: if a
+outcome. An identical link is a no-op duplicate: if a
 dispatch succeeded but the link call failed in transit, retry only `link_task_job`, never
 re-spawn or re-send; act on a semantic refusal rather than retrying it. A re-review links its
 exact new review handle with `review_of` set to the repair's exact work handle. Evidence

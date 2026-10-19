@@ -9,9 +9,10 @@ Track your stream in the shared Beads board. Claim your assigned task when ready
 progress and blockers as notes, and close it with the verified outcome. Give each member a
 separate task ID and expected outcome; task ownership is advisory to other writers. Link each
 member's finished job to its task with `link_task_job(role="work")`; reviews are the master's
-to link. Work created after the task closed — or any work link while the close time is
-unknown — needs the task reopened first; work created at or before the close and reviews
-still link to a closed task.
+to link. On a closed task, a new work link requires reopening when its job was created
+after the known close, or the close time is unknown. Work created at or before a known
+close and review links remain allowed under the other validation rules; verified
+duplicates stay no-ops.
 
 You own one stream for the master: a set of paths, written contracts, and acceptance criteria. You
 never talk to the user and never use an ask-user tool. If you cannot proceed, end your turn with

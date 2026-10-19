@@ -97,10 +97,12 @@ garbage-collected job, or its facts: `state`, `error_code`, `kind`, `caller_id`,
 `structured_status`, `delegate_status`, `review_verdict`, `git` (null or
 `pin_state`, `commit_sha`, `dirty_entries`, `clean`), `handoff` (null or
 `source_handle`, `task_kind`), and with `PLAYS_READ` also `play` (`instance_id`,
-`caller_seated_at_creation`) — only while the job also carries a current
-plugin-dependent play binding; `caller_seated_at_creation: false` means
-membership is unproven, not proven absent. Facts stay readable after the job's
-caller retires.
+`caller_seated_at_creation`). That `play` fact is reported to the requesting
+credential, not carried by the job: a `PLAYS_READ` credential currently bound
+to a play depending on this plugin receives it, and retained historical jobs
+still qualify. `caller_seated_at_creation: false` means membership is
+unproven, not proven absent. Facts stay readable after the job's caller
+retires.
 
 The shipped hierarchy play belongs to Beads. Its existing
 `[skills] disabled = ["hierarchy"]` opt-out is preserved; local plugin plays
@@ -288,21 +290,24 @@ failure and costing no facts read, while changing a stored link is refused. A
 task keeps at most 100 links. Closing and reopening a task starts a new
 generation bounded by the recorded close time (`theater_closed_at`), then bd's
 native `closed_at`, or the reopen moment with `boundary_fallback` set when
-neither is known: jobs created before the boundary are stale and refused. Work
-created after the task closed — or any work link while the close time is
-unknown — needs the task reopened first; work created at or before the close
-and reviews still link to a closed task. Links,
+neither is known: jobs created before the boundary are stale and refused. On
+a closed task, a new work link requires reopening when its job was created
+after the known close, or the close time is unknown. Work created at or
+before a known close and review links remain allowed under the other
+validation rules; verified duplicates stay no-ops. Links,
 generations and boundaries persist in task metadata only. Corrupt or unsupported
 stored link metadata — an unknown record version, an over-cap list, an unusable time or
 generation — fails closed: linking, the progress view and reopening refuse rather
 than normalize, rewrite or evict it.
 
-`get_task(view="progress")` adds the compact link view: generation, boundary and
-whether it fell back, the current work and latest review with their states and
-evidence (`artifact_relation` of `matched`, `stale`, `unverified`, `unavailable`
-plus the review's `source_basis` of `handoff` or `declared`), and bounded linked
-job states. An ambiguous current-work tie leaves the review `unverified`. Facts are read in batches of 50, blockers are capped at 200 with
-`truncated` reported, and the default `detail` view never reads job facts.
+`get_task(view="progress")` returns the compact alternative view: generation,
+boundary and whether it fell back, the current work and latest review with
+their states and evidence (`artifact_relation` of `matched`, `stale`,
+`unverified`, `unavailable` plus the review's `source_basis` of `handoff` or
+`declared`), and bounded linked job states. An ambiguous current-work tie
+leaves the review `unverified`. Facts are read in batches of 50, blockers are
+capped at 200 with `truncated` reported, and the default `detail` view never
+reads job facts.
 
 Each play instance gets one lazily initialized embedded board at
 `$THEATER_HOME/var/state/plugins/beads/plays/<instance_id>/`, shared across its
