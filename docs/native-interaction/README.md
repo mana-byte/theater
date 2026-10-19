@@ -31,8 +31,7 @@ scheduler and does not require every capability to stop using tmux.
 | Pi | Stock-TUI extension; native send/follow-up, exact-run interrupt, reasoning setting, and lifecycle | Only explicit legacy mode; steer remains unavailable |
 | Vibe | Durable observation; native topology proof remains a no-go | All controls |
 
-Detailed plans: [Claude Code](claude.md), [Codex](codex.md),
-[OpenCode](opencode.md), [Pi](pi.md), and [Vibe](vibe.md).
+Detailed plans: [Codex](codex.md), [OpenCode](opencode.md), [Pi](pi.md), and [Vibe](vibe.md).
 
 ## Route and receipt contract
 

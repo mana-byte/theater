@@ -1,12 +1,11 @@
 """Test-only conformance harness for Claude Code's documented messaging socket.
 
-Drives one disposable stock session through the Phase 0 gates of
-docs/native-interaction/claude.md and records a redacted, machine-readable
-schema-2 document. Wire facts are pinned to the official documentation plus
-static inspection of the stock 2.1.248 binary; the live gates only ever run
-against that real binary, and every required subcase must carry classified
-evidence or its gate records an honest no-go. No production code may import
-this module. FakeInbox here is a self-test receiver model, never evidence.
+Drives one disposable stock session through the Phase 0 messaging gates and
+records a redacted, machine-readable schema-2 document. Wire facts are pinned to
+the official documentation plus static inspection of the stock 2.1.248 binary; the
+live gates only ever run against that real binary, and every required subcase must
+carry classified evidence or its gate records an honest no-go. No production code
+may import this module. FakeInbox here is a self-test receiver model, never evidence.
 """
 
 from __future__ import annotations
