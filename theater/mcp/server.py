@@ -23,14 +23,13 @@ from mcp.server import MCPServer
 from mcp.types import CallToolResult
 
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS, RPC_MAX_AWAIT_SECONDS
-from theater.constants.harness import (
-    CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS,
-    CLAUDE_MCP_AUTO_BACKGROUND_ENV,
-    CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS,
-    HARNESS_MCP_SERVER_NAME,
-)
+from theater.constants.harness import HARNESS_MCP_SERVER_NAME
 from theater.harness import describe
-from theater.harness.registry.mcp import ErrorDelivery, mcp_error_delivery
+from theater.harness.registry.mcp import (
+    ErrorDelivery,
+    mcp_error_delivery,
+    mcp_foreground_ceiling,
+)
 from theater.mcp import tools
 from theater.mcp.arguments import ignored_arguments, with_ignored_arguments
 from theater.mcp.client_pool import DaemonClientPool
@@ -117,20 +116,6 @@ A finished job also carries changes: either
 "modified_count":int,"read_count":int}; evidence "none" means Theater saw no file paths, not
 that nothing changed. Process every qualified entry; several may be ready together.
 """
-
-
-def await_ceiling(harness: str) -> float | None:
-    """Longest wait this client keeps in the foreground; None when it never backgrounds."""
-    if harness != "claude":
-        return None
-    raw = os.environ.get(CLAUDE_MCP_AUTO_BACKGROUND_ENV)
-    try:
-        ms = float(raw) if raw else CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS
-    except ValueError:
-        ms = CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS
-    if ms <= 0:
-        return None
-    return max(ms / 1000 - CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS, 0.0)
 
 
 def _await_doc(ceiling: float | None) -> str:
@@ -781,7 +766,7 @@ def build(
             description=description,
         )
 
-    ceiling = await_ceiling(harness)
+    ceiling = mcp_foreground_ceiling(harness)
 
     @mcp_tool(description=_await_doc(ceiling))
     async def await_sessions(

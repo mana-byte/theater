@@ -10,11 +10,17 @@ from theater.harness.contracts.manifest import (
     ControlManifest,
     HarnessManifest,
     InterruptPlan,
+    McpForegroundWait,
     McpRenderingManifest,
     NativeCompatibilityManifest,
 )
 
 from .compatibility import claude_messaging_range_text, probe_claude_native_compatibility
+from .constants import (
+    CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS,
+    CLAUDE_MCP_AUTO_BACKGROUND_ENV,
+    CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS,
+)
 from .launch import LAUNCH, _resume_launch_overlay, _resume_preflight
 from .observation import OBSERVATION, observation_for
 
@@ -27,7 +33,14 @@ MANIFEST = HarnessManifest(
     launch=LAUNCH,
     observation=OBSERVATION,
     controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
-    mcp=McpRenderingManifest(renderer=render_mcp_servers_file),
+    mcp=McpRenderingManifest(
+        renderer=render_mcp_servers_file,
+        foreground_wait=McpForegroundWait(
+            env=CLAUDE_MCP_AUTO_BACKGROUND_ENV,
+            default_ms=CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS,
+            margin_seconds=CLAUDE_MCP_AUTO_BACKGROUND_MARGIN_SECONDS,
+        ),
+    ),
     native_compatibility=NativeCompatibilityManifest(
         qualified_range=claude_messaging_range_text(),
         probe=probe_claude_native_compatibility,

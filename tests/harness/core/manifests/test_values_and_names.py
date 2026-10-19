@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import FrozenInstanceError, replace
 from functools import partial
 
@@ -19,12 +20,14 @@ from theater.harness.contracts.channels import (
     SignalOwnership,
 )
 from theater.harness.contracts.harness import Harness
-from theater.harness.contracts.launch import ResumeLaunchOverlay
+from theater.harness.contracts.launch import McpRenderOverlay, ResumeLaunchOverlay
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
     ControlManifest,
     InterruptPlan,
     LaunchManifest,
+    McpForegroundWait,
+    McpRenderingManifest,
     ObservationManifest,
     ScreenManifest,
     SourceManifest,
@@ -315,5 +318,66 @@ def test_missing_or_wrong_callback_diagnostics(changed, path: str) -> None:
 def test_resume_configuration_requires_resume_support(launch: LaunchManifest, path: str) -> None:
     with pytest.raises(ManifestValidationError) as raised:
         compile_manifest("acme", manifest(launch=launch))
+
+    assert raised.value.path == path
+
+
+@pytest.mark.parametrize(
+    ("wait", "path"),
+    [
+        ("not-a-wait", "mcp.foreground_wait"),
+        (
+            McpForegroundWait(env=" ", default_ms=30_000, margin_seconds=2.5),
+            "mcp.foreground_wait.env",
+        ),
+        (
+            McpForegroundWait(env="ACME_MS", default_ms=0, margin_seconds=2.5),
+            "mcp.foreground_wait.default_ms",
+        ),
+        (
+            McpForegroundWait(env="ACME_MS", default_ms=-1, margin_seconds=2.5),
+            "mcp.foreground_wait.default_ms",
+        ),
+        (
+            McpForegroundWait(env="ACME_MS", default_ms=True, margin_seconds=2.5),
+            "mcp.foreground_wait.default_ms",
+        ),
+        (
+            McpForegroundWait(env="ACME_MS", default_ms=math.inf, margin_seconds=2.5),
+            "mcp.foreground_wait.default_ms",
+        ),
+        (
+            McpForegroundWait(env="ACME_MS", default_ms=math.nan, margin_seconds=2.5),
+            "mcp.foreground_wait.default_ms",
+        ),
+        (
+            McpForegroundWait(env="ACME_MS", default_ms="30000", margin_seconds=2.5),
+            "mcp.foreground_wait.default_ms",
+        ),
+        (
+            McpForegroundWait(env="ACME_MS", default_ms=30_000, margin_seconds=-0.1),
+            "mcp.foreground_wait.margin_seconds",
+        ),
+        (
+            McpForegroundWait(env="ACME_MS", default_ms=30_000, margin_seconds=True),
+            "mcp.foreground_wait.margin_seconds",
+        ),
+        (
+            McpForegroundWait(env="ACME_MS", default_ms=30_000, margin_seconds=math.inf),
+            "mcp.foreground_wait.margin_seconds",
+        ),
+    ],
+)
+def test_foreground_wait_declarations_are_validated(wait: object, path: str) -> None:
+    built = replace(
+        manifest(),
+        mcp=McpRenderingManifest(
+            renderer=lambda _context: McpRenderOverlay(),
+            foreground_wait=wait,  # type: ignore[arg-type]
+        ),
+    )
+
+    with pytest.raises(ManifestValidationError) as raised:
+        compile_manifest("acme", built)
 
     assert raised.value.path == path

@@ -15,7 +15,8 @@ from theater.daemon.response_contracts.contract import StrictContract
 from theater.daemon.response_contracts.presets import PRESET_SCHEMAS
 from theater.daemon.server import Daemon
 from theater.harness.contracts.events import clip
-from theater.mcp.server import await_ceiling, build
+from theater.harness.registry.mcp import mcp_foreground_ceiling
+from theater.mcp.server import build
 from theater.models import JobState
 
 
@@ -196,10 +197,16 @@ async def test_descriptions_pin_non_obvious_wire_contracts(mcp_daemon):
         ("claude", "120000", 110.0, "cap 110."),
         ("claude", "360000", 350.0, "cap 300."),
         ("claude", "0", None, "cap 300."),
+        ("claude", "-5000", None, "cap 300."),
+        ("claude", "banana", 110.0, "cap 110."),
+        ("claude", "inf", 110.0, "cap 110."),
+        ("claude", "nan", 110.0, "cap 110."),
+        ("ClaudeCode", "120000", 110.0, "cap 110."),
         ("vibe", "120000", None, "cap 300."),
+        ("never-registered", "120000", None, "cap 300."),
     ],
 )
-async def test_await_cap_stays_under_claudes_background_threshold(
+async def test_await_cap_follows_the_declared_foreground_wait(
     mcp_daemon, monkeypatch, harness, env, ceiling, cap
 ):
     """Claude backgrounds a call past its threshold and the await result never arrives."""
@@ -207,9 +214,54 @@ async def test_await_cap_stays_under_claudes_background_threshold(
         monkeypatch.delenv("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", raising=False)
     else:
         monkeypatch.setenv("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", env)
-    assert await_ceiling(harness) == ceiling
+    assert mcp_foreground_ceiling(harness) == ceiling
     tools = {t.name: t for t in await build("p1", harness, "wait").list_tools()}
     assert cap in tools["await_sessions"].description
+
+
+async def test_a_synthetic_harness_selects_its_own_wait_policy(mcp_daemon, monkeypatch):
+    """One declared policy reaches the await cap with zero harness-specific core code."""
+    from dataclasses import replace
+    from pathlib import Path
+
+    from tests.support.manifest_rig import manifest
+    from theater.harness.contracts.launch import McpRenderOverlay
+    from theater.harness.contracts.manifest import McpForegroundWait, McpRenderingManifest
+    from theater.harness.loading.models import LoadedPlugin
+    from theater.harness.manifests.compiler import compile_manifest
+    from theater.harness.registry import _PLUGINS, HARNESSES
+    from theater.plugins.loading import LOCAL
+
+    compiled = compile_manifest(
+        "acme",
+        replace(
+            manifest(),
+            mcp=McpRenderingManifest(
+                renderer=lambda _context: McpRenderOverlay(),
+                foreground_wait=McpForegroundWait(
+                    env="ACME_MCP_BACKGROUND_MS", default_ms=30_000, margin_seconds=2.5
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setitem(HARNESSES, "acme", compiled)
+    monkeypatch.setitem(
+        _PLUGINS,
+        "acme",
+        LoadedPlugin(path=Path("acme"), source=LOCAL, name="acme", harness=compiled),
+    )
+
+    monkeypatch.delenv("ACME_MCP_BACKGROUND_MS", raising=False)
+    assert mcp_foreground_ceiling("acme") == 27.5
+    tools = {t.name: t for t in await build("p1", "acme", "wait").list_tools()}
+    assert "cap 27.5" in tools["await_sessions"].description
+
+    monkeypatch.setenv("ACME_MCP_BACKGROUND_MS", "60000")
+    assert mcp_foreground_ceiling("acme") == 57.5
+    monkeypatch.setenv("ACME_MCP_BACKGROUND_MS", "0")
+    assert mcp_foreground_ceiling("acme") is None  # explicitly disabled
+    monkeypatch.setenv("ACME_MCP_BACKGROUND_MS", "10")
+    assert mcp_foreground_ceiling("acme") == 0.0  # the margin floors the ceiling at zero
 
 
 async def test_the_server_carries_its_instructions(mcp_daemon):
