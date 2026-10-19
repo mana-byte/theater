@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 
 from theater.daemon.operations.service import OperationOutcome, ReconcileEvidence
+from theater.frontend.capabilities import MAX_ERROR_CODE_CHARS, MAX_ERROR_MESSAGE_CHARS
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
@@ -48,8 +49,8 @@ class DurableEvidenceReconciler:
         if control.delivery_phase is not ControlDeliveryPhase.SETTLED:
             return None
         error = {
-            "code": (control.error_code or "dispatch_failed")[:512],
-            "message": (control.error or "the control was rejected")[:8192],
+            "code": (control.error_code or "dispatch_failed")[:MAX_ERROR_CODE_CHARS],
+            "message": (control.error or "the control was rejected")[:MAX_ERROR_MESSAGE_CHARS],
         }
         if control.delivery_result is DeliveryResult.ACCEPTED:
             outcome = OperationOutcome.succeeded(

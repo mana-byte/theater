@@ -12,6 +12,8 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from theater.frontend.capabilities import (
     CALLBACK_CATALOG,
+    MAX_ERROR_CODE_CHARS,
+    MAX_ERROR_MESSAGE_CHARS,
     MAX_EXACT_JSON_INTEGER,
     METHOD_CATALOG,
     PUBLIC_API_MAJOR,
@@ -154,6 +156,8 @@ def test_complete_catalog_and_offline_schema_resolution(monkeypatch: pytest.Monk
     assert set(callbacks["callbackMethod"]["enum"]) == EXPECTED_CALLBACKS
     assert tuple(common["event"]["properties"]["kind"]["enum"]) == EVENT_KINDS
     assert set(errors["knownCode"]["enum"]) == {code.value for code in ErrorCode}
+    assert common["identifier"]["maxLength"] == MAX_ERROR_CODE_CHARS
+    assert common["error"]["properties"]["message"]["maxLength"] == MAX_ERROR_MESSAGE_CHARS
 
     business = {MethodClass.WRITE, MethodClass.OPERATION}
     assert all(

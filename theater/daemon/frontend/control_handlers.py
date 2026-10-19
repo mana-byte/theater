@@ -12,6 +12,7 @@ from theater.daemon.presence import access as presence_access
 from theater.daemon.response_contracts import resolve_response_format
 from theater.daemon.rpc.params import _prompt_with_response_format
 from theater.daemon.transcript_projection import observed_transcript_identity
+from theater.frontend.capabilities import MAX_ERROR_CODE_CHARS, MAX_ERROR_MESSAGE_CHARS
 from theater.harness.contracts.runtime import (
     ConnectionHealth,
     ControlDeliveryPhase,
@@ -77,8 +78,10 @@ def _dispatch_for(route) -> DispatchIntent:
 
 def _stored_outcome(operation) -> OperationOutcome:
     error = {
-        "code": (operation.error_code or "delivery_unknown")[:512],
-        "message": (operation.error or "the control delivery outcome is unknown")[:8192],
+        "code": (operation.error_code or "delivery_unknown")[:MAX_ERROR_CODE_CHARS],
+        "message": (operation.error or "the control delivery outcome is unknown")[
+            :MAX_ERROR_MESSAGE_CHARS
+        ],
     }
     if operation.delivery_phase is not ControlDeliveryPhase.SETTLED:
         return OperationOutcome.uncertain(phase="delivery_unknown", error=error)
