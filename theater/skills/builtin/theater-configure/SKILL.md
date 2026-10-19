@@ -116,7 +116,9 @@ what was granted before the file takes effect.
    copy the list verbatim, never from memory. opencode and vibe take none — never write
    a key for them. Matching is exact.
 5. `[mcp] enabled` — only if MCP plugin packages were found: "Do you want any of these
-   extras switched on?" Options: the plugin names, multi-select. Some plugins need
+   extras switched on?" Options: the plugin names, multi-select. An explicit list replaces
+   the shipped default, and `beads` ships enabled — say so, and keep `beads` in a written
+   list unless the user explicitly declines it. Some plugins need
    settings of their own before they will actually switch on — `theater plugins` shows
    each one's state and error. For each chosen plugin that does, in order:
    - Check whether the plugin ships a configure skill of its own —
@@ -203,6 +205,9 @@ batches of 50; ledger page 30; sentence and tip typing pacing; every observer ti
 - Shapes: `favourite` and `theme` are strings; `[models]` and `[reasoning]` hold one list
   per harness; `[mcp] enabled`, `[skills] disabled`, and `[harness] disabled` are lists.
   Model and effort spellings are the CLI's own, exact and case-sensitive.
+- `[mcp] enabled` is authoritative: it replaces the shipped default, where `beads` is
+  enabled — so keep `beads` in a written list unless the user declined it, and if the
+  list already holds names, append — never drop one.
 - Last write of the session: add `theater-configure` itself to `[skills] disabled`.
   The skill's work is done once the file validates, and a disabled configure skill
   cannot be loaded by accident later. This is the one deliberate exception to writing
