@@ -6,8 +6,8 @@ from collections.abc import Callable, Mapping
 
 from sqlalchemy.exc import IntegrityError
 
+from theater.daemon.events.projection import _provider_projection
 from theater.daemon.events.publication import catalog_invalidated_event
-from theater.daemon.events.snapshot import _provider_projection
 from theater.daemon.operations import OperationService
 from theater.models import JournalEventRecord, ProviderRecord, TheaterError, new_id, now
 

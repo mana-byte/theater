@@ -7,7 +7,7 @@ from typing import Literal
 
 from sqlalchemy import Connection
 
-from theater.daemon.events.snapshot import (
+from theater.daemon.events.projection import (
     _job_projection,
     _participant_projection,
     _workspace_projection,
