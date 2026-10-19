@@ -13,6 +13,10 @@ from typing import NoReturn
 from theater import protocol
 from theater.constants.refusals import NEXT_NOT_YOUR_CHILD, NEXT_SEND_BUSY
 from theater.daemon.controls.gates import ControlGates
+from theater.daemon.controls.preflight import (
+    check_transcript_send_preflight,
+    transcript_send_failure,
+)
 from theater.daemon.controls.service import ACTION_SEND
 from theater.daemon.operations import OperationNotFound
 from theater.models import (
@@ -94,9 +98,7 @@ def _terminal_steer_plan(daemon):
 def _project_send_preflight(daemon):
     def project_send_preflight(participant) -> tuple[str | None, str | None]:
         """Return the exact transcript refusal without creating refusal telemetry."""
-        from theater.daemon.rpc import sending as sending_mod
-
-        failure = sending_mod._transcript_send_failure(daemon, participant)
+        failure = transcript_send_failure(daemon, participant)
         if failure is None:
             return None, None
         exc, reason = failure
@@ -180,14 +182,13 @@ def _authorize(daemon):
 def _send_preflight(daemon):
     async def send_preflight(participant_id: str) -> None:
         """Shared transcript delivery checks; providers own terminal evidence."""
-        from theater.daemon.rpc import sending as sending_mod
 
         def refuse(exc: TheaterError, *, reason: str) -> NoReturn:
             exc.refusal_reason = reason
             raise exc
 
         target = daemon.registry.get(participant_id)
-        sending_mod._check_transcript_send_preflight(daemon, target, refuse)
+        check_transcript_send_preflight(daemon, target, refuse)
 
     return send_preflight
 
