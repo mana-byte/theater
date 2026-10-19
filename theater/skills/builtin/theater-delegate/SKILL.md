@@ -1,58 +1,49 @@
 ---
 name: theater-delegate
-description: Delegate one implementation task to a builder and reviewer pair when the user asks to delegate, hand off, or run a task in the background while the chat continues. Writes a complete brief to the scratchpad, starts the pair play, tells the user where to look and ends the turn.
+description: Hand a scoped task to a suitable existing Theater peer, or start a builder and independent reviewer pair when the work needs one. Stay or run in the background as the user requested.
 ---
 
 # Delegate
 
-The user hands you a task to run in the background so this chat stays free for more tasks. You write
-the brief, start the `pair` play, tell the user where to look, and end your turn. You never await,
-poll, read diffs, edit, verify, push, or answer the pair's questions: the pair asks the user
-directly.
+Reuse explicit user decisions that still cover this task: scope, branch or destination, approval
+mode, and any named retirement or cleanup. Ask only about missing, changed or materially
+out-of-scope decisions. A turn boundary, compaction, check or retry does not revoke a yes. `yolo`
+authorizes execution for a spawn; it does not authorize publishing or deletion. Supply `approval`
+on every spawn; there is no global default.
 
-## Before you start
+## Existing peer
 
-- You must not be inside a live play; a play cannot start inside another, and the spawn is
-  refused. If you are, tell the user. A pair needs two spawn levels below you; on `depth_exceeded`
-  tell the user.
-- Never `load_skill` `pair/reviewer` yourself: loading a master skill starts the play for this
-  chat. Attach it on a spawn.
-- Get from the repo or this conversation whatever you can, then delegate. Ask the user only about
-  features or design, never raw code.
+For a simple handoff, check that the peer's current play role and actual capability fit the work;
+`addressable` proves only a physical route. Use one `send` to that peer. Its prompt must state the
+goal, owned and forbidden paths or scope, expected output, acceptance criteria, checks, and the
+explicit authorization already given. Set `response_format` for a result you will act on. Await
+the exact handle returned by that send when the user expects completion here; judge its `state`
+and parsed result, then verify the work. For requested background work, give the user the handle
+and end the turn. Do not start a nested pair play or require a scratchpad for this handoff. Never
+silently delegate independent review to the implementer.
 
-## Write the brief
+## New builder and reviewer pair
 
-Pick a unique `run` id of at most 8 letters or digits. Write each key with `scratchpad_write(value,
-namespace="delegate/<run>", key=...)`. The pair infers nothing, so every key is complete:
+Use a pair when implementation needs a new builder and independent review. Do not start it inside
+a live play; use that play's roles and policy instead. Use
+`load_skill(name="pair/reviewer", preview=true)` only to inspect its master card without activating
+the play; omitting `preview` activates it in this chat. Attach `pair/reviewer` on spawn. Choose
+different builder and reviewer models with `list_harnesses(include_models=true)`. The reviewer
+needs a native ask tool for any remaining user decision. Obtain a base commit without switching,
+staging or stashing the user's checkout; uncommitted work is excluded unless the user explicitly
+includes it through a commit.
 
-- `goal`: what to build and why, in the user's words and yours.
-- `acceptance`: numbered, checkable criteria.
-- `scope`: owned paths, forbidden paths, what is out of scope.
-- `base`: `git rev-parse HEAD`; uncommitted work is not included.
-- `context`: conventions to follow (AGENTS.md), `path:line` pointers, decisions already made and
-  why, failed attempts.
-- `checks`: exact commands (lint, types, focused tests, full suite) and what green means.
-- `done` and `settings`: the definition of done; approval mode (default `yolo`); the builder's
-  harness and model, different from the reviewer's (`list_harnesses(include_models=true)`); round cap 8.
+Choose a unique `run` of at most 8 letters or digits. Give the reviewer a complete brief: goal,
+numbered acceptance criteria, owned and forbidden scope, base SHA, applicable user decisions and
+authorization, checks, expected output, builder approval mode, chosen models and `pair-<run>`
+worktree name. Put it directly in the prompt for a self-contained task. Use `scratchpad_write`
+under a `delegate/<run>` namespace only when the brief is large or
+needs durable handoff across separately started workers; then pass that namespace in the prompt.
 
-Entries expire (about 7 days) and are not a record; the pair's transcript is.
-
-## Spawn the reviewer
-
-`spawn_session(harness, model, approval="yolo" unless the user chose otherwise,
-skills=["pair/reviewer"], worktree="pair-<run>", base_branch=<base>, name="Reviewer-<run>",
-description=<the task>, response_format={"$theater": "delegate"}, prompt=<pointer>)`. The prompt
-names the namespace `delegate/<run>` and the worktree name `pair-<run>`, states the goal in one
-line, and says to read every value with
-`scratchpad_get(namespace="delegate/<run>", keys_only=false)`. Choose the reviewer's harness and
-model with `list_harnesses(include_models=true)`. The reviewer alone asks the user, so its harness
-needs a native ask tool (Claude and opencode have one); the builder needs none. If none is available, tell the user. A pair holds 2 slots; on
-`budget_exceeded` tell the user and do not retry.
-
-## Tell the user, then stop
-
-Give the reviewer's name and handle, the branch `theater/named/pair-<run>` with its worktree, the
-brief's namespace, and that the reviewer will ask the user directly about features or design,
-including the builder's questions. End your turn. When the user asks later, one
-`await_sessions(max_wait=0)` on the handle returns the report and `read_transcript` shows every
-exchange. Ask before terminating the reviewer; merge and push only on the user's word.
+Spawn the reviewer with `skills=["pair/reviewer"]`, `approval="yolo"` for its read-only work,
+`worktree="pair-<run>"`, `base_branch=<base>`, and `response_format={"$theater": "delegate"}`.
+The reviewer spawns the builder with the chosen explicit approval mode and reviews its exact
+commit. Keep the reviewer's returned handle. Await it and inspect its structured report when the
+user expects completion here; if the user asked for background work, give them the handle,
+worktree and branch, then end the turn. Merge, push and cleanup only within the user's explicit
+authorization.

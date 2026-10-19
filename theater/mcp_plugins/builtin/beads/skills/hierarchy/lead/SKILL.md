@@ -6,9 +6,10 @@ description: Lead one stream in a hierarchy play. Own a disjoint set of paths, b
 # Lead
 
 Track your stream in the shared Beads board. Claim your assigned task when ready, record
-progress and blockers as notes, and close it with the verified outcome. Give each member a
-separate task ID and expected outcome; task ownership is advisory to other writers. Link each
-member's finished job to its task with `link_task_job(role="work")`; the master normally
+progress and blockers as notes, and close it with the verified outcome and truthful
+`outcome_status` from checks/review (`succeeded`, `failed` or `cancelled`; omission is unknown).
+Give each member a separate task ID and expected outcome; task ownership is advisory to other
+writers. Link each member's finished job with `link_task_job(role="work")`; the master normally
 links reviews. On a closed task, a new work link requires reopening when its job was created
 after the known close, or the close time is unknown. Work created at or before a known
 close and review links remain allowed under the other validation rules; verified
@@ -19,8 +20,9 @@ never talk to the user and never use an ask-user tool. If you cannot proceed, en
 status `blocked` and the exact decision you need; a wrong or missing contract is a blocker.
 
 Your brief must name owned and forbidden paths, contracts verbatim, acceptance criteria, your
-stream-base SHA, the checks to run, your allotment of participants and the approval mode for
-children. Anything missing is a blocker. Never edit outside your paths or send work to other streams.
+stream-base SHA, the checks to run, your allotment of participants, the approval mode for
+children, and applicable user authorization. Anything missing is a blocker. Never edit outside
+your paths or send work to other streams.
 
 ## Build
 
@@ -34,6 +36,10 @@ children. Anything missing is a blocker. Never edit outside your paths or send w
   child inherits nothing you know. Await all children together and process every ready entry;
   judge each entry by `state`: a `done` entry is finished even if the await timed out; otherwise
   re-await the same handle.
+- For a simple handoff to a suitable existing member, use one `send` with its goal, owned and
+  forbidden scope, expected output, acceptance criteria, checks and applicable authorization.
+  Keep its current play role; use `response_format` when acting on the answer and await the
+  returned exact handle. Do not infer permission from `addressable` or delegate review yourself.
 - Record each child's base. Before merging, check `git diff --name-status -M <child-base>
   <child-SHA>` against its paths and run the focused checks, then merge exact SHAs into your
   stream branch. Run the stream's checks on the result.
@@ -47,9 +53,10 @@ Before you end your turn, retire the members whose commits you merged or dropped
 
 ## Repair
 
-The master sends review findings. Fix them as new commits on the same branch: never rebase,
-amend or force-push, since the reviewer fast-forwards to your new SHA. End clean again and
-report the new SHA.
+The master sends review findings. Fix them as new commits on the same branch under still-applicable
+user authorization: never rebase, amend or force-push, since the reviewer fast-forwards to your new
+SHA. A changed commit needs renewed review, not another user yes for the same approved repair. End
+clean again and report the new SHA.
 
 ## Cleanup
 
