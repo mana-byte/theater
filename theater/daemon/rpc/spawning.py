@@ -25,6 +25,7 @@ from theater.daemon.rpc.skill_attachments import (
 )
 from theater.daemon.skill_cards import compose_prompt
 from theater.daemon.spawning.git_cwd import reject_worktree_outside_git
+from theater.daemon.spawning.models import wiring_from_value
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import (
     HARNESSES,
@@ -46,8 +47,6 @@ from theater.harness.contracts.runtime import (
 from theater.harness.registry.lookup import ProbeOutcome
 from theater.models import BadRequest, PublicOperationState, Status, new_id
 
-_WIRING_CHOICES = "auto, native, or legacy"
-
 logger = logging.getLogger(__name__)
 
 
@@ -57,21 +56,6 @@ def _wiring_param(params: dict) -> RuntimeWiring:
     ``legacy`` is the explicit opt-out. Approval has no default and no connection to wiring.
     """
     return wiring_from_value(params.get("wiring"))
-
-
-def wiring_from_value(raw: object) -> RuntimeWiring:
-    """The ``wiring`` choice from a stored or wire value; None means ``auto``."""
-    if raw is None:
-        return RuntimeWiring.AUTO
-    if not isinstance(raw, str):
-        raise BadRequest(f"spawn parameter 'wiring' must be a string: {_WIRING_CHOICES}")
-    try:
-        return RuntimeWiring(raw)
-    except ValueError:
-        raise BadRequest(
-            f"unknown wiring {raw!r}: choose {_WIRING_CHOICES}; 'legacy' is the "
-            "explicit opt-out of native runtime wiring"
-        ) from None
 
 
 @method("spawn")

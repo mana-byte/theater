@@ -478,7 +478,7 @@ class HandoffService:
         }
         if params.get("provider"):
             request["provider"] = params["provider"]
-        from theater.daemon.rpc.spawning import wiring_from_value
+        from theater.daemon.spawning.models import wiring_from_value
 
         await ParticipantLaunchService(self.daemon).spawn(
             client_id="private-rpc",
