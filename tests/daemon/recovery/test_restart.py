@@ -196,6 +196,51 @@ async def test_restart_identity_loss_replay_respects_grace(
         await d2.aclose()
 
 
+def _committed_repo(tmp_path: Path, name: str) -> Path:
+    path = _repo(tmp_path, name)
+    subprocess.run(["git", "commit", "--allow-empty", "-qm", "init"], cwd=path, check=True)
+    return path
+
+
+async def test_tmux_restart_releases_the_named_worktree_usage(
+    theater_home, terminal_provider, tmp_path
+):
+    """tmux_restart marks a holder dead and must release its durable workspace usage,
+    or the named worktree stays owned by the dead and blocks recovery."""
+    from theater.daemon.worktrees.service import WorkspaceRequest
+    from theater.models import WorkspaceUsageHolderKind
+
+    repo = _committed_repo(tmp_path, "proj")
+    d = Daemon(harnesses={})
+    await d.start()
+    try:
+        reservation = await d.workspace_service.reserve(
+            WorkspaceRequest(cwd=str(repo), worktree="pair-x"), reservation_id="r-builder"
+        )
+        participant = d.registry.create_spawned(
+            harness="vibe",
+            cwd=reservation.workspace.path,
+            workspace_id=reservation.workspace.workspace_id,
+        )
+        usage = d.workspace_service.handoff_usage(
+            reservation.usage.usage_id, participant_id=participant.id
+        )
+        assert usage.released_at is None
+
+        d._finalize_tmux_restarted([participant])
+
+        released = d.store.workspaces.get_usage(usage.usage_id)
+        assert released is not None and released.released_at is not None
+        assert released.release_reason == "tmux_restart"
+        assert [
+            u
+            for u in d.store.workspaces.active_usages(reservation.workspace.workspace_id)
+            if u.holder_kind == WorkspaceUsageHolderKind.PARTICIPANT.value
+        ] == []
+    finally:
+        await d.aclose()
+
+
 async def test_restart_preserves_resume_floor(theater_home, terminal_provider):
     """A persisted resume floor survives daemon restart."""
     from theater.resume_floor import UNKNOWN_FLOOR, floor_is_present

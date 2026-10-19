@@ -274,6 +274,10 @@ class Daemon:
     def _finalize_tmux_restarted(self, participants: Sequence[Participant]) -> None:
         self.registry.finalize_tmux_restarted(list(participants))
         for participant in participants:
+            # tmux_restart kills outside the normal teardown path, so release the
+            # durable workspace usage here or a named worktree stays owned by the
+            # dead and blocks its own resume with path_already_owned.
+            self.spawner.release_workspace_usage(participant, reason="tmux_restart")
             for job in self.store.running_jobs_for_target(participant.id):
                 self.jobs.finish(
                     job.handle,
