@@ -183,6 +183,8 @@ preserves its participants and jobs; incomplete or stale reports cannot prove
 replacement. A complete report must supply identity once its capability, legacy
 contract, or retained evidence establishes that duty. Dropping a capability does
 not erase it. First identity evidence alone is not a restart.
+Unusable stored identity can retain the reporting duty, but cannot prove
+replacement. A stray legacy key in a non-tmux binding creates no tmux duty.
 
 One compatibility adapter accepts legacy `tmux_server_identity` reports and
 stored bindings. Régie's existing report and occupant shapes stay valid; dual
