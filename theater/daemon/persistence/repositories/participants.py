@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from sqlalchemy import Connection, and_, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import participant_runtime_bindings, participants, terminal_bindings
 from theater.models import ControlOwnerKind, Participant, ParticipantOrigin, Status, now
@@ -195,12 +194,13 @@ class ParticipantRepository:
         result = conn.execute(stmt)
         return result.rowcount
 
-    def mark_tmux_restarted(
+    def mark_runtime_restarted(
         self,
         participant_ids: Sequence[str],
         *,
         incident: str,
         terminated_at: float,
+        reason: str,
         connection: Connection | None = None,
     ) -> int:
         if not participant_ids:
@@ -212,7 +212,7 @@ class ParticipantRepository:
             .where(participants.c.status != str(Status.DEAD))
             .values(
                 status=str(Status.DEAD),
-                termination_reason=TMUX_RESTART_TERMINATION_REASON,
+                termination_reason=reason,
                 termination_incident=incident,
                 terminated_at=terminated_at,
                 last_activity=terminated_at,

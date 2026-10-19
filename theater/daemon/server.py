@@ -21,7 +21,10 @@ from theater.config import Config
 from theater.config import load as load_config
 from theater.constants.daemon import (
     CHANNEL_OTEL_RECEIVER_PORT_META_KEY,
+    TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE,
+    TERMINAL_RUNTIME_RESTART_TERMINATION_REASON,
     TMUX_RESTART_JOB_ERROR_CODE,
+    TMUX_RESTART_TERMINATION_REASON,
 )
 
 # Importing methods registers all @method handlers as a side effect.
@@ -269,21 +272,36 @@ class Daemon:
                 self.controls.route_for(participant_id, RuntimeCapability.SEND).route_available
             )
         )
-        self.terminal_service.configure_tmux_restart_finalizer(self._finalize_tmux_restarted)
+        self.terminal_service.configure_runtime_restart_finalizer(
+            self._finalize_terminal_runtime_restarted
+        )
 
-    def _finalize_tmux_restarted(self, participants: Sequence[Participant]) -> None:
-        self.registry.finalize_tmux_restarted(list(participants))
+    def _finalize_terminal_runtime_restarted(
+        self, participants: Sequence[Participant], legacy: bool
+    ) -> None:
+        self.registry.finalize_runtime_restarted(list(participants))
+        reason = (
+            TMUX_RESTART_TERMINATION_REASON
+            if legacy
+            else TERMINAL_RUNTIME_RESTART_TERMINATION_REASON
+        )
+        error_code = (
+            TMUX_RESTART_JOB_ERROR_CODE if legacy else TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE
+        )
         for participant in participants:
-            # tmux_restart kills outside the normal teardown path, so release the
+            # Runtime replacement kills outside the normal teardown path, so release the
             # durable workspace usage here or a named worktree stays owned by the
             # dead and blocks its own resume with path_already_owned.
-            self.spawner.release_workspace_usage(participant, reason="tmux_restart")
+            self.spawner.release_workspace_usage(participant, reason=reason)
             for job in self.store.running_jobs_for_target(participant.id):
                 self.jobs.finish(
                     job.handle,
                     state=JobState.CRASHED,
-                    error_code=TMUX_RESTART_JOB_ERROR_CODE,
+                    error_code=error_code,
                 )
+
+    def _finalize_tmux_restarted(self, participants: Sequence[Participant]) -> None:
+        self._finalize_terminal_runtime_restarted(participants, legacy=True)
 
     def _state_route_for(self, participant_id: str, capability: RuntimeCapability):
         return self.controls.route_for(participant_id, capability)

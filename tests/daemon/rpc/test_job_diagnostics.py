@@ -7,7 +7,10 @@ import json
 import pytest
 from sqlalchemy import update
 
-from theater.constants.daemon import TMUX_RESTART_JOB_ERROR_CODE
+from theater.constants.daemon import (
+    TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE,
+    TMUX_RESTART_JOB_ERROR_CODE,
+)
 from theater.daemon.response_contracts.contract import StrictContract
 from theater.daemon.schema import jobs as jobs_table
 from theater.models import JobState
@@ -71,11 +74,14 @@ async def test_strict_failure_projects_validation_issues_only(client, daemon, mo
     assert awaited[0]["structured_error"] == row["structured_error"]
 
 
-async def test_tmux_recovery_hint_uses_the_job_target_id(client, daemon):
+@pytest.mark.parametrize(
+    "error_code", [TMUX_RESTART_JOB_ERROR_CODE, TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE]
+)
+async def test_runtime_recovery_hint_uses_the_job_target_id(client, daemon, error_code):
     job = daemon.jobs.create(
         handle="target#17", caller_id="caller", target_id="target", kind="spawn"
     )
-    daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code=TMUX_RESTART_JOB_ERROR_CODE)
+    daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code=error_code)
     row = await client.call("jobs.status", handle=job.handle)
     assert row["target_id"] == "target"
     assert "resume=<target_id>" in row["error"]

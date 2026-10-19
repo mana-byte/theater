@@ -17,6 +17,7 @@ from theater.config import RetentionSection
 from theater.constants import SECONDS_PER_DAY
 from theater.constants.daemon import (
     BUS_KIND_SEND_REFUSED,
+    TERMINAL_RUNTIME_RESTART_TERMINATION_REASON,
     TMUX_RESTART_TERMINATION_REASON,
     TRANSCRIPT_AUDIT_KINDS,
 )
@@ -532,7 +533,9 @@ def _eligible_participant_filters(restart_cutoff: float):
         participants.c.status == "dead",
         or_(
             participants.c.termination_reason.is_(None),
-            participants.c.termination_reason != TMUX_RESTART_TERMINATION_REASON,
+            participants.c.termination_reason.not_in(
+                (TMUX_RESTART_TERMINATION_REASON, TERMINAL_RUNTIME_RESTART_TERMINATION_REASON)
+            ),
             participants.c.terminated_at <= restart_cutoff,
         ),
         participants.c.id.not_in(select(jobs.c.target_id).where(jobs.c.target_id.is_not(None))),

@@ -29,14 +29,34 @@ TMUX_PROVIDER_IDENTITY_META_PREFIX = "tmux_provider_identity:"
 #: One diagnostic row emitted for each detected tmux server replacement.
 BUS_KIND_TMUX_SERVER_RESTART = "daemon.tmux_server_restart"
 
-#: Bound the participant ids carried by one tmux server restart diagnostic.
-TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT = 100
+#: Bound the participant ids carried by one runtime restart diagnostic.
+TERMINAL_RUNTIME_RESTART_AFFECTED_IDS_LIMIT = 100
+TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT = TERMINAL_RUNTIME_RESTART_AFFECTED_IDS_LIMIT
 
 #: Participant termination reason for a confirmed tmux server replacement.
 TMUX_RESTART_TERMINATION_REASON = "tmux_restart"
 
 #: Job failure code for work interrupted by a confirmed tmux server replacement.
 TMUX_RESTART_JOB_ERROR_CODE = "tmux_restarted"
+
+#: Durable identity and diagnosis for providers using the generic runtime contract.
+TERMINAL_RUNTIME_IDENTITY_META_PREFIX = "terminal_runtime_identity:"
+BUS_KIND_TERMINAL_RUNTIME_RESTART = "daemon.terminal_runtime_restart"
+TERMINAL_RUNTIME_RESTART_TERMINATION_REASON = "terminal_runtime_restarted"
+TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE = "terminal_runtime_restarted"
+
+
+def terminal_runtime_identity_meta_key(provider_id: str | None, *, legacy: bool) -> str:
+    if legacy:
+        return (
+            TMUX_SERVER_IDENTITY_META_KEY
+            if provider_id is None
+            else f"{TMUX_PROVIDER_IDENTITY_META_PREFIX}{provider_id}"
+        )
+    if provider_id is None:
+        raise ValueError("generic runtime identity requires a provider id")
+    return f"{TERMINAL_RUNTIME_IDENTITY_META_PREFIX}{provider_id}"
+
 
 #: Meta key prefix for per-participant receipt tokens; the participant id is appended.
 RECEIPT_TOKEN_PREFIX = "receipt_token:"

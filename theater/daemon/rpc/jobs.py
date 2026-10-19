@@ -10,6 +10,7 @@ from theater.constants.daemon import (
     BUS_KIND_JOB_AWAIT_END,
     BUS_KIND_JOB_AWAIT_START,
     SEND_SUPERSEDED_ERROR_CODE,
+    TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE,
     TMUX_RESTART_JOB_ERROR_CODE,
 )
 
@@ -74,6 +75,10 @@ def _await_announce_after() -> float:
 
 
 _JOB_ERROR_MESSAGES = {
+    TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE: (
+        "The terminal provider runtime restarted and this participant is gone; resume it with "
+        "spawn_session(resume=<target_id>) using this entry's target_id."
+    ),
     TMUX_RESTART_JOB_ERROR_CODE: (
         "The terminal server restarted and this child is gone; resume it with "
         "spawn_session(resume=<target_id>) using this entry's target_id; the "

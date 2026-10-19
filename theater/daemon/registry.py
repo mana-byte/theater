@@ -567,7 +567,7 @@ class Registry:
         self._names.pop(pid, None)
         self.store.bus_append("participant.dead", to_id=pid)
 
-    def finalize_tmux_restarted(self, participants: builtins.list[Participant]) -> None:
+    def finalize_runtime_restarted(self, participants: builtins.list[Participant]) -> None:
         for p in participants:
             self.store.delete_receipt_token(p.id)
             self.store.delete_channel_credentials(p.id)
@@ -576,6 +576,10 @@ class Registry:
             self._cleanup_participant(p.id)
             self._names.pop(p.id, None)
             self.store.delete_participant_name(p.id)
+
+    def finalize_tmux_restarted(self, participants: builtins.list[Participant]) -> None:
+        """Historical entry point for callers handling legacy tmux incidents."""
+        self.finalize_runtime_restarted(participants)
 
     def touch(self, pid: str) -> None:
         self.store.touch(pid)
