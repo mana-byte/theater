@@ -17,6 +17,7 @@ from theater.constants.daemon import (
     RECALL_READ_RESPONSE_MAX_BYTES,
     TRANSCRIPT_READABLE_KINDS,
 )
+from theater.constants.observation import CORRELATION_AMBIGUOUS_CODE
 from theater.daemon import workers
 from theater.daemon.observation.process import observation_process_id
 from theater.daemon.observer import history_correlation_is_ambiguous
@@ -165,6 +166,35 @@ def _encoded_size(brief: dict) -> int:
 # ---- job segments --------------------------------------------------------
 
 
+def _touched_paths(store, handle: str, participant) -> list[dict]:
+    touch_rows = store.conn.execute(
+        select(
+            touch.c.path,
+            touch.c.mode,
+            touch.c.sha_before,
+            touch.c.sha_after,
+            touch.c.sha_before_error,
+            touch.c.sha_after_error,
+        )
+        .where(touch.c.job_handle == handle)
+        .order_by(touch.c.path)
+    ).fetchall()
+    return [
+        {
+            "path": r._mapping["path"],
+            "mode": r._mapping["mode"],
+            "sha_before": r._mapping["sha_before"],
+            "sha_after": r._mapping["sha_after"],
+            "sha_before_error": r._mapping["sha_before_error"],
+            "sha_after_error": r._mapping["sha_after_error"],
+        }
+        for r in touch_rows
+        if participant is not None
+        and participant.cwd is not None
+        and is_canonical_touch_path(participant.cwd, r._mapping["path"])
+    ]
+
+
 async def _read_job(
     handle: str,
     *,
@@ -187,32 +217,7 @@ async def _read_job(
     except Exception:
         participant = None
 
-    touch_rows = store.conn.execute(
-        select(
-            touch.c.path,
-            touch.c.mode,
-            touch.c.sha_before,
-            touch.c.sha_after,
-            touch.c.sha_before_error,
-            touch.c.sha_after_error,
-        )
-        .where(touch.c.job_handle == handle)
-        .order_by(touch.c.path)
-    ).fetchall()
-    paths = [
-        {
-            "path": r._mapping["path"],
-            "mode": r._mapping["mode"],
-            "sha_before": r._mapping["sha_before"],
-            "sha_after": r._mapping["sha_after"],
-            "sha_before_error": r._mapping["sha_before_error"],
-            "sha_after_error": r._mapping["sha_after_error"],
-        }
-        for r in touch_rows
-        if participant is not None
-        and participant.cwd is not None
-        and is_canonical_touch_path(participant.cwd, r._mapping["path"])
-    ]
+    paths = _touched_paths(store, handle, participant)
 
     brief = {
         "segment": handle,
@@ -335,10 +340,15 @@ async def _read_job(
                 "session is known only from cwd/time and another retained participant "
                 "of the same harness shares that transcript root and cwd"
             ),
-            "error_code": "transcript_correlation_ambiguous",
+            "error_code": CORRELATION_AMBIGUOUS_CODE,
         }
         return brief
 
+    brief["transcript"] = _transcript_projection(history)
+    return brief
+
+
+def _transcript_projection(history) -> dict:
     events = [
         {
             "index": event.raw_index,
@@ -351,13 +361,13 @@ async def _read_job(
         for event in history.transcript_events
         if event.kind.value in _READABLE
     ]
-    brief["transcript"] = {
+    transcript = {
         "available": True,
         "location": history.location,
         "events": events,
     }
     if history.has_older:
-        brief["transcript"].update(
+        transcript.update(
             has_older=True,
             truncated=True,
             dropped_events=None,
@@ -366,7 +376,7 @@ async def _read_job(
                 "use read_transcript on this participant to page older material"
             ),
         )
-    return brief
+    return transcript
 
 
 # ---- gap segments --------------------------------------------------------
