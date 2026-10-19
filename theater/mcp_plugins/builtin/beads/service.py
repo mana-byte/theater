@@ -15,10 +15,17 @@ from theater.plugin_client import TheaterPluginClient, TheaterPluginError
 
 from . import links
 from .backend import BeadsError, Board
-from .context import _assignee, _assignment, _context, _members, _reassign
+from .context import MemberSnapshot, _assignee, _assignment, _context, _members, _reassign
 from .lifecycle import _reopen_args
 from .locking import board_lock, drain_cancelled_worker
-from .projection import _detail, _edges, _summary
+from .projection import (
+    OUTCOME_KEY,
+    OUTCOME_STATUS_KEY,
+    OUTCOME_STATUSES,
+    _detail,
+    _edges,
+    _summary,
+)
 
 
 def _text(value: str, field: str, maximum: int, *, required: bool = False) -> str:
@@ -47,10 +54,9 @@ class BeadsService:
     async def _operate(
         self,
         permission: str,
-        action: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
+        action: Callable[[Board, str, MemberSnapshot], Any],
         finish: Callable[
-            [Board, str, tuple[set[str], dict[str, str]], Any, dict[str, dict[str, Any]]],
-            dict[str, Any],
+            [Board, str, MemberSnapshot, Any, dict[str, dict[str, Any]]], dict[str, Any]
         ]
         | None = None,
     ) -> dict[str, Any]:
@@ -69,7 +75,9 @@ class BeadsService:
                 if (fresh_actor, fresh_id) != (actor, instance_id):
                     raise BeadsError("play membership changed while waiting for the board")
                 members = (
-                    _members(await client.play_members()) if permission == "write" else (set(), {})
+                    _members(await client.play_members())
+                    if permission == "write"
+                    else (set(), {}, [])
                 )
                 outcome = await self._run_locked(board, actor, members, action)
                 if not isinstance(outcome, _NeedsFacts):
@@ -79,7 +87,7 @@ class BeadsService:
                 facts = await self._fetch_facts(client, outcome.handles)
                 context = outcome.context
 
-                def complete(board: Board, actor: str, members: Any) -> dict[str, Any]:
+                def complete(board: Board, actor: str, members: MemberSnapshot) -> dict[str, Any]:
                     return finish(board, actor, members, context, facts)
 
                 # Same board and lock as the plan phase; it is already ensured.
@@ -89,8 +97,8 @@ class BeadsService:
         self,
         board: Board,
         actor: str,
-        members: tuple[set[str], dict[str, str]],
-        action: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
+        members: MemberSnapshot,
+        action: Callable[[Board, str, MemberSnapshot], Any],
         ensure: bool = True,
     ) -> Any:
         """One shielded worker run; cancellation waits for bd to finish first."""
@@ -107,8 +115,8 @@ class BeadsService:
     def _run(
         board: Board,
         actor: str,
-        members: tuple[set[str], dict[str, str]],
-        action: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
+        members: MemberSnapshot,
+        action: Callable[[Board, str, MemberSnapshot], Any],
         ensure: bool = True,
     ) -> Any:
         if ensure:
@@ -441,21 +449,39 @@ class BeadsService:
 
         return await self._operate("write", action)
 
-    async def close_task(self, task_id: str, outcome: str) -> dict[str, Any]:
+    async def close_task(
+        self,
+        task_id: str,
+        outcome: str,
+        outcome_status: Literal["succeeded", "failed", "cancelled"] | None = None,
+    ) -> dict[str, Any]:
+        """Close with the required free-text outcome; a typed status is never inferred.
+
+        An omitted or null outcome_status stays unknown: closing, a native done
+        state, or the outcome text alone never count as success.
+        """
         outcome = _text(outcome, "outcome", 4000, required=True)
+        if outcome_status is not None and outcome_status not in OUTCOME_STATUSES:
+            raise BeadsError(
+                "outcome_status must be succeeded, failed, or cancelled; "
+                "omit it when the result is unknown"
+            )
 
         def action(board, actor, _members):
             rows = board.rows()
             board.require_id(task_id, rows)
             if rows[task_id].get("status") == "closed":
                 raise BeadsError("task is already closed")
+            metadata = {OUTCOME_KEY: outcome, links.CLOSED_AT_KEY: time.time()}
+            if outcome_status is not None:
+                metadata[OUTCOME_STATUS_KEY] = outcome_status
             board.command(
                 "update",
                 task_id,
                 "--status",
                 "closed",
                 "--metadata",
-                json.dumps({"theater_outcome": outcome, links.CLOSED_AT_KEY: time.time()}),
+                json.dumps(metadata),
                 "--append-notes",
                 "Outcome: " + outcome,
                 actor=actor,

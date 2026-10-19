@@ -60,6 +60,13 @@ def test_beads_manifest_and_static_tools(tmp_path: Path, monkeypatch) -> None:
         assert not {"participant_id", "play_instance_id", "board_dir", "database"} & set(
             tool.input_schema["properties"]
         )
+    close = next(tool for tool in tools if tool.name == "close_task")
+    assert close.input_schema["properties"]["outcome_status"]["anyOf"][0]["enum"] == [
+        "succeeded",
+        "failed",
+        "cancelled",
+    ]
+    assert "outcome_status" not in close.input_schema["required"]
     assert not (tmp_path / "plays").exists()
 
 
@@ -236,16 +243,24 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
             await adapter.claim_task(child_id)
         await adapter.update_task(child_id, assignee="author", status="open")
         assert (await adapter.claim_task(child_id))["assignee"] == "author"
-        await adapter.close_task(child_id, "failed; work handed back")
+        await adapter.close_task(child_id, "failed; work handed back", "failed")
+        closed_child = Board(tmp_path, "instance-one", binary).rows()[child_id]
+        assert closed_child["metadata"]["theater_outcome_status"] == "failed"
         await adapter.close_task(root_id, "milestone accepted")
         with pytest.raises(BeadsError, match="reopen closed parents"):
             await adapter.update_task(child_id, status="blocked")
         await adapter.update_task(root_id, status="open")
         reopened = await adapter.update_task(child_id, status="blocked")
         assert reopened["outcome"] is None
+        assert reopened["outcome_status"] is None
         assert reopened["outcome_history"] == ["failed; work handed back"]
+        assert reopened["outcome_status_history"] == ["failed"]
         raw = Board(tmp_path, "instance-one", binary).rows()[child_id]
         assert "theater_outcome" not in raw["metadata"]
+        assert "theater_outcome_status" not in raw["metadata"]
+        assert json.loads(raw["metadata"]["theater_outcome_history"]) == [
+            {"outcome": "failed; work handed back", "status": "failed"}
+        ]
         assert (
             root_id in (await adapter.get_task(child_id))["deps"] or child["parent_id"] == root_id
         )
@@ -320,10 +335,16 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
             "failed; work handed back",
             "second outcome; links retained",
         ]
+        assert reopened2["outcome_status_history"] == ["failed", None]
         raw = Board(tmp_path, "instance-one", binary).rows()[child_id]
         assert raw["metadata"]["theater_generation"] == 2
         assert isinstance(raw["metadata"]["theater_boundary"], float)
         assert "theater_closed_at" not in raw["metadata"]
+        assert "theater_outcome_status" not in raw["metadata"]
+        assert json.loads(raw["metadata"]["theater_outcome_history"]) == [
+            {"outcome": "failed; work handed back", "status": "failed"},
+            "second outcome; links retained",
+        ]
         assert len(raw["metadata"]["theater_links"]) == 2
         assert raw["metadata"]["theater_links"][0]["handle"] == work_handle
         repair = await adapter.link_task_job(child_id, "tb-xzg-repair-job", "work")
@@ -375,13 +396,27 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
         prereq = await adapter.create_task("Prerequisite")
         dependent = await adapter.create_task("Dependent", dependencies=[prereq["id"]])
         assert prereq["id"] in dependent["blockers"]
-        await adapter.close_task(prereq["id"], "cancelled")
+        await adapter.close_task(prereq["id"], "cancelled", "cancelled")
         assert prereq["id"] not in (await adapter.get_task(dependent["id"]))["blockers"]
-        await adapter.close_task(dependent["id"], "done")
+        waiting = await adapter.get_task(dependent["id"])
+        assert waiting["failed_prerequisites"] == [
+            {"id": prereq["id"], "outcome_status": "cancelled"}
+        ]
+        progress_waiting = await adapter.get_task(dependent["id"], view="progress")
+        assert progress_waiting["failed_prerequisites"] == [
+            {"id": prereq["id"], "outcome_status": "cancelled"}
+        ]
+        closed_rows = await adapter.list_tasks(status="closed")
+        assert [row["outcome_status"] for row in closed_rows["tasks"]] == ["cancelled"]
+        await adapter.close_task(dependent["id"], "done", "succeeded")
         with pytest.raises(BeadsError, match="dependent"):
             await adapter.update_task(prereq["id"], status="in_progress")
         await adapter.update_task(dependent["id"], status="open")
         await adapter.update_task(prereq["id"], status="open")
+        raw_dependent = Board(tmp_path, "instance-one", binary).rows()[dependent["id"]]
+        assert json.loads(raw_dependent["metadata"]["theater_outcome_history"]) == [
+            {"outcome": "done", "status": "succeeded"}
+        ]
 
         candidate = await adapter.create_task("Claimable")
 

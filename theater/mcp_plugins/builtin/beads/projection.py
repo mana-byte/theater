@@ -7,6 +7,39 @@ from typing import Any
 
 from .backend import Board
 
+OUTCOME_KEY = "theater_outcome"
+OUTCOME_STATUS_KEY = "theater_outcome_status"
+OUTCOME_STATUSES = ("succeeded", "failed", "cancelled")
+HISTORY_KEY = "theater_outcome_history"
+
+
+def _history_items(metadata: dict[str, Any]) -> list[Any]:
+    """The stored mixed outcome history; bd keeps complex metadata as text."""
+    history = metadata.get(HISTORY_KEY) or []
+    if isinstance(history, str):
+        try:
+            history = json.loads(history)
+        except json.JSONDecodeError:
+            history = []
+    return history if isinstance(history, list) else []
+
+
+def _history_item(item: Any) -> tuple[str, str | None]:
+    """One stored entry as (text, status): strings mean unknown, objects carry a type."""
+    if isinstance(item, dict):
+        status = item.get("status")
+        return str(item.get("outcome"))[:4000], status if status in OUTCOME_STATUSES else None
+    return str(item)[:4000], None
+
+
+def _outcome_status(row: dict[str, Any]) -> str | None:
+    """The typed outcome, only while closed; unreadable stays unknown, never success."""
+    if row.get("status") != "closed":
+        return None
+    metadata = row.get("metadata") or {}
+    value = metadata.get(OUTCOME_STATUS_KEY) if isinstance(metadata, dict) else None
+    return value if isinstance(value, str) and value in OUTCOME_STATUSES else None
+
 
 def _edges(board: Board, rows: dict[str, dict[str, Any]], task_id: str) -> list[str]:
     deps = rows[task_id].get("dependencies") or []
@@ -32,6 +65,7 @@ def _summary(
         "title": str(row.get("title", ""))[:500],
         "kind": row.get("issue_type"),
         "status": row.get("status"),
+        "outcome_status": _outcome_status(row),
         "priority": row.get("priority"),
         "assignee": str(row["assignee"])[:128] if row.get("assignee") else None,
         "parent_id": parent
@@ -52,22 +86,34 @@ def _blockers(
     return deps, children, sorted(set(blockers))
 
 
+def _failed_prerequisites(
+    rows: dict[str, dict[str, Any]], deps: list[str], children: list[str]
+) -> list[dict[str, str]]:
+    """Advisory: prerequisites that closed as failed or cancelled, sorted, never gated on.
+
+    A closed prerequisite with unknown status is never taken for success; it just
+    stays outside this list, which names known failures only. Native readiness
+    and close guards are unaffected by it.
+    """
+    statuses: dict[str, str] = {}
+    for task_id in [*deps, *children]:
+        row = rows.get(task_id)
+        status = _outcome_status(row) if row is not None else None
+        if status in ("failed", "cancelled"):
+            statuses[task_id] = status
+    return [{"id": task_id, "outcome_status": statuses[task_id]} for task_id in sorted(statuses)]
+
+
 def _detail(
     board: Board, task_id: str, rows: dict[str, dict[str, Any]], ready: set[str]
 ) -> dict[str, Any]:
     row = rows[task_id]
     deps, children, blockers = _blockers(board, rows, task_id)
+    failed = _failed_prerequisites(rows, deps, children)
     metadata = row.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
-    history = metadata.get("theater_outcome_history") or []
-    if isinstance(history, str):
-        try:
-            history = json.loads(history)
-        except json.JSONDecodeError:
-            history = []
-    if not isinstance(history, list):
-        history = []
+    history = [_history_item(item) for item in _history_items(metadata)[:50]]
     return {
         "play_instance_id": board.instance_id,
         **_summary(board, row, rows, ready),
@@ -75,10 +121,14 @@ def _detail(
         "deps": deps[:200],
         "blockers": sorted(set(blockers))[:200],
         "children": children[:200],
+        "failed_prerequisites": failed[:200],
         "notes": str(row.get("notes") or "")[:16000],
-        "outcome": str(metadata["theater_outcome"])[:4000]
-        if row.get("status") == "closed" and metadata.get("theater_outcome")
+        "outcome": str(metadata[OUTCOME_KEY])[:4000]
+        if row.get("status") == "closed" and metadata.get(OUTCOME_KEY)
         else None,
-        "outcome_history": [str(item)[:4000] for item in history[:50]],
-        "truncated": len(deps) > 200 or len(blockers) > 200 or len(children) > 200,
+        "outcome_history": [text for text, _status in history],
+        "outcome_status_history": [status for _text, status in history],
+        "truncated": (
+            len(deps) > 200 or len(blockers) > 200 or len(children) > 200 or len(failed) > 200
+        ),
     }

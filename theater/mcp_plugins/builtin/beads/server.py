@@ -91,9 +91,17 @@ def build(
         return await service.claim_task(task_id)
 
     @server.tool()
-    async def close_task(task_id: str, outcome: str) -> dict:
-        """Close through Beads' native guards and record the outcome."""
-        return await service.close_task(task_id, outcome)
+    async def close_task(
+        task_id: str,
+        outcome: str,
+        outcome_status: Literal["succeeded", "failed", "cancelled"] | None = None,
+    ) -> dict:
+        """Close through Beads' native guards and record the outcome.
+
+        outcome_status optionally types the result as succeeded, failed or
+        cancelled; omit it when the result is unknown.
+        """
+        return await service.close_task(task_id, outcome, outcome_status)
 
     @server.tool()
     async def link_task_job(

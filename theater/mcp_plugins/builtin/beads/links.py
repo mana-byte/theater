@@ -16,15 +16,13 @@ from typing import Any
 from theater.json_values import decode_finite_json, finite_json_value
 
 from .backend import BeadsError, Board
-from .projection import _blockers, _summary
+from .projection import _blockers, _failed_prerequisites, _summary
 
 LINKS_KEY = "theater_links"
 GENERATION_KEY = "theater_generation"
 BOUNDARY_KEY = "theater_boundary"
 BOUNDARY_FALLBACK_KEY = "theater_boundary_fallback"
 CLOSED_AT_KEY = "theater_closed_at"
-OUTCOME_KEY = "theater_outcome"
-HISTORY_KEY = "theater_outcome_history"
 
 MAX_LINKS = 100
 FACTS_BATCH = 50
@@ -463,7 +461,8 @@ def progress_view(
 ) -> dict[str, Any]:
     """Compact alternative to detail: links and evidence, never descriptions or notes."""
     state = task_state(row)
-    _deps, _children, blockers = _blockers(board, rows, task_id)
+    deps, children, blockers = _blockers(board, rows, task_id)
+    failed = _failed_prerequisites(rows, deps, children)
     generation = state["generation"]
     current_work = _selection(state["links"], generation, "work")
     work_ambiguous = current_work is not None and bool(current_work.get("ambiguous"))
@@ -488,13 +487,14 @@ def progress_view(
         "play_instance_id": board.instance_id,
         **_summary(board, row, rows, ready),
         "blockers": blockers[:200],
+        "failed_prerequisites": failed[:200],
         "generation": generation,
         "boundary": state["boundary"],
         "boundary_fallback": state["boundary_fallback"],
         "current_work": _work_entry(current_work, facts),
         "latest_review": _review_entry(latest_review, facts, work_handle, work_ambiguous),
         "job_links": entries,
-        "truncated": len(blockers) > 200,
+        "truncated": len(blockers) > 200 or len(failed) > 200,
     }
 
 

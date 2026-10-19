@@ -7,7 +7,14 @@ from typing import Any
 
 from . import links
 from .backend import BeadsError, Board
-from .projection import _edges
+from .projection import (
+    HISTORY_KEY,
+    OUTCOME_KEY,
+    OUTCOME_STATUS_KEY,
+    _edges,
+    _history_items,
+    _outcome_status,
+)
 
 
 def _closed_reopen_obstacles(
@@ -43,21 +50,21 @@ def _reopen_args(
     if not isinstance(metadata, dict):
         metadata = {}
     args = links.reopen_generation_args(row)
-    if not metadata.get("theater_outcome"):
-        return args
-    history = metadata.get("theater_outcome_history") or []
-    if isinstance(history, str):
-        try:
-            history = json.loads(history)
-        except json.JSONDecodeError:
-            history = []
-    if not isinstance(history, list):
-        history = []
-    history = [*history, metadata["theater_outcome"]][-50:]
+    if not metadata.get(OUTCOME_KEY):
+        # Reopen still clears a stray status, so no typed outcome outlives a cycle.
+        return [*args, "--unset-metadata", OUTCOME_STATUS_KEY]
+    # A typed close is retained as {outcome, status}; unknown stays a plain string.
+    entry: Any = metadata[OUTCOME_KEY]
+    status = _outcome_status(row)
+    if status is not None:
+        entry = {"outcome": metadata[OUTCOME_KEY], "status": status}
+    history = [*_history_items(metadata), entry][-50:]
     return [
         *args,
         "--set-metadata",
-        "theater_outcome_history=" + json.dumps(history),
+        f"{HISTORY_KEY}=" + json.dumps(history),
         "--unset-metadata",
-        "theater_outcome",
+        OUTCOME_KEY,
+        "--unset-metadata",
+        OUTCOME_STATUS_KEY,
     ]
