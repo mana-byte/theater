@@ -70,7 +70,7 @@ def test_malformed_version_is_refused(monkeypatch):
 def test_ceiling_tracks_the_reader_store_minor():
     """The launch ceiling and declared range use the probe's gate."""
     assert vibe_store_format_ceiling() == _CEILING
-    assert STORE_FORMAT_MINOR == 8
+    assert STORE_FORMAT_MINOR == 9
     declared = manifest_for_roots().native_compatibility
     assert declared is not None
     assert declared.qualified_range == vibe_qualified_range_text()

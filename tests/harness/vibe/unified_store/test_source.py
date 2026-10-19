@@ -529,6 +529,20 @@ def test_exact_malformed_store_does_not_fall_back_to_legacy(store: Store) -> Non
     assert missing.error_code == "transcript_identity_lost"
 
 
+def test_relocated_session_is_still_found_by_its_first_cwd(store: Store) -> None:
+    store.publish(
+        generation=GEN1,
+        snapshot_sequence=0,
+        state=make_state([]),
+        watermark=1,
+        store_minor=9,
+        session_metadata={"cwd": "/tmp/moved", "origin_cwd": "/tmp/work"},
+    )
+    observer = VibeObserver(root=store.session_root.parent.parent)
+
+    assert observer.find_unified_transcript(cwd="/tmp/work") == store.current
+
+
 def test_child_lineage_and_logical_floor(store: Store) -> None:
     child_id = "child-1"
     store.publish(

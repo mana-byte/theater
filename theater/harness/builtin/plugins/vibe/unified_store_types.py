@@ -9,9 +9,10 @@ from typing import Any
 
 STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
 # Highest store minor understood (2: projection_delta; 4: chunk-pool transcripts;
-# 5-7 opaque; 8: pruned settled-action bodies, pooled capability catalogs).
+# 5-7 opaque; 8: pruned settled-action bodies, pooled capability catalogs;
+# 9: session relocation records, system-instruction baselines).
 # The field defaults to 1, so a pre-minor pointer restores as minor 1.
-STORE_FORMAT_MINOR = 8
+STORE_FORMAT_MINOR = 9
 
 _CHUNKS_DIRNAME = "chunks"
 _GENERATION_PATTERN = re.compile(r"^[0-9]{16}$")
@@ -46,8 +47,12 @@ _JOURNAL_RECORD_TYPES = frozenset(
         "receipt_failed",
         "projection_advanced",
         "projection_delta",
+        "session_relocated",
     }
 )
+#: Record types whose payload carries a projection ``watermark`` and ``delta``; a relocation
+#: (minor 9) also rewrites cwd and the plugin lock, which the reader does not need.
+_DELTA_RECORD_TYPES = frozenset({"projection_delta", "session_relocated"})
 _SESSION_STATUS_TYPES = frozenset({"idle", "running", "blocked", "failed", "archived"})
 _TURN_STATUSES = frozenset({"in_progress", "completed", "failed", "interrupted"})
 

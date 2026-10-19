@@ -13,7 +13,13 @@ from .unified_store_loading import (
     _read_journal_detail,
     _session_root,
 )
-from .unified_store_types import UnifiedStoreError, UnifiedStoreView, _JournalRecord, _Manifest
+from .unified_store_types import (
+    _DELTA_RECORD_TYPES,
+    UnifiedStoreError,
+    UnifiedStoreView,
+    _JournalRecord,
+    _Manifest,
+)
 
 logger = logging.getLogger("theater.observer")
 
@@ -41,7 +47,7 @@ class TurnTracker:
         turn = self._turn
         if record.record_type == "projection_advanced":
             turn = latest_turn(record.snapshot or {})
-        elif record.record_type == "projection_delta":
+        elif record.record_type in _DELTA_RECORD_TYPES:
             envelopes = [op for op in record.delta or () if op.get("op") == "set_envelope"]
             if envelopes:
                 turn = latest_turn(envelopes[-1]["state"])

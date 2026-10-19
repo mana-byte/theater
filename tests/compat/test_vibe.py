@@ -291,3 +291,22 @@ def test_vibe_install_failure_is_inconclusive(monkeypatch: pytest.MonkeyPatch) -
         )
         with pytest.raises(InstallFailed, match="wheel unavailable"):
             ADAPTER.install(sandbox, candidate)
+
+
+@pytest.mark.parametrize(("version", "python"), [("2.26.1", "3.12"), ("3.0.0", "3.14")])
+def test_vibe_install_pins_the_python_the_release_requires(
+    monkeypatch: pytest.MonkeyPatch, version: str, python: str
+) -> None:
+    argv: list[str] = []
+
+    def run(command, *_args, **_kwargs):
+        argv.extend(command)
+        return SimpleNamespace(returncode=1, stderr="stop here")
+
+    monkeypatch.setattr(
+        "scripts.harness_compat.adapters.vibe.shutil.which", lambda *_args, **_kw: "/fake/uv"
+    )
+    monkeypatch.setattr("scripts.harness_compat.adapters.vibe.subprocess.run", run)
+    with make_sandbox("vibe") as sandbox, pytest.raises(InstallFailed):
+        ADAPTER.install(sandbox, version)
+    assert argv[argv.index("--python") + 1] == python

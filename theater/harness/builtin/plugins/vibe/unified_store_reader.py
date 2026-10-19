@@ -17,6 +17,7 @@ from .unified_store_loading import (
 )
 from .unified_store_turns import TurnTracker, latest_turn
 from .unified_store_types import (
+    _DELTA_RECORD_TYPES,
     _MAX_DOCUMENT_BYTES,
     _READER_CHUNK_CACHE_BYTES,
     UnifiedStoreError,
@@ -29,7 +30,7 @@ from .unified_store_validation import _replay_projection
 
 def _touched_entries(record: _JournalRecord, changed: set[str]) -> bool:
     """Add a projection record's touched entry IDs; True when they cannot be known."""
-    if record.record_type != "projection_delta":
+    if record.record_type not in _DELTA_RECORD_TYPES:
         return True
     unknown = False
     for op in record.delta or ():

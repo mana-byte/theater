@@ -17,10 +17,13 @@ from ..contract import (
     Verdict,
     VerifiedSet,
     load_evidenced,
+    version_key,
 )
 from .vibe_bump import bump, gate
 from .vibe_store import reader_minor, store_check
 
+#: First Vibe release whose wheels require Python 3.14 (`requires-python >=3.14`).
+_PYTHON_314_FROM = (3, 0, 0)
 _PROOF = "tests/compat/test_vibe.py"
 _GREEN_TESTS = (
     f"{_PROOF}::test_real_vibe_store_format",
@@ -74,6 +77,7 @@ class VibeAdapter:
         }
         try:
             # Pinned: a runner without Python makes uv fetch the newest one, which has no wheels.
+            python = "3.14" if version_key(version) >= _PYTHON_314_FROM else "3.12"
             result = subprocess.run(
                 [
                     uv,
@@ -81,7 +85,7 @@ class VibeAdapter:
                     "install",
                     "--no-config",
                     "--python",
-                    "3.12",
+                    python,
                     f"mistral-vibe=={version}",
                 ],
                 env=env,

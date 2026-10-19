@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .unified_store_types import (
+    _DELTA_RECORD_TYPES,
     _GENERATION_PATTERN,
     _JOURNAL_PATH_PATTERN,
     _JOURNAL_RECORD_TYPES,
@@ -63,8 +64,14 @@ def _validate_journal_record(value: Any, expected_sequence: int) -> _JournalReco
         watermark = _safe_integer(payload["watermark"], "projection watermark")
         validated = _validate_public_session_state(payload["snapshot"], "projection snapshot")
         snapshot = validated
-    elif record_type == "projection_delta":
-        _require_strict_object(payload, {"watermark", "delta"}, "projection_delta payload")
+    elif record_type in _DELTA_RECORD_TYPES:
+        keys = {"watermark", "delta"}
+        if record_type == "session_relocated":
+            keys |= {"metadata", "plugin_lock"}
+        _require_strict_object(payload, keys, f"{record_type} payload")
+        for opaque in keys - {"watermark", "delta"}:
+            if not isinstance(payload[opaque], dict):
+                raise UnifiedStoreError(f"{record_type} {opaque} must be an object")
         watermark = _safe_integer(payload["watermark"], "projection watermark")
         delta = _validate_projection_delta(payload["delta"])
     return _JournalRecord(
@@ -92,7 +99,7 @@ def _replay_projection(
                 raise UnifiedStoreError("projection watermark moved backwards")
             watermark = record.watermark
             snapshot = record.snapshot or {}
-        elif record.record_type == "projection_delta":
+        elif record.record_type in _DELTA_RECORD_TYPES:
             if record.watermark < watermark:
                 raise UnifiedStoreError("projection watermark moved backwards")
             watermark = record.watermark

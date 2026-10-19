@@ -176,7 +176,9 @@ class VibeIdentityMixin:
     def _unified_metadata(view: UnifiedStoreView) -> tuple[str | None, str | None, float, float]:
         metadata = view.runtime_state.get("session_metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
-        cwd = metadata.get("cwd")
+        # Only the first cwd: a relocation's new one lives in journal metadata this reader never
+        # applies, so origin_cwd is the one key stable across checkpoints (upstream matches either).
+        cwd = metadata.get("origin_cwd") or metadata.get("cwd")
         parent = metadata.get("parent_session_id")
         session = view.snapshot.get("session")
         session = session if isinstance(session, dict) else {}

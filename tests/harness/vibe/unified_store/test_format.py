@@ -245,6 +245,38 @@ def test_abandoned_command_receipts_replay_as_no_ops(store: Store) -> None:
     assert [entry["id"] for entry in view.snapshot["history"]["entries"]][-1] == "entry-1"
 
 
+def test_minor9_session_relocation_applies_its_projection_delta(store: Store) -> None:
+    publish_default(
+        store,
+        store_minor=9,
+        journal=[
+            (
+                "session_relocated",
+                {
+                    "metadata": {"cwd": "/tmp/moved", "origin_cwd": "/tmp/work"},
+                    "plugin_lock": {},
+                    "watermark": 3,
+                    "delta": [{"op": "append_entry", "entry": basic_entry("entry-1")}],
+                },
+            ),
+        ],
+    )
+    view = load_unified_store(store.current)
+    assert view is not None
+    assert view.watermark == 3
+    assert [entry["id"] for entry in view.snapshot["history"]["entries"]][-1] == "entry-1"
+
+
+def test_session_relocation_without_its_metadata_is_rejected(store: Store) -> None:
+    publish_default(
+        store,
+        store_minor=9,
+        journal=[("session_relocated", {"watermark": 3, "delta": []})],
+    )
+    with pytest.raises(UnifiedStoreError, match="session_relocated payload"):
+        load_unified_store(store.current)
+
+
 def test_projection_delta_mutations_follow_entry_identity(store: Store) -> None:
     publish_default(
         store,

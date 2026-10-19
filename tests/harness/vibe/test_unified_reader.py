@@ -220,6 +220,23 @@ def test_reader_consumes_appended_records_without_full_reads(store: Store, monke
     assert plain.snapshot == update.view.snapshot
 
 
+def test_reader_reports_the_entries_a_session_relocation_touches(store: Store) -> None:
+    publish_default(store, store_minor=9)
+    reader = UnifiedStoreReader()
+    reader.load(store.current)
+    relocated = {
+        "metadata": {"cwd": "/tmp/moved", "origin_cwd": "/tmp/work"},
+        "plugin_lock": {},
+        "watermark": 2,
+        "delta": [{"op": "append_entry", "entry": basic_entry("e1")}],
+    }
+    append_journal(store, ("session_relocated", relocated))
+
+    update = reader.load(store.current)
+    assert update.changed_entry_ids == frozenset({"e1"})
+    assert update.view.watermark == 2
+
+
 def test_reader_falls_back_to_a_full_load_on_truncation(store: Store, monkeypatch) -> None:
     publish_default(store)
     append_journal(
