@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import os
 import threading
 from dataclasses import replace
 from pathlib import Path
-from typing import ClassVar
 
 import pytest
 
+from tests.support.beads_fakes import FakeClient, fact
+from tests.support.beads_fakes import caller as _caller
+from tests.support.beads_fakes import instance as _instance
 from theater.config import Config
 from theater.mcp_plugins import McpLaunchContext, PluginCapability, validate_manifest
 from theater.mcp_plugins import registry as mcp_registry
@@ -27,7 +28,9 @@ from theater.skills import discover
 def test_beads_manifest_and_static_tools(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PATH", "")
     validate_manifest("beads", MANIFEST)
-    assert MANIFEST.capabilities == frozenset({PluginCapability.PLAYS_READ})
+    assert MANIFEST.capabilities == frozenset(
+        {PluginCapability.PLAYS_READ, PluginCapability.JOBS_READ}
+    )
     assert MANIFEST.plays == ("hierarchy",)
     assert MANIFEST.play_permissions == frozenset({"read", "write"})
     launch = plan(
@@ -49,6 +52,7 @@ def test_beads_manifest_and_static_tools(tmp_path: Path, monkeypatch) -> None:
         "set_dependency",
         "claim_task",
         "close_task",
+        "link_task_job",
     }
     for tool in tools:
         assert not {"participant_id", "play_instance_id", "board_dir", "database"} & set(
@@ -62,9 +66,10 @@ def test_shipped_hierarchy_defaults_and_both_opt_outs(tmp_path: Path) -> None:
     mcp_registry.install(settings, local_dir=tmp_path / "plugins")
     snapshot = mcp_registry.catalog()
     registry = discover(user_dir=tmp_path / "skills", plugin_plays=snapshot.registered_plays)
-    assert registry.play("hierarchy").provider == "beads"
+    play = registry.play("hierarchy")
+    assert play is not None and play.provider == "beads"
     assert registry.load("hierarchy/master").provider == "beads"
-    assert registry.play("hierarchy").rules.plugin_permissions["beads"]["member"] == (
+    assert play.rules.plugin_permissions["beads"]["member"] == (
         "read",
         "write",
     )
@@ -79,12 +84,6 @@ def test_shipped_hierarchy_defaults_and_both_opt_outs(tmp_path: Path) -> None:
         replace(settings, mcp=replace(settings.mcp, enabled=[])), local_dir=tmp_path / "plugins"
     )
     assert not mcp_registry.catalog().registered_plays
-
-
-_caller = contextvars.ContextVar("beads_test_caller", default="author")
-
-
-_instance = contextvars.ContextVar("beads_test_instance", default="instance-one")
 
 
 def test_npm_launcher_preserves_node_path_and_scrubs_routing(tmp_path: Path, monkeypatch) -> None:
@@ -104,46 +103,6 @@ def test_npm_launcher_preserves_node_path_and_scrubs_routing(tmp_path: Path, mon
     assert board._run("version", json_output=False) == "bd version test"
     assert board._env()["BEADS_DIR"] == str(board.path / ".beads")
     assert "BEADS_DOLT_SERVER_HOST" not in board._env()
-
-
-class FakeClient:
-    enabled = True
-    permissions: ClassVar[list[str]] = ["read", "write"]
-    members: ClassVar[list[dict[str, str]]] = [
-        {"participant_id": "author", "name": "Author", "position": "master"},
-        {"participant_id": "peer", "name": "Peer", "position": "member"},
-    ]
-    live: ClassVar[dict[str, bool]] = {"instance-one": True, "instance-two": True}
-    unavailable = False
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_exc):
-        return None
-
-    async def play_context(self):
-        return {
-            "participant_id": _caller.get(),
-            "plugin_name": "beads",
-            "enabled": self.enabled,
-            "play": {
-                "instance_id": _instance.get(),
-                "master_id": "author",
-                "name": "hierarchy",
-                "position": "master",
-                "plugins": ["beads"],
-                "permissions": self.permissions,
-            },
-        }
-
-    async def play_members(self):
-        return self.members
-
-    async def play_instances_status(self, instance_ids):
-        if self.unavailable:
-            raise OSError("daemon unavailable")
-        return [{"instance_id": key, "active": self.live.get(key, False)} for key in instance_ids]
 
 
 def test_permission_gate_precedes_backend(tmp_path: Path, monkeypatch) -> None:
@@ -254,7 +213,7 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
         root = await adapter.create_task("--root", kind="epic")
         root_id = root["id"]
         with pytest.raises(BeadsError, match="cannot close"):
-            await adapter.update_task(root_id, status="closed")
+            await adapter.update_task(root_id, status="closed")  # type: ignore[arg-type]
         child = await adapter.create_task("Implement", parent_id=root_id, assignee="Peer")
         child_id = child["id"]
         assert child["assignee"] == "peer"
@@ -288,6 +247,85 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
         assert (
             root_id in (await adapter.get_task(child_id))["deps"] or child["parent_id"] == root_id
         )
+
+        work_handle = "tb-xzg-work-job-1"
+        review_handle = "tb-xzg-review-job-1"
+        FakeClient.facts = {
+            work_handle: fact(work_handle),
+            review_handle: fact(
+                review_handle,
+                contract_preset="review",
+                review_verdict="approve",
+                target_id="target-two",
+            ),
+        }
+        FakeClient.facts_calls = 0
+        linked = await adapter.link_task_job(child_id, work_handle, "work")
+        assert linked == {
+            "play_instance_id": "instance-one",
+            "task_id": child_id,
+            "handle": work_handle,
+            "role": "work",
+            "review_of": None,
+            "generation": 1,
+            "duplicate": False,
+            "links_total": 1,
+        }
+        with pytest.raises(BeadsError, match="review_of must be an exact job handle"):
+            await adapter.link_task_job(child_id, review_handle, "review")
+        with pytest.raises(BeadsError, match="review_of must name a work job"):
+            await adapter.link_task_job(child_id, review_handle, "review", "tb-xzg-unlinked-work")
+        with pytest.raises(BeadsError, match="work link cannot name"):
+            await adapter.link_task_job(child_id, work_handle, "work", work_handle)
+        reviewed = await adapter.link_task_job(child_id, review_handle, "review", work_handle)
+        assert reviewed["duplicate"] is False and reviewed["links_total"] == 2
+        replay = await adapter.link_task_job(child_id, review_handle, "review", work_handle)
+        assert replay["duplicate"] is True and replay["generation"] == 1
+        with pytest.raises(BeadsError, match="changing a stored link"):
+            await adapter.link_task_job(child_id, work_handle, "review", work_handle)
+        assert FakeClient.facts_calls == 2
+        progress = await adapter.get_task(child_id, view="progress")
+        assert progress["generation"] == 1
+        assert progress["current_work"]["handle"] == work_handle
+        assert progress["latest_review"]["review_of"] == work_handle
+        assert progress["latest_review"]["source_basis"] == "declared"
+        assert progress["latest_review"]["artifact_relation"] == "matched"
+        assert [entry["handle"] for entry in progress["job_links"]] == [
+            work_handle,
+            review_handle,
+        ]
+        assert FakeClient.facts_calls == 3
+        detail = await adapter.get_task(child_id)
+        assert "job_links" not in detail
+        assert FakeClient.facts_calls == 3
+        with pytest.raises(BeadsError, match="view must be"):
+            await adapter.get_task(child_id, view="brief")  # type: ignore[arg-type]
+
+        await adapter.close_task(child_id, "second outcome; links retained")
+        FakeClient.facts = {"tb-xzg-repair-job": fact("tb-xzg-repair-job")}
+        FakeClient.facts_calls = 0
+        with pytest.raises(BeadsError, match="after this task closed"):
+            await adapter.link_task_job(child_id, "tb-xzg-repair-job", "work")
+        assert FakeClient.facts_calls == 1
+        reopened2 = await adapter.update_task(child_id, status="open")
+        assert reopened2["outcome"] is None
+        assert reopened2["outcome_history"] == [
+            "failed; work handed back",
+            "second outcome; links retained",
+        ]
+        raw = Board(tmp_path, "instance-one", binary).rows()[child_id]
+        assert raw["metadata"]["theater_generation"] == 2
+        assert isinstance(raw["metadata"]["theater_boundary"], float)
+        assert "theater_closed_at" not in raw["metadata"]
+        assert len(raw["metadata"]["theater_links"]) == 2
+        assert raw["metadata"]["theater_links"][0]["handle"] == work_handle
+        repair = await adapter.link_task_job(child_id, "tb-xzg-repair-job", "work")
+        assert repair["generation"] == 2 and repair["links_total"] == 3
+        FakeClient.facts = {}
+        FakeClient.facts_calls = 0
+        replay2 = await adapter.link_task_job(child_id, "tb-xzg-repair-job", "work")
+        assert replay2["duplicate"] is True and replay2["links_total"] == 3
+        assert FakeClient.facts_calls == 0
 
         milestone = await adapter.create_task("Review milestone", kind="milestone")
         milestone_child = await adapter.create_task("Review", parent_id=milestone["id"])

@@ -41,14 +41,22 @@ def _summary(
     }
 
 
-def _detail(
-    board: Board, task_id: str, rows: dict[str, dict[str, Any]], ready: set[str]
-) -> dict[str, Any]:
-    row = rows[task_id]
+def _blockers(
+    board: Board, rows: dict[str, dict[str, Any]], task_id: str
+) -> tuple[list[str], list[str], list[str]]:
+    """Local edges, children, and the ids of those still blocking this task."""
     deps = _edges(board, rows, task_id)
     children = sorted(key for key, value in rows.items() if value.get("parent") == task_id)
     blockers = [key for key in deps if rows[key].get("status") != "closed"]
     blockers.extend(key for key in children if rows[key].get("status") != "closed")
+    return deps, children, sorted(set(blockers))
+
+
+def _detail(
+    board: Board, task_id: str, rows: dict[str, dict[str, Any]], ready: set[str]
+) -> dict[str, Any]:
+    row = rows[task_id]
+    deps, children, blockers = _blockers(board, rows, task_id)
     metadata = row.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}

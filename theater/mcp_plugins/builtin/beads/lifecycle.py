@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from . import links
 from .backend import BeadsError, Board
 from .projection import _edges
 
@@ -37,9 +38,13 @@ def _reopen_args(
     closed = _closed_reopen_obstacles(board, rows, task_id)
     if closed:
         raise BeadsError("reopen closed parents and dependent tasks first: " + ", ".join(closed))
-    metadata = rows[task_id].get("metadata") or {}
-    if not isinstance(metadata, dict) or not metadata.get("theater_outcome"):
-        return []
+    row = rows[task_id]
+    metadata = row.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    args = links.reopen_generation_args(row)
+    if not metadata.get("theater_outcome"):
+        return args
     history = metadata.get("theater_outcome_history") or []
     if isinstance(history, str):
         try:
@@ -50,6 +55,7 @@ def _reopen_args(
         history = []
     history = [*history, metadata["theater_outcome"]][-50:]
     return [
+        *args,
         "--set-metadata",
         "theater_outcome_history=" + json.dumps(history),
         "--unset-metadata",

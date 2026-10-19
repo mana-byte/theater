@@ -8,8 +8,11 @@ description: "Lead mid to large work by interviewing the user, then running a li
 Use this play's Beads board for explicit task tracking. Create a root epic with the goal and
 acceptance criteria, then milestones and separate implementation and review tasks. Give each
 delegate its task ID and expected outcome; make review tasks depend on implementation tasks,
-and milestones depend on both. Record the final outcome by closing the root task. Closing it
-does not end Theater membership.
+and milestones depend on both. Link each finished job to its task with `link_task_job`: work
+jobs as `work`, a review as `review` naming the reviewed work job in `review_of`. Retry-safe:
+an identical link is a no-op duplicate. `get_task(view="progress")` then shows the linked work,
+review and evidence without re-reading job facts in the detail view. Record the final outcome by
+closing the root task. Closing it does not end Theater membership.
 
 Loading this skill starts the play, and it governs the session until you end. Every agent you start
 must hold one position, plus at most one role; a plain spawn is refused. If the work turns out to be

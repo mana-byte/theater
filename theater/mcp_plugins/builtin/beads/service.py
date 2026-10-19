@@ -6,12 +6,14 @@ import asyncio
 import base64
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
-from theater.plugin_client import TheaterPluginClient
+from theater.plugin_client import TheaterPluginClient, TheaterPluginError
 
+from . import links
 from .backend import BeadsError, Board
 from .context import _assignee, _assignment, _context, _members, _reassign
 from .lifecycle import _reopen_args
@@ -25,6 +27,16 @@ def _text(value: str, field: str, maximum: int, *, required: bool = False) -> st
     if required and not value.strip():
         raise BeadsError(f"{field} is required")
     return value
+
+
+class _NeedsFacts:
+    """A plan's request for one bounded job-facts read before it finishes."""
+
+    __slots__ = ("context", "handles")
+
+    def __init__(self, handles: list[str], context: dict[str, Any]) -> None:
+        self.handles = handles
+        self.context = context
 
 
 class BeadsService:
@@ -65,6 +77,74 @@ class BeadsService:
     ) -> dict[str, Any]:
         board.ensure()
         return action(board, actor, members)
+
+    async def _operate_phased(
+        self,
+        permission: str,
+        plan: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
+        finish: Callable[
+            [Board, str, tuple[set[str], dict[str, str]], Any, dict[str, dict[str, Any]]],
+            dict[str, Any],
+        ],
+    ) -> dict[str, Any]:
+        """Locked board work in phases, with one bounded facts read between them.
+
+        The plan runs first under the same freshness, lock and cancellation
+        guarantees as _operate. It either returns a final result or asks for
+        job facts, which are read outside the worker thread; the finish phase
+        then re-enters the thread holding the same board lock, so the board it
+        validated is still current.
+        """
+        async with TheaterPluginClient() as client:
+            actor, instance_id = _context(await client.play_context(), permission)
+            board = Board(self.state_dir, instance_id, self.bd_path)
+            async with board_lock(self.state_dir, instance_id):
+                fresh_actor, fresh_id = _context(await client.play_context(), permission)
+                if (fresh_actor, fresh_id) != (actor, instance_id):
+                    raise BeadsError("play membership changed while waiting for the board")
+                members = (
+                    _members(await client.play_members()) if permission == "write" else (set(), {})
+                )
+                outcome = await self._phase(board, actor, members, plan)
+                if not isinstance(outcome, _NeedsFacts):
+                    return outcome
+                facts = await self._fetch_facts(client, outcome.handles)
+                context = outcome.context
+
+                def complete(board: Board, actor: str, members: Any) -> dict[str, Any]:
+                    return finish(board, actor, members, context, facts)
+
+                return await self._phase(board, actor, members, complete)
+
+    async def _phase(
+        self,
+        board: Board,
+        actor: str,
+        members: tuple[set[str], dict[str, str]],
+        action: Callable[[Board, str, tuple[set[str], dict[str, str]]], Any],
+    ) -> Any:
+        worker = asyncio.create_task(asyncio.to_thread(self._run, board, actor, members, action))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await drain_cancelled_worker(worker)
+            raise
+
+    @staticmethod
+    async def _fetch_facts(
+        client: TheaterPluginClient, handles: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """One bounded facts read per batch of stored handles."""
+        by_handle: dict[str, dict[str, Any]] = {}
+        try:
+            for start in range(0, len(handles), links.FACTS_BATCH):
+                batch = handles[start : start + links.FACTS_BATCH]
+                for row in await client.get_job_facts(batch):
+                    if isinstance(row, dict) and isinstance(row.get("handle"), str):
+                        by_handle[row["handle"]] = row
+        except TheaterPluginError as exc:
+            raise BeadsError(f"job facts are unavailable: {exc}") from exc
+        return by_handle
 
     async def list_tasks(
         self,
@@ -114,13 +194,114 @@ class BeadsService:
 
         return await self._operate("read", action)
 
-    async def get_task(self, task_id: str) -> dict[str, Any]:
-        def action(board, _actor, _members):
+    async def get_task(
+        self, task_id: str, view: Literal["detail", "progress"] = "detail"
+    ) -> dict[str, Any]:
+        if view not in ("detail", "progress"):
+            raise BeadsError("view must be detail or progress")
+        if view == "detail":
+
+            def action(board, _actor, _members):
+                rows = board.rows()
+                board.require_id(task_id, rows)
+                return _detail(board, task_id, rows, board.ready_ids())
+
+            return await self._operate("read", action)
+
+        def plan(board, _actor, _members):
+            rows = board.rows()
+            ready = board.ready_ids()
+            board.require_id(task_id, rows)
+            row = rows[task_id]
+            state = links.task_state(row)
+            handles = links.facts_handles(state["links"])
+            if not handles:
+                return links.progress_view(board, task_id, row, rows, ready, {})
+            return _NeedsFacts(handles, {"row": row, "rows": rows, "ready": ready})
+
+        def finish(board, _actor, _members, context, facts):
+            return links.progress_view(
+                board, task_id, context["row"], context["rows"], context["ready"], facts
+            )
+
+        return await self._operate_phased("read", plan, finish)
+
+    async def link_task_job(
+        self,
+        task_id: str,
+        handle: str,
+        role: Literal["work", "review"],
+        review_of: str | None = None,
+    ) -> dict[str, Any]:
+        """Associate one dispatched job with this task; duplicates replay, never edit."""
+        handle = links.handle_text(handle)
+        if role not in links.ROLES:
+            raise BeadsError("role must be work or review")
+        if role == "work":
+            if review_of is not None:
+                raise BeadsError("a work link cannot name review_of")
+        else:
+            review_of = links.handle_text(review_of, "review_of")
+
+        def plan(board, _actor, _members):
             rows = board.rows()
             board.require_id(task_id, rows)
-            return _detail(board, task_id, rows, board.ready_ids())
+            row = rows[task_id]
+            prepared = links.plan_link(row, handle, role, review_of)
+            if prepared["duplicate"]:
+                record = prepared["record"]
+                return self._link_result(
+                    board, task_id, handle, record, True, prepared["links_total"]
+                )
+            state = prepared["state"]
+            return _NeedsFacts(
+                [handle],
+                {
+                    "row_status": row.get("status"),
+                    "close": links.close_epoch(row),
+                    "state": state,
+                },
+            )
 
-        return await self._operate("read", action)
+        def finish(board, actor, _members, context, facts):
+            created_at = links.authorize_new_link(facts.get(handle), board.instance_id, handle)
+            links.guard_new_link(
+                created_at, role, context["state"], context["row_status"], context["close"]
+            )
+            record = {
+                "version": links.LINK_VERSION,
+                "handle": handle,
+                "role": role,
+                "review_of": review_of,
+                "generation": context["state"]["generation"],
+                "created_at": created_at,
+            }
+            links.persist_link(board, task_id, context["state"]["links"], record, actor)
+            return self._link_result(
+                board, task_id, handle, record, False, len(context["state"]["links"]) + 1
+            )
+
+        return await self._operate_phased("write", plan, finish)
+
+    @staticmethod
+    def _link_result(
+        board: Board,
+        task_id: str,
+        handle: str,
+        record: dict[str, Any],
+        duplicate: bool,
+        links_total: int,
+    ) -> dict[str, Any]:
+        return {
+            "play_instance_id": board.instance_id,
+            "task_id": task_id,
+            "handle": handle,
+            "role": record["role"],
+            "review_of": record["review_of"],
+            "generation": record["generation"],
+            "duplicate": duplicate,
+            "links_total": links_total,
+        }
 
     async def create_task(
         self,
@@ -165,7 +346,8 @@ class BeadsService:
                 args.extend(("--deps", ",".join(dependencies)))
             created = board.command(*args, actor=actor)
             task_id = created.get("id") if isinstance(created, dict) else None
-            if not board.local_id(task_id):
+            # local_id rejects non-strings too, but the isinstance also narrows the type
+            if not isinstance(task_id, str) or not board.local_id(task_id):
                 raise BeadsError("Beads created an invalid local task ID")
             rows = board.rows()
             board.require_id(task_id, rows)
@@ -288,7 +470,7 @@ class BeadsService:
                 "--status",
                 "closed",
                 "--metadata",
-                json.dumps({"theater_outcome": outcome}),
+                json.dumps({"theater_outcome": outcome, links.CLOSED_AT_KEY: time.time()}),
                 "--append-notes",
                 "Outcome: " + outcome,
                 actor=actor,

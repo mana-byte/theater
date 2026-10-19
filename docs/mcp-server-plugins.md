@@ -85,6 +85,20 @@ the participant credential. Missing instances report inactive; inspecting an
 existing instance without the plugin dependency is refused. These APIs supply
 facts; each plugin owns its tool access policy and may support use outside plays.
 
+With `PluginCapability.JOBS_READ`, `TheaterPluginClient` additionally exposes:
+
+| Method | Input | Output |
+| --- | --- | --- |
+| `get_job_facts(handles)` | At most 50 exact job handles, each 1–256 nonblank characters | One fact row per handle, order and duplicates preserved |
+
+A row reports `handle` and either `available: false` for a missing or
+garbage-collected job, or its facts: `state`, `error_code`, `kind`, `caller_id`,
+`target_id`, `created_at`, `finished_at`, `contract_preset`,
+`structured_status`, `delegate_status`, `review_verdict`, `git`, `handoff`,
+and with `PLAYS_READ` also `play` (`instance_id`,
+`caller_seated_at_creation`). Facts stay readable after the job's caller
+retires.
+
 The shipped hierarchy play belongs to Beads. Its existing
 `[skills] disabled = ["hierarchy"]` opt-out is preserved; local plugin plays
 remain unaffected by the bundled-skill denylist.
@@ -239,12 +253,13 @@ master, lead, and member positions.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `list_tasks` | `view` (all/ready/mine), optional `status`, `kind`, `cursor`; `limit` 1–100 | `play_instance_id`, task summaries, `next_cursor` |
-| `get_task` | `task_id` | Detailed task with `play_instance_id` |
+| `get_task` | `task_id`, `view` (detail/progress, default detail) | Detailed or progress task with `play_instance_id` |
 | `create_task` | `title`, optional `description`, `kind`, `priority`, `parent_id`, `assignee`, `dependencies` | Created detailed task |
 | `update_task` | `task_id`, optional title/description/kind/priority/status/assignee/parent/note | Updated detailed task |
 | `set_dependency` | `task_id`, `prerequisite_id`, `add` (default true) | Play instance, both IDs, edge `present` |
 | `claim_task` | `task_id` | Task assigned to authenticated caller, in progress |
 | `close_task` | `task_id`, required `outcome` text | Closed detailed task |
+| `link_task_job` | `task_id`, `handle`, `role` (work/review), optional `review_of` | `duplicate`, `generation`, `links_total` |
 
 `read` permits list/get; `write` permits the five mutations. Tasks have kinds
 `task`, `milestone`, `epic`, priorities 0–4, and statuses `open`, `in_progress`,
@@ -259,6 +274,25 @@ every closed prerequisite resolves its dependency, including failure or
 cancellation. Reopen with `update_task(status="open")`, reopening closed parents
 and dependent tasks first. Previous outcomes remain in history. Use separate
 implementation and review tasks, both required by their milestone.
+
+`link_task_job` records that this play dispatched a job as a task's work or
+review. The handle must be an exact job handle (at most 256 characters); the job
+must be available, carry a play proof for this instance, have been issued by a
+member seated in the play, and have a usable creation time. A review link names
+one of the task's work links in `review_of`; a work link names none. An
+identical stored link is a no-op duplicate, safe to retry after a transport
+failure and costing no facts read, while changing a stored link is refused. A
+task keeps at most 100 links. Closing and reopening a task starts a new
+generation bounded by the close time — the native `closed_at`, or the reopen
+moment when that is unknown: jobs created before the boundary are stale and
+refused, and a closed task accepts no new work links until reopened. Links,
+generations and boundaries persist in task metadata only.
+
+`get_task(view="progress")` adds the compact link view: generation, boundary and
+whether it fell back, the current work and latest review with their states and
+evidence (`matched`, `stale`, `unverified`, `unavailable`), and bounded linked
+job states. Facts are read in batches of 50, blockers are capped at 200 with
+`truncated` reported, and the default `detail` view never reads job facts.
 
 Each play instance gets one lazily initialized embedded board at
 `$THEATER_HOME/var/state/plugins/beads/plays/<instance_id>/`, shared across its

@@ -34,7 +34,7 @@ def plan(context: McpLaunchContext) -> McpLaunchPlan:
 MANIFEST = McpServerManifest(
     api_version=MANIFEST_API_VERSION,
     description="Play-scoped Beads task boards",
-    capabilities=frozenset({PluginCapability.PLAYS_READ}),
+    capabilities=frozenset({PluginCapability.PLAYS_READ, PluginCapability.JOBS_READ}),
     launch=McpLaunchManifest(planner=plan),
     config=McpConfigSchema(
         {

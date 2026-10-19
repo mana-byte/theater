@@ -44,9 +44,9 @@ def build(
         return await service.list_tasks(view, status, kind, cursor, limit)
 
     @server.tool()
-    async def get_task(task_id: str) -> dict:
-        """Show a task and its local relationships."""
-        return await service.get_task(task_id)
+    async def get_task(task_id: str, view: Literal["detail", "progress"] = "detail") -> dict:
+        """Show a task and its local relationships, or its linked-job progress."""
+        return await service.get_task(task_id, view)
 
     @server.tool()
     async def create_task(
@@ -94,6 +94,21 @@ def build(
     async def close_task(task_id: str, outcome: str) -> dict:
         """Close through Beads' native guards and record the outcome."""
         return await service.close_task(task_id, outcome)
+
+    @server.tool()
+    async def link_task_job(
+        task_id: str,
+        handle: str,
+        role: Literal["work", "review"],
+        review_of: str | None = None,
+    ) -> dict:
+        """Link one of this play's dispatched jobs to a task as its work or review.
+
+        A review link names the exact work job it reviews via review_of. An
+        identical stored link is a no-op duplicate, safe to retry after a
+        transport failure; changing a stored link is refused.
+        """
+        return await service.link_task_job(task_id, handle, role, review_of)
 
     return server
 
