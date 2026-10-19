@@ -453,6 +453,9 @@ async def test_whoami_registers_on_first_call(mcp_daemon):
     assert "session_id" not in me  # omitted until the observer finds the transcript
     # No pane reached us: TMUX_PANE is not in the SDK's env allowlist.
     assert me["tier"] == "external"
+    assert "git" not in me
+    live = tool_payload(await mcp.call_tool("whoami", {"include_git": True}))
+    assert set(live["git"]) == {"pin_state", "commit_sha", "branch", "dirty_entries", "reason"}
 
     async with DaemonClient(autostart=False) as c:
         rows = await c.call("participants.list")

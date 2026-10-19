@@ -44,15 +44,19 @@ def _summarise(p: dict) -> dict:
     )
 
 
-async def whoami(session: Session) -> dict:
+async def whoami(session: Session, *, include_git: bool = False) -> dict:
     if not session._resolved:
         await session.identify()
     # The self view adds what this agent may spawn in its live play.
-    record = await session.client.call(
-        "participants.get", id=session.participant_id, self_view=True
-    )
+    params: dict[str, object] = {"id": session.participant_id, "self_view": True}
+    if include_git:
+        params["include_git"] = True
+    record = await session.client.call("participants.get", **params)
     assert isinstance(record, dict)
     me = _summarise(record)
+    if include_git:
+        # Kept whole: a null branch (detached HEAD) or reason is the answer, not noise.
+        me["git"] = record["git"]
     rows = await session.client.call("participants.list", parent_id=me["id"])
     assert isinstance(rows, list)
     children = [

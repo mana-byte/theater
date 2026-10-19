@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from theater.constants.daemon import PARTICIPANTS_LIST_MAX_LIMIT
+from theater.daemon import workers
+from theater.daemon.handoff.gitfacts import pin_git_facts
 from theater.daemon.participants import mutations, termination
 from theater.daemon.participants.resume import resume_state
 from theater.daemon.presence import access as presence_access
@@ -183,8 +187,25 @@ async def _tree(daemon, params: dict) -> list[dict]:
 
 @method("participants.get")
 async def _get(daemon, params: dict) -> dict:
-    record = daemon.registry.resolve(_require(params, "id")).to_dict()
-    return _with_presence(daemon, record, self_view=params.get("self_view") is True)
+    include_git = params.get("include_git", False)
+    if not isinstance(include_git, bool):
+        raise BadRequest("include_git must be a boolean")
+    participant = daemon.registry.resolve(_require(params, "id"))
+    record = _with_presence(
+        daemon, participant.to_dict(), self_view=params.get("self_view") is True
+    )
+    if include_git:
+        record["git"] = await _current_git(participant.cwd)
+    return record
+
+
+async def _current_git(cwd: str | None) -> dict:
+    """Observe the cwd's Git state now; ``branch`` stays the recorded workspace metadata.
+
+    Never persisted: rewriting a recorded branch would defeat cleanup's moved-branch fence.
+    """
+    facts = await workers.to_thread(pin_git_facts, cwd, label="participants.git")
+    return asdict(facts)
 
 
 @method("participant.rename")

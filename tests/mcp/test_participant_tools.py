@@ -71,6 +71,20 @@ async def test_whoami_answers_who_where_and_reachable():
     assert got["name"] == "Arlequin"
 
 
+async def test_whoami_include_git_adds_the_live_observation_with_its_nulls():
+    git = {"pin_state": "pinned", "commit_sha": "abc", "branch": None, "dirty_entries": 0}
+    record = {**RECORD, "branch": "rc10/integration", "git": {**git, "reason": None}}
+    s = resolved(**{"participants.get": record, "participants.list": []})
+    got = await tools.whoami(s, include_git=True)
+    assert s.client.params("participants.get") == {
+        "id": "p-me",
+        "self_view": True,
+        "include_git": True,
+    }
+    assert got["branch"] == "rc10/integration"
+    assert got["git"] == {**git, "reason": None}, "detached HEAD's null branch is the answer"
+
+
 async def test_whoami_omits_a_lazy_session_id_until_discovered():
     got = await tools.whoami(
         resolved(**{"participants.get": {**RECORD, "session_id": None}, "participants.list": []})

@@ -595,7 +595,7 @@ def build(
         return decorator
 
     @mcp_tool()
-    async def whoami() -> dict:
+    async def whoami(include_git: bool = False) -> dict:
         """Identify yourself. Returned fields include id, live name, description,
         harness, tier, status, cwd, branch, session_id, parent_id, addressable,
         and play inside a live play; unset fields are omitted. play holds play,
@@ -611,8 +611,14 @@ def build(
         from the other participants in the list. `session_id` is the harness's
         opaque resume identifier and is omitted until Theater's observer finds
         your transcript; call this tool again later to refresh it.
+
+        `branch` is recorded workspace metadata and can be stale: a borrowed
+        checkout may have switched branches since. include_git=true adds `git`,
+        your cwd's Git state read now (pin_state, commit_sha, branch, null when
+        detached, dirty_entries, and reason when unpinned). It is a current
+        observation, not evidence of any past job.
         """
-        return await tools.whoami(session)
+        return await tools.whoami(session, include_git=include_git)
 
     @mcp_tool()
     async def list_participants(
