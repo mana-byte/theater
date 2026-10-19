@@ -6,6 +6,13 @@ from typing import Any
 
 from .backend import BeadsError, Board
 
+# Live members as (exact IDs, casefolded-name map, roster); the map holds a member
+# ID for one live name or None when several members share the casefolded spelling.
+MemberSnapshot = tuple[set[str], dict[str, str | None], list[tuple[str, str]]]
+
+MAX_SUGGESTIONS = 20
+MAX_SUGGESTION_CHARS = 128
+
 
 def _context(raw: dict[str, Any], permission: str) -> tuple[str, str]:
     play = raw.get("play")
@@ -20,31 +27,63 @@ def _context(raw: dict[str, Any], permission: str) -> tuple[str, str]:
     return raw["participant_id"], play["instance_id"]
 
 
-def _members(raw: list[dict[str, Any]]) -> tuple[set[str], dict[str, str]]:
+def _members(raw: list[dict[str, Any]]) -> MemberSnapshot:
+    """One membership snapshot; names casefold exactly as Theater resolves them."""
     ids: set[str] = set()
-    names: dict[str, str] = {}
+    aliases: dict[str, str | None] = {}
+    roster: list[tuple[str, str]] = []
     for member in raw:
+        if not isinstance(member, dict):
+            continue  # a malformed entry resolves nothing; it never breaks the rest
         identifier = member.get("participant_id")
-        if isinstance(identifier, str):
-            ids.add(identifier)
-            name = member.get("name")
-            if isinstance(name, str) and name:
-                names[name] = identifier
-    return ids, names
+        if not isinstance(identifier, str):
+            continue
+        ids.add(identifier)
+        name = member.get("name")
+        if isinstance(name, str) and name:
+            roster.append((name, identifier))
+            folded = name.casefold()
+            if folded in aliases and aliases[folded] != identifier:
+                aliases[folded] = None  # a shared spelling can never pick one member
+            else:
+                aliases[folded] = identifier
+    return ids, aliases, roster
 
 
-def _assignee(value: str, members: tuple[set[str], dict[str, str]]) -> str:
-    ids, names = members
+def _known_members(roster: list[tuple[str, str]]) -> str:
+    """Deterministic bounded guidance so a refusal can name the real choices."""
+    shown = sorted(roster)[:MAX_SUGGESTIONS]
+    hint = ", ".join(
+        f"{name[:MAX_SUGGESTION_CHARS]} ({identifier[:MAX_SUGGESTION_CHARS]})"
+        for name, identifier in shown
+    )
+    if not hint:
+        return ""
+    suffix = f"; known members: {hint}"
+    if len(roster) > MAX_SUGGESTIONS:
+        suffix += f" and {len(roster) - MAX_SUGGESTIONS} more"
+    return suffix
+
+
+def _assignee(value: str, members: MemberSnapshot) -> str:
+    ids, aliases, roster = members
     if value in ids:
         return value
-    if value in names:
-        return names[value]
-    raise BeadsError("assignee must be a live member ID or name in this play")
+    folded = value.casefold()
+    if folded in aliases:
+        member = aliases[folded]
+        if member is None:
+            raise BeadsError(
+                f"assignee name {value!r} is shared by several live members "
+                f"case-insensitively; use an exact member ID{_known_members(roster)}"
+            )
+        return member
+    raise BeadsError(
+        f"assignee must be a live member ID or name in this play{_known_members(roster)}"
+    )
 
 
-def _assignment(
-    row: dict[str, Any], value: str, members: tuple[set[str], dict[str, str]]
-) -> tuple[str, bool]:
+def _assignment(row: dict[str, Any], value: str, members: MemberSnapshot) -> tuple[str, bool]:
     assigned = _assignee(value, members) if value else ""
     force = row.get("status") == "in_progress" and row.get("assignee") not in (
         None,
