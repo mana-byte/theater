@@ -11,8 +11,10 @@ from tests.support.presence import FakePresence
 from theater import paths
 from theater.client import DaemonClient
 from theater.constants.response_contract import CONTRACT_PRESET_NAMES
+from theater.daemon.response_contracts.contract import StrictContract
 from theater.daemon.response_contracts.presets import PRESET_SCHEMAS
 from theater.daemon.server import Daemon
+from theater.harness.contracts.events import clip
 from theater.mcp.server import await_ceiling, build
 from theater.models import JobState
 
@@ -100,6 +102,35 @@ async def test_await_returns_a_native_structured_result(mcp_daemon, presence):
     entry = tool_payload(result)[0]
     assert entry["structured_status"] == "parsed"
     assert entry["structured_result"] == {"answer": 42}
+
+
+async def test_await_exposes_safe_failure_details_and_the_authoritative_target(
+    mcp_daemon, presence
+):
+    schema = {"type": "object", "properties": {"summary": {"type": "string", "maxLength": 1500}}}
+    answer = json.dumps({"summary": "SECRET" + "x" * 2500})
+    job = mcp_daemon.jobs.create(
+        handle="opaque-job",
+        caller_id="p1",
+        target_id="the-worker",
+        kind="send",
+        response_format=StrictContract("custom", json.dumps(schema)).envelope(),
+    )
+    mcp_daemon.jobs.finish(job.handle, state=JobState.DONE, result=clip(answer), raw_result=answer)
+
+    result = await build("p1", "vibe", "wait").call_tool(
+        "await_sessions", {"handles": [job.handle], "max_wait": 0}
+    )
+    entry = tool_payload(result)[0]
+
+    assert entry["target_id"] == "the-worker"
+    assert entry["structured_status"] == "unable_to_parse"
+    assert entry["structured_error"] == {
+        "event": "unsupported_route",
+        "reason": "schema",
+        "issues": [{"path": "/summary", "keyword": "maxLength", "limit": 1500, "actual": 2506}],
+    }
+    assert "SECRET" not in json.dumps(entry["structured_error"])
 
 
 async def test_bare_dict_tools_return_one_native_object_with_the_text_mirror(mcp_daemon):
