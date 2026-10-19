@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from theater.constants.daemon import TMUX_PROVIDER_IDENTITY_META_PREFIX
+from theater.constants.daemon import terminal_runtime_identity_meta_key
 from theater.daemon.events.publication import catalog_invalidated_event, terminal_binding_event
 from theater.daemon.operations import OperationOutcome, OperationService
 from theater.daemon.terminals.bindings import TerminalBindingService, TerminalIdentityMismatch
@@ -19,7 +19,21 @@ from theater.daemon.terminals.connections import (
 )
 from theater.daemon.terminals.recovery import ProviderReceiptError, ProviderReceiptReconciler
 from theater.daemon.terminals.registry import ProviderRegistry, provider_event
-from theater.models import Participant, TerminalBindingRecord, TheaterError, new_id, now
+from theater.daemon.terminals.runtime_identity import (
+    RuntimeIdentity,
+    RuntimeIdentityInvalid,
+    binding_identity_duty,
+    report_identity,
+    usable_runtime_identity,
+)
+from theater.models import (
+    Participant,
+    ProviderRecord,
+    TerminalBindingRecord,
+    TheaterError,
+    new_id,
+    now,
+)
 
 
 class ProviderReportInvalid(TheaterError):
@@ -60,7 +74,7 @@ class _ReportContext:
     ignored: tuple[str, ...]
     has_terminal_facts: bool
     inventory_verified: bool
-    tmux_server_identity: str | None
+    runtime_identity: RuntimeIdentity | None
     health_snapshot: str
     health_changes: bool
     timestamp: float
@@ -103,15 +117,15 @@ class TerminalProviderService:
         self._clock = clock
         self._startup_recovering = False
         self._presence_invalidated: Callable[..., None] | None = None
-        self._tmux_restart_finalizer: Callable[[Sequence[Participant]], None] | None = None
+        self._runtime_restart_finalizer: Callable[[Sequence[Participant], bool], None] | None = None
 
     def configure_presence_invalidation(self, callback: Callable[..., None]) -> None:
         self._presence_invalidated = callback
 
-    def configure_tmux_restart_finalizer(
-        self, callback: Callable[[Sequence[Participant]], None]
+    def configure_runtime_restart_finalizer(
+        self, callback: Callable[[Sequence[Participant], bool], None]
     ) -> None:
-        self._tmux_restart_finalizer = callback
+        self._runtime_restart_finalizer = callback
 
     def begin_startup_recovery(self) -> None:
         self._startup_recovering = True
@@ -198,8 +212,8 @@ class TerminalProviderService:
             )
         provider = self._store.providers.get(provider_id)
         assert provider is not None
-        tmux_server_identity = self._tmux_server_identity(
-            provider.kind,
+        runtime_identity = self._runtime_identity(
+            provider,
             facts,
             terminals,
             inventory_complete=inventory_verified,
@@ -221,7 +235,7 @@ class TerminalProviderService:
             ignored=ignored,
             has_terminal_facts=has_terminal_facts,
             inventory_verified=inventory_verified,
-            tmux_server_identity=tmux_server_identity,
+            runtime_identity=runtime_identity,
             health_snapshot=health_snapshot,
             health_changes=health_changes,
             timestamp=self._clock(),
@@ -268,11 +282,11 @@ class TerminalProviderService:
                     context.revision,
                     connection=unit.connection,
                 )
-            if context.inventory_verified and context.tmux_server_identity is not None:
-                self._reconcile_tmux_server_identity(
+            if context.inventory_verified and context.runtime_identity is not None:
+                self._reconcile_runtime_identity(
                     unit,
                     provider_id=context.provider_id,
-                    server_identity=context.tmux_server_identity,
+                    identity=context.runtime_identity,
                     timestamp=context.timestamp,
                 )
             restored, changed_bindings = (
@@ -400,8 +414,9 @@ class TerminalProviderService:
             "terminals": terminals,
             "complete": result["complete"],
         }
-        if "tmux_server_identity" in result:
-            report_facts["tmux_server_identity"] = result["tmux_server_identity"]
+        for key in ("runtime_identity", "tmux_server_identity"):
+            if key in result:
+                report_facts[key] = result[key]
         self.report(
             provider_id,
             generation,
@@ -547,38 +562,52 @@ class TerminalProviderService:
         except ProviderReceiptError as exc:
             raise ProviderReportInvalid(str(exc)) from exc
 
-    def _reconcile_tmux_server_identity(
+    def _reconcile_runtime_identity(
         self,
         unit,
         *,
         provider_id: str,
-        server_identity: str,
+        identity: RuntimeIdentity,
         timestamp: float,
     ) -> None:
-        meta_key = f"{TMUX_PROVIDER_IDENTITY_META_PREFIX}{provider_id}"
-        previous_identity = self._store.get_meta(meta_key, connection=unit.connection)
-        affected = self.bindings.participants_on_other_tmux_server(
+        provider = self._store.providers.get(provider_id, connection=unit.connection)
+        assert provider is not None
+        affected = self.bindings.participants_on_other_runtime(
             provider_id,
-            server_identity,
+            identity.value,
+            provider.kind,
             connection=unit.connection,
         )
-        if previous_identity is None and not affected:
-            self._store.set_meta(meta_key, server_identity, connection=unit.connection)
-            return
-        if previous_identity == server_identity and not affected:
-            return
-        self._store.record_tmux_server_restart(
-            provider_id=provider_id,
-            server_identity=server_identity,
-            affected_ids=[participant.id for participant in affected],
-            newly_owned_ids=[],
-            incident=new_id(),
-            terminated_at=timestamp,
-            unit=unit,
-        )
-        if affected and self._tmux_restart_finalizer is not None:
-            callback = self._tmux_restart_finalizer
-            unit.after_commit(lambda: callback(affected))
+        for legacy in (False, True):
+            if legacy and not (identity.legacy or identity.dual):
+                continue
+            if not legacy and identity.legacy:
+                continue
+            participants = tuple(
+                participant for participant, evidence in affected if evidence.legacy is legacy
+            )
+            meta_key = terminal_runtime_identity_meta_key(provider_id, legacy=legacy)
+            previous = self._store.get_meta(meta_key, connection=unit.connection)
+            changed_runtime = usable_runtime_identity(previous) not in (None, identity.value)
+            if participants or changed_runtime:
+                self._store.record_terminal_runtime_restart(
+                    provider_id=provider_id,
+                    runtime_identity=identity.value,
+                    legacy=legacy,
+                    affected_ids=[participant.id for participant in participants],
+                    incident=new_id(),
+                    terminated_at=timestamp,
+                    unit=unit,
+                )
+                if participants and self._runtime_restart_finalizer is not None:
+                    callback = self._runtime_restart_finalizer
+                    unit.after_commit(
+                        lambda group=participants, provenance=legacy, notify=callback: notify(
+                            group, provenance
+                        )
+                    )
+            elif previous != identity.value:
+                self._store.set_meta(meta_key, identity.value, connection=unit.connection)
 
     async def aclose(self) -> None:
         await self.connections.aclose()
@@ -684,43 +713,43 @@ class TerminalProviderService:
             raise ProviderReportInvalid("provider report facts.receipts must be a bounded array")
         return raw
 
-    @staticmethod
-    def _tmux_server_identity(
-        provider_kind: str,
+    def _runtime_identity(
+        self,
+        provider: ProviderRecord,
         facts: Mapping[str, object] | None,
         terminals: Sequence[Mapping[str, object]],
         *,
         inventory_complete: bool,
-    ) -> str | None:
-        has_identity = facts is not None and "tmux_server_identity" in facts
-        raw_identity = None if facts is None else facts.get("tmux_server_identity")
-        if provider_kind != "tmux":
-            if has_identity:
-                raise ProviderReportInvalid(
-                    "only tmux providers may report facts.tmux_server_identity"
-                )
-            return None
-        if inventory_complete and not has_identity:
-            raise ProviderReportInvalid(
-                "a complete tmux provider report requires facts.tmux_server_identity"
+    ) -> RuntimeIdentity | None:
+        needs_duty = inventory_complete or (facts is not None and "runtime_identity" in facts)
+        if not needs_duty:
+            needs_duty = any(
+                isinstance(occupant := terminal.get("occupant"), Mapping)
+                and "runtime_identity" in occupant
+                for terminal in terminals
             )
-        if not has_identity:
-            return None
-        if not isinstance(raw_identity, str) or not raw_identity or len(raw_identity) > 4096:
-            raise ProviderReportInvalid(
-                "provider report facts.tmux_server_identity must be a non-empty bounded string"
+        retained_generic = retained_legacy = False
+        if needs_duty:
+            bindings = self.bindings.list(provider.provider_id)
+            binding_generic, binding_legacy = binding_identity_duty(
+                (binding.occupant_evidence for binding in bindings), provider.kind
             )
-        for terminal in terminals:
-            occupant = terminal.get("occupant")
-            if (
-                not isinstance(occupant, Mapping)
-                or occupant.get("provider_kind") != "tmux"
-                or occupant.get("tmux_server_identity") != raw_identity
-            ):
-                raise ProviderReportInvalid(
-                    "tmux terminal occupant evidence does not match the reported server identity"
-                )
-        return raw_identity
+            generic_key = terminal_runtime_identity_meta_key(provider.provider_id, legacy=False)
+            legacy_key = terminal_runtime_identity_meta_key(provider.provider_id, legacy=True)
+            retained_generic = self._store.get_meta(generic_key) is not None or binding_generic
+            retained_legacy = self._store.get_meta(legacy_key) is not None or binding_legacy
+        try:
+            return report_identity(
+                provider.kind,
+                provider.capabilities,
+                facts,
+                terminals,
+                complete=inventory_complete,
+                retained_generic=retained_generic,
+                retained_legacy=retained_legacy,
+            )
+        except RuntimeIdentityInvalid as exc:
+            raise ProviderReportInvalid(str(exc)) from exc
 
     @staticmethod
     def _result_error(result: Mapping[str, object], fallback: str) -> dict[str, object]:

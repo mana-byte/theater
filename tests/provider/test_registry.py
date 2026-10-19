@@ -13,6 +13,7 @@ from theater.daemon.operations import OperationService
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.control_operations import ControlOperationRepository
 from theater.daemon.persistence.repositories.journal import JournalRepository
+from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.persistence.repositories.providers import ProviderRepository
@@ -35,6 +36,7 @@ class _Store:
         self.terminal_bindings = TerminalBindingRepository(self.db)
         self.operations = OperationRepository(self.db)
         self._controls = ControlOperationRepository(self.db)
+        self._meta = MetadataRepository(self.db)
         self.journal = JournalRepository(self.db)
 
     def write_unit(self):
@@ -45,6 +47,9 @@ class _Store:
 
     def get_control_operation(self, operation_id: str, *, connection=None):
         return self._controls.get(operation_id, connection=connection)
+
+    def get_meta(self, key: str, *, connection=None):
+        return self._meta.get(key, connection=connection)
 
     def close(self) -> None:
         self.db.close()

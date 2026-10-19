@@ -10,7 +10,10 @@ import pytest
 from tests.support.builders import make_bus_row, make_job, make_participant, make_touch
 from tests.support.gc_sweep import count_rows, retention
 from theater.config import RetentionSection
-from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
+from theater.constants.daemon import (
+    TERMINAL_RUNTIME_RESTART_TERMINATION_REASON,
+    TMUX_RESTART_TERMINATION_REASON,
+)
 from theater.daemon.gc import SweepResult, sweep
 from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.schema import bus, global_scratchpad, jobs, participants, touch
@@ -257,9 +260,14 @@ async def test_active_workspace_usage_keeps_dead_participant_and_workspace(store
     assert store.workspaces.get(workspace.workspace_id) == workspace
 
 
-async def test_tmux_restart_participant_waits_for_jobs_retention_after_termination(store):
+@pytest.mark.parametrize(
+    "reason", [TMUX_RESTART_TERMINATION_REASON, TERMINAL_RUNTIME_RESTART_TERMINATION_REASON]
+)
+async def test_runtime_restart_participant_waits_for_jobs_retention_after_termination(
+    store, reason: str
+):
     participant = make_participant(store, pid="restart")
-    participant.termination_reason = TMUX_RESTART_TERMINATION_REASON
+    participant.termination_reason = reason
     participant.termination_incident = "incident-123"
     participant.terminated_at = now()
     store.upsert_participant(participant)

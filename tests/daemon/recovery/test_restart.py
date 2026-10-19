@@ -10,6 +10,12 @@ import pytest
 
 from tests.support.workspace_services import make_repository
 from theater.client import DaemonClient
+from theater.constants.daemon import (
+    TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE,
+    TERMINAL_RUNTIME_RESTART_TERMINATION_REASON,
+    TMUX_RESTART_JOB_ERROR_CODE,
+    TMUX_RESTART_TERMINATION_REASON,
+)
 from theater.constants.observation import OBSERVATION_FAILURE_GRACE
 from theater.daemon.observation.service import Observer
 from theater.daemon.server import Daemon
@@ -197,11 +203,10 @@ async def test_restart_identity_loss_replay_respects_grace(
         await d2.aclose()
 
 
-async def test_tmux_restart_releases_the_named_worktree_usage(
-    theater_home, terminal_provider, tmp_path
+@pytest.mark.parametrize("legacy", [True, False])
+async def test_runtime_restart_finalizes_job_credentials_and_workspace(
+    theater_home, terminal_provider, tmp_path, legacy: bool
 ):
-    """tmux_restart marks a holder dead and must release its durable workspace usage,
-    or the named worktree stays owned by the dead and blocks recovery."""
     from theater.daemon.worktrees.service import WorkspaceRequest
     from theater.models import WorkspaceUsageHolderKind
 
@@ -216,17 +221,37 @@ async def test_tmux_restart_releases_the_named_worktree_usage(
             harness="vibe",
             cwd=reservation.workspace.path,
             workspace_id=reservation.workspace.workspace_id,
+            name="runtime-holder",
         )
         usage = d.workspace_service.handoff_usage(
             reservation.usage.usage_id, participant_id=participant.id
         )
         assert usage.released_at is None
+        d.store.set_receipt_token(participant.id, "receipt-token")
+        d.jobs.create(
+            handle="runtime-job",
+            caller_id="operator",
+            target_id=participant.id,
+            kind="send",
+        )
 
-        d._finalize_tmux_restarted([participant])
+        d._finalize_terminal_runtime_restarted([participant], legacy=legacy)
 
         released = d.store.workspaces.get_usage(usage.usage_id)
         assert released is not None and released.released_at is not None
-        assert released.release_reason == "tmux_restart"
+        assert released.release_reason == (
+            TMUX_RESTART_TERMINATION_REASON
+            if legacy
+            else TERMINAL_RUNTIME_RESTART_TERMINATION_REASON
+        )
+        assert d.store.get_receipt_token(participant.id) is None
+        assert not any(pid == participant.id for pid, _name in d.store.live_participant_names())
+        job = d.store.get_job("runtime-job")
+        assert job is not None
+        assert job.state == "crashed"
+        assert job.error_code == (
+            TMUX_RESTART_JOB_ERROR_CODE if legacy else TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE
+        )
         assert [
             u
             for u in d.store.workspaces.active_usages(reservation.workspace.workspace_id)

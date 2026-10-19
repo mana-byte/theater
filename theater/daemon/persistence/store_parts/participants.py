@@ -11,10 +11,12 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from theater.constants.daemon import (
     BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
     BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+    BUS_KIND_TERMINAL_RUNTIME_RESTART,
     BUS_KIND_TMUX_SERVER_RESTART,
-    TMUX_PROVIDER_IDENTITY_META_PREFIX,
-    TMUX_SERVER_IDENTITY_META_KEY,
-    TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT,
+    TERMINAL_RUNTIME_RESTART_AFFECTED_IDS_LIMIT,
+    TERMINAL_RUNTIME_RESTART_TERMINATION_REASON,
+    TMUX_RESTART_TERMINATION_REASON,
+    terminal_runtime_identity_meta_key,
 )
 from theater.daemon.artifacts import OwnedArtifact
 from theater.daemon.events.publication import next_revision, participant_event
@@ -179,19 +181,44 @@ class ParticipantStore(StoreHost):
         provider_id: str | None = None,
         unit: SQLiteWriteUnit | None = None,
     ) -> int:
+        return self.record_terminal_runtime_restart(
+            provider_id=provider_id,
+            runtime_identity=server_identity,
+            legacy=True,
+            affected_ids=affected_ids,
+            newly_owned_ids=newly_owned_ids,
+            incident=incident,
+            terminated_at=terminated_at,
+            unit=unit,
+        )
+
+    def record_terminal_runtime_restart(
+        self,
+        *,
+        provider_id: str | None,
+        runtime_identity: str,
+        legacy: bool,
+        affected_ids: Sequence[str],
+        incident: str,
+        terminated_at: float,
+        newly_owned_ids: Sequence[str] = (),
+        unit: SQLiteWriteUnit | None = None,
+    ) -> int:
         payload = {
             "incident": incident,
             "affected_count": len(affected_ids),
-            "affected_ids": list(affected_ids[:TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT]),
+            "affected_ids": list(affected_ids[:TERMINAL_RUNTIME_RESTART_AFFECTED_IDS_LIMIT]),
         }
         if provider_id is not None:
             payload["provider_id"] = provider_id
         listeners = tuple(self._bus_listeners)
         timestamp = now()
-        meta_key = (
-            TMUX_SERVER_IDENTITY_META_KEY
-            if provider_id is None
-            else f"{TMUX_PROVIDER_IDENTITY_META_PREFIX}{provider_id}"
+        meta_key = terminal_runtime_identity_meta_key(provider_id, legacy=legacy)
+        event_kind = BUS_KIND_TMUX_SERVER_RESTART if legacy else BUS_KIND_TERMINAL_RUNTIME_RESTART
+        termination_reason = (
+            TMUX_RESTART_TERMINATION_REASON
+            if legacy
+            else TERMINAL_RUNTIME_RESTART_TERMINATION_REASON
         )
 
         def record(active_unit: SQLiteWriteUnit) -> int:
@@ -203,24 +230,26 @@ class ParticipantStore(StoreHost):
                 is not None
                 and participant.status is not Status.DEAD
             ]
-            self._participants.mark_tmux_restarted(
+            self._participants.mark_runtime_restarted(
                 affected_ids,
                 incident=incident,
                 terminated_at=terminated_at,
+                reason=termination_reason,
                 connection=conn,
             )
-            self._participants.stamp_live_tmux_server_identity(
-                server_identity,
-                participant_ids=newly_owned_ids,
-                connection=conn,
-            )
+            if legacy:
+                self._participants.stamp_live_tmux_server_identity(
+                    runtime_identity,
+                    participant_ids=newly_owned_ids,
+                    connection=conn,
+                )
             self._meta.set(
                 meta_key,
-                server_identity,
+                runtime_identity,
                 connection=conn,
             )
             row_id = self._bus.append(
-                BUS_KIND_TMUX_SERVER_RESTART,
+                event_kind,
                 payload=payload,
                 timestamp=timestamp,
                 connection=conn,
@@ -251,7 +280,7 @@ class ParticipantStore(StoreHost):
                     timestamp,
                     None,
                     None,
-                    BUS_KIND_TMUX_SERVER_RESTART,
+                    event_kind,
                     json.dumps(payload),
                 )
                 active_unit.after_commit(lambda: self._notify_bus_listeners([row], listeners))

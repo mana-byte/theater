@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 
 from jsonschema.exceptions import ValidationError
 
+from theater.daemon.terminals.runtime_identity import RuntimeIdentity, usable_binding_identity
 from theater.frontend.schemas import validator_for
 from theater.models import Participant, Status, TerminalBindingRecord, TheaterError
 
@@ -36,28 +37,25 @@ class TerminalBindingService:
     def list(self, provider_id: str) -> tuple[TerminalBindingRecord, ...]:
         return self._store.terminal_bindings.list_for_provider(provider_id)
 
-    def participants_on_other_tmux_server(
+    def participants_on_other_runtime(
         self,
         provider_id: str,
-        server_identity: str,
+        runtime_identity: str,
+        provider_kind: str,
         *,
         connection,
-    ) -> tuple[Participant, ...]:
-        """Return live owners whose durable binding proves an older tmux epoch."""
-        affected: list[Participant] = []
+    ) -> tuple[tuple[Participant, RuntimeIdentity], ...]:
+        """Return live owners whose durable binding proves another runtime."""
+        affected: list[tuple[Participant, RuntimeIdentity]] = []
         for binding in self._store.terminal_bindings.list_for_provider(
             provider_id, connection=connection
         ):
-            evidence = binding.occupant_evidence
-            if (
-                evidence.get("provider_kind") != "tmux"
-                or not isinstance(evidence.get("tmux_server_identity"), str)
-                or evidence["tmux_server_identity"] == server_identity
-            ):
+            evidence = usable_binding_identity(binding.occupant_evidence, provider_kind)
+            if evidence is None or evidence.value == runtime_identity:
                 continue
             participant = self._store.get_participant(binding.participant_id, connection=connection)
             if participant is not None and participant.status is not Status.DEAD:
-                affected.append(participant)
+                affected.append((participant, evidence))
         return tuple(affected)
 
     def reconcile(
