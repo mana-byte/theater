@@ -31,7 +31,6 @@ BUS_KIND_TMUX_SERVER_RESTART = "daemon.tmux_server_restart"
 
 #: Bound the participant ids carried by one runtime restart diagnostic.
 TERMINAL_RUNTIME_RESTART_AFFECTED_IDS_LIMIT = 100
-TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT = TERMINAL_RUNTIME_RESTART_AFFECTED_IDS_LIMIT
 
 #: Participant termination reason for a confirmed tmux server replacement.
 TMUX_RESTART_TERMINATION_REASON = "tmux_restart"

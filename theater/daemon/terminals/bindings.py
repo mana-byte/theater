@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 
 from jsonschema.exceptions import ValidationError
 
-from theater.daemon.terminals.runtime_identity import RuntimeIdentity, stored_identity
+from theater.daemon.terminals.runtime_identity import RuntimeIdentity, usable_binding_identity
 from theater.frontend.schemas import validator_for
 from theater.models import Participant, Status, TerminalBindingRecord, TheaterError
 
@@ -50,7 +50,7 @@ class TerminalBindingService:
         for binding in self._store.terminal_bindings.list_for_provider(
             provider_id, connection=connection
         ):
-            evidence = stored_identity(binding.occupant_evidence, provider_kind)
+            evidence = usable_binding_identity(binding.occupant_evidence, provider_kind)
             if evidence is None or evidence.value == runtime_identity:
                 continue
             participant = self._store.get_participant(binding.participant_id, connection=connection)

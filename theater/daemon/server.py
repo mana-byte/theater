@@ -300,9 +300,6 @@ class Daemon:
                     error_code=error_code,
                 )
 
-    def _finalize_tmux_restarted(self, participants: Sequence[Participant]) -> None:
-        self._finalize_terminal_runtime_restarted(participants, legacy=True)
-
     def _state_route_for(self, participant_id: str, capability: RuntimeCapability):
         return self.controls.route_for(participant_id, capability)
 

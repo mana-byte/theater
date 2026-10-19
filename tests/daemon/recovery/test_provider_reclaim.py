@@ -92,11 +92,12 @@ def test_complete_tmux_report_atomically_retires_previous_server_bindings(
     service = provider_service(store)
     finalized: list[tuple[str, ...]] = []
 
-    def finalize(participants) -> None:
+    def finalize(participants, legacy: bool) -> None:
+        assert legacy
         finalized.append(tuple(participant.id for participant in participants))
         assert store.get_participant("participant-old").status is Status.DEAD
 
-    service.configure_tmux_restart_finalizer(finalize)
+    service.configure_runtime_restart_finalizer(finalize)
     generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
     same_terminal = tmux_terminal_identity(
         generation,

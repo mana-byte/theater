@@ -10,15 +10,18 @@ from tests.support.provider_recovery import provider_service
 from theater.constants.daemon import (
     BUS_KIND_TERMINAL_RUNTIME_RESTART,
     BUS_KIND_TMUX_SERVER_RESTART,
+    TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE,
     TERMINAL_RUNTIME_RESTART_TERMINATION_REASON,
     TMUX_RESTART_TERMINATION_REASON,
     terminal_runtime_identity_meta_key,
 )
+from theater.daemon.persistence.repositories.job_repairs import RepairAttempt, RepairState
 from theater.daemon.persistence.store import Store
 from theater.daemon.plugins.credentials import credential_verifier
+from theater.daemon.response_contracts import resolve_response_format
 from theater.daemon.terminals import TerminalProviderService
 from theater.daemon.terminals.service import ProviderReportInvalid, StaleReportRevision
-from theater.models import Participant, Status, TerminalBindingRecord
+from theater.models import JobState, Participant, Status, TerminalBindingRecord, now
 
 
 def _register(
@@ -367,3 +370,148 @@ async def test_callback_inventory_forwards_declared_identity(
         )
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "declared", "fact_key", "event_kind"),
+    [
+        ("tmux", False, "tmux_server_identity", BUS_KIND_TMUX_SERVER_RESTART),
+        ("synthetic", True, "runtime_identity", BUS_KIND_TERMINAL_RUNTIME_RESTART),
+    ],
+)
+def test_identity_change_without_bindings_keeps_restart_event(
+    tmp_path: Path, kind: str, declared: bool, fact_key: str, event_kind: str
+) -> None:
+    store = Store(tmp_path / "empty-runtime-change.db")
+    try:
+        service = provider_service(store)
+        provider_id = _register(service, "empty", kind=kind, declared=declared)
+        generation, _ = service.connections.acquire_callback(provider_id, "credential")
+        for revision, value in enumerate(("runtime-a", "runtime-a", "runtime-b"), start=1):
+            service.report(
+                provider_id,
+                generation,
+                revision,
+                {"terminals": [], "complete": True, fact_key: value},
+            )
+            count = len([row for row in store.bus_tail() if row["kind"] == event_kind])
+            assert count == (1 if revision == 3 else 0)
+        meta_key = terminal_runtime_identity_meta_key(provider_id, legacy=kind == "tmux")
+        assert store.get_meta(meta_key) == "runtime-b"
+        store.set_meta(meta_key, "")
+        service.report(
+            provider_id,
+            generation,
+            4,
+            {"terminals": [], "complete": True, fact_key: "runtime-c"},
+        )
+        assert len([row for row in store.bus_tail() if row["kind"] == event_kind]) == 1
+        assert store.get_meta(meta_key) == "runtime-c"
+    finally:
+        store.close()
+
+
+def test_presence_only_report_does_not_scan_identity_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = Store(tmp_path / "presence-fast-path.db")
+    try:
+        service = provider_service(store)
+        provider_id = _register(service, "presence")
+        generation, _ = service.connections.acquire_callback(provider_id, "credential")
+
+        def unexpected(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("presence-only report scanned identity history")
+
+        monkeypatch.setattr(store.terminal_bindings, "list_for_provider", unexpected)
+        monkeypatch.setattr(store, "get_meta", unexpected)
+        service.report(provider_id, generation, 1, {"presence_invalidated": True})
+    finally:
+        store.close()
+
+
+def test_invalid_stored_identity_retains_duty_without_authorizing_retirement(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "invalid-stored-identity.db")
+    try:
+        service = provider_service(store)
+        provider_id = _register(service, "invalid")
+        generation, _ = service.connections.acquire_callback(provider_id, "credential")
+        malformed = _terminal(provider_id, generation, "old", "")
+        _bind(store, malformed)
+        service.registry.update(
+            client_id="operator",
+            idempotency_key="drop-identity-capability",
+            params={"provider_id": provider_id, "capabilities": ["terminal-provider.v1"]},
+        )
+        service.report(provider_id, generation, 1, {"presence_invalidated": True})
+        with pytest.raises(ProviderReportInvalid, match=r"requires facts\.runtime_identity"):
+            _report(service, provider_id, generation, 2, None, [])
+        _report(service, provider_id, generation, 2, "runtime-b", [])
+        assert store.get_participant("old").status is not Status.DEAD
+        assert not [
+            row for row in store.bus_tail() if row["kind"] == BUS_KIND_TERMINAL_RUNTIME_RESTART
+        ]
+
+        wrong_kind = _register(service, "wrong-kind")
+        wrong_generation, _ = service.connections.acquire_callback(wrong_kind, "credential")
+        wrong = _terminal(wrong_kind, wrong_generation, "wrong", "runtime-a")
+        wrong["occupant"]["tmux_server_identity"] = "runtime-a"
+        _bind(store, wrong)
+        service.report(wrong_kind, wrong_generation, 1, {"presence_invalidated": True})
+        with pytest.raises(ProviderReportInvalid, match=r"only tmux|requires facts"):
+            _report(service, wrong_kind, wrong_generation, 2, "runtime-b", [])
+        assert store.get_participant("wrong").status is not Status.DEAD
+    finally:
+        store.close()
+
+
+async def test_generic_restart_settles_exact_running_jobs_without_lifting_repair_fence(
+    daemon,
+) -> None:
+    store = daemon.store
+    service = daemon.terminal_service
+    provider_id = _register(service, "job-settlement")
+    generation, _ = service.connections.acquire_callback(provider_id, "credential")
+    old = _terminal(provider_id, generation, "old", "runtime-a")
+    _bind(store, old)
+    store.upsert_participant(Participant(id="unaffected", harness="codex"))
+    strict_format = resolve_response_format(store, {"$theater": "delegate"}, creator_id="caller")
+    strict = daemon.jobs.create(
+        handle="old#strict",
+        caller_id="caller",
+        target_id="old",
+        kind="send",
+        response_format=strict_format,
+    )
+    plain = daemon.jobs.create(handle="old#plain", caller_id="caller", target_id="old", kind="send")
+    untouched = daemon.jobs.create(
+        handle="unaffected#1", caller_id="caller", target_id="unaffected", kind="send"
+    )
+    attempt = RepairAttempt(
+        attempt_id="repair-old",
+        job_handle=strict.handle,
+        participant_id="old",
+        attempt=1,
+        state=RepairState.AWAITING,
+        native_turn_id="exact-repair-turn",
+        turn_proven=True,
+        created_at=now(),
+        updated_at=now(),
+    )
+    assert store.create_repair_attempt(attempt)
+    assert store.repair_fence_active("old")
+
+    _report(service, provider_id, generation, 1, "runtime-a", [old])
+    _report(service, provider_id, generation, 2, "runtime-b", [])
+
+    for handle in (strict.handle, plain.handle):
+        settled = store.get_job(handle)
+        assert settled is not None
+        assert settled.state == JobState.CRASHED
+        assert settled.error_code == TERMINAL_RUNTIME_RESTART_JOB_ERROR_CODE
+        assert settled.finished_at is not None
+    assert store.get_job(untouched.handle).state == JobState.RUNNING
+    assert store.repair_fence_active("old")
+    assert store.repair_attempts_for_job(strict.handle)[0].native_turn_id == "exact-repair-turn"

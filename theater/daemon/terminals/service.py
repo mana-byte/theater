@@ -24,6 +24,7 @@ from theater.daemon.terminals.runtime_identity import (
     RuntimeIdentityInvalid,
     binding_identity_duty,
     report_identity,
+    usable_runtime_identity,
 )
 from theater.models import (
     Participant,
@@ -125,14 +126,6 @@ class TerminalProviderService:
         self, callback: Callable[[Sequence[Participant], bool], None]
     ) -> None:
         self._runtime_restart_finalizer = callback
-
-    def configure_tmux_restart_finalizer(
-        self, callback: Callable[[Sequence[Participant]], None]
-    ) -> None:
-        """Keep the historical callback shape for legacy provider clients."""
-        self.configure_runtime_restart_finalizer(
-            lambda participants, legacy: callback(participants) if legacy else None
-        )
 
     def begin_startup_recovery(self) -> None:
         self._startup_recovering = True
@@ -586,34 +579,34 @@ class TerminalProviderService:
             connection=unit.connection,
         )
         for legacy in (False, True):
-            participants = tuple(
-                participant for participant, evidence in affected if evidence.legacy is legacy
-            )
-            if not participants:
-                continue
-            self._store.record_terminal_runtime_restart(
-                provider_id=provider_id,
-                runtime_identity=identity.value,
-                legacy=legacy,
-                affected_ids=[participant.id for participant in participants],
-                incident=new_id(),
-                terminated_at=timestamp,
-                unit=unit,
-            )
-            if self._runtime_restart_finalizer is not None:
-                callback = self._runtime_restart_finalizer
-                unit.after_commit(
-                    lambda group=participants, provenance=legacy, notify=callback: notify(
-                        group, provenance
-                    )
-                )
-        for legacy in (False, True):
             if legacy and not (identity.legacy or identity.dual):
                 continue
             if not legacy and identity.legacy:
                 continue
+            participants = tuple(
+                participant for participant, evidence in affected if evidence.legacy is legacy
+            )
             meta_key = terminal_runtime_identity_meta_key(provider_id, legacy=legacy)
-            if self._store.get_meta(meta_key, connection=unit.connection) != identity.value:
+            previous = self._store.get_meta(meta_key, connection=unit.connection)
+            changed_runtime = usable_runtime_identity(previous) not in (None, identity.value)
+            if participants or changed_runtime:
+                self._store.record_terminal_runtime_restart(
+                    provider_id=provider_id,
+                    runtime_identity=identity.value,
+                    legacy=legacy,
+                    affected_ids=[participant.id for participant in participants],
+                    incident=new_id(),
+                    terminated_at=timestamp,
+                    unit=unit,
+                )
+                if participants and self._runtime_restart_finalizer is not None:
+                    callback = self._runtime_restart_finalizer
+                    unit.after_commit(
+                        lambda group=participants, provenance=legacy, notify=callback: notify(
+                            group, provenance
+                        )
+                    )
+            elif previous != identity.value:
                 self._store.set_meta(meta_key, identity.value, connection=unit.connection)
 
     async def aclose(self) -> None:
@@ -728,21 +721,32 @@ class TerminalProviderService:
         *,
         inventory_complete: bool,
     ) -> RuntimeIdentity | None:
-        bindings = self.bindings.list(provider.provider_id)
-        generic_key = terminal_runtime_identity_meta_key(provider.provider_id, legacy=False)
-        legacy_key = terminal_runtime_identity_meta_key(provider.provider_id, legacy=True)
-        try:
-            binding_generic, binding_legacy = binding_identity_duty(
-                (binding.occupant_evidence for binding in bindings), provider.kind
+        needs_duty = inventory_complete or (facts is not None and "runtime_identity" in facts)
+        if not needs_duty:
+            needs_duty = any(
+                isinstance(occupant := terminal.get("occupant"), Mapping)
+                and "runtime_identity" in occupant
+                for terminal in terminals
             )
+        retained_generic = retained_legacy = False
+        if needs_duty:
+            bindings = self.bindings.list(provider.provider_id)
+            binding_generic, binding_legacy = binding_identity_duty(
+                binding.occupant_evidence for binding in bindings
+            )
+            generic_key = terminal_runtime_identity_meta_key(provider.provider_id, legacy=False)
+            legacy_key = terminal_runtime_identity_meta_key(provider.provider_id, legacy=True)
+            retained_generic = self._store.get_meta(generic_key) is not None or binding_generic
+            retained_legacy = self._store.get_meta(legacy_key) is not None or binding_legacy
+        try:
             return report_identity(
                 provider.kind,
                 provider.capabilities,
                 facts,
                 terminals,
                 complete=inventory_complete,
-                retained_generic=self._store.get_meta(generic_key) is not None or binding_generic,
-                retained_legacy=self._store.get_meta(legacy_key) is not None or binding_legacy,
+                retained_generic=retained_generic,
+                retained_legacy=retained_legacy,
             )
         except RuntimeIdentityInvalid as exc:
             raise ProviderReportInvalid(str(exc)) from exc

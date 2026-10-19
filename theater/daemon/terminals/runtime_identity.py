@@ -23,9 +23,15 @@ class RuntimeIdentity:
 
 
 def _identity(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value or len(value) > _IDENTITY_MAX_CHARS:
+    usable = usable_runtime_identity(value)
+    if usable is None:
         raise RuntimeIdentityInvalid(f"{field} must be a non-empty bounded string")
-    return value
+    return usable
+
+
+def usable_runtime_identity(value: object) -> str | None:
+    """Only positive, bounded stored identity can prove a runtime change."""
+    return value if isinstance(value, str) and value and len(value) <= _IDENTITY_MAX_CHARS else None
 
 
 def stored_identity(evidence: Mapping[str, object], provider_kind: str) -> RuntimeIdentity | None:
@@ -51,18 +57,23 @@ def stored_identity(evidence: Mapping[str, object], provider_kind: str) -> Runti
     return None
 
 
-def binding_identity_duty(
-    evidence: Iterable[Mapping[str, object]], provider_kind: str
-) -> tuple[bool, bool]:
-    """Return retained generic and legacy duties from durable binding evidence."""
+def usable_binding_identity(
+    evidence: Mapping[str, object], provider_kind: str
+) -> RuntimeIdentity | None:
+    """Malformed historical evidence keeps its duty but cannot retire a participant."""
+    try:
+        return stored_identity(evidence, provider_kind)
+    except RuntimeIdentityInvalid:
+        return None
+
+
+def binding_identity_duty(evidence: Iterable[Mapping[str, object]]) -> tuple[bool, bool]:
+    """Key presence retains the duty even when historical values are unusable."""
     generic = False
     legacy = False
     for occupant in evidence:
-        identity = stored_identity(occupant, provider_kind)
-        if identity is None:
-            continue
-        generic |= not identity.legacy
-        legacy |= identity.legacy or identity.dual
+        generic |= "runtime_identity" in occupant
+        legacy |= "tmux_server_identity" in occupant
     return generic, legacy
 
 

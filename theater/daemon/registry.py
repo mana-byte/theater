@@ -577,9 +577,5 @@ class Registry:
             self._names.pop(p.id, None)
             self.store.delete_participant_name(p.id)
 
-    def finalize_tmux_restarted(self, participants: builtins.list[Participant]) -> None:
-        """Historical entry point for callers handling legacy tmux incidents."""
-        self.finalize_runtime_restarted(participants)
-
     def touch(self, pid: str) -> None:
         self.store.touch(pid)
