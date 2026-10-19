@@ -150,6 +150,13 @@ class TheaterPluginClient:
     async def get_job(self, handle: str) -> dict[str, Any]:
         return _dict_result(await self._call("jobs.get", handle=handle), "jobs.get")
 
+    async def get_job_facts(self, handles: Sequence[str]) -> list[dict[str, Any]]:
+        """Selected retained facts in input order; missing handles have ``available: false``.
+
+        A ``play`` issuance fact appears only with PLAYS_READ and a current plugin/play binding.
+        """
+        return _list_result(await self._call("jobs.facts", handles=list(handles)), "jobs.facts")
+
     async def await_jobs(
         self,
         *,

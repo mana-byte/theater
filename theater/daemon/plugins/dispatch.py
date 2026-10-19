@@ -346,7 +346,7 @@ async def _sessions_kill(daemon, params: dict[str, Any], actor_id: str) -> Any:
 
 
 def _operations() -> Mapping[str, PluginOperation]:
-    from theater.daemon.plugins import play_context
+    from theater.daemon.plugins import job_facts, play_context
 
     entries = {
         "plays.context": PluginOperation(
@@ -406,6 +406,12 @@ def _operations() -> Mapping[str, PluginOperation]:
             PluginCapability.JOBS_READ,
             _jobs_get,
             "Read one job by handle.",
+        ),
+        "jobs.facts": PluginOperation(
+            PluginCapability.JOBS_READ,
+            job_facts.facts,
+            "Read bounded retained facts for up to 50 exact job handles.",
+            True,
         ),
         "jobs.read": PluginOperation(
             PluginCapability.JOBS_READ,
