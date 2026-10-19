@@ -418,6 +418,20 @@ def test_real_beads_board_workflow_and_retention(tmp_path: Path, monkeypatch) ->
             {"outcome": "done", "status": "succeeded"}
         ]
 
+        # a stale status set on the open row by raw bd must not survive an untyped close
+        stale = await adapter.create_task("Stale status")
+        Board(tmp_path, "instance-one", binary).command(
+            "update",
+            stale["id"],
+            "--set-metadata",
+            "theater_outcome_status=succeeded",
+            actor="author",
+        )
+        untyped = await adapter.close_task(stale["id"], "closed with no type")
+        assert untyped["outcome_status"] is None
+        raw_stale = Board(tmp_path, "instance-one", binary).rows()[stale["id"]]
+        assert raw_stale["metadata"]["theater_outcome_status"] is None
+
         candidate = await adapter.create_task("Claimable")
 
         async def claim_as(participant_id):

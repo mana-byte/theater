@@ -468,9 +468,13 @@ class BeadsService:
             board.require_id(task_id, rows)
             if rows[task_id].get("status") == "closed":
                 raise BeadsError("task is already closed")
-            metadata = {OUTCOME_KEY: outcome, links.CLOSED_AT_KEY: time.time()}
-            if outcome_status is not None:
-                metadata[OUTCOME_STATUS_KEY] = outcome_status
+            # The status key is always written, null when unknown: bd's merge would
+            # otherwise keep a stale status from the open row, and this close is atomic.
+            metadata = {
+                OUTCOME_KEY: outcome,
+                OUTCOME_STATUS_KEY: outcome_status,
+                links.CLOSED_AT_KEY: time.time(),
+            }
             board.command(
                 "update",
                 task_id,

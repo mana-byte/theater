@@ -59,7 +59,7 @@ async def test_close_task_refuses_unknown_status_values(
     assert row["metadata"] == {}
 
 
-async def test_close_task_keeps_unknown_status_absent(
+async def test_close_task_writes_an_unknown_status_as_null(
     adapter: BeadsService, tmp_path: Path
 ) -> None:
     task_id = await make_task(adapter)
@@ -67,11 +67,46 @@ async def test_close_task_keeps_unknown_status_absent(
     assert omitted["outcome_status"] is None
     assert omitted["outcome_history"] == []
     assert omitted["outcome_status_history"] == []
-    assert "theater_outcome_status" not in raw_row(tmp_path, task_id)["metadata"]
+    assert raw_row(tmp_path, task_id)["metadata"]["theater_outcome_status"] is None
     await adapter.update_task(task_id, status="open")
     explicit = await adapter.close_task(task_id, "still unknown", None)
     assert explicit["outcome_status"] is None
-    assert "theater_outcome_status" not in raw_row(tmp_path, task_id)["metadata"]
+    assert raw_row(tmp_path, task_id)["metadata"]["theater_outcome_status"] is None
+
+
+async def test_stale_status_on_an_open_row_never_survives_a_close(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    for stale in ("succeeded", "failed", "cancelled"):
+        task_id = await make_task(adapter, f"Stale {stale}")
+        edit_row(
+            tmp_path,
+            task_id,
+            lambda row, value=stale: row["metadata"].update({"theater_outcome_status": value}),
+        )
+        assert (await adapter.get_task(task_id))["outcome_status"] is None  # not closed
+        closed = await adapter.close_task(task_id, "closed with no type")
+        assert closed["outcome_status"] is None  # the stale value is not inherited
+        assert raw_row(tmp_path, task_id)["metadata"]["theater_outcome_status"] is None
+        await adapter.update_task(task_id, status="open")
+        detail = await adapter.get_task(task_id)
+        assert detail["outcome_status_history"] == [None]  # history keeps it unknown
+
+
+async def test_stale_failed_status_never_feeds_failed_prerequisites(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    parent = await make_task(adapter, "Watcher")
+    dep = await make_task(adapter, "Dep")
+    await adapter.set_dependency(parent, dep, True)
+    edit_row(
+        tmp_path,
+        dep,
+        lambda row: row["metadata"].update({"theater_outcome_status": "failed"}),
+    )
+    await adapter.close_task(dep, "no type given")
+    watcher = await adapter.get_task(parent)
+    assert watcher["failed_prerequisites"] == []  # unknown, not a known failure
 
 
 async def test_status_reads_only_while_closed_and_reopen_clears_it(
