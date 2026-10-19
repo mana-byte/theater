@@ -23,6 +23,7 @@ from theater.daemon.frontend.participant_mutation_handlers import (
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.operations import operation_to_wire
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
+from theater.daemon.registry import Registry
 from theater.daemon.rpc import participants as participant_rpc
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
@@ -416,6 +417,21 @@ async def test_participant_termination_normalizes_pathological_error(
     validator_for("https://theater.dev/schemas/frontend/1.0/common.json#/$defs/operation").validate(
         operation_to_wire(operation)
     )
+
+
+async def test_public_rename_survives_a_daemon_restart(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
+    await participants_update(
+        daemon,
+        operator_context(),
+        {"participant_id": participant_id, "name": "Renamed-In-Regie"},
+        idempotency_key="participant-rename-a",
+    )
+
+    assert Registry(daemon.store).get(participant_id).name == "Renamed-In-Regie"
 
 
 async def test_public_metadata_and_status_mutations_are_idempotent_and_schema_valid(

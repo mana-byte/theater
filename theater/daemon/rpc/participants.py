@@ -111,6 +111,11 @@ def update_participant_metadata(
             daemon.registry._validate_name(target.id, name)
         updated = replace(target, name=name, description=normalized_description)
         daemon.registry.persist_in_connection(updated, unit.connection)
+        # The live-name table is what a daemon restart reloads; the `participants` row has no name.
+        if name is None:
+            daemon.store.delete_participant_name(target.id, connection=unit.connection)
+        else:
+            daemon.store.set_participant_name(target.id, name, connection=unit.connection)
         event = participant_event(
             daemon.store,
             updated,
