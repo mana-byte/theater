@@ -535,7 +535,7 @@ async def test_control_tools_propagate_daemon_errors():
         ),
         ("crashed", "daemon_restarted", "daemon restarted", "daemon restarted", False),
         ("killed", "unknown_code", "termination detail", "termination detail", False),
-        ("crashed", "tmux_restarted", "old detail", "spawn_session(resume=<id>)", False),
+        ("crashed", "tmux_restarted", "old detail", "spawn_session(resume=<target_id>)", False),
         ("crashed", "prompt_never_seen", "old detail", "read_transcript before re-sending", False),
         ("crashed", "turn_failed", "backend failed", "see result for the detail", True),
         ("killed", "cancelled", "cancelled before its source ended", "nothing reached", True),
@@ -559,4 +559,5 @@ async def test_await_preserves_failure_guidance(state, code, detail, explanation
     [entry] = await tools.await_sessions(session, handles=[job.handle], max_wait=0)
 
     assert explanation in entry["error"]
+    assert entry["target_id"] == job.target_id
     assert entry.get("result") == (detail if keeps_result else None)
