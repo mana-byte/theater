@@ -161,7 +161,7 @@ def _job_to_dict(job: Job, store=None) -> dict:
                 else STRUCTURED_UNAVAILABLE
             )
             row["structured_result"] = None
-    if job.structured_status == STRUCTURED_UNABLE_TO_PARSE and store is not None:
+    if row["structured_status"] == STRUCTURED_UNABLE_TO_PARSE and store is not None:
         row["structured_error"] = audit.project(store, job.handle) or {
             "event": "unknown",
             "reason": None,

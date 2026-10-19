@@ -55,6 +55,8 @@ CONTRACT_ISSUE_KEYWORDS = frozenset(
         "const",
         "required",
         "additionalProperties",
+        "items",
+        "prefixItems",
         "minItems",
         "maxItems",
         "minLength",

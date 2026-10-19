@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 
 import pytest
+from sqlalchemy import update
 
 from theater.constants.daemon import TMUX_RESTART_JOB_ERROR_CODE
 from theater.daemon.response_contracts.contract import StrictContract
+from theater.daemon.schema import jobs as jobs_table
 from theater.models import JobState
 
 
@@ -78,6 +80,30 @@ async def test_tmux_recovery_hint_uses_the_job_target_id(client, daemon):
     assert row["target_id"] == "target"
     assert "resume=<target_id>" in row["error"]
     assert "split" not in row["error"] and "up to" not in row["error"]
+
+
+async def test_corrupt_stored_parsed_result_gets_a_safe_unknown_diagnostic(client, daemon):
+    fmt = StrictContract("custom", '{"type":"number"}').envelope()
+    job = daemon.jobs.create(
+        handle="target#corrupt",
+        caller_id="caller",
+        target_id="target",
+        kind="send",
+        response_format=fmt,
+    )
+    daemon.jobs.finish(job.handle, state=JobState.DONE, result="1", raw_result="1")
+    with daemon.store.write_unit() as unit:
+        unit.connection.execute(
+            update(jobs_table)
+            .where(jobs_table.c.handle == job.handle)
+            .values(structured_result="1e10000", structured_status="parsed")
+        )
+
+    row = await client.call("jobs.status", handle=job.handle)
+    assert row["structured_status"] == "unable_to_parse"
+    assert row["structured_result"] is None
+    assert row["structured_error"] == {"event": "unknown", "reason": None, "issues": []}
+    assert daemon.store.contract_audit_for_job(job.handle) == []
 
 
 @pytest.mark.parametrize(

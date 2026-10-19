@@ -61,9 +61,14 @@ def _schema_issue(error: ValidationError) -> tuple[dict[str, str | int | float],
             parts.append(missing)
     path = "/" + "/".join(str(part).replace("~", "~0").replace("/", "~1") for part in parts)
     clipped = len(path) > CONTRACT_ISSUE_PATH_MAX_CHARS
+    keyword = (
+        "prefixItems"
+        if error.validator is None and "prefixItems" in error.absolute_schema_path
+        else str(error.validator)
+    )
     issue: dict[str, str | int | float] = {
         "path": _clip(path, CONTRACT_ISSUE_PATH_MAX_CHARS),
-        "keyword": str(error.validator)[:32],
+        "keyword": keyword[:32],
     }
     if error.validator in CONTRACT_MEASURED_KEYWORDS and isinstance(error.validator_value, int):
         issue["limit"] = error.validator_value
@@ -153,8 +158,8 @@ class StrictContract:
                     {
                         "path": "/",
                         "keyword": "maxValues",
+                        # value_count stops at the first excess value, so actual is unknown.
                         "limit": CONTRACT_ANSWER_MAX_VALUES,
-                        "actual": count,
                     },
                 ),
             )

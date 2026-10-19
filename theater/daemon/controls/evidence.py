@@ -153,7 +153,11 @@ class EvidenceControls(ControlHost):
                         state=JobState.DONE,
                         result=result,
                         contract_failure=ContractFailure(
-                            audit.CONTRACT_UNAVAILABLE, verdict.detail
+                            audit.CONTRACT_UNAVAILABLE,
+                            verdict.detail,
+                            verdict.reason,
+                            verdict.issues,
+                            verdict.truncated,
                         ),
                     )
                 # The turn is exactly this job's, so Theater may ask the same agent to answer again.

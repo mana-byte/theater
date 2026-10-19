@@ -452,3 +452,8 @@ async def test_a_stored_schema_the_validator_cannot_run_fails_without_repair(sto
     assert finished.structured_status == "unable_to_parse"
     assert store.repair_attempts_for_job(job.handle) == []
     assert audit_events(store, job.handle)[-1] == "contract_unavailable"
+    assert audit.project(store, job.handle) == {
+        "event": "contract_unavailable",
+        "reason": "contract_unavailable",
+        "issues": [],
+    }

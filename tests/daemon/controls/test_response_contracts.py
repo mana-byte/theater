@@ -193,7 +193,29 @@ def test_worst_case_validation_stays_short_enough_for_the_event_loop(store):
     assert contract.validate(json.dumps([63] * 4_900)).ok  # as many values as are accepted
     over = contract.validate(json.dumps([0] * 6_000))
     assert (over.ok, over.reason) == (False, "too_large") and "shorten" in over.detail
+    assert over.issues == ({"path": "/", "keyword": "maxValues", "limit": 5_000},)
     assert time.perf_counter() - started < 5.0  # catches a stall, not coverage/xdist load
+
+
+@pytest.mark.parametrize(
+    ("schema", "keyword"),
+    [
+        ({"type": "array", "items": False}, "items"),
+        ({"type": "array", "prefixItems": [False]}, "prefixItems"),
+    ],
+)
+def test_admitted_array_schema_failures_keep_their_keyword(store, schema, keyword):
+    from theater.daemon.response_contracts import audit
+
+    fmt = resolve(store, {"$theater": "custom", "name": "array_rule", "schema": schema})
+    verdict = parse_stored(fmt).validate("[1]")
+    assert verdict.reason == "schema"
+    assert verdict.issues[0]["keyword"] == keyword
+    jobs = JobManager(store)
+    _job(store, jobs, "p1#array", fmt)
+    jobs.finish("p1#array", state=JobState.DONE, result="[1]")
+    projected = audit.project(store, "p1#array")
+    assert projected["issues"][0]["keyword"] == keyword
 
 
 def test_a_property_named_like_a_forbidden_keyword_is_not_a_keyword(store):

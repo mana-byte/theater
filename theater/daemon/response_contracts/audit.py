@@ -59,11 +59,13 @@ def _issue(value: dict) -> dict[str, str | int | float] | None:
     ):
         return None
     issue: dict[str, str | int | float] = {"path": path, "keyword": keyword}
-    keys = (
-        ("limit", "actual")
-        if keyword in CONTRACT_MEASURED_KEYWORDS
-        else (("position",) if keyword == "json" else ())
-    )
+    keys: tuple[str, ...]
+    if keyword == "maxValues":
+        keys = ("limit",)
+    elif keyword in CONTRACT_MEASURED_KEYWORDS:
+        keys = ("limit", "actual")
+    else:
+        keys = ("position",) if keyword == "json" else ()
     for key in keys:
         number = value.get(key)
         if (
@@ -87,7 +89,9 @@ def diagnostic(
     row: dict[str, object] = {
         "v": 1,
         "event": event,
-        "reason": reason if reason in CONTRACT_FAILURE_REASONS else None,
+        "reason": reason
+        if isinstance(reason, str) and reason in CONTRACT_FAILURE_REASONS
+        else None,
         "issues": kept,
     }
     safe = [_issue(issue) for issue in issues[:CONTRACT_ERRORS_MAX]]
