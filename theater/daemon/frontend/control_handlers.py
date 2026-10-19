@@ -10,7 +10,7 @@ from theater.daemon.operations import DispatchIntent, OperationOutcome, Prepared
 from theater.daemon.operations.error_values import operation_error as _error
 from theater.daemon.presence import access as presence_access
 from theater.daemon.response_contracts import resolve_response_format
-from theater.daemon.rpc.params import _prompt_with_response_format
+from theater.daemon.skill_cards import compose_prompt
 from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.frontend.capabilities import MAX_ERROR_CODE_CHARS, MAX_ERROR_MESSAGE_CHARS
 from theater.harness.contracts.runtime import (
@@ -22,6 +22,22 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
 )
 from theater.models import PublicOperationRecord, PublicOperationState, Status, now
+
+_CONTROL_METHODS = MappingProxyType(
+    {
+        "frontend.controls.send": (RuntimeCapability.SEND, ControlKind.SEND),
+        "frontend.controls.steer": (RuntimeCapability.STEER, ControlKind.STEER),
+        "frontend.controls.queue_followup": (
+            RuntimeCapability.QUEUE_FOLLOWUP,
+            ControlKind.QUEUE_FOLLOWUP,
+        ),
+        "frontend.controls.interrupt": (RuntimeCapability.INTERRUPT, ControlKind.INTERRUPT),
+        "frontend.controls.settings.update": (
+            RuntimeCapability.SETTINGS_UPDATE,
+            ControlKind.SETTINGS_UPDATE,
+        ),
+    }
+)
 
 
 def _prepared(
@@ -113,30 +129,18 @@ def _submit(
     idempotency_key: str,
 ):
     participant_id = str(params["participant_id"])
-    capability = {
-        "frontend.controls.send": RuntimeCapability.SEND,
-        "frontend.controls.steer": RuntimeCapability.STEER,
-        "frontend.controls.queue_followup": RuntimeCapability.QUEUE_FOLLOWUP,
-        "frontend.controls.interrupt": RuntimeCapability.INTERRUPT,
-        "frontend.controls.settings.update": RuntimeCapability.SETTINGS_UPDATE,
-    }[method]
-    kind = {
-        "frontend.controls.send": ControlKind.SEND,
-        "frontend.controls.steer": ControlKind.STEER,
-        "frontend.controls.queue_followup": ControlKind.QUEUE_FOLLOWUP,
-        "frontend.controls.interrupt": ControlKind.INTERRUPT,
-        "frontend.controls.settings.update": ControlKind.SETTINGS_UPDATE,
-    }[method]
+    capability, kind = _CONTROL_METHODS[method]
     serialized_format = resolve_response_format(
         daemon.store, params.get("response_format"), creator_id=None
     )
-    prompt = (
-        _prompt_with_response_format(str(params["prompt"]), serialized_format)
-        if method in {"frontend.controls.send", "frontend.controls.queue_followup"}
-        else str(params["prompt"])
-        if method == "frontend.controls.steer"
-        else None
-    )
+    if method in {"frontend.controls.send", "frontend.controls.queue_followup"}:
+        prompt: str | None = compose_prompt(
+            str(params["prompt"]), response_format=serialized_format
+        )
+    elif method == "frontend.controls.steer":
+        prompt = str(params["prompt"])
+    else:
+        prompt = None
     captured: dict[str, object] = {}
 
     def prepare(operation_id, unit):
@@ -189,7 +193,6 @@ def _submit(
     )
     if acceptance.replayed:
         return dict(acceptance.response)
-    route = captured["route"]
     control_operation_id = f"{acceptance.record.operation_id}:control"
     pre_reserved = acceptance.record.control_operation_id is not None
 
@@ -295,7 +298,7 @@ def _submit(
 
     daemon.operation_service.start(
         acceptance.record.operation_id,
-        dispatch=_dispatch_for(route),
+        dispatch=_dispatch_for(captured["route"]),
         side_effect=side_effect,
     )
     return dict(acceptance.response)
