@@ -48,7 +48,7 @@ from theater.daemon.controls.interaction_wire import cached_pending_interaction
 from theater.daemon.job_changes import job_changes
 from theater.daemon.jobs import STRUCTURED_PARSED, STRUCTURED_UNAVAILABLE
 from theater.daemon.rails import CycleDetected, check_cycle, check_wait_cycle
-from theater.daemon.response_contracts import parse_stored
+from theater.daemon.response_contracts import audit, parse_stored
 from theater.daemon.rpc.params import _finite_number_param, _require
 from theater.daemon.rpc.router import method
 from theater.json_values import decode_finite_json
@@ -76,7 +76,7 @@ def _await_announce_after() -> float:
 _JOB_ERROR_MESSAGES = {
     TMUX_RESTART_JOB_ERROR_CODE: (
         "The terminal server restarted and this child is gone; resume it with "
-        'spawn_session(resume=<id>), where <id> is the handle up to "#"; the '
+        "spawn_session(resume=<target_id>) using this entry's target_id; the "
         "theater-recover-tmux skill explains."
     ),
     UNDELIVERED_CODE: (
@@ -161,6 +161,12 @@ def _job_to_dict(job: Job, store=None) -> dict:
                 else STRUCTURED_UNAVAILABLE
             )
             row["structured_result"] = None
+    if row["structured_status"] == STRUCTURED_UNABLE_TO_PARSE and store is not None:
+        row["structured_error"] = audit.project(store, job.handle) or {
+            "event": "unknown",
+            "reason": None,
+            "issues": [],
+        }
     message = _JOB_ERROR_MESSAGES.get(job.error_code or "")
     if message is not None:
         row["error"] = message

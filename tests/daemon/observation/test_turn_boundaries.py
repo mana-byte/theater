@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
 
 from tests.support.observation import poised
 from tests.support.observer_rigs import said
+from tests.support.pi_transcripts import message_record
 from theater.daemon.observer import (
     Turn,
     TurnAccumulator,
 )
 from theater.harness.base import Event, EventKind, TurnTerminal
+from theater.harness.builtin.plugins.pi.observer import PiObserver
 from theater.harness.source import Batch
 
 
@@ -118,6 +121,92 @@ def test_multi_block_raw_assistant_text_becomes_structured_result(registry):
     assert job.result == '{"answer":\n\n"clipped"}'
     assert job.structured_result == '{"answer":\n\n"raw"}'
     assert job.structured_status == "parsed"
+
+
+@pytest.mark.parametrize("final", ['{"answer":"final"}', ""])
+def test_marked_final_answer_replaces_earlier_narration_even_when_empty(registry, final):
+    observer, _screen, clock, p, jobs = poised(registry, response_format="json")
+    observer._apply(
+        p.id,
+        Batch(
+            events=[
+                Event(kind=EventKind.ASSISTANT, text="Working on it.", turn_id="turn-1"),
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    text=final,
+                    raw_text=final,
+                    turn_id="turn-1",
+                    turn_end=True,
+                    answer_final=True,
+                ),
+            ]
+        ),
+        clock,
+        TurnAccumulator(),
+    )
+    job = jobs.get("h1")
+    assert job.result == final
+    assert job.structured_status == ("parsed" if final else "unavailable")
+
+
+def test_unmarked_empty_boundary_retains_accumulated_text(registry):
+    observer, _screen, clock, p, jobs = poised(registry, response_format="json")
+    observer._apply(
+        p.id,
+        Batch(
+            events=[
+                Event(kind=EventKind.ASSISTANT, text='{"answer":"reported"}', turn_id="msg-1"),
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    text="",
+                    raw_text="",
+                    turn_id="msg-1",
+                    turn_end=True,
+                ),
+            ]
+        ),
+        clock,
+        TurnAccumulator(),
+    )
+    assert jobs.get("h1").structured_result == '{"answer":"reported"}'
+
+
+def test_pi_final_text_and_usage_settle_together(registry, tmp_path):
+    observer, _screen, clock, p, jobs = poised(registry, response_format="json")
+    pi = PiObserver(root=tmp_path)
+    pi.parse_record(json.dumps(message_record("u1", {"role": "user", "content": "work"})), 1)
+    narration = pi.parse_record(
+        json.dumps(
+            message_record(
+                "a1", {"role": "assistant", "content": "Working.", "stopReason": "toolUse"}
+            )
+        ),
+        2,
+    )
+    terminal = pi.parse_record(
+        json.dumps(
+            message_record(
+                "a2",
+                {
+                    "role": "assistant",
+                    "content": '{"answer":"done"}',
+                    "stopReason": "stop",
+                    "usage": {"input": 7, "output": 4},
+                },
+            )
+        ),
+        3,
+    )
+    observer._apply(
+        p.id,
+        Batch(events=[*narration.events, *terminal.events]),
+        clock,
+        TurnAccumulator(),
+    )
+    job = jobs.get("h1")
+    assert job.result == '{"answer":"done"}'
+    assert job.structured_result == '{"answer":"done"}'
+    assert registry.store.usage_totals()["input_tokens"] == 7
 
 
 def test_two_turns_in_one_batch_answer_two_jobs_in_order(registry):

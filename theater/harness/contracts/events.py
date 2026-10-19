@@ -130,6 +130,8 @@ class Event:
     #: Terminal outcome of the turn this event closes; only a boundary event
     #: (turn_end=True) may carry it. None keeps the historical DONE finish.
     turn_terminal: TurnTerminal | None = None
+    #: This boundary carries the complete final answer, even when its text is empty.
+    answer_final: bool = False
 
     def __post_init__(self) -> None:
         if self.native_id is not None and (
@@ -153,6 +155,10 @@ class Event:
                 "event turn_terminal requires turn_end=True — only the "
                 "boundary event that closes a turn may carry a terminal outcome"
             )
+        if type(self.answer_final) is not bool:
+            raise ValueError("event answer_final must be a bool")
+        if self.answer_final and not self.turn_end:
+            raise ValueError("event answer_final requires turn_end=True")
 
     @property
     def usage_only(self) -> bool:

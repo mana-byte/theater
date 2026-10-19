@@ -84,7 +84,14 @@ class RepairControls(ControlHost):
             if not self._store.create_repair_attempt(attempt, connection=unit.connection):
                 return job
             audit.record(
-                self._store, job, audit.REPAIR_STARTED, verdict.reason, connection=unit.connection
+                self._store,
+                job,
+                audit.REPAIR_STARTED,
+                verdict.reason,
+                reason=verdict.reason,
+                issues=verdict.issues,
+                truncated=verdict.truncated,
+                connection=unit.connection,
             )
         self._schedule_maintenance(participant_id)
         return job
@@ -137,10 +144,14 @@ class RepairControls(ControlHost):
             self._settle_repair(attempt, audit.REPAIR_SUCCEEDED)
             return finished
         if verdict.reason == "contract_unavailable":
-            return self._end_repair(attempt, job, text, audit.CONTRACT_UNAVAILABLE, verdict.detail)
+            return self._end_repair(
+                attempt, job, text, audit.CONTRACT_UNAVAILABLE, verdict.detail, verdict=verdict
+            )
         if attempt.attempt < REPAIR_MAX_ATTEMPTS:
             return self._next_attempt(attempt, job, evidence, verdict)
-        return self._end_repair(attempt, job, text, audit.REPAIR_EXHAUSTED, verdict.detail)
+        return self._end_repair(
+            attempt, job, text, audit.REPAIR_EXHAUSTED, verdict.detail, verdict=verdict
+        )
 
     def _next_attempt(
         self, attempt: RepairAttempt, job: Job, evidence: NativeTerminalEvidence, verdict: Verdict
@@ -175,6 +186,9 @@ class RepairControls(ControlHost):
                 job,
                 audit.REPAIR_STARTED,
                 f"attempt {follow.attempt}: {verdict.reason}",
+                reason=verdict.reason,
+                issues=verdict.issues,
+                truncated=verdict.truncated,
                 connection=unit.connection,
             )
         self._schedule_maintenance(attempt.participant_id)
@@ -188,6 +202,7 @@ class RepairControls(ControlHost):
         event: str,
         detail: str | None,
         *,
+        verdict: Verdict | None = None,
         release: bool = True,
     ) -> Job | None:
         """The one caller-visible end of a job that never produced a valid answer."""
@@ -195,7 +210,13 @@ class RepairControls(ControlHost):
             job.handle,
             state=JobState.DONE,
             result=candidate or "",
-            contract_failure=ContractFailure(event, detail),
+            contract_failure=ContractFailure(
+                event,
+                detail,
+                verdict.reason if verdict else None,
+                verdict.issues if verdict else (),
+                verdict.truncated if verdict else False,
+            ),
         )
         self._settle_repair(attempt, event, release=release)
         return finished

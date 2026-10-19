@@ -563,12 +563,13 @@ class PiParserMixin:
         # or cancels). Those calls must be terminal, never PENDING.
         call_status = _tool_call_status(stop_reason, deferred_close)
         events: list[Event] = []
-        if raw:
+        if raw or immediate_close:
             events.append(
                 Event(
                     kind=EventKind.ASSISTANT,
                     text=clipper(clip_text)(raw),
                     raw_text=raw,
+                    usage=usage,
                     ts=event_ts,
                     turn_id=turn_id,
                     raw_index=index,
@@ -585,7 +586,7 @@ class PiParserMixin:
                     raw_index=index,
                 )
             )
-        if usage is not None:
+        if usage is not None and not (raw or immediate_close):
             events.append(
                 Event(
                     kind=EventKind.ASSISTANT,
@@ -608,21 +609,12 @@ class PiParserMixin:
                 )
             )
         if immediate_close:
-            if events:
-                events[-1] = replace(
-                    events[-1], turn_end=True, turn_terminal=TurnTerminal.COMPLETED
-                )
-            else:
-                events.append(
-                    Event(
-                        kind=EventKind.ASSISTANT,
-                        ts=event_ts,
-                        turn_end=True,
-                        turn_terminal=TurnTerminal.COMPLETED,
-                        turn_id=turn_id,
-                        raw_index=index,
-                    )
-                )
+            events[-1] = replace(
+                events[-1],
+                turn_end=True,
+                turn_terminal=TurnTerminal.COMPLETED,
+                answer_final=True,
+            )
             self._active_turn_id = None
             self._pending_terminal = False
             self._pending_terminal_turn_id = None

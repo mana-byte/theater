@@ -606,6 +606,8 @@ class Reducer:
             self.registry.set_status(pid, Status.WORKING)
 
     def turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
+        if event.answer_final:
+            return event.text, event.raw_text if event.raw_text is not None else event.text
         if not (event.text or event.raw_text):
             return turn.said, turn.raw_said
         if event.kind is EventKind.ERROR:

@@ -67,6 +67,18 @@ def test_opencode_emits_usage_for_an_empty_tool_step(tmp_path):
     assert events[0].turn_end is False
 
 
+def test_opencode_reported_terminal_signal_remains_unmarked(tmp_path):
+    from theater.harness.builtin.plugins.opencode import OpenCodeSource
+
+    src = OpenCodeSource(tmp_path / "opencode-stable.db", cwd=str(tmp_path))
+    src._snapshotted.add("msg_a1")
+    events = src._on_message({"info": {"id": "msg_a1", "role": "assistant", "finish": "stop"}}, 1)
+    assert len(events) == 1
+    assert events[0].turn_end is True
+    assert events[0].text == events[0].raw_text == ""
+    assert events[0].answer_final is False
+
+
 def test_opencode_idle_fixture_classifies_as_prompt():
     capture = read_screen("opencode_idle.txt")
     reading = OpenCodeObserver().screen_reading(capture)
