@@ -103,6 +103,8 @@ class ControlTransport(StrEnum):
     LEGACY_TMUX = "legacy_tmux"
     NATIVE_RUNTIME = "native_runtime"
     PROVIDER_TERMINAL = "provider_terminal"
+    # Preserve the historical member and wire value while core uses a neutral name.
+    TERMINAL_FALLBACK = LEGACY_TMUX
 
 
 class RuntimeCapability(StrEnum):

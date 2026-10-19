@@ -130,7 +130,11 @@ class SendControls(ControlHost):
                     actor_client_id=request.actor_client_id,
                     actor_participant_id=request.actor_participant_id,
                 )
-                return legacy_job, CONTROL_DELIVERY_ACCEPTED, ControlTransport.LEGACY_TMUX.value
+                return (
+                    legacy_job,
+                    CONTROL_DELIVERY_ACCEPTED,
+                    ControlTransport.TERMINAL_FALLBACK.value,
+                )
             if not route.is_native:
                 raise NotAddressable(
                     f"participant {participant_id!r} does not offer a transport for sending"
@@ -477,7 +481,7 @@ class SendControls(ControlHost):
             operation_id,
             participant_id=participant_id,
             kind=ControlKind.SEND,
-            transport=ControlTransport.LEGACY_TMUX,
+            transport=ControlTransport.TERMINAL_FALLBACK,
             phase=ControlDeliveryPhase.RESERVED,
             job_handle=job.handle,
         )

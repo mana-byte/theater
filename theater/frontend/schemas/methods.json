@@ -294,6 +294,12 @@
         "facts": {
           "$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject",
           "properties": {
+            "runtime_identity": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "description": "Opaque terminal-runtime identity, stable across provider reconnects. Requires terminal-runtime-identity.v1; only a complete verified report with matching terminal evidence may establish runtime replacement."
+            },
             "presence_invalidated": {
               "type": "boolean",
               "description": "True revokes cached provider presence and requests fresh inspection; it never asserts absence. Omitted or false leaves cached presence unchanged."

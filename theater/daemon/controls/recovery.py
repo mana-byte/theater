@@ -134,7 +134,7 @@ class RecoveryControls(ControlHost):
         failed: list[Job] = []
         for operation in self._store.queued_control_operations(participant_id):
             if operation.transport is ControlTransport.PROVIDER_TERMINAL or (
-                preserve_legacy_queued and operation.transport is ControlTransport.LEGACY_TMUX
+                preserve_legacy_queued and operation.transport is ControlTransport.TERMINAL_FALLBACK
             ):
                 continue
             self._store.settle_control_operation(

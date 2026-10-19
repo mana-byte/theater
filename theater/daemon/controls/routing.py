@@ -45,7 +45,7 @@ class ControlRoute:
 
     @property
     def is_legacy(self) -> bool:
-        return self.terminal is None and self.transport is ControlTransport.LEGACY_TMUX
+        return self.terminal is None and self.transport is ControlTransport.TERMINAL_FALLBACK
 
     @property
     def is_provider(self) -> bool:
@@ -211,7 +211,7 @@ class ControlRouteResolver:
         )
         if binding is None:
             if route.transport in {
-                ControlTransport.LEGACY_TMUX,
+                ControlTransport.TERMINAL_FALLBACK,
                 ControlTransport.PROVIDER_TERMINAL,
             }:
                 return ControlRoute(
@@ -277,7 +277,7 @@ def _pinned_route(policy: str | None, capability: RuntimeCapability) -> ControlR
     if transport == ControlTransport.NATIVE_RUNTIME.value:
         return ControlRoute(capability, ControlTransport.NATIVE_RUNTIME, native_wiring=True)
     if transport in {
-        ControlTransport.LEGACY_TMUX.value,
+        ControlTransport.TERMINAL_FALLBACK.value,
         ControlTransport.PROVIDER_TERMINAL.value,
     }:
         return ControlRoute(capability, ControlTransport.PROVIDER_TERMINAL, native_wiring=True)

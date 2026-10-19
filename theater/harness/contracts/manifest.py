@@ -64,12 +64,22 @@ class LaunchManifest:
 
 
 @dataclass(frozen=True, slots=True)
+class McpForegroundWait:
+    """Environment-declared foreground timeout and the margin for returning an await."""
+
+    env: str
+    default_ms: float
+    margin_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class McpRenderingManifest:
     """The native renderer for participant-scoped stdio MCP endpoints."""
 
     renderer: McpRenderer
     #: "result" delivers refusals as successful text for runtimes that hide isError content.
     error_delivery: Literal["is_error", "result"] = "is_error"
+    foreground_wait: McpForegroundWait | None = None
 
     def __post_init__(self) -> None:
         if self.error_delivery not in ("is_error", "result"):
@@ -281,6 +291,7 @@ __all__ = [
     "InterruptPlan",
     "LaunchManifest",
     "LineageManifest",
+    "McpForegroundWait",
     "McpRenderingManifest",
     "ModelDiscoveryManifest",
     "NativeCompatibilityManifest",

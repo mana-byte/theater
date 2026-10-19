@@ -17,7 +17,11 @@ from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.models import BadRequest
 
 if TYPE_CHECKING:
-    from theater.harness.contracts.manifest import ControlManifest, NativeCompatibilityManifest
+    from theater.harness.contracts.manifest import (
+        ControlManifest,
+        McpForegroundWait,
+        NativeCompatibilityManifest,
+    )
     from theater.harness.contracts.observation import HarnessObserver
     from theater.harness.contracts.runtime import RuntimeManifest
     from theater.mcp_plugins import McpServerSpec
@@ -64,6 +68,8 @@ class Harness(ABC):
     supports_mcp_rendering: bool = False
     #: How Theater's MCP server delivers refusals to this harness ("is_error" or "result").
     mcp_error_delivery: str = "is_error"
+    #: Optional client foreground timeout declared by the harness plugin.
+    mcp_foreground_wait: McpForegroundWait | None = None
     #: Optional native runtime wiring compiled from the manifest; ``None``
     #: means legacy behavior everywhere. An annotation, not abstract: existing
     #: harnesses and sources gain no mandatory methods.

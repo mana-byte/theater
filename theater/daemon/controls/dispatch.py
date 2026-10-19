@@ -349,10 +349,10 @@ class DispatchControls(ControlHost):
         job: Job,
         caller_id: str,
     ) -> QueueDispatchOutcome:
-        if head.transport is not ControlTransport.LEGACY_TMUX:
+        if head.transport is not ControlTransport.TERMINAL_FALLBACK:
             selected = self._select_queued_route(
                 head,
-                transport=ControlTransport.LEGACY_TMUX,
+                transport=ControlTransport.TERMINAL_FALLBACK,
                 backend_generation=None,
                 native_session_id=None,
                 payload=None,
