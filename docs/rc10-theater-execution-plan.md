@@ -375,7 +375,7 @@ contract commit and publish its exact symbols/schema revision. Only then start G
 **G01 — Independent raw contract consumer.**
 
 - Own `tests/support/raw_client.py`, raw JSON fixtures under
-  `tests/fixtures/rc10/`, and `tests/frontend/test_raw_framing.py`.
+  `tests/fixtures/frontend_wire/`, and `tests/frontend/test_raw_framing.py`.
 - Build a stdlib-only socket client/decoder from the frozen contract. It must not
   import Theater, its SDK or installed schema libraries in the client process.
 - Exercise framing, explicit errors and unknown response fields using a tiny

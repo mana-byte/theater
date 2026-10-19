@@ -1,11 +1,11 @@
-"""An old-style local harness plugin: no ``runtime`` field anywhere.
+"""A local harness plugin with no ``runtime`` field anywhere.
 
-This fixture is the compatibility proof for the runtime-contracts wave: a
-plugin authored before native wiring existed must keep launching, observing,
+This fixture is the compatibility proof for runtime contracts: a
+plugin authored without native wiring must keep launching, observing,
 sending, and interrupting exactly as before. ``HarnessManifest.runtime``
 defaults to ``None`` and nothing below knows the runtime contracts exist.
 
-Install it by copying this directory to ``$THEATER_HOME/plugins/oldstyle/``
+Install it by copying this directory to ``$THEATER_HOME/plugins/no_runtime/``
 and scanning; see ``tests/harness/core/test_runtime_contracts.py``.
 """
 

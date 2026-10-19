@@ -1,4 +1,4 @@
-"""Minimal stdlib-only RC10 frontend NDJSON client for contract tests."""
+"""Minimal stdlib-only frontend NDJSON client for contract tests."""
 
 from __future__ import annotations
 

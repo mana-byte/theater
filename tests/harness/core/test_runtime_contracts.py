@@ -62,7 +62,7 @@ from theater.harness.contracts.source import (
 from theater.harness.loading import LOCAL, scan
 from theater.harness.manifests import ManifestValidationError, compile_manifest
 
-OLD_STYLE_FIXTURE = fixture("plugins", "oldstyle")
+NO_RUNTIME_FIXTURE = fixture("plugins", "no_runtime")
 
 
 def _screen(capture: str) -> ScreenReading:
@@ -660,24 +660,24 @@ async def test_fake_runtime_snapshot_capabilities_are_explicitly_enabled() -> No
     assert snapshot.capabilities.supports(RuntimeCapability.SEND)
 
 
-def test_old_style_plugin_without_runtime_stays_compatible(theater_home) -> None:
+def test_plugin_without_runtime_stays_compatible(theater_home) -> None:
     plugins = theater_home / "plugins"
     plugins.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(OLD_STYLE_FIXTURE, plugins / "oldstyle")
+    shutil.copytree(NO_RUNTIME_FIXTURE, plugins / "no_runtime")
     loaded = [plugin for plugin in scan(plugins, source=LOCAL) if not plugin.error]
     names = [plugin.name for plugin in loaded]
-    assert "oldstyle" in names
+    assert "no_runtime" in names
 
-    manifest = loaded[names.index("oldstyle")].manifest
+    manifest = loaded[names.index("no_runtime")].manifest
     assert isinstance(manifest, HarnessManifest)
     assert manifest.runtime is None
 
-    harness = compile_manifest("oldstyle", manifest)
+    harness = compile_manifest("no_runtime", manifest)
     assert harness.runtime is None
     plan = harness.plan_launch(
         participant_id="p1",
         prompt="hello",
-        config_path=Path("/tmp/oldstyle-mcp.json"),
+        config_path=Path("/tmp/no_runtime-mcp.json"),
         approval="manual",
     )
     assert plan.argv[0] == "acme"
@@ -686,13 +686,13 @@ def test_old_style_plugin_without_runtime_stays_compatible(theater_home) -> None
     assert reading.kind is ScreenKind.PROMPT
 
 
-def test_registry_installs_old_style_plugin_alongside_builtin(theater_home, tmp_path) -> None:
+def test_registry_installs_plugin_without_runtime_alongside_builtin(theater_home, tmp_path) -> None:
     plugins = theater_home / "plugins"
     plugins.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(OLD_STYLE_FIXTURE, plugins / "oldstyle")
+    shutil.copytree(NO_RUNTIME_FIXTURE, plugins / "no_runtime")
     from theater import config as cfg
     from theater import harness as harness_registry
 
     names = harness_registry.install(cfg.Config(), local_dir=plugins)
-    assert "oldstyle" in names
-    assert harness_registry.get("oldstyle").runtime is None
+    assert "no_runtime" in names
+    assert harness_registry.get("no_runtime").runtime is None

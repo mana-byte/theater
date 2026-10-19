@@ -28,7 +28,7 @@ from tests.support.raw_client import (
     encode_frame,
 )
 
-FIXTURES = fixture("rc10")
+FIXTURES = fixture("frontend_wire")
 
 
 def _fixture(name: str) -> dict[str, object]:

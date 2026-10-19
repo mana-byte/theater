@@ -1,4 +1,4 @@
-"""The operation and journal repositories over one database, as the rc10 services take them."""
+"""The operation and journal repositories over one database, as the operation services take them."""
 
 from __future__ import annotations
 

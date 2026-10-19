@@ -1,4 +1,4 @@
-"""Run a non-tmux RC10 terminal-provider fixture against an explicit public socket.
+"""Run a non-tmux terminal-provider fixture against an explicit public socket.
 
 The CLI accepts ``--socket``, durable provider identity, and an optional JSON
 ``--plan`` so an integration gate can point this process at a candidate daemon.
