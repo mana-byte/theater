@@ -134,6 +134,11 @@ See the [module map](docs/architecture.md#11-module-map) for detail and
 
 ## Invariants — do not break these
 
+- **Keep core policy harness- and frontend-agnostic.** Use harness contracts,
+  the public frontend API and declared provider capabilities. Keep harness-specific
+  behavior in harness plugins and UI/terminal implementations in frontend/provider
+  packages. Do not add core policy branches on harness/frontend/provider names or
+  import their internals into core; verify the import and process-boundary tests.
 - **The daemon is the sole writer** of orchestration SQLite state. It plans
   launches and authorizes controls; the selected terminal provider performs
   terminal creation, inspection, input, interruption, and termination through
