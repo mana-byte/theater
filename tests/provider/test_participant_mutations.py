@@ -22,6 +22,7 @@ from theater.daemon.frontend.participant_mutation_handlers import (
 )
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.operations import operation_to_wire
+from theater.daemon.participants import termination as participant_termination
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.registry import Registry
 from theater.daemon.rpc import participants as participant_rpc
@@ -199,7 +200,7 @@ async def test_verified_provider_termination_releases_usage_but_retains_workspac
         assert daemon.store.get_job(handle).state == JobState.RUNNING
         assert daemon.store.workspaces.active_usages("workspace-a")
 
-    monkeypatch.setattr(participant_rpc, "_require_verified_backend_stop", backend_stopped)
+    monkeypatch.setattr(participant_termination, "_require_verified_backend_stop", backend_stopped)
     accepted = await participants_terminate(
         daemon,
         operator_context(),
@@ -272,7 +273,9 @@ async def test_unverified_native_stop_retains_provider_participant_job_and_usage
         raise TheaterError("native backend exit is unverified")
 
     monkeypatch.setattr(daemon.terminal_service.connections, "request", terminate)
-    monkeypatch.setattr(participant_rpc, "_require_verified_backend_stop", backend_unverified)
+    monkeypatch.setattr(
+        participant_termination, "_require_verified_backend_stop", backend_unverified
+    )
     accepted = await participants_terminate(
         daemon,
         operator_context(),

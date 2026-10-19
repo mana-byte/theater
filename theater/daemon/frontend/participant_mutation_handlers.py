@@ -14,8 +14,8 @@ from theater.daemon.participants.mutations import (
     persist_participant_status,
     update_participant_metadata,
 )
+from theater.daemon.participants.termination import terminate_participant
 from theater.daemon.presence import access as presence_access
-from theater.daemon.rpc.participants import terminate_participant
 from theater.models import (
     PublicOperationRecord,
     PublicOperationState,
