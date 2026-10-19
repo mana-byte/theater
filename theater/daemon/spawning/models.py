@@ -12,7 +12,24 @@ from theater.harness.contracts.runtime import (
     RuntimeManifest,
     RuntimeWiring,
 )
-from theater.models import Participant
+from theater.models import BadRequest, Participant
+
+_WIRING_CHOICES = "auto, native, or legacy"
+
+
+def wiring_from_value(raw: object) -> RuntimeWiring:
+    """The ``wiring`` choice from a stored or wire value; None means ``auto``."""
+    if raw is None:
+        return RuntimeWiring.AUTO
+    if not isinstance(raw, str):
+        raise BadRequest(f"spawn parameter 'wiring' must be a string: {_WIRING_CHOICES}")
+    try:
+        return RuntimeWiring(raw)
+    except ValueError:
+        raise BadRequest(
+            f"unknown wiring {raw!r}: choose {_WIRING_CHOICES}; 'legacy' is the "
+            "explicit opt-out of native runtime wiring"
+        ) from None
 
 
 @dataclass(frozen=True, slots=True)
