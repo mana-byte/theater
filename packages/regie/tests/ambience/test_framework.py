@@ -160,10 +160,6 @@ async def test_the_band_plays_under_the_tree_when_its_setting_says(
         await wait_until(pilot, app._trajectory_has_focus)
         await wait_until(pilot, lambda: bool(band.display) is not on_tree)
         await pilot.press("escape")
-        # Known product gap: leaving the trajectory removes the focused timeline before its blur
-        # is delivered, and the app only re-syncs on focus/blur/projection events
-        # (regie/app_parts/ambience.py:172-179), so the test syncs explicitly.
-        app._sync_ambience()
         await wait_until(pilot, lambda: bool(band.display) is on_tree)
 
 

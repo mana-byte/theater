@@ -155,6 +155,7 @@ class TrajectoryActions(_AppBase):
         self._sync_surface()
         self.set_focus(None)
         self.query_one(ParticipantTree).set_cursor_visible(True)
+        self._sync_ambience()  # the removed timeline delivers no blur; re-sync the band here
 
     async def _copy_trajectory(self, text: str) -> None:
         try:
