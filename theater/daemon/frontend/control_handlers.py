@@ -6,8 +6,8 @@ from types import MappingProxyType
 
 from theater.daemon.controls.interaction_wire import cached_control_details, interaction_to_wire
 from theater.daemon.frontend.handshake import ConnectionContext
-from theater.daemon.frontend.mutation_errors import operation_error as _error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
+from theater.daemon.operations.error_values import operation_error as _error
 from theater.daemon.presence import access as presence_access
 from theater.daemon.response_contracts import resolve_response_format
 from theater.daemon.rpc.params import _prompt_with_response_format
