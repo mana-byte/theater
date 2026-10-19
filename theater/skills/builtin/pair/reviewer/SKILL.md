@@ -47,9 +47,10 @@ observed, inferred and preference; a preference is not a finding.
 After each round write one plain line in your chat (the finding, what the builder did, your verdict
 with the evidence) so a reader of your transcript follows every step. For a durable handoff, also
 `scratchpad_write` `progress`: round, builder id, last SHA and finding states. After compaction,
-recover the brief, progress and `git log` before continuing. Stop at 8 rounds: report both
-positions and finish with status `partial`. Agreement requires both of you to state it for the same
-exact final SHA, with no substantiated blocker left.
+recover the brief, progress and `git log`; if no progress key exists, read your own transcript for
+the last round and finding states. Stop at 8 rounds: report both positions and finish with status
+`partial`. Agreement requires both of you to state it for the same exact final SHA, with no
+substantiated blocker left.
 
 ## Verify, retire, report
 

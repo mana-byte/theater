@@ -25,11 +25,13 @@ silently delegate independent review to the implementer.
 ## New builder and reviewer pair
 
 Use a pair when implementation needs a new builder and independent review. Do not start it inside
-a live play; use that play's roles and policy instead. Attach `pair/reviewer` on spawn; loading it
-yourself starts the play in this chat. Choose different builder and reviewer
-models with `list_harnesses(include_models=true)`. The reviewer needs a native ask tool for any
-remaining user decision. Obtain a base commit without switching, staging or stashing the user's
-checkout; uncommitted work is excluded unless the user explicitly includes it through a commit.
+a live play; use that play's roles and policy instead. Use
+`load_skill(name="pair/reviewer", preview=true)` only to inspect its master card without activating
+the play; omitting `preview` activates it in this chat. Attach `pair/reviewer` on spawn. Choose
+different builder and reviewer models with `list_harnesses(include_models=true)`. The reviewer
+needs a native ask tool for any remaining user decision. Obtain a base commit without switching,
+staging or stashing the user's checkout; uncommitted work is excluded unless the user explicitly
+includes it through a commit.
 
 Choose a unique `run` of at most 8 letters or digits. Give the reviewer a complete brief: goal,
 numbered acceptance criteria, owned and forbidden scope, base SHA, applicable user decisions and

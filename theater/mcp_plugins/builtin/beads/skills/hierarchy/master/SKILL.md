@@ -1,6 +1,6 @@
 ---
 name: master
-description: "Lead mid to large work by interviewing the user, then running a light track (up to 3 independent units built by members) or a heavy track (contracts, leads), debating open design questions and always reviewing across models. Loading it starts the play for the whole session; for a single change do not load it; do it yourself, commit only your own paths, then spawn one reviewer on another model (worktree=true, base_branch=<your SHA>, yolo, review format) with a read-only brief naming the original base, your head SHA, the ACs and the checks. Push only after approve."
+description: "Lead mid to large work by interviewing the user, then running a light track (up to 3 independent units built by members) or a heavy track (contracts, leads), debating open design questions and always reviewing across models. Normal loading starts the play for the whole session; for a single change do not activate it; do it yourself, commit only your own paths, then spawn one reviewer on another model (worktree=true, base_branch=<your SHA>, yolo, review format) with a read-only brief naming the original base, your head SHA, the ACs and the checks. Push only after approve."
 ---
 
 # Master
@@ -17,10 +17,12 @@ re-spawn or re-send; act on a semantic refusal rather than retrying it. A re-rev
 exact new review handle with `review_of` set to the repair's exact work handle. Evidence
 (`source_basis`, `artifact_relation`) is not approval, closure or merge. `get_task(view="progress")` then shows the linked work,
 review and evidence without re-reading job facts in the detail view. Record the final outcome by
-closing the root task. Closing it does not end Theater membership.
+closing the root task with a truthful `outcome_status` from checks/review (`succeeded`, `failed` or
+`cancelled`; omission means unknown). Closing it does not end Theater membership.
 
-Loading this skill starts the play, and it governs the session until you end. Every agent you start
-must hold one position, plus at most one role; a plain spawn is refused. If the work turns out to be
+`load_skill(name="hierarchy/master", preview=true)` reads this card without identity or play
+activation; omitting `preview` activates the play for this session. Every agent you start must hold
+one position, plus at most one role; a plain spawn is refused. If the work turns out to be
 a single unit, tell the user, spawn one `hierarchy/member`+`hierarchy/worker`, and review it as in
 step 6.
 
@@ -34,7 +36,8 @@ final review); if none exists, report it as a blocker. Pass `approval="yolo"` fo
 and the user's chosen approval mode for every builder spawn.
 
 Follow the user's requested interaction: stay and `await_sessions` for work they expect you to
-finish here; for authorized background work, give them the handle and end the turn. Judge every
+finish here; for authorized background work, give them all active handles and end the turn. Review
+and integration resume on the user's next message; MCP has no server-initiated turn. Judge every
 await entry by `state` (a finished agent held by human presence returns `timeout` with state `done`;
 tell the user once and continue), and re-await pending work when staying. A child's `done` is not a
 verdict: check the repo.
