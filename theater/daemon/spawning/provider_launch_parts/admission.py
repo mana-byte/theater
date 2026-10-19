@@ -141,7 +141,7 @@ class SpawnAdmission(ParticipantLaunchHost):
         )
         harness = get_harness(request.harness)
         request = self.spawner._resolve_resume_reference(request)
-        _predecessor, overlay, fingerprint = await self.spawner._validate_before_create(
+        predecessor, overlay, fingerprint = await self.spawner._validate_before_create(
             request, harness
         )
         if overlay is not None and overlay.cwd is not None:
@@ -149,7 +149,10 @@ class SpawnAdmission(ParticipantLaunchHost):
                 raise BadRequest("resume workspace does not match the predecessor's trusted cwd")
             if workspace_request.workspace_id is None:
                 workspace_request = replace(workspace_request, cwd=overlay.cwd)
-        preparation = await self.workspaces.prepare_for_spawn(workspace_request)
+        preparation = await self.workspaces.prepare_for_spawn(
+            workspace_request,
+            join_workspace_id=None if predecessor is None else predecessor.workspace_id,
+        )
         return _PreparedSpawn(
             preparation=preparation,
             resume_overlay=overlay,

@@ -84,7 +84,9 @@ class WorkspaceReservationFlow(WorkspaceHost):
             return await self.materialize_creation(reservation, reservation_id=reservation_id)
         return reservation
 
-    async def prepare_for_spawn(self, request: WorkspaceRequest) -> WorkspacePreparation:
+    async def prepare_for_spawn(
+        self, request: WorkspaceRequest, *, join_workspace_id: str | None = None
+    ) -> WorkspacePreparation:
         """Resolve all filesystem/Git facts before operation admission begins."""
         self._validate_request(request)
         if request.workspace_id is not None:
@@ -125,7 +127,9 @@ class WorkspaceReservationFlow(WorkspaceHost):
             request.cwd,
             label="workspace.reserve.inspect",
         )
-        return WorkspacePreparation(request, existing_path_facts=facts)
+        return WorkspacePreparation(
+            request, existing_path_facts=facts, join_workspace_id=join_workspace_id
+        )
 
     def reserve_for_spawn(
         self,
@@ -167,7 +171,11 @@ class WorkspaceReservationFlow(WorkspaceHost):
         if existing_facts is None:
             raise ValueError("borrowed workspace requires pre-inspected path facts")
         return self._reserve_borrowed_in_connection(
-            existing_facts, reservation_id=reservation_id, owner_id=owner_id, connection=connection
+            existing_facts,
+            reservation_id=reservation_id,
+            owner_id=owner_id,
+            connection=connection,
+            join_workspace_id=preparation.join_workspace_id,
         )
 
     def _reserve_existing(self, workspace_id: str, reservation_id: str) -> WorkspaceReservation:
@@ -203,14 +211,14 @@ class WorkspaceReservationFlow(WorkspaceHost):
             )
             if usage.holder_kind == WorkspaceUsageHolderKind.PARTICIPANT.value
         ]
-        if holders:
+        if holders and workspace.ownership_kind != WorkspaceOwnershipKind.THEATER.value:
             return (
                 f"path {workspace.path!r} is owned by live participant {holders[0]}; "
                 "kill it or wait, then resume"
             )
         return (
-            f"path {workspace.path!r} is a {workspace.ownership_kind}-owned workspace "
-            "that cannot be borrowed"
+            f"path {workspace.path!r} is a {workspace.ownership_kind}-owned workspace that "
+            "cannot be borrowed; a resume may only reuse its predecessor's own workspace"
         )
 
     def _reserve_borrowed_in_connection(
@@ -220,6 +228,7 @@ class WorkspaceReservationFlow(WorkspaceHost):
         reservation_id: str,
         owner_id: str,
         connection: Connection,
+        join_workspace_id: str | None = None,
     ) -> WorkspaceReservation:
         workspace = self._store.workspaces.get_active_by_path(facts.path, connection=connection)
         created_workspace = False
@@ -239,7 +248,10 @@ class WorkspaceReservationFlow(WorkspaceHost):
             )
             self._store.workspaces.create(workspace, connection=connection)
             created_workspace = True
-        elif workspace.ownership_kind != WorkspaceOwnershipKind.BORROWED.value:
+        elif workspace.ownership_kind != WorkspaceOwnershipKind.BORROWED.value and not (
+            workspace.workspace_id == join_workspace_id
+            and workspace.ownership_kind == WorkspaceOwnershipKind.THEATER.value
+        ):
             raise WorkspaceOwnershipConflict(
                 workspace.workspace_id,
                 "path_already_owned",

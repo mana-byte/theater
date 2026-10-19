@@ -60,8 +60,9 @@ For a resumable row, call `spawn_session` with:
 - `worktree=False`;
 - the same `harness` and the chosen `approval`.
 
-Resume reuses the predecessor's workspace: never combine it with `worktree`, and if the path is
-owned by a live participant, kill it or wait for it, then resume.
+Resume reuses the predecessor's workspace: never combine it with `worktree`. Pass the retained
+`cwd`; a THEATER-owned (named or unique) worktree is rejoined even while other participants share
+it. A path owned by any other non-borrowed workspace is refused with `path_already_owned`.
 
 Do not invent a model or reasoning effort. Pass `model` or `reasoning_effort` only when the row
 actually records that native value; otherwise omit the parameter. Do not change the retained branch

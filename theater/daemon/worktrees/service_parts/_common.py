@@ -71,3 +71,5 @@ class WorkspacePreparation:
     creation_facts: WorktreeCreationFacts | None = None
     existing_path_facts: ExistingPathFacts | None = None
     named_workspace: WorkspaceRecord | None = None
+    # A resume may join its predecessor's THEATER workspace by path instead of borrowing it.
+    join_workspace_id: str | None = None

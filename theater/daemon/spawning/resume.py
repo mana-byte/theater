@@ -156,6 +156,7 @@ def _participant_identity(participant: Participant) -> tuple:
         participant.id,
         participant.harness,
         participant.cwd,
+        participant.workspace_id,
         str(participant.status),
         participant.session_id,
         participant.session_correlation,
