@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import replace
 
@@ -25,6 +26,8 @@ from theater.models import (
     now,
 )
 
+logger = logging.getLogger(__name__)
+
 _RESTART_ERROR = {
     "code": "daemon_restarted",
     "message": "the daemon restarted before provider dispatch; the request was not replayed",
@@ -39,6 +42,12 @@ async def reconcile_workspace_lifecycle(daemon) -> tuple[str, ...]:
     if not callable(reconcile) or not callable(recover_cleanup):
         return ()
     reconciled = list(await reconcile())
+    release_dead = getattr(service, "reconcile_dead_holder_usages", None)
+    if callable(release_dead):
+        try:
+            release_dead()
+        except Exception:
+            logger.exception("dead-holder usage reconcile failed at startup")
     cursor: tuple[float, str] | None = None
     while True:
         records, cursor = daemon.store.workspaces.list_by_states_page(

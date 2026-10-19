@@ -9,8 +9,8 @@ from sqlalchemy import Connection, exists, insert, literal, or_, select, update
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories._json import decode_json, encode_json
-from theater.daemon.schema import workspace_usages, workspaces
-from theater.models import WorkspaceRecord, WorkspaceUsageRecord
+from theater.daemon.schema import participants, workspace_usages, workspaces
+from theater.models import WorkspaceRecord, WorkspaceUsageHolderKind, WorkspaceUsageRecord
 
 
 class WorkspaceRepository:
@@ -407,6 +407,34 @@ class WorkspaceRepository:
             .where(workspace_usages.c.released_at.is_(None))
             .order_by(workspace_usages.c.acquired_at, workspace_usages.c.usage_id)
         ).fetchall()
+        return [self._usage_from_row(dict(row._mapping)) for row in rows]
+
+    def stranded_dead_holder_usages(
+        self,
+        *,
+        dead_status: str,
+        limit: int,
+        after_id: str | None = None,
+        connection: Connection | None = None,
+    ) -> list[WorkspaceUsageRecord]:
+        """Active participant usages whose holder participant row is DEAD, paged by usage_id.
+
+        Inner-joined to participants, so a usage with no participant row is never returned.
+        """
+        conn = self._db.conn if connection is None else connection
+        stmt = (
+            select(workspace_usages)
+            .join(participants, participants.c.id == workspace_usages.c.holder_id)
+            .where(
+                workspace_usages.c.holder_kind == WorkspaceUsageHolderKind.PARTICIPANT.value,
+                workspace_usages.c.released_at.is_(None),
+                participants.c.status == dead_status,
+            )
+        )
+        if after_id is not None:
+            stmt = stmt.where(workspace_usages.c.usage_id > after_id)
+        stmt = stmt.order_by(workspace_usages.c.usage_id).limit(limit)
+        rows = conn.execute(stmt).fetchall()
         return [self._usage_from_row(dict(row._mapping)) for row in rows]
 
     def prepare_delete(

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+from dataclasses import replace
+
 from theater.daemon import workers
 from theater.daemon.worktrees import cleanup
 from theater.daemon.worktrees.cleanup import (
@@ -13,10 +16,17 @@ from theater.daemon.worktrees.identity import (
 from theater.daemon.worktrees.service_parts._host import WorkspaceHost
 from theater.models import (
     BadRequest,
+    Status,
     WorkspaceOwnershipKind,
     WorkspaceRecord,
     WorkspaceState,
+    WorkspaceUsageRecord,
 )
+
+logger = logging.getLogger(__name__)
+
+#: Dead-holder usages released per write unit, keeping the synchronous store off a long lock.
+_DEAD_HOLDER_BATCH = 100
 
 
 class WorkspaceRecovery(WorkspaceHost):
@@ -42,6 +52,45 @@ class WorkspaceRecovery(WorkspaceHost):
             if cursor is None:
                 break
         return tuple(reconciled)
+
+    def reconcile_dead_holder_usages(self) -> int:
+        """Release active participant usages stranded by a dead holder (e.g. tmux_restart).
+
+        Idempotent and paged by usage_id so a release the query already reflects, or a
+        single failing row, can never loop; a failure is logged and never blocks startup.
+        """
+        released = 0
+        after_id: str | None = None
+        dead = str(Status.DEAD)
+        while True:
+            batch = self._store.workspaces.stranded_dead_holder_usages(
+                dead_status=dead, limit=_DEAD_HOLDER_BATCH, after_id=after_id
+            )
+            if not batch:
+                return released
+            after_id = batch[-1].usage_id
+            for usage in batch:
+                try:
+                    if self._release_dead_holder_usage(usage):
+                        released += 1
+                except Exception:
+                    logger.exception("dead-holder usage release failed for %s", usage.usage_id)
+
+    def _release_dead_holder_usage(self, usage: WorkspaceUsageRecord) -> bool:
+        timestamp = self._clock()
+        with self._store.write_unit() as unit:
+            if not self._store.workspaces.release_usage(
+                usage.usage_id,
+                released_at=timestamp,
+                reason="dead_holder_reconcile",
+                connection=unit.connection,
+            ):
+                return False
+            self._journal.append_usage(
+                unit,
+                replace(usage, released_at=timestamp, release_reason="dead_holder_reconcile"),
+            )
+        return True
 
     async def recover_cleanup_deletion(
         self, workspace_id: str, *, operation_id: str, non_dispatch_proven: bool
