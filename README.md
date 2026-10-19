@@ -92,10 +92,32 @@ nix profile add github:mana-byte/theater/v1.0.0rc11#theater github:mana-byte/the
 
 Drop `/v1.0.0rc11` to track `main` instead. From a local checkout, use `nix profile add .#theater .#regie` instead.
 `nix run .#theater -- --help` and `nix run .#regie -- --help` run either CLI
-without adding it to your profile. The default package and app remain Theater;
-install both named packages to use Régie. Neither package exposes Python or
-dependency executables in your profile. An existing `tmux` or `git` on PATH
-takes precedence over the bundled fallback.
+without adding it to your profile. The default app remains Theater. Neither
+package exposes Python or dependency executables in your profile. An existing
+`tmux` or `git` on PATH takes precedence over the bundled fallback.
+
+Install profiles bundle the packages above; each adds to the previous one:
+
+| Profile | Installs |
+|---|---|
+| `theater-base` (also `default`) | Theater and Régie |
+| `theater-plus` | `theater-base` plus Beads (`bd` 1.3.1, the only version Theater accepts) |
+| `theater-full` | `theater-plus` plus the supported coding-agent CLIs (`claude`, `codex`, `opencode`, `pi`, `vibe`) |
+
+```sh
+nix profile add github:mana-byte/theater#theater-plus   # or #theater-base, #theater-full
+```
+
+Profiles are on `main`; tagged releases before them still treat the default
+package as Theater only. `theater-full` includes unfree packages (`claude-code` and
+`textual-speedups`, a Vibe dependency); the flake allows exactly those two.
+Profiles link only executables, so man pages and shell completions are not installed.
+
+Adding or upgrading a profile next to a separately installed `#theater` or
+`#regie` fails with a `bin/theater` or `bin/regie` conflict and leaves the
+profile unchanged (the upgrade error suggests no fix). Run `nix profile list` to
+find the element names, `nix profile remove` them, then add the profile, or add
+it with `--priority`.
 
 ### With uv
 
