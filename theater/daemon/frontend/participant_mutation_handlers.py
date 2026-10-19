@@ -9,13 +9,13 @@ from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
 from theater.daemon.operations.error_values import operation_error
 from theater.daemon.operations.termination import termination_dispatch
-from theater.daemon.presence import access as presence_access
-from theater.daemon.rpc.participants import (
+from theater.daemon.participants.mutations import (
     authorize_participant_mutation,
     persist_participant_status,
-    terminate_participant,
     update_participant_metadata,
 )
+from theater.daemon.presence import access as presence_access
+from theater.daemon.rpc.participants import terminate_participant
 from theater.models import (
     PublicOperationRecord,
     PublicOperationState,
