@@ -6,8 +6,8 @@ from types import MappingProxyType
 
 from theater.daemon.control_ownership import ControlTransferService
 from theater.daemon.frontend.handshake import ConnectionContext
-from theater.daemon.frontend.mutation_errors import operation_error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
+from theater.daemon.operations.error_values import operation_error
 from theater.daemon.operations.termination import termination_dispatch
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.participants import (

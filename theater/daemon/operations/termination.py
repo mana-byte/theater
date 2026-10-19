@@ -80,7 +80,7 @@ async def terminate_with_operation(
         )
         raise
     except Exception as exc:
-        from theater.daemon.frontend.mutation_errors import operation_error
+        from theater.daemon.operations.error_values import operation_error
 
         error = operation_error(exc, default_code="termination_failed")
         details = error.get("details")
