@@ -107,9 +107,16 @@ def _follow(calls, is_done) -> Counter:
 
 def measure_a3() -> dict:
     try:
-        from theater.mcp.server import await_ceiling
+        from theater.harness.registry.mcp import mcp_foreground_ceiling as await_ceiling
     except ImportError:
-        await_ceiling = None
+        try:
+            from theater.mcp.server import await_ceiling
+        except ImportError:
+            await_ceiling = None
+    else:
+        from theater.harness.registry.install import install_configured
+
+        install_configured()
     ceilings = {}
     for value in (None, "120000", LAUNCH_ENV_MS, "0"):
         if value is None:
