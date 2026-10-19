@@ -170,12 +170,26 @@ that id is dead. A live participant's session id is refused even when exact:
 live work goes through `send`, while resume continues dead sessions without two
 processes appending to the same harness session.
 
-For legacy tmux routes, pane identity is scoped to a tmux server epoch. The
-provider reports its server identity beside each pane-backed participant and a
-changed identity makes the old route unavailable without retiring its worktree.
-Empty or failed inventories remain inconclusive. The retained incident metadata
-lets the `theater-recover-tmux` skill plan explicit, conservative resume
-attempts.
+Terminal runtime identity is independent of the provider connection generation.
+A provider declaring `terminal-runtime-identity.v1` reports the same opaque,
+nonempty string (at most 4096 characters) in `facts.runtime_identity` and each
+terminal's `occupant.runtime_identity`. It stays stable across bridge reconnects
+and changes when the underlying terminal runtime is replaced. Exact occupant,
+process, and terminal-incarnation checks still apply.
+
+A complete verified inventory can retire only that provider's bindings with
+usable, different persisted runtime identity. Reconnecting to the same runtime
+preserves its participants and jobs; incomplete or stale reports cannot prove
+replacement. A complete report must supply identity once its capability, legacy
+contract, or retained evidence establishes that duty. Dropping a capability does
+not erase it. First identity evidence alone is not a restart.
+
+One compatibility adapter accepts legacy `tmux_server_identity` reports and
+stored bindings. Régie's existing report and occupant shapes stay valid; dual
+identity fields must agree. Generic incidents use `terminal_runtime_restarted`
+and provider-neutral recovery guidance. Legacy incidents retain their tmux
+errors, events, and metadata for `theater-recover-tmux`; historical database and
+API fields remain compatible.
 
 ---
 
@@ -1121,6 +1135,12 @@ bounded `InterruptPlan`; the daemon owns lineage, status, pane-identity, and
 human-presence checks, while each plugin owns only the native key sequence its
 TUI understands. Interruption never sets participant status directly—the
 observer remains authoritative.
+
+MCP foreground waits follow the same boundary: the optional
+`McpRenderingManifest.foreground_wait` declares an environment variable, default
+timeout, and return margin. The registry resolves it for MCP without a named
+harness branch. Native environment constants belong to the plugin; see
+[MCP foreground waits](harness-plugins.md#mcp-foreground-waits).
 
 This inbound harness OTel channel is distinct from `theater/observability/`,
 which exports Theater's own daemon, CLI, and régie telemetry. Claude ships its

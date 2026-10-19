@@ -438,6 +438,33 @@ The compiler checks callback presence and returned runtime values, while the
 manifest validator checks its structural contract. Keep callback modules beside
 the manifest and wire them visibly with relative imports.
 
+### MCP foreground waits
+
+A client that backgrounds long MCP calls declares its timing in the plugin:
+
+```python
+from theater.harness.contracts import McpForegroundWait, McpRenderingManifest
+
+mcp = McpRenderingManifest(
+    renderer=render_mcp,
+    foreground_wait=McpForegroundWait(
+        env="ACME_MCP_BACKGROUND_MS",
+        default_ms=120_000,
+        margin_seconds=10,
+    ),
+)
+```
+
+Set `HarnessManifest.mcp` to this value. The compiler validates a nonempty
+environment-variable name, a finite positive default, and a finite nonnegative
+margin; booleans are invalid numeric declarations. MCP resolves the policy
+through the harness registry, including aliases. Omission adds no harness ceiling.
+
+Missing, malformed, or nonfinite environment values use the declared default.
+A finite value at or below zero disables this ceiling. Otherwise the ceiling is
+`max(milliseconds / 1000 - margin_seconds, 0)`, still bounded by Theater's RPC
+wait limit. Keep native environment names and launch overrides inside the plugin.
+
 ## Identity, resume, and recovery
 
 `IdentityManifest` fields are all optional. Omission means the capability is
