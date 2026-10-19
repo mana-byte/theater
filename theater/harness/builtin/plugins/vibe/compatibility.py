@@ -13,7 +13,7 @@ from .version import parse_vibe_version
 _FLOOR = (2, 24, 0)
 #: The first Vibe release not yet proved compatible with this store reader.
 #: Launch planning enforces the ceiling because the probe is display-only.
-_CEILING = (2, 27, 0)
+_CEILING = (3, 0, 1)
 _POLICY = f"vibe-harness-{'.'.join(map(str, _FLOOR))}-compatible"
 
 
