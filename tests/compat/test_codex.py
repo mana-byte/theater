@@ -272,6 +272,32 @@ def test_qualify_accepts_only_the_named_optional_control_skip(
     assert result.verdict == verdict
 
 
+def test_an_explicit_proof_failure_outranks_a_setup_error_beside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree(tmp_path / "tree")
+    adapter = codex.ADAPTER
+
+    def collect(command, **kwargs):
+        _bundle(Path(command[command.index("--out") + 1]))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def run_pytest(root, nodeids, *, env, expected_skips, timeout=900):
+        if nodeids != adapter.green_tests:
+            return tuple(Check(nodeid, "pass") for nodeid in nodeids)
+        return (Check(nodeids[0], "fail"), Check(nodeids[1], "error"), *map(_pass, nodeids[2:]))
+
+    monkeypatch.setattr(codex.subprocess, "run", collect)
+    monkeypatch.setattr(codex.framework, "run_pytest", run_pytest)
+    with make_sandbox("codex", root=tmp_path / "sandbox") as sb:
+        result = adapter.qualify(root, "1.5.0", sb, sb.bin_dir / "codex")
+    assert result.verdict == "red"
+
+
+def _pass(nodeid: str) -> Check:
+    return Check(nodeid, "pass")
+
+
 def test_collector_keeps_failure_diagnostics_only_when_asked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -300,13 +300,16 @@ class CodexAdapter:
         green = framework.run_pytest(
             root, self.green_tests, env=proof_env, expected_skips=self.expected_skips, timeout=900
         )
-        if not green or any(check.status == "error" for check in green):
-            verdict: Verdict = "inconclusive"
-        elif any(check.status == "fail" for check in green):
-            verdict = "red"
-        elif any(
-            check.status == "skip" and check.name not in self.expected_skips for check in green
-        ) or not any(check.status == "pass" for check in green):
+        if any(check.status == "fail" for check in green):
+            verdict: Verdict = "red"  # an explicit failure outranks a setup error beside it
+        elif (
+            not green
+            or any(check.status == "error" for check in green)
+            or any(
+                check.status == "skip" and check.name not in self.expected_skips for check in green
+            )
+            or not any(check.status == "pass" for check in green)
+        ):
             verdict = "inconclusive"
         else:
             verdict = "green"
