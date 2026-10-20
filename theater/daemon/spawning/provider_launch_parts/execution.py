@@ -203,7 +203,7 @@ class SpawnExecution(ParticipantLaunchHost):
         assert provider is not None
         artifacts = tuple(str(path) for path in (*plan.files.keys(), *plan.private_files.keys()))
         with self.store.write_unit() as unit:
-            encoded_facts = unit.connection.execute(
+            encoded_facts: str = unit.connection.execute(
                 select(launch_reservations.c.launch_facts).where(
                     launch_reservations.c.operation_id == operation_id
                 )

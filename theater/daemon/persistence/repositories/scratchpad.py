@@ -408,7 +408,7 @@ class ScratchpadRepository:
         )
         if after_namespace is not None:
             stmt = stmt.where(global_scratchpad.c.namespace > after_namespace)
-        names = tuple(conn.execute(stmt).scalars())
+        names: tuple[str, ...] = tuple(conn.execute(stmt).scalars())
         page = names[:limit]
         return ScratchpadNamespacePage(
             namespaces=page,
@@ -446,6 +446,7 @@ class ScratchpadRepository:
         if digests:
             wanted = frozenset(digests)
             matches: dict[str, list[str]] = {}
+            row_key: str
             for row_key in connection.execute(
                 select(global_scratchpad.c.key).where(global_scratchpad.c.namespace == namespace)
             ).scalars():
@@ -459,7 +460,7 @@ class ScratchpadRepository:
                         "entries — refuse to guess; delete them by name"
                     )
             names.extend(key for matched in matches.values() for key in matched)
-        existing = list(
+        existing: list[str] = list(
             connection.execute(
                 select(global_scratchpad.c.key)
                 .where(global_scratchpad.c.namespace == namespace)
