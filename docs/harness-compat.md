@@ -32,7 +32,8 @@ release.
 The detailed checks stay in the workflow run. A red issue carries `compat:<harness>`;
 `tooling` marks an automation or mock failure, `admitted-regression` marks an in-range
 release that failed the daily watch, and `inconclusive` marks a release whose three attempts
-all ended in infrastructure noise. The issue closes after a conclusive green run.
+all ended in infrastructure noise. The issue closes once every release it lists is proved
+again or retired (see the ledger below).
 Issue creation, updates, labels, and closure use the GitHub REST API; an issue is found by its
 `compat:<harness>` label and exact title.
 
@@ -51,7 +52,7 @@ Issue creation, updates, labels, and closure use the GitHub REST API; an issue i
   the ceiling moves only over an unbroken run of greens, a release that cannot be proved goes
   into `CODEX_RUNTIME_QUALIFIED_EXCLUDED` with its measured cause, and anything outside the
   range stays on the legacy launch. The retained `latest` fixture is rewritten only when a
-  capture's evidence differs, so an unchanged schema bumps one ceiling line.
+  capture's evidence differs, so unchanged evidence bumps one ceiling line.
 - Claude's gate is one inclusive literal, `_QUALIFIED_MAX` in
   `theater/harness/builtin/plugins/claude/compatibility.py`, next to the hook floor. It covers
   the asynchronous hook surface only: the messaging range stays display-only (`runtime=None`) and
