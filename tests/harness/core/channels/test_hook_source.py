@@ -379,14 +379,15 @@ async def test_hook_callbacks_stay_off_loop_and_recover_queued_order() -> None:
     # exhausted and requeues the survivors instead of decoding them.
     assert (await source.read()).error_code == "hook_decode_failed"
     assert (await source.read()).error_code == "hook_decode_failed"
-    # Once the straggler finishes, the queued deliveries decode in order. A busy
-    # read requeues without yielding, so each retry gives the loop one tick.
+    # Once the straggler finishes, the queued deliveries decode in order. The straggler is a
+    # real worker thread, so wait for it on a deadline: a fixed number of loop ticks can all
+    # pass before the thread is scheduled (it did, on a slow runner).
     decode_release.set()
+    deadline = asyncio.get_running_loop().time() + 10.0
     batch = await source.read()
-    for _ in range(1000):
-        if batch.error_code is None:
-            break
-        await asyncio.sleep(0)
+    while batch.error_code is not None:
+        assert asyncio.get_running_loop().time() < deadline, batch.error_code
+        await asyncio.sleep(0.005)
         batch = await source.read()
     assert [fact.native_id for fact in batch.trajectory] == ["second", "third"]
     await source.aclose()
