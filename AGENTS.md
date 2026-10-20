@@ -245,8 +245,8 @@ reports what loaded and why anything was rejected.
 Every harness's supported-version bound is one constant in its plugin, and the daily
 [compatibility pipeline](docs/harness-compat.md) proves new upstream releases against it:
 `scripts/harness_compat/adapters/<h>_bump.py` parses that constant by name and rewrites one
-literal (Claude `_QUALIFIED_MAX`, Codex/OpenCode `runtime_plan.py`, Pi `runtime_constants.py`,
-Vibe `_CEILING`). Treat the gate and the pipeline as one contract:
+literal (Claude `_QUALIFIED_MAX`, Codex/OpenCode `runtime_plan.py` (OpenCode has a 1.x and a 2.x
+ceiling, qualified as `opencode` and `opencode2`), Pi `runtime_constants.py`, Vibe `_CEILING`). Treat the gate and the pipeline as one contract:
 
 - Do not rename, move or reshape a gate constant without updating its `<h>_bump.py`,
   `tests/compat/test_bump_size.py::_INPUTS` and the `paths:` filter of

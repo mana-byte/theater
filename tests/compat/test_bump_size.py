@@ -14,6 +14,8 @@ from scripts.harness_compat.adapters import (
     codex,
     codex_bump,
     opencode,
+    opencode2,
+    opencode2_bump,
     opencode_bump,
     pi,
     pi_bump,
@@ -27,6 +29,7 @@ _ADAPTERS = {
     "claude": claude.ADAPTER,
     "codex": codex.ADAPTER,
     "opencode": opencode.ADAPTER,
+    "opencode2": opencode2.ADAPTER,
     "pi": pi.ADAPTER,
     "vibe": vibe.ADAPTER,
 }
@@ -34,6 +37,7 @@ _INPUTS = {
     "claude": (claude_bump.COMPAT,),
     "codex": (codex_bump.PLAN,),
     "opencode": (opencode_bump.RUNTIME_PLAN,),
+    "opencode2": (opencode2_bump.RUNTIME_PLAN,),
     "pi": (pi_bump._CONSTANTS,),
     "vibe": (vibe_bump.COMPAT,),
 }
@@ -79,6 +83,6 @@ def _measure_bump(name: str, root: Path) -> tuple[set[Path], int, set[Path]]:
     return changed, lines, declared
 
 
-@pytest.mark.parametrize("name", ("claude", "codex", "opencode", "pi", "vibe"))
+@pytest.mark.parametrize("name", ("claude", "codex", "opencode", "opencode2", "pi", "vibe"))
 def test_apply_bump_publishes_only_declared_small_changes(name: str, tmp_path: Path) -> None:
     _measure_bump(name, tmp_path)

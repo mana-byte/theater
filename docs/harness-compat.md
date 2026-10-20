@@ -1,6 +1,6 @@
 # Harness compatibility
 
-The daily workflow qualifies stable releases of Claude Code, Codex, opencode, Pi, and Vibe
+The daily workflow qualifies stable releases of Claude Code, Codex, opencode (1.x and 2.x), Pi, and Vibe
 without real API keys or user configuration. It updates one rolling gate PR per harness and
 one issue per harness for red, tooling, or still-inconclusive results. An inconclusive release
 never justifies a gate bump; it is retried (below) and, if it stays inconclusive, becomes an
@@ -41,7 +41,7 @@ Issue creation, updates, labels, and closure use the GitHub REST API; an issue i
 
 - A candidate is a stable upstream release without reusable cached evidence and outside the
   harness's `known_bad` list. `--version X` forces one release.
-- Range gates (Claude, Codex, OpenCode, Pi, Vibe): the oldest releases at or above the current
+- Range gates (Claude, Codex, OpenCode 1.x and 2.x, Pi, Vibe): the oldest releases at or above the current
   ceiling, tested in ascending order. `--max-candidates N` (default 5) caps the run. The first
   red or inconclusive result stops the run (the untested rest is reported as deferred), and the
   bump goes only to the last contiguous green. A range gate also qualifies its
@@ -59,12 +59,14 @@ Issue creation, updates, labels, and closure use the GitHub REST API; an issue i
   is not qualified by this pipeline. A release newer than the maximum has its optional hooks
   omitted until the gate PR is merged; releases between the floor and the maximum are admitted
   without a proof of their own.
-- OpenCode qualifies the 1.x line only (the adapter is its "1.x arm"). The plugin also supports
-  2.0.x (`OPENCODE_SERVER_V2_MIN/MAX_VERSION` in `runtime_plan.py`, and the exact release list in
-  `tui_recovery_v2.py`), but there is no stable 2.x release to discover: npm `opencode-ai` and
-  the GitHub releases stop at 1.19.x, and the beta, dev, next and tui-v2 channels report
-  `0.0.0-<channel>-<timestamp>`, which the probe refuses. Those v2 bounds stay human-owned until
-  a stable 2.x ships; then add a v2 arm with its own proofs.
+- OpenCode is qualified as two harnesses because its two lines ship as different npm packages
+  and keep separate gates: `opencode` (1.x, package `opencode-ai`, `OPENCODE_TUI_MAX_VERSION`) and
+  `opencode2` (2.x, package `@opencode/cli`, `OPENCODE_SERVER_V2_MAX_VERSION`, whose exclusive
+  ceiling may end in `.0`). Each has its own cache, rolling PR and issue. The 2.x proofs
+  (`tests/integration/opencode/test_server_v2_proof.py`) are model-free: banner, Basic auth,
+  `/api/info`, session location and idle absence, and a durable prompt admission read back through
+  the lineage database. A 2.x model turn, the generated approval plugin and the TUI attach are not
+  proven, and the exact release list in `tui_recovery_v2.py` stays human-owned.
 - Vibe's floor is enforced at launch as well as displayed: a release older than
   `_FLOOR` ignores the isolated session-log directory, so launch planning refuses it.
 - An adapter that changes no gate value produces no PR.

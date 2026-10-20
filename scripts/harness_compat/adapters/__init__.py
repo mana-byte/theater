@@ -6,7 +6,7 @@ import importlib
 
 from ..contract import Adapter
 
-ADAPTER_NAMES = ("codex", "claude", "opencode", "pi", "vibe")
+ADAPTER_NAMES = ("codex", "claude", "opencode", "opencode2", "pi", "vibe")
 
 
 def load_adapter(name: str) -> Adapter:

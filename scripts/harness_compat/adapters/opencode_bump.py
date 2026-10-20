@@ -13,7 +13,6 @@ RUNTIME_PLAN = Path("theater/harness/builtin/plugins/opencode/runtime_plan.py")
 COUPLED_FILES: tuple[Path, ...] = (RUNTIME_PLAN,)
 _FLOOR = "OPENCODE_TUI_MIN_VERSION"
 _CEILING = "OPENCODE_TUI_MAX_VERSION"
-_GATE_LINE = re.compile(r"^OPENCODE_TUI_MAX_VERSION = \(\d+, \d+, \d+\)$", re.M)
 
 
 def _render(version: tuple[int, int, int]) -> str:
@@ -40,7 +39,7 @@ def next_patch(version: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
-def read_gate(root: Path) -> tuple[str, str]:
+def read_tuples(root: Path, names: set[str]) -> dict[str, tuple[int, int, int]]:
     """Read AST tuple literals from plugin source without importing theater."""
     source = (root / RUNTIME_PLAN).read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(RUNTIME_PLAN))
@@ -49,7 +48,7 @@ def read_gate(root: Path) -> tuple[str, str]:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
-        if not isinstance(target, ast.Name) or target.id not in {_FLOOR, _CEILING}:
+        if not isinstance(target, ast.Name) or target.id not in names:
             continue
         if target.id in gate or not isinstance(node.value, ast.Tuple):
             raise ValueError(f"the OpenCode gate is unreadable: {target.id} in {RUNTIME_PLAN}")
@@ -59,11 +58,34 @@ def read_gate(root: Path) -> tuple[str, str]:
         ):
             raise ValueError(f"the OpenCode gate is unreadable: {target.id} in {RUNTIME_PLAN}")
         gate[target.id] = cast(tuple[int, int, int], ast.literal_eval(node.value))
-    if set(gate) != {_FLOOR, _CEILING}:
+    if set(gate) != names:
         raise ValueError(f"the OpenCode gate is unreadable: missing tuple in {RUNTIME_PLAN}")
+    return gate
+
+
+def read_gate(root: Path) -> tuple[str, str]:
+    """The v1 floor and exclusive ceiling as release text."""
+    gate = read_tuples(root, {_FLOOR, _CEILING})
     if gate[_CEILING] <= gate[_FLOOR] or gate[_CEILING][2] == 0:
         raise ValueError("the OpenCode v1 gate has an invalid exclusive ceiling")
     return _render(gate[_FLOOR]), _render(gate[_CEILING])
+
+
+def rewrite_ceiling(root: Path, name: str, green: str) -> list[Path]:
+    """Point ``name`` at the exclusive ceiling right after ``green``; one source line changes."""
+    path = root / RUNTIME_PLAN
+    original = path.read_text(encoding="utf-8")
+    match = re.search(rf"^{name} = \(\d+, \d+, \d+\)$", original, re.M)
+    if match is None:
+        raise ValueError(f"bump anchor missing in {RUNTIME_PLAN}: {name}")
+    major, minor, patch = version_key(next_patch(green))
+    bumped = (
+        original[: match.start()]
+        + f"{name} = ({major}, {minor}, {patch})"
+        + original[match.end() :]
+    )
+    path.write_text(bumped, encoding="utf-8")
+    return [RUNTIME_PLAN]
 
 
 def verified_set(root: Path) -> VerifiedSet:
@@ -97,13 +119,4 @@ def apply_bump(root: Path, greens: list[str]) -> list[Path]:
             f"got {greens[0]!r}"
         )
 
-    path = root / RUNTIME_PLAN
-    original = path.read_text(encoding="utf-8")
-    match = _GATE_LINE.search(original)
-    if match is None:
-        raise ValueError(f"bump anchor missing in {RUNTIME_PLAN}: {_CEILING}")
-    major, minor, patch = version_key(next_patch(greens[-1]))
-    replacement = f"{_CEILING} = ({major}, {minor}, {patch})"
-    bumped = original[: match.start()] + replacement + original[match.end() :]
-    path.write_text(bumped, encoding="utf-8")
-    return [RUNTIME_PLAN]
+    return rewrite_ceiling(root, _CEILING, greens[-1])

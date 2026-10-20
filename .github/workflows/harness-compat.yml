@@ -14,7 +14,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, claude, codex, opencode, pi, vibe]
+        options: [all, claude, codex, opencode, opencode2, pi, vibe]
       version:
         description: Exact stable version of one harness; empty discovers new releases
         required: false
@@ -79,7 +79,7 @@ jobs:
             exit 1
           fi
           if [[ "$REQUESTED_HARNESS" == "all" ]]; then
-            harnesses='["claude","codex","opencode","pi","vibe"]'
+            harnesses='["claude","codex","opencode","opencode2","pi","vibe"]'
           else
             harnesses="[\"$REQUESTED_HARNESS\"]"
           fi

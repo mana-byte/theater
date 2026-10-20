@@ -137,7 +137,7 @@ def qualification_inputs(root: Path, harness: str, adapter: Adapter | None = Non
     # The lockfile and pytest settings decide what the proofs run on.
     paths |= {root / "uv.lock", root / "pyproject.toml"}
     paths |= set((root / "tests/native").glob("*.py"))
-    paths |= _tree(root / _PLUGINS / harness)
+    paths |= _tree(root / _PLUGINS / getattr(adapter, "plugin", harness))
     if adapter is not None:
         paths |= _closure(root, _seed_tests(root, adapter))
         fixtures = root / "tests/fixtures"

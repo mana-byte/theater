@@ -14,13 +14,45 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ..contract import Sandbox
-from .opencode_pi_process import terminate_group
+from ..contract import InstallFailed, Sandbox
+from .opencode_pi_process import run_group, terminate_group
 
 _BANNER_PREFIX = "opencode server listening on "
 _PREWARM_PASSWORD = "harness-compat-prewarm"
 _CATALOG = Path("opencode/models.json")
 _CATALOG_SECONDS = 30.0
+
+
+def npm_install(sb: Sandbox, package: str, version: str) -> Path:
+    """npm-install exactly ``package@version`` and expose its ``opencode`` bin under the sandbox."""
+    prefix = sb.root / "npm-opencode"
+    try:
+        run = run_group(
+            ["npm", "install", "--prefix", str(prefix), f"{package}@{version}"],
+            env=dict(sb.env),
+            timeout=600,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise InstallFailed(f"npm install {package}@{version} did not run: {exc}") from exc
+    if run.returncode != 0:
+        raise InstallFailed(
+            f"npm install {package}@{version} exited {run.returncode}: "
+            f"{(run.stderr or run.stdout).strip()[-400:]}"
+        )
+    packaged = prefix / "node_modules" / ".bin" / "opencode"
+    if not packaged.exists():
+        raise InstallFailed(f"npm install {package}@{version} produced no bin/opencode")
+    exposed = sb.bin_dir / "opencode"
+    exposed.unlink(missing_ok=True)
+    exposed.symlink_to(packaged)
+    try:
+        check = run_group([str(exposed), "--version"], env=sb.offline_env, timeout=60)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise InstallFailed(f"installed opencode version check failed: {exc}") from exc
+    output = f"{check.stdout}{check.stderr}".strip()
+    if check.returncode != 0 or version not in output:
+        raise InstallFailed(f"installed opencode did not report {version!r}: {output!r}")
+    return exposed
 
 
 def write_provider_override(sb: Sandbox) -> None:

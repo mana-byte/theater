@@ -14,7 +14,6 @@ from scripts.harness_compat import contract
 from scripts.harness_compat.adapters import (
     opencode,
     opencode_bump,
-    opencode_pi_process,
     opencode_sandbox,
 )
 from scripts.harness_compat.probe import _probe
@@ -345,6 +344,6 @@ def test_install_failure_raises_install_failed(
         stdout = ""
         stderr = "npm ERR! network unreachable"
 
-    monkeypatch.setattr(opencode_pi_process, "run_group", lambda *args, **kwargs: _Result())
+    monkeypatch.setattr(opencode_sandbox, "run_group", lambda *args, **kwargs: _Result())
     with pytest.raises(contract.InstallFailed, match="exited 1"):
         opencode.ADAPTER.install(_sandbox(tmp_path), _candidate())

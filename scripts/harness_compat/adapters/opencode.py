@@ -5,7 +5,6 @@ Detached runtime lacks a TUI installer, so that gate requires human review.
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -14,7 +13,6 @@ from .. import framework, github
 from ..contract import (
     Adapter,
     Check,
-    InstallFailed,
     Result,
     Route,
     Sandbox,
@@ -23,7 +21,7 @@ from ..contract import (
     verdict_from_checks,
     version_key,
 )
-from . import opencode_bump, opencode_pi_process, opencode_sandbox
+from . import opencode_bump, opencode_sandbox
 
 NPM_PACKAGE = "opencode-ai"
 
@@ -96,36 +94,7 @@ class OpenCodeAdapter:
 
     def install(self, sb: Sandbox, version: str) -> Path:
         """npm-install exactly ``version`` and expose its bin under ``sb.bin_dir``."""
-        prefix = sb.root / "npm-opencode"
-        try:
-            run = opencode_pi_process.run_group(
-                ["npm", "install", "--prefix", str(prefix), f"{NPM_PACKAGE}@{version}"],
-                env=dict(sb.env),
-                timeout=600,
-            )
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            raise InstallFailed(f"npm install {NPM_PACKAGE}@{version} did not run: {exc}") from exc
-        if run.returncode != 0:
-            raise InstallFailed(
-                f"npm install {NPM_PACKAGE}@{version} exited {run.returncode}: "
-                f"{(run.stderr or run.stdout).strip()[-400:]}"
-            )
-        packaged = prefix / "node_modules" / ".bin" / "opencode"
-        if not packaged.exists():
-            raise InstallFailed(f"npm install {NPM_PACKAGE}@{version} produced no bin/opencode")
-        exposed = sb.bin_dir / "opencode"
-        exposed.unlink(missing_ok=True)
-        exposed.symlink_to(packaged)
-        try:
-            check = opencode_pi_process.run_group(
-                [str(exposed), "--version"], env=sb.offline_env, timeout=60
-            )
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            raise InstallFailed(f"installed opencode version check failed: {exc}") from exc
-        output = f"{check.stdout}{check.stderr}".strip()
-        if check.returncode != 0 or version not in output:
-            raise InstallFailed(f"installed opencode did not report {version!r}: {output!r}")
-        return exposed
+        return opencode_sandbox.npm_install(sb, NPM_PACKAGE, version)
 
     def version_line(self, version: str) -> str:
         """1.x prints a bare release; the probe regex tolerates an optional ``v``."""

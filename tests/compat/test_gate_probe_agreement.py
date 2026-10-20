@@ -20,7 +20,9 @@ def test_the_probe_admits_the_last_gated_release_and_refuses_the_ceiling(
     gate = adapter.verified(REPO_ROOT)
     assert gate.ceiling is not None
     major, minor, patch = version_key(gate.ceiling)
-    last = f"{major}.{minor}.{patch - 1}"
+    # A ceiling such as 2.1.0 has no previous patch release; the floor is admitted then.
+    last = f"{major}.{minor}.{patch - 1}" if patch else gate.floor
+    assert last is not None
     assert gate.admits(last) and not gate.admits(gate.ceiling)
     stub = tmp_path / "stub"
     assert _probe(adapter, REPO_ROOT, last, stub)[0] is True
