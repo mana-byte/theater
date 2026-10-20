@@ -13,7 +13,7 @@ import pytest
 
 from scripts.harness_compat import runner
 from scripts.harness_compat.artifacts import stage_composed
-from scripts.harness_compat.cli import exit_code, main
+from scripts.harness_compat.cli import _open_failures, exit_code, main
 from scripts.harness_compat.contract import Check, Result, Sandbox, VerifiedSet
 from scripts.harness_compat.evidence import adapter_digest, cache_root, write_evidence
 from scripts.harness_compat.inputs import qualification_inputs
@@ -416,3 +416,42 @@ def test_a_deterministic_problem_beside_a_timeout_is_not_retried(
     summary = runner.run_harness(GateFileAdapter(["green"]), tmp_path)
     [row] = summary["issues"]
     assert (row["verdict"], len(row["attempts"]), sleeps) == ("tooling", 1, [])
+
+
+@pytest.mark.parametrize(
+    ("problems", "verdict", "attempts"),
+    [
+        (["bump check timed out"], "inconclusive", 3),
+        (["bump check timed out", "probe 3.0.0: supported=False"], "tooling", 1),
+    ],
+)
+def test_a_candidate_bump_check_retries_only_pure_timeouts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sleeps: list[float],
+    problems: list[str],
+    verdict: str,
+    attempts: int,
+) -> None:
+    (tmp_path / "gate.txt").write_text("old\n")
+    _repo(tmp_path)
+    monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: problems)
+    summary = runner.run_harness(GateFileAdapter(["green"]), tmp_path)
+    [row] = summary["issues"]
+    assert (row["verdict"], len(row["attempts"])) == (verdict, attempts)
+
+
+@pytest.mark.parametrize(
+    ("raw", "listed"),
+    [
+        ("", []),
+        (" ", []),
+        ("2.8.0,2.9.0", ["2.8.0", "2.9.0"]),
+        ("2.8.0, 2.9.0 ,", ["2.8.0", "2.9.0"]),
+    ],
+)
+def test_the_issue_ledger_tolerates_spaces(
+    monkeypatch: pytest.MonkeyPatch, raw: str, listed: list[str]
+) -> None:
+    monkeypatch.setenv("HARNESS_COMPAT_OPEN_FAILURES", raw)
+    assert _open_failures() == listed

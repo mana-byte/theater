@@ -68,6 +68,12 @@ def _run_url() -> str:
     return "local"
 
 
+def _open_failures() -> list[str]:
+    """The releases the open issue lists, tolerant of the spaces a human may add."""
+    ledger = os.environ.get("HARNESS_COMPAT_OPEN_FAILURES", "")
+    return [item.strip() for item in ledger.split(",") if item.strip()]
+
+
 def exit_code(summaries: list[dict[str, Any]]) -> int:
     """1: a red or tooling row; 2: only exhausted inconclusive rows; 0: nothing to act on."""
     rows = [row for summary in summaries for row in summary["issues"]]
@@ -116,10 +122,7 @@ def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
         )
     if args.publish and summary_path:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        open_failures = [
-            v for v in os.environ.get("HARNESS_COMPAT_OPEN_FAILURES", "").split(",") if v
-        ]
-        report = prepare_publication(summaries[0], summary_path, open_failures)
+        report = prepare_publication(summaries[0], summary_path, _open_failures())
         summaries[0]["publication"] = {"pr": report.pr_needed, "issue": report.issue_action}
     if summary_path:
         summary_path.parent.mkdir(parents=True, exist_ok=True)

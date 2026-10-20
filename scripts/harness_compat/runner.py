@@ -167,7 +167,7 @@ def _qualify(
                 if problems:
                     verdict = (
                         "inconclusive"
-                        if any("timed out" in problem.lower() for problem in problems)
+                        if all("timed out" in problem.lower() for problem in problems)
                         else "tooling"
                     )
                     return (
