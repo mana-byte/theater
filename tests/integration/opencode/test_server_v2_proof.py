@@ -11,6 +11,7 @@ import asyncio
 import base64
 import contextlib
 import http.client
+import json
 import os
 import secrets
 import selectors
@@ -26,8 +27,14 @@ from urllib.parse import urlsplit
 import pytest
 
 from theater.harness.builtin.plugins.opencode import ids_v2, store
+from theater.harness.builtin.plugins.opencode.approval_v2 import require_plugin_active
 from theater.harness.builtin.plugins.opencode.constants import V2_DB_NAME
 from theater.harness.builtin.plugins.opencode.http_v2 import OpenCodeV2Client, session_directory
+from theater.harness.builtin.plugins.opencode.native_plugin_v2 import (
+    PLUGIN_ID,
+    plugin_dir,
+    render_native_plugin_v2,
+)
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
     OPENCODE_SERVER_V2_MAX_VERSION,
     OPENCODE_SERVER_V2_MIN_VERSION,
@@ -77,6 +84,7 @@ class StockServer:
         self.endpoint = endpoint
         self.token_file = workdir / "runtime.token"
         self.database = workdir / V2_DB_NAME
+        self.config = workdir / "server.json"
 
     def stop(self) -> None:
         # serve forks workers: signal the whole group so none is orphaned.
@@ -136,6 +144,24 @@ def stock() -> Iterator[StockServer]:
     token_file = workdir / "runtime.token"
     token_file.write_text(password, encoding="utf-8")
     token_file.chmod(0o600)
+    config = workdir / "server.json"
+    # The production plugin package, rendered by the production renderer for `manual` approval.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("THEATER_HOME", str(workdir / "theater-home"))
+        for path, text in render_native_plugin_v2(
+            "hproof0000001", config, workdir / "receipt-token", "manual"
+        ).items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+    config.write_text(
+        json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "plugin": [plugin_dir(config).resolve().as_uri()],
+            }
+        ),
+        encoding="utf-8",
+    )
     process = subprocess.Popen(
         ["opencode", "serve", "--port", "0", "--hostname", "127.0.0.1"],
         stdout=subprocess.PIPE,
@@ -146,6 +172,7 @@ def stock() -> Iterator[StockServer]:
             **os.environ,
             "OPENCODE_SERVER_PASSWORD": password,
             "OPENCODE_DB": str(workdir / V2_DB_NAME),
+            "OPENCODE_CONFIG": str(config),
         },
     )
     server = StockServer(process, workdir, "http://127.0.0.1:1")
@@ -206,3 +233,21 @@ def test_v2_prompt_admission_is_durable_and_projects_into_the_lineage_database(
                 return
         time.sleep(0.2)
     raise AssertionError("the admitted prompt never reached the lineage database")
+
+
+def test_v2_generated_approval_plugin_is_active_on_the_selected_server(stock: StockServer) -> None:
+    """Core swallows a plugin load failure, so Theater proves the exact plugin before any send."""
+
+    async def scenario() -> None:
+        client = stock.client()
+        session_id = await client.create_session(directory=str(stock.workdir))
+        location = session_directory(await client.read_session(session_id))
+        await require_plugin_active(
+            client,
+            plugin_id=PLUGIN_ID,
+            source_path=str((plugin_dir(stock.config) / "server.js").resolve()),
+            directory=location,
+            timeout=30.0,
+        )
+
+    asyncio.run(scenario())

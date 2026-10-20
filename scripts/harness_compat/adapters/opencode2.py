@@ -30,6 +30,7 @@ _PROOF_TESTS = (
     "test_v2_banner_basic_auth_and_info",
     "test_v2_session_location_and_idle_absence",
     "test_v2_prompt_admission_is_durable_and_projects_into_the_lineage_database",
+    "test_v2_generated_approval_plugin_is_active_on_the_selected_server",
 )
 
 

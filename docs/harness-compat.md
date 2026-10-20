@@ -64,9 +64,10 @@ Issue creation, updates, labels, and closure use the GitHub REST API; an issue i
   `opencode2` (2.x, package `@opencode/cli`, `OPENCODE_SERVER_V2_MAX_VERSION`, whose exclusive
   ceiling may end in `.0`). Each has its own cache, rolling PR and issue. The 2.x proofs
   (`tests/integration/opencode/test_server_v2_proof.py`) are model-free: banner, Basic auth,
-  `/api/info`, session location and idle absence, and a durable prompt admission read back through
-  the lineage database. A 2.x model turn, the generated approval plugin and the TUI attach are not
-  proven, and the exact release list in `tui_recovery_v2.py` stays human-owned.
+  `/api/info`, session location and idle absence, a durable prompt admission read back through
+  the lineage database, and the production-rendered approval plugin proven active with the
+  runtime's own fail-closed check. A 2.x model turn and the TUI attach are not proven, and the
+  exact release list in `tui_recovery_v2.py` stays human-owned.
 - Vibe's floor is enforced at launch as well as displayed: a release older than
   `_FLOOR` ignores the isolated session-log directory, so launch planning refuses it.
 - An adapter that changes no gate value produces no PR.
