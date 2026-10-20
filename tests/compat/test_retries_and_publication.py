@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
@@ -81,7 +82,7 @@ class ScriptedAdapter:
 @pytest.fixture
 def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     waited: list[float] = []
-    monkeypatch.setattr(runner.time, "sleep", waited.append)
+    monkeypatch.setattr(runner, "_sleep", waited.append)
     return waited
 
 
@@ -108,11 +109,9 @@ def test_only_inconclusive_is_retried_at_most_three_times(
     assert (result.verdict, len(log), sleeps) == (final, attempts, waited)
 
 
-def test_retry_stops_when_the_run_budget_cannot_fit_another_attempt(
-    sleeps: list[float], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(runner.time, "monotonic", lambda: 0.0)
-    result, _, log = runner._retry(lambda: (_result("inconclusive"), None), 1.0)
+def test_retry_stops_when_the_run_budget_cannot_fit_another_attempt(sleeps: list[float]) -> None:
+    soon = time.monotonic() + 1.0  # less than the reserve one more attempt needs
+    result, _, log = runner._retry(lambda: (_result("inconclusive"), None), soon)
     assert result.verdict == "inconclusive" and sleeps == []
     assert [item["verdict"] for item in log] == ["inconclusive", "not run"]
 
@@ -153,11 +152,12 @@ def test_red_outranks_inconclusive_and_a_green_prefix_still_publishes() -> None:
     )
 
 
-def test_a_red_result_revokes_the_cached_green_and_withdraws_the_pr(
-    tmp_path: Path, sleeps: list[float]
+@pytest.mark.parametrize("verdict", ["red", "inconclusive"])
+def test_a_final_non_green_revokes_the_cached_green_and_names_the_pr_release(
+    tmp_path: Path, sleeps: list[float], verdict: str
 ) -> None:
     _repo(tmp_path)
-    adapter = ScriptedAdapter(["red"])
+    adapter = ScriptedAdapter([verdict])
     stale = Result("vibe", "3.0.0", "green", (Check("proof", "pass"),))
     write_evidence(
         tmp_path,
@@ -167,9 +167,9 @@ def test_a_red_result_revokes_the_cached_green_and_withdraws_the_pr(
     cached = cache_root(tmp_path) / "vibe/3.0.0.json"
     assert cached.exists()
     summary = runner.run_harness(adapter, tmp_path, version="3.0.0", publish=True)
-    assert not cached.exists() and sleeps == []
+    assert not cached.exists()
     assert summary["invalidated"] == ["3.0.0"] and summary["greens"] == []
-    assert prepare_publication(summary, tmp_path / "summary.json").pr_withdraw is True
+    assert prepare_publication(summary, tmp_path / "summary.json").pr_withdraw == "3.0.0"
 
 
 def test_job_summary_annotations_and_overview(tmp_path: Path, sleeps: list[float]) -> None:
@@ -197,6 +197,9 @@ def test_summarize_fails_when_a_selected_harness_left_no_result(
     assert main(["summarize", str(tmp_path / "results"), "--expect", "vibe"]) == 0
     assert main(["summarize", str(tmp_path / "results"), "--expect", "vibe,pi"]) == 1
     assert "no result" in target.read_text()
+    red = runner.run_harness(ScriptedAdapter(["red"]), tmp_path / "src", version="3.0.0")
+    (results / "compat-summary.json").write_text(json.dumps({"harnesses": [red]}))
+    assert main(["summarize", str(tmp_path / "results"), "--expect", "vibe"]) == 1
 
 
 def test_staging_refuses_paths_the_bump_did_not_declare(tmp_path: Path) -> None:
@@ -256,3 +259,58 @@ def test_an_inconclusive_composition_is_retried_then_reported(
     assert sleeps == [30.0, 90.0][: calls - 1]
     assert summary["greens"] == ["3.0.0"]
     assert [row["verdict"] for row in summary["issues"]] == ([verdict] if verdict else [])
+    if verdict:
+        [row] = summary["issues"]
+        assert row["role"] == "composition" and len(row["attempts"]) == 3
+        report = prepare_publication(summary, tmp_path / "summary.json")
+        assert "inconclusive after 3 attempts" in report.issue_body
+
+
+class UnrelatedFileAdapter(GateFileAdapter):
+    """Upstream code ran in the candidate tree and left an extra file behind."""
+
+    def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+        (root / ".github/workflows").mkdir(parents=True)
+        (root / ".github/workflows/unrelated.yml").write_text("name: planted\n")
+        return super().qualify(root, version, sb, binary)
+
+
+def test_a_file_outside_the_declared_artifact_roots_never_ships(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "gate.txt").write_text("old\n")
+    _repo(tmp_path)
+    monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
+    summary = runner.run_harness(UnrelatedFileAdapter(["green"]), tmp_path, publish=True)
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert summary["published"] is True and staged == ["gate.txt"]
+
+
+class HungConsistencyAdapter(ScriptedAdapter):
+    def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+        hung = Check("consistency", "error", "Command 'pytest' timed out after 900 seconds")
+        return Result(self.name, version, "tooling", (hung,))
+
+
+def test_a_timed_out_consistency_run_is_infrastructure_noise_not_tooling(tmp_path: Path) -> None:
+    result, _ = runner._qualify(HungConsistencyAdapter([]), tmp_path, "3.0.0", bump=False)
+    assert result.verdict == "inconclusive"
+
+
+def test_a_crossed_major_boundary_is_called_out_in_the_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    (tmp_path / "gate.txt").write_text("old\n")
+    _repo(tmp_path)
+    monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
+    adapter = GateFileAdapter(["green"], releases=("3.0.0", "4.0.0"))
+    summary = runner.run_harness(adapter, tmp_path)
+    assert summary["greens"] == ["3.0.0", "4.0.0"]
+    report = prepare_publication(summary, tmp_path / "summary.json")
+    assert "Major version boundary:** 4.0.0 crosses from 3.x" in report.pr_body

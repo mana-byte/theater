@@ -39,10 +39,11 @@ from .stale import stale_warnings
 #: Infrastructure noise gets a whole fresh unit again; a red or tooling verdict never does.
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = (30.0, 90.0)
-#: Wall-clock budget of one harness run; the workflow's job timeout sits above it.
-RUN_BUDGET_SECONDS = 80 * 60
-#: What one attempt may need; nothing new starts without this much budget left.
-ATTEMPT_RESERVE_SECONDS = 10 * 60
+#: Wall-clock budget of one harness run. The first attempt of every unit always runs, so the
+#: workflow's job timeout (90 min = budget + reserve) is the hard bound, not this value.
+RUN_BUDGET_SECONDS = 70 * 60
+#: What one attempt may need (a pytest invocation may take 15 min); nothing new starts without it.
+ATTEMPT_RESERVE_SECONDS = 20 * 60
 
 
 def _cause(result: Result) -> str:
@@ -66,12 +67,15 @@ def _retry[T](
     return result, extra, log
 
 
+_sleep = time.sleep  # a seam: tests patch this, never the process-wide time.sleep
+
+
 def _backoff(number: int, deadline: float) -> bool:
     """Wait before attempt ``number + 1``; False when the run budget cannot fit another one."""
     delay = RETRY_BACKOFF_SECONDS[number - 1]
     if time.monotonic() + delay + ATTEMPT_RESERVE_SECONDS > deadline:
         return False
-    time.sleep(delay)
+    _sleep(delay)
     return True
 
 
@@ -179,7 +183,12 @@ def _qualify(
             relevant = tuple(
                 check for check in observed.checks if check.name in adapter.green_tests
             )
-            if observed.verdict in ("tooling", "inconclusive"):
+            if observed.verdict == "tooling" and any(
+                check.status == "error" and "timed out" in check.detail.lower()
+                for check in observed.checks
+            ):
+                verdict = "inconclusive"  # a hung consistency run says nothing about the bump
+            elif observed.verdict in ("tooling", "inconclusive"):
                 verdict = observed.verdict
             elif observed.verdict == "red" and any(c.status == "fail" for c in observed.checks):
                 verdict = "red"  # an early conclusive failure needs no further proofs
@@ -272,12 +281,18 @@ def _compose_retrying(
     *,
     publish: bool,
     deadline: float,
-) -> tuple[list[str], bool, bool, list[str]]:
-    """``_compose`` again while its only failure is infrastructure noise."""
+) -> tuple[tuple[list[str], bool, bool, list[str]], list[dict[str, Any]]]:
+    """``_compose`` again while its only failure is infrastructure noise, with its history."""
+    log: list[dict[str, Any]] = []
     for number in range(1, MAX_ATTEMPTS + 1):
         outcome = _compose(adapter, root, greens, artifacts, publish=publish)
-        if not outcome[1] or number == MAX_ATTEMPTS or not _backoff(number, deadline):
-            return outcome
+        problems, noisy = outcome[0], outcome[1]
+        verdict = "inconclusive" if noisy else "tooling" if problems else "green"
+        log.append(
+            {"attempt": number, "verdict": verdict, "cause": problems[0] if problems else ""}
+        )
+        if not noisy or number == MAX_ATTEMPTS or not _backoff(number, deadline):
+            return outcome, log
     raise AssertionError("unreachable")
 
 
@@ -326,7 +341,7 @@ def _watch(
     watched, routes, log = _retry(attempt, deadline)
     if watched.verdict == "green":
         write_evidence(root, replace(watched, adapter_digest=digest), run_url)
-    elif watched.verdict in ("red", "tooling"):
+    else:
         drop_evidence(root, adapter.name, version)
     row = {**watched.to_evidence(), "routes": routes, "run_url": run_url, "attempts": log}
     return row, False
@@ -364,7 +379,7 @@ def _walk_candidates(
                 candidate, cache_artifacts_dir(root, adapter.name, candidate)
             )
             write_evidence(root, result, run_url, artifacts=cached)
-        elif result.verdict in ("red", "tooling"):
+        else:
             drop_evidence(root, adapter.name, candidate)
             reused.pop(candidate, None)
         results.append(result)
@@ -431,6 +446,7 @@ def _run_with_artifacts(
                 document.get("artifacts", {}),
             )
     warnings: list[str]
+    compose_log: list[dict[str, Any]] = []
     if artifact_conflicts:
         problems, compose_inconclusive, published, warnings = (
             artifact_conflicts,
@@ -439,7 +455,7 @@ def _run_with_artifacts(
             [],
         )
     elif greens:
-        problems, compose_inconclusive, published, warnings = _compose_retrying(
+        (problems, compose_inconclusive, published, warnings), compose_log = _compose_retrying(
             adapter, root, greens, artifacts, publish=publish, deadline=deadline
         )
     else:
@@ -465,6 +481,8 @@ def _run_with_artifacts(
                 ],
                 "routes": [],
                 "run_url": run_url,
+                "role": "composition",
+                "attempts": compose_log,
             }
         )
     warnings = sorted(set(candidate_warnings) | set(warnings))
@@ -520,7 +538,8 @@ def run_harness(
         return _run_with_artifacts(
             adapter,
             root,
-            CandidateArtifacts(Path(temporary)),
+            # An adapter that generates files names where; every other path is dropped.
+            CandidateArtifacts(Path(temporary), getattr(adapter, "artifact_roots", ())),
             version=version,
             max_candidates=max_candidates,
             publish=publish,

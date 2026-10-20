@@ -166,6 +166,8 @@ class CodexAdapter:
     stub_help = ""
     green_tests = _GREEN
     consistency_tests = _CONSISTENCY
+    #: Where a qualification leaves the bundle it captured; the runner ships nothing else.
+    artifact_roots = (_CANDIDATES,)
     expected_skips: ClassVar[dict[str, str]] = {
         _UI_CONTROL: "downloaded binaries may not show Codex's update dialog"
     }

@@ -25,7 +25,7 @@ CORE = (
     "select",
     "stale",
 )
-_TRACKED = ("tests", "scripts", "theater/harness", "theater/trajectory")
+_TRACKED = ("tests", "scripts", "theater")
 _PLUGINS = Path("theater/harness/builtin/plugins")
 
 

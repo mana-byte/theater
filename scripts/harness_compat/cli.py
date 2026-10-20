@@ -92,7 +92,7 @@ def _summarize(args: argparse.Namespace) -> int:
     ]
     table, missing = render_overview(summaries, [n for n in args.expect.split(",") if n])
     _append_step_summary(table)
-    return 1 if missing else 0
+    return 1 if missing else exit_code(summaries)
 
 
 def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:

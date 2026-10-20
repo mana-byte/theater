@@ -92,6 +92,7 @@ def render_harness(summary: Mapping[str, Any]) -> str:
 
 
 def _row(row: Mapping[str, Any], role: str) -> str:
+    role = row.get("role", role)
     log = row.get("attempts", [])
     tried = sum(1 for item in log if item["verdict"] != "not run") or 1
     cause = _cause(row)

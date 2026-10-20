@@ -67,10 +67,15 @@ def _copy(source: Path, destination: Path) -> None:
 
 
 class CandidateArtifacts:
-    """One candidate's files never overwrite another candidate's proof."""
+    """One candidate's files never overwrite another candidate's proof.
 
-    def __init__(self, storage: Path) -> None:
+    Only files under the adapter's declared ``roots`` are captured: qualification runs upstream
+    code, so whatever else it leaves in the tree must never reach a gate PR.
+    """
+
+    def __init__(self, storage: Path, roots: Collection[Path]) -> None:
         self.storage = storage
+        self.roots = tuple(roots)
         self.owners: dict[Path, str] = {}
 
     def capture(self, tree: Path, version: str) -> list[str]:
@@ -78,6 +83,8 @@ class CandidateArtifacts:
         for relative in sorted(untracked_files(tree)):
             if not valid_artifact_path(relative.as_posix()):
                 problems.append(f"candidate wrote forbidden evidence path: {relative}")
+                continue
+            if not any(relative.is_relative_to(root) for root in self.roots):
                 continue
             if owner := self.owners.get(relative):
                 problems.append(

@@ -73,8 +73,7 @@ def _measure_bump(name: str, root: Path) -> tuple[set[Path], int, set[Path]]:
     assert not any(path.parts[:3] == ("tests", "fixtures", "harness_compat") for path in changed)
 
     lines = sum(_changed_lines(before.get(path, b""), after.get(path, b"")) for path in changed)
-    if name in {"claude", "codex", "opencode", "pi", "vibe"}:
-        assert lines <= 4, f"{name}: {lines} changed diff lines"
+    assert lines <= 4, f"{name}: {lines} changed diff lines"
     assert adapter.apply_bump(root, [version]) == []
     assert _snapshot(root) == after
     return changed, lines, declared

@@ -98,7 +98,7 @@ jobs:
     name: Qualify ${{ matrix.harness }}
     needs: [static-checks, plan]
     runs-on: ubuntu-24.04
-    # RUN_BUDGET_SECONDS (80 min) in scripts/harness_compat/runner.py sits below this.
+    # RUN_BUDGET_SECONDS + ATTEMPT_RESERVE_SECONDS (70 + 20 min) in scripts/harness_compat/runner.py.
     timeout-minutes: 90
     permissions:
       contents: read
@@ -172,14 +172,23 @@ jobs:
           title: ${{ steps.compat.outputs.pr_title }}
           body: ${{ steps.compat.outputs.pr_body }}
           delete-branch: true
-      - name: Withdraw the gate PR whose evidence was contradicted
-        if: steps.compat.outputs.pr_withdraw == 'true'
+      - name: Withdraw the gate PR whose evidence was revoked
+        if: steps.compat.outputs.pr_withdraw != ''
         env:
           GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN }}
+          REVOKED: ${{ steps.compat.outputs.pr_withdraw }}
         run: |
-          gh pr close "chore/compat-$HARNESS" --delete-branch \
-            --comment "A conclusive run contradicted the evidence behind this gate bump: $RUN_URL" \
-            || echo "No open gate PR for $HARNESS."
+          set -euo pipefail
+          # Only a PR that actually lists a revoked release is withdrawn.
+          body="$(gh pr list --head "chore/compat-$HARNESS" --state open --json body --jq '.[0].body // empty')"
+          IFS=',' read -ra revoked <<< "$REVOKED"
+          for version in "${revoked[@]}"; do
+            if [[ "$body" == *"\`$version\`"* ]]; then
+              gh pr close "chore/compat-$HARNESS" --delete-branch \
+                --comment "The evidence for $version was revoked by $RUN_URL"
+              break
+            fi
+          done
       - name: Upsert failure issue
         if: steps.compat.outputs.issue_action == 'upsert'
         env:
@@ -199,8 +208,12 @@ jobs:
           if [[ -n "$number" ]]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$number" -f body="$ISSUE_BODY" --silent
           else
+            # Labelled at creation: the label is how the next run finds this issue.
+            IFS=',' read -ra initial <<< "$ISSUE_LABELS"
+            create=()
+            for label in "${initial[@]}"; do create+=(-f "labels[]=$label"); done
             number="$(gh api -X POST "repos/$GITHUB_REPOSITORY/issues" \
-              -f title="$ISSUE_TITLE" -f body="$ISSUE_BODY" --jq '.number')"
+              -f title="$ISSUE_TITLE" -f body="$ISSUE_BODY" "${create[@]}" --jq '.number')"
           fi
           # Assign labels explicitly so permission failures surface.
           IFS=',' read -ra labels <<< "$ISSUE_LABELS"
@@ -264,4 +277,11 @@ jobs:
       - name: Summarize every selected harness
         env:
           EXPECTED: ${{ join(fromJSON(needs.plan.outputs.harnesses), ',') }}
-        run: uv run python -m scripts.harness_compat summarize "$RUNNER_TEMP/results" --expect "$EXPECTED"
+          QUALIFY_RESULT: ${{ needs.qualify.result }}
+        run: |
+          # Fails for a missing result, a red/tooling/inconclusive row, or a failed publishing step.
+          uv run python -m scripts.harness_compat summarize "$RUNNER_TEMP/results" --expect "$EXPECTED"
+          if [[ "$QUALIFY_RESULT" != "success" ]]; then
+            echo "::error title=Harness compatibility::A qualification job ended as $QUALIFY_RESULT; see its summary."
+            exit 1
+          fi

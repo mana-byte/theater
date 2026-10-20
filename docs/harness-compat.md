@@ -65,12 +65,15 @@ Issue creation, updates, labels, and closure use the GitHub REST API; an issue i
 
 ## Retries and outcomes
 
-A release is qualified in a fresh worktree, home and mock; so is the composed bump. Only an `inconclusive` result
-(install, timeout or tooling noise that proves nothing about upstream) is repeated, at most
-three attempts in total with 30 s and 90 s backoff; red and tooling are never retried. A run has
-an 80-minute budget inside the 90-minute job: a retry or a further candidate starts only if its
-worst case still fits, otherwise it is shown as not run or deferred. Each row records its
-attempts.
+A release is qualified in a fresh worktree, home and mock; so is the composed bump. Only an
+`inconclusive` result (install, timeout or tooling noise that proves nothing about upstream)
+is repeated, at most
+three attempts in total with 30 s and 90 s backoff; red and tooling are never retried, but a
+timed-out proof run counts as noise whatever an adapter called it. A run has a 70-minute budget
+plus a 20-minute reserve for one attempt, which is the 90-minute job timeout: a retry or a
+further candidate starts only if the reserve still fits, otherwise it is shown as not run or
+deferred. The first attempt of the watch and of the composition always runs, so the job timeout
+is the hard bound. Each row (candidate, watch, composition) records its attempts.
 
 | Rows after the retries | PR | Issue | Exit |
 | --- | --- | --- | --- |
@@ -79,10 +82,14 @@ attempts.
 | only inconclusive rows | none for them | opened or updated, `inconclusive` | 2 |
 | all green or no work | per prefix | closed | 0 |
 
-A red or tooling result also revokes that release's cached green, and a gate PR left with no
-promotable release because of it is closed. Evidence is reused only for the same digest: the framework, adapter,
-proofs and their imports (including `theater/trajectory`), the plugin, `uv.lock` and
-`pyproject.toml`.
+Any final non-green result (red, tooling, or exhausted inconclusive) revokes that release's
+cached green. If that leaves no promotable release, the run closes the open gate PR, but only
+when the PR body lists a revoked release. Only files under an adapter's declared
+`artifact_roots` (Codex: its candidate bundle directory) are captured and can enter a PR;
+everything else a qualification leaves in the tree is dropped. Evidence is reused only for the
+same digest: the framework, adapter, proofs and every module they import from `theater`, the
+plugin, `uv.lock` and `pyproject.toml`. A digest change empties the cache, so a gate PR from
+an older digest stays open until it is merged or recomputed.
 
 ## Reading a run
 
@@ -92,7 +99,8 @@ proofs and their imports (including `theater/trajectory`), the plugin, `uv.lock`
 - Dispatching one harness creates only that harness's job. A version needs exactly one harness.
 - Each job writes a summary (gate, candidates, deferred, every row with its attempts and
   cause) and annotates each failing row; the `Result overview` job adds one table over all
-  selected harnesses and fails when one of them left no result.
+  selected harnesses and fails when one of them left no result, has a red, tooling or
+  inconclusive row, or when a qualification job (including its publishing steps) failed.
 - The summary JSON, the PR and issue bodies and the diagnostics are uploaded as
   `compat-result-<harness>` for 14 days.
 - PRs and issues are produced only for runs on `main`; any other ref is a dry run of its own

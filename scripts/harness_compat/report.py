@@ -26,13 +26,13 @@ class PublishReport:
     issue_title: str
     issue_body: str
     issue_labels: tuple[str, ...]
-    pr_withdraw: bool = False
+    pr_withdraw: str = ""  # comma-separated releases whose evidence was revoked; "" = none
 
     def github_outputs(self) -> dict[str, str]:
         """Values consumed by ``harness-compat.yml``."""
         return {
             "pr_needed": str(self.pr_needed).lower(),
-            "pr_withdraw": str(self.pr_withdraw).lower(),
+            "pr_withdraw": self.pr_withdraw,
             "pr_title": self.pr_title,
             "pr_body": self.pr_body,
             "issue_action": self.issue_action,

@@ -24,6 +24,30 @@ def _result(row: dict[str, Any]) -> Result:
     )
 
 
+def _attempts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Attempts per release: the most any of its rows (candidate, watch, composition) needed."""
+    tried: dict[str, int] = {}
+    for row in rows:
+        made = sum(1 for item in row.get("attempts", []) if item["verdict"] != "not run")
+        tried[row["version"]] = max(tried.get(row["version"], 0), made)
+    return tried
+
+
+def _major_boundary(summary: dict[str, Any]) -> str:
+    """A promoted release in a newer major than the gate's current ceiling needs a human look."""
+    ceiling = (summary.get("gate") or {}).get("ceiling")
+    if not ceiling:
+        return ""
+    major = int(ceiling.split(".")[0])
+    crossed = [version for version in summary["greens"] if int(version.split(".")[0]) > major]
+    if not crossed:
+        return ""
+    return (
+        f"\n\n**Major version boundary:** {', '.join(crossed)} crosses from {major}.x. "
+        "The proofs cover the protocol only; read the release notes before merging."
+    )
+
+
 def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishReport:
     """Write PR and issue body files and append the GitHub step outputs."""
     rows = [*summary["reused_results"], *summary["results"]]
@@ -49,20 +73,19 @@ def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishR
         routes=routes,
         admitted_versions=admitted,
         stale_warnings=summary.get("stale_warnings", ()),
-        attempts={
-            row["version"]: sum(
-                1 for item in row.get("attempts", []) if item["verdict"] != "not run"
-            )
-            for row in rows
-        },
+        attempts=_attempts(rows),
     )
     recovered = bool(watch and watch["verdict"] == "green")
     action = report.issue_action
     if action == "none" and recovered:
         action = "close"
-    withdraw = bool(summary.get("invalidated")) and not summary["greens"]
+    withdraw = "" if summary["greens"] else ",".join(summary.get("invalidated", ()))
     report = replace(
-        report, pr_needed=summary["published"], issue_action=action, pr_withdraw=withdraw
+        report,
+        pr_needed=summary["published"],
+        issue_action=action,
+        pr_withdraw=withdraw,
+        pr_body=report.pr_body + _major_boundary(summary),
     )
     stem = summary_path.with_suffix("")
     stem.with_name(stem.name + ".pr.md").write_text(report.pr_body + "\n", encoding="utf-8")

@@ -328,6 +328,7 @@ class ArtifactAdapter:
     stub_help = ""
     green_tests = ("proof",)
     consistency_tests: tuple[str, ...] = ()
+    artifact_roots = (Path("candidates"), Path("fixtures"))
     expected_skips: ClassVar[dict[str, str]] = {}
     expected_routes: frozenset[tuple[str, str]] = frozenset()
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
@@ -548,7 +549,7 @@ def test_green_candidate_artifact_is_composed_and_staged(
     assert reused["published"] is True
     assert (tmp_path / "fixtures/1.2.0.json").read_text() == '{"proved": true}\n'
     assert not (tmp_path / "candidates/1.2.0.json").exists()
-    pool = CandidateArtifacts(tmp_path / "collision-pool")
+    pool = CandidateArtifacts(tmp_path / "collision-pool", [Path("same.txt")])
     first, second = tmp_path / "collision-1", tmp_path / "collision-2"
     for tree in (first, second):
         tree.mkdir()
@@ -561,9 +562,9 @@ def test_green_candidate_artifact_is_composed_and_staged(
     forbidden = first / "tests/fixtures/harness_compat/vibe/1.2.0.json"
     forbidden.parent.mkdir(parents=True)
     forbidden.write_text("legacy evidence")
-    assert CandidateArtifacts(tmp_path / "forbidden-pool").capture(first, "1.2.0") == [
-        "candidate wrote forbidden evidence path: tests/fixtures/harness_compat/vibe/1.2.0.json"
-    ]
+    assert CandidateArtifacts(tmp_path / "forbidden-pool", [Path("tests")]).capture(
+        first, "1.2.0"
+    ) == ["candidate wrote forbidden evidence path: tests/fixtures/harness_compat/vibe/1.2.0.json"]
 
 
 def test_unpromoted_candidate_artifacts_stay_out_of_the_composed_tree(
