@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from sqlalchemy import Connection, exists, insert, select, update
+from sqlalchemy.engine import ScalarResult
 
 from theater.constants.response_contract import CONTRACT_AUDIT_DETAIL_MAX_CHARS
 from theater.daemon.persistence.database import Database
@@ -170,14 +171,12 @@ class JobRepairRepository:
         if not handles:
             return set()
         conn = self._db.conn if connection is None else connection
-        return {
-            str(handle)
-            for handle in conn.execute(
-                select(job_repairs.c.job_handle)
-                .where(job_repairs.c.job_handle.in_(list(handles)))
-                .where(job_repairs.c.state != str(RepairState.SETTLED))
-            ).scalars()
-        }
+        unsettled: ScalarResult[str] = conn.execute(
+            select(job_repairs.c.job_handle)
+            .where(job_repairs.c.job_handle.in_(list(handles)))
+            .where(job_repairs.c.state != str(RepairState.SETTLED))
+        ).scalars()
+        return {str(handle) for handle in unsettled}
 
     def update(
         self,

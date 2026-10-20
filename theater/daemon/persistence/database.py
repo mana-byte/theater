@@ -16,7 +16,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.script.revision import ResolutionError
 from sqlalchemy import Connection, create_engine, event, inspect, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, ScalarResult
 
 from theater import paths
 from theater.daemon.persistence.transactions import SQLiteWriteUnit
@@ -235,7 +235,9 @@ def ensure_rc9_upgrade_allowed(connection: Connection) -> None:
     if "participants" not in tables:
         return
     if "alembic_version" in tables:
-        revisions = connection.execute(text("SELECT version_num FROM alembic_version")).scalars()
+        revisions: ScalarResult[str] = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalars()
         if any(revision_is_rc10(revision) for revision in revisions):
             return
     participant_count = int(
@@ -243,7 +245,7 @@ def ensure_rc9_upgrade_allowed(connection: Connection) -> None:
             text("SELECT count(*) FROM participants WHERE status != 'dead'")
         ).scalar_one()
     )
-    participant_ids = list(
+    participant_ids: list[str] = list(
         connection.execute(
             text("SELECT id FROM participants WHERE status != 'dead' ORDER BY id LIMIT :limit"),
             {"limit": _BLOCKER_LIMIT},

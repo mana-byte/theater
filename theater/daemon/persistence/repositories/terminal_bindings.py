@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy import Connection, insert, select, update
+from sqlalchemy.engine import ScalarResult
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories._json import decode_json, encode_json
@@ -131,21 +132,19 @@ class TerminalBindingRepository:
         updated_at: float,
         connection: Connection,
     ) -> tuple[str, ...]:
-        participant_ids = tuple(
-            str(value)
-            for value in connection.execute(
-                select(terminal_bindings.c.participant_id)
-                .where(terminal_bindings.c.provider_id == provider_id)
-                .where(terminal_bindings.c.health != health)
-                .where(
-                    terminal_bindings.c.participant_id.in_(
-                        # Dead participants' bindings are inert to provider lifecycle moves.
-                        select(participants.c.id).where(participants.c.status != str(Status.DEAD))
-                    )
+        stale: ScalarResult[str] = connection.execute(
+            select(terminal_bindings.c.participant_id)
+            .where(terminal_bindings.c.provider_id == provider_id)
+            .where(terminal_bindings.c.health != health)
+            .where(
+                terminal_bindings.c.participant_id.in_(
+                    # Dead participants' bindings are inert to provider lifecycle moves.
+                    select(participants.c.id).where(participants.c.status != str(Status.DEAD))
                 )
-                .order_by(terminal_bindings.c.participant_id)
-            ).scalars()
-        )
+            )
+            .order_by(terminal_bindings.c.participant_id)
+        ).scalars()
+        participant_ids = tuple(str(value) for value in stale)
         if participant_ids:
             connection.execute(
                 update(terminal_bindings)

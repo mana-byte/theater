@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass
 
 from sqlalchemy import and_, delete, exists, or_, select, text, update
+from sqlalchemy.engine import ScalarResult
 
 from theater import timing
 from theater.config import RetentionSection
@@ -343,17 +344,15 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
 
         timestamp = now()
         with store.write_unit() as unit:
-            retained_handles = [
-                str(value)
-                for value in unit.connection.execute(
-                    select(jobs.c.handle)
-                    .where(jobs.c.handle.in_(handles))
-                    .where(jobs.c.finished_at.is_not(None))
-                    .where(jobs.c.finished_at < cutoff)
-                    .where(jobs.c.handle.not_in(_fenced_repair_jobs()))
-                    .order_by(jobs.c.handle)
-                ).scalars()
-            ]
+            retained: ScalarResult[str] = unit.connection.execute(
+                select(jobs.c.handle)
+                .where(jobs.c.handle.in_(handles))
+                .where(jobs.c.finished_at.is_not(None))
+                .where(jobs.c.finished_at < cutoff)
+                .where(jobs.c.handle.not_in(_fenced_repair_jobs()))
+                .order_by(jobs.c.handle)
+            ).scalars()
+            retained_handles = [str(value) for value in retained]
             if not retained_handles:
                 continue
             touch_result = unit.connection.execute(

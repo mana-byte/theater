@@ -116,14 +116,14 @@ class JournalRepository:
 
     def stream_id(self, *, connection: Connection | None = None) -> str:
         conn = self._db.conn if connection is None else connection
-        value = conn.execute(
+        value: str = conn.execute(
             select(meta.c.value).where(meta.c.key == STREAM_ID_META_KEY)
         ).scalar_one()
         return str(value)
 
     def current_sequence(self, *, connection: Connection | None = None) -> int:
         conn = self._db.conn if connection is None else connection
-        value = conn.execute(
+        value: str = conn.execute(
             select(meta.c.value).where(meta.c.key == SEQUENCE_META_KEY)
         ).scalar_one()
         return int(value)
