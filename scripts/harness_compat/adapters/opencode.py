@@ -59,8 +59,11 @@ class OpenCodeAdapter:
     """The OpenCode 1.x arm of the frozen adapter contract."""
 
     name = "opencode"
-    probe = "theater.harness.builtin.plugins.opencode.runtime_plan:probe_opencode_compatibility"
-    stub_help = "--model --auto --fork"
+    # The probe the manifest wires (server topology); the stub answers both `--help` shapes.
+    probe = (
+        "theater.harness.builtin.plugins.opencode.server_plan:probe_opencode_server_compatibility"
+    )
+    stub_help = "--model --auto --fork --port --hostname"
     green_tests: tuple[str, ...] = (
         *(f"{_SERVER_PROOF}::{test}" for test in _SERVER_PROOF_TESTS),
         *(f"{_STOCK_PROOF}::{test}" for test in _STOCK_PROOF_TESTS),

@@ -13,9 +13,12 @@ from tests.support.shipped import VibeHarness, pin_installed_vibe_version
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.vibe import version as version_module
 from theater.harness.builtin.plugins.vibe.approval_guard import shadowed_approval_profile
-from theater.harness.builtin.plugins.vibe.compatibility import vibe_store_format_ceiling
+from theater.harness.builtin.plugins.vibe.compatibility import (
+    vibe_isolation_floor,
+    vibe_store_format_ceiling,
+)
 from theater.harness.builtin.plugins.vibe.constants import VIBE_BYPASS_TOOL_PERMISSIONS_ENV
-from theater.harness.builtin.plugins.vibe.launch import _ASK_FLOOR, _YOLO_FLOOR
+from theater.harness.builtin.plugins.vibe.launch import _ASK_FLOOR
 from theater.harness.builtin.plugins.vibe.manifest import MANIFEST
 from theater.harness.builtin.plugins.vibe.version import installed_vibe_version
 from theater.harness.contracts.manifest import InterruptPlan
@@ -275,12 +278,39 @@ def _plan(tmp_path, approval):
     )
 
 
+def test_launch_admits_the_oldest_qualified_writer(tmp_path, monkeypatch):
+    pin_installed_vibe_version(monkeypatch, vibe_isolation_floor())
+    plan = plan_launch(
+        "vibe",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="yolo",
+    )
+    assert plan.argv[0] == "vibe"
+    assert plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"]
+
+
+@pytest.mark.parametrize("version", [_before(vibe_isolation_floor()), (2, 0, 0)])
+def test_launch_refuses_a_writer_that_ignores_the_isolated_log_directory(
+    tmp_path, monkeypatch, version
+):
+    """Such a release writes its transcript where the observer never looks."""
+    pin_installed_vibe_version(monkeypatch, version)
+    with pytest.raises(BadRequest, match="upgrade Vibe"):
+        plan_launch(
+            "vibe",
+            participant_id="a",
+            prompt="",
+            config_path=tmp_path / "x.json",
+            approval="yolo",
+        )
+
+
 @pytest.mark.parametrize(
     ("version", "agent"),
     [
         pytest.param(None, "ask", id="probe-failed"),
-        pytest.param(_before(_YOLO_FLOOR), "default", id="before-yolo-floor"),
-        pytest.param(_YOLO_FLOOR, "default", id="yolo-floor"),
         pytest.param(_before(_ASK_FLOOR), "default", id="before-ask-floor"),
         pytest.param(_ASK_FLOOR, "ask", id="ask-floor"),
         pytest.param(_after(_ASK_FLOOR), "ask", id="after-ask-floor"),
@@ -293,28 +323,16 @@ def test_manual_maps_the_approval_per_tool_profile(tmp_path, monkeypatch, versio
     assert "--yolo" not in argv
 
 
-@pytest.mark.parametrize(
-    ("version", "yolo"),
-    [
-        pytest.param(None, "flag", id="probe-failed"),
-        pytest.param(_before(_YOLO_FLOOR), "agent", id="before-yolo-floor"),
-        pytest.param(_YOLO_FLOOR, "flag", id="yolo-floor"),
-        pytest.param(_after(_YOLO_FLOOR), "flag", id="after-yolo-floor"),
-    ],
-)
-def test_yolo_takes_the_flag_only_where_it_exists(tmp_path, monkeypatch, version, yolo):
+@pytest.mark.parametrize("version", [None, vibe_isolation_floor(), _after(vibe_isolation_floor())])
+def test_yolo_takes_the_flag(tmp_path, monkeypatch, version):
     pin_installed_vibe_version(monkeypatch, version)
     argv = _plan(tmp_path, "yolo").argv
-    if yolo == "flag":
-        assert "--yolo" in argv
-        assert "--agent" not in argv
-    else:
-        assert argv[argv.index("--agent") + 1] == "auto-approve"
-        assert "--yolo" not in argv
+    assert "--yolo" in argv
+    assert "--agent" not in argv
 
 
 def test_edits_pins_accept_edits_on_every_version(tmp_path, monkeypatch):
-    pin_installed_vibe_version(monkeypatch, _before(_YOLO_FLOOR))
+    pin_installed_vibe_version(monkeypatch, vibe_isolation_floor())
     argv = _plan(tmp_path, "edits").argv
     assert argv[argv.index("--agent") + 1] == "accept-edits"
 

@@ -59,6 +59,14 @@ Issue creation, updates, labels, and closure use the GitHub REST API; an issue i
   is not qualified by this pipeline. A release newer than the maximum has its optional hooks
   omitted until the gate PR is merged; releases between the floor and the maximum are admitted
   without a proof of their own.
+- OpenCode qualifies the 1.x line only (the adapter is its "1.x arm"). The plugin also supports
+  2.0.x (`OPENCODE_SERVER_V2_MIN/MAX_VERSION` in `runtime_plan.py`, and the exact release list in
+  `tui_recovery_v2.py`), but there is no stable 2.x release to discover: npm `opencode-ai` and
+  the GitHub releases stop at 1.19.x, and the beta, dev, next and tui-v2 channels report
+  `0.0.0-<channel>-<timestamp>`, which the probe refuses. Those v2 bounds stay human-owned until
+  a stable 2.x ships; then add a v2 arm with its own proofs.
+- Vibe's floor is enforced at launch as well as displayed: a release older than
+  `_FLOOR` ignores the isolated session-log directory, so launch planning refuses it.
 - An adapter that changes no gate value produces no PR.
 - Cached evidence is reused only while the framework, the adapter, the proof tests
   with their imported helpers and conftests, and the harness plugin are unchanged; otherwise the

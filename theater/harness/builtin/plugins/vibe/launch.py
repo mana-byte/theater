@@ -16,7 +16,11 @@ from theater.harness.contracts.callbacks import (
 from theater.models import BadRequest
 
 from .approval_guard import shadowed_approval_profile, vibe_home
-from .compatibility import vibe_qualified_range_text, vibe_store_format_ceiling
+from .compatibility import (
+    vibe_isolation_floor,
+    vibe_qualified_range_text,
+    vibe_store_format_ceiling,
+)
 from .constants import (
     ISOLATION_MARKER,
     VIBE_ACTIVE_MODEL_ENV,
@@ -30,9 +34,8 @@ from .isolation import _canonical, isolation_marker_text, validate_isolated_doma
 from .version import installed_vibe_version, resolve_vibe_binary
 
 # Verified against real wheels: `ask` replaces `default` as the builtin
-# approval-per-tool profile in 2.24.1; `--yolo` exists from 2.17.0.
+# approval-per-tool profile in 2.24.1.
 _ASK_FLOOR = (2, 24, 1)
-_YOLO_FLOOR = (2, 17, 0)
 
 
 def plan_launch(
@@ -47,6 +50,14 @@ def plan_launch(
     resume = context.resume
     # Undeterminable version keeps today's argv; never guess from a probe failure.
     version = installed_vibe_version(context.binary)
+    if version is not None and version < vibe_isolation_floor():
+        # Such a release ignores the isolated session-log directory below, so its transcript
+        # never appears where the observer looks and the job would wait forever.
+        raise BadRequest(
+            f"refusing to launch Vibe {'.'.join(str(part) for part in version)}: it predates "
+            "the isolated session-log directory Theater relies on (qualified Vibe "
+            f"releases are {vibe_qualified_range_text()}); upgrade Vibe"
+        )
     if version is not None and version >= vibe_store_format_ceiling():
         # Refuse a writer whose unified store this reader cannot open: the job
         # would wait forever on a transcript that never becomes readable.
@@ -62,10 +73,7 @@ def plan_launch(
     argv = [resolve_vibe_binary(context.binary) or "vibe"]
     profile: str | None = None
     if approval == "yolo":
-        if version is None or version >= _YOLO_FLOOR:
-            argv.append("--yolo")
-        else:
-            argv += ["--agent", "auto-approve"]
+        argv.append("--yolo")
     elif approval == "edits":
         profile = "accept-edits"
         argv += ["--agent", profile]

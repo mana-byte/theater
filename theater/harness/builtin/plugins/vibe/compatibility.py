@@ -1,4 +1,4 @@
-"""Installed-version probe for the Vibe harness: display only, never a runtime."""
+"""Vibe version bounds: a display-only probe; launch planning enforces both bounds."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbe
 from .version import parse_vibe_version
 
 # _FLOOR is the first release whose config honours VIBE_SESSION_LOGGING__SAVE_DIR.
-# Earlier releases write outside the isolated domain; mode thresholds live in launch.
+# Earlier releases write outside the isolated domain, so launch planning refuses them.
 _FLOOR = (2, 24, 0)
 #: The first Vibe release not yet proved compatible with this store reader.
 #: Launch planning enforces the ceiling because the probe is display-only.
@@ -22,6 +22,15 @@ def vibe_qualified_range_text() -> str:
     floor = ".".join(str(part) for part in _FLOOR)
     ceiling = ".".join(str(part) for part in _CEILING)
     return f">={floor},<{ceiling}"
+
+
+def vibe_isolation_floor() -> tuple[int, int, int]:
+    """The oldest Vibe whose config honours the isolated session-log directory.
+
+    Older releases write their transcript outside it, where the observer never looks, so
+    launch planning refuses them instead of letting the job wait forever.
+    """
+    return _FLOOR
 
 
 def vibe_store_format_ceiling() -> tuple[int, int, int]:
@@ -66,6 +75,7 @@ def probe_vibe_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibili
 
 __all__ = [
     "probe_vibe_compatibility",
+    "vibe_isolation_floor",
     "vibe_qualified_range_text",
     "vibe_store_format_ceiling",
 ]
