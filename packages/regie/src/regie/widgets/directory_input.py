@@ -59,7 +59,8 @@ def directory_suggestion(value: str, *, base_dir: Path) -> str | None:
         return None
     if len(matches) == 1:
         return f"{display_prefix}{matches[0]}{os.sep}"
-    common = os.path.commonprefix(matches)
+    # Character-wise on purpose: completing a typed fragment, not a shared parent directory.
+    common = os.path.commonprefix(matches)  # noqa: RUF071
     if len(common) > len(fragment):
         return f"{display_prefix}{common}"
     return None
