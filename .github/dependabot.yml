@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Ungrouped on purpose: grouped updates rewrite workspace member pins
+  # (dependabot-core #15786). theater and regie are lockstep workspace members
+  # (dependabot-core #14004).
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: theater
+      - dependency-name: regie
+  # Actions are SHA-pinned; without these updates the pins rot and a human
+  # would have to rewrite them by hand.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
