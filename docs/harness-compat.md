@@ -80,14 +80,15 @@ is the hard bound. Each row (candidate, watch, composition) records its attempts
 | contiguous green prefix, composition passes | yes, for that prefix | only for other failing rows | per rows below |
 | any red or tooling row | independent of this | opened or updated | 1 |
 | only inconclusive rows | none for them | opened or updated, `inconclusive` | 2 |
-| all green or no work | per prefix | closed | 0 |
+| all green or no work, every listed release proved again or retired | per prefix | closed | 0 |
 
 Any final non-green result (red, tooling, or exhausted inconclusive) revokes that release's
 cached green. An open gate PR whose body lists a release that ended non-green in this run is
 closed after the PR step, so a recomputed replacement survives; a PR that lists none of them is
 left alone. The issue body ends with a `compat-failing` marker: the issue closes only once every
 release it lists was proved again or retired (below the floor, or `known_bad`); a release this
-run did not retest stays listed as still unresolved. Only files under an adapter's declared
+run did not retest stays listed as still unresolved, the list shrinks as releases recover, and an
+entry that is not a release (a hand-edited marker) keeps the issue open. Only files under an adapter's declared
 `artifact_roots` (Codex: its candidate bundle directory) are captured and can enter a PR;
 everything else a qualification leaves in the tree is dropped. Evidence is reused only for the
 same digest: the framework, adapter, proofs and every module they import from `theater`, the

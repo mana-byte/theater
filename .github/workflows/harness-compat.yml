@@ -140,13 +140,16 @@ jobs:
       - name: Read the open issue's unresolved releases
         env:
           GH_TOKEN: ${{ github.token }}
+          # Must equal issue_title in scripts/harness_compat/report.py (the publish steps use it).
+          ISSUE_TITLE: "Harness compatibility failures: ${{ matrix.harness }}"
         run: |
           set -euo pipefail
           # The issue closes only once every release it lists was proved again (or retired).
           body="$(gh issue list --state open --label "compat:$HARNESS" --limit 1000 \
-            --json body --jq '.[0].body // empty')"
-          failing="$(grep -o '<!-- compat-failing: [^ ]* -->' <<< "$body" |
-            sed -E 's/<!-- compat-failing: ([^ ]*) -->/\1/' | head -1 || true)"
+            --json title,body |
+            jq -r --arg title "$ISSUE_TITLE" 'map(select(.title == $title))[0].body // empty')"
+          marker="$(grep -o '<!-- compat-failing:[^>]*-->' <<< "$body" | head -1 || true)"
+          failing="$(sed -E 's/<!-- compat-failing:([^>]*)-->/\1/' <<< "$marker" | tr -d ' ')"
           echo "HARNESS_COMPAT_OPEN_FAILURES=$failing" >> "$GITHUB_ENV"
       - name: Qualify and prepare publication
         id: compat
@@ -201,9 +204,10 @@ jobs:
             fi
           done
       - name: Upsert failure issue
-        if: steps.compat.outputs.issue_action == 'upsert'
+        if: steps.compat.outputs.issue_action == 'upsert' || steps.compat.outputs.issue_action == 'ledger'
         env:
           GH_TOKEN: ${{ github.token }}
+          ISSUE_ACTION: ${{ steps.compat.outputs.issue_action }}
           ISSUE_BODY: ${{ steps.compat.outputs.issue_body }}
           ISSUE_LABELS: ${{ steps.compat.outputs.issue_labels }}
           ISSUE_TITLE: ${{ steps.compat.outputs.issue_title }}
@@ -218,6 +222,8 @@ jobs:
             jq -r --arg title "$ISSUE_TITLE" 'map(select(.title == $title))[0].number // empty')"
           if [[ -n "$number" ]]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$number" -f body="$ISSUE_BODY" --silent
+          elif [[ "$ISSUE_ACTION" == "ledger" ]]; then
+            exit 0  # nothing to shrink
           else
             # Labelled at creation: the label is how the next run finds this issue.
             IFS=',' read -ra initial <<< "$ISSUE_LABELS"
@@ -225,6 +231,10 @@ jobs:
             for label in "${initial[@]}"; do create+=(-f "labels[]=$label"); done
             number="$(gh api -X POST "repos/$GITHUB_REPOSITORY/issues" \
               -f title="$ISSUE_TITLE" -f body="$ISSUE_BODY" "${create[@]}" --jq '.number')"
+          fi
+          # A ledger update only shrinks the unresolved list: the labels keep describing the failure.
+          if [[ "$ISSUE_ACTION" == "ledger" ]]; then
+            exit 0
           fi
           # Assign labels explicitly so permission failures surface.
           IFS=',' read -ra labels <<< "$ISSUE_LABELS"

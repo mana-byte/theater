@@ -368,6 +368,8 @@ class WatchedAdapter(ScriptedAdapter):
         (("2.8.0",), frozenset(), "none", True),  # another release: still unresolved
         (("2.8.0",), frozenset({"2.8.0"}), "close", False),  # retired from the gate by a human
         (("1.0.0",), frozenset(), "close", False),  # below the floor: no longer admitted
+        (("2.8.0", "2.9.0"), frozenset(), "ledger", True),  # partial recovery shrinks the list
+        (("not-a-release",), frozenset(), "none", True),  # a hand-edited entry never recovers
     ],
 )
 def test_an_issue_closes_only_when_every_release_it_lists_recovered(
@@ -397,3 +399,20 @@ def test_a_failing_row_and_an_unretested_failure_share_one_issue_ledger(
     assert report.issue_action == "upsert"
     assert "Still unresolved, not retested by this run: `2.8.0`" in report.issue_body
     assert "<!-- compat-failing: 2.8.0,3.0.0 -->" in report.issue_body
+
+
+def test_a_deterministic_problem_beside_a_timeout_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    (tmp_path / "gate.txt").write_text("old\n")
+    _repo(tmp_path)
+    seen: list[int] = []
+
+    def mixed(adapter: object, root: Path, bumped: list[str]) -> list[str]:
+        seen.append(1)  # the first call is the candidate's own check
+        return [] if len(seen) == 1 else ["bump check timed out", "probe 3.0.0: supported=False"]
+
+    monkeypatch.setattr(runner, "check_bump", mixed)
+    summary = runner.run_harness(GateFileAdapter(["green"]), tmp_path)
+    [row] = summary["issues"]
+    assert (row["verdict"], len(row["attempts"]), sleeps) == ("tooling", 1, [])

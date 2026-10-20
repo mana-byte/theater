@@ -236,9 +236,10 @@ def _compose(
                 return stray, False, False, []
             problems = check_bump(adapter, tree, greens)
             if problems:
+                # Noise only when every problem is a timeout; one deterministic problem wins.
                 return (
                     problems,
-                    any("timed out" in problem.lower() for problem in problems),
+                    all("timed out" in problem.lower() for problem in problems),
                     False,
                     [],
                 )
@@ -250,27 +251,22 @@ def _compose(
                 env=sandbox.env,
                 expected_skips=adapter.expected_skips,
             )
-            problems = [
-                f"{check.name}: {check.status}: {check.detail}"
-                for check in checks
-                if check.status not in ("pass", "skip")
-            ]
+            bad = [check for check in checks if check.status not in ("pass", "skip")]
+            problems = [f"{check.name}: {check.status}: {check.detail}" for check in bad]
+            deterministic: list[str] = []
             if tracked_patch(tree) != patch_before_tests:
-                problems.append("consistency tests changed tracked files")
-            problems.extend(artifacts.stray_files(tree, changed))
+                deterministic.append("consistency tests changed tracked files")
+            deterministic.extend(artifacts.stray_files(tree, changed))
+            problems.extend(deterministic)
             if problems:
-                return (
-                    problems,
-                    any(check.status == "error" for check in checks),
-                    False,
-                    warnings,
-                )
+                # Noise only when every failing check merely errored: a fail always wins.
+                noisy = not deterministic and all(check.status == "error" for check in bad)
+                return problems, noisy, False, warnings
             if publish:
                 try:
                     stage_composed(tree, root, {*changed, *artifacts.owners})
-                except (
-                    Exception
-                ) as exc:  # deterministic (dirty or undeclared paths): ours, not noise
+                except Exception as exc:
+                    # Deterministic (dirty checkout, undeclared paths): ours, never noise.
                     return [f"staging failed: {exc}"], False, False, warnings
                 return [], False, True, warnings
             return [], False, False, warnings

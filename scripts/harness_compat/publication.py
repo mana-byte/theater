@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .contract import Check, Result, Route, version_key
+from .contract import Check, Result, Route, is_stable, version_key
 from .report import PublishReport, build_report, write_github_outputs
 
 
@@ -45,9 +45,13 @@ def _carried(summary: dict[str, Any], rows: list[dict[str, Any]], open_failures:
     return [
         version
         for version in open_failures
-        if version not in seen
-        and version not in retired
-        and (floor is None or version_key(version) >= version_key(floor))
+        # An entry that is not a release (a hand-edited ledger) can never recover: it stays.
+        if not is_stable(version)
+        or (
+            version not in seen
+            and version not in retired
+            and (floor is None or version_key(version) >= version_key(floor))
+        )
     ]
 
 
@@ -105,6 +109,8 @@ def prepare_publication(
     action = report.issue_action
     if action == "none" and recovered and not carried:
         action = "close"
+    elif action == "none" and carried and set(carried) != set(open_failures):
+        action = "ledger"  # some listed releases recovered: shrink the stored list, keep labels
     withdraw = ",".join(summary.get("revoked", ()))
     report = replace(
         report,
