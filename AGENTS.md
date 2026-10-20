@@ -240,6 +240,27 @@ cannot be expressed in config. Full guide:
 [`docs/harness-plugins.md`](docs/harness-plugins.md). `theater harnesses`
 reports what loaded and why anything was rejected.
 
+## Changing a version gate or native wiring
+
+Every harness's supported-version bound is one constant in its plugin, and the daily
+[compatibility pipeline](docs/harness-compat.md) proves new upstream releases against it:
+`scripts/harness_compat/adapters/<h>_bump.py` parses that constant by name and rewrites one
+literal (Claude `_QUALIFIED_MAX`, Codex/OpenCode `runtime_plan.py`, Pi `runtime_constants.py`,
+Vibe `_CEILING`). Treat the gate and the pipeline as one contract:
+
+- Do not rename, move or reshape a gate constant without updating its `<h>_bump.py`,
+  `tests/compat/test_bump_size.py::_INPUTS` and the `paths:` filter of
+  `.github/workflows/harness-compat.yml`.
+- Changing what a harness does inside Theater (runtime, probe, launch argv, hooks, transcript or
+  store format) changes what "compatible" means. Update the adapter's `green_tests`,
+  `consistency_tests` and expected routes so the pipeline proves the behaviour Theater really
+  runs, and keep every declared gap in `docs/harness-compat.md`. Moving a proof test breaks its
+  selector.
+- Prove a candidate with `make compat HARNESS=<h> VERSION=<newest>` before moving a gate by hand.
+  Gate PRs change one literal; never hand-edit cached evidence, `.md` files or tests in them.
+- Check with `uv run python -m scripts.harness_compat check` and
+  `uv run pytest tests/compat tests/harness/<h>`.
+
 ## When adding a skill
 
 Write one data-only package at `$THEATER_HOME/skills/<name>/SKILL.md`, or under

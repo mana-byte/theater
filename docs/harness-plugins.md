@@ -1012,6 +1012,10 @@ was verified against. Unknown or unsupported versions keep the ordinary
 launch under either `auto` or `native`.
 The Codex runtime re-checks the version at the connection handshake, so a
 binary that changed between probe and connect fails closed.
+A version bound is only as good as its proof: each shipped harness's bound is moved by the
+[compatibility pipeline](harness-compat.md), which edits one constant in the plugin, so a new
+or changed probe, bound or runtime needs a matching adapter under
+`scripts/harness_compat/adapters/`.
 
 Settings are separately gated: a runtime must not emulate `update_settings`
 by storing values that might apply to an unrelated future turn. Report
@@ -1294,6 +1298,8 @@ teardown if the test suite continues in the same process.
   daemon-owned teardown after process-identity verification.
 - Do not alter global/project hooks or steal an OTel exporter.
 - Preserve daemon-only ownership of SQLite, pane lifecycle, and tmux input.
+- Keep the version gate a single constant the compatibility pipeline can read and bump
+  (see `AGENTS.md`, "Changing a version gate or native wiring").
 
 ## Trust
 
