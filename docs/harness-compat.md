@@ -65,7 +65,7 @@ Issue creation, updates, labels, and closure use the GitHub REST API; an issue i
 
 ## Retries and outcomes
 
-A release is qualified in a fresh worktree, home and mock. Only an `inconclusive` result
+A release is qualified in a fresh worktree, home and mock; so is the composed bump. Only an `inconclusive` result
 (install, timeout or tooling noise that proves nothing about upstream) is repeated, at most
 three attempts in total with 30 s and 90 s backoff; red and tooling are never retried. A run has
 an 80-minute budget inside the 90-minute job: a retry or a further candidate starts only if its

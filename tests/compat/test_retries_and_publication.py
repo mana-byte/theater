@@ -225,3 +225,34 @@ def test_evidence_digest_covers_the_lockfile_and_pytest_settings(tmp_path: Path)
     (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
     inputs = {path.name for path in qualification_inputs(tmp_path, "vibe")}
     assert {"uv.lock", "pyproject.toml"} <= inputs
+
+
+class GateFileAdapter(ScriptedAdapter):
+    def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
+        (root / "gate.txt").write_text(f"{greens[-1]}\n")
+        return [Path("gate.txt")]
+
+
+@pytest.mark.parametrize(("timeouts", "calls", "verdict"), [(1, 2, None), (9, 3, "inconclusive")])
+def test_an_inconclusive_composition_is_retried_then_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sleeps: list[float],
+    timeouts: int,
+    calls: int,
+    verdict: str | None,
+) -> None:
+    (tmp_path / "gate.txt").write_text("old\n")
+    _repo(tmp_path)
+    seen: list[int] = []
+
+    def slow_check(adapter: object, root: Path, bumped: list[str]) -> list[str]:
+        seen.append(1)  # the first call is the candidate's own bump check, then the composition's
+        return ["bump check timed out"] if 1 < len(seen) <= timeouts + 1 else []
+
+    monkeypatch.setattr(runner, "check_bump", slow_check)
+    summary = runner.run_harness(GateFileAdapter(["green"]), tmp_path)
+    assert len(seen) == calls + 1
+    assert sleeps == [30.0, 90.0][: calls - 1]
+    assert summary["greens"] == ["3.0.0"]
+    assert [row["verdict"] for row in summary["issues"]] == ([verdict] if verdict else [])

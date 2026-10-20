@@ -60,12 +60,19 @@ def _retry[T](
         log.append({"attempt": number, "verdict": result.verdict, "cause": _cause(result)})
         if result.verdict != "inconclusive" or number == MAX_ATTEMPTS:
             break
-        delay = RETRY_BACKOFF_SECONDS[number - 1]
-        if time.monotonic() + delay + ATTEMPT_RESERVE_SECONDS > deadline:
+        if not _backoff(number, deadline):
             log.append({"attempt": number + 1, "verdict": "not run", "cause": "run budget spent"})
             break
-        time.sleep(delay)
     return result, extra, log
+
+
+def _backoff(number: int, deadline: float) -> bool:
+    """Wait before attempt ``number + 1``; False when the run budget cannot fit another one."""
+    delay = RETRY_BACKOFF_SECONDS[number - 1]
+    if time.monotonic() + delay + ATTEMPT_RESERVE_SECONDS > deadline:
+        return False
+    time.sleep(delay)
+    return True
 
 
 @contextmanager
@@ -247,12 +254,31 @@ def _compose(
             if publish:
                 try:
                     stage_composed(tree, root, {*changed, *artifacts.owners})
-                except Exception as exc:
-                    return [f"staging failed: {exc}"], True, False, warnings
+                except (
+                    Exception
+                ) as exc:  # deterministic (dirty or undeclared paths): ours, not noise
+                    return [f"staging failed: {exc}"], False, False, warnings
                 return [], False, True, warnings
             return [], False, False, warnings
     except Exception as exc:
         return [f"composed bump failed: {exc}"], False, False, []
+
+
+def _compose_retrying(
+    adapter: Adapter,
+    root: Path,
+    greens: list[str],
+    artifacts: CandidateArtifacts,
+    *,
+    publish: bool,
+    deadline: float,
+) -> tuple[list[str], bool, bool, list[str]]:
+    """``_compose`` again while its only failure is infrastructure noise."""
+    for number in range(1, MAX_ATTEMPTS + 1):
+        outcome = _compose(adapter, root, greens, artifacts, publish=publish)
+        if not outcome[1] or number == MAX_ATTEMPTS or not _backoff(number, deadline):
+            return outcome
+    raise AssertionError("unreachable")
 
 
 def _candidate_attempt(
@@ -413,12 +439,8 @@ def _run_with_artifacts(
             [],
         )
     elif greens:
-        problems, compose_inconclusive, published, warnings = _compose(
-            adapter,
-            root,
-            greens,
-            artifacts,
-            publish=publish,
+        problems, compose_inconclusive, published, warnings = _compose_retrying(
+            adapter, root, greens, artifacts, publish=publish, deadline=deadline
         )
     else:
         problems, compose_inconclusive, published, warnings = (
