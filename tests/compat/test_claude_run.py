@@ -50,7 +50,7 @@ def _wait_for(predicate, *, timeout: float = 45, what: str = "the expected trans
     raise AssertionError(f"Claude TUI did not produce {what}")
 
 
-_HOOK_EVENTS = frozenset({"SessionStart", "PreToolUse", "PostToolUse"})
+_HOOK_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
 
 
 def _captured_hooks(capture: Path) -> list[dict]:
@@ -258,11 +258,17 @@ def test_claude_tool_hook_decodes_live_payload() -> None:
     )
     settings = json.loads(next(iter(overlay.replacements.values())))
     assert {"SessionStart", "PreCompact", "PreToolUse", "PostToolUse"} <= settings["hooks"].keys()
-    for entries in settings["hooks"].values():
-        for entry in entries:
-            for hook in entry["hooks"]:
-                hook["command"] = command
-                assert hook["async"] is True  # production installs asynchronous hooks
+    # Only the production asynchronous observation hooks are captured; the synchronous receipt
+    # hooks of the launch settings would need a Theater daemon, so they become no-ops.
+    noop = shlex.join([sys.executable, "-c", "pass"])
+    hooks = [hook for entries in settings["hooks"].values() for e in entries for hook in e["hooks"]]
+    for hook in hooks:
+        hook["command"] = command if hook.get("async") is True else noop
+    assert {"PreToolUse", "PostToolUse"} <= {
+        event
+        for event, entries in settings["hooks"].items()
+        if any(hook.get("async") is True for e in entries for hook in e["hooks"])
+    }
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
 
     def settled() -> bool:
@@ -276,6 +282,8 @@ def test_claude_tool_hook_decodes_live_payload() -> None:
     records = _captured_hooks(capture)
     post = next(record for record in records if record.get("hook_event_name") == "PostToolUse")
     assert post["tool_name"] == "Read"
+    pre = next(record for record in records if record.get("hook_event_name") == "PreToolUse")
+    assert pre["tool_use_id"] == post["tool_use_id"]
     # The launched session is known independently of the payload under test.
     assert post["session_id"] == transcript.stem
     assert Path(post["transcript_path"]).resolve() == transcript.resolve()
