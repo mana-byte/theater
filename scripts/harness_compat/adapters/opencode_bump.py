@@ -15,7 +15,7 @@ _FLOOR = "OPENCODE_TUI_MIN_VERSION"
 _CEILING = "OPENCODE_TUI_MAX_VERSION"
 
 
-def _render(version: tuple[int, int, int]) -> str:
+def render_release(version: tuple[int, int, int]) -> str:
     return ".".join(str(part) for part in version)
 
 
@@ -68,7 +68,7 @@ def read_gate(root: Path) -> tuple[str, str]:
     gate = read_tuples(root, {_FLOOR, _CEILING})
     if gate[_CEILING] <= gate[_FLOOR] or gate[_CEILING][2] == 0:
         raise ValueError("the OpenCode v1 gate has an invalid exclusive ceiling")
-    return _render(gate[_FLOOR]), _render(gate[_CEILING])
+    return render_release(gate[_FLOOR]), render_release(gate[_CEILING])
 
 
 def rewrite_ceiling(root: Path, name: str, green: str) -> list[Path]:

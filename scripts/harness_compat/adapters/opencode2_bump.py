@@ -19,7 +19,7 @@ def read_gate(root: Path) -> tuple[str, str]:
     gate = opencode_bump.read_tuples(root, {_FLOOR, _CEILING})
     if gate[_CEILING] <= gate[_FLOOR]:
         raise ValueError("the OpenCode 2.x gate has an invalid exclusive ceiling")
-    return opencode_bump._render(gate[_FLOOR]), opencode_bump._render(gate[_CEILING])
+    return opencode_bump.render_release(gate[_FLOOR]), opencode_bump.render_release(gate[_CEILING])
 
 
 def verified_set(root: Path) -> VerifiedSet:
