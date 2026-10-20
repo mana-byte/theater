@@ -69,7 +69,8 @@ def render_harness(summary: Mapping[str, Any]) -> str:
             else ""
         ),
         f"- **Promoted by this run:** {', '.join(summary['greens']) or 'none'}",
-        f"- **Published:** {_action(summary)}",
+        f"- **Publication:** {_action(summary)}",
+        *_composition(summary),
         "",
         "| Release | Role | Verdict | Attempts | Cause |",
         "| --- | --- | --- | --- | --- |",
@@ -89,6 +90,13 @@ def render_harness(summary: Mapping[str, Any]) -> str:
     for warning in summary.get("stale_warnings", ()):
         lines.append(f"\nReview: {warning}")
     return "\n".join(lines)
+
+
+def _composition(summary: Mapping[str, Any]) -> list[str]:
+    log = summary.get("composition_attempts", [])
+    if len(log) < 2:
+        return []
+    return [f"- **Composition:** {len(log)} attempts ({' → '.join(i['verdict'] for i in log)})"]
 
 
 def _row(row: Mapping[str, Any], role: str) -> str:
@@ -112,7 +120,7 @@ def render_overview(
     lines = [
         "## Harness compatibility",
         "",
-        "| Harness | Result | Candidates | Watch | Published |",
+        "| Harness | Result | Candidates | Watch | Publication |",
         "| --- | --- | --- | --- | --- |",
     ]
     for name in names:

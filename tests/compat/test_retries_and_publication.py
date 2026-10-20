@@ -168,7 +168,7 @@ def test_a_final_non_green_revokes_the_cached_green_and_names_the_pr_release(
     assert cached.exists()
     summary = runner.run_harness(adapter, tmp_path, version="3.0.0", publish=True)
     assert not cached.exists()
-    assert summary["invalidated"] == ["3.0.0"] and summary["greens"] == []
+    assert summary["revoked"] == ["3.0.0"] and summary["greens"] == []
     assert prepare_publication(summary, tmp_path / "summary.json").pr_withdraw == "3.0.0"
 
 
@@ -293,14 +293,28 @@ def test_a_file_outside_the_declared_artifact_roots_never_ships(
 
 
 class HungConsistencyAdapter(ScriptedAdapter):
+    extra: tuple[Check, ...] = ()
+
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
         hung = Check("consistency", "error", "Command 'pytest' timed out after 900 seconds")
-        return Result(self.name, version, "tooling", (hung,))
+        return Result(self.name, version, "tooling", (hung, *self.extra))
 
 
-def test_a_timed_out_consistency_run_is_infrastructure_noise_not_tooling(tmp_path: Path) -> None:
-    result, _ = runner._qualify(HungConsistencyAdapter([]), tmp_path, "3.0.0", bump=False)
-    assert result.verdict == "inconclusive"
+@pytest.mark.parametrize(
+    ("extra", "verdict"),
+    [
+        ((), "inconclusive"),
+        ((Check("mock_routes", "fail", "unexpected private mock routes"),), "tooling"),
+        ((Check("collect_bundle", "error", "bundle incomplete"),), "tooling"),
+    ],
+)
+def test_only_a_timeout_that_hides_no_deterministic_failure_is_noise(
+    tmp_path: Path, extra: tuple[Check, ...], verdict: str
+) -> None:
+    adapter = HungConsistencyAdapter([])
+    adapter.extra = extra
+    result, _ = runner._qualify(adapter, tmp_path, "3.0.0", bump=False)
+    assert result.verdict == verdict
 
 
 def test_a_crossed_major_boundary_is_called_out_in_the_pr(
@@ -314,3 +328,72 @@ def test_a_crossed_major_boundary_is_called_out_in_the_pr(
     assert summary["greens"] == ["3.0.0", "4.0.0"]
     report = prepare_publication(summary, tmp_path / "summary.json")
     assert "Major version boundary:** 4.0.0 crosses from 3.x" in report.pr_body
+
+
+class FailingNewestAdapter(GateFileAdapter):
+    """3.0.0 proves green and 3.0.1 red: the first release is promoted, the second revoked."""
+
+    def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+        self.verdicts = ["green" if version == "3.0.0" else "red"]
+        self.calls = 0
+        return super().qualify(root, version, sb, binary)
+
+
+def test_a_revoked_release_is_named_even_when_other_releases_are_promoted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    (tmp_path / "gate.txt").write_text("old\n")
+    _repo(tmp_path)
+    monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
+    adapter = FailingNewestAdapter([], releases=("3.0.0", "3.0.1"))
+    summary = runner.run_harness(adapter, tmp_path)
+    assert (summary["greens"], summary["revoked"]) == (["3.0.0"], ["3.0.1"])
+    assert prepare_publication(summary, tmp_path / "summary.json").pr_withdraw == "3.0.1"
+
+
+class WatchedAdapter(ScriptedAdapter):
+    """Admits 2.0.0 up to 3.0.0; its watch is the newest release below the ceiling."""
+
+    retired: frozenset[str] = frozenset()
+
+    def verified(self, root: Path) -> VerifiedSet:
+        return VerifiedSet("range", floor="2.0.0", ceiling="3.0.0", known_bad=self.retired)
+
+
+@pytest.mark.parametrize(
+    ("open_failures", "retired", "action", "carried"),
+    [
+        ((), frozenset(), "close", False),  # a legacy issue without a ledger
+        (("2.9.0",), frozenset(), "close", False),  # the watched release itself recovered
+        (("2.8.0",), frozenset(), "none", True),  # another release: still unresolved
+        (("2.8.0",), frozenset({"2.8.0"}), "close", False),  # retired from the gate by a human
+        (("1.0.0",), frozenset(), "close", False),  # below the floor: no longer admitted
+    ],
+)
+def test_an_issue_closes_only_when_every_release_it_lists_recovered(
+    tmp_path: Path,
+    sleeps: list[float],
+    open_failures: tuple[str, ...],
+    retired: frozenset[str],
+    action: str,
+    carried: bool,
+) -> None:
+    _repo(tmp_path)
+    adapter = WatchedAdapter(["green"], releases=("2.8.0", "2.9.0"))
+    adapter.retired = retired
+    summary = runner.run_harness(adapter, tmp_path)
+    assert summary["watch"]["version"] == "2.9.0"
+    report = prepare_publication(summary, tmp_path / "summary.json", list(open_failures))
+    assert report.issue_action == action
+    assert ("Still unresolved" in report.issue_body) is carried
+
+
+def test_a_failing_row_and_an_unretested_failure_share_one_issue_ledger(
+    tmp_path: Path, sleeps: list[float]
+) -> None:
+    _repo(tmp_path)
+    summary = runner.run_harness(ScriptedAdapter(["red"]), tmp_path)
+    report = prepare_publication(summary, tmp_path / "summary.json", ["2.8.0"])
+    assert report.issue_action == "upsert"
+    assert "Still unresolved, not retested by this run: `2.8.0`" in report.issue_body
+    assert "<!-- compat-failing: 2.8.0,3.0.0 -->" in report.issue_body

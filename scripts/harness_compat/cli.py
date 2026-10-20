@@ -116,7 +116,10 @@ def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
         )
     if args.publish and summary_path:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        report = prepare_publication(summaries[0], summary_path)
+        open_failures = [
+            v for v in os.environ.get("HARNESS_COMPAT_OPEN_FAILURES", "").split(",") if v
+        ]
+        report = prepare_publication(summaries[0], summary_path, open_failures)
         summaries[0]["publication"] = {"pr": report.pr_needed, "issue": report.issue_action}
     if summary_path:
         summary_path.parent.mkdir(parents=True, exist_ok=True)

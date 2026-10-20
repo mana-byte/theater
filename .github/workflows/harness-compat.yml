@@ -137,6 +137,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Sync project
         run: uv sync --locked --all-packages --group dev
+      - name: Read the open issue's unresolved releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The issue closes only once every release it lists was proved again (or retired).
+          body="$(gh issue list --state open --label "compat:$HARNESS" --limit 1000 \
+            --json body --jq '.[0].body // empty')"
+          failing="$(grep -o '<!-- compat-failing: [^ ]* -->' <<< "$body" |
+            sed -E 's/<!-- compat-failing: ([^ ]*) -->/\1/' | head -1 || true)"
+          echo "HARNESS_COMPAT_OPEN_FAILURES=$failing" >> "$GITHUB_ENV"
       - name: Qualify and prepare publication
         id: compat
         continue-on-error: true

@@ -46,6 +46,14 @@ RUN_BUDGET_SECONDS = 70 * 60
 ATTEMPT_RESERVE_SECONDS = 20 * 60
 
 
+def _timeouts_only(checks: tuple[Check, ...]) -> bool:
+    """True when every non-passing check merely timed out: no deterministic failure is hidden."""
+    bad = [check for check in checks if check.status in ("error", "fail")]
+    return bool(bad) and all(
+        check.status == "error" and "timed out" in check.detail.lower() for check in bad
+    )
+
+
 def _cause(result: Result) -> str:
     check = next((item for item in result.checks if item.status in ("error", "fail")), None)
     return clip_diagnostic(f"{check.name}: {check.detail}", 200, tail=True) if check else ""
@@ -183,10 +191,7 @@ def _qualify(
             relevant = tuple(
                 check for check in observed.checks if check.name in adapter.green_tests
             )
-            if observed.verdict == "tooling" and any(
-                check.status == "error" and "timed out" in check.detail.lower()
-                for check in observed.checks
-            ):
+            if observed.verdict == "tooling" and _timeouts_only(observed.checks):
                 verdict = "inconclusive"  # a hung consistency run says nothing about the bump
             elif observed.verdict in ("tooling", "inconclusive"):
                 verdict = observed.verdict
@@ -413,7 +418,6 @@ def _run_with_artifacts(
         required=adapter.green_tests,
         skips=adapter.expected_skips,
     )
-    proved_before = set(reused)
     releases = adapter.discover()
     candidates = select_candidates(
         adapter, gate, reused, max_candidates=max_candidates, version=version, releases=releases
@@ -495,14 +499,25 @@ def _run_with_artifacts(
     return {
         "harness": adapter.name,
         "gate_kind": gate.kind,
-        "gate": {"floor": gate.floor, "ceiling": gate.ceiling},
+        "gate": {
+            "floor": gate.floor,
+            "ceiling": gate.ceiling,
+            "known_bad": sorted(gate.known_bad),
+        },
         "adapter_digest": digest,
         "candidates": candidates,
         "deferred": deferred,
-        # Promotable releases whose cached green a conclusive run just contradicted.
-        "invalidated": sorted(
-            item for item in proved_before - set(reused) if not gate.admits(item)
+        # Candidates that ended non-green: an open gate PR that lists one is withdrawn.
+        "revoked": sorted(
+            {
+                row["version"]
+                for row in rows
+                if row["verdict"] != "green"
+                and row.get("role") != "composition"
+                and not gate.admits(row["version"])
+            }
         ),
+        "composition_attempts": compose_log,
         "reused": sorted(reused),
         "reused_results": [
             {

@@ -111,7 +111,9 @@ class CandidateArtifacts:
         """Restore validated generated files for a reused release."""
         for name, digest in sorted(manifest.items()):
             relative = Path(name)
-            if not valid_artifact_path(name):
+            if not valid_artifact_path(name) or not any(
+                relative.is_relative_to(root) for root in self.roots
+            ):
                 raise ValueError(f"invalid cached artifact path: {name!r}")
             if relative in self.owners:
                 raise ValueError(f"cached artifact conflicts with {self.owners[relative]}: {name}")

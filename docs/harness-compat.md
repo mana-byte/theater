@@ -83,13 +83,16 @@ is the hard bound. Each row (candidate, watch, composition) records its attempts
 | all green or no work | per prefix | closed | 0 |
 
 Any final non-green result (red, tooling, or exhausted inconclusive) revokes that release's
-cached green. If that leaves no promotable release, the run closes the open gate PR, but only
-when the PR body lists a revoked release. Only files under an adapter's declared
+cached green. An open gate PR whose body lists a release that ended non-green in this run is
+closed after the PR step, so a recomputed replacement survives; a PR that lists none of them is
+left alone. The issue body ends with a `compat-failing` marker: the issue closes only once every
+release it lists was proved again or retired (below the floor, or `known_bad`); a release this
+run did not retest stays listed as still unresolved. Only files under an adapter's declared
 `artifact_roots` (Codex: its candidate bundle directory) are captured and can enter a PR;
 everything else a qualification leaves in the tree is dropped. Evidence is reused only for the
 same digest: the framework, adapter, proofs and every module they import from `theater`, the
-plugin, `uv.lock` and `pyproject.toml`. A digest change empties the cache, so a gate PR from
-an older digest stays open until it is merged or recomputed.
+plugin, `uv.lock` and `pyproject.toml`. A digest change empties the cache, so those proofs run again; an open
+gate PR is touched only when a release it lists ends non-green.
 
 ## Reading a run
 

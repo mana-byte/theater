@@ -53,6 +53,7 @@ def build_report(
     admitted_versions: Iterable[str] = (),
     stale_warnings: Iterable[str] = (),
     attempts: Mapping[str, int] | None = None,
+    carried: Sequence[str] = (),
 ) -> PublishReport:
     """Build one rolling PR/issue report; an inconclusive row opens an issue, never a PR."""
     if any(result.harness != harness for result in results):
@@ -90,7 +91,7 @@ def build_report(
         pr_needed=bool(pr_green),
         pr_title=f"chore(compat): advance {harness} version gate",
         pr_body=pr_body,
-        issue_action="upsert" if failing else "close" if green else "none",
+        issue_action=("upsert" if failing else "none" if carried else "close" if green else "none"),
         issue_title=f"Harness compatibility failures: {harness}",
         issue_body=_body(
             f"Failing {harness} releases",
@@ -98,6 +99,7 @@ def build_report(
             run_url=run_url,
             routes=ordered_routes,
             attempts=attempts or {},
+            carried=carried,
         ),
         issue_labels=tuple(labels),
     )
@@ -136,6 +138,7 @@ def _body(
     run_url: str,
     routes: Iterable[Route],
     attempts: Mapping[str, int],
+    carried: Sequence[str] = (),
 ) -> str:
     run = f"[workflow run]({_markdown_url(run_url)})" if run_url else "not available"
     rows = ["| Version | Verdict | Checks | Run |", "| --- | --- | --- | --- |"]
@@ -153,14 +156,24 @@ def _body(
     ]
     if not route_lines:
         route_lines.append("- None recorded")
+    ledger = sorted({*(result.version for result in results), *carried})
+    carried_lines = (
+        [f"Still unresolved, not retested by this run: {', '.join(f'`{v}`' for v in carried)}", ""]
+        if carried
+        else []
+    )
     return "\n".join(
         [
             f"## {heading}",
             "",
             *rows,
             "",
+            *carried_lines,
             "Routes:",
             *route_lines,
+            "",
+            # The next run reads this to close the issue only once every listed release recovered.
+            f"<!-- compat-failing: {','.join(ledger)} -->",
         ]
     )
 

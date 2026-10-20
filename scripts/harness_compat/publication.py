@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .contract import Check, Result, Route
+from .contract import Check, Result, Route, version_key
 from .report import PublishReport, build_report, write_github_outputs
 
 
@@ -33,6 +34,23 @@ def _attempts(rows: list[dict[str, Any]]) -> dict[str, int]:
     return tried
 
 
+def _carried(summary: dict[str, Any], rows: list[dict[str, Any]], open_failures: Any) -> list[str]:
+    """Earlier failures this run neither fixed nor retested; only a human retires them."""
+    gate = summary.get("gate") or {}
+    floor = gate.get("floor")
+    retired = set(gate.get("known_bad", ()))
+    seen = {row["version"] for row in rows}
+    if watch := summary.get("watch"):
+        seen.add(watch["version"])
+    return [
+        version
+        for version in open_failures
+        if version not in seen
+        and version not in retired
+        and (floor is None or version_key(version) >= version_key(floor))
+    ]
+
+
 def _major_boundary(summary: dict[str, Any]) -> str:
     """A promoted release in a newer major than the gate's current ceiling needs a human look."""
     ceiling = (summary.get("gate") or {}).get("ceiling")
@@ -48,8 +66,14 @@ def _major_boundary(summary: dict[str, Any]) -> str:
     )
 
 
-def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishReport:
-    """Write PR and issue body files and append the GitHub step outputs."""
+def prepare_publication(
+    summary: dict[str, Any], summary_path: Path, open_failures: Sequence[str] = ()
+) -> PublishReport:
+    """Write PR and issue body files and append the GitHub step outputs.
+
+    ``open_failures`` are the releases the open issue lists: it closes only once each of them
+    was proved again (or retired from the gate), never because some other release was green.
+    """
     rows = [*summary["reused_results"], *summary["results"]]
     watch = summary.get("watch")
     distinct_watch = watch if watch is not None and not summary.get("watch_reused", False) else None
@@ -57,6 +81,7 @@ def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishR
     if distinct_watch is not None and distinct_watch["verdict"] in failing:
         rows.append(distinct_watch)
     results = tuple(_result(row) for row in rows)
+    carried = _carried(summary, [*summary["results"], *summary["reused_results"]], open_failures)
     route_rows = [*rows]
     if distinct_watch is not None and distinct_watch["verdict"] not in failing:
         route_rows.append(distinct_watch)
@@ -74,12 +99,13 @@ def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishR
         admitted_versions=admitted,
         stale_warnings=summary.get("stale_warnings", ()),
         attempts=_attempts(rows),
+        carried=carried,
     )
     recovered = bool(watch and watch["verdict"] == "green")
     action = report.issue_action
-    if action == "none" and recovered:
+    if action == "none" and recovered and not carried:
         action = "close"
-    withdraw = "" if summary["greens"] else ",".join(summary.get("invalidated", ()))
+    withdraw = ",".join(summary.get("revoked", ()))
     report = replace(
         report,
         pr_needed=summary["published"],
