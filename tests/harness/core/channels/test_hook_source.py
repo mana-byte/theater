@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -319,20 +320,22 @@ async def test_shared_manifest_does_not_crosswire_two_daemon_hook_runtimes(
 
 @pytest.mark.asyncio
 async def test_hook_callbacks_stay_off_loop_and_recover_queued_order() -> None:
-    runner = HookCallbackRunner(max_in_flight=1, correlation_timeout=0.1, decoder_timeout=0.01)
+    correlation_release = threading.Event()
+    decode_release = threading.Event()
+    runner = HookCallbackRunner(max_in_flight=1, correlation_timeout=30.0, decoder_timeout=0.05)
     runtime = HookRuntime(lambda _participant_id, _channel_id: True, callback_runner=runner)
 
-    def slow_correlation(_context: HookCorrelationContext) -> str:
-        time.sleep(0.04)
+    def blocking_correlation(_context: HookCorrelationContext) -> str:
+        correlation_release.wait(timeout=10.0)
         return "correlated"
 
     correlation_binding = (
-        hook_manifest(correlation=slow_correlation).observation.hook_channels[0].bindings[0]
+        hook_manifest(correlation=blocking_correlation).observation.hook_channels[0].bindings[0]
     )
 
     def decoder(context: HookDecodeContext) -> tuple[ChannelFact, ...]:
         if context.native_id == "slow":
-            time.sleep(0.05)
+            decode_release.wait(timeout=10.0)
         return (
             ChannelFact(
                 SignalKind.TOOL,
@@ -340,7 +343,10 @@ async def test_hook_callbacks_stay_off_loop_and_recover_queued_order() -> None:
             ),
         )
 
-    started = time.monotonic()
+    # The loop must serve a timer tick while the callback is still blocked in its
+    # worker thread. Ordering proves that without a wall-clock budget: the
+    # correlation cannot finish before the release, and a loop blocked by the
+    # callback would only resume after the wait timed out, once it is done.
     correlation = asyncio.create_task(
         runtime.correlate(
             correlation_binding,
@@ -352,8 +358,9 @@ async def test_hook_callbacks_stay_off_loop_and_recover_queued_order() -> None:
             ),
         )
     )
-    await asyncio.sleep(0.005)
-    assert time.monotonic() - started < 0.03
+    await asyncio.sleep(0)
+    assert not correlation.done()
+    correlation_release.set()
     assert await correlation == "correlated"
 
     timed_channel = hook_manifest(max_queue=3, decoder=decoder).observation.hook_channels[0]
@@ -367,12 +374,21 @@ async def test_hook_callbacks_stay_off_loop_and_recover_queued_order() -> None:
             native_id=native_id,
         )
     source = runtime.open_source(participant_id="participant", channel=timed_channel)
-    started = time.monotonic()
+    # "slow" blocks in the worker and is dropped by the decoder timeout; the
+    # straggler still holds the single slot, so the next read reports capacity
+    # exhausted and requeues the survivors instead of decoding them.
     assert (await source.read()).error_code == "hook_decode_failed"
-    assert time.monotonic() - started < 0.04
     assert (await source.read()).error_code == "hook_decode_failed"
-    await asyncio.sleep(0.06)
-    assert [fact.native_id for fact in (await source.read()).trajectory] == ["second", "third"]
+    # Once the straggler finishes, the queued deliveries decode in order. A busy
+    # read requeues without yielding, so each retry gives the loop one tick.
+    decode_release.set()
+    batch = await source.read()
+    for _ in range(1000):
+        if batch.error_code is None:
+            break
+        await asyncio.sleep(0)
+        batch = await source.read()
+    assert [fact.native_id for fact in batch.trajectory] == ["second", "third"]
     await source.aclose()
     await runtime.aclose()
 
