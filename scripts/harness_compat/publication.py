@@ -29,11 +29,12 @@ def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishR
     rows = [*summary["reused_results"], *summary["results"]]
     watch = summary.get("watch")
     distinct_watch = watch if watch is not None and not summary.get("watch_reused", False) else None
-    if distinct_watch is not None and distinct_watch["verdict"] in ("red", "tooling"):
+    failing = ("red", "tooling", "inconclusive")
+    if distinct_watch is not None and distinct_watch["verdict"] in failing:
         rows.append(distinct_watch)
     results = tuple(_result(row) for row in rows)
     route_rows = [*rows]
-    if distinct_watch is not None and distinct_watch["verdict"] not in ("red", "tooling"):
+    if distinct_watch is not None and distinct_watch["verdict"] not in failing:
         route_rows.append(distinct_watch)
     routes: list[Route] = [
         (route["method"], route["path"]) for row in route_rows for route in row.get("routes", [])
@@ -48,15 +49,21 @@ def prepare_publication(summary: dict[str, Any], summary_path: Path) -> PublishR
         routes=routes,
         admitted_versions=admitted,
         stale_warnings=summary.get("stale_warnings", ()),
+        attempts={
+            row["version"]: sum(
+                1 for item in row.get("attempts", []) if item["verdict"] != "not run"
+            )
+            for row in rows
+        },
     )
     recovered = bool(watch and watch["verdict"] == "green")
-    if summary["inconclusive"]:
-        report = replace(report, pr_needed=False, issue_action="none")
-    else:
-        action = report.issue_action
-        if action == "none" and recovered:
-            action = "close"
-        report = replace(report, pr_needed=summary["published"], issue_action=action)
+    action = report.issue_action
+    if action == "none" and recovered:
+        action = "close"
+    withdraw = bool(summary.get("invalidated")) and not summary["greens"]
+    report = replace(
+        report, pr_needed=summary["published"], issue_action=action, pr_withdraw=withdraw
+    )
     stem = summary_path.with_suffix("")
     stem.with_name(stem.name + ".pr.md").write_text(report.pr_body + "\n", encoding="utf-8")
     stem.with_name(stem.name + ".issue.md").write_text(report.issue_body + "\n", encoding="utf-8")

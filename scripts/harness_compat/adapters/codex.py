@@ -261,11 +261,15 @@ class CodexAdapter:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
+            # A slow collector is infrastructure noise worth a retry; a missing one is ours.
+            slow: Verdict = (
+                "inconclusive" if isinstance(error, subprocess.TimeoutExpired) else "tooling"
+            )
             return _classify_mock_routes(
                 Result(
                     self.name,
                     version,
-                    "tooling",
+                    slow,
                     (Check("collect_bundle", "error", str(error)),),
                 ),
                 mock_log,

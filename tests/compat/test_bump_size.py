@@ -10,6 +10,7 @@ import pytest
 
 from scripts.harness_compat.adapters import (
     claude,
+    claude_bump,
     codex,
     codex_bump,
     opencode,
@@ -30,7 +31,7 @@ _ADAPTERS = {
     "vibe": vibe.ADAPTER,
 }
 _INPUTS = {
-    "claude": (claude._PROBE_SOURCE,),
+    "claude": (claude_bump.COMPAT,),
     "codex": (codex_bump.PLAN,),
     "opencode": (opencode_bump.RUNTIME_PLAN,),
     "pi": (pi_bump._CONSTANTS,),
@@ -55,14 +56,9 @@ def _measure_bump(name: str, root: Path) -> tuple[set[Path], int, set[Path]]:
     before = _snapshot(root)
     adapter = _ADAPTERS[name]
     gate = adapter.verified(root)
-    declared = set(_INPUTS[name]) if name != "claude" else set()
-
-    if name == "claude":
-        assert gate.floor is not None
-        version = gate.floor
-    else:
-        assert gate.ceiling is not None
-        version = gate.ceiling
+    declared = set(_INPUTS[name])
+    assert gate.ceiling is not None
+    version = gate.ceiling
 
     reported = adapter.apply_bump(root, [version])
     after = _snapshot(root)
@@ -77,7 +73,7 @@ def _measure_bump(name: str, root: Path) -> tuple[set[Path], int, set[Path]]:
     assert not any(path.parts[:3] == ("tests", "fixtures", "harness_compat") for path in changed)
 
     lines = sum(_changed_lines(before.get(path, b""), after.get(path, b"")) for path in changed)
-    if name in {"codex", "opencode", "pi", "vibe"}:
+    if name in {"claude", "codex", "opencode", "pi", "vibe"}:
         assert lines <= 4, f"{name}: {lines} changed diff lines"
     assert adapter.apply_bump(root, [version]) == []
     assert _snapshot(root) == after

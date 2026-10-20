@@ -13,11 +13,17 @@ from typing import Any
 from .adapters import ADAPTER_NAMES, load_adapter
 from .publication import prepare_publication
 from .runner import run_harness
+from .summary import error_annotation, render_harness, render_overview, workflow_annotations
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m scripts.harness_compat")
     commands = parser.add_subparsers(dest="command", required=True)
+    summarize = commands.add_parser("summarize")
+    summarize.add_argument("directory", type=Path)
+    summarize.add_argument(
+        "--expect", default="", help="comma-separated harnesses that must report"
+    )
     for command in ("discover", "run", "check"):
         action = commands.add_parser(command)
         action.add_argument("--harness", choices=ADAPTER_NAMES)
@@ -62,11 +68,77 @@ def _run_url() -> str:
     return "local"
 
 
+def exit_code(summaries: list[dict[str, Any]]) -> int:
+    """1: a red or tooling row; 2: only exhausted inconclusive rows; 0: nothing to act on."""
+    rows = [row for summary in summaries for row in summary["issues"]]
+    if any(row["verdict"] in ("red", "tooling") for row in rows):
+        return 1
+    return 2 if any(summary["inconclusive"] for summary in summaries) else 0
+
+
+def _append_step_summary(text: str) -> None:
+    if target := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(target).open("a", encoding="utf-8") as stream:
+            stream.write(text + "\n")
+    else:
+        print(text, file=sys.stderr)
+
+
+def _summarize(args: argparse.Namespace) -> int:
+    summaries = [
+        summary
+        for path in sorted(args.directory.rglob("compat-summary.json"))
+        for summary in json.loads(path.read_text(encoding="utf-8"))["harnesses"]
+    ]
+    table, missing = render_overview(summaries, [n for n in args.expect.split(",") if n])
+    _append_step_summary(table)
+    return 1 if missing else 0
+
+
+def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
+    _validate_run(args)
+    summaries = [
+        run_harness(
+            adapter,
+            root,
+            version=args.version,
+            max_candidates=args.max_candidates,
+            publish=args.publish,
+            run_url=args.run_url or _run_url(),
+        )
+        for adapter in adapters
+    ]
+    document = {"harnesses": summaries}
+    summary_path = args.summary_json
+    if args.publish and summary_path is None:
+        summary_path = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / (
+            f"harness-compat-{adapters[0].name}.json"
+        )
+    if args.publish and summary_path:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        report = prepare_publication(summaries[0], summary_path)
+        summaries[0]["publication"] = {"pr": report.pr_needed, "issue": report.issue_action}
+    if summary_path:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    print(json.dumps(document, sort_keys=True))
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        for summary in summaries:
+            _append_step_summary(render_harness(summary))
+            for command in workflow_annotations(summary):
+                print(command)
+    return exit_code(summaries)
+
+
 def main(argv: list[str] | None = None) -> int:
-    """0: all clear; 1: red/tooling; 2: usage or infrastructure error."""
+    """0: all clear; 1: red/tooling or a missing result; 2: inconclusive or a usage error."""
     args = _parser().parse_args(argv)
     root = Path.cwd()
     try:
+        if args.command == "summarize":
+            return _summarize(args)
         adapters = _adapters(args.harness)
         if args.command == "discover":
             versions = {adapter.name: adapter.discover() for adapter in adapters}
@@ -78,36 +150,9 @@ def main(argv: list[str] | None = None) -> int:
         if not adapters:
             print("harness-compat: no harness adapters import successfully", file=sys.stderr)
             return 2
-        _validate_run(args)
-        summaries = []
-        for adapter in adapters:
-            summaries.append(
-                run_harness(
-                    adapter,
-                    root,
-                    version=args.version,
-                    max_candidates=args.max_candidates,
-                    publish=args.publish,
-                    run_url=args.run_url or _run_url(),
-                )
-            )
-        document = {"harnesses": summaries}
-        summary_path = args.summary_json
-        if args.publish and summary_path is None:
-            summary_path = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / (
-                f"harness-compat-{adapters[0].name}.json"
-            )
-        if summary_path:
-            summary_path.parent.mkdir(parents=True, exist_ok=True)
-            summary_path.write_text(
-                json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
-        if args.publish and summary_path:
-            prepare_publication(summaries[0], summary_path)
-        print(json.dumps(document, sort_keys=True))
-        if any(summary["inconclusive"] for summary in summaries):
-            return 2
-        return int(any(summary["issues"] for summary in summaries))
+        return _run(args, root, adapters)
     except Exception as exc:
         print(f"harness-compat: {exc}", file=sys.stderr)
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(error_annotation("Harness compatibility", str(exc)))
         return 2

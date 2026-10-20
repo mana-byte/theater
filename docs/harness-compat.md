@@ -2,7 +2,9 @@
 
 The daily workflow qualifies stable releases of Claude Code, Codex, opencode, Pi, and Vibe
 without real API keys or user configuration. It updates one rolling gate PR per harness and
-one issue for red or tooling results; inconclusive runs publish neither.
+one issue per harness for red, tooling, or still-inconclusive results. An inconclusive release
+never justifies a gate bump; it is retried (below) and, if it stays inconclusive, becomes an
+`inconclusive`-labelled issue.
 
 Run every harness locally:
 
@@ -15,8 +17,8 @@ Select one harness or release with `make compat HARNESS=codex` or
 workflow dispatch form to publish. CI alone passes `--publish`; PR creation uses
 `PR_AUTOMATION_TOKEN`, while issue publication uses the workflow token with `issues: write`.
 
-The command exits `0` for green or no work, `1` for red or tooling, and `2` for usage or
-infrastructure errors, including an inconclusive qualification. `--summary-json PATH` writes
+The command exits `0` for green or no work, `1` for a red or tooling row, and `2` for usage
+errors or when only inconclusive rows remain after the retries. `--summary-json PATH` writes
 the detailed results. A local run never edits the repo or publishes anything, but it caches
 green results outside the checkout.
 
@@ -28,18 +30,20 @@ captured lives beside the cached JSON, so a reused green can still refresh the r
 when the captured evidence differs, that one fixture; its body has one verdict and run link per
 release.
 The detailed checks stay in the workflow run. A red issue carries `compat:<harness>`;
-`tooling` marks an automation or mock failure, and `admitted-regression` marks an in-range
-release that failed the daily watch. The issue closes after a conclusive green run.
-Issue creation, updates, labels, and closure use the GitHub REST API. Claude's green results
-remain cache-only and never produce a PR.
+`tooling` marks an automation or mock failure, `admitted-regression` marks an in-range
+release that failed the daily watch, and `inconclusive` marks a release whose three attempts
+all ended in infrastructure noise. The issue closes after a conclusive green run.
+Issue creation, updates, labels, and closure use the GitHub REST API; an issue is found by its
+`compat:<harness>` label and exact title.
 
 ## How releases are chosen
 
 - A candidate is a stable upstream release without reusable cached evidence and outside the
   harness's `known_bad` list. `--version X` forces one release.
 - Range gates (Claude, Codex, OpenCode, Pi, Vibe): the oldest releases at or above the current
-  ceiling, tested in ascending order. `--max-candidates N` (default 5) caps the run. The first red stops
-  the run, and the bump goes only to the last contiguous green. A range gate also qualifies its
+  ceiling, tested in ascending order. `--max-candidates N` (default 5) caps the run. The first
+  red or inconclusive result stops the run (the untested rest is reported as deferred), and the
+  bump goes only to the last contiguous green. A range gate also qualifies its
   newest admitted release every day: a red result there opens an `admitted-regression` issue,
   while a green one stays silent.
   A forced `--version` is promoted only when every discovered release below it is proved too.
@@ -48,10 +52,51 @@ remain cache-only and never produce a PR.
   into `CODEX_RUNTIME_QUALIFIED_EXCLUDED` with its measured cause, and anything outside the
   range stays on the legacy launch. The retained `latest` fixture is rewritten only when a
   capture's evidence differs, so an unchanged schema bumps one ceiling line.
-- An adapter that changes no gate value produces no PR, including Claude.
+- Claude's gate is one inclusive literal, `_QUALIFIED_MAX` in
+  `theater/harness/builtin/plugins/claude/compatibility.py`, next to the hook floor. It covers
+  the asynchronous hook surface only: the messaging range stays display-only (`runtime=None`) and
+  is not qualified by this pipeline. A release newer than the maximum has its optional hooks
+  omitted until the gate PR is merged; releases between the floor and the maximum are admitted
+  without a proof of their own.
+- An adapter that changes no gate value produces no PR.
 - Cached evidence is reused only while the framework, the adapter, the proof tests
   with their imported helpers and conftests, and the harness plugin are unchanged; otherwise the
   release is qualified again.
+
+## Retries and outcomes
+
+A release is qualified in a fresh worktree, home and mock. Only an `inconclusive` result
+(install, timeout or tooling noise that proves nothing about upstream) is repeated, at most
+three attempts in total with 30 s and 90 s backoff; red and tooling are never retried. A run has
+an 80-minute budget inside the 90-minute job: a retry or a further candidate starts only if its
+worst case still fits, otherwise it is shown as not run or deferred. Each row records its
+attempts.
+
+| Rows after the retries | PR | Issue | Exit |
+| --- | --- | --- | --- |
+| contiguous green prefix, composition passes | yes, for that prefix | only for other failing rows | per rows below |
+| any red or tooling row | independent of this | opened or updated | 1 |
+| only inconclusive rows | none for them | opened or updated, `inconclusive` | 2 |
+| all green or no work | per prefix | closed | 0 |
+
+A red or tooling result also revokes that release's cached green, and a gate PR left with no
+promotable release because of it is closed. Evidence is reused only for the same digest: the framework, adapter,
+proofs and their imports (including `theater/trajectory`), the plugin, `uv.lock` and
+`pyproject.toml`.
+
+## Reading a run
+
+- The run name says what was selected (`claude @ 2.1.305 (workflow_dispatch)`); on a PR it says
+  `static checks`, because a PR only runs the lint, type and unit checks, never an upstream
+  release.
+- Dispatching one harness creates only that harness's job. A version needs exactly one harness.
+- Each job writes a summary (gate, candidates, deferred, every row with its attempts and
+  cause) and annotates each failing row; the `Result overview` job adds one table over all
+  selected harnesses and fails when one of them left no result.
+- The summary JSON, the PR and issue bodies and the diagnostics are uploaded as
+  `compat-result-<harness>` for 14 days.
+- PRs and issues are produced only for runs on `main`; any other ref is a dry run of its own
+  code (the workflow checks out the triggering commit).
 
 ## Reading a PR or an issue
 
@@ -94,4 +139,4 @@ the evidence changes.
 To add a harness, implement the frozen `Adapter` in
 `scripts/harness_compat/adapters/<name>.py`, export `ADAPTER`, and register its name in
 `adapters/__init__.py`. Add its real-binary tests, expected model routes, and gate files,
-then add it to the workflow matrix. Keep installs and CLI invocations inside `make_sandbox`. Pi's install pins its `@earendil-works/*` dependencies to the range floor upstream shipped, since npm would otherwise resolve carets to a newer, incompatible sibling.
+then add it to the `plan` job's list and the dispatch options. Keep installs and CLI invocations inside `make_sandbox`. Pi's install pins its `@earendil-works/*` dependencies to the range floor upstream shipped, since npm would otherwise resolve carets to a newer, incompatible sibling.

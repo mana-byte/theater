@@ -25,7 +25,7 @@ CORE = (
     "select",
     "stale",
 )
-_TRACKED = ("tests", "scripts", "theater/harness")
+_TRACKED = ("tests", "scripts", "theater/harness", "theater/trajectory")
 _PLUGINS = Path("theater/harness/builtin/plugins")
 
 
@@ -134,6 +134,8 @@ def qualification_inputs(root: Path, harness: str, adapter: Adapter | None = Non
     if not any(path.stem == harness or path.stem.startswith(f"{harness}_") for path in adapters):
         raise FileNotFoundError(f"adapter source absent: {harness}")
     paths = {base / f"{name}.py" for name in CORE} | set(adapters)
+    # The lockfile and pytest settings decide what the proofs run on.
+    paths |= {root / "uv.lock", root / "pyproject.toml"}
     paths |= set((root / "tests/native").glob("*.py"))
     paths |= _tree(root / _PLUGINS / harness)
     if adapter is not None:

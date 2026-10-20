@@ -13,8 +13,8 @@ from theater.daemon.spawning.hook_compatibility import probe_hook_channels
 from theater.daemon.spawning.planning import install_hook_plan
 from theater.harness.builtin.plugins.claude.compatibility import (
     _HOOK_FLOOR,
-    _HOOK_UPPER,
     _MESSAGING_FLOOR,
+    _QUALIFIED_MAX,
     claude_messaging_range_text,
     probe_claude_hooks,
     probe_claude_native_compatibility,
@@ -156,8 +156,12 @@ def _cli_version(parts: tuple[int, int, int]) -> str:
         pytest.param(
             (_HOOK_FLOOR[0], _HOOK_FLOOR[1], _HOOK_FLOOR[2] + 1), True, id="hook-next-patch"
         ),
-        pytest.param((_HOOK_UPPER[0] - 1, 99, 99), True, id="hook-last-major"),
-        pytest.param(_HOOK_UPPER, False, id="hook-ceiling"),
+        pytest.param(_QUALIFIED_MAX, True, id="hook-max"),
+        pytest.param(
+            (_QUALIFIED_MAX[0], _QUALIFIED_MAX[1], _QUALIFIED_MAX[2] + 1),
+            False,
+            id="hook-above-max",
+        ),
     ],
 )
 def test_claude_hook_version_range(sample, supported, monkeypatch):
@@ -169,7 +173,7 @@ def test_claude_hook_version_range(sample, supported, monkeypatch):
     result = probe_claude_hooks(RuntimeProbeContext())
     assert result.supported is supported
     assert result.policy == f"claude-hooks-{'.'.join(map(str, _HOOK_FLOOR))}-compatible"
-    hook_range = f">={'.'.join(map(str, _HOOK_FLOOR))},<{_HOOK_UPPER[0]}"
+    hook_range = f">={'.'.join(map(str, _HOOK_FLOOR))},<={'.'.join(map(str, _QUALIFIED_MAX))}"
     assert result.reason == (None if supported else f"Claude native support requires {hook_range}")
 
 
@@ -190,7 +194,7 @@ def test_claude_hook_rejects_malformed_version(version, monkeypatch):
         ((_MESSAGING_FLOOR[0], _MESSAGING_FLOOR[1], _MESSAGING_FLOOR[2] - 1), False),
         (_MESSAGING_FLOOR, True),
         ((_MESSAGING_FLOOR[0], _MESSAGING_FLOOR[1], _MESSAGING_FLOOR[2] + 1), True),
-        (_HOOK_UPPER, True),
+        ((_QUALIFIED_MAX[0] + 1, 0, 0), True),
     ],
 )
 def test_claude_messaging_version_floor(sample, supported, monkeypatch):

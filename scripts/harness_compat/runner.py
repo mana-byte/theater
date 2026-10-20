@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -21,11 +23,49 @@ from .contract import (
     VerifiedSet,
     verdict_from_checks,
 )
-from .evidence import adapter_digest, cache_artifacts_dir, reusable_evidence, write_evidence
+from .diagnostics import clip_diagnostic
+from .evidence import (
+    adapter_digest,
+    cache_artifacts_dir,
+    drop_evidence,
+    reusable_evidence,
+    write_evidence,
+)
 from .framework import check_bump, run_pytest
 from .sandbox import make_sandbox
 from .select import newest_in_range, plan_bump, select_candidates
 from .stale import stale_warnings
+
+#: Infrastructure noise gets a whole fresh unit again; a red or tooling verdict never does.
+MAX_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = (30.0, 90.0)
+#: Wall-clock budget of one harness run; the workflow's job timeout sits above it.
+RUN_BUDGET_SECONDS = 80 * 60
+#: What one attempt may need; nothing new starts without this much budget left.
+ATTEMPT_RESERVE_SECONDS = 10 * 60
+
+
+def _cause(result: Result) -> str:
+    check = next((item for item in result.checks if item.status in ("error", "fail")), None)
+    return clip_diagnostic(f"{check.name}: {check.detail}", 200, tail=True) if check else ""
+
+
+def _retry[T](
+    attempt: Callable[[], tuple[Result, T]], deadline: float
+) -> tuple[Result, T, list[dict[str, Any]]]:
+    """Run ``attempt`` until it is conclusive, at most ``MAX_ATTEMPTS`` times within budget."""
+    log: list[dict[str, Any]] = []
+    for number in range(1, MAX_ATTEMPTS + 1):
+        result, extra = attempt()
+        log.append({"attempt": number, "verdict": result.verdict, "cause": _cause(result)})
+        if result.verdict != "inconclusive" or number == MAX_ATTEMPTS:
+            break
+        delay = RETRY_BACKOFF_SECONDS[number - 1]
+        if time.monotonic() + delay + ATTEMPT_RESERVE_SECONDS > deadline:
+            log.append({"attempt": number + 1, "verdict": "not run", "cause": "run budget spent"})
+            break
+        time.sleep(delay)
+    return result, extra, log
 
 
 @contextmanager
@@ -206,13 +246,34 @@ def _compose(
                 )
             if publish:
                 try:
-                    stage_composed(tree, root)
+                    stage_composed(tree, root, {*changed, *artifacts.owners})
                 except Exception as exc:
                     return [f"staging failed: {exc}"], True, False, warnings
                 return [], False, True, warnings
             return [], False, False, warnings
     except Exception as exc:
         return [f"composed bump failed: {exc}"], False, False, []
+
+
+def _candidate_attempt(
+    adapter: Adapter, root: Path, candidate: str, artifacts: CandidateArtifacts
+) -> tuple[Result, tuple[list[dict[str, Any]], list[str], list[str]]]:
+    """One fresh attempt: qualify in its own tree and capture a green's generated files."""
+    warnings: list[str] = []
+    conflicts: list[str] = []
+    with _worktree(root) as tree:
+        result, routes = _qualify(adapter, tree, candidate, bump=True)
+        if result.verdict in ("green", "red"):
+            warnings = stale_warnings(adapter, tree, [candidate])
+        if result.verdict == "green":
+            conflicts = artifacts.capture(tree, candidate)
+            if conflicts:
+                result = replace(
+                    result,
+                    verdict="tooling",
+                    checks=(*result.checks, Check("artifacts", "fail", "; ".join(conflicts))),
+                )
+    return result, (routes, warnings, conflicts)
 
 
 def _watch(
@@ -223,6 +284,7 @@ def _watch(
     rows: list[dict[str, Any]],
     run_url: str,
     digest: str,
+    deadline: float,
 ) -> tuple[dict[str, Any] | None, bool]:
     """The daily regression watch: reuse a candidate row for the newest admitted release."""
     version = newest_in_range(adapter, gate, releases)
@@ -230,11 +292,62 @@ def _watch(
         return None, False
     if row := next((dict(item) for item in rows if item["version"] == version), None):
         return row, True
-    with _worktree(root) as tree:
-        watched, routes = _qualify(adapter, tree, version, bump=False)
+
+    def attempt() -> tuple[Result, list[dict[str, Any]]]:
+        with _worktree(root) as tree:
+            return _qualify(adapter, tree, version, bump=False)
+
+    watched, routes, log = _retry(attempt, deadline)
     if watched.verdict == "green":
         write_evidence(root, replace(watched, adapter_digest=digest), run_url)
-    return {**watched.to_evidence(), "routes": routes, "run_url": run_url}, False
+    elif watched.verdict in ("red", "tooling"):
+        drop_evidence(root, adapter.name, version)
+    row = {**watched.to_evidence(), "routes": routes, "run_url": run_url, "attempts": log}
+    return row, False
+
+
+def _walk_candidates(
+    adapter: Adapter,
+    root: Path,
+    gate: VerifiedSet,
+    candidates: list[str],
+    artifacts: CandidateArtifacts,
+    reused: dict[str, dict[str, Any]],
+    digest: str,
+    run_url: str,
+    deadline: float,
+) -> tuple[list[Result], list[dict[str, Any]], list[str], list[str], list[str]]:
+    """Qualify candidates in ascending order: results, rows, conflicts, warnings, deferred."""
+    results: list[Result] = []
+    rows: list[dict[str, Any]] = []
+    conflicts_seen: list[str] = []
+    warnings_seen: list[str] = []
+    deferred: list[str] = []
+    for index, candidate in enumerate(candidates):
+        if index and time.monotonic() + ATTEMPT_RESERVE_SECONDS > deadline:
+            deferred = candidates[index:]
+            break
+        result, (routes, warnings, conflicts), log = _retry(
+            partial(_candidate_attempt, adapter, root, candidate, artifacts), deadline
+        )
+        warnings_seen.extend(warnings)
+        conflicts_seen.extend(conflicts)
+        result = replace(result, adapter_digest=digest)
+        if result.verdict == "green":
+            cached = artifacts.cache_version(
+                candidate, cache_artifacts_dir(root, adapter.name, candidate)
+            )
+            write_evidence(root, result, run_url, artifacts=cached)
+        elif result.verdict in ("red", "tooling"):
+            drop_evidence(root, adapter.name, candidate)
+            reused.pop(candidate, None)
+        results.append(result)
+        rows.append({**result.to_evidence(), "routes": routes, "run_url": run_url, "attempts": log})
+        # A candidate that was ever inconclusive ends the walk: the backlog waits for tomorrow.
+        if gate.kind == "range" and (result.verdict != "green" or len(log) > 1):
+            deferred = candidates[index + 1 :]
+            break
+    return results, rows, conflicts_seen, warnings_seen, deferred
 
 
 def _run_with_artifacts(
@@ -246,8 +359,10 @@ def _run_with_artifacts(
     max_candidates: int = 5,
     publish: bool = False,
     run_url: str = "local",
+    budget_seconds: float = RUN_BUDGET_SECONDS,
 ) -> dict[str, Any]:
     """Qualify one harness; publish only after the composed tree passes."""
+    deadline = time.monotonic() + budget_seconds
     gate = adapter.verified(root)
     digest = adapter_digest(root, adapter.name, adapter)
     reused = reusable_evidence(
@@ -257,42 +372,15 @@ def _run_with_artifacts(
         required=adapter.green_tests,
         skips=adapter.expected_skips,
     )
+    proved_before = set(reused)
     releases = adapter.discover()
     candidates = select_candidates(
         adapter, gate, reused, max_candidates=max_candidates, version=version, releases=releases
     )
-    rows: list[dict[str, Any]] = []
-    results: list[Result] = []
-    artifact_conflicts: list[str] = []
-    candidate_warnings: list[str] = []
-    for candidate in candidates:
-        with _worktree(root) as tree:
-            result, routes = _qualify(adapter, tree, candidate, bump=True)
-            candidate_warnings.extend(
-                stale_warnings(adapter, tree, [candidate])
-                if result.verdict in ("green", "red")
-                else []
-            )
-            if result.verdict == "green":
-                conflicts = artifacts.capture(tree, candidate)
-                artifact_conflicts.extend(conflicts)
-                if conflicts:
-                    result = replace(
-                        result,
-                        verdict="tooling",
-                        checks=(*result.checks, Check("artifacts", "fail", "; ".join(conflicts))),
-                    )
-        result = replace(result, adapter_digest=digest)
-        if result.verdict == "green":
-            cached = artifacts.cache_version(
-                candidate, cache_artifacts_dir(root, adapter.name, candidate)
-            )
-            write_evidence(root, result, run_url, artifacts=cached)
-        results.append(result)
-        rows.append({**result.to_evidence(), "routes": routes, "run_url": run_url})
-        if gate.kind == "range" and result.verdict != "green":
-            break
-    watch, watch_reused = _watch(adapter, root, gate, releases, rows, run_url, digest)
+    results, rows, artifact_conflicts, candidate_warnings, deferred = _walk_candidates(
+        adapter, root, gate, candidates, artifacts, reused, digest, run_url, deadline
+    )
+    watch, watch_reused = _watch(adapter, root, gate, releases, rows, run_url, digest, deadline)
     reused_results = [
         Result(
             adapter.name,
@@ -316,8 +404,6 @@ def _run_with_artifacts(
                 cache_artifacts_dir(root, adapter.name, result.version),
                 document.get("artifacts", {}),
             )
-    pre_inconclusive = any(result.verdict == "inconclusive" for result in results)
-    pre_inconclusive |= bool(watch and watch["verdict"] == "inconclusive")
     warnings: list[str]
     if artifact_conflicts:
         problems, compose_inconclusive, published, warnings = (
@@ -332,7 +418,7 @@ def _run_with_artifacts(
             root,
             greens,
             artifacts,
-            publish=publish and not pre_inconclusive,
+            publish=publish,
         )
     else:
         problems, compose_inconclusive, published, warnings = (
@@ -362,14 +448,21 @@ def _run_with_artifacts(
     warnings = sorted(set(candidate_warnings) | set(warnings))
     inconclusive = any(row["verdict"] == "inconclusive" for row in rows)
     inconclusive |= bool(watch and watch["verdict"] == "inconclusive")
-    issues = [row for row in rows if row["verdict"] in ("red", "tooling")]
-    if watch and not watch_reused and watch["verdict"] in ("red", "tooling"):
+    failing = ("red", "tooling", "inconclusive")
+    issues = [row for row in rows if row["verdict"] in failing]
+    if watch and not watch_reused and watch["verdict"] in failing:
         issues.append({**watch, "admitted_regression": watch["verdict"] == "red"})
     return {
         "harness": adapter.name,
         "gate_kind": gate.kind,
+        "gate": {"floor": gate.floor, "ceiling": gate.ceiling},
         "adapter_digest": digest,
         "candidates": candidates,
+        "deferred": deferred,
+        # Promotable releases whose cached green a conclusive run just contradicted.
+        "invalidated": sorted(
+            item for item in proved_before - set(reused) if not gate.admits(item)
+        ),
         "reused": sorted(reused),
         "reused_results": [
             {
@@ -383,7 +476,7 @@ def _run_with_artifacts(
         "watch": watch,
         "watch_reused": watch_reused,
         "greens": greens,
-        "issues": issues if not inconclusive else [],
+        "issues": issues,
         "inconclusive": inconclusive,
         "published": published,
         "stale_warnings": warnings,

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -39,17 +40,39 @@ def _run_tmux(socket: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _wait_for(predicate, *, timeout: float = 45) -> object:
+def _wait_for(predicate, *, timeout: float = 45, what: str = "the expected transcript evidence"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
         if value:
             return value
         time.sleep(0.2)
-    raise AssertionError("Claude TUI did not produce the expected transcript evidence")
+    raise AssertionError(f"Claude TUI did not produce {what}")
 
 
-def _run_turn(*, settings: Path | None = None, prompt: str = "Reply with a short greeting") -> Path:
+_HOOK_EVENTS = frozenset({"SessionStart", "PreToolUse", "PostToolUse"})
+
+
+def _captured_hooks(capture: Path) -> list[dict]:
+    """Complete JSON lines only: an asynchronous hook may still be mid-write."""
+    if not capture.exists():
+        return []
+    records = []
+    for line in capture.read_text(encoding="utf-8").splitlines():
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def _run_turn(
+    *,
+    settings: Path | None = None,
+    prompt: str = "Reply with a short greeting",
+    settle: Callable[[], object] | None = None,
+) -> Path:
+    """Run one TUI turn; ``settle`` must hold before the TUI is torn down."""
     binary = Path(os.environ["HARNESS_COMPAT_BINARY"])
     cwd = Path(os.environ["HARNESS_COMPAT_WORKDIR"])
     socket = Path(os.environ["HARNESS_COMPAT_TMUX_SOCKET"])
@@ -112,9 +135,9 @@ def _run_turn(*, settings: Path | None = None, prompt: str = "Reply with a short
             return None
 
         try:
-            return _wait_for(
+            transcript = _wait_for(
                 completed, timeout=float(os.environ.get("HARNESS_COMPAT_TURN_TIMEOUT", "90"))
-            )  # type: ignore[return-value]
+            )
         except AssertionError as exc:
             pane = _run_tmux(socket, "capture-pane", "-p", "-t", "compat", "-S", "-80")
             paths = list((config / "projects").glob(f"*/{session_id}.jsonl"))
@@ -124,6 +147,13 @@ def _run_turn(*, settings: Path | None = None, prompt: str = "Reply with a short
                 f"Claude turn incomplete; pane={pane.stdout[-1200:]!r}; "
                 f"transcripts={paths!r}; routes={detail}"
             ) from exc
+        if settle is not None:
+            _wait_for(
+                settle,
+                timeout=float(os.environ.get("HARNESS_COMPAT_HOOK_TIMEOUT", "45")),
+                what="the asynchronous hook payloads",
+            )
+        return transcript
     finally:
         _run_tmux(socket, "kill-server")
 
@@ -147,6 +177,13 @@ def test_claude_turn_reaps_tmux_when_setup_fails(tmp_path: Path, monkeypatch, fa
     with pytest.raises((AssertionError, subprocess.TimeoutExpired)):
         _run_turn()
     assert calls[-1] == ("kill-server",)
+
+
+def test_captured_hooks_skips_a_line_still_being_written(tmp_path: Path) -> None:
+    capture = tmp_path / "hooks.jsonl"
+    assert _captured_hooks(capture) == []
+    capture.write_text('{"hook_event_name": "SessionStart"}\n{"hook_event_na', encoding="utf-8")
+    assert _captured_hooks(capture) == [{"hook_event_name": "SessionStart"}]
 
 
 @pytest.fixture(scope="module")
@@ -225,36 +262,31 @@ def test_claude_tool_hook_decodes_live_payload() -> None:
         for entry in entries:
             for hook in entry["hooks"]:
                 hook["command"] = command
-                hook["async"] = False
+                assert hook["async"] is True  # production installs asynchronous hooks
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
-    _run_turn(settings=settings_path, prompt="Read hook-proof.txt, then reply done")
 
-    def payloads() -> list[dict] | None:
-        if not capture.exists():
-            return None
-        records = [json.loads(line) for line in capture.read_text().splitlines() if line]
-        return (
-            records
-            if any(record.get("hook_event_name") == "PostToolUse" for record in records)
-            else None
-        )
+    def settled() -> bool:
+        return {
+            record.get("hook_event_name") for record in _captured_hooks(capture)
+        } >= _HOOK_EVENTS
 
-    records = _wait_for(
-        payloads, timeout=float(os.environ.get("HARNESS_COMPAT_HOOK_TIMEOUT", "45"))
+    transcript = _run_turn(
+        settings=settings_path, prompt="Read hook-proof.txt, then reply done", settle=settled
     )
-    assert {"SessionStart", "PreToolUse", "PostToolUse"} <= {
-        record.get("hook_event_name") for record in records
-    }
-    post = next(record for record in records if record.get("hook_event_name") == "PostToolUse")  # type: ignore[union-attr]
+    records = _captured_hooks(capture)
+    post = next(record for record in records if record.get("hook_event_name") == "PostToolUse")
     assert post["tool_name"] == "Read"
+    # The launched session is known independently of the payload under test.
+    assert post["session_id"] == transcript.stem
+    assert Path(post["transcript_path"]).resolve() == transcript.resolve()
     native_id = correlate_tool_hook(
         HookCorrelationContext(
             participant_id="compat",
             channel_id=NATIVE_HOOK_CHANNEL,
             event="PostToolUse",
             payload=post,
-            expected_session_id=post["session_id"],
-            expected_transcript_location=post["transcript_path"],
+            expected_session_id=transcript.stem,
+            expected_transcript_location=str(transcript),
             expected_session_provenance="exact",
         )
     )

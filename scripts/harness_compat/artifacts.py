@@ -142,13 +142,21 @@ class CandidateArtifacts:
         ]
 
 
-def stage_composed(tree: Path, root: Path) -> list[Path]:
-    """Copy only the composed tree's Git changes to the checkout and stage those paths."""
+def stage_composed(tree: Path, root: Path, allowed: Collection[Path]) -> list[Path]:
+    """Copy only the composed tree's Git changes to the checkout and stage those paths.
+
+    ``allowed`` is what the bump reported plus the promoted releases' captured files:
+    anything else a proof or install left behind never ships.
+    """
     if _git(root, "status", "--porcelain=v1", "-z"):
         raise RuntimeError("publishing checkout is dirty before staging the composed tree")
     changed = tracked_changes(tree) | status_untracked(tree)
     if forbidden := [path for path in changed if not valid_artifact_path(path.as_posix())]:
         raise RuntimeError(f"composed tree contains forbidden evidence paths: {sorted(forbidden)}")
+    if unlisted := sorted(path for path in changed if path not in allowed):
+        raise RuntimeError(f"composed tree changed paths the bump did not declare: {unlisted}")
+    if links := sorted(path for path in changed if (tree / path).is_symlink()):
+        raise RuntimeError(f"composed tree contains symlinks: {links}")
     for relative in sorted(changed):
         source, target = tree / relative, root / relative
         if source.exists() or source.is_symlink():

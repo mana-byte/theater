@@ -26,11 +26,13 @@ class PublishReport:
     issue_title: str
     issue_body: str
     issue_labels: tuple[str, ...]
+    pr_withdraw: bool = False
 
     def github_outputs(self) -> dict[str, str]:
         """Values consumed by ``harness-compat.yml``."""
         return {
             "pr_needed": str(self.pr_needed).lower(),
+            "pr_withdraw": str(self.pr_withdraw).lower(),
             "pr_title": self.pr_title,
             "pr_body": self.pr_body,
             "issue_action": self.issue_action,
@@ -50,8 +52,9 @@ def build_report(
     routes: Iterable[Route] = (),
     admitted_versions: Iterable[str] = (),
     stale_warnings: Iterable[str] = (),
+    attempts: Mapping[str, int] | None = None,
 ) -> PublishReport:
-    """Build one rolling PR/issue report; inconclusive results cause neither."""
+    """Build one rolling PR/issue report; an inconclusive row opens an issue, never a PR."""
     if any(result.harness != harness for result in results):
         raise ValueError("every result must match the report harness")
 
@@ -60,12 +63,15 @@ def build_report(
     green = tuple(result for result in ordered if result.verdict == "green")
     promoted = frozenset(pr_versions) if pr_versions is not None else None
     pr_green = tuple(result for result in green if promoted is None or result.version in promoted)
-    failing = tuple(result for result in ordered if result.verdict in {"red", "tooling"})
+    failing = tuple(
+        result for result in ordered if result.verdict in {"red", "tooling", "inconclusive"}
+    )
     admitted = frozenset(admitted_versions)
-    inconclusive = any(result.verdict == "inconclusive" for result in ordered)
     labels = [f"compat:{harness}"]
     if any(result.verdict == "tooling" for result in failing):
         labels.append("tooling")
+    if any(result.verdict == "inconclusive" for result in failing):
+        labels.append("inconclusive")
     if any(result.verdict == "red" and result.version in admitted for result in failing):
         labels.append("admitted-regression")
 
@@ -81,15 +87,17 @@ def build_report(
         )
     return PublishReport(
         harness=harness,
-        pr_needed=bool(pr_green) and not inconclusive,
+        pr_needed=bool(pr_green),
         pr_title=f"chore(compat): advance {harness} version gate",
         pr_body=pr_body,
-        issue_action=(
-            "none" if inconclusive else "upsert" if failing else "close" if green else "none"
-        ),
+        issue_action="upsert" if failing else "close" if green else "none",
         issue_title=f"Harness compatibility failures: {harness}",
         issue_body=_body(
-            f"Failing {harness} releases", failing, run_url=run_url, routes=ordered_routes
+            f"Failing {harness} releases",
+            failing,
+            run_url=run_url,
+            routes=ordered_routes,
+            attempts=attempts or {},
         ),
         issue_labels=tuple(labels),
     )
@@ -127,11 +135,12 @@ def _body(
     *,
     run_url: str,
     routes: Iterable[Route],
+    attempts: Mapping[str, int],
 ) -> str:
     run = f"[workflow run]({_markdown_url(run_url)})" if run_url else "not available"
     rows = ["| Version | Verdict | Checks | Run |", "| --- | --- | --- | --- |"]
     rows.extend(
-        f"| {_cell(result.version)} | {result.verdict} | {_checks(result)} | {run} |"
+        f"| {_cell(result.version)} | {_verdict(result, attempts)} | {_checks(result)} | {run} |"
         for result in results
     )
     if not results:
@@ -154,6 +163,11 @@ def _body(
             *route_lines,
         ]
     )
+
+
+def _verdict(result: Result, attempts: Mapping[str, int]) -> str:
+    tried = attempts.get(result.version, 1)
+    return f"{result.verdict} after {tried} attempts" if tried > 1 else result.verdict
 
 
 def _checks(result: Result) -> str:

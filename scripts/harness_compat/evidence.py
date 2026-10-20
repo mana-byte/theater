@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ __all__ = [
     "adapter_digest",
     "cache_artifacts_dir",
     "cache_root",
+    "drop_evidence",
     "reusable_evidence",
     "write_evidence",
 ]
@@ -147,3 +149,9 @@ def write_evidence(
     temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
     return path
+
+
+def drop_evidence(root: Path, harness: str, version: str) -> None:
+    """Revoke a release's cached green once a conclusive run contradicts it."""
+    (cache_root(root) / harness / f"{version}.json").unlink(missing_ok=True)
+    shutil.rmtree(cache_artifacts_dir(root, harness, version), ignore_errors=True)

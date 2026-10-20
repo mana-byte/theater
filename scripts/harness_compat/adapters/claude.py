@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import re
 import subprocess
@@ -20,12 +19,11 @@ from ..contract import (
     Result,
     Sandbox,
     VerifiedSet,
-    load_evidenced,
     verdict_from_checks,
 )
+from . import claude_bump
 
 _PACKAGE = "@anthropic-ai/claude-code"
-_PROBE_SOURCE = Path("theater/harness/builtin/plugins/claude/compatibility.py")
 _HINT = re.compile(r"transcript|hook|session|--session-id|turn_duration", re.IGNORECASE)
 _GREEN_TESTS = (
     "tests/compat/test_claude_run.py::test_claude_seeded_tui_turn",
@@ -62,39 +60,6 @@ def changelog_hints(version: str, changelog: str) -> tuple[str, ...]:
     return tuple(hints)
 
 
-def _gate(root: Path) -> tuple[str, str | None]:
-    tree = ast.parse((root / _PROBE_SOURCE).read_text(encoding="utf-8"))
-    constants = {
-        target.id: ast.literal_eval(node.value)
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        for target in node.targets
-        if isinstance(target, ast.Name) and target.id in {"_HOOK_FLOOR", "_HOOK_UPPER"}
-    }
-    probe = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "probe_claude_hooks"
-    )
-    call = next(
-        node.value
-        for node in ast.walk(probe)
-        if isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
-    )
-    values = {
-        keyword.arg: (
-            constants[keyword.value.id]
-            if isinstance(keyword.value, ast.Name)
-            else ast.literal_eval(keyword.value)
-        )
-        for keyword in call.keywords
-        if keyword.arg in {"floor", "upper"}
-    }
-    floor = ".".join(map(str, values["floor"]))
-    ceiling = values.get("upper")
-    return floor, ".".join(map(str, ceiling)) if ceiling is not None else None
-
-
 class ClaudeAdapter:
     name = "claude"
     probe = "theater.harness.builtin.plugins.claude.compatibility:probe_claude_hooks"
@@ -102,7 +67,8 @@ class ClaudeAdapter:
     green_tests = _GREEN_TESTS
     consistency_tests = (
         "tests/harness/claude/test_hook_compatibility.py::test_claude_hook_version_range[hook-floor]",
-        "tests/harness/claude/test_hook_compatibility.py::test_claude_hook_version_range[hook-ceiling]",
+        "tests/harness/claude/test_hook_compatibility.py::test_claude_hook_version_range[hook-max]",
+        "tests/harness/claude/test_hook_compatibility.py::test_claude_hook_version_range[hook-above-max]",
     )
     expected_skips: ClassVar[Mapping[str, str]] = MappingProxyType({})
     expected_routes = frozenset(
@@ -114,10 +80,7 @@ class ClaudeAdapter:
         return github.npm_versions(_PACKAGE)
 
     def verified(self, root: Path) -> VerifiedSet:
-        floor, ceiling = _gate(root)
-        return VerifiedSet(
-            "range", floor=floor, ceiling=ceiling, evidenced=load_evidenced(root, self.name)
-        )
+        return claude_bump.verified(root)
 
     def install(self, sb: Sandbox, version: str) -> Path:
         prefix = sb.root / "npm"
@@ -163,8 +126,7 @@ class ClaudeAdapter:
         return f"{version} (Claude Code)"
 
     def apply_bump(self, root: Path, greens: Sequence[str]) -> list[Path]:
-        del root, greens
-        return []
+        return claude_bump.bump(root, greens)
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
         cwd = sb.root / "project"

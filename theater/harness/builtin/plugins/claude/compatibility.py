@@ -9,7 +9,8 @@ from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbe
 
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?: \(Claude Code\))?")
 _HOOK_FLOOR = (2, 1, 119)
-_HOOK_UPPER = (3, 0, 0)
+#: Newest release the daily compat pipeline proved (inclusive); it is the only value it moves.
+_QUALIFIED_MAX = (2, 1, 304)
 _MESSAGING_FLOOR = (2, 1, 248)
 _POLICY = f"claude-hooks-{'.'.join(map(str, _HOOK_FLOOR))}-compatible"
 _MESSAGING_POLICY = f"claude-messaging-native-controls-{'.'.join(map(str, _MESSAGING_FLOOR))}"
@@ -20,9 +21,9 @@ def claude_messaging_range_text() -> str:
 
 
 def probe_claude_hooks(context: RuntimeProbeContext) -> RuntimeCompatibility:
-    """Check the stable CLI range; hook payload decoding is the schema gate."""
+    """Check the qualified CLI range; hook payload decoding is the schema gate."""
     # The hook floor is where PostToolUse/PostToolUseFailure gained duration_ms.
-    return _probe_claude(context, floor=_HOOK_FLOOR, policy=_POLICY, upper=_HOOK_UPPER)
+    return _probe_claude(context, floor=_HOOK_FLOOR, policy=_POLICY, maximum=_QUALIFIED_MAX)
 
 
 def probe_claude_native_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
@@ -35,7 +36,7 @@ def _probe_claude(
     *,
     floor: tuple[int, int, int],
     policy: str,
-    upper: tuple[int, int, int] | None = None,
+    maximum: tuple[int, int, int] | None = None,
 ) -> RuntimeCompatibility:
     try:
         result = subprocess.run(
@@ -55,9 +56,13 @@ def _probe_claude(
             supported=False, policy=policy, reason="Claude did not report a stable CLI version"
         )
     version = tuple(int(part) for part in match.groups())
-    supported = version >= floor and (upper is None or version < upper)
+    supported = version >= floor and (maximum is None or version <= maximum)
     lower_text = ".".join(str(part) for part in floor)
-    range_text = f">={lower_text}" if upper is None else f">={lower_text},<{upper[0]}"
+    range_text = (
+        f">={lower_text}"
+        if maximum is None
+        else f">={lower_text},<={'.'.join(str(part) for part in maximum)}"
+    )
     return RuntimeCompatibility(
         supported=supported,
         policy=policy,
