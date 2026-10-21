@@ -500,6 +500,10 @@ class JobManager:
         """Count of jobs whose persisted state is ``running``."""
         return self.store.active_job_count()
 
+    def live_handles(self) -> frozenset[str]:
+        """Snapshot handles whose local waiters still protect them from collection."""
+        return frozenset(self._events)
+
     @staticmethod
     def write_direct_terminal_in_unit(
         store: Store,
