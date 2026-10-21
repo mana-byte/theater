@@ -6,7 +6,6 @@ the exact session (never a cwd guess); consume evidence; close ambiguity without
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Awaitable, Callable
 
@@ -15,6 +14,7 @@ from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.operations import DispatchIntent, OperationOutcome
 from theater.daemon.runtime.evidence import persist_buffered_evidence
+from theater.daemon.runtime.launch_policy import decode_launch_policy
 from theater.daemon.runtime.public_recovery import (
     fail_proven_undispatched,
     reconcile_workspace_lifecycle,
@@ -580,7 +580,7 @@ def _runtime_factory(daemon, binding, participant: Participant):
     manifest = wiring_mod.runtime_manifest_of(harness) if harness is not None else None
     if manifest is None:
         return None
-    launch_policy = _launch_policy(binding.launch_policy)
+    launch_policy = decode_launch_policy(binding.launch_policy).fields
     io = daemon.runtime_io
     token_file = _runtime_token_file(daemon, binding, manifest)
 
@@ -903,17 +903,6 @@ def _register_live(daemon, binding, runtime, manifest) -> None:
             active_job_for_turn=daemon.controls.active_job_for_native_turn,
         )
     )
-
-
-def _launch_policy(raw: str | None) -> dict:
-    """The persisted launch-policy facts (approval/model selection, no secrets)."""
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def _backend_gone(daemon, binding) -> None:

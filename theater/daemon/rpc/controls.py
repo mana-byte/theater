@@ -6,9 +6,6 @@ operation or mints a job; responses are additive (wire protocol stays version 1)
 
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping
-
 from theater.constants.refusals import NEXT_STEER_STALE
 from theater.daemon.controls.interaction_wire import interaction_to_wire
 from theater.daemon.presence import access as presence_access
@@ -20,6 +17,7 @@ from theater.daemon.rpc.params import (
 )
 from theater.daemon.rpc.router import method
 from theater.daemon.rpc.skill_attachments import attach_skills
+from theater.daemon.runtime.launch_policy import decode_launch_policy
 from theater.daemon.skill_cards import compose_prompt
 from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.harness import HARNESSES, normalize
@@ -200,16 +198,9 @@ def _effective_capabilities(daemon, target, snapshot=None) -> dict:
 def _runtime_host(daemon, target) -> RuntimeHost | None:
     binding = daemon.store.get_runtime_binding(target.id)
     if binding is not None and binding.launch_policy:
-        try:
-            policy = json.loads(binding.launch_policy)
-        except ValueError:
-            policy = {}
-        value = policy.get("runtime_host") if isinstance(policy, Mapping) else None
-        if isinstance(value, str):
-            try:
-                return RuntimeHost(value)
-            except ValueError:
-                pass
+        host = decode_launch_policy(binding.launch_policy).runtime_host
+        if host is not None:
+            return host
     harness = HARNESSES.get(normalize(target.harness))
     runtime = None if harness is None else getattr(harness, "runtime", None)
     host = None if runtime is None else getattr(runtime, "host", None)
