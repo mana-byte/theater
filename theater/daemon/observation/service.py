@@ -7,8 +7,9 @@ import contextlib
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
+from enum import Enum
 from functools import partial
 
 from theater import timing
@@ -103,6 +104,11 @@ class _WatchIteration:
     batch: Batch | None = None
     inner: list[Batch] = field(default_factory=list)
     applied: bool = False
+
+
+class _CheckpointDecision(Enum):
+    ADVANCE = "advance"
+    HOLD = "hold"
 
 
 class Observer(
@@ -436,11 +442,7 @@ class Observer(
             return False
         self._capture_trajectory(context.pid, batch)
         self._failures.update_source_error(context.pid, batch, finish_fn=context.completion.finish)
-        if await self._route_terminal_evidence(
-            context.pid, context.source, batch, context.registration
-        ):
-            self._ack_terminal_evidence(context.source)
-            self._persist_pending_source_checkpoint(context.pid, context.source)
+        await self._settle_evidence(context, (batch,), checkpoint=_CheckpointDecision.ADVANCE)
         await self._screen_only(
             context.pid, context.observer, context.clock, source_status=batch.status
         )
@@ -455,11 +457,7 @@ class Observer(
             context.active_at = self._monotonic()
             if batch.status is not None:
                 self._settle(context.pid, batch.status)
-        if await self._route_terminal_evidence(
-            context.pid, context.source, batch, context.registration
-        ):
-            self._ack_terminal_evidence(context.source)
-            self._persist_pending_source_checkpoint(context.pid, context.source)
+        await self._settle_evidence(context, (batch,), checkpoint=_CheckpointDecision.ADVANCE)
         await self._screen_only(
             context.pid, context.observer, context.clock, source_status=batch.status
         )
@@ -485,10 +483,7 @@ class Observer(
         await self._screen_only(
             context.pid, context.observer, context.clock, source_status=batch.status
         )
-        if await self._route_terminal_evidence(
-            context.pid, context.source, batch, context.registration
-        ):
-            self._ack_terminal_evidence(context.source)
+        await self._settle_evidence(context, (batch,), checkpoint=_CheckpointDecision.HOLD)
         await self._sleep(self.search, context.wake)
         return True
 
@@ -583,11 +578,7 @@ class Observer(
     ) -> None:
         if context.registration is None:
             return
-        if iteration.batch is not None and iteration.batch.terminal_evidence:
-            self._retain_terminal_evidence(
-                context.pid, context.source, iteration.batch, context.registration
-            )
-        for batch in iteration.inner:
+        for batch in self._iteration_batches(iteration):
             if batch.terminal_evidence:
                 self._retain_terminal_evidence(
                     context.pid, context.source, batch, context.registration
@@ -595,28 +586,40 @@ class Observer(
         self._retain_source_terminal_evidence(context.pid, context.source, context.registration)
 
     async def _handle_contract_failure(self, context: _WatchContext, batch: Batch | None) -> None:
-        if batch is not None and await self._route_terminal_evidence(
-            context.pid, context.source, batch, context.registration
-        ):
-            self._ack_terminal_evidence(context.source)
+        if batch is not None:
+            await self._settle_evidence(context, (batch,), checkpoint=_CheckpointDecision.HOLD)
         logger.exception(SOURCE_CONTRACT_FAILED, context.pid)
 
     async def _finish_iteration(self, context: _WatchContext, iteration: _WatchIteration) -> None:
-        routed = True
+        checkpoint = _CheckpointDecision.ADVANCE if iteration.applied else _CheckpointDecision.HOLD
+        await self._settle_evidence(
+            context, self._iteration_batches(iteration), checkpoint=checkpoint
+        )
+        await self._sleep(self._quiet_poll(context, iteration.next_poll), context.wake)
+
+    @staticmethod
+    def _iteration_batches(iteration: _WatchIteration) -> Iterator[Batch]:
         if iteration.batch is not None:
-            routed = await self._route_terminal_evidence(
-                context.pid, context.source, iteration.batch, context.registration
-            )
-        for batch in iteration.inner:
+            yield iteration.batch
+        yield from iteration.inner
+
+    async def _settle_evidence(
+        self,
+        context: _WatchContext,
+        batches: Iterable[Batch],
+        *,
+        checkpoint: _CheckpointDecision,
+    ) -> None:
+        routed = True
+        for batch in batches:
             if not await self._route_terminal_evidence(
                 context.pid, context.source, batch, context.registration
             ):
                 routed = False
         if routed:
             self._ack_terminal_evidence(context.source)
-            if iteration.applied:
+            if checkpoint is _CheckpointDecision.ADVANCE:
                 self._persist_pending_source_checkpoint(context.pid, context.source)
-        await self._sleep(self._quiet_poll(context, iteration.next_poll), context.wake)
 
     async def _close_watch(self, context: _WatchContext) -> None:
         pid = context.pid

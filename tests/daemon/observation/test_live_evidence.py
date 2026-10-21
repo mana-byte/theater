@@ -17,12 +17,13 @@ from tests.support.observation import (
 )
 from tests.support.waiting import until
 from theater.daemon.observation.live import LiveObservationHub, LiveRegistration
+from theater.daemon.observation.service import _WatchIteration
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.harness.contracts.events import Event, EventKind, EventPath
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
 )
-from theater.harness.source import Batch, Source
+from theater.harness.source import Attachment, Batch, Source
 from theater.models import JobState, Status
 
 
@@ -50,6 +51,38 @@ class RelocatingEvidenceSource(Source):
     def terminal_evidence_delivered(self) -> None:
         self.delivered += 1
         self.held = ()
+
+
+class CheckpointEvidenceSource(Source):
+    def __init__(self, batch: Batch):
+        self.batch = batch
+        self.pending = None
+        self.held = ()
+        self.delivered = 0
+        self.acknowledged = 0
+        self.discarded = 0
+
+    async def read(self) -> Batch:
+        self.pending = "cursor-1"
+        self.held = self.batch.terminal_evidence
+        return self.batch
+
+    def pending_source_checkpoint(self) -> str | None:
+        return self.pending
+
+    def acknowledge_source_checkpoint(self) -> None:
+        self.acknowledged += 1
+        self.pending = None
+
+    def pending_terminal_evidence(self) -> bool:
+        return bool(self.held)
+
+    def terminal_evidence_delivered(self) -> None:
+        self.delivered += 1
+        self.held = ()
+
+    def discard_attachment(self) -> None:
+        self.discarded += 1
 
 
 def relocation_watch(registry, source, sink, *, awaiting=999.0):
@@ -128,6 +161,92 @@ async def test_cancelling_after_relocation_retains_its_exact_evidence(registry, 
     assert routed == [("p1", 7, evidence)]
     assert source.delivered == 1
     assert observer._pending_evidence == {}
+
+
+async def test_all_outer_and_inner_evidence_routes_are_attempted_after_a_failure(registry):
+    evidence = tuple(outcome(f"turn-{index}", "session-1") for index in range(3))
+    source = CheckpointEvidenceSource(Batch())
+    source.pending = "cursor-1"
+    source.held = evidence
+    attempted = []
+
+    async def sink(_pid, *, backend_generation, outcome):
+        assert backend_generation == 7
+        attempted.append(outcome.native_turn_id)
+        if len(attempted) == 1:
+            raise RuntimeError("first route failed")
+
+    observer, context = relocation_watch(registry, source, sink)
+    iteration = _WatchIteration(
+        next_poll=0.0,
+        batch=Batch(terminal_evidence=(evidence[0],)),
+        inner=[Batch(terminal_evidence=(item,)) for item in evidence[1:]],
+        applied=True,
+    )
+    await observer._finish_iteration(context, iteration)
+
+    assert attempted == ["turn-0", "turn-1", "turn-2"]
+    assert len(observer._pending_evidence["p1"]) == 1
+    assert source.delivered == 0
+    assert registry.store.get_participant("p1").source_checkpoint is None
+
+    assert await observer._flush_pending_evidence("p1")
+    assert source.delivered == 1
+    assert source.acknowledged == 0
+    assert registry.store.get_participant("p1").source_checkpoint is None
+    assert observer._persist_pending_source_checkpoint("p1", source)
+    assert source.acknowledged == 1
+    assert registry.store.get_participant("p1").source_checkpoint == "cursor-1"
+
+
+async def test_rejected_attachment_routes_evidence_but_holds_its_checkpoint(registry):
+    evidence = outcome("turn-1", "session-1")
+    batch = Batch(
+        attached=Attachment(location="/tmp/untrusted", correlation="heuristic"),
+        terminal_evidence=(evidence,),
+    )
+    source = CheckpointEvidenceSource(batch)
+    source.pending = "cursor-1"
+    source.held = (evidence,)
+    routed = []
+
+    async def sink(_pid, *, backend_generation, outcome):
+        routed.append((backend_generation, outcome))
+
+    observer, context = relocation_watch(registry, source, sink)
+    assert await observer._handle_rejected_attachment(context, batch)
+
+    assert source.discarded == 1
+    assert routed == [(7, evidence)]
+    assert source.delivered == 1
+    assert source.acknowledged == 0
+    assert source.pending_source_checkpoint() == "cursor-1"
+    assert registry.store.get_participant("p1").source_checkpoint is None
+
+
+async def test_contract_failure_routes_evidence_but_holds_its_checkpoint(registry):
+    evidence = outcome("turn-1", "session-1")
+    source = CheckpointEvidenceSource(
+        Batch(
+            waiting=True,
+            attached=Attachment(location="/tmp/invalid", correlation="exact"),
+            terminal_evidence=(evidence,),
+        )
+    )
+    routed = []
+
+    async def sink(_pid, *, backend_generation, outcome):
+        routed.append((backend_generation, outcome))
+
+    observer, context = relocation_watch(registry, source, sink)
+    assert not await observer._watch_iteration(context)
+
+    assert source.discarded == 1
+    assert routed == [(7, evidence)]
+    assert source.delivered == 1
+    assert source.acknowledged == 0
+    assert source.pending_source_checkpoint() == "cursor-1"
+    assert registry.store.get_participant("p1").source_checkpoint is None
 
 
 async def test_terminal_evidence_finishes_exact_job_with_evidence_committed_first(rig: Rig):
