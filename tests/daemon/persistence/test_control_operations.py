@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from tests.support.builders import running_send_job
 from tests.support.runtime_storage import make_job, make_operation
+from theater import paths
 from theater.constants.daemon import CONTROL_OPERATION_PAYLOAD_MAX_BYTES, SEND_SEQ_META_KEY
 from theater.constants.harness import HARNESS_RUNTIME_ERROR_MAX_CHARS
 from theater.daemon.persistence.repositories.control_operations import (
@@ -438,6 +440,28 @@ def test_allocate_control_queue_sequence_rollback_is_not_persisted(store: Store)
         raise RuntimeError("queue reservation failed")
     # The rolled-back increment never became visible.
     assert store.get_control_queue_sequence() == 0
+
+
+def test_control_sequence_survives_highest_job_deletion_and_reopen(theater_home) -> None:
+    """Deleting the highest job cannot reissue its handle after a database restart."""
+    database_path = paths.db_path()
+    store = Store(database_path)
+    try:
+        first = store.allocate_control_queue_sequence()
+        second = store.allocate_control_queue_sequence()
+        store.create_job(running_send_job(f"p#{first}"))
+        store.create_job(running_send_job(f"p#{second}"))
+        store.conn.exec_driver_sql("DELETE FROM jobs WHERE handle = ?", (f"p#{second}",))
+    finally:
+        store.close()
+
+    reopened = Store(database_path)
+    try:
+        assert reopened.get_job(f"p#{first}") is not None
+        assert reopened.get_job(f"p#{second}") is None
+        assert reopened.allocate_control_queue_sequence() == second + 1
+    finally:
+        reopened.close()
 
 
 def test_control_operation_rejects_malformed_rows(store: Store) -> None:
