@@ -8,7 +8,7 @@ from dataclasses import replace
 
 from sqlalchemy import update
 
-from theater.daemon.events.publication import job_event, participant_event, workspace_usage_event
+from theater.daemon.events.publication import participant_event, workspace_usage_event
 from theater.daemon.schema import launch_reservations
 from theater.harness.contracts.runtime import ControlDeliveryPhase
 from theater.models import (
@@ -144,11 +144,7 @@ async def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> 
         )
         if finished_job is not None:
             unit.after_commit(
-                lambda handle=finished_job.handle: daemon.jobs.finish(
-                    handle,
-                    state=JobState.CRASHED,
-                    error_code="daemon_restarted",
-                )
+                lambda handle=finished_job.handle: daemon.jobs.wake_committed_direct_finish(handle)
             )
         if retired_participant is not None:
             unit.after_commit(
@@ -342,31 +338,19 @@ def _finish_reserved_job(
     job = daemon.store.get_job(handle, connection=unit.connection)
     if job is None or job.state != JobState.RUNNING:
         return None
-    finished = replace(
-        job,
-        state=JobState.CRASHED.value,
+    outcome = daemon.jobs.write_direct_terminal_in_unit(
+        daemon.store,
+        unit,
+        job=job,
+        state=JobState.CRASHED,
         result="the daemon restarted before launch dispatch",
         error_code="daemon_restarted",
         finished_at=timestamp,
     )
-    daemon.store.finish_job(
-        handle,
-        state=finished.state,
-        result=finished.result,
-        error_code=finished.error_code,
-        finished_at=timestamp,
-        response_format=finished.response_format,
-        structured_result=finished.structured_result,
-        structured_status=finished.structured_status,
-        connection=unit.connection,
-    )
-    events.append(
-        job_event(
-            finished,
-            revision=0,
-            recorded_at=timestamp,
-        )
-    )
+    if outcome is None:
+        return None
+    finished, event = outcome
+    events.append(event)
     return finished
 
 

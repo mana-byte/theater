@@ -7,7 +7,6 @@ from dataclasses import replace
 
 from theater.daemon.events.publication import (
     control_event,
-    job_event,
     next_revision,
     participant_event,
 )
@@ -71,7 +70,9 @@ def _commit_owner_change(
         for participant_id in ids
         for operation in store.queued_control_operations(participant_id, connection=unit.connection)
     ]
-    cancelled = controls.cancel_queued_for_control_transfer(ids, unit=unit, timestamp=timestamp)
+    cancelled_with_events = controls.cancel_queued_for_control_transfer(
+        ids, unit=unit, timestamp=timestamp
+    )
     first = next_revision(store, unit.connection)
     events = [
         participant_event(
@@ -93,11 +94,11 @@ def _commit_owner_change(
             events.append(event)
     first_job_revision = first + len(events)
     events.extend(
-        job_event(job, revision=first_job_revision + index, recorded_at=timestamp)
-        for index, job in enumerate(cancelled)
+        replace(event, entity_revision=first_job_revision + index)
+        for index, (_job, event) in enumerate(cancelled_with_events)
     )
     store.journal.append_group(unit, events)
-    return cancelled
+    return tuple(job for job, _event in cancelled_with_events)
 
 
 class ControlTransferService:
