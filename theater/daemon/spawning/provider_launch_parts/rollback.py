@@ -7,14 +7,13 @@ from dataclasses import replace
 from sqlalchemy import select, update
 
 from theater.daemon.operations.projection import operation_event_payload
-from theater.daemon.schema import jobs as jobs_table
+from theater.daemon.persistence.transactions import WriteUnit
 from theater.daemon.schema import launch_reservations
 from theater.daemon.spawning.provider_launch_parts._host import ParticipantLaunchHost
 from theater.daemon.worktrees.service import (
     WorkspaceReservation,
 )
 from theater.models import (
-    Job,
     JobState,
     JournalEventRecord,
     ParticipantOrigin,
@@ -75,31 +74,9 @@ class SpawnRollback(ParticipantLaunchHost):
                         connection=unit.connection,
                     )
                 )
-            job_row = unit.connection.execute(
-                select(jobs_table).where(jobs_table.c.handle == participant_id)
-            ).first()
-            if job_row is not None:
-                job = Job.from_row(job_row._mapping)
-                if job.state == JobState.RUNNING.value:
-                    job = replace(
-                        job,
-                        state=JobState.CRASHED.value,
-                        error_code=error_code,
-                        finished_at=timestamp,
-                    )
-                    unit.connection.execute(
-                        update(jobs_table)
-                        .where(
-                            jobs_table.c.handle == participant_id,
-                            jobs_table.c.state == JobState.RUNNING.value,
-                        )
-                        .values(
-                            state=JobState.CRASHED.value,
-                            error_code=error_code,
-                            finished_at=timestamp,
-                        )
-                    )
-                    events.append(self._job_event(job, timestamp, revision=0))
+            job_exists = self._write_rollback_job(
+                participant_id, error_code, timestamp, unit, events
+            )
             usage_id = launch._mapping["workspace_usage_id"]
             if usage_id is None and isinstance(workspace_value, WorkspaceReservation):
                 usage_id = workspace_value.usage.usage_id
@@ -151,20 +128,41 @@ class SpawnRollback(ParticipantLaunchHost):
             if events:
                 self.store.journal.append_group(unit, events)
 
-            def finish_job() -> None:
-                self.daemon.jobs.finish(
-                    participant_id,
-                    state=JobState.CRASHED,
-                    error_code=error_code,
+            if job_exists:
+                unit.after_commit(
+                    lambda: self.daemon.jobs.wake_committed_direct_finish(participant_id)
                 )
-
-            unit.after_commit(finish_job)
             unit.after_commit(lambda: self.registry.mark_dead(participant_id))
         if created_workspace_id is not None:
             await self.workspaces.rollback_created_reservation(
                 workspace_id=created_workspace_id,
                 reservation_id=operation_id,
             )
+
+    def _write_rollback_job(
+        self,
+        participant_id: str,
+        error_code: str,
+        timestamp: float,
+        unit: WriteUnit,
+        events: list[JournalEventRecord],
+    ) -> bool:
+        job = self.store.get_job(participant_id, connection=unit.connection)
+        if job is None:
+            return False
+        if job.state == JobState.RUNNING.value:
+            outcome = self.daemon.jobs.write_direct_terminal_in_unit(
+                self.store,
+                unit,
+                job=job,
+                state=JobState.CRASHED,
+                result=job.result,
+                error_code=error_code,
+                finished_at=timestamp,
+            )
+            if outcome is not None:
+                events.append(outcome[1])
+        return True
 
     def _rollback_adoption_reservation(self, participant_id: str) -> None:
         timestamp = now()

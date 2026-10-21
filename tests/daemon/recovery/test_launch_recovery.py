@@ -296,6 +296,7 @@ async def test_restart_atomically_fails_never_dispatched_launch_and_releases_res
                 error_code=None,
                 created_at=timestamp,
                 finished_at=None,
+                response_format="json",
                 actor_client_id="operator-a",
             ),
             connection=unit.connection,
@@ -365,11 +366,17 @@ async def test_restart_atomically_fails_never_dispatched_launch_and_releases_res
 
     reopened = Store(path)
     operation_service = OperationService(reopened)
+    jobs = JobManager(reopened)
+    jobs.track("participant-a")
+    wake = jobs._events["participant-a"]
+    listeners: list[str] = []
+    jobs.add_terminal_listener(listeners.append)
+    finished_bus_before = [row for row in reopened.bus_tail() if row["kind"] == "job.finished"]
     daemon = SimpleNamespace(
         store=reopened,
         operation_service=operation_service,
         registry=Registry(reopened),
-        jobs=JobManager(reopened),
+        jobs=jobs,
     )
     await reconcile_public_control_operations(daemon)
 
@@ -379,7 +386,17 @@ async def test_restart_atomically_fails_never_dispatched_launch_and_releases_res
     assert undispatched.dispatch_provider_generation is None
     assert reopened.operations.get_launch("operation-create").phase == "rolled_back"
     assert reopened.get_participant("participant-a").status is Status.DEAD
-    assert reopened.get_job("participant-a").state == JobState.CRASHED
+    recovered_job = reopened.get_job("participant-a")
+    assert recovered_job.state == JobState.CRASHED
+    assert (
+        recovered_job.response_format == "json"
+        and recovered_job.structured_status is None
+        and recovered_job.actor_client_id == "operator-a"
+    )
+    assert wake.is_set() and listeners == []
+    assert [row for row in reopened.bus_tail() if row["kind"] == "job.finished"] == (
+        finished_bus_before
+    )
     assert reopened.workspaces.get_usage("usage-a").released_at is not None
     idempotency = reopened.operations.get_idempotency("operator-a", "accepted-spawn")
     assert idempotency is not None and idempotency.retain_until is not None
