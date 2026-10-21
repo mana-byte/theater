@@ -146,6 +146,18 @@ class OperationService:
         self._reconciler = reconciler
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
+    def write_replacement_in_unit(
+        self,
+        unit: WriteUnit,
+        *,
+        expected_state: str,
+        expected_updated_at: float,
+        replacement: PublicOperationRecord,
+        idempotency_settled_at: float | None,
+    ) -> JournalEventRecord | None:
+        """Return an ungrouped event, or None on CAS miss; caller chooses settlement."""
+        raise NotImplementedError
+
     def configure_reconciler(self, reconciler: EvidenceReconciler) -> None:
         """Install the daemon evidence reader after dependent services exist."""
         self._reconciler = reconciler

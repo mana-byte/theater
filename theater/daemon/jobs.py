@@ -24,7 +24,7 @@ from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
 from theater.daemon.events.publication import job_event, next_revision
 from theater.daemon.handoff.evidence import EvidencePinner
 from theater.daemon.handoff.models import GitFacts, JobEvidence
-from theater.daemon.persistence.transactions import active_write_unit, after_commit
+from theater.daemon.persistence.transactions import WriteUnit, active_write_unit, after_commit
 from theater.daemon.response_contracts import audit, parse_stored
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
@@ -32,7 +32,7 @@ from theater.daemon.store import Store
 from theater.daemon.touch_paths import normalize_touch_path
 from theater.harness.base import EventPath
 from theater.json_values import decode_finite_json
-from theater.models import Job, JobKind, JobState, now
+from theater.models import Job, JobKind, JobState, JournalEventRecord, now
 
 logger = logging.getLogger("theater.jobs")
 
@@ -499,6 +499,24 @@ class JobManager:
     def active_count(self) -> int:
         """Count of jobs whose persisted state is ``running``."""
         return self.store.active_job_count()
+
+    @staticmethod
+    def write_direct_terminal_in_unit(
+        store: Store,
+        unit: WriteUnit,
+        *,
+        job: Job,
+        state: JobState,
+        result: str | None,
+        error_code: str | None,
+        finished_at: float,
+    ) -> tuple[Job, JournalEventRecord] | None:
+        """Write direct terminal fields; caller owns the journal group and wakeup."""
+        raise NotImplementedError
+
+    def wake_committed_direct_finish(self, handle: str) -> None:
+        """Wake a committed direct finish without terminal listeners or bus writes."""
+        raise NotImplementedError
 
     def finish(
         self,
