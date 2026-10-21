@@ -48,6 +48,14 @@ DecorateParsed = Callable[[ParsedRecord, int], ParsedRecord]
 PrepareHistoryParse = Callable[[BinaryIO, int], None]
 
 
+@dataclass(frozen=True, slots=True)
+class HistoryParseContext:
+    """Keep one history parser paired with its bounded-context seed hook."""
+
+    parse_record: ParseRecord
+    prepare_history_parse: PrepareHistoryParse
+
+
 class HistoryReader:
     """Read bounded pages while adapters supply their parsing hooks."""
 
