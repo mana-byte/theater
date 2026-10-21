@@ -17,8 +17,6 @@ from theater.daemon.events.publication import (
     terminal_binding_event,
     workspace_usage_event,
 )
-from theater.daemon.operations.projection import operation_event_payload
-from theater.daemon.operations.service import IDEMPOTENCY_RETENTION_SECONDS
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.schema import launch_reservations
 from theater.daemon.terminals.bindings import TerminalIdentityMismatch, ensure_terminal_unbound
@@ -244,28 +242,16 @@ class ProviderReceiptReconciler:
                 updated_at=updated_at,
                 settled_at=updated_at,
             )
-            if not self._store.operations.replace(
-                updated,
+            operation_event = self._operations.write_replacement_in_unit(
+                unit,
                 expected_state=operation.state,
                 expected_updated_at=operation.updated_at,
-                connection=unit.connection,
-            ):
+                replacement=updated,
+                idempotency_settled_at=updated_at,
+            )
+            if operation_event is None:
                 continue
-            self._store.operations.settle_idempotency_for_operation(
-                operation_id,
-                settled_at=updated_at,
-                retain_until=updated_at + IDEMPOTENCY_RETENTION_SECONDS,
-                connection=unit.connection,
-            )
-            changed.append(
-                JournalEventRecord(
-                    kind="operation.updated",
-                    entity_id=operation_id,
-                    entity_revision=0,
-                    payload=operation_event_payload(updated),
-                    recorded_at=updated_at,
-                )
-            )
+            changed.append(operation_event)
             for event in changed:
                 events.append(replace(event, entity_revision=first_revision + len(events)))
             unit.after_commit(

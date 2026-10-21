@@ -9,8 +9,6 @@ from dataclasses import replace
 from sqlalchemy import update
 
 from theater.daemon.events.publication import job_event, participant_event, workspace_usage_event
-from theater.daemon.operations.projection import operation_event_payload
-from theater.daemon.operations.service import IDEMPOTENCY_RETENTION_SECONDS
 from theater.daemon.schema import launch_reservations
 from theater.harness.contracts.runtime import ControlDeliveryPhase
 from theater.models import (
@@ -124,28 +122,16 @@ async def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> 
             updated_at=timestamp,
             settled_at=timestamp,
         )
-        if not daemon.store.operations.replace(
-            updated,
+        operation_event = daemon.operation_service.write_replacement_in_unit(
+            unit,
             expected_state=current.state,
             expected_updated_at=current.updated_at,
-            connection=unit.connection,
-        ):
+            replacement=updated,
+            idempotency_settled_at=timestamp,
+        )
+        if operation_event is None:
             raise RuntimeError("accepted operation changed during restart recovery")
-        daemon.store.operations.settle_idempotency_for_operation(
-            current.operation_id,
-            settled_at=timestamp,
-            retain_until=timestamp + IDEMPOTENCY_RETENTION_SECONDS,
-            connection=unit.connection,
-        )
-        events.append(
-            JournalEventRecord(
-                kind="operation.updated",
-                entity_id=updated.operation_id,
-                entity_revision=0,
-                payload=operation_event_payload(updated),
-                recorded_at=timestamp,
-            )
-        )
+        events.append(operation_event)
         first = daemon.store.journal.current_sequence(connection=unit.connection) + 1
         daemon.store.journal.append_group(
             unit,

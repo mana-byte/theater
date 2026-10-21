@@ -241,12 +241,14 @@ class ParticipantAdoption(ParticipantLaunchHost):
             dispatch_terminal_process_facts=None if process is None else dict(process),
             updated_at=now(),
         )
-        if not self.store.operations.replace(
-            updated,
+        event = self.operations.write_replacement_in_unit(
+            unit,
             expected_state=operation.state,
             expected_updated_at=operation.updated_at,
-            connection=unit.connection,
-        ):
+            replacement=updated,
+            idempotency_settled_at=None,
+        )
+        if event is None:
             raise RuntimeError("public operation changed during terminal binding")
         return updated
 

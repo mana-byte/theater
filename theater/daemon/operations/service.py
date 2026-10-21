@@ -155,8 +155,28 @@ class OperationService:
         replacement: PublicOperationRecord,
         idempotency_settled_at: float | None,
     ) -> JournalEventRecord | None:
-        """Return an ungrouped event, or None on CAS miss; caller chooses settlement."""
-        raise NotImplementedError
+        """Write one replacement and return its ungrouped event on CAS success."""
+        if not self._store.operations.replace(
+            replacement,
+            expected_state=expected_state,
+            expected_updated_at=expected_updated_at,
+            connection=unit.connection,
+        ):
+            return None
+        if idempotency_settled_at is not None:
+            self._store.operations.settle_idempotency_for_operation(
+                replacement.operation_id,
+                settled_at=idempotency_settled_at,
+                retain_until=idempotency_settled_at + IDEMPOTENCY_RETENTION_SECONDS,
+                connection=unit.connection,
+            )
+        return JournalEventRecord(
+            kind="operation.updated",
+            entity_id=replacement.operation_id,
+            entity_revision=0,
+            payload=operation_event_payload(replacement),
+            recorded_at=replacement.updated_at,
+        )
 
     def configure_reconciler(self, reconciler: EvidenceReconciler) -> None:
         """Install the daemon evidence reader after dependent services exist."""
@@ -765,21 +785,27 @@ class OperationService:
                 job_handle=job_handle if job_handle is not None else current.job_handle,
             )
             _validate_operation(updated)
-            if not self._store.operations.replace(
-                updated,
+            event = self.write_replacement_in_unit(
+                unit,
                 expected_state=current.state,
                 expected_updated_at=current.updated_at,
-                connection=unit.connection,
-            ):
+                replacement=updated,
+                idempotency_settled_at=timestamp if terminal else None,
+            )
+            if event is None:
                 raise RuntimeError("operation changed during its synchronous write unit")
-            if terminal:
-                self._store.operations.settle_idempotency_for_operation(
-                    operation_id,
-                    settled_at=timestamp,
-                    retain_until=timestamp + IDEMPOTENCY_RETENTION_SECONDS,
-                    connection=unit.connection,
-                )
-            self._append_event(unit, updated)
+            self._store.journal.append_group(
+                unit,
+                [
+                    replace(
+                        event,
+                        entity_revision=self._store.journal.current_sequence(
+                            connection=unit.connection
+                        )
+                        + 1,
+                    )
+                ],
+            )
             unit.after_commit(lambda: self._notifier.notify(operation_id))
         return updated
 

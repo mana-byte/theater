@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -660,5 +661,109 @@ def test_failed_admission_claim_rolls_back_and_completed_results_retain(tmp_path
             store.db.conn.execute(select(func.count()).select_from(idempotency_records)).scalar()
             == 1
         )
+    finally:
+        store.close()
+
+
+def test_replacement_in_outer_unit_rolls_back_and_keeps_cas_and_event_order(
+    tmp_path: Path,
+) -> None:
+    store = OperationStore(tmp_path / "replacement-unit.db")
+    clock = Clock()
+    ids = iter(("operation-a", "operation-b"))
+    service = OperationService(store, clock=clock, id_factory=lambda: next(ids))
+    try:
+        first = _accept(service, clock, key="send-a", participant_id="participant-a").record
+        second = _accept(service, clock, key="send-b", participant_id="participant-b").record
+        first = service.fail(
+            first.operation_id,
+            phase="preexisting_failure",
+            error={"code": "internal", "message": "already settled"},
+        )
+        first_claim = store.operations.get_idempotency("client-a", "send-a")
+        assert first_claim is not None
+        dispatch = replace(
+            first,
+            phase="dispatch_target",
+            updated_at=first.updated_at + 1,
+        )
+        settled_at = second.updated_at + 2
+        failed = replace(
+            second,
+            state="failed",
+            phase="recovery_failed",
+            updated_at=settled_at,
+            settled_at=settled_at,
+            error_code="daemon_restarted",
+            error={"code": "daemon_restarted", "message": "not dispatched"},
+        )
+        cursor = store.journal.current_sequence()
+        notifications: list[int] = []
+        wakes: list[str] = []
+        store.journal.register_listener(notifications.append)
+
+        def write_group(unit) -> None:
+            first_event = service.write_replacement_in_unit(
+                unit,
+                expected_state=first.state,
+                expected_updated_at=first.updated_at,
+                replacement=dispatch,
+                idempotency_settled_at=None,
+            )
+            second_event = service.write_replacement_in_unit(
+                unit,
+                expected_state=second.state,
+                expected_updated_at=second.updated_at,
+                replacement=failed,
+                idempotency_settled_at=settled_at,
+            )
+            assert first_event is not None and second_event is not None
+            revision = store.journal.current_sequence(connection=unit.connection) + 1
+            store.journal.append_group(
+                unit,
+                [
+                    replace(first_event, entity_revision=revision),
+                    replace(second_event, entity_revision=revision + 1),
+                ],
+            )
+            unit.after_commit(lambda: wakes.append("committed"))
+
+        with pytest.raises(RuntimeError, match="abort"), store.write_unit() as unit:
+            write_group(unit)
+            raise RuntimeError("abort")
+        assert store.operations.get(first.operation_id) == first
+        assert store.operations.get(second.operation_id) == second
+        assert store.operations.get_idempotency("client-a", "send-b").settled_at is None
+        assert store.journal.current_sequence() == cursor
+        assert notifications == wakes == []
+
+        with store.write_unit() as unit:
+            assert (
+                service.write_replacement_in_unit(
+                    unit,
+                    expected_state="running",
+                    expected_updated_at=first.updated_at,
+                    replacement=dispatch,
+                    idempotency_settled_at=None,
+                )
+                is None
+            )
+        assert store.journal.current_sequence() == cursor
+
+        with store.write_unit() as unit:
+            write_group(unit)
+        groups = store.journal.groups_after(cursor, limit=10)
+        assert len(groups) == 1
+        assert [(event.entity_id, event.entity_revision) for event in groups[0].events] == [
+            (first.operation_id, cursor + 1),
+            (second.operation_id, cursor + 2),
+        ]
+        assert notifications == [cursor + 2] and wakes == ["committed"]
+        assert store.operations.get(first.operation_id) == dispatch
+        assert store.operations.get(second.operation_id) == failed
+        assert store.operations.get_idempotency("client-a", "send-a") == first_claim
+        claim = store.operations.get_idempotency("client-a", "send-b")
+        assert claim.settled_at == settled_at
+        assert claim.retain_until == settled_at + IDEMPOTENCY_RETENTION_SECONDS
     finally:
         store.close()
