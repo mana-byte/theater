@@ -59,15 +59,12 @@ class HandshakeResult:
             api=ApiVersion.from_wire(data.get("api")),
             daemon_instance_id=string_value(
                 data.get("daemon_instance_id"), "handshake result.daemon_instance_id"
-            )
-            or "",
+            ),
             package_version=string_value(
                 data.get("package_version"), "handshake result.package_version"
-            )
-            or "",
+            ),
             capabilities=tuple(
-                string_value(item, "handshake result.capabilities[]") or ""
-                for item in raw_capabilities
+                string_value(item, "handshake result.capabilities[]") for item in raw_capabilities
             ),
             limits=limits,
             provider_generation=generation,

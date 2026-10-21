@@ -13,6 +13,7 @@ from theater.frontend.dto._wire import (
     extras,
     freeze_json,
     object_value,
+    optional_number,
     string_value,
     thaw_json,
 )
@@ -74,9 +75,9 @@ class Job:
         if target is not None and not isinstance(target, str):
             raise TypeError("job.target_id must be a string or null")
         return cls(
-            handle=string_value(data.get("handle"), "job.handle") or "",
-            state=string_value(data.get("state"), "job.state") or "",
-            kind=string_value(data.get("kind"), "job.kind") or "",
+            handle=string_value(data.get("handle"), "job.handle"),
+            state=string_value(data.get("state"), "job.state"),
+            kind=string_value(data.get("kind"), "job.kind"),
             actor=Actor.from_wire(actor) if actor is not None else None,
             legacy_caller_id=string_value(
                 data.get("legacy_caller_id"), "job.legacy_caller_id", optional=True
@@ -84,8 +85,8 @@ class Job:
             target_id=target,
             result=freeze_json(data.get("result"), "job.result"),
             error=ErrorValue.from_wire(error) if error is not None else None,
-            created_at=_optional_number(data.get("created_at"), "job.created_at"),
-            finished_at=_optional_number(data.get("finished_at"), "job.finished_at"),
+            created_at=optional_number(data.get("created_at"), "job.created_at"),
+            finished_at=optional_number(data.get("finished_at"), "job.finished_at"),
             extra=extras(
                 data,
                 {
@@ -102,14 +103,6 @@ class Job:
                 },
             ),
         )
-
-
-def _optional_number(value: object, label: str) -> float | None:
-    if value is None:
-        return None
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise TypeError(f"{label} must be a number or null")
-    return float(value)
 
 
 __all__ = ["Job", "JobState"]

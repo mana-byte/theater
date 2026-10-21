@@ -45,7 +45,7 @@ class EventCursor:
     def from_wire(cls, value: object) -> EventCursor:
         data = object_value(value, "event cursor")
         return cls(
-            stream_id=string_value(data.get("stream_id"), "event cursor.stream_id") or "",
+            stream_id=string_value(data.get("stream_id"), "event cursor.stream_id"),
             sequence=integer_value(data.get("sequence"), "event cursor.sequence"),
         )
 
@@ -79,8 +79,8 @@ class Event:
         payload = freeze_json(object_value(data.get("payload"), "event.payload"))
         assert isinstance(payload, Mapping)
         return cls(
-            kind=string_value(data.get("kind"), "event.kind") or "",
-            entity_id=string_value(data.get("entity_id"), "event.entity_id") or "",
+            kind=string_value(data.get("kind"), "event.kind"),
+            entity_id=string_value(data.get("entity_id"), "event.entity_id"),
             entity_revision=integer_value(data.get("entity_revision"), "event.entity_revision"),
             payload=payload,
             extra=extras(data, {"kind", "entity_id", "entity_revision", "payload"}),
@@ -113,8 +113,7 @@ class EventTransaction:
         return cls(
             transaction_id=string_value(
                 data.get("transaction_id"), "event transaction.transaction_id"
-            )
-            or "",
+            ),
             events=tuple(Event.from_wire(item) for item in raw_events),
             ending_cursor=EventCursor.from_wire(data.get("ending_cursor")),
             extra=extras(data, {"transaction_id", "events", "ending_cursor"}),
