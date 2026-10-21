@@ -18,7 +18,7 @@ from theater.harness.contracts.events import Event, EventKind, EventPath
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
 )
-from theater.harness.source import Batch
+from theater.harness.source import Batch, Source
 from theater.models import JobState, Status
 
 
@@ -407,3 +407,24 @@ async def test_retired_watch_retries_evidence_without_reopening_a_source(registr
         assert "p1" not in observer._tasks
     finally:
         await observer.aclose()
+
+
+def test_ack_terminal_evidence_tolerates_default_and_raising_sources(caplog):
+    """Evidence release is typed: default no-op, and a raising release is logged, not fatal."""
+    from theater.daemon.observer import Observer
+
+    observer = object.__new__(Observer)
+
+    class _DefaultSource(Source):
+        async def read(self) -> Batch:
+            return Batch()
+
+    class _RaisingDelivered(_DefaultSource):
+        def terminal_evidence_delivered(self) -> None:
+            raise RuntimeError("release failed")
+
+    with caplog.at_level(logging.DEBUG, logger="theater.observer"):
+        observer._ack_terminal_evidence(_DefaultSource())
+        observer._ack_terminal_evidence(_RaisingDelivered())
+
+    assert "releasing terminal evidence failed" in caplog.text
