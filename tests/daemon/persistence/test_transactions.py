@@ -125,11 +125,14 @@ def test_commit_failure_rolls_back_a_supplied_connection(tmp_path, monkeypatch) 
         store.close()
 
 
-class _CheckpointSource:
+class _CheckpointSource(Source):
     def __init__(self, checkpoint: str) -> None:
         self.checkpoint = checkpoint
         self.acknowledged = False
         self.rolled_back = False
+
+    async def read(self) -> Batch:
+        return Batch()
 
     def pending_source_checkpoint(self) -> str:
         return self.checkpoint
