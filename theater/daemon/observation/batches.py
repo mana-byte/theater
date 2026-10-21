@@ -165,8 +165,7 @@ class BatchApplication:
     def _persist_pending_source_checkpoint(
         self, pid: str, source: Source, *, connection=None
     ) -> bool:
-        pending_evidence = getattr(source, "pending_terminal_evidence", None)
-        if callable(pending_evidence) and pending_evidence():
+        if source.pending_terminal_evidence():
             # Exact terminal evidence owns this checkpoint's acknowledgement:
             # until the evidence sink has durably routed every held outcome,
             # the cursor stays unacknowledged and the evidence stays retained,
