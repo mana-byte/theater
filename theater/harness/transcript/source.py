@@ -574,10 +574,11 @@ class TranscriptSource(Source):
         )
 
     def _history_reader(self) -> HistoryReader:
+        context = self._history_parse_context()
         return HistoryReader(
-            parse_record=lambda line, index: self._parse_record(line, index, clip_text=False),
+            parse_record=context.parse_record,
             decorate_parsed=self._decorate_parsed,
-            prepare_history_parse=self._prepare_history_parse,
+            prepare_history_parse=context.prepare_history_parse,
         )
 
     def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:
