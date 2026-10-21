@@ -118,10 +118,10 @@ class ParticipantsClient(_Facade):
     async def list(
         self,
         *,
-        cursor: object = _UNSET,
-        limit: object = _UNSET,
-        status: object = _UNSET,
-        owner_id: object = _UNSET,
+        cursor: str | _Unset | None = _UNSET,
+        limit: int | _Unset = _UNSET,
+        status: str | _Unset | None = _UNSET,
+        owner_id: str | _Unset | None = _UNSET,
     ) -> FrontendResult[Page[Participant]]:
         return result_of(
             await self._call(
@@ -138,7 +138,7 @@ class ParticipantsClient(_Facade):
         )
 
     async def resume_candidates(
-        self, *, limit: object = _UNSET
+        self, *, limit: int | _Unset = _UNSET
     ) -> FrontendResult[Page[ResumeCandidate]]:
         """Return the bounded, most-recent dead sessions and daemon resume verdicts."""
         return result_of(
@@ -162,15 +162,15 @@ class ParticipantsClient(_Facade):
         approval: str,
         *,
         idempotency_key: str,
-        cwd: object = _UNSET,
-        provider: object = _UNSET,
-        workspace: object = _UNSET,
-        model: object = _UNSET,
-        reasoning_effort: object = _UNSET,
-        resume: object = _UNSET,
-        name: object = _UNSET,
-        description: object = _UNSET,
-        initiating_participant_id: object = _UNSET,
+        cwd: str | _Unset | None = _UNSET,
+        provider: str | _Unset | None = _UNSET,
+        workspace: Mapping[str, object] | _Unset = _UNSET,
+        model: str | _Unset | None = _UNSET,
+        reasoning_effort: str | _Unset | None = _UNSET,
+        resume: str | _Unset | None = _UNSET,
+        name: str | _Unset | None = _UNSET,
+        description: str | _Unset | None = _UNSET,
+        initiating_participant_id: str | _Unset | None = _UNSET,
     ) -> FrontendResult[AcceptedOperation]:
         return result_of(
             await self._call(
@@ -201,8 +201,8 @@ class ParticipantsClient(_Facade):
         terminal_incarnation: str,
         *,
         idempotency_key: str,
-        participant_id: object = _UNSET,
-        initiating_participant_id: object = _UNSET,
+        participant_id: str | _Unset | None = _UNSET,
+        initiating_participant_id: str | _Unset | None = _UNSET,
     ) -> FrontendResult[AcceptedOperation]:
         return result_of(
             await self._call(
@@ -224,8 +224,8 @@ class ParticipantsClient(_Facade):
         participant_id: str,
         *,
         idempotency_key: str,
-        name: object = _UNSET,
-        description: object = _UNSET,
+        name: str | _Unset | None = _UNSET,
+        description: str | _Unset | None = _UNSET,
     ) -> FrontendResult[Participant]:
         return result_of(
             await self._call(
@@ -290,7 +290,7 @@ class ControlsClient(_Facade):
         prompt: str,
         *,
         idempotency_key: str,
-        response_format: object = _UNSET,
+        response_format: Mapping[str, object] | _Unset = _UNSET,
     ) -> FrontendResult[AcceptedOperation]:
         return await self._prompt_operation(
             "frontend.controls.send",
@@ -306,7 +306,7 @@ class ControlsClient(_Facade):
         prompt: str,
         *,
         idempotency_key: str,
-        expected_turn_id: object = _UNSET,
+        expected_turn_id: str | _Unset | None = _UNSET,
     ) -> FrontendResult[AcceptedOperation]:
         return result_of(
             await self._call(
@@ -327,7 +327,7 @@ class ControlsClient(_Facade):
         prompt: str,
         *,
         idempotency_key: str,
-        response_format: object = _UNSET,
+        response_format: Mapping[str, object] | _Unset = _UNSET,
     ) -> FrontendResult[AcceptedOperation]:
         return await self._prompt_operation(
             "frontend.controls.queue_followup",
@@ -354,8 +354,8 @@ class ControlsClient(_Facade):
         participant_id: str,
         *,
         idempotency_key: str,
-        model: object = _UNSET,
-        reasoning_effort: object = _UNSET,
+        model: str | _Unset | None = _UNSET,
+        reasoning_effort: str | _Unset | None = _UNSET,
     ) -> FrontendResult[AcceptedOperation]:
         return result_of(
             await self._call(
@@ -377,7 +377,7 @@ class ControlsClient(_Facade):
         prompt: str,
         *,
         idempotency_key: str,
-        response_format: object,
+        response_format: Mapping[str, object] | _Unset,
     ) -> FrontendResult[AcceptedOperation]:
         return result_of(
             await self._call(
@@ -397,10 +397,10 @@ class OperationsClient(_Facade):
     async def list(
         self,
         *,
-        cursor: object = _UNSET,
-        limit: object = _UNSET,
-        unsettled_only: object = _UNSET,
-        target_id: object = _UNSET,
+        cursor: str | _Unset | None = _UNSET,
+        limit: int | _Unset = _UNSET,
+        unsettled_only: bool | _Unset = _UNSET,
+        target_id: str | _Unset | None = _UNSET,
     ) -> FrontendResult[Page[Operation]]:
         return result_of(
             await self._call(
@@ -422,7 +422,7 @@ class OperationsClient(_Facade):
         )
 
     async def wait(
-        self, operation_id: str, *, wait_seconds: object = _UNSET
+        self, operation_id: str, *, wait_seconds: float | _Unset = _UNSET
     ) -> FrontendResult[OperationAwaitResult]:
         """Observe one durable operation without retrying or changing its work."""
         return result_of(
@@ -434,7 +434,7 @@ class OperationsClient(_Facade):
         )
 
     async def await_(
-        self, operation_id: str, *, wait_seconds: object = _UNSET
+        self, operation_id: str, *, wait_seconds: float | _Unset = _UNSET
     ) -> FrontendResult[OperationAwaitResult]:
         """Compatibility spelling for :meth:`wait`."""
         return await self.wait(operation_id, wait_seconds=wait_seconds)
@@ -450,10 +450,10 @@ class JobsClient(_Facade):
     async def list(
         self,
         *,
-        cursor: object = _UNSET,
-        limit: object = _UNSET,
-        state: object = _UNSET,
-        participant_id: object = _UNSET,
+        cursor: str | _Unset | None = _UNSET,
+        limit: int | _Unset = _UNSET,
+        state: str | _Unset | None = _UNSET,
+        participant_id: str | _Unset | None = _UNSET,
     ) -> FrontendResult[Page[Job]]:
         return result_of(
             await self._call(
@@ -469,7 +469,7 @@ class JobsClient(_Facade):
         )
 
     async def await_(
-        self, job_handles: Sequence[str], *, wait_seconds: object = _UNSET
+        self, job_handles: Sequence[str], *, wait_seconds: float | _Unset = _UNSET
     ) -> FrontendResult[JobsAwaitResult]:
         return result_of(
             await self._call(
@@ -485,9 +485,9 @@ class ProviderTerminalsClient(_Facade):
         self,
         provider_id: str,
         *,
-        cursor: object = _UNSET,
-        limit: object = _UNSET,
-        refresh: object = _UNSET,
+        cursor: str | _Unset | None = _UNSET,
+        limit: int | _Unset = _UNSET,
+        refresh: bool | _Unset = _UNSET,
     ) -> FrontendResult[Page[TerminalIdentity]]:
         return result_of(
             await self._call(
@@ -548,24 +548,28 @@ class ProvidersClient(_Facade):
         provider_id: str,
         *,
         idempotency_key: str,
-        capabilities: object = _UNSET,
-        limits: object = _UNSET,
+        capabilities: Sequence[str] | _Unset = _UNSET,
+        limits: Mapping[str, object] | _Unset = _UNSET,
     ) -> FrontendResult[Provider]:
-        if capabilities is not _UNSET:
-            capabilities = _array_value(capabilities, "capabilities")
-        if limits is not _UNSET:
-            limits = _mapping_value(limits, "limits")
+        capabilities_value = (
+            _array_value(capabilities, "capabilities") if capabilities is not _UNSET else _UNSET
+        )
+        limits_value = _mapping_value(limits, "limits") if limits is not _UNSET else _UNSET
         return result_of(
             await self._call(
                 "frontend.providers.update",
-                _params(provider_id=provider_id, capabilities=capabilities, limits=limits),
+                _params(
+                    provider_id=provider_id,
+                    capabilities=capabilities_value,
+                    limits=limits_value,
+                ),
                 idempotency_key=idempotency_key,
             ),
             Provider.from_wire,
         )
 
     async def list(
-        self, *, cursor: object = _UNSET, limit: object = _UNSET
+        self, *, cursor: str | _Unset | None = _UNSET, limit: int | _Unset = _UNSET
     ) -> FrontendResult[Page[Provider]]:
         return result_of(
             await self._call("frontend.providers.list", _params(cursor=cursor, limit=limit)),
@@ -583,7 +587,7 @@ class ProvidersClient(_Facade):
         provider_generation: int,
         report_revision: int,
         *,
-        facts: object = _UNSET,
+        facts: Mapping[str, object] | _Unset = _UNSET,
     ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call(
@@ -602,7 +606,7 @@ class ProvidersClient(_Facade):
         provider_generation: int,
         report_revision: int,
         *,
-        facts: object = _UNSET,
+        facts: Mapping[str, object] | _Unset = _UNSET,
     ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call(
@@ -625,9 +629,9 @@ class WorkspacesClient(_Facade):
         path: str,
         *,
         idempotency_key: str,
-        canonical_repository_root: object = _UNSET,
-        branch: object = _UNSET,
-        resolved_base_commit: object = _UNSET,
+        canonical_repository_root: str | _Unset | None = _UNSET,
+        branch: str | _Unset | None = _UNSET,
+        resolved_base_commit: str | _Unset | None = _UNSET,
     ) -> FrontendResult[Workspace]:
         return result_of(
             await self._call(
@@ -648,9 +652,9 @@ class WorkspacesClient(_Facade):
     async def list(
         self,
         *,
-        cursor: object = _UNSET,
-        limit: object = _UNSET,
-        state: object = _UNSET,
+        cursor: str | _Unset | None = _UNSET,
+        limit: int | _Unset = _UNSET,
+        state: str | _Unset | None = _UNSET,
     ) -> FrontendResult[Page[Workspace]]:
         return result_of(
             await self._call(
@@ -670,9 +674,9 @@ class WorkspacesClient(_Facade):
         workspace_id: str,
         *,
         idempotency_key: str,
-        force: object = _UNSET,
-        delete_branch: object = _UNSET,
-        force_branch: object = _UNSET,
+        force: bool | _Unset = _UNSET,
+        delete_branch: bool | _Unset = _UNSET,
+        force_branch: bool | _Unset = _UNSET,
     ) -> FrontendResult[AcceptedOperation]:
         return result_of(
             await self._call(
@@ -729,7 +733,7 @@ class WorkspacesClient(_Facade):
 
 class ScratchpadClient(_Facade):
     async def namespaces(
-        self, *, cursor: object = _UNSET, limit: object = _UNSET
+        self, *, cursor: str | _Unset | None = _UNSET, limit: int | _Unset = _UNSET
     ) -> FrontendResult[Page[JSONValue]]:
         return result_of(
             await self._call("frontend.scratchpad.namespaces", _params(cursor=cursor, limit=limit)),
@@ -740,16 +744,15 @@ class ScratchpadClient(_Facade):
         self,
         namespace: str,
         *,
-        keys: object = _UNSET,
-        cursor: object = _UNSET,
-        limit: object = _UNSET,
+        keys: Sequence[str] | _Unset = _UNSET,
+        cursor: str | _Unset | None = _UNSET,
+        limit: int | _Unset = _UNSET,
     ) -> FrontendResult[Page[JSONValue]]:
-        if keys is not _UNSET:
-            keys = _array_value(keys, "keys")
+        keys_value = _array_value(keys, "keys") if keys is not _UNSET else _UNSET
         return result_of(
             await self._call(
                 "frontend.scratchpad.get",
-                _params(namespace=namespace, keys=keys, cursor=cursor, limit=limit),
+                _params(namespace=namespace, keys=keys_value, cursor=cursor, limit=limit),
             ),
             lambda value: decode_page(value, _json_value),
         )
@@ -760,7 +763,7 @@ class ScratchpadClient(_Facade):
         value: str,
         *,
         idempotency_key: str,
-        key: object = _UNSET,
+        key: str | _Unset | None = _UNSET,
     ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call(
@@ -776,15 +779,14 @@ class ScratchpadClient(_Facade):
         namespace: str,
         *,
         idempotency_key: str,
-        keys: object = _UNSET,
-        clear: object = _UNSET,
+        keys: Sequence[str] | _Unset = _UNSET,
+        clear: bool | _Unset = _UNSET,
     ) -> FrontendResult[Mapping[str, JSONValue]]:
-        if keys is not _UNSET:
-            keys = _array_value(keys, "keys")
+        keys_value = _array_value(keys, "keys") if keys is not _UNSET else _UNSET
         return result_of(
             await self._call(
                 "frontend.scratchpad.delete",
-                _params(namespace=namespace, keys=keys, clear=clear),
+                _params(namespace=namespace, keys=keys_value, clear=clear),
                 idempotency_key=idempotency_key,
             ),
             freeze_object,
@@ -793,14 +795,16 @@ class ScratchpadClient(_Facade):
 
 class CatalogsClient(_Facade):
     async def harnesses(
-        self, *, provider: object = _UNSET
+        self, *, provider: str | _Unset | None = _UNSET
     ) -> FrontendResult[Page[HarnessCatalogEntry]]:
         return result_of(
             await self._call("frontend.catalogs.harnesses", _params(provider=provider)),
             lambda value: decode_page(value, HarnessCatalogEntry.from_wire),
         )
 
-    async def models(self, *, provider: object = _UNSET) -> FrontendResult[Page[JSONValue]]:
+    async def models(
+        self, *, provider: str | _Unset | None = _UNSET
+    ) -> FrontendResult[Page[JSONValue]]:
         return result_of(
             await self._call("frontend.catalogs.models", _params(provider=provider)),
             lambda value: decode_page(value, _json_value),
@@ -823,8 +827,8 @@ class TranscriptsClient(_Facade):
         self,
         participant_id: str,
         *,
-        cursor: object = _UNSET,
-        max_bytes: object = _UNSET,
+        cursor: str | _Unset | None = _UNSET,
+        max_bytes: int | _Unset = _UNSET,
     ) -> FrontendResult[TranscriptReadPage]:
         return result_of(
             await self._call(
@@ -846,7 +850,7 @@ class TranscriptsClient(_Facade):
         location: str,
         *,
         idempotency_key: str,
-        prior_owner_id: object = _UNSET,
+        prior_owner_id: str | _Unset | None = _UNSET,
     ) -> FrontendResult[TranscriptBindResult]:
         return result_of(
             await self._call(
@@ -864,7 +868,7 @@ class TranscriptsClient(_Facade):
 
 class RecallClient(_Facade):
     async def query(
-        self, path: str, *, cursor: object = _UNSET, limit: object = _UNSET
+        self, path: str, *, cursor: str | _Unset | None = _UNSET, limit: int | _Unset = _UNSET
     ) -> FrontendResult[Page[JSONValue]]:
         return result_of(
             await self._call(
@@ -877,8 +881,8 @@ class RecallClient(_Facade):
         self,
         segment_id: str,
         *,
-        offset: object = _UNSET,
-        max_bytes: object = _UNSET,
+        offset: int | _Unset = _UNSET,
+        max_bytes: int | _Unset = _UNSET,
     ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call(
@@ -941,18 +945,22 @@ class TrajectoryClient(_Facade):
 
 
 class UsageClient(_Facade):
-    async def totals(self, *, since: object = _UNSET) -> FrontendResult[Mapping[str, JSONValue]]:
+    async def totals(
+        self, *, since: float | _Unset | None = _UNSET
+    ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call("frontend.usage.totals", _params(since=since)), freeze_object
         )
 
-    async def summary(self, *, since: object = _UNSET) -> FrontendResult[Mapping[str, JSONValue]]:
+    async def summary(
+        self, *, since: float | _Unset | None = _UNSET
+    ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call("frontend.usage.summary", _params(since=since)), freeze_object
         )
 
     async def by_harness(
-        self, *, since: object = _UNSET, detailed: object = _UNSET
+        self, *, since: float | _Unset | None = _UNSET, detailed: bool | _Unset = _UNSET
     ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call("frontend.usage.by_harness", _params(since=since, detailed=detailed)),
@@ -962,16 +970,19 @@ class UsageClient(_Facade):
     async def by_participant(
         self,
         *,
-        since: object = _UNSET,
-        participant_ids: object = _UNSET,
-        limit: object = _UNSET,
+        since: float | _Unset | None = _UNSET,
+        participant_ids: Sequence[str] | _Unset = _UNSET,
+        limit: int | _Unset = _UNSET,
     ) -> FrontendResult[Mapping[str, JSONValue]]:
-        if participant_ids is not _UNSET:
-            participant_ids = _array_value(participant_ids, "participant_ids")
+        participant_ids_value = (
+            _array_value(participant_ids, "participant_ids")
+            if participant_ids is not _UNSET
+            else _UNSET
+        )
         return result_of(
             await self._call(
                 "frontend.usage.by_participant",
-                _params(since=since, participant_ids=participant_ids, limit=limit),
+                _params(since=since, participant_ids=participant_ids_value, limit=limit),
             ),
             freeze_object,
         )
