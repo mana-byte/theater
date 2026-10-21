@@ -38,6 +38,8 @@ from theater.trajectory.enums import (
 from theater.trajectory.records import Timing, TrajectoryFailure
 from theater.transcript_identity import canonical_location
 
+from .path_facts import has_session_stem, is_jsonl_transcript
+
 NATIVE_HOOK_CHANNEL = "native-hooks"
 CLAUDE_TOOL_HOOK_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
 
@@ -280,7 +282,7 @@ def _canonical_transcript_for_session(value: object, session_id: str, *, label: 
         raise ValueError(f"Claude hook {label} must be an absolute transcript path")
     transcript_path = canonical_location(value)
     canonical = Path(transcript_path)
-    if canonical.suffix != ".jsonl" or canonical.stem != session_id:
+    if not is_jsonl_transcript(canonical) or not has_session_stem(canonical, session_id):
         raise ValueError(f"Claude hook {label} does not match session_id")
     return transcript_path
 
