@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.support.observation import poised
+from tests.support.observation import apply_batch, poised
 from tests.support.observer_rigs import said
 from theater.daemon.observer import (
     Observer,
@@ -246,7 +246,7 @@ def test_post_floor_drained_progress_clears_floor(registry):
     # Now: a non-attachment batch with actual progress (new events).
     new_event = said("successor reply", turn_end=True)
     batch = Batch(events=[new_event], progressed=True)
-    observer._apply(p.id, batch, clock, TurnAccumulator())
+    apply_batch(observer, p.id, batch, clock, TurnAccumulator())
     # The floor was cleared.
     reloaded = registry.store.get_participant(p.id)
     assert reloaded.resume_floor is None
@@ -271,7 +271,7 @@ def test_empty_poll_does_not_clear_floor(registry):
     )
     observer._on_attach(p.id, attached)
     # An empty batch — no progress, no events.
-    observer._apply(p.id, Batch(), clock, TurnAccumulator())
+    apply_batch(observer, p.id, Batch(), clock, TurnAccumulator())
     # Floor is still present.
     reloaded = registry.store.get_participant(p.id)
     assert floor_is_present(reloaded.resume_floor)

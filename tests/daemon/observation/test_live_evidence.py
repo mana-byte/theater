@@ -5,21 +5,129 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import pytest
+
 from tests.support.live_observation import CountingBatchSource, evidence_row, outcome, touch_paths
 from tests.support.observation import (
     LIVE_CHANNEL,
     FakeHarness,
     Rig,
     ScriptedDurable,
+    make_watch_context,
 )
 from tests.support.waiting import until
-from theater.daemon.observation.live import LiveRegistration
+from theater.daemon.observation.live import LiveObservationHub, LiveRegistration
+from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.harness.contracts.events import Event, EventKind, EventPath
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
 )
 from theater.harness.source import Batch, Source
 from theater.models import JobState, Status
+
+
+class RelocatingEvidenceSource(Source):
+    def __init__(self, evidence):
+        self.evidence = evidence
+        self.held = ()
+        self.refreshed = 0
+        self.delivered = 0
+
+    async def read(self) -> Batch:
+        return Batch()
+
+    async def refresh(self) -> Batch:
+        self.refreshed += 1
+        self.held = (self.evidence,)
+        return Batch(terminal_evidence=self.held)
+
+    def pending_terminal_evidence(self) -> bool:
+        return bool(self.held)
+
+    def terminal_evidence_snapshot(self):
+        return self.held
+
+    def terminal_evidence_delivered(self) -> None:
+        self.delivered += 1
+        self.held = ()
+
+
+def relocation_watch(registry, source, sink, *, awaiting=999.0):
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    hub = LiveObservationHub()
+    observer = Observer(
+        registry,
+        {"fake": FakeHarness()},
+        live_hub=hub,
+        relocate=0.0,
+        awaiting=awaiting,
+        rescue=999.0,
+        poll=0.0,
+    )
+    hub.register(
+        LiveRegistration(
+            participant_id="p1",
+            live_source=source,
+            channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+            backend_generation=7,
+            native_session_id="session-1",
+            evidence_sink=sink,
+        )
+    )
+    clock = QuietClock(quiet_since=-1.0, screen_quiet_since=-1.0)
+    context = make_watch_context(
+        observer, "p1", observer.harnesses["fake"].observer, source, clock, TurnAccumulator()
+    )
+    return observer, context
+
+
+async def test_relocated_evidence_routes_from_the_production_watch(registry):
+    evidence = outcome("turn-1", "session-1")
+    source = RelocatingEvidenceSource(evidence)
+    routed = []
+
+    async def sink(pid, *, backend_generation, outcome):
+        routed.append((pid, backend_generation, outcome))
+
+    observer, context = relocation_watch(registry, source, sink)
+    assert await observer._watch_iteration(context)
+
+    assert source.refreshed == 1
+    assert routed == [("p1", 7, evidence)]
+    assert source.delivered == 1
+    assert source.terminal_evidence_snapshot() == ()
+
+
+async def test_cancelling_after_relocation_retains_its_exact_evidence(registry, monkeypatch):
+    evidence = outcome("turn-1", "session-1")
+    source = RelocatingEvidenceSource(evidence)
+    routed = []
+    screen_due = asyncio.Event()
+
+    async def sink(pid, *, backend_generation, outcome):
+        routed.append((pid, backend_generation, outcome))
+
+    async def block_screen(*_args, **_kwargs):
+        screen_due.set()
+        await asyncio.Future()
+
+    observer, context = relocation_watch(registry, source, sink, awaiting=0.0)
+    monkeypatch.setattr(observer._reducer, "_screen_status_due", block_screen)
+    watch = asyncio.create_task(observer._watch_iteration(context))
+    await screen_due.wait()
+    watch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await watch
+
+    assert source.refreshed == 1
+    assert routed == []
+    assert len(observer._pending_evidence["p1"]) == 1
+    assert source.terminal_evidence_snapshot() == (evidence,)
+
+    assert await observer._flush_pending_evidence("p1")
+    assert routed == [("p1", 7, evidence)]
+    assert source.delivered == 1
+    assert observer._pending_evidence == {}
 
 
 async def test_terminal_evidence_finishes_exact_job_with_evidence_committed_first(rig: Rig):

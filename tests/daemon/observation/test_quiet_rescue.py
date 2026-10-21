@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support.observation import age_job, poised
+from tests.support.observation import age_job, apply_batch, poised, run_quiet_step
 from tests.support.vibe_store import (
     A_ENDS,
     ANSWER_A,
@@ -166,16 +166,16 @@ async def test_rescue_waits_for_the_job_itself_to_age(registry):
     observer.rescue = 60.0
     expire_rescue_clock(clock, observer)
 
-    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await run_quiet_step(observer, p.id, screen, QuietSource(), clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == "running"
     assert job.error_code is None
 
     age_job(registry, "h1", observer.rescue + 1)
-    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await run_quiet_step(observer, p.id, screen, QuietSource(), clock, TurnAccumulator())
     assert str(jobs.get("h1").state) == "running"  # armed, not ended
     let_rescue_confirm(clock)
-    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await run_quiet_step(observer, p.id, screen, QuietSource(), clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == "done"
     assert job.error_code == "turn_end_unseen"
@@ -190,9 +190,9 @@ async def test_rescue_gate_uses_the_oldest_running_job(registry):
     jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
     expire_rescue_clock(clock, observer)
 
-    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await run_quiet_step(observer, p.id, screen, QuietSource(), clock, TurnAccumulator())
     let_rescue_confirm(clock)
-    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await run_quiet_step(observer, p.id, screen, QuietSource(), clock, TurnAccumulator())
     assert str(jobs.get("h1").state) == "done"
     assert str(jobs.get("h2").state) == "done"
 
@@ -204,7 +204,7 @@ async def test_rescue_gate_tolerates_no_running_jobs(registry):
     expire_rescue_clock(clock, observer)
     expired_since = clock.rescue_since
 
-    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await run_quiet_step(observer, p.id, screen, QuietSource(), clock, TurnAccumulator())
     assert jobs.get("h1").result == "done already"
     assert clock.rescue_since is not None
     assert expired_since is not None
@@ -226,8 +226,8 @@ async def test_rescue_attempts_are_still_throttled(registry):
     observer._capture = capture_pane
     expire_rescue_clock(clock, observer)
 
-    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
-    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await run_quiet_step(observer, p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await run_quiet_step(observer, p.id, screen, QuietSource(), clock, TurnAccumulator())
 
     assert captures == 1
     assert str(jobs.get("h1").state) == "running"
@@ -307,7 +307,7 @@ def test_structured_error_boundary_is_unavailable(registry):
             )
         ]
     )
-    observer._apply(p.id, batch, clock, TurnAccumulator())
+    apply_batch(observer, p.id, batch, clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == "done"
     assert job.result == "null"

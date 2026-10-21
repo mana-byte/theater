@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from sqlalchemy import update
 
 from tests.support.control_harness import make_runtime
@@ -10,6 +12,7 @@ from tests.support.waiting import until
 from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.jobs import JobManager
 from theater.daemon.observation.live import LiveRegistration
+from theater.daemon.observation.service import _WatchContext, _WatchIteration
 from theater.daemon.observer import (
     Observer,
     QuietClock,
@@ -56,6 +59,58 @@ class ScriptedDurable(Source):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def apply_batch(
+    observer: Observer,
+    pid: str,
+    batch: Batch,
+    clock: QuietClock,
+    turns,
+    *,
+    source: Source | None = None,
+) -> bool:
+    """Exercise the watch's source-aware apply path with a stateless test source by default."""
+    return observer._apply_source_batch(
+        pid, source if source is not None else ScriptedDurable(), batch, clock, turns
+    )
+
+
+def make_watch_context(
+    observer: Observer,
+    pid: str,
+    screen: HarnessObserver,
+    source: Source,
+    clock: QuietClock,
+    turns,
+) -> _WatchContext:
+    registration = observer.live.registration_for(pid)
+    return _WatchContext(
+        pid=pid,
+        observer=screen,
+        source=source,
+        registration=registration,
+        opened_durable=True,
+        finish_fn=partial(observer._finish, registration=registration),
+        wake=None,
+        clock=clock,
+        turns=turns,
+    )
+
+
+async def run_quiet_step(
+    observer: Observer,
+    pid: str,
+    screen: HarnessObserver,
+    source: Source,
+    clock: QuietClock,
+    turns,
+) -> _WatchIteration:
+    """Exercise the production quiet step with the supplied source and watch state."""
+    context = make_watch_context(observer, pid, screen, source, clock, turns)
+    iteration = _WatchIteration(next_poll=observer.poll)
+    await observer._quiet_step(context, iteration, Batch())
+    return iteration
 
 
 class FakeHarnessObserver(HarnessObserver):

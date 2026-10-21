@@ -515,6 +515,17 @@ class Observer(
             self._reducer.unblock_on_semantic_progress(context.pid, batch)
             await self._reducer.on_progress(context.pid, context.observer, batch, context.clock)
             return
+        await self._quiet_step(context, iteration, batch)
+        iteration.applied = True
+
+    async def _quiet_step(
+        self, context: _WatchContext, iteration: _WatchIteration, batch: Batch
+    ) -> None:
+        """The one production quiet step: relocate -> identity probe -> screen -> rescue.
+
+        Registration-bound collaborators come from the watch context, and relocated
+        batches collect into ``iteration.inner`` so routing and cancellation see them.
+        """
         await self._reducer.on_quiet(
             context.pid,
             context.observer,
@@ -542,7 +553,6 @@ class Observer(
             rescue_jobs_fn=partial(self._rescue_jobs, registration=context.registration),
             pinned_fn=self._pinned_for,
         )
-        iteration.applied = True
 
     def _apply_inner(
         self,

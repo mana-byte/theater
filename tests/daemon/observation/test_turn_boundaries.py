@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from tests.support.observation import poised
+from tests.support.observation import apply_batch, poised
 from tests.support.observer_rigs import said
 from tests.support.pi_transcripts import message_record
 from theater.daemon.observer import (
@@ -34,7 +34,7 @@ def test_a_turn_end_mid_batch_still_answers(registry):
     """The reply plus the next prompt arrive together. The reply still lands."""
     observer, _screen, clock, p, jobs = poised(registry)
     batch = Batch(events=[said("the answer", turn_end=True), spoke("and now this")])
-    observer._apply(p.id, batch, clock, TurnAccumulator())
+    apply_batch(observer, p.id, batch, clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == "done"
     assert job.result == "the answer"
@@ -60,7 +60,7 @@ def test_the_boundary_outcome_decides_how_the_answered_job_finishes(
         turn_end=True,
         turn_terminal=terminal,
     )
-    observer._apply(p.id, Batch(events=[event]), clock, TurnAccumulator())
+    apply_batch(observer, p.id, Batch(events=[event]), clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == expected_state
     assert job.error_code == expected_error_code
@@ -115,7 +115,7 @@ def test_multi_block_raw_assistant_text_becomes_structured_result(registry):
             Event(kind=EventKind.ASSISTANT, turn_end=True),
         ]
     )
-    observer._apply(p.id, batch, clock, TurnAccumulator())
+    apply_batch(observer, p.id, batch, clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == "done"
     assert job.result == '{"answer":\n\n"clipped"}'
@@ -126,7 +126,8 @@ def test_multi_block_raw_assistant_text_becomes_structured_result(registry):
 @pytest.mark.parametrize("final", ['{"answer":"final"}', ""])
 def test_marked_final_answer_replaces_earlier_narration_even_when_empty(registry, final):
     observer, _screen, clock, p, jobs = poised(registry, response_format="json")
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(
             events=[
@@ -151,7 +152,8 @@ def test_marked_final_answer_replaces_earlier_narration_even_when_empty(registry
 
 def test_unmarked_empty_boundary_retains_accumulated_text(registry):
     observer, _screen, clock, p, jobs = poised(registry, response_format="json")
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(
             events=[
@@ -197,7 +199,8 @@ def test_pi_final_text_and_usage_settle_together(registry, tmp_path):
         ),
         3,
     )
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[*narration.events, *terminal.events]),
         clock,
@@ -221,7 +224,7 @@ def test_two_turns_in_one_batch_answer_two_jobs_in_order(registry):
             said("second", turn_end=True),
         ]
     )
-    observer._apply(p.id, batch, clock, TurnAccumulator())
+    apply_batch(observer, p.id, batch, clock, TurnAccumulator())
     assert jobs.get("h1").result == "first"
     assert jobs.get("h2").result == "second"
 
@@ -231,7 +234,9 @@ def test_one_turn_answers_only_the_caller_that_waited_longest(registry):
     observer, _screen, clock, p, jobs = poised(registry)
     time.sleep(0.002)
     jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
-    observer._apply(p.id, Batch(events=[said("for h1", turn_end=True)]), clock, TurnAccumulator())
+    apply_batch(
+        observer, p.id, Batch(events=[said("for h1", turn_end=True)]), clock, TurnAccumulator()
+    )
     assert jobs.get("h1").result == "for h1"
     assert str(jobs.get("h2").state) == "running"
 
@@ -250,7 +255,7 @@ def test_structured_undelivered_job_is_unavailable(registry):
             said('{"answer": 2}', turn_end=True),
         ]
     )
-    observer._apply(p.id, batch, clock, TurnAccumulator())
+    apply_batch(observer, p.id, batch, clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == "crashed"
     assert job.error_code == "prompt_never_seen"

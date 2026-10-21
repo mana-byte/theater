@@ -13,6 +13,7 @@ from tests.support.collision_rig import collision_observer as shared_collision_o
 from tests.support.collision_rig import collision_registry as shared_collision_registry
 from tests.support.collision_rig import make_session
 from tests.support.collision_rig import vibe_tree as shared_vibe_tree
+from tests.support.observation import apply_batch, run_quiet_step
 from tests.support.shipped import VibeHarness, VibeObserver
 from theater.daemon import methods as methods_mod
 from theater.daemon.jobs import JobManager
@@ -236,8 +237,8 @@ async def test_rejected_rotation_keeps_events_and_awaits_session_local(
     batch_b = await source_b.read()
     assert observer._accept_attachment(p_a.id, source_a, batch_a)
     assert observer._accept_attachment(p_b.id, source_b, batch_b)
-    observer._apply(p_a.id, batch_a, QuietClock(), turns_a)
-    observer._apply(p_b.id, batch_b, QuietClock(), TurnAccumulator())
+    apply_batch(observer, p_a.id, batch_a, QuietClock(), turns_a, source=source_a)
+    apply_batch(observer, p_b.id, batch_b, QuietClock(), TurnAccumulator(), source=source_b)
     assert len(observer._bound_transcripts) == 2
 
     # Cwd-only relocation finds B only through the non-committable loss probe.
@@ -254,7 +255,9 @@ async def test_rejected_rotation_keeps_events_and_awaits_session_local(
     # candidate must not be re-read on every 250ms poll forever.
     relocate_clock = QuietClock()
     relocate_clock.quiet_since = time.monotonic() - observer.relocate - 1
-    await observer._on_quiet(p_a.id, observer_adapter, source_a, relocate_clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, p_a.id, observer_adapter, source_a, relocate_clock, TurnAccumulator()
+    )
     assert relocate_clock.quiet_for(time.monotonic()) < 0.1
 
     before = collision_registry.store.bus_tail(limit=500)[-1]["id"]
@@ -265,7 +268,7 @@ async def test_rejected_rotation_keeps_events_and_awaits_session_local(
     # A remains on its own quiet transcript. Only B can publish B's append.
     assert not (await source_a.read()).events
     foreign = await source_b.read()
-    observer._apply(p_b.id, foreign, QuietClock(), TurnAccumulator())
+    apply_batch(observer, p_b.id, foreign, QuietClock(), TurnAccumulator(), source=source_b)
     rows = collision_registry.store.bus_tail(limit=500, after_id=before)
     agent_rows = [r for r in rows if r["kind"].startswith("agent.")]
     assert agent_rows
@@ -280,7 +283,7 @@ async def test_rejected_rotation_keeps_events_and_awaits_session_local(
         fh.write(json.dumps({"role": "assistant", "content": "A is done"}) + "\n")
 
     own = await source_a.read()
-    observer._apply(p_a.id, own, QuietClock(), turns_a)
+    apply_batch(observer, p_a.id, own, QuietClock(), turns_a, source=source_a)
     result = await asyncio.wait_for(waiting, timeout=0.2)
     assert result[0].state == "done"
     assert result[0].result == "A is done"

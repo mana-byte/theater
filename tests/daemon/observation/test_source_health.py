@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import update
 
-from tests.support.observation import bus_kinds
+from tests.support.observation import apply_batch, bus_kinds
 from tests.support.observer_rigs import ReadingObserver, said, screen_checked
 from tests.support.waiting import until
 from theater.daemon import methods as methods_mod
@@ -326,8 +326,8 @@ def test_consumed_input_counts_as_activity_even_with_no_events(registry):
     observer = Observer(registry, harnesses={})
     clock = QuietClock()
     turns = TurnAccumulator()
-    assert observer._apply("nobody", Batch(progressed=True), clock, turns) is True
-    assert observer._apply("nobody", Batch(), clock, turns) is False
+    assert apply_batch(observer, "nobody", Batch(progressed=True), clock, turns) is True
+    assert apply_batch(observer, "nobody", Batch(), clock, turns) is False
 
 
 @pytest.mark.parametrize(
@@ -414,7 +414,7 @@ def test_events_count_as_activity_even_if_the_source_forgets_to_say_so(registry)
     p = registry.register(harness="scripted", pane=None, cwd="/tmp")
     clock = QuietClock()
     batch = Batch(events=[said("hello", turn_end=False)])
-    assert observer._apply(p.id, batch, clock, TurnAccumulator()) is True
+    assert apply_batch(observer, p.id, batch, clock, TurnAccumulator()) is True
     assert clock.last_text == "hello"
 
 
