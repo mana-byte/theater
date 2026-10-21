@@ -37,7 +37,7 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
     RuntimeCapability,
 )
-from theater.models import BadRequest, Job, JobState
+from theater.models import BadRequest, Job, JobState, JournalEventRecord
 
 logger = logging.getLogger("theater.daemon.controls")
 
@@ -355,9 +355,9 @@ class InterruptControls(ControlHost):
         *,
         unit,
         timestamp: float,
-    ) -> tuple[Job, ...]:
+    ) -> tuple[tuple[Job, JournalEventRecord], ...]:
         """Cancel only undispatched followups inside the ownership write unit."""
-        cancelled: list[Job] = []
+        cancelled: list[tuple[Job, JournalEventRecord]] = []
         for participant_id in participant_ids:
             operations = self._store.queued_control_operations(
                 participant_id, connection=unit.connection
@@ -401,7 +401,7 @@ class InterruptControls(ControlHost):
                 unit.after_commit(
                     lambda handle=job.handle: self._jobs.wake_committed_direct_finish(handle)
                 )
-                cancelled.append(outcome[0])
+                cancelled.append(outcome)
         return tuple(cancelled)
 
     async def _cancel_queued_followups(self, participant_id: str) -> tuple[str, ...]:
