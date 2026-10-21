@@ -90,7 +90,7 @@ def test_the_attach_time_outcome_decides_how_the_answered_job_finishes(
         turn_end=True,
         turn_terminal=terminal,
     )
-    observer._settle_from_event(p.id, event, registration=None)
+    observer._settle_from_event(p.id, event)
 
     job = jobs.get("h1")
     assert str(job.state) == expected_state

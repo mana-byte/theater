@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
+from theater.daemon.observation.completion_gate import BoundCompletionGate
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.observation.reducer import QuietClock, Reducer
 from theater.daemon.observation.rollback import rollback_observation_state
@@ -38,7 +38,7 @@ class BatchApplication:
     if TYPE_CHECKING:
         _reducer: Reducer
         store: Store
-        _answer_turn: Callable[..., Any]
+        _bind_completion: Callable[[LiveRegistration | None], BoundCompletionGate]
 
     def _path_target(
         self,
@@ -82,6 +82,7 @@ class BatchApplication:
         turns: TurnAccumulator,
         *,
         registration: LiveRegistration | None = None,
+        completion: BoundCompletionGate | None = None,
     ) -> bool:
         """Apply once, then persist its cursor without replaying applied semantics.
 
@@ -95,7 +96,9 @@ class BatchApplication:
             if registration is not None and registration.active_job_for_turn is not None
             else None
         )
-        answer_turn_fn = partial(self._answer_turn, registration=registration)
+        answer_turn_fn = (
+            completion if completion is not None else self._bind_completion(registration)
+        ).answer_turn
         promoted = turns.promotions(batch.turn_state)
         try:
             if (
@@ -153,10 +156,13 @@ class BatchApplication:
         turns: TurnAccumulator,
         routed_batches: list[Batch],
         registration: LiveRegistration | None,
+        completion: BoundCompletionGate,
     ) -> bool:
         """Apply an inner (quiet-time) batch and remember it for evidence routing."""
         routed_batches.append(batch)
-        return self._apply_source_batch(pid, source, batch, clock, turns, registration=registration)
+        return self._apply_source_batch(
+            pid, source, batch, clock, turns, registration=registration, completion=completion
+        )
 
     def _persist_pending_source_checkpoint(
         self, pid: str, source: Source, *, connection=None
@@ -200,12 +206,14 @@ class BatchApplication:
         pid: str,
         event: Event,
         *,
-        registration: LiveRegistration | None = None,
+        completion: BoundCompletionGate | None = None,
     ) -> None:
         self._reducer.settle_from_event(
             pid,
             event,
-            answer_turn_fn=partial(self._answer_turn, registration=registration),
+            answer_turn_fn=(
+                completion if completion is not None else self._bind_completion(None)
+            ).answer_turn,
             turn_result_fn=self._turn_result,
         )
 

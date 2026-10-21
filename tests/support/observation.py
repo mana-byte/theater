@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from functools import partial
-
 from sqlalchemy import update
 
 from tests.support.control_harness import make_runtime
@@ -91,7 +89,7 @@ def make_watch_context(
         source=source,
         registration=registration,
         opened_durable=True,
-        finish_fn=partial(observer._finish, registration=registration),
+        completion=observer._bind_completion(registration),
         wake=None,
         clock=clock,
         turns=turns,

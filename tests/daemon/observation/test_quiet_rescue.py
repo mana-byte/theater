@@ -406,7 +406,7 @@ class Watch:
             source=Script(state) if source is None else source,
             registration=None,
             opened_durable=True,
-            finish_fn=observer._finish,
+            completion=observer._bind_completion(None),
             wake=None,
         )
         return cls(observer, context, jobs, clock)

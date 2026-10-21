@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Connection
@@ -31,6 +32,9 @@ class CompletionGate:
         store: Store
         _capture: Callable[..., Any]
         _monotonic: Callable[[], float]
+
+    def _bind_completion(self, registration: LiveRegistration | None) -> BoundCompletionGate:
+        return BoundCompletionGate(self, registration)
 
     def _finish(
         self,
@@ -159,3 +163,72 @@ class CompletionGate:
     ) -> bool:
         current = registration or self.live.registration_for(participant_id)
         return current is not None and current.channel.drives_job_completion
+
+
+@dataclass(frozen=True, slots=True)
+class BoundCompletionGate:
+    """One watch's heuristic authority; an unbound watch resolves the hub at call time."""
+
+    owner: CompletionGate
+    registration: LiveRegistration | None
+
+    def finish(
+        self,
+        handle: str,
+        result_text: str,
+        *,
+        error_code: str | None = None,
+        state: JobState = JobState.DONE,
+        raw_result: str | object | None = RAW_RESULT_UNSET,
+    ) -> None:
+        self.owner._finish(
+            handle,
+            result_text,
+            error_code=error_code,
+            state=state,
+            raw_result=raw_result,
+            registration=self.registration,
+        )
+
+    def answer_turn(
+        self,
+        pid: str,
+        result_text: str,
+        heard: Sequence[str] = (),
+        *,
+        raw_result: str | object | None = RAW_RESULT_UNSET,
+        terminal: TurnTerminal | None = None,
+        connection: Connection | None = None,
+    ) -> None:
+        self.owner._answer_turn(
+            pid,
+            result_text,
+            heard,
+            raw_result=raw_result,
+            registration=self.registration,
+            terminal=terminal,
+            connection=connection,
+        )
+
+    async def rescue_jobs(
+        self,
+        pid: str,
+        observer: HarnessObserver,
+        clock: QuietClock,
+        *,
+        turns: TurnAccumulator | None = None,
+        turn_state: NativeTurnState | None = None,
+    ) -> bool:
+        return await self.owner._rescue_jobs(
+            pid,
+            observer,
+            clock,
+            registration=self.registration,
+            turns=turns,
+            turn_state=turn_state,
+        )
+
+    async def release_unproven(
+        self, pid: str, turns: TurnAccumulator, state: NativeTurnState
+    ) -> None:
+        await self.owner._release_unproven(pid, turns, state, self.registration)
