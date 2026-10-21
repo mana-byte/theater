@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+from sqlalchemy import delete
 
 from theater.daemon.jobs import JobManager
+from theater.daemon.schema import jobs as jobs_table
 from theater.models import Job, JobState, JournalEventRecord
 
 
@@ -109,3 +111,47 @@ def test_direct_finish_rolls_back_then_wakes_without_listeners_or_bus(store) -> 
             is None
         )
     assert store.journal.current_sequence() == cursor + 1
+
+
+def test_direct_finish_skips_wake_when_earlier_callback_deletes_row(store) -> None:
+    initial = Job(
+        handle="deleted-before-wake",
+        caller_id="cli",
+        target_id="participant-a",
+        kind="send",
+        prompt=None,
+        state=JobState.RUNNING.value,
+        result=None,
+        error_code=None,
+        created_at=1.0,
+        finished_at=None,
+    )
+    store.create_job(initial)
+    jobs = JobManager(store)
+    jobs.track(initial.handle)
+    wake = jobs._events[initial.handle]
+    assert jobs.replace_touch_accumulator(initial.handle, cwd="/tmp")
+
+    def delete_row() -> None:
+        with store.write_unit() as unit:
+            unit.connection.execute(delete(jobs_table).where(jobs_table.c.handle == initial.handle))
+
+    with store.write_unit() as unit:
+        assert (
+            jobs.write_direct_terminal_in_unit(
+                store,
+                unit,
+                job=initial,
+                state=JobState.KILLED,
+                result=None,
+                error_code="cancelled",
+                finished_at=8.0,
+            )
+            is not None
+        )
+        unit.after_commit(delete_row)
+        unit.after_commit(lambda: jobs.wake_committed_direct_finish(initial.handle))
+
+    assert store.get_job(initial.handle) is None
+    assert not wake.is_set() and jobs._events[initial.handle] is wake
+    assert initial.handle in jobs._accumulators

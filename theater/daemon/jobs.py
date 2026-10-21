@@ -532,6 +532,11 @@ class JobManager:
 
     def wake_committed_direct_finish(self, handle: str) -> None:
         """Wake a committed direct finish without terminal listeners or bus writes."""
+        if self.store.get_job(handle) is None:
+            return
+        self._wake_direct_finish(handle)
+
+    def _wake_direct_finish(self, handle: str) -> None:
         event = self._events.pop(handle, None)
         if event:
             event.set()
@@ -563,7 +568,7 @@ class JobManager:
             return None
         if job.state != JobState.RUNNING:
             # Already finished; event may linger after a daemon restart — set it so await wakes.
-            self.wake_committed_direct_finish(handle)
+            self._wake_direct_finish(handle)
             return job
 
         acc = self._accumulators.get(handle)
