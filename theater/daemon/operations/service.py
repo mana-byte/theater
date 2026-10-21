@@ -170,12 +170,16 @@ class OperationService:
                 retain_until=idempotency_settled_at + IDEMPOTENCY_RETENTION_SECONDS,
                 connection=unit.connection,
             )
+        return self._operation_event(replacement)
+
+    @staticmethod
+    def _operation_event(record: PublicOperationRecord) -> JournalEventRecord:
         return JournalEventRecord(
             kind="operation.updated",
-            entity_id=replacement.operation_id,
+            entity_id=record.operation_id,
             entity_revision=0,
-            payload=operation_event_payload(replacement),
-            recorded_at=replacement.updated_at,
+            payload=operation_event_payload(record),
+            recorded_at=record.updated_at,
         )
 
     def configure_reconciler(self, reconciler: EvidenceReconciler) -> None:
@@ -240,7 +244,9 @@ class OperationService:
                     raise RuntimeError(
                         "accepted idempotency claim disappeared inside its write unit"
                     )
-                self._append_event(unit, prepared.record, preceding=prepared.events)
+                self._append_event(
+                    unit, self._operation_event(prepared.record), preceding=prepared.events
+                )
                 unit.after_commit(lambda: self._notifier.notify(operation_id))
         except IntegrityError:
             winner = self._active_idempotency(client_id, idempotency_key, self._clock())
@@ -794,25 +800,14 @@ class OperationService:
             )
             if event is None:
                 raise RuntimeError("operation changed during its synchronous write unit")
-            self._store.journal.append_group(
-                unit,
-                [
-                    replace(
-                        event,
-                        entity_revision=self._store.journal.current_sequence(
-                            connection=unit.connection
-                        )
-                        + 1,
-                    )
-                ],
-            )
+            self._append_event(unit, event)
             unit.after_commit(lambda: self._notifier.notify(operation_id))
         return updated
 
     def _append_event(
         self,
         unit: WriteUnit,
-        record: PublicOperationRecord,
+        event: JournalEventRecord,
         *,
         preceding: tuple[JournalEventRecord, ...] = (),
     ) -> None:
@@ -823,13 +818,7 @@ class OperationService:
             unit,
             [
                 *preceding,
-                JournalEventRecord(
-                    kind="operation.updated",
-                    entity_id=record.operation_id,
-                    entity_revision=revision,
-                    payload=operation_event_payload(record),
-                    recorded_at=record.updated_at,
-                ),
+                replace(event, entity_revision=revision),
             ],
         )
 
