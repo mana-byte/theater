@@ -37,7 +37,7 @@ class Provider:
         if not isinstance(raw_capabilities, (list, tuple)):
             raise TypeError("provider.capabilities must be an array")
         capabilities = tuple(
-            string_value(item, "provider.capabilities[]") or "" for item in raw_capabilities
+            string_value(item, "provider.capabilities[]") for item in raw_capabilities
         )
         limits = freeze_json(object_value(data.get("limits", {}), "provider.limits"))
         assert isinstance(limits, Mapping)
@@ -45,11 +45,11 @@ class Provider:
         if revision is not None:
             revision = integer_value(revision, "provider.last_report_revision")
         return cls(
-            provider_id=string_value(data.get("provider_id"), "provider.provider_id") or "",
-            selector=string_value(data.get("selector"), "provider.selector") or "",
-            kind=string_value(data.get("kind"), "provider.kind") or "",
+            provider_id=string_value(data.get("provider_id"), "provider.provider_id"),
+            selector=string_value(data.get("selector"), "provider.selector"),
+            kind=string_value(data.get("kind"), "provider.kind"),
             generation=integer_value(data.get("generation"), "provider.generation"),
-            health=string_value(data.get("health"), "provider.health") or "",
+            health=string_value(data.get("health"), "provider.health"),
             capabilities=capabilities,
             limits=limits,
             last_report_revision=revision,

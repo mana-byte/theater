@@ -50,9 +50,9 @@ class WorkspaceUsage:
     def from_wire(cls, value: object) -> WorkspaceUsage:
         data = object_value(value, "workspace usage")
         return cls(
-            workspace_id=string_value(data.get("workspace_id"), "usage.workspace_id") or "",
-            holder_kind=string_value(data.get("holder_kind"), "usage.holder_kind") or "",
-            holder_id=string_value(data.get("holder_id"), "usage.holder_id") or "",
+            workspace_id=string_value(data.get("workspace_id"), "usage.workspace_id"),
+            holder_kind=string_value(data.get("holder_kind"), "usage.holder_kind"),
+            holder_id=string_value(data.get("holder_id"), "usage.holder_id"),
             acquired_at=_number(data.get("acquired_at"), "usage.acquired_at"),
             released_at=_optional_number(data.get("released_at"), "usage.released_at"),
             release_reason=string_value(
@@ -102,9 +102,9 @@ class WorkspaceUsageHandoff:
     def from_wire(cls, value: object) -> WorkspaceUsageHandoff:
         data = object_value(value, "workspace usage handoff")
         return cls(
-            workspace_id=string_value(data.get("workspace_id"), "handoff.workspace_id") or "",
-            reservation_id=string_value(data.get("reservation_id"), "handoff.reservation_id") or "",
-            participant_id=string_value(data.get("participant_id"), "handoff.participant_id") or "",
+            workspace_id=string_value(data.get("workspace_id"), "handoff.workspace_id"),
+            reservation_id=string_value(data.get("reservation_id"), "handoff.reservation_id"),
+            participant_id=string_value(data.get("participant_id"), "handoff.participant_id"),
         )
 
 
@@ -170,11 +170,10 @@ class Workspace:
         fence_value = data.get("deletion_fence")
         fence = _fence_from_wire(fence_value) if fence_value is not None else None
         return cls(
-            workspace_id=string_value(data.get("workspace_id"), "workspace.workspace_id") or "",
-            ownership_kind=string_value(data.get("ownership_kind"), "workspace.ownership_kind")
-            or "",
-            owner_id=string_value(data.get("owner_id"), "workspace.owner_id") or "",
-            path=string_value(data.get("path"), "workspace.path") or "",
+            workspace_id=string_value(data.get("workspace_id"), "workspace.workspace_id"),
+            ownership_kind=string_value(data.get("ownership_kind"), "workspace.ownership_kind"),
+            owner_id=string_value(data.get("owner_id"), "workspace.owner_id"),
+            path=string_value(data.get("path"), "workspace.path"),
             canonical_repository_root=string_value(
                 data.get("canonical_repository_root"),
                 "workspace.canonical_repository_root",
@@ -184,7 +183,7 @@ class Workspace:
                 data.get("resolved_base_commit"), "workspace.resolved_base_commit", optional=True
             ),
             branch=string_value(data.get("branch"), "workspace.branch", optional=True),
-            state=string_value(data.get("state"), "workspace.state") or "",
+            state=string_value(data.get("state"), "workspace.state"),
             usages=tuple(WorkspaceUsage.from_wire(item) for item in raw_usages),
             deletion_fence=fence,
             extra=extras(
@@ -208,9 +207,9 @@ class Workspace:
 def _fence_from_wire(value: object) -> WorkspaceDeletionFence:
     data = object_value(value, "workspace deletion fence")
     return WorkspaceDeletionFence(
-        token=string_value(data.get("token"), "deletion fence.token") or "",
+        token=string_value(data.get("token"), "deletion fence.token"),
         revision=integer_value(data.get("revision"), "deletion fence.revision"),
-        owner_id=string_value(data.get("owner_id"), "deletion fence.owner_id") or "",
+        owner_id=string_value(data.get("owner_id"), "deletion fence.owner_id"),
         operation_id=string_value(
             data.get("operation_id"), "deletion fence.operation_id", optional=True
         ),

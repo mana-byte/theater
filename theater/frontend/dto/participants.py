@@ -14,18 +14,11 @@ from theater.frontend.dto._wire import (
     freeze_json,
     integer_value,
     object_value,
+    optional_number,
     string_value,
     thaw_json,
 )
 from theater.frontend.dto.identity import ControlOwner, TerminalIdentity
-
-
-def _optional_number(value: object, label: str) -> float | None:
-    if value is None:
-        return None
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise TypeError(f"{label} must be a number or null")
-    return float(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +37,7 @@ class TranscriptIdentity:
     def from_wire(cls, value: object) -> TranscriptIdentity:
         data = object_value(value, "transcript identity")
         return cls(
-            state=string_value(data.get("state"), "transcript identity.state") or "",
+            state=string_value(data.get("state"), "transcript identity.state"),
             session_id=string_value(
                 data.get("session_id"), "transcript identity.session_id", optional=True
             ),
@@ -97,11 +90,9 @@ class ResumeCandidate:
         return cls(
             participant_id=string_value(
                 data.get("participant_id"), "resume candidate.participant_id"
-            )
-            or "",
-            harness=string_value(data.get("harness"), "resume candidate.harness") or "",
-            resume_state=string_value(data.get("resume_state"), "resume candidate.resume_state")
-            or "",
+            ),
+            harness=string_value(data.get("harness"), "resume candidate.harness"),
+            resume_state=string_value(data.get("resume_state"), "resume candidate.resume_state"),
             identity=TranscriptIdentity.from_wire(data.get("transcript_identity")),
             cwd=string_value(data.get("cwd"), "resume candidate.cwd", optional=True),
             name=string_value(data.get("name"), "resume candidate.name", optional=True),
@@ -111,7 +102,7 @@ class ResumeCandidate:
             spawn_prompt=string_value(
                 data.get("spawn_prompt"), "resume candidate.spawn_prompt", optional=True
             ),
-            last_activity=_optional_number(
+            last_activity=optional_number(
                 data.get("last_activity"), "resume candidate.last_activity"
             ),
             extra=extras(
@@ -235,7 +226,7 @@ class NativeRouteSummary:
             backend_generation=integer_value(
                 data.get("backend_generation"), "native route.backend_generation"
             ),
-            health=string_value(data.get("health"), "native route.health") or "",
+            health=string_value(data.get("health"), "native route.health"),
             native_session_id=string_value(
                 data.get("native_session_id"), "native route.native_session_id", optional=True
             ),
@@ -259,7 +250,7 @@ class TerminalRouteSummary:
         data = object_value(value, "terminal route")
         return cls(
             identity=TerminalIdentity.from_wire(data.get("identity")),
-            health=string_value(data.get("health"), "terminal route.health") or "",
+            health=string_value(data.get("health"), "terminal route.health"),
             extra=extras(data, {"identity", "health"}),
         )
 
@@ -308,10 +299,10 @@ class Participant:
             assert isinstance(frozen_identity, Mapping)
             trusted_identity = frozen_identity
         return cls(
-            participant_id=string_value(data.get("participant_id"), "participant.id") or "",
-            origin=string_value(data.get("origin"), "participant.origin") or "",
-            harness=string_value(data.get("harness"), "participant.harness") or "",
-            status=string_value(data.get("status"), "participant.status") or "",
+            participant_id=string_value(data.get("participant_id"), "participant.id"),
+            origin=string_value(data.get("origin"), "participant.origin"),
+            harness=string_value(data.get("harness"), "participant.harness"),
+            status=string_value(data.get("status"), "participant.status"),
             owner=ControlOwner.from_wire(data.get("owner")),
             parent_id=string_value(data.get("parent_id"), "participant.parent_id", optional=True),
             cwd=string_value(data.get("cwd"), "participant.cwd", optional=True),
@@ -323,8 +314,7 @@ class Participant:
                 data.get("description"), "participant.description", optional=True
             ),
             addressable=boolean_value(data.get("addressable", False), "participant.addressable"),
-            presence=string_value(data.get("presence", "unknown"), "participant.presence")
-            or "unknown",
+            presence=string_value(data.get("presence", "unknown"), "participant.presence"),
             terminal_route=TerminalRouteSummary.from_wire(terminal) if terminal else None,
             native_route=NativeRouteSummary.from_wire(native) if native else None,
             trusted_identity=trusted_identity,
@@ -336,8 +326,8 @@ class Participant:
             resume_state=string_value(
                 data.get("resume_state"), "participant.resume_state", optional=True
             ),
-            created_at=_optional_number(data.get("created_at"), "participant.created_at"),
-            last_activity=_optional_number(data.get("last_activity"), "participant.last_activity"),
+            created_at=optional_number(data.get("created_at"), "participant.created_at"),
+            last_activity=optional_number(data.get("last_activity"), "participant.last_activity"),
             actions=actions,
             extra=extras(
                 data,

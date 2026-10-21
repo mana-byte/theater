@@ -13,6 +13,7 @@ from theater.frontend.dto._wire import (
     extras,
     freeze_json,
     object_value,
+    optional_number,
     string_value,
     thaw_json,
 )
@@ -142,14 +143,14 @@ class Operation:
         raw_targets = data.get("target_ids", [])
         if not isinstance(raw_targets, (list, tuple)):
             raise TypeError("operation.target_ids must be an array")
-        targets = tuple(string_value(item, "operation.target_ids[]") or "" for item in raw_targets)
+        targets = tuple(string_value(item, "operation.target_ids[]") for item in raw_targets)
         dispatch = data.get("dispatch_identity")
         error = data.get("error")
         return cls(
-            operation_id=string_value(data.get("operation_id"), "operation.operation_id") or "",
-            kind=string_value(data.get("kind"), "operation.kind") or "",
-            state=string_value(data.get("state"), "operation.state") or "",
-            phase=string_value(data.get("phase"), "operation.phase") or "",
+            operation_id=string_value(data.get("operation_id"), "operation.operation_id"),
+            kind=string_value(data.get("kind"), "operation.kind"),
+            state=string_value(data.get("state"), "operation.state"),
+            phase=string_value(data.get("phase"), "operation.phase"),
             actor=Actor.from_wire(data.get("actor")),
             target_ids=targets,
             control_operation_id=string_value(
@@ -161,8 +162,8 @@ class Operation:
             ),
             result=freeze_json(data.get("result"), "operation.result"),
             error=ErrorValue.from_wire(error) if error is not None else None,
-            created_at=_optional_number(data.get("created_at"), "operation.created_at"),
-            updated_at=_optional_number(data.get("updated_at"), "operation.updated_at"),
+            created_at=optional_number(data.get("created_at"), "operation.created_at"),
+            updated_at=optional_number(data.get("updated_at"), "operation.updated_at"),
             extra=extras(
                 data,
                 {
@@ -182,14 +183,6 @@ class Operation:
                 },
             ),
         )
-
-
-def _optional_number(value: object, label: str) -> float | None:
-    if value is None:
-        return None
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise TypeError(f"{label} must be a number or null")
-    return float(value)
 
 
 __all__ = ["DispatchIdentity", "Operation", "OperationState"]

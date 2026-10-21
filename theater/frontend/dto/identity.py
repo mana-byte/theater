@@ -36,7 +36,7 @@ class Actor:
     def from_wire(cls, value: object) -> Actor:
         data = object_value(value, "actor")
         return cls(
-            client_id=string_value(data.get("client_id"), "actor.client_id") or "",
+            client_id=string_value(data.get("client_id"), "actor.client_id"),
             participant_id=string_value(
                 data.get("participant_id"), "actor.participant_id", optional=True
             ),
@@ -71,7 +71,7 @@ class ControlOwner:
     def from_wire(cls, value: object) -> ControlOwner:
         data = object_value(value, "control owner")
         return cls(
-            kind=string_value(data.get("kind"), "control owner.kind") or "",
+            kind=string_value(data.get("kind"), "control owner.kind"),
             participant_id=string_value(
                 data.get("participant_id"), "control owner.participant_id", optional=True
             ),
@@ -142,17 +142,14 @@ class TerminalIdentity:
         assert isinstance(occupant, Mapping)
         process = data.get("process")
         return cls(
-            provider_id=string_value(data.get("provider_id"), "terminal identity.provider_id")
-            or "",
+            provider_id=string_value(data.get("provider_id"), "terminal identity.provider_id"),
             provider_generation=integer_value(
                 data.get("provider_generation"), "terminal identity.provider_generation"
             ),
-            terminal_id=string_value(data.get("terminal_id"), "terminal identity.terminal_id")
-            or "",
+            terminal_id=string_value(data.get("terminal_id"), "terminal identity.terminal_id"),
             terminal_incarnation=string_value(
                 data.get("terminal_incarnation"), "terminal identity.terminal_incarnation"
-            )
-            or "",
+            ),
             occupant=occupant,
             process=ProcessFacts.from_wire(process) if process is not None else None,
             extra=extras(

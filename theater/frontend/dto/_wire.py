@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from types import MappingProxyType
+from typing import Literal, overload
 
 type JSONScalar = bool | int | float | str | None
 type JSONValue = JSONScalar | tuple[JSONValue, ...] | Mapping[str, JSONValue]
@@ -38,6 +39,14 @@ def object_value(value: object, label: str) -> Mapping[str, object]:
     return value
 
 
+@overload
+def string_value(value: object, label: str, *, optional: Literal[False] = False) -> str: ...
+
+
+@overload
+def string_value(value: object, label: str, *, optional: Literal[True]) -> str | None: ...
+
+
 def string_value(value: object, label: str, *, optional: bool = False) -> str | None:
     if value is None and optional:
         return None
@@ -56,6 +65,14 @@ def boolean_value(value: object, label: str) -> bool:
     if type(value) is not bool:
         raise TypeError(f"{label} must be a boolean")
     return value
+
+
+def optional_number(value: object, label: str) -> float | None:
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise TypeError(f"{label} must be a number or null")
+    return float(value)
 
 
 def extras(value: Mapping[str, object], known: set[str]) -> Mapping[str, JSONValue]:
