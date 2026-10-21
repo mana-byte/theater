@@ -7,7 +7,7 @@ import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import cast
+from typing import TypedDict, cast
 
 from theater.frontend._results import StateFollowResult
 from theater.frontend.client import FrontendClient, FrontendResponseError
@@ -57,6 +57,15 @@ class StateProjection:
         default_factory=lambda: MappingProxyType({})
     )
     stale: bool = False
+
+
+class _FollowParams(TypedDict, total=False):
+    wait_seconds: float
+    limit: int
+
+
+class _SnapshotParams(TypedDict, total=False):
+    page_size: int
 
 
 class StateSynchronizer:
@@ -127,7 +136,7 @@ class StateSynchronizer:
             return await self.refresh(page_size=page_size)
         if self._resnapshot_before_follow:
             return await self.refresh(page_size=page_size)
-        params: dict[str, object] = {}
+        params: _FollowParams = {}
         if wait_seconds is not None:
             params["wait_seconds"] = wait_seconds
         if limit is not None:
@@ -149,7 +158,7 @@ class StateSynchronizer:
         return candidate
 
     async def _fetch_snapshot(self, *, page_size: int | None) -> StateProjection:
-        params: dict[str, object] = {}
+        params: _SnapshotParams = {}
         if page_size is not None:
             params["page_size"] = page_size
         first = (await self._client.state.snapshot(**params)).value

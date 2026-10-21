@@ -80,7 +80,7 @@ class HealthClient(_Facade):
 
 
 class StateClient(_Facade):
-    async def snapshot(self, *, page_size: object = _UNSET) -> FrontendResult[SnapshotPage]:
+    async def snapshot(self, *, page_size: int | _Unset = _UNSET) -> FrontendResult[SnapshotPage]:
         return result_of(
             await self._call("frontend.state.snapshot", _params(page_size=page_size)),
             SnapshotPage.from_wire,
@@ -101,8 +101,8 @@ class StateClient(_Facade):
         self,
         cursor: EventCursor | Mapping[str, object],
         *,
-        wait_seconds: object = _UNSET,
-        limit: object = _UNSET,
+        wait_seconds: float | _Unset = _UNSET,
+        limit: int | _Unset = _UNSET,
     ) -> FrontendResult[StateFollowResult]:
         cursor_value = cursor.to_wire() if isinstance(cursor, EventCursor) else cursor
         return result_of(
@@ -895,7 +895,11 @@ class RecallClient(_Facade):
 
 class TrajectoryClient(_Facade):
     async def snapshot(
-        self, participant_id: str, *, before: object = _UNSET, limit: object = _UNSET
+        self,
+        participant_id: str,
+        *,
+        before: str | _Unset | None = _UNSET,
+        limit: int | _Unset = _UNSET,
     ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call(
@@ -906,7 +910,7 @@ class TrajectoryClient(_Facade):
         )
 
     async def follow(
-        self, stream_id: str, cursor: object, *, wait_seconds: object = _UNSET
+        self, stream_id: str, cursor: object, *, wait_seconds: float | _Unset = _UNSET
     ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call(
@@ -933,7 +937,7 @@ class TrajectoryClient(_Facade):
         )
 
     async def search(
-        self, participant_id: str, query: str, *, limit: object = _UNSET
+        self, participant_id: str, query: str, *, limit: int | _Unset = _UNSET
     ) -> FrontendResult[Page[JSONValue]]:
         return result_of(
             await self._call(
@@ -995,10 +999,10 @@ class DiagnosticsClient(_Facade):
     async def bus_tail(
         self,
         *,
-        after_id: object = _UNSET,
-        limit: object = _UNSET,
-        kinds: object = _UNSET,
-        wait_seconds: object = _UNSET,
+        after_id: int | _Unset = _UNSET,
+        limit: int | _Unset = _UNSET,
+        kinds: Sequence[str] | _Unset = _UNSET,
+        wait_seconds: float | _Unset = _UNSET,
     ) -> FrontendResult[Page[JSONValue]]:
         params = _params(after_id=after_id, limit=limit, kinds=kinds, wait_seconds=wait_seconds)
         return result_of(

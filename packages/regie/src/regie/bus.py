@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from typing import TypedDict
 
 from theater.frontend import ErrorCode, FrontendClient, FrontendResponseError
 
 # Pause between bounded polls against a daemon that cannot long-poll.
 _FALLBACK_POLL_SECONDS = 1.0
+
+
+class _BusTailParams(TypedDict, total=False):
+    after_id: int
+    limit: int
+    kinds: list[str]
+    wait_seconds: float
 
 
 class DiagnosticBusController:
@@ -47,11 +55,11 @@ class DiagnosticBusController:
         # A filtered reader starts at the bus head instead of replaying old coordination rows.
         priming = kinds is not None and not self._primed
         wanted = None if priming else kinds
-        params: dict[str, object] = {
+        params: _BusTailParams = {
             "after_id": self._after_id,
             "limit": 1 if priming else self._batch,
         }
-        extended: dict[str, object] = {}
+        extended: _BusTailParams = {}
         if wanted is not None:
             extended["kinds"] = list(wanted)
         if wait_seconds > 0 and not priming:
@@ -93,7 +101,7 @@ class DiagnosticBusController:
         self._primed = True
         return () if priming else tuple(rows)
 
-    async def _tail(self, params: dict[str, object]) -> object:
+    async def _tail(self, params: _BusTailParams) -> object:
         response = await self._client.diagnostics.bus_tail(**params)
         return getattr(response, "value", None)
 
