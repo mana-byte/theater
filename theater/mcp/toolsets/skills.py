@@ -16,10 +16,7 @@ async def load_skill(session: Session, *, name: str, preview: bool = False) -> d
     if preview:
         result = await session.client.call("skills.load", name=name, preview=True)
     else:
-        if not session._resolved:
-            await session.identify()
-        result = await session.client.call(
-            "skills.load", name=name, caller_id=session.participant_id
-        )
+        caller_id = await session.caller_id()
+        result = await session.client.call("skills.load", name=name, caller_id=caller_id)
     assert isinstance(result, dict)
     return result

@@ -49,6 +49,12 @@ class Session:
             assert isinstance(record, dict)
             return record
 
+    async def caller_id(self) -> str | None:
+        """Resolve this caller only when a tool needs its identity."""
+        if not self._resolved:
+            await self.identify()
+        return self.participant_id
+
     async def me(self) -> dict:
         if not self._resolved:
             return await self.identify()

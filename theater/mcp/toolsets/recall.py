@@ -12,17 +12,8 @@ from theater.mcp.session import Session
 
 
 async def recall(session: Session, *, paths: list[str], depth: int = 5) -> dict[str, dict]:
-    """Per-file timelines of what Theater watched happen.
-
-    Returns one timeline per path, keyed by the repo-relative path.
-    A resumable job point carries a ``session_id`` that may be passed to
-    ``spawn_session(resume=<session_id>)``; current launch gates still apply.
-
-    Paths may be absolute or repo-relative but must stay inside the repository.
-    A path that has never been touched comes back as an empty timeline.
-    """
-    if not session._resolved:
-        await session.identify()
+    """Request per-file timelines and remove private job handles."""
+    await session.caller_id()
     result = await session.client.call(
         "recall",
         paths=paths,
@@ -37,20 +28,8 @@ async def recall(session: Session, *, paths: list[str], depth: int = 5) -> dict[
 
 
 async def recall_read(session: Session, *, segment_id: str) -> dict:
-    """Explain one point of a `recall` timeline.
-
-    Takes the ``segment`` id off a timeline point. A job segment comes
-    back with the job's transcript; a gap segment comes back with the
-    commits git can find for that blob transition, or an explicit
-    ``explained: false`` when no explanation is returned. Missing repository
-    context, rejected paths, and git failures can also cause it.
-
-    Separate from `recall` because it is the only call in the feature
-    that spends a ``git log``, and because it answers about one segment
-    rather than about paths.
-    """
-    if not session._resolved:
-        await session.identify()
+    """Request one bounded transcript or Git-history segment."""
+    await session.caller_id()
     result = await session.client.call(
         "recall_read",
         segment_id=segment_id,
