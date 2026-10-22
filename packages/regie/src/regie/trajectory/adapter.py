@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import TypedDict, Unpack, cast
 
+from regie.trajectory.rich.clients import TypedTrajectoryFollow, TypedTrajectoryQuery
 from regie.trajectory.rich.models import (
     TrajectoryDelta,
     TrajectoryLocation,
@@ -32,7 +33,7 @@ class _FollowParams(TypedDict, total=False):
     wait_seconds: float
 
 
-class TrajectoryQueryAdapter:
+class TrajectoryQueryAdapter(TypedTrajectoryQuery):
     """Decode named queries while serializing the shared SDK connection."""
 
     def __init__(self, client: FrontendClient) -> None:
@@ -41,22 +42,25 @@ class TrajectoryQueryAdapter:
 
     async def call(self, method: str, **params: object) -> object:
         """Preserve the exported wire-oriented generic-call interface."""
-        participant_id = _participant_id(params)
-        if method == "trajectory.snapshot":
-            return await self._snapshot_wire(
-                participant_id, **cast(_SnapshotParams, _optional(params, "before", "limit"))
-            )
-        if method == "trajectory.locate":
-            return await self._locate_wire(participant_id, _required_string(params, "record_id"))
-        if method == "trajectory.search":
-            return await self._search_wire(
-                participant_id,
-                _required_string(params, "query"),
-                **cast(_SearchParams, _optional(params, "limit")),
-            )
-        if method == "trajectory.close":
-            return await self._release_wire(params.get("stream_id"))
-        raise TypeError(f"unsupported trajectory query method {method!r}")
+        async with self._request_lock:
+            participant_id = _participant_id(params)
+            if method == "trajectory.snapshot":
+                return await self._snapshot_wire(
+                    participant_id, **cast(_SnapshotParams, _optional(params, "before", "limit"))
+                )
+            if method == "trajectory.locate":
+                return await self._locate_wire(
+                    participant_id, _required_string(params, "record_id")
+                )
+            if method == "trajectory.search":
+                return await self._search_wire(
+                    participant_id,
+                    _required_string(params, "query"),
+                    **cast(_SearchParams, _optional(params, "limit")),
+                )
+            if method == "trajectory.close":
+                return await self._release_wire(params.get("stream_id"))
+            raise TypeError(f"unsupported trajectory query method {method!r}")
 
     async def snapshot(
         self, participant_id: str, *, limit: int, before: str | None = None
@@ -64,52 +68,61 @@ class TrajectoryQueryAdapter:
         options: _SnapshotParams = {"limit": limit}
         if before is not None:
             options["before"] = before
-        return decode_page(await self._snapshot_wire(participant_id, **options))
+        async with self._request_lock:
+            wire = await self._snapshot_wire(participant_id, **options)
+        return decode_page(wire)
 
     async def locate(self, participant_id: str, record_id: str) -> TrajectoryLocation:
-        return decode_location(await self._locate_wire(participant_id, record_id))
+        async with self._request_lock:
+            wire = await self._locate_wire(participant_id, record_id)
+        return decode_location(wire)
 
     async def search(
         self, participant_id: str, query: str, *, limit: int
     ) -> TrajectorySearchResult:
-        return decode_search_result(await self._search_wire(participant_id, query, limit=limit))
+        async with self._request_lock:
+            wire = await self._search_wire(participant_id, query, limit=limit)
+        return decode_search_result(wire)
 
     async def release(self, participant_id: str, stream_id: str | None = None) -> None:
-        await self._release_wire(stream_id)
+        async with self._request_lock:
+            _required_string({"id": participant_id}, "id")
+            await self._release_wire(stream_id)
 
     async def _snapshot_wire(
         self, participant_id: str, **options: Unpack[_SnapshotParams]
     ) -> object:
-        async with self._request_lock:
-            result = await self._client.trajectory.snapshot(participant_id, **options)
-            return _plain_json(result.value)
+        participant_id = _required_string({"id": participant_id}, "id")
+        result = await self._client.trajectory.snapshot(participant_id, **options)
+        return _plain_json(result.value)
 
     async def _locate_wire(self, participant_id: str, record_id: str) -> object:
-        async with self._request_lock:
-            result = await self._client.trajectory.locate(participant_id, record_id)
-            return _plain_json(result.value)
+        participant_id = _required_string({"id": participant_id}, "id")
+        record_id = _required_string({"record_id": record_id}, "record_id")
+        result = await self._client.trajectory.locate(participant_id, record_id)
+        return _plain_json(result.value)
 
     async def _search_wire(
         self, participant_id: str, query: str, **options: Unpack[_SearchParams]
     ) -> object:
-        async with self._request_lock:
-            result = await self._client.trajectory.search(participant_id, query, **options)
-            page = result.value
-            return _plain_json({**dict(page.extra), "records": list(page.items)})
+        participant_id = _required_string({"id": participant_id}, "id")
+        query = _required_string({"query": query}, "query")
+        result = await self._client.trajectory.search(participant_id, query, **options)
+        page = result.value
+        return _plain_json({**dict(page.extra), "records": list(page.items)})
 
     async def _release_wire(self, stream_id: object) -> object:
         if stream_id is None:
             return {"released": False}
         if not isinstance(stream_id, str) or not stream_id:
             raise TypeError("trajectory stream_id must be a non-empty string")
-        async with self._request_lock:
-            return (await self._client.trajectory.close(stream_id)).value
+        return (await self._client.trajectory.close(stream_id)).value
 
     async def close(self) -> None:
         """The owning Régie app closes the shared frontend client."""
 
 
-class TrajectoryFollowAdapter:
+class TrajectoryFollowAdapter(TypedTrajectoryFollow):
     """Route long polls through the SDK's dedicated trajectory lane."""
 
     def __init__(self, client: FrontendClient) -> None:
@@ -134,6 +147,8 @@ class TrajectoryFollowAdapter:
     async def _follow_wire(
         self, stream_id: str, cursor: str, **options: Unpack[_FollowParams]
     ) -> object:
+        stream_id = _required_string({"stream_id": stream_id}, "stream_id")
+        cursor = _required_string({"after": cursor}, "after")
         result = await self._client.trajectory.follow(stream_id, cursor, **options)
         return _plain_json(result.value)
 

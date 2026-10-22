@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast
 
 from regie.trajectory.rich.models import (
     TrajectoryDelta,
@@ -17,7 +17,6 @@ from regie.trajectory.rich.models import (
 )
 
 
-@runtime_checkable
 class TrajectoryQueryClient(Protocol):
     async def snapshot(
         self, participant_id: str, *, limit: int, before: str | None = None
@@ -32,11 +31,18 @@ class TrajectoryQueryClient(Protocol):
     async def release(self, participant_id: str, stream_id: str | None = None) -> None: ...
 
 
-@runtime_checkable
 class TrajectoryFollowClient(Protocol):
     async def follow(
         self, participant_id: str, stream_id: str, after: str, *, wait: float, limit: int
     ) -> TrajectoryDelta: ...
+
+
+class TypedTrajectoryQuery:
+    """Nominal opt-in for clients implementing the typed query protocol."""
+
+
+class TypedTrajectoryFollow:
+    """Nominal opt-in for clients implementing the typed follow protocol."""
 
 
 async def _invoke(client: object, method: str, **params: object) -> object:
@@ -107,8 +113,12 @@ class LegacyFollowClient:
 
 
 def query_client(client: object) -> TrajectoryQueryClient:
-    return client if isinstance(client, TrajectoryQueryClient) else LegacyQueryClient(client)
+    if TypedTrajectoryQuery in type(client).__mro__:
+        return cast(TrajectoryQueryClient, client)
+    return LegacyQueryClient(client)
 
 
 def follow_client(client: object) -> TrajectoryFollowClient:
-    return client if isinstance(client, TrajectoryFollowClient) else LegacyFollowClient(client)
+    if TypedTrajectoryFollow in type(client).__mro__:
+        return cast(TrajectoryFollowClient, client)
+    return LegacyFollowClient(client)

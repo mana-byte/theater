@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import MagicMock
 
 import pytest
+from regie.trajectory.rich.clients import (
+    LegacyFollowClient,
+    LegacyQueryClient,
+    follow_client,
+    query_client,
+)
 from regie.trajectory.rich.controller import TrajectoryController
 from regie.trajectory.rich.state import TrajectoryStateStore
 
@@ -95,6 +102,47 @@ def test_controller_rejects_identical_clients_before_adapting() -> None:
 
     with pytest.raises(ValueError, match="must be distinct"):
         TrajectoryController(client, client)
+
+
+def test_dynamic_mocks_do_not_opt_in_to_typed_clients() -> None:
+    mock = MagicMock()
+    assert isinstance(query_client(mock), LegacyQueryClient)
+    assert isinstance(follow_client(mock), LegacyFollowClient)
+
+
+@pytest.mark.asyncio
+async def test_generic_call_precedes_conflicting_named_methods() -> None:
+    class Query(FakeClient):
+        def snapshot(self, *args: object, **kwargs: object) -> None:
+            pytest.fail("typed snapshot must not be selected")
+
+        locate = search = release = snapshot
+
+    class Follow(FakeClient):
+        def follow(self, *args: object, **kwargs: object) -> None:
+            pytest.fail("typed follow must not be selected")
+
+    query = Query(lambda _method, _params: page("p1", "record"))
+    seen = asyncio.Event()
+    follow = Follow(
+        lambda _method, _params: {
+            "stream_id": "stream-p1",
+            "panel_state": {"state": "waiting", "participant_state": "dead"},
+        }
+    )
+    controller = TrajectoryController(query, follow, follow_wait=0)
+    controller.subscribe(
+        lambda state: (
+            seen.set() if state.panel.participant_state is TrajectoryParticipantState.DEAD else None
+        )
+    )
+
+    assert await controller.open("p1") is not None
+    await seen.wait()
+    await controller.close()
+
+    assert query.calls[0][0] == "trajectory.snapshot"
+    assert follow.calls[0][0] == "trajectory.follow"
 
 
 @pytest.mark.asyncio
