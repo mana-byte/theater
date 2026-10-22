@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
+from theater.daemon.harness_runtime.exact_stop import (
+    BackendAdoptionFailed,
+    BackendTeardownFailed,
+    persisted_backend_identity,
+    stop_exact_backend,
+)
 from theater.daemon.spawning.frontend import close_frontend_runtime, is_frontend_binding
 from theater.models import Status
 
@@ -39,7 +45,8 @@ async def teardown_participant_runtime(
             "queue cancellation for %s failed; backend teardown continues",
             participant_id,
         )
-    if binding.backend_pid is None or binding.backend_started_at is None:
+    identity = persisted_backend_identity(binding.backend_pid, binding.backend_started_at)
+    if identity is None:
         logger.warning(
             "cannot terminate the backend of %s: no verified process identity was "
             "ever persisted, so no signal may be sent and no retirement may "
@@ -48,33 +55,26 @@ async def teardown_participant_runtime(
             participant_id,
         )
         return False
-    if daemon.runtime_manager.backend(participant_id) is None:
-        try:
-            await daemon.runtime_manager.adopt_backend(
-                participant_id,
-                backend_generation=binding.backend_generation,
-                pid=binding.backend_pid,
-                started_at=binding.backend_started_at,
-                endpoint=cast(str, binding.endpoint),
-            )
-        except BackendIdentityMismatch:
-            # The persisted identity is the authority: a pid that no longer
-            # verifies is a backend that exited, positively — safe.
-            _unregister_live(daemon, participant_id)
-            daemon.store.delete_runtime_binding(participant_id)
-            return True
-        except Exception:
-            logger.exception(
-                "could not adopt the persisted backend of %s for teardown; "
-                "the binding is kept and retirement must not proceed",
-                participant_id,
-            )
-            return False
     try:
-        await daemon.runtime_manager.teardown(
-            participant_id, backend_generation=binding.backend_generation
+        await stop_exact_backend(
+            daemon.runtime_manager,
+            participant_id,
+            backend_generation=binding.backend_generation,
+            identity=identity,
+            endpoint=binding.endpoint,
         )
-    except Exception:
+    except BackendIdentityMismatch:
+        # The persisted identity is the authority: a pid that no longer
+        # verifies is a backend that exited, positively — safe.
+        pass
+    except BackendAdoptionFailed:
+        logger.exception(
+            "could not adopt the persisted backend of %s for teardown; "
+            "the binding is kept and retirement must not proceed",
+            participant_id,
+        )
+        return False
+    except BackendTeardownFailed:
         logger.exception(
             "backend teardown for %s failed; the binding is kept and "
             "retirement must not proceed — a backend may still be running",
