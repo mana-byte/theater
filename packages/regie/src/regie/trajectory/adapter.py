@@ -4,8 +4,22 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from typing import TypedDict, cast
 
 from theater.frontend import FrontendClient
+
+
+class _SnapshotParams(TypedDict, total=False):
+    before: str | None
+    limit: int
+
+
+class _SearchParams(TypedDict, total=False):
+    limit: int
+
+
+class _FollowParams(TypedDict, total=False):
+    wait_seconds: float
 
 
 class TrajectoryQueryAdapter:
@@ -25,7 +39,7 @@ class TrajectoryQueryAdapter:
         if method == "trajectory.snapshot":
             snapshot_result = await self._client.trajectory.snapshot(
                 participant_id,
-                **_optional(params, "before", "limit"),
+                **cast(_SnapshotParams, _optional(params, "before", "limit")),
             )
             return _plain_json(snapshot_result.value)
         if method == "trajectory.locate":
@@ -38,7 +52,7 @@ class TrajectoryQueryAdapter:
             search_result = await self._client.trajectory.search(
                 participant_id,
                 query,
-                **_optional(params, "limit"),
+                **cast(_SearchParams, _optional(params, "limit")),
             )
             page = search_result.value
             return _plain_json(
@@ -74,7 +88,7 @@ class TrajectoryFollowAdapter:
         result = await self._client.trajectory.follow(
             stream_id,
             cursor,
-            **_renamed_optional(params, {"wait": "wait_seconds"}),
+            **cast(_FollowParams, _renamed_optional(params, {"wait": "wait_seconds"})),
         )
         return _plain_json(result.value)
 

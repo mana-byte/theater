@@ -66,6 +66,15 @@ def _is_codex(comm: str) -> bool:
     return comm.rsplit("/", 1)[-1] == CODEX_BINARY
 
 
+def _rollout_session_id(path: Path) -> str | None:
+    found = _STEM.match(path.stem)
+    return found.group(1) if found else None
+
+
+def _is_rollout_jsonl(path: Path) -> bool:
+    return path.suffix == ".jsonl" and _rollout_session_id(path) is not None
+
+
 class CodexIdentityMixin:
     if TYPE_CHECKING:
         root: Path
@@ -265,7 +274,7 @@ class CodexIdentityMixin:
         return admitted
 
     def _is_rollout_shape(self, path: Path, *, root: Path | None = None) -> bool:
-        if path.suffix != ".jsonl" or _STEM.match(path.stem) is None:
+        if not _is_rollout_jsonl(path):
             return False
         try:
             relative = path.resolve().relative_to((root or self.root).resolve())
@@ -336,7 +345,7 @@ class CodexIdentityMixin:
         )
 
     def _is_rollout(self, path: Path, root: Path) -> bool:
-        if path.suffix != ".jsonl" or _STEM.match(path.stem) is None:
+        if not _is_rollout_jsonl(path):
             return False
         return _resolve(path).is_relative_to(root)
 
@@ -368,5 +377,4 @@ class CodexIdentityMixin:
         return metadata
 
     def session_id(self, transcript: Path) -> str | None:
-        found = _STEM.match(transcript.stem)
-        return found.group(1) if found else None
+        return _rollout_session_id(transcript)

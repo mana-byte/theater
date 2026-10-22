@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from theater.daemon.controls._common import (
     ACTION_INTERRUPT,
@@ -37,7 +37,7 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
     RuntimeCapability,
 )
-from theater.models import BadRequest, Job, JobState
+from theater.models import BadRequest, Job, JobState, JournalEventRecord
 
 logger = logging.getLogger("theater.daemon.controls")
 
@@ -355,9 +355,9 @@ class InterruptControls(ControlHost):
         *,
         unit,
         timestamp: float,
-    ) -> tuple[Job, ...]:
+    ) -> tuple[tuple[Job, JournalEventRecord], ...]:
         """Cancel only undispatched followups inside the ownership write unit."""
-        cancelled: list[Job] = []
+        cancelled: list[tuple[Job, JournalEventRecord]] = []
         for participant_id in participant_ids:
             operations = self._store.queued_control_operations(
                 participant_id, connection=unit.connection
@@ -384,9 +384,11 @@ class InterruptControls(ControlHost):
                 job = self._store.get_job(operation.job_handle, connection=unit.connection)
                 if job is None or job.state != JobState.RUNNING:
                     continue
-                finished = replace(
-                    job,
-                    state=JobState.KILLED.value,
+                outcome = self._jobs.write_direct_terminal_in_unit(
+                    self._store,
+                    unit,
+                    job=job,
+                    state=JobState.KILLED,
                     result=(
                         "Queued followup was cancelled before dispatch because control "
                         "ownership changed. Queue it again under the new owner if needed."
@@ -394,25 +396,12 @@ class InterruptControls(ControlHost):
                     error_code=CONTROL_TRANSFERRED_ERROR_CODE,
                     finished_at=timestamp,
                 )
-                self._store.finish_job(
-                    job.handle,
-                    state=finished.state,
-                    result=finished.result,
-                    error_code=finished.error_code,
-                    finished_at=finished.finished_at,
-                    response_format=finished.response_format,
-                    structured_result=finished.structured_result,
-                    structured_status=finished.structured_status,
-                    connection=unit.connection,
-                )
+                if outcome is None:
+                    continue
                 unit.after_commit(
-                    lambda handle=job.handle: self._jobs.finish(
-                        handle,
-                        state=JobState.KILLED,
-                        error_code=CONTROL_TRANSFERRED_ERROR_CODE,
-                    )
+                    lambda handle=job.handle: self._jobs.wake_committed_direct_finish(handle)
                 )
-                cancelled.append(finished)
+                cancelled.append(outcome)
         return tuple(cancelled)
 
     async def _cancel_queued_followups(self, participant_id: str) -> tuple[str, ...]:

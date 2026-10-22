@@ -6,8 +6,10 @@ import asyncio
 import sys
 
 import pytest
+from sqlalchemy import update
 
 from theater import paths
+from theater.daemon.schema import jobs as jobs_table
 from theater.harness import HARNESSES
 from theater.protocol import RemoteError
 
@@ -389,7 +391,26 @@ async def test_promptless_launch_failure_leaves_crashed_job(
     so a launch failure leaves the job CRASHED with spawn_failed.
     """
 
+    wakes: list[asyncio.Event] = []
+    listeners: list[str] = []
+    daemon.jobs.add_terminal_listener(listeners.append)
+    finished_bus_before = [row for row in daemon.store.bus_tail() if row["kind"] == "job.finished"]
+
     async def reject(_provider_id, generation, _method, params):
+        handle = params["participant_id"]
+        with daemon.store.write_unit() as unit:
+            unit.connection.execute(
+                update(jobs_table)
+                .where(jobs_table.c.handle == handle)
+                .values(
+                    result="prior result",
+                    response_format="json",
+                    structured_result='{"answer":"old"}',
+                    structured_status="parsed",
+                )
+            )
+        daemon.jobs.track(handle)
+        wakes.append(daemon.jobs._events[handle])
         return {
             "operation_id": params["operation_id"],
             "provider_generation": generation,
@@ -417,3 +438,13 @@ async def test_promptless_launch_failure_leaves_crashed_job(
     assert job is not None
     assert job.state == "crashed", "promptless launch failure must CRASH the job, not DONE"
     assert job.error_code == "provider_busy"
+    assert (job.result, job.response_format, job.structured_result, job.structured_status) == (
+        "prior result",
+        "json",
+        '{"answer":"old"}',
+        "parsed",
+    )
+    assert len(wakes) == 1 and wakes[0].is_set() and listeners == []
+    assert [row for row in daemon.store.bus_tail() if row["kind"] == "job.finished"] == (
+        finished_bus_before
+    )

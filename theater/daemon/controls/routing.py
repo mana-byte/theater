@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
+from theater.daemon.runtime.launch_policy import decode_launch_policy
 from theater.daemon.runtime.wiring import runtime_manifest_of
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import (
@@ -266,14 +266,11 @@ def manifest_control_routes(manifest: RuntimeManifest) -> dict[str, str | None]:
 
 
 def _pinned_route(policy: str | None, capability: RuntimeCapability) -> ControlRoute | None:
-    try:
-        value = json.loads(policy) if policy else {}
-    except ValueError:
-        value = {}
-    if not isinstance(value, Mapping) or "control_routes" not in value:
+    facts = decode_launch_policy(policy)
+    if not facts.control_routes_present:
         return None  # Bindings created before per-capability routing.
-    routes = value["control_routes"]
-    transport = routes.get(capability.value) if isinstance(routes, Mapping) else None
+    routes = facts.control_routes
+    transport = routes.get(capability.value) if routes is not None else None
     if transport == ControlTransport.NATIVE_RUNTIME.value:
         return ControlRoute(capability, ControlTransport.NATIVE_RUNTIME, native_wiring=True)
     if transport in {

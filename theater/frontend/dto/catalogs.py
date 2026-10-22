@@ -90,7 +90,7 @@ class NativeCompatibility:
             else MappingProxyType({})
         )
         return cls(
-            status=string_value(data.get("status"), "native compatibility.status") or "",
+            status=string_value(data.get("status"), "native compatibility.status"),
             installed_version=string_value(
                 data.get("installed_version"),
                 "native compatibility.installed_version",
@@ -188,16 +188,15 @@ class HarnessCatalogEntry:
             None
             if raw_approvals is None
             else tuple(
-                string_value(item, "harness catalog entry.approvals[]") or ""
-                for item in raw_approvals
+                string_value(item, "harness catalog entry.approvals[]") for item in raw_approvals
             )
         )
         return cls(
-            name=string_value(data.get("name"), "harness catalog entry.name") or "",
+            name=string_value(data.get("name"), "harness catalog entry.name"),
             installed=boolean_value(data["installed"], "harness catalog entry.installed"),
             compatible=boolean_value(data["compatible"], "harness catalog entry.compatible"),
             supported_wiring=tuple(
-                string_value(item, "harness catalog entry.supported_wiring[]") or ""
+                string_value(item, "harness catalog entry.supported_wiring[]")
                 for item in raw_wiring
             ),
             requires_terminal=boolean_value(
@@ -214,8 +213,7 @@ class HarnessCatalogEntry:
             approvals=approvals,
             binary=string_value(data.get("binary"), "harness catalog entry.binary", optional=True),
             binaries=tuple(
-                string_value(item, "harness catalog entry.binaries[]") or ""
-                for item in raw_binaries
+                string_value(item, "harness catalog entry.binaries[]") for item in raw_binaries
             ),
             icon=string_value(data.get("icon"), "harness catalog entry.icon", optional=True),
             native_compatibility=(

@@ -29,7 +29,7 @@ from theater.harness.contracts.source import (
 )
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.transcript.attachment import attach_point
-from theater.harness.transcript.history import HistoryPageError, HistoryReader
+from theater.harness.transcript.history import HistoryPageError, HistoryParseContext, HistoryReader
 from theater.models import Status
 from theater.provenance import (
     TranscriptProvenance,
@@ -566,11 +566,19 @@ class TranscriptSource(Source):
             return []
         return events
 
-    def _history_reader(self) -> HistoryReader:
-        return HistoryReader(
+    def _history_parse_context(self) -> HistoryParseContext:
+        """Select the parser and seed hook for one bounded history read."""
+        return HistoryParseContext(
             parse_record=lambda line, index: self._parse_record(line, index, clip_text=False),
-            decorate_parsed=self._decorate_parsed,
             prepare_history_parse=self._prepare_history_parse,
+        )
+
+    def _history_reader(self) -> HistoryReader:
+        context = self._history_parse_context()
+        return HistoryReader(
+            parse_record=context.parse_record,
+            decorate_parsed=self._decorate_parsed,
+            prepare_history_parse=context.prepare_history_parse,
         )
 
     def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:

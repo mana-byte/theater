@@ -208,7 +208,7 @@ def test_vibe_history_seed_restores_turn_before_page() -> None:
 
 
 def test_vibe_history_page_seeds_turn_without_mutating_live_parser(
-    tmp_path: Path, workdir: Path
+    tmp_path: Path, workdir: Path, monkeypatch
 ) -> None:
     root = tmp_path / "sessions"
     session = root / "session_20260827_120000_12345678"
@@ -241,6 +241,13 @@ def test_vibe_history_page_seeds_turn_without_mutating_live_parser(
     assert {fact.turn_id for fact in page.trajectory} == {"turn-1"}
     assert source._observer is not None
     assert source._observer.current_turn_id is None
+
+    def unreadable_seed(self, fh, start):
+        raise OSError("seed read failed")
+
+    monkeypatch.setattr(VibeObserver, "_seed_history_context", unreadable_seed)
+    failed = asyncio.run(source.history_page(limit=2))
+    assert failed.error_code == "transcript_source_unavailable"
 
 
 def test_vibe_live_attachment_seeds_an_in_progress_turn(tmp_path: Path, workdir: Path) -> None:

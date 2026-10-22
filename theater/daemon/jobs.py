@@ -500,6 +500,10 @@ class JobManager:
         """Count of jobs whose persisted state is ``running``."""
         return self.store.active_job_count()
 
+    def live_handles(self) -> frozenset[str]:
+        """Snapshot handles whose local waiters still protect them from collection."""
+        return frozenset(self._events)
+
     @staticmethod
     def write_direct_terminal_in_unit(
         store: Store,
@@ -512,11 +516,35 @@ class JobManager:
         finished_at: float,
     ) -> tuple[Job, JournalEventRecord] | None:
         """Write direct terminal fields; caller owns the journal group and wakeup."""
-        raise NotImplementedError
+        if job.state != JobState.RUNNING:
+            return None
+        changed = unit.connection.execute(
+            update(jobs_table)
+            .where(jobs_table.c.handle == job.handle, jobs_table.c.state == JobState.RUNNING.value)
+            .values(
+                state=state.value,
+                result=result,
+                error_code=error_code,
+                finished_at=finished_at,
+            )
+        )
+        if changed.rowcount != 1:
+            return None
+        finished = store.get_job(job.handle, connection=unit.connection)
+        assert finished is not None
+        return finished, job_event(finished, revision=0, recorded_at=finished_at)
 
     def wake_committed_direct_finish(self, handle: str) -> None:
         """Wake a committed direct finish without terminal listeners or bus writes."""
-        raise NotImplementedError
+        if self.store.get_job(handle) is None:
+            return
+        self._wake_direct_finish(handle)
+
+    def _wake_direct_finish(self, handle: str) -> None:
+        event = self._events.pop(handle, None)
+        if event:
+            event.set()
+        self._accumulators.pop(handle, None)
 
     def finish(
         self,
@@ -544,10 +572,7 @@ class JobManager:
             return None
         if job.state != JobState.RUNNING:
             # Already finished; event may linger after a daemon restart — set it so await wakes.
-            event = self._events.pop(handle, None)
-            if event:
-                event.set()
-            self._accumulators.pop(handle, None)
+            self._wake_direct_finish(handle)
             return job
 
         acc = self._accumulators.get(handle)

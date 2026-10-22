@@ -101,10 +101,6 @@ class JobStore(StoreHost):
     ) -> Job | None:
         return self._jobs.first_send_between(caller_id, target_id, after=after, until=until)
 
-    def max_send_seq(self) -> int:
-        """Highest numeric suffix across every send handle, 0 if none."""
-        return self._jobs.max_send_seq()
-
     def spawn_prompts_for_targets(self, ids: Sequence[str]) -> dict[str, str | None]:
         return self._jobs.spawn_prompts_for_targets(list(ids))
 

@@ -206,7 +206,6 @@ class Daemon:
             self._sock_id: tuple[int, int] | None = None
             self._stopping = asyncio.Event()
             self._conns: set[asyncio.Task] = set()
-            self._send_seq = 0
         except BaseException:
             if _owned_store is not None:
                 with contextlib.suppress(Exception):
@@ -408,12 +407,6 @@ class Daemon:
 
     def _set_otel_receiver_port(self, port: int) -> None:
         self.store.set_meta(CHANNEL_OTEL_RECEIVER_PORT_META_KEY, str(port))
-
-    def _next_send_seq(self) -> int:
-        return lifecycle.next_send_seq(self)
-
-    def _init_send_seq(self) -> None:
-        lifecycle.init_send_seq(self)
 
     # ---- lifecycle -----------------------------------------------------
 

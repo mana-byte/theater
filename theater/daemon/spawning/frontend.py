@@ -9,6 +9,7 @@ from typing import Any
 
 from theater import timing
 from theater.daemon.observation.live import LiveRegistration
+from theater.daemon.runtime.launch_policy import decode_launch_policy
 from theater.daemon.spawning.runtime_identity import (
     bind_runtime_identity,
     validate_runtime_binding,
@@ -270,7 +271,7 @@ async def restore_frontend_listener(daemon, binding, participant: Participant) -
     )
     if credential is None or credential.harness != binding.harness:
         return False
-    policy = _launch_policy(binding.launch_policy)
+    policy = decode_launch_policy(binding.launch_policy).fields
     await start_frontend_listener(
         host=daemon.frontend_runtime_host,
         runtime_manager=daemon.runtime_manager,
@@ -301,25 +302,15 @@ async def close_frontend_runtime(daemon, participant_id: str) -> None:
 
 
 def is_frontend_binding(binding) -> bool:
-    policy = _launch_policy(binding.launch_policy)
-    if "runtime_host" in policy:
-        return policy["runtime_host"] == RuntimeHost.FRONTEND.value
+    policy = decode_launch_policy(binding.launch_policy)
+    if policy.runtime_host_present:
+        return policy.fields["runtime_host"] == RuntimeHost.FRONTEND.value
     try:
         harness = get_harness(binding.harness)
     except Exception:
         return False
     runtime = getattr(harness, "runtime", None)
     return runtime is not None and runtime.host is RuntimeHost.FRONTEND
-
-
-def _launch_policy(raw: str | None) -> dict[str, object]:
-    import json
-
-    try:
-        value = json.loads(raw) if raw else {}
-    except ValueError:
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 def _optional_text(values: Mapping[str, object], key: str) -> str | None:
