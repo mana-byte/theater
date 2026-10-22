@@ -1,4 +1,4 @@
-"""Ordinary send: native, provider, and legacy prompt delivery."""
+"""Ordinary send over native and provider routes."""
 
 from __future__ import annotations
 
@@ -6,10 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
-from theater.constants.refusals import NEXT_BUSY, NEXT_SELF_SEND, NEXT_SEND_BUSY
+from theater.constants.refusals import NEXT_SELF_SEND, NEXT_SEND_BUSY
 from theater.daemon.controls._common import (
     ACTION_SEND,
-    CONTROL_DELIVERY_ACCEPTED,
     CONTROL_DELIVERY_QUEUED,
     NativeControlPreparation,
     _delivery_label,
@@ -23,7 +22,6 @@ from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
     ControlTransport,
-    DeliveryResult,
     HarnessRuntime,
     RuntimeCapability,
     RuntimeSnapshot,
@@ -31,7 +29,6 @@ from theater.harness.contracts.runtime import (
 from theater.models import (
     BadRequest,
     Busy,
-    ControlOwnerKind,
     Job,
     JobState,
     NotAddressable,
@@ -113,29 +110,6 @@ class SendControls(ControlHost):
             route, initial_dispatch = await self._prepare_send(request)
             if route.is_provider:
                 return await self._send_provider(request, route, initial_dispatch=initial_dispatch)
-            if route.is_legacy:
-                if request.job_handle is not None:
-                    raise BadRequest(
-                        f"reusing job {request.job_handle!r} for the initial dispatch of "
-                        f"participant {participant_id!r} requires native runtime "
-                        "wiring; its harness has no runtime, so the prompt can only "
-                        "be sent as an ordinary send"
-                    )
-                legacy_job = await self._send_legacy(
-                    participant_id,
-                    caller_id=request.caller_id,
-                    prompt=request.prompt,
-                    response_format=request.response_format,
-                    operation_id=request.operation_id,
-                    on_reserved=request.on_reserved,
-                    actor_client_id=request.actor_client_id,
-                    actor_participant_id=request.actor_participant_id,
-                )
-                return (
-                    legacy_job,
-                    CONTROL_DELIVERY_ACCEPTED,
-                    ControlTransport.TERMINAL_FALLBACK.value,
-                )
             if not route.is_native:
                 raise NotAddressable(
                     f"participant {participant_id!r} does not offer a transport for sending"
@@ -454,106 +428,6 @@ class SendControls(ControlHost):
                 "during control preparation"
             )
         return route
-
-    async def _send_legacy(
-        self,
-        participant_id: str,
-        *,
-        caller_id: str,
-        prompt: str,
-        response_format: str | None,
-        operation_id: str | None = None,
-        on_reserved: Callable[[str, str | None], None] | None = None,
-        actor_client_id: str | None = None,
-        actor_participant_id: str | None = None,
-    ) -> Job:
-        """Legacy transport: the same durable receipt transitions, no runtime."""
-        await self._gates.require_absent(participant_id)
-        await self._gates.legacy_copy_mode_check(participant_id)
-        # Recheck after the awaited copy-mode query, before any durable effect.
-        await self._gates.require_absent(participant_id)
-        # Keep FIFO refusal ordering: a queued followup refuses the send before any job row or
-        # typing, so it stays behind the queue; queue dispatch skips _send_legacy, so no self-block.
-        queued = self._store.queued_control_operation_count(participant_id)
-        if queued:
-            raise Busy(
-                f"participant {participant_id!r} has {queued} queued followup(s); "
-                "an ordinary send cannot jump ahead of them — await the queued "
-                "handles or send again with if_busy omitted to queue behind them",
-                details={"next": NEXT_SEND_BUSY},
-            )
-        # The busy/claim check mutates claim rows; it runs after all awaited
-        # prep, its synchronous body adjacent to reservation and delivery.
-        participant = self._store.get_participant(participant_id)
-        if participant is not None and participant.status is Status.WORKING:
-            message = f"participant {participant_id!r} is working; not injecting a new prompt."
-            if (
-                participant.parent_id == caller_id
-                and participant.control_owner_kind in (None, ControlOwnerKind.PARTICIPANT)
-                and participant.control_owner_id in (None, caller_id)
-            ):
-                next_step = f"{NEXT_SEND_BUSY}; or {NEXT_BUSY}"
-            else:
-                next_step = NEXT_SEND_BUSY
-            raise Busy(f"{message} {next_step}", details={"next": next_step})
-        await self._gates.legacy_busy_check(participant_id)
-        job = self._create_send_job(
-            participant_id,
-            caller_id=caller_id,
-            prompt=prompt,
-            response_format=response_format,
-            actor_client_id=actor_client_id,
-            actor_participant_id=actor_participant_id,
-        )
-        operation_id = operation_id or self._mint_operation_id(participant_id, ControlKind.SEND)
-        self._reserve(
-            operation_id,
-            participant_id=participant_id,
-            kind=ControlKind.SEND,
-            transport=ControlTransport.TERMINAL_FALLBACK,
-            phase=ControlDeliveryPhase.RESERVED,
-            job_handle=job.handle,
-        )
-        self._notify_reserved(on_reserved, operation_id, job.handle)
-        self._store.mark_control_operation_dispatched(operation_id, updated_at=self._clock())
-        try:
-            await self._gates.legacy_deliver(participant_id, prompt)
-        except Exception as exc:
-            # Nothing was delivered, so nothing will ever answer.
-            self._store.settle_control_operation(
-                operation_id,
-                result=DeliveryResult.REJECTED,
-                error_code="send_failed",
-                error=str(exc),
-                updated_at=self._clock(),
-            )
-            self._jobs.finish(
-                job.handle,
-                state=JobState.CRASHED,
-                result=str(exc),
-                error_code="send_failed",
-            )
-            raise
-        self._store.settle_control_operation(
-            operation_id, result=DeliveryResult.ACCEPTED, updated_at=self._clock()
-        )
-        self._record_legacy_send(participant_id, caller_id=caller_id, job=job, prompt=prompt)
-        return self._require_job(job.handle)
-
-    def _record_legacy_send(
-        self,
-        participant_id: str,
-        *,
-        caller_id: str,
-        job: Job,
-        prompt: str,
-    ) -> None:
-        self._store.bus_append(
-            "agent.send",
-            from_id=caller_id,
-            to_id=participant_id,
-            payload={"handle": job.handle, "prompt": prompt[:200]},
-        )
 
     def _disconnected_native_refusal(self, participant_id: str, control: str) -> StaleTarget:
         """A persisted native binding whose runtime is gone: fail closed."""

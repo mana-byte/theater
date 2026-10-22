@@ -172,14 +172,11 @@ def minimal_gates() -> ControlGates:
         require_absent=noop,
         check_absent=lambda participant_id: None,
         send_preflight=noop,
-        legacy_copy_mode_check=noop,
-        legacy_busy_check=noop,
         send_claim_now=now,
         send_claim_ttl=lambda: SEND_CLAIM_TTL_SECONDS,
         check_prompt=lambda prompt: None,
         check_settings=lambda model, effort: None,
         cwd_for=lambda participant_id: "/tmp",
-        legacy_deliver=noop,
     )
 
 

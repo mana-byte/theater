@@ -55,22 +55,16 @@ class PresenceGates:
             raise HumanPresent(f"human focus protects {participant_id!r}")
 
     def gates(self) -> ControlGates:
-        async def noop(*args, **kwargs) -> None:
-            return None
-
         return ControlGates(
             authorize=lambda *args: None,
             require_absent=self.require_absent,
             check_absent=self.check_absent,
             send_preflight=self._send_preflight,
-            legacy_copy_mode_check=noop,
-            legacy_busy_check=noop,
             send_claim_now=now,
             send_claim_ttl=lambda: SEND_CLAIM_TTL_SECONDS,
             check_prompt=lambda prompt: None,
             check_settings=lambda model, effort: None,
             cwd_for=lambda participant_id: None,
-            legacy_deliver=noop,
         )
 
     async def _send_preflight(self, participant_id: str) -> None:

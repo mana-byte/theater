@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 from tests.support.builders import operator_context
 from tests.support.provider_controls import online, provider_target
 from tests.support.provider_native import assert_result_valid
+from tests.support.queued_followups import provider_terminal_op
 from tests.support.waiting import settle_operations
 from theater.daemon.frontend.control_handlers import (
     _error,
@@ -26,7 +27,9 @@ from theater.daemon.terminals import CallbackOutcomeUnknown
 from theater.frontend.schemas import validate_callback_request
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
+    ControlKind,
     ControlTransport,
+    DeliveryResult,
 )
 from theater.models import (
     BadRequest,
@@ -158,6 +161,56 @@ async def test_second_provider_send_is_refused_while_first_job_is_running(
     assert refused.state == PublicOperationState.FAILED.value
     assert refused.error is not None and refused.error["code"] == "busy"
     assert callback_count == 1
+
+
+async def test_historical_unpinned_queue_refuses_after_route_selection(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
+    job = daemon.jobs.create(
+        handle="historical#queue",
+        caller_id="cli",
+        target_id=participant_id,
+        kind="send",
+        prompt="old queued prompt",
+        cwd=None,
+    )
+    operation_id = "historical#queue:followup"
+    daemon.store.reserve_control_operation(
+        provider_terminal_op(
+            operation_id,
+            participant_id,
+            kind=ControlKind.QUEUE_FOLLOWUP,
+            phase=ControlDeliveryPhase.QUEUED,
+            job_handle=job.handle,
+        )
+    )
+
+    async def no_delivery(*_args):
+        pytest.fail("a row without a pinned provider must not use the current provider")
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", no_delivery)
+    absence_checks = 0
+    original_require_absent = daemon.controls._gates.require_absent
+
+    async def require_absent(participant_id: str) -> None:
+        nonlocal absence_checks
+        absence_checks += 1
+        await original_require_absent(participant_id)
+
+    daemon.controls._gates = replace(daemon.controls._gates, require_absent=require_absent)
+    outcome = await daemon.controls.dispatch_queue(participant_id)
+
+    assert outcome.failed == ((job.handle, "not_addressable"),)
+    assert absence_checks == 2
+    control = daemon.store.get_control_operation(operation_id)
+    assert control is not None
+    assert control.transport is ControlTransport.TERMINAL_FALLBACK
+    assert control.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert control.delivery_result is DeliveryResult.REJECTED
+    assert control.error == f"participant {participant_id!r} has no current terminal-provider route"
+    assert daemon.store.get_job(job.handle).state == JobState.CRASHED
 
 
 async def test_pre_reserved_provider_send_rechecks_busy_after_modal_gate(
