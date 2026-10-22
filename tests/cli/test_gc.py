@@ -121,6 +121,28 @@ async def test_gc_rpc_passes_live_handles(client, daemon, terminal_provider):
     assert job.finished_at is None
 
 
+async def test_manual_gc_does_not_wake_handoffs_after_marking_a_running_job(
+    client, daemon, terminal_provider, monkeypatch
+):
+    make_participant(daemon.store, pid="old-target")
+    make_job(
+        daemon.store,
+        handle="stale-source",
+        target_id="old-target",
+        state=JobState.RUNNING,
+        finished_at=None,
+        created_at=now() - 30 * _DAY,
+    )
+    wakes = []
+    monkeypatch.setattr(daemon.handoff, "wake", lambda: wakes.append("wake"))
+
+    data = await client.call("gc")
+
+    assert data["running_marked"] == 1
+    assert daemon.store.get_job("stale-source").state == JobState.CRASHED
+    assert wakes == []
+
+
 # ---- vacuum=False does not vacuum; vacuum=True does, after sweep
 
 
