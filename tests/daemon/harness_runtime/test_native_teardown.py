@@ -25,6 +25,7 @@ from tests.support.runtime_processes import (
 )
 from theater.daemon.rpc import participants as participants_mod
 from theater.daemon.runtime import wiring as wiring_mod
+from theater.daemon.runtime.recovery import teardown_participant_runtime
 from theater.models import BadRequest, Status, TheaterError
 
 # ---- teardown failure: recoverable state is preserved -------------------------
@@ -99,6 +100,31 @@ async def test_teardown_failure_preserves_the_worktree_terminal_and_binding(
 
 
 # ---- explicit kill and confirmed exit --------------------------------------------
+
+
+async def test_adoption_failure_keeps_native_binding_for_reaper(
+    theater_home, terminal_provider, native_rig, monkeypatch
+):
+    d = await native_daemon(native_rig.io, native_rig.harness, terminal_provider)
+    p = None
+    try:
+        p = await spawn_native(d, spawn_request(prompt=""))
+        binding = d.store.get_runtime_binding(p.id)
+        assert binding is not None and binding.backend_pid is not None
+        monkeypatch.setattr(d.runtime_manager, "backend", lambda _participant_id: None)
+
+        async def refuse_adoption(*_args, **_kwargs):
+            raise RuntimeError("adoption could not verify the backend")
+
+        monkeypatch.setattr(d.runtime_manager, "adopt_backend", refuse_adoption)
+        assert not await teardown_participant_runtime(d, p.id, caller_id="cli")
+        assert d.store.get_runtime_binding(p.id) == binding
+        assert pid_alive(binding.backend_pid)
+        assert d.observer.live.registration_for(p.id) is not None
+    finally:
+        if p is not None:
+            await teardown_backend(d, p.id)
+        await d.aclose()
 
 
 async def test_explicit_kill_terminates_the_backend_before_worktree_cleanup(
