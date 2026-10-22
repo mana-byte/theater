@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 
 from ._assets import read_asset
 
@@ -16,12 +15,8 @@ _QUALIFIED_VERSIONS = ("2.0.17", "2.0.18", "2.0.19", "2.0.20")
 
 
 def render_tui_recovery_v2(plugin_id: str) -> str:
-    values = {
-        "__PLUGIN_ID__": json.dumps(plugin_id),
-        "__QUALIFIED_VERSIONS__": json.dumps(list(_QUALIFIED_VERSIONS)),
-    }
-    return re.sub(
-        r"__(?:PLUGIN_ID|QUALIFIED_VERSIONS)__",
-        lambda match: values[match.group()],
-        read_asset("tui_recovery_v2.js"),
+    return (
+        read_asset("tui_recovery_v2.js")
+        .replace("__PLUGIN_ID__", json.dumps(plugin_id))
+        .replace("__QUALIFIED_VERSIONS__", json.dumps(list(_QUALIFIED_VERSIONS)))
     )

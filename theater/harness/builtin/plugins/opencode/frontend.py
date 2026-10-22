@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -44,15 +43,11 @@ def install_opencode_tui_extension(
 
 
 def render_opencode_tui_plugin(socket_path: str, token_file: Path) -> str:
-    values = {
-        _SOCKET_SENTINEL: json.dumps(socket_path),
-        _TOKEN_SENTINEL: json.dumps(str(token_file)),
-        "__THEATER_INPUT_OBSERVER__": TUI_INPUTS,
-    }
-    return re.sub(
-        r"__THEATER_(?:FRONTEND_SOCKET|FRONTEND_TOKEN|INPUT_OBSERVER)__",
-        lambda match: values[match.group()],
-        read_asset("frontend.js"),
+    return (
+        read_asset("frontend.js")
+        .replace("__THEATER_INPUT_OBSERVER__", TUI_INPUTS)
+        .replace(_SOCKET_SENTINEL, json.dumps(socket_path))
+        .replace(_TOKEN_SENTINEL, json.dumps(str(token_file)))
     )
 
 

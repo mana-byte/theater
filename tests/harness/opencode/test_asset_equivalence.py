@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from theater.harness.builtin.plugins.opencode import (
     frontend_inputs,
     native_plugin,
     native_plugin_v2,
+    tui_recovery_v2,
 )
 
 _PROOF = "0123456789abcdef0123456789abcdef"
@@ -59,12 +61,22 @@ def test_rendered_assets_match_pre_extraction_bytes_and_parse(monkeypatch, tmp_p
         assert result.returncode == 0, f"{name}: {result.stderr}"
 
 
-def test_template_tokens_inside_settings_are_not_expanded(monkeypatch) -> None:
+def test_native_fstring_values_are_not_reexpanded(monkeypatch) -> None:
     monkeypatch.setattr(native_plugin.secrets, "token_hex", lambda _size: _PROOF)
     source = native_plugin.render_native_plugin("__THEATER_TOKEN__", Path("/x/__THEATER_RULES__"))
     assert 'const participantID = "__THEATER_TOKEN__"' in source
     assert 'const tokenPath = "/x/__THEATER_RULES__"' in source
+
+
+def test_frontend_and_recovery_keep_ordered_replacement(monkeypatch) -> None:
+    # Later replacements also rewrite sentinel-shaped text inserted by earlier ones.
+    monkeypatch.setattr(frontend, "TUI_INPUTS", "const inputSocket = __THEATER_FRONTEND_SOCKET__\n")
     frontend_source = frontend.render_opencode_tui_plugin(
         "__THEATER_FRONTEND_TOKEN__", Path("/x/token")
     )
-    assert 'const socketPath = "__THEATER_FRONTEND_TOKEN__"' in frontend_source
+    assert 'const inputSocket = ""/x/token""' in frontend_source
+    assert 'const socketPath = ""/x/token""' in frontend_source
+
+    recovery = tui_recovery_v2.render_tui_recovery_v2("__QUALIFIED_VERSIONS__")
+    qualified = json.dumps(list(tui_recovery_v2._QUALIFIED_VERSIONS))
+    assert f'  id: "{qualified}",' in recovery
