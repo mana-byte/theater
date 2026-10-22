@@ -476,7 +476,7 @@ class Observer(
     async def _handle_rejected_attachment(self, context: _WatchContext, batch: Batch) -> bool:
         async with self._pinned_for(context.pid, batch):  # an attach-time turn end finishes a job
             accepted = self._accept_attachment(
-                context.pid, context.source, batch, completion=context.completion
+                context.pid, context.source, batch, completion=getattr(context, "completion", None)
             )
         if accepted:
             return False
