@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
 from theater.constants.refusals import NEXT_BUSY, NEXT_SELF_SEND, NEXT_SEND_BUSY
 from theater.daemon.controls._common import (
     ACTION_SEND,
@@ -195,7 +196,7 @@ class SendControls(ControlHost):
                 response_format=request.response_format,
             )
         else:
-            await self._gates.legacy_busy_check(participant_id)
+            self._admit_provider_send(participant_id)
             self._reject_provider_send_busy(participant_id, exclude=None)
             # The route and presence can still change during the awaits above. Both are rechecked
             # here with no await before delivery re-checks them, so a refusal never strands a job.
@@ -345,6 +346,34 @@ class SendControls(ControlHost):
             _delivery_label(delivery),
             ControlTransport.NATIVE_RUNTIME.value,
         )
+
+    def _admit_provider_send(self, participant_id: str) -> None:
+        """Expire old prompt claims only after checking WORKING and before fresh-job refusal."""
+        participant = self._store.get_participant(participant_id)
+        if participant is not None and participant.status is Status.WORKING:
+            raise Busy(
+                f"participant {participant_id!r} is working; not delivering now",
+                details={"next": NEXT_SEND_BUSY},
+            )
+        stale = self._gates.send_claim_now() - self._gates.send_claim_ttl()
+        running_prompt_jobs = [
+            job for job in self._store.active_running_jobs_for_target(participant_id) if job.prompt
+        ]
+        for job in (item for item in running_prompt_jobs if item.created_at <= stale):
+            self._jobs.finish(
+                job.handle,
+                state=JobState.CRASHED,
+                result=(
+                    f"Send to participant {participant_id!r} was superseded after its "
+                    "delivery claim expired; await the newer send handle instead."
+                ),
+                error_code=SEND_SUPERSEDED_ERROR_CODE,
+            )
+        if any(job.created_at > stale for job in running_prompt_jobs):
+            raise Busy(
+                f"participant {participant_id!r} has a running send job",
+                details={"next": NEXT_SEND_BUSY},
+            )
 
     def _reject_provider_send_busy(self, participant_id: str, *, exclude: str | None) -> None:
         """Serialize provider sends behind accepted work and uncertain execution."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import select, update
@@ -157,6 +158,34 @@ async def test_second_provider_send_is_refused_while_first_job_is_running(
     assert refused.state == PublicOperationState.FAILED.value
     assert refused.error is not None and refused.error["code"] == "busy"
     assert callback_count == 1
+
+
+async def test_pre_reserved_provider_send_rechecks_busy_after_modal_gate(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
+
+    async def become_working(_participant_id: str) -> None:
+        daemon.registry.set_status(participant_id, Status.WORKING)
+
+    async def no_delivery(*_args):
+        pytest.fail("pre-reserved send must refuse before provider delivery")
+
+    daemon.controls._gates = replace(daemon.controls._gates, provider_modal_check=become_working)
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", no_delivery)
+    accepted = await controls_send(
+        daemon,
+        operator_context(),
+        {"participant_id": participant_id, "prompt": "reserved"},
+        idempotency_key="provider-pre-reserved-busy",
+    )
+    await settle_operations(daemon)
+
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.job_handle is not None
+    assert operation.state == PublicOperationState.FAILED.value
+    assert operation.error is not None and operation.error["code"] == "busy"
 
 
 async def test_public_send_acceptance_atomically_persists_job_control_and_operation(

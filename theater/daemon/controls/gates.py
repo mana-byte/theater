@@ -38,6 +38,10 @@ class ControlGates:
     #: The composed callback must not suspend between claim handling and return.
     legacy_busy_check: Callable[[str], Awaitable[None]]
 
+    #: Read the send-claim compatibility clock and TTL at admission time.
+    send_claim_now: Callable[[], float]
+    send_claim_ttl: Callable[[], float]
+
     #: ``(prompt) -> None``. Prompt-size and response-format policy, reused
     #: unchanged by ordinary send and queued followups.
     check_prompt: Callable[[str], None]

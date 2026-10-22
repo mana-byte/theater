@@ -7,6 +7,7 @@ from sqlalchemy import update
 from tests.support.control_harness import make_runtime
 from tests.support.fake_runtime import FakeRuntimeState
 from tests.support.waiting import until
+from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS
 from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.jobs import JobManager
 from theater.daemon.observation.live import LiveRegistration
@@ -173,6 +174,8 @@ def minimal_gates() -> ControlGates:
         send_preflight=noop,
         legacy_copy_mode_check=noop,
         legacy_busy_check=noop,
+        send_claim_now=now,
+        send_claim_ttl=lambda: SEND_CLAIM_TTL_SECONDS,
         check_prompt=lambda prompt: None,
         check_settings=lambda model, effort: None,
         cwd_for=lambda participant_id: "/tmp",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS
 from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.jobs import JobManager
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
@@ -131,6 +132,8 @@ class RecordingGates:
             send_preflight=send_preflight,
             legacy_copy_mode_check=legacy_copy_mode_check,
             legacy_busy_check=legacy_busy_check,
+            send_claim_now=now,
+            send_claim_ttl=lambda: SEND_CLAIM_TTL_SECONDS,
             check_prompt=check_prompt,
             check_settings=check_settings,
             cwd_for=cwd_for,

@@ -17,6 +17,7 @@ from tests.support.presence_rig import _OWNED_SERVICES, Rig, operation_rows
 from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     BUS_KIND_SEND_REFUSED,
+    SEND_CLAIM_TTL_SECONDS,
 )
 from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.jobs import JobState
@@ -26,7 +27,7 @@ from theater.harness.contracts.runtime import (
     RuntimeCapability,
     RuntimeContext,
 )
-from theater.models import HumanPresent, Status
+from theater.models import HumanPresent, Status, now
 from theater.protocol import RemoteError
 
 
@@ -454,6 +455,8 @@ async def test_unrelated_participant_is_never_stalled_by_a_blocked_gate(store):
             send_preflight=_async_noop,
             legacy_copy_mode_check=_async_noop,
             legacy_busy_check=_async_noop,
+            send_claim_now=now,
+            send_claim_ttl=lambda: SEND_CLAIM_TTL_SECONDS,
             check_prompt=lambda prompt: None,
             check_settings=lambda model, effort: None,
             cwd_for=lambda participant_id: None,

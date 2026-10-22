@@ -43,6 +43,13 @@ _NOT_YOUR_CHILD_CONTROLS = (
 def build_control_gates(daemon) -> ControlGates:
     """Wire every physical/policy fact the control service needs."""
     from theater.daemon.presence import access
+    from theater.daemon.rpc import sending as sending_mod
+
+    def send_claim_now() -> float:
+        return sending_mod.now()
+
+    def send_claim_ttl() -> float:
+        return sending_mod._send_claim_ttl()
 
     return ControlGates(
         authorize=_authorize(daemon),
@@ -52,6 +59,8 @@ def build_control_gates(daemon) -> ControlGates:
         provider_modal_check=_provider_modal_check(daemon),
         legacy_copy_mode_check=_legacy_copy_mode_check(daemon),
         legacy_busy_check=_legacy_busy_check(daemon),
+        send_claim_now=send_claim_now,
+        send_claim_ttl=send_claim_ttl,
         check_prompt=check_prompt,
         check_settings=check_settings,
         cwd_for=_cwd_for(daemon),
