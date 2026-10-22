@@ -6,6 +6,11 @@ from dataclasses import dataclass
 
 from theater.daemon.controls._common import CANCELLED_ERROR_CODE
 from theater.daemon.controls._host import ControlHost
+from theater.daemon.persistence.repositories.operation_predicates import (
+    cancel_accepted,
+    cancel_delivery_started,
+    cancel_outcome_definitive,
+)
 from theater.harness.contracts.runtime import ControlDeliveryPhase, ControlKind, DeliveryResult
 from theater.models import JobState, NotFound, NotYourJob
 
@@ -77,16 +82,11 @@ class CancelControls(ControlHost):
             (op for op in operations if op.delivery_phase is ControlDeliveryPhase.QUEUED), None
         )
         if queued is None:
-            if any(self._delivery_started(op) for op in operations):
-                definitive = all(
-                    op.delivery_phase is ControlDeliveryPhase.SETTLED
-                    and op.delivery_result in (DeliveryResult.ACCEPTED, DeliveryResult.REJECTED)
-                    and not op.execution_barrier
-                    for op in operations
-                )
+            if any(cancel_delivery_started(op) for op in operations):
+                definitive = all(cancel_outcome_definitive(op) for op in operations)
                 reason = (
                     REASON_DELIVERED
-                    if definitive and any(self._accepted(op) for op in operations)
+                    if definitive and any(cancel_accepted(op) for op in operations)
                     else REASON_DELIVERY_UNCERTAIN
                 )
                 return self._cancel_outcome(handle, reason)
@@ -107,21 +107,6 @@ class CancelControls(ControlHost):
         )
         self._count_cancel("cancelled")
         return CancelOutcome(handle, True)
-
-    @staticmethod
-    def _delivery_started(operation) -> bool:
-        return operation.delivery_phase in (
-            ControlDeliveryPhase.DISPATCHED,
-            ControlDeliveryPhase.SETTLED,
-        )
-
-    @staticmethod
-    def _accepted(operation) -> bool:
-        return (
-            operation.delivery_phase is ControlDeliveryPhase.SETTLED
-            and operation.delivery_result is DeliveryResult.ACCEPTED
-            and not operation.execution_barrier
-        )
 
     def _cancel_outcome(
         self, handle: str, reason: str, *, state: str | None = None
