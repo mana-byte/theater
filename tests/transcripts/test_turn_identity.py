@@ -7,6 +7,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from tests.support.observation import apply_batch
 from tests.support.paths import FIXTURES
 from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from theater.daemon.jobs import JobManager
@@ -199,7 +200,7 @@ def test_one_message_announced_twice_answers_one_caller(registry):
     observer, p, jobs = poised(registry, jobs_wanted=2)
     batch = Batch(events=[ended("the reply", "msg_01"), ended("the reply", "msg_01")])
 
-    observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
+    apply_batch(observer, p.id, batch, QuietClock(), TurnAccumulator())
 
     assert jobs.get("h1").result == "the reply"
     assert str(jobs.get("h2").state) == "running"
@@ -214,8 +215,8 @@ def test_the_duplicate_is_still_ignored_a_poll_later(registry):
     observer, p, jobs = poised(registry, jobs_wanted=2)
     clock, turns = QuietClock(), TurnAccumulator()
 
-    observer._apply(p.id, Batch(events=[ended("the reply", "m1")]), clock, turns)
-    observer._apply(p.id, Batch(events=[ended("the reply", "m1")]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[ended("the reply", "m1")]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[ended("the reply", "m1")]), clock, turns)
 
     assert jobs.get("h1").result == "the reply"
     assert str(jobs.get("h2").state) == "running"
@@ -226,8 +227,8 @@ def test_two_genuinely_different_turns_answer_two_callers(registry):
     observer, p, jobs = poised(registry, jobs_wanted=2)
     clock, turns = QuietClock(), TurnAccumulator()
 
-    observer._apply(p.id, Batch(events=[ended("first", "m1")]), clock, turns)
-    observer._apply(p.id, Batch(events=[ended("second", "m2")]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[ended("first", "m1")]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[ended("second", "m2")]), clock, turns)
 
     assert jobs.get("h1").result == "first"
     assert jobs.get("h2").result == "second"
@@ -242,8 +243,8 @@ def test_unidentified_boundaries_are_never_treated_as_duplicates(registry):
     observer, p, jobs = poised(registry, jobs_wanted=2)
     clock, turns = QuietClock(), TurnAccumulator()
 
-    observer._apply(p.id, Batch(events=[ended("same words", None)]), clock, turns)
-    observer._apply(p.id, Batch(events=[ended("same words", None)]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[ended("same words", None)]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[ended("same words", None)]), clock, turns)
 
     assert jobs.get("h1").result == "same words"
     assert jobs.get("h2").result == "same words"
@@ -263,8 +264,8 @@ def test_text_from_an_earlier_poll_still_answers_the_boundary(registry):
     clock, turns = QuietClock(), TurnAccumulator()
     spoke = Event(kind=EventKind.ASSISTANT, text="what it said", turn_end=False)
 
-    observer._apply(p.id, Batch(events=[spoke]), clock, turns)
-    observer._apply(p.id, Batch(events=[ended("", "m1")]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[spoke]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[ended("", "m1")]), clock, turns)
 
     assert jobs.get("h1").result == "what it said"
 
@@ -284,7 +285,7 @@ def test_a_reply_written_in_blocks_comes_back_whole(registry):
         ]
     )
 
-    observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
+    apply_batch(observer, p.id, batch, QuietClock(), TurnAccumulator())
 
     assert jobs.get("h1").result == "first para\n\nsecond para"
 
@@ -303,7 +304,7 @@ def test_a_boundary_that_carries_its_own_text_is_believed(registry):
         ]
     )
 
-    observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
+    apply_batch(observer, p.id, batch, QuietClock(), TurnAccumulator())
 
     assert jobs.get("h1").result == "the answer"
 
@@ -317,8 +318,9 @@ def test_the_previous_turn_does_not_leak_into_the_next(registry):
     observer, p, jobs = poised(registry, jobs_wanted=2)
     clock, turns = QuietClock(), TurnAccumulator()
 
-    observer._apply(p.id, Batch(events=[ended("first answer", "m1")]), clock, turns)
-    observer._apply(
+    apply_batch(observer, p.id, Batch(events=[ended("first answer", "m1")]), clock, turns)
+    apply_batch(
+        observer,
         p.id,
         Batch(
             events=[
@@ -351,7 +353,7 @@ def test_a_duplicate_boundary_does_not_carry_text_into_the_next_turn(registry):
         ]
     )
 
-    observer._apply(p.id, batch, clock, turns)
+    apply_batch(observer, p.id, batch, clock, turns)
 
     assert jobs.get("h1").result == "turn one"
     assert jobs.get("h2").result == "turn two"

@@ -22,18 +22,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("theater.observer")
 
 
-class _NoopSource(Source):
-    """A stateless source: checkpoints and evidence lifecycle stay at their defaults."""
-
-    async def read(self) -> Batch:
-        return Batch()
-
-
-#: The source for callers that have no source of their own (legacy test entry points);
-#: production callers pass the watched participant's real source.
-_SOURCELESS = _NoopSource()
-
-
 class BatchApplication:
     if TYPE_CHECKING:
         _reducer: Reducer
@@ -64,14 +52,6 @@ class BatchApplication:
 
     def _record_usage(self, pid: str, event: Event) -> bool:
         return self._reducer.record_usage(pid, event)
-
-    def _apply(self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator) -> bool:
-        """Apply a sourceless batch through the production assembly.
-
-        A compatibility entry for callers that hold no source; the write unit, fence
-        promotion and checkpoint handling are exactly ``_apply_source_batch``'s.
-        """
-        return self._apply_source_batch(pid, _SOURCELESS, batch, clock, turns)
 
     def _apply_source_batch(
         self,
