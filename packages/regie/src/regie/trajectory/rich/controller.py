@@ -8,11 +8,11 @@ import inspect
 from collections.abc import Callable
 from typing import Protocol
 
-from regie.trajectory.rich.models import (
-    decode_delta,
-    decode_location,
-    decode_page,
-    decode_search_result,
+from regie.trajectory.rich.clients import (
+    follow_client as adapt_follow_client,
+)
+from regie.trajectory.rich.clients import (
+    query_client as adapt_query_client,
 )
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.frontend.trajectory import (
@@ -106,6 +106,8 @@ class TrajectoryController:
             raise ValueError(f"follow_wait must be in [0, {TRAJECTORY_FOLLOW_TIMEOUT_SECONDS}]")
         self.query_client = query_client
         self.follow_client = follow_client
+        self._query = adapt_query_client(query_client)
+        self._follow = adapt_follow_client(follow_client)
         self.state_store = state_store if state_store is not None else TrajectoryStateStore()
         self.page_limit = page_limit
         self.follow_wait = follow_wait
@@ -164,16 +166,6 @@ class TrajectoryController:
             and participant_id == self._active_participant
         )
 
-    async def _call(self, client: object, method: str, **params: object) -> object:
-        call = getattr(client, "call", None)
-        if callable(call):
-            return await _maybe_await(call(method, **params))
-        method_name = method.replace(".", "_")
-        operation = getattr(client, method_name, None)
-        if not callable(operation):
-            raise TypeError(f"trajectory client does not implement {method}")
-        return await _maybe_await(operation(**params))
-
     async def open(
         self,
         participant_id: str,
@@ -198,11 +190,8 @@ class TrajectoryController:
         state.retry_kind = None
         state.retry_message = ""
         self._publish(state)
-        params: dict[str, object] = {"id": participant_id, "limit": self.page_limit}
-        if before is not None:
-            params["before"] = before
         try:
-            page = decode_page(await self._call(self.query_client, "trajectory.snapshot", **params))
+            page = await self._query.snapshot(participant_id, limit=self.page_limit, before=before)
             _validate_page(page, participant_id)
         except asyncio.CancelledError:
             raise
@@ -221,13 +210,7 @@ class TrajectoryController:
 
     async def locate(self, participant_id: str, record_id: str) -> TrajectoryLocation:
         """Resolve one exact record through the daemon's bounded lookup."""
-        response = await self._call(
-            self.query_client,
-            "trajectory.locate",
-            id=participant_id,
-            record_id=record_id,
-        )
-        location = decode_location(response)
+        location = await self._query.locate(participant_id, record_id)
         if location.participant_id != participant_id:
             raise TrajectoryValidationError("trajectory location participant does not match target")
         if location.requested_record_id != record_id:
@@ -251,14 +234,10 @@ class TrajectoryController:
             return
         generation = self._generation
         try:
-            result = decode_search_result(
-                await self._call(
-                    self.query_client,
-                    "trajectory.search",
-                    id=participant_id,
-                    query=query,
-                    limit=min(self.state_store.page_size, TRAJECTORY_SEARCH_RESULT_LIMIT),
-                )
+            result = await self._query.search(
+                participant_id,
+                query,
+                limit=min(self.state_store.page_size, TRAJECTORY_SEARCH_RESULT_LIMIT),
             )
             _validate_search_result(result, participant_id, query)
         except asyncio.CancelledError:
@@ -287,14 +266,9 @@ class TrajectoryController:
         self._publish(state)
         result: TrajectoryPage | None = None
         try:
-            response = await self._call(
-                self.query_client,
-                "trajectory.snapshot",
-                id=participant_id,
-                before=state.older_cursor,
-                limit=self.page_limit,
+            page = await self._query.snapshot(
+                participant_id, before=state.older_cursor, limit=self.page_limit
             )
-            page = decode_page(response)
             _validate_page(page, participant_id)
             _validate_stream(state.stream_id, page.stream_id, "older page")
             if self._is_current(participant_id, generation):
@@ -337,16 +311,13 @@ class TrajectoryController:
             while self._is_current(participant_id, generation):
                 if state.stream_id is None or state.cursor is None:
                     return
-                response = await self._call(
-                    self.follow_client,
-                    "trajectory.follow",
-                    id=participant_id,
-                    stream_id=state.stream_id,
-                    after=state.cursor,
+                delta = await self._follow.follow(
+                    participant_id,
+                    state.stream_id,
+                    state.cursor,
                     wait=min(TRAJECTORY_FOLLOW_TIMEOUT_SECONDS, self.follow_wait),
                     limit=self.page_limit,
                 )
-                delta = decode_delta(response)
                 if not self._is_current(participant_id, generation):
                     return
                 _validate_delta(delta, participant_id)
@@ -383,14 +354,7 @@ class TrajectoryController:
         state.resyncing = True
         self._publish(state)
         try:
-            page = decode_page(
-                await self._call(
-                    self.query_client,
-                    "trajectory.snapshot",
-                    id=participant_id,
-                    limit=self.page_limit,
-                )
-            )
+            page = await self._query.snapshot(participant_id, limit=self.page_limit)
             _validate_page(page, participant_id)
         except asyncio.CancelledError:
             raise
@@ -461,11 +425,8 @@ class TrajectoryController:
             await task
 
     async def _best_effort_close(self, participant_id: str, stream_id: str | None = None) -> None:
-        params = {"id": participant_id}
-        if stream_id is not None:
-            params["stream_id"] = stream_id
         try:
-            await self._call(self.query_client, "trajectory.close", **params)
+            await self._query.release(participant_id, stream_id)
         except Exception:
             return
 

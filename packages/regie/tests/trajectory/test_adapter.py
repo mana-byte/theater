@@ -14,6 +14,7 @@ from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectorySt
 
 from theater.frontend import FrontendClient
 from theater.frontend.trajectory import (
+    TRAJECTORY_RESPONSE_MAX_BYTES,
     ContentFormat,
     DetailField,
     PanelState,
@@ -194,13 +195,13 @@ async def test_public_query_adapter_serializes_its_interactive_connection() -> N
             self.maximum_active = max(self.maximum_active, self.active)
             await asyncio.sleep(0)
             self.active -= 1
-            return SimpleNamespace(value={"participant_id": participant_id})
+            return SimpleNamespace(value=page_wire([]))
 
     client = SimpleNamespace(trajectory=Trajectory())
     adapter = TrajectoryQueryAdapter(cast(FrontendClient, client))
 
     await asyncio.gather(
-        adapter.call("trajectory.snapshot", id="p1", limit=30),
+        adapter.snapshot("p1", limit=30),
         adapter.call("trajectory.snapshot", id="p2", limit=30),
     )
 
@@ -226,6 +227,9 @@ async def test_public_adapters_thaw_the_sdk_immutable_json_view() -> None:
     )
 
     class Trajectory:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
         async def snapshot(self, participant_id: str, *, limit: int) -> object:
             assert participant_id == "p1"
             assert limit == 200
@@ -257,19 +261,40 @@ async def test_public_adapters_thaw_the_sdk_immutable_json_view() -> None:
                 )
             )
 
+        async def close(self, stream_id: str) -> object:
+            self.close_calls += 1
+            return SimpleNamespace(value={"released": True})
+
     client = SimpleNamespace(trajectory=Trajectory())
     query = TrajectoryQueryAdapter(cast(FrontendClient, client))
     follow = TrajectoryFollowAdapter(cast(FrontendClient, client))
 
-    page = decode_page(await query.call("trajectory.snapshot", id="p1", limit=200))
-    delta = decode_delta(
-        await follow.call(
-            "trajectory.follow",
-            stream_id="stream",
-            after="cursor-1",
-            wait=20,
-        )
+    page = await query.snapshot("p1", limit=200)
+    delta = await follow.follow("p1", "stream", "cursor-1", wait=20, limit=200)
+
+    assert isinstance(await query.call("trajectory.snapshot", id="p1", limit=200), dict)
+    assert isinstance(
+        await follow.call("trajectory.follow", stream_id="stream", after="cursor-1", wait=20),
+        dict,
     )
+    await query.release("p1", "stream")
+    await query.close()
+    await follow.close()
 
     assert page.records[0].details[0].preview.text == "hello"
     assert delta.upserts[0].record.record_id == "r1"
+    assert client.trajectory.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_named_query_rejects_oversized_sdk_response_at_adapter_boundary() -> None:
+    class Trajectory:
+        async def snapshot(self, participant_id: str, *, limit: int) -> object:
+            return SimpleNamespace(
+                value=page_wire([wire_record("r1", summary="x" * TRAJECTORY_RESPONSE_MAX_BYTES)])
+            )
+
+    adapter = TrajectoryQueryAdapter(cast(FrontendClient, SimpleNamespace(trajectory=Trajectory())))
+
+    with pytest.raises(TrajectoryValidationError, match="exceeds"):
+        await adapter.snapshot("p1", limit=1)
