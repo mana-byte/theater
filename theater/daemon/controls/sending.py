@@ -32,6 +32,7 @@ from theater.models import (
     Job,
     JobState,
     NotAddressable,
+    NotFound,
     StaleTarget,
     Status,
 )
@@ -324,7 +325,9 @@ class SendControls(ControlHost):
     def _admit_provider_send(self, participant_id: str) -> None:
         """Expire old prompt claims only after checking WORKING and before fresh-job refusal."""
         participant = self._store.get_participant(participant_id)
-        if participant is not None and participant.status is Status.WORKING:
+        if participant is None:
+            raise NotFound(f"no participant {participant_id!r}")
+        if participant.status is Status.WORKING:
             raise Busy(
                 f"participant {participant_id!r} is working; not delivering now",
                 details={"next": NEXT_SEND_BUSY},
