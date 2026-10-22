@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
+from theater.daemon.harness_runtime.manager import CachedNativeRoute
 from theater.daemon.runtime.launch_policy import decode_launch_policy
 from theater.daemon.runtime.wiring import runtime_manifest_of
 from theater.harness import get as get_harness
@@ -22,7 +23,7 @@ from theater.models import TerminalBindingRecord
 ProviderHealth = Callable[[str, int], str]
 NativeRoute = Callable[[str, object | None], Mapping[str, object] | None]
 NativeCapabilities = Callable[[str, object | None], RuntimeCapabilities | None]
-NativeAdmission = Callable[[str, object | None], Mapping[str, object] | None]
+NativeAdmission = Callable[[str, object | None], CachedNativeRoute | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +38,7 @@ class ControlRoute:
     provider_health: str | None = None
     native_route: Mapping[str, object] | None = None
     native_capabilities: RuntimeCapabilities | None = None
-    native_admission: Mapping[str, object] | None = None
+    native_facts: CachedNativeRoute | None = None
 
     @property
     def is_native(self) -> bool:
@@ -182,7 +183,7 @@ class ControlRouteResolver:
             if self._native_capabilities is None
             else self._native_capabilities(participant_id, binding)
         )
-        admission = (
+        facts = (
             None
             if self._native_admission is None
             else self._native_admission(participant_id, binding)
@@ -191,7 +192,7 @@ class ControlRouteResolver:
             route,
             native_route=current,
             native_capabilities=capabilities,
-            native_admission=admission,
+            native_facts=facts,
         )
 
     def _with_provider_fallback(

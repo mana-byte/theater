@@ -7,7 +7,11 @@ operation or mints a job; responses are additive (wire protocol stays version 1)
 from __future__ import annotations
 
 from theater.constants.refusals import NEXT_STEER_STALE
-from theater.daemon.controls.interaction_wire import interaction_to_wire
+from theater.daemon.controls.report import (
+    ControlActiveTurn,
+    build_control_report,
+    control_report_to_wire,
+)
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
 from theater.daemon.rpc.params import (
@@ -23,12 +27,10 @@ from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
-    ConnectionHealth,
     ControlKind,
     DeliveryResult,
     RuntimeCapability,
     RuntimeHost,
-    RuntimeWiring,
 )
 from theater.models import StaleTarget
 
@@ -362,10 +364,11 @@ async def _controls(daemon, params: dict) -> dict:
     transcript = observed_transcript_identity(target, getattr(daemon, "observer", None))
     queued = [job.handle for job in daemon.controls.queued_jobs(pid)]
     runtime = daemon.runtime_manager.get(pid)
+    snapshot = None
+    active_turn = None
     if runtime is not None:
         snapshot = await runtime.snapshot()
         daemon.runtime_manager.record_snapshot(pid, runtime, snapshot)
-        active_turn: dict | None = None
         if snapshot.native_turn_id is not None:
             job = daemon.controls.active_job_for_native_turn(
                 pid,
@@ -373,86 +376,26 @@ async def _controls(daemon, params: dict) -> dict:
                 native_session_id=snapshot.native_session_id,
                 native_turn_id=snapshot.native_turn_id,
             )
-            active_turn = {
-                "native_turn_id": snapshot.native_turn_id,
-                "job_handle": job.handle if job is not None else None,
-            }
-            interaction = interaction_to_wire(snapshot.pending_interaction)
-            if interaction is not None:
-                active_turn["pending_interaction"] = interaction
-        return {
-            "id": pid,
-            "wiring": str(RuntimeWiring.NATIVE),
-            "backend_generation": snapshot.backend_generation,
-            "native_session_id": snapshot.native_session_id,
-            "health": {
-                "connection": str(snapshot.health),
-                "diagnostics": list(snapshot.health_diagnostics),
-            },
-            "settings": {
-                "model": snapshot.settings.model,
-                "reasoning_effort": snapshot.settings.reasoning_effort,
-            },
-            "capabilities": _effective_capabilities(daemon, target, snapshot),
-            "transcript_identity": transcript,
-            "active_turn": active_turn,
-            "queued": queued,
-            "human_presence": presence,
-        }
-    binding = daemon.store.get_runtime_binding(pid)
-    if binding is not None:
-        # Native-wired, but its runtime is not connected right now (for
-        # example between a daemon restart and recovery's reconnect). Report
-        # the persisted wiring honestly instead of pretending it is legacy.
-        return {
-            "id": pid,
-            "wiring": str(binding.wiring),
-            "backend_generation": binding.backend_generation,
-            "native_session_id": binding.native_session_id,
-            "health": {
-                "connection": str(ConnectionHealth.DISCONNECTED),
-                "diagnostics": ["no runtime connection: the daemon reconnects during recovery"],
-            },
-            "settings": None,
-            "capabilities": _effective_capabilities(daemon, target),
-            "transcript_identity": transcript,
-            "active_turn": None,
-            "queued": queued,
-            "human_presence": presence,
-        }
-    terminal_route = daemon.controls.terminal_route_for(pid)
-    if terminal_route.is_provider and terminal_route.terminal is not None:
-        terminal = terminal_route.terminal
-        return {
-            "id": pid,
-            "wiring": "provider",
-            "backend_generation": None,
-            "native_session_id": None,
-            "health": {
-                "connection": terminal_route.provider_health,
-                "diagnostics": [],
-            },
-            "settings": None,
-            "capabilities": _effective_capabilities(daemon, target),
-            "transcript_identity": transcript,
-            "active_turn": None,
-            "queued": queued,
-            "human_presence": presence,
-            "provider_id": terminal.provider_id,
-            "provider_generation": terminal.provider_generation,
-            "terminal_id": terminal.terminal_id,
-            "terminal_incarnation": terminal.terminal_incarnation,
-        }
-    return {
-        "id": pid,
-        "wiring": str(RuntimeWiring.LEGACY),
-        "backend_generation": None,
-        "native_session_id": None,
-        "health": None,
-        "settings": None,
-        "capabilities": _effective_capabilities(daemon, target),
-        "transcript_identity": transcript,
-        "active_turn": None,
-        "queued": queued,
-        "human_presence": presence,
-    }
+            active_turn = ControlActiveTurn(
+                snapshot.native_turn_id,
+                job.handle if job is not None else None,
+                snapshot.pending_interaction,
+            )
+    binding = None if snapshot is not None else daemon.store.get_runtime_binding(pid)
+    terminal_route = (
+        daemon.controls.terminal_route_for(pid) if snapshot is None and binding is None else None
+    )
+    report = build_control_report(
+        pid,
+        native=snapshot,
+        binding=binding,
+        provider_route=terminal_route,
+        active_turn=active_turn,
+        queued=queued,
+        human_presence=presence,
+    )
+    return control_report_to_wire(
+        report,
+        capabilities=_effective_capabilities(daemon, target, snapshot),
+        transcript_identity=transcript,
+    )

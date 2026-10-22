@@ -61,6 +61,7 @@ from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
 from theater.daemon.controls.sending import SendControls
 from theater.daemon.controls.settings import SettingsControls, SettingsOutcome
 from theater.daemon.controls.steering import SteerControls
+from theater.daemon.harness_runtime.manager import CachedNativeRoute
 from theater.daemon.jobs import JobManager
 from theater.daemon.operations.notifications import OperationNotifier
 from theater.daemon.persistence.store import Store
@@ -237,7 +238,7 @@ class ControlService(
         native_route: Callable[[str, object | None], Mapping[str, object] | None] | None = None,
         native_capabilities: Callable[[str, object | None], RuntimeCapabilities | None]
         | None = None,
-        native_admission: Callable[[str, object | None], Mapping[str, object] | None] | None = None,
+        native_admission: Callable[[str, object | None], CachedNativeRoute | None] | None = None,
         gate_opener=None,
         play_gate=None,
     ) -> None:

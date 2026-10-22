@@ -120,6 +120,19 @@ async def test_controls_reports_the_native_snapshot(client, daemon):
 
     controls = await client.call("participant.controls", target=child.name)
 
+    assert list(controls) == [
+        "id",
+        "wiring",
+        "backend_generation",
+        "native_session_id",
+        "health",
+        "settings",
+        "capabilities",
+        "transcript_identity",
+        "active_turn",
+        "queued",
+        "human_presence",
+    ]
     assert controls["id"] == child.id
     assert controls["wiring"] == "native"
     assert controls["backend_generation"] == 1
@@ -140,6 +153,20 @@ async def test_controls_reports_the_native_snapshot(client, daemon):
         "model",
         "reasoning_effort",
     ]
+
+
+async def test_private_controls_refreshes_snapshot_and_frontend_reads_cache(client, daemon):
+    _parent, child, state = await native_pair(daemon)
+    state.settings["model"] = "new-model"
+
+    before = await controls_get(daemon, None, {"participant_id": child.id})
+    assert before["settings"] == {"model": None, "reasoning_effort": None}
+
+    private = await client.call("participant.controls", target=child.id)
+    assert private["settings"] == {"model": "new-model", "reasoning_effort": None}
+
+    after = await controls_get(daemon, None, {"participant_id": child.id})
+    assert after["settings"] == private["settings"]
 
 
 async def test_controls_distinguishes_a_human_only_turn(client, daemon):

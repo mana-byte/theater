@@ -21,7 +21,11 @@ from theater.daemon.harness_runtime.errors import (
     BackendIdentityMismatch,
     RuntimeGenerationMismatch,
 )
-from theater.daemon.harness_runtime.manager import HarnessRuntimeManager, ManagedRuntime
+from theater.daemon.harness_runtime.manager import (
+    CachedNativeRoute,
+    HarnessRuntimeManager,
+    ManagedRuntime,
+)
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -92,6 +96,13 @@ async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None
         "native_session_id": "session-4",
         "health": "connected",
     }
+    facts = manager.cached_native_facts("p1", backend_generation=4, native_session_id="session-4")
+    assert isinstance(facts, CachedNativeRoute)
+    assert facts.health is ConnectionHealth.CONNECTED
+    assert (
+        manager.cached_native_admission("p1", backend_generation=4, native_session_id="session-4")
+        is facts
+    )
     capabilities = manager.cached_native_capabilities(
         "p1", backend_generation=4, native_session_id="session-4"
     )
@@ -108,6 +119,10 @@ async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None
     )
     assert (
         manager.cached_native_route("p1", backend_generation=4, native_session_id="replacement")
+        is None
+    )
+    assert (
+        manager.cached_native_facts("p1", backend_generation=4, native_session_id="replacement")
         is None
     )
     assert not manager.record_snapshot("p1", runtime, replace(snapshot, backend_generation=5))
