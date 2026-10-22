@@ -25,6 +25,7 @@ from regie.tmux.terminals import (
     ensure_server,
     inspect_terminal,
     managed_inventory,
+    recover_terminal_launch,
     terminate_terminal,
 )
 
@@ -256,7 +257,7 @@ async def _assert_presentation_lifecycle(
     assert await run("show-options", "-t", REGIE_DEFAULT_SESSION, "status") == status_before
 
 
-async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
+async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(  # noqa: PLR0915
     isolated_tmux: Path,
     monkeypatch,
 ) -> None:
@@ -364,6 +365,35 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
     )
     assert reclaimed["terminal_id"] == terminal_id
     assert reclaimed["provider_generation"] == 3
+    with pytest.raises(TmuxError, match="another participant"):
+        await create_terminal(
+            provider_id="provider-a",
+            generation=3,
+            participant_id="participant-b",
+            launch_id="launch-a",
+            executable=sys.executable,
+            argv=[sys.executable, "-c", program],
+            cwd=str(isolated_tmux),
+            environment={},
+            presentation={"name": "must-not-rename"},
+            expected_server_identity=server,
+            terminal_incarnation=incarnation,
+            provisional_window_name="regie-launch-anothertoken123",
+            dispatch_previously_started=False,
+        )
+    with pytest.raises(TmuxError, match="durable launch identity"):
+        await recover_terminal_launch(
+            provider_id="provider-a",
+            participant_id="participant-a",
+            launch_id="launch-a",
+            executable="/wrong/executable",
+            terminal_incarnation=incarnation,
+            provisional_window_name="regie-launch-anothertoken123",
+            expected_server_identity=server,
+        )
+    assert (
+        await run("display-message", "-p", "-t", terminal_id, "#{window_name}") == "provider-test"
+    )
     assert (
         len(
             await managed_inventory(
@@ -415,6 +445,44 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
     assert not await presentation.terminal_exists(target)
     assert shutil.which("tmux") is not None
     assert "THEATER_ID" not in os.environ
+
+
+async def test_real_tmux_recovery_marks_provisional_pane_without_launch_or_rename(
+    isolated_tmux: Path,
+) -> None:
+    server = await ensure_server(cwd=str(isolated_tmux))
+    name = "regie-launch-recoverytoken123"
+    pane_id = await run(
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        f"{REGIE_DEFAULT_SESSION}:",
+        "-n",
+        name,
+        "-c",
+        str(isolated_tmux),
+        "--",
+        sys.executable,
+        "-c",
+        "import time; time.sleep(30)",
+    )
+    before = await run("list-panes", "-a", "-F", "#{pane_id}")
+    recovered = await recover_terminal_launch(
+        provider_id="provider-a",
+        participant_id="participant-a",
+        launch_id="launch-a",
+        executable=sys.executable,
+        terminal_incarnation="recovered-incarnation",
+        provisional_window_name=name,
+        expected_server_identity=server,
+    )
+    assert recovered is not None and recovered.pane_id == pane_id
+    assert recovered.launch_executable == sys.executable
+    assert await run("list-panes", "-a", "-F", "#{pane_id}") == before
+    assert await run("display-message", "-p", "-t", pane_id, "#{window_name}") == name
 
 
 async def test_regie_window_is_created_and_reused_on_the_pinned_server(

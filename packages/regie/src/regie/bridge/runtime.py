@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from regie.bridge.callbacks import TmuxProviderCallbacks
 from regie.bridge.persistence import BridgePersistence
 from regie.bridge.presence_scope import reportable_terminals
+from regie.bridge.receipts import accepted_create_receipt
 from regie.bridge.state import BridgeStateStore
 from regie.contracts import BridgeConfig, BridgeStatus
 from regie.tmux.command import TmuxError
@@ -338,17 +339,14 @@ class TmuxBridge:
                     self._state.write_receipt,
                     "terminal.create",
                     intent.operation_id,
-                    {
-                        "operation_id": intent.operation_id,
-                        "provider_generation": intent.provider_generation,
-                        "outcome": "accepted",
-                        "terminal": terminal_identity(
+                    accepted_create_receipt(
+                        intent,
+                        terminal_identity(
                             recovered,
                             provider_id=intent.provider_id,
                             generation=intent.provider_generation,
                         ),
-                        "launch_id": intent.launch_id,
-                    },
+                    ),
                 )
                 await self._persistence.run(self._state.complete_launch, intent)
 

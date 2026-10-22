@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from regie.bridge.persistence import BridgePersistence
+from regie.bridge.receipts import accepted_create_receipt
 from regie.bridge.state import BridgeStateStore
 from regie.bridge.timing import phase, timed_handlers
 from regie.tmux.command import TmuxError, TmuxOutcomeUnknown
@@ -186,13 +187,7 @@ class TmuxProviderCallbacks:
                     "error": {"code": "terminal_create_failed", "message": str(exc)[:4096]},
                 }
             else:
-                result = {
-                    "operation_id": operation_id,
-                    "provider_generation": request.provider_generation,
-                    "outcome": "accepted",
-                    "terminal": identity,
-                    "launch_id": launch_id,
-                }
+                result = accepted_create_receipt(intent, identity)
             await self._persistence.run(
                 self._state.write_receipt, request.method, operation_id, result
             )
