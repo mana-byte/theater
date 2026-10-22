@@ -227,8 +227,6 @@ class AttachmentManager:
         *,
         settle_fn,
         settle_from_event_fn,
-        answer_turn_fn,
-        turn_result_fn,
     ) -> None:
         """Record the effects of an attachment already accepted and committed."""
         self.release_transcript(pid)

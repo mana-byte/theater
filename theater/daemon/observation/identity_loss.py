@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from theater.constants.observation import CORRELATION_AMBIGUOUS_CODE
 from theater.daemon.observation.attachment import AttachmentManager
 from theater.daemon.observation.failures import FailureTracker
-from theater.daemon.observation.live import LiveRegistration
 from theater.harness.source import Batch, IdentityLossEvidence
 
 logger = logging.getLogger("theater.observer")
@@ -29,20 +27,22 @@ class IdentityLossWiring:
     def transcript_identity_lost(self, pid: str) -> bool:
         return self._failures.transcript_identity_lost(pid)
 
-    def _restore_transcript_identity_loss(self, pid: str) -> None:
-        self._failures.restore_transcript_identity_loss(pid, finish_fn=self._finish)
+    def _restore_transcript_identity_loss(self, pid: str, *, finish_fn=None) -> None:
+        self._failures.restore_transcript_identity_loss(
+            pid, finish_fn=self._finish if finish_fn is None else finish_fn
+        )
 
     def _sweep_identity_lost_grace(
         self,
         pid: str,
         failed_at: float | None = None,
         *,
-        registration: LiveRegistration | None = None,
+        finish_fn=None,
     ) -> None:
         self._failures.sweep_identity_lost_grace(
             pid,
             failed_at,
-            finish_fn=partial(self._finish, registration=registration),
+            finish_fn=self._finish if finish_fn is None else finish_fn,
         )
 
     def mark_transcript_identity_lost(
@@ -50,12 +50,12 @@ class IdentityLossWiring:
         pid: str,
         reason: str,
         *,
-        registration: LiveRegistration | None = None,
+        finish_fn=None,
     ) -> None:
         self._failures.mark_transcript_identity_lost(
             pid,
             reason,
-            finish_fn=partial(self._finish, registration=registration),
+            finish_fn=self._finish if finish_fn is None else finish_fn,
         )
 
     def _handle_source_error(
@@ -63,12 +63,12 @@ class IdentityLossWiring:
         pid: str,
         batch: Batch,
         *,
-        registration: LiveRegistration | None = None,
+        finish_fn=None,
     ) -> None:
         self._failures.handle_source_error(
             pid,
             batch,
-            finish_fn=partial(self._finish, registration=registration),
+            finish_fn=self._finish if finish_fn is None else finish_fn,
         )
 
     def _update_source_error(self, pid: str, batch: Batch) -> None:

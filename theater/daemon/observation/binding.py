@@ -8,9 +8,9 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from theater.daemon.observation.attachment import AttachmentManager
+from theater.daemon.observation.completion_gate import BoundCompletionGate
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.identity import history_correlation_is_ambiguous
-from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.registry import Registry
 from theater.harness.source import Attachment, Batch, History, Source
 
@@ -27,11 +27,10 @@ class TranscriptBinding:
         _pending_transcripts: set[str]
         registry: Registry
         store: Store
-        _answer_turn: Callable[..., Any]
+        _bind_completion: Callable[..., BoundCompletionGate]
         _handle_source_error: Callable[..., Any]
         _settle: Callable[..., Any]
         _settle_from_event: Callable[..., Any]
-        _turn_result: Callable[..., Any]
 
     def transcript_pending(self, pid: str) -> bool:
         """A source is waiting for its first transcript, not reporting an identity conflict."""
@@ -62,14 +61,15 @@ class TranscriptBinding:
         source: Source,
         batch: Batch,
         *,
-        registration: LiveRegistration | None = None,
+        completion: BoundCompletionGate | None = None,
     ) -> bool:
+        gate = completion if completion is not None else self._bind_completion(None)
         return self._attachments.accept_attachment(
             pid,
             source,
             batch,
-            handle_source_error_fn=partial(self._handle_source_error, registration=registration),
-            on_attach_fn=partial(self._on_attach, registration=registration),
+            handle_source_error_fn=partial(self._handle_source_error, finish_fn=gate.finish),
+            on_attach_fn=partial(self._on_attach, completion=gate),
             clear_source_errors_fn=self._failures.clear_source_errors,
         )
 
@@ -118,13 +118,12 @@ class TranscriptBinding:
         pid: str,
         attached: Attachment,
         *,
-        registration: LiveRegistration | None = None,
+        completion: BoundCompletionGate | None = None,
     ) -> None:
+        gate = completion if completion is not None else self._bind_completion(None)
         self._attachments.on_attach(
             pid,
             attached,
             settle_fn=self._settle,
-            settle_from_event_fn=partial(self._settle_from_event, registration=registration),
-            answer_turn_fn=partial(self._answer_turn, registration=registration),
-            turn_result_fn=self._turn_result,
+            settle_from_event_fn=partial(self._settle_from_event, completion=gate),
         )

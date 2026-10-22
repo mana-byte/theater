@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from tests.support.observation import apply_batch
 from tests.support.paths import fixture
 from tests.support.shipped import VibeHarness
 from tests.support.vibe_store import SESSION_ID, make_state, public_message
@@ -130,7 +131,9 @@ async def test_pending_approval_survives_polling_and_progress(
             batch = await source.read()
             assert batch.status is Status.AWAITING_INPUT
             assert batch.progressed is (phase != "quiet")
-            observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+            apply_batch(
+                observer, participant.id, batch, QuietClock(), TurnAccumulator(), source=source
+            )
             observer._unblock_on_semantic_progress(participant.id, batch)
             await observer._screen_only(
                 participant.id,
@@ -138,14 +141,14 @@ async def test_pending_approval_survives_polling_and_progress(
                 QuietClock(screen_quiet_since=0.0),
                 source_status=batch.status,
             )
-            source.acknowledge_source_checkpoint()
             assert registry.get(participant.id).status is Status.AWAITING_INPUT
 
         publish(2, "running")
         resumed = await source.read()
         assert resumed.status is Status.WORKING
-        observer._apply(participant.id, resumed, QuietClock(), TurnAccumulator())
-        source.acknowledge_source_checkpoint()
+        apply_batch(
+            observer, participant.id, resumed, QuietClock(), TurnAccumulator(), source=source
+        )
         assert registry.get(participant.id).status is Status.WORKING
     finally:
         await source.aclose()

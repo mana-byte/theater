@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import update
 
+from tests.support.observation import apply_batch
 from tests.support.observer_rigs import WaitingHarness, screen_checked
 from tests.support.shipped import VibeHarness
 from tests.support.waiting import until
@@ -45,7 +46,8 @@ def test_explicit_awaiting_input_status_survives_semantic_progress(registry):
     observer = Observer(registry, harnesses={})
     batch = Batch(status=Status.AWAITING_INPUT, progressed=True)
 
-    assert observer._apply(
+    assert apply_batch(
+        observer,
         participant.id,
         batch,
         QuietClock(),

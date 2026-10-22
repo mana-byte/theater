@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import theater.daemon.trajectory.telemetry.labels as telemetry_labels
+from tests.support.observation import apply_batch
 from theater.constants.observability import (
     AGENT_COST_METRIC,
     AGENT_FAILURES_METRIC,
@@ -422,8 +423,8 @@ def usage_event(key: str) -> Event:
 
 def test_observer_without_telemetry_keeps_existing_apply_result(registry):
     observer = Observer(registry, harnesses={})
-    assert observer._apply("missing", Batch(progressed=True), QuietClock(), TurnAccumulator())
-    assert not observer._apply("missing", Batch(), QuietClock(), TurnAccumulator())
+    assert apply_batch(observer, "missing", Batch(progressed=True), QuietClock(), TurnAccumulator())
+    assert not apply_batch(observer, "missing", Batch(), QuietClock(), TurnAccumulator())
 
 
 def test_telemetry_receives_only_new_usage_events(registry):
@@ -434,7 +435,7 @@ def test_telemetry_receives_only_new_usage_events(registry):
     second = usage_event("same")
     batch = Batch(events=[first, second])
 
-    assert observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+    assert apply_batch(observer, participant.id, batch, QuietClock(), TurnAccumulator())
 
     assert telemetry.calls == [(participant.id, batch, (first,))]
 
@@ -444,7 +445,7 @@ def test_telemetry_receives_accepted_usage_free_batch_once(registry):
     observer = Observer(registry, harnesses={}, agent_telemetry=telemetry)
     batch = Batch(progressed=True)
 
-    assert observer._apply("missing", batch, QuietClock(), TurnAccumulator())
+    assert apply_batch(observer, "missing", batch, QuietClock(), TurnAccumulator())
 
     assert telemetry.calls == [("missing", batch, ())]
 
@@ -452,7 +453,7 @@ def test_telemetry_receives_accepted_usage_free_batch_once(registry):
 def test_telemetry_failure_does_not_change_apply_result(registry, caplog):
     observer = Observer(registry, harnesses={}, agent_telemetry=Telemetry(fail_record=True))
 
-    assert observer._apply("missing", Batch(progressed=True), QuietClock(), TurnAccumulator())
+    assert apply_batch(observer, "missing", Batch(progressed=True), QuietClock(), TurnAccumulator())
     assert "agent telemetry failed for missing" in caplog.text
 
 

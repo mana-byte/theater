@@ -18,6 +18,7 @@ from tests.support.collision_rig import (
 )
 from tests.support.collision_rig import collision_registry as shared_collision_registry
 from tests.support.collision_rig import vibe_tree as shared_vibe_tree
+from tests.support.observation import apply_batch, run_quiet_step
 from tests.support.shipped import ClaudeCodeHarness, VibeHarness
 from theater.daemon import methods as methods_mod
 from theater.daemon.jobs import JobManager
@@ -47,7 +48,7 @@ async def test_identity_loss_growing_pin_stays_bound_and_attributed(collision_re
         fh.write(json.dumps({"role": "assistant", "content": "still me"}) + "\n")
     batch = await source.read()
     assert batch.progressed
-    observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+    apply_batch(observer, participant.id, batch, QuietClock(), TurnAccumulator(), source=source)
 
     assert not observer.transcript_identity_lost(participant.id)
     rows = collision_registry.store.bus_tail(limit=500)
@@ -103,11 +104,15 @@ async def test_claude_readable_pin_uses_newer_candidate_only_as_loss_evidence(
     clock.quiet_since = time.monotonic() - 10
     # Two consecutive relocate windows with the same evidence location are
     # required before quarantine. The first call alone does not quarantine.
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     if lost:
         assert not observer.transcript_identity_lost(participant.id)
         clock.quiet_since = time.monotonic() - 10
-        await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+        await run_quiet_step(
+            observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+        )
 
     assert observer.transcript_identity_lost(participant.id) is lost
     assert source.path == old
@@ -142,7 +147,9 @@ async def test_identity_loss_inert_idle_pin_stays_bound(collision_registry, vibe
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
 
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
 
     assert source.path == vibe_tree["transcript_a"]
     assert not observer.transcript_identity_lost(participant.id)
@@ -176,10 +183,14 @@ async def test_identity_loss_inert_working_new_candidate_enters_quarantine_once(
     clock.quiet_since = time.monotonic() - 10
 
     # Two consecutive relocate windows with the same evidence are required.
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert not observer.transcript_identity_lost(participant.id)
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     observer.mark_transcript_identity_lost(participant.id, "repeat should not spam")
 
     assert source.path == vibe_tree["transcript_a"]

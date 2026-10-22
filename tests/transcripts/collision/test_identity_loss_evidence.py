@@ -8,6 +8,7 @@ from pathlib import Path
 from tests.support.collision_rig import accept_bound_source, trust_pin, write_claude_transcript
 from tests.support.collision_rig import collision_registry as shared_collision_registry
 from tests.support.collision_rig import vibe_tree as shared_vibe_tree
+from tests.support.observation import run_quiet_step
 from tests.support.shipped import ClaudeCodeHarness, VibeHarness
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
@@ -70,9 +71,13 @@ async def test_identity_loss_evidence_bound_to_another_live_participant_is_rejec
     # Even after two relocate windows, quarantine must not be entered.
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert not observer.transcript_identity_lost(participant.id)
 
 

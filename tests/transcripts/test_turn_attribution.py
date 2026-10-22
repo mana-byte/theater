@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.support.observation import apply_batch
 from tests.support.paths import FIXTURES
 from tests.support.shipped import ClaudeCodeObserver, CodexObserver, VibeObserver
 from theater.daemon.jobs import JobManager
@@ -72,7 +73,7 @@ def test_a_human_typing_does_not_answer_the_waiting_peer(registry):
         ]
     )
 
-    observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
+    apply_batch(observer, p.id, batch, QuietClock(), TurnAccumulator())
 
     assert str(jobs.get("h1").state) == "running"
     assert jobs.get("h1").result is None
@@ -87,7 +88,7 @@ def test_the_peers_own_reply_still_answers_it(registry):
     observer, p, jobs = poised(registry)
     batch = Batch(events=[heard(PROMPT), said("it validates the bearer token")])
 
-    observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
+    apply_batch(observer, p.id, batch, QuietClock(), TurnAccumulator())
 
     assert jobs.get("h1").result == "it validates the bearer token"
 
@@ -102,7 +103,8 @@ def test_the_peer_is_answered_after_the_human_has_had_a_turn(registry):
     observer, p, jobs = poised(registry)
     clock, turns = QuietClock(), TurnAccumulator()
 
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[heard("wait, what branch am i on?"), said("main", "m1")]),
         clock,
@@ -110,7 +112,8 @@ def test_the_peer_is_answered_after_the_human_has_had_a_turn(registry):
     )
     assert str(jobs.get("h1").state) == "running"
 
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[heard(PROMPT), said("it validates the bearer token", "m2")]),
         clock,
@@ -137,7 +140,7 @@ def test_a_split_human_turn_is_skipped_on_both_records(registry):
         ]
     )
 
-    observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
+    apply_batch(observer, p.id, batch, QuietClock(), TurnAccumulator())
 
     assert str(jobs.get("h1").state) == "running"
 
@@ -151,7 +154,8 @@ def test_one_unmatched_turn_end_leaves_the_job_running(registry):
     observer, p, jobs = poised(registry)
     clock, turns = QuietClock(), TurnAccumulator()
 
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[heard("what branch am i on?"), said("main", "m1")]),
         clock,
@@ -178,7 +182,8 @@ def test_two_consecutive_unmatched_turn_ends_crash_the_job(registry):
     observer, p, jobs = poised(registry)
     clock, turns = QuietClock(), TurnAccumulator()
 
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[heard("what branch am i on?"), said("main", "m1")]),
         clock,
@@ -186,7 +191,8 @@ def test_two_consecutive_unmatched_turn_ends_crash_the_job(registry):
     )
     assert str(jobs.get("h1").state) == "running"
 
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[heard("any merge conflicts?"), said("no", "m2")]),
         clock,
@@ -210,7 +216,8 @@ def test_a_match_after_one_miss_clears_the_counter(registry):
     clock, turns = QuietClock(), TurnAccumulator()
 
     # Miss one: human interjects.
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[heard("hold on"), said("ok", "m1")]),
         clock,
@@ -219,7 +226,8 @@ def test_a_match_after_one_miss_clears_the_counter(registry):
     assert observer._unmatched.get("h1") == 1
 
     # Match: the peer's turn.
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[heard(PROMPT), said("the answer", "m2")]),
         clock,
@@ -257,7 +265,8 @@ def test_the_unmatched_dict_evicts_the_oldest_entry_past_the_cap(registry):
     assert len(observer._unmatched) == UNMATCHED_CAP
 
     # One real miss: a non-matching turn end for the waiting job h1.
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[heard("what branch am i on?"), said("main", "m1")]),
         clock,
@@ -287,8 +296,8 @@ def test_the_user_record_may_arrive_in_an_earlier_batch(registry):
     observer, p, jobs = poised(registry)
     clock, turns = QuietClock(), TurnAccumulator()
 
-    observer._apply(p.id, Batch(events=[heard(PROMPT)]), clock, turns)
-    observer._apply(p.id, Batch(events=[said("the answer")]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[heard(PROMPT)]), clock, turns)
+    apply_batch(observer, p.id, Batch(events=[said("the answer")]), clock, turns)
 
     assert jobs.get("h1").result == "the answer"
 
@@ -303,7 +312,7 @@ def test_a_turn_with_no_user_record_answers_as_it_always_did(registry):
     """
     observer, p, jobs = poised(registry)
 
-    observer._apply(p.id, Batch(events=[said("the answer")]), QuietClock(), TurnAccumulator())
+    apply_batch(observer, p.id, Batch(events=[said("the answer")]), QuietClock(), TurnAccumulator())
 
     assert jobs.get("h1").result == "the answer"
 
@@ -316,7 +325,8 @@ def test_a_promptless_job_answers_as_it_always_did(registry):
     """
     observer, p, jobs = poised(registry, prompt=None)
 
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[heard("something else entirely"), said("the answer")]),
         QuietClock(),

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.observation import apply_batch
 from tests.support.shipped import ClaudeCodeHarness
 from tests.support.waiting import until
 from theater import paths
@@ -544,11 +545,13 @@ async def test_current_path_receipt_does_not_detach_or_reset_mid_turn(registry, 
     assert observer.transcript_receipt(p.id, location=str(path), session_id=path.stem) == "accepted"
     assert p.id not in observer._reset_watch_state
     assert (clock.quiet_since, clock.screen_quiet_since, clock.rescue_since) == (1.0, 2.0, 3.0)
-    observer._apply(
+    apply_batch(
+        observer,
         p.id,
         Batch(events=[Event(kind=EventKind.ASSISTANT, turn_end=True)]),
         clock,
         turns,
+        source=source,
     )
 
     assert jobs.get("h1").result == "partial"

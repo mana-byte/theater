@@ -1,6 +1,6 @@
-"""Central status policy: QuietClock, _apply, _on_quiet, _settle, screen status.
+"""Central status policy: QuietClock, batch apply, quiet decisions, and screen status.
 
-``_on_quiet`` ordering matters: relocate -> identity probe -> screen status -> rescue.
+Quiet ordering matters: relocate -> identity probe -> screen status -> rescue.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from theater.constants.observation import (
     WORKING_SCREEN_INTERVAL_CAP_SECONDS,
 )
 from theater.daemon import lineage
-from theater.daemon.observation.rollback import rollback_observation_state
 from theater.daemon.observation.screen import end_turn_from_screen_text
 from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.persistence.transactions import active_write_unit
@@ -233,22 +232,7 @@ class Reducer:
                 self._safe_telemetry(pid, batch, ())
             return False
         if connection is None:
-            with (
-                rollback_observation_state(clock, turns),
-                self.staged_hashes(pid, batch),
-                self.store.write_unit() as unit,
-            ):
-                return self.apply(
-                    pid,
-                    batch,
-                    clock,
-                    turns,
-                    answer_turn_fn=answer_turn_fn,
-                    settle_fn=settle_fn,
-                    turn_result_fn=turn_result_fn,
-                    path_target_fn=path_target_fn,
-                    connection=unit.connection,
-                )
+            raise ValueError("a writeful observation batch requires its source write unit")
         state = _ApplyState(usage_events=[] if self._telemetry_fn is not None else None)
         callbacks = _ApplyCallbacks(answer_turn_fn, turn_result_fn, path_target_fn)
         paths_now = any(event.turn_end for event in batch.events)
@@ -494,7 +478,7 @@ class Reducer:
         reset_identity_loss_fn,
         is_untrusted_rotation_fn,
         rescue_jobs_fn,
-        pinned_fn=None,
+        pinned_fn,
     ) -> None:
         """Nothing arrived this tick. Run the three quiet timers.
 
@@ -514,7 +498,7 @@ class Reducer:
             if untrusted_refresh:
                 source.discard_attachment()
             # A relocated transcript can end a job on attach or in its events; pin Git first.
-            async with pinned_fn(pid, batch) if pinned_fn else nullcontext():
+            async with pinned_fn(pid, batch):
                 accepted = not untrusted_refresh and accept_attachment_fn(pid, source, batch)
                 progressed = accepted and apply_fn(pid, batch, clock, turns)
             if progressed:

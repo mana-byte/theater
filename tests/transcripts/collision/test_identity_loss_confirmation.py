@@ -8,6 +8,7 @@ import time
 from tests.support.collision_rig import accept_bound_source, make_session, trust_pin
 from tests.support.collision_rig import collision_registry as shared_collision_registry
 from tests.support.collision_rig import vibe_tree as shared_vibe_tree
+from tests.support.observation import run_quiet_step
 from tests.support.shipped import VibeHarness
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
@@ -43,13 +44,17 @@ async def test_identity_loss_confirmation_requires_two_windows_with_same_locatio
     clock.quiet_since = time.monotonic() - 10
 
     # First relocate window: evidence found, but no quarantine yet.
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert not observer.transcript_identity_lost(participant.id)
     assert participant.id in observer._identity_loss_pending
 
     # Second relocate window: same evidence location, now quarantine.
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert observer.transcript_identity_lost(participant.id)
 
 
@@ -78,7 +83,9 @@ async def test_identity_loss_confirmation_resets_on_semantic_progress(
     clock.quiet_since = time.monotonic() - 10
 
     # First relocate window: evidence found, counter at 1.
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert participant.id in observer._identity_loss_pending
     assert observer._identity_loss_pending[participant.id][1] == 1
 
@@ -90,7 +97,9 @@ async def test_identity_loss_confirmation_resets_on_semantic_progress(
 
     # Next relocate window starts fresh: counter at 1 again, not 2.
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert not observer.transcript_identity_lost(participant.id)
     assert observer._identity_loss_pending[participant.id][1] == 1
 
@@ -118,13 +127,17 @@ async def test_identity_loss_confirmation_resets_when_location_changes(
 
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert observer._identity_loss_pending[participant.id] == (str(first_new), 1)
 
     # A different candidate location resets the counter to 1, not 2.
     second_new = make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert not observer.transcript_identity_lost(participant.id)
     assert observer._identity_loss_pending[participant.id] == (str(second_new), 1)
 
@@ -162,9 +175,13 @@ async def test_identity_loss_grace_sweep_crashes_job_after_grace_in_quarantine(
     # Enter quarantine via two relocate windows.
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert observer.transcript_identity_lost(participant.id)
 
     # With 0 grace, the sweep on the first quarantine tick crashes the job.
@@ -200,9 +217,13 @@ async def test_identity_loss_grace_sweep_preserves_fresh_job_in_quarantine(
 
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert observer.transcript_identity_lost(participant.id)
 
     # Fresh job within grace: sweep must not crash it.
@@ -277,20 +298,26 @@ async def test_identity_loss_confirmation_appear_gap_appear_resets(collision_reg
     # Window 1: evidence found, counter at 1.
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert observer._identity_loss_pending[participant.id] == (str(candidate), 1)
 
     # Gap: remove the candidate so the probe returns None.
     shutil.rmtree(candidate.parent)
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert participant.id not in observer._identity_loss_pending
 
     # Window 3: candidate reappears, counter back to 1, not 2.
     candidate2 = make_session(root, "zzzzzzzz", str(project), text="not mine")
     os.utime(candidate2, ns=(3_000_000_000, 3_000_000_000))
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert not observer.transcript_identity_lost(participant.id)
     assert observer._identity_loss_pending[participant.id][1] == 1
 
@@ -320,19 +347,25 @@ async def test_identity_loss_confirmation_working_nonworking_gap_resets(
     # Window 1: HIGH/WORKING, evidence found, counter at 1.
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert observer._identity_loss_pending[participant.id][1] == 1
 
     # Gap: screen is PROMPT (not WORKING), so evidence is not admissible.
     reading["kind"] = ScreenKind.PROMPT
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert participant.id not in observer._identity_loss_pending
 
     # Window 3: HIGH/WORKING again, counter back to 1, not 2.
     reading["kind"] = ScreenKind.WORKING
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert not observer.transcript_identity_lost(participant.id)
     assert observer._identity_loss_pending[participant.id][1] == 1
 
@@ -366,7 +399,9 @@ async def test_identity_loss_quarantine_with_empty_polls_between_windows(
     # Window 1: relocate fires, evidence found, counter at 1.
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert observer._identity_loss_pending[participant.id][1] == 1
 
     # Simulate normal empty polls between relocate windows. The watch loop
@@ -380,7 +415,9 @@ async def test_identity_loss_quarantine_with_empty_polls_between_windows(
 
     # Window 2: same evidence location, quarantine entered.
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert observer.transcript_identity_lost(participant.id)
 
 
@@ -408,7 +445,9 @@ async def test_identity_loss_actual_progress_resets_confirmation(collision_regis
     # Window 1: evidence found, counter at 1.
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert observer._identity_loss_pending[participant.id][1] == 1
 
     # Actual progress: a batch with events from the pinned source.
@@ -418,6 +457,8 @@ async def test_identity_loss_actual_progress_resets_confirmation(collision_regis
 
     # Next window starts fresh: counter at 1, not 2.
     clock.quiet_since = time.monotonic() - 10
-    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    await run_quiet_step(
+        observer, participant.id, harness.observer, source, clock, TurnAccumulator()
+    )
     assert not observer.transcript_identity_lost(participant.id)
     assert observer._identity_loss_pending[participant.id][1] == 1
