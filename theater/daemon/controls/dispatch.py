@@ -35,6 +35,7 @@ from theater.models import (
     HumanPresent,
     Job,
     JobState,
+    NotAddressable,
     StaleTarget,
 )
 
@@ -250,7 +251,7 @@ class DispatchControls(ControlHost):
                 participant_id,
             )
             return QueueDispatchOutcome(deferred=True)
-        return await self._dispatch_head_legacy(participant_id, head, job, caller_id)
+        return await self._refuse_unbound_queued(participant_id, head, job)
 
     async def _dispatch_head_provider(
         self,
@@ -342,13 +343,13 @@ class DispatchControls(ControlHost):
             return float(value)
         return 0.0
 
-    async def _dispatch_head_legacy(
+    async def _refuse_unbound_queued(
         self,
         participant_id: str,
         head: ControlOperation,
         job: Job,
-        caller_id: str,
     ) -> QueueDispatchOutcome:
+        """Record the historical route, then refuse after the presence recheck."""
         if head.transport is not ControlTransport.TERMINAL_FALLBACK:
             selected = self._select_queued_route(
                 head,
@@ -362,35 +363,18 @@ class DispatchControls(ControlHost):
             head = selected
         try:
             await self._gates.require_absent(participant_id)
-            await self._gates.legacy_copy_mode_check(participant_id)
-            # Recheck after the awaited copy-mode query, before dispatch effects.
-            await self._gates.require_absent(participant_id)
-            # The busy/claim check mutates claim rows; it runs after all awaited
-            # prep, its synchronous body adjacent to dispatch initiation.
-            await self._gates.legacy_busy_check(participant_id)
         except TEMPORARY_REFUSALS as exc:
-            # Legacy busy defers the unchanged FIFO head until active work settles.
             logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
             return QueueDispatchOutcome(deferred=True)
         except Exception as exc:
             return self._fail_queued_item(head, job, exc)
-        self._store.mark_control_operation_dispatched(head.operation_id, updated_at=self._clock())
-        try:
-            await self._gates.legacy_deliver(participant_id, job.prompt or "")
-        except Exception as exc:
-            return self._fail_queued_item(head, job, exc)
-        self._store.settle_control_operation(
-            head.operation_id,
-            result=DeliveryResult.ACCEPTED,
-            updated_at=self._clock(),
+        return self._fail_queued_item(
+            head,
+            job,
+            NotAddressable(
+                f"participant {participant_id!r} has no current terminal-provider route"
+            ),
         )
-        self._record_legacy_send(
-            participant_id,
-            caller_id=caller_id,
-            job=job,
-            prompt=job.prompt or "",
-        )
-        return QueueDispatchOutcome(dispatched=(job.handle,))
 
     async def _dispatch_head_native(
         self,

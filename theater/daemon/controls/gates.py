@@ -27,16 +27,12 @@ class ControlGates:
     check_absent: Callable[[str], None]
 
     #: ``(participant_id) -> None``. Pane/approval/transcript preflights shared
-    #: by native and legacy sends; copy mode is deliberately absent here.
+    #: by native and provider sends; copy mode is deliberately absent here.
     send_preflight: Callable[[str], Awaitable[None]]
 
-    #: ``(participant_id) -> None``. Copy mode blocks legacy key injection
-    #: with a transient, actionable refusal; it never gates native delivery.
-    legacy_copy_mode_check: Callable[[str], Awaitable[None]]
-
-    #: Legacy-only working-status and send-claim expiry handling.
-    #: The composed callback must not suspend between claim handling and return.
-    legacy_busy_check: Callable[[str], Awaitable[None]]
+    #: Read the send-claim compatibility clock and TTL at admission time.
+    send_claim_now: Callable[[], float]
+    send_claim_ttl: Callable[[], float]
 
     #: ``(prompt) -> None``. Prompt-size and response-format policy, reused
     #: unchanged by ordinary send and queued followups.
@@ -50,14 +46,10 @@ class ControlGates:
     #: directory, used for path-touch attribution once a job is dispatched.
     cwd_for: Callable[[str], str | None]
 
-    #: Legacy tmux text delivery; an exception means nothing was delivered,
-    #: matching the existing send contract.
-    legacy_deliver: Callable[[str, str], Awaitable[None]]
-
     #: ``(participant_id) -> None``. Provider-only readiness gate for prompt
     #: submission: fresh identity-fenced screen evidence must show a prompt
-    #: composer. Dialogs refuse; unproven screens fail closed. Native and
-    #: legacy routes never consult it.
+    #: composer. Dialogs refuse; unproven screens fail closed. Native routes
+    #: never consult it.
     provider_modal_check: Callable[[str], Awaitable[None]] | None = None
 
     #: Live callback health for one exact provider generation.
