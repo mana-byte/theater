@@ -16,7 +16,7 @@ from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig, PresentationTarget
 from regie.tmux import bootstrap
 from regie.tmux.bootstrap import REGIE_DEFAULT_SESSION
-from regie.tmux.command import TmuxError, available, run, sequence_argv
+from regie.tmux.command import TmuxError, TmuxOutcomeUnknown, available, run, sequence_argv
 from regie.tmux.identity import pane_snapshot
 from regie.tmux.presentation import TmuxPresentation
 from regie.tmux.terminals import (
@@ -447,12 +447,8 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation( 
     assert "THEATER_ID" not in os.environ
 
 
-async def test_real_tmux_recovery_marks_provisional_pane_without_launch_or_rename(
-    isolated_tmux: Path,
-) -> None:
-    server = await ensure_server(cwd=str(isolated_tmux))
-    name = "regie-launch-recoverytoken123"
-    pane_id = await run(
+async def _provisional_pane(isolated_tmux: Path, name: str) -> str:
+    return await run(
         "new-window",
         "-d",
         "-P",
@@ -469,6 +465,106 @@ async def test_real_tmux_recovery_marks_provisional_pane_without_launch_or_renam
         "-c",
         "import time; time.sleep(30)",
     )
+
+
+async def _create_provisional_launch(
+    isolated_tmux: Path,
+    server: str,
+    name: str,
+    *,
+    launch_id: str,
+    presentation_name: str,
+    participant_id: str = "participant-a",
+) -> dict[str, object]:
+    return await create_terminal(
+        provider_id="provider-a",
+        generation=3,
+        participant_id=participant_id,
+        launch_id=launch_id,
+        executable=sys.executable,
+        argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=str(isolated_tmux),
+        environment={},
+        presentation={"name": presentation_name},
+        expected_server_identity=server,
+        terminal_incarnation=f"{launch_id}-incarnation",
+        provisional_window_name=name,
+        dispatch_previously_started=True,
+    )
+
+
+async def test_real_tmux_create_adopts_provisional_pane_and_renames_without_launch(
+    isolated_tmux: Path,
+) -> None:
+    server = await ensure_server(cwd=str(isolated_tmux))
+    name = "regie-launch-createadopt123"
+    pane_id = await _provisional_pane(isolated_tmux, name)
+    before = await pane_snapshot(pane_id)
+    assert before is not None and not before.managed
+    pane_ids = await run("list-panes", "-a", "-F", "#{pane_id}")
+    identity = await _create_provisional_launch(
+        isolated_tmux, server, name, launch_id="launch-a", presentation_name="adopted-create"
+    )
+    after = await pane_snapshot(pane_id)
+    assert after is not None and after.managed
+    assert identity["terminal_id"] == pane_id
+    assert (after.pane_pid, after.window_id, after.launch_id) == (
+        before.pane_pid,
+        before.window_id,
+        "launch-a",
+    )
+    assert await run("list-panes", "-a", "-F", "#{pane_id}") == pane_ids
+    assert await run("display-message", "-p", "-t", pane_id, "#{window_name}") == "adopted-create"
+
+
+async def test_real_tmux_create_refuses_managed_provisional_without_changes(
+    isolated_tmux: Path,
+) -> None:
+    server = await ensure_server(cwd=str(isolated_tmux))
+    name = "regie-launch-markedtoken123"
+    pane_id = await _provisional_pane(isolated_tmux, name)
+    await _create_provisional_launch(
+        isolated_tmux, server, name, launch_id="launch-original", presentation_name=name
+    )
+    before = await pane_snapshot(pane_id)
+    assert before is not None and before.managed
+    pane_ids = await run("list-panes", "-a", "-F", "#{pane_id}")
+    with pytest.raises(TmuxError, match="recoverable launch pane no longer matches its intent"):
+        await _create_provisional_launch(
+            isolated_tmux,
+            server,
+            name,
+            launch_id="launch-new",
+            presentation_name="must-not-rename",
+            participant_id="participant-b",
+        )
+    assert await pane_snapshot(pane_id) == before
+    assert await run("list-panes", "-a", "-F", "#{pane_id}") == pane_ids
+    assert await run("display-message", "-p", "-t", pane_id, "#{window_name}") == name
+
+
+async def test_real_tmux_dispatched_create_missing_pane_stays_unknown_without_launch(
+    isolated_tmux: Path,
+) -> None:
+    server = await ensure_server(cwd=str(isolated_tmux))
+    pane_ids = await run("list-panes", "-a", "-F", "#{pane_id}")
+    with pytest.raises(TmuxOutcomeUnknown, match="no exact pane remains"):
+        await _create_provisional_launch(
+            isolated_tmux,
+            server,
+            "regie-launch-missingpane123",
+            launch_id="launch-missing",
+            presentation_name="must-not-launch",
+        )
+    assert await run("list-panes", "-a", "-F", "#{pane_id}") == pane_ids
+
+
+async def test_real_tmux_recovery_marks_provisional_pane_without_launch_or_rename(
+    isolated_tmux: Path,
+) -> None:
+    server = await ensure_server(cwd=str(isolated_tmux))
+    name = "regie-launch-recoverytoken123"
+    pane_id = await _provisional_pane(isolated_tmux, name)
     before = await run("list-panes", "-a", "-F", "#{pane_id}")
     recovered = await recover_terminal_launch(
         provider_id="provider-a",
