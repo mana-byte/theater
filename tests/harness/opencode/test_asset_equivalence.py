@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from tests.support.paths import REPO_ROOT
 from theater.harness.builtin.plugins.opencode import (
     frontend,
     frontend_inputs,
@@ -54,11 +57,33 @@ def test_rendered_assets_match_pre_extraction_bytes_and_parse(monkeypatch, tmp_p
     for name, source in rendered.items():
         assert hashlib.sha256(source.encode()).hexdigest() == _DIGESTS[name]
         target = tmp_path / name
-        target.write_text(source)
+        target.write_text(source, encoding="utf-8")
         result = subprocess.run(
             ["node", "--check", str(target)], capture_output=True, text=True, check=False
         )
         assert result.returncode == 0, f"{name}: {result.stderr}"
+
+
+@pytest.mark.requires_node
+def test_fixed_renderings_in_an_ascii_locale() -> None:
+    env = {**os.environ, "LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+    env.pop("PYTEST_ADDOPTS", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            f"{__file__}::test_rendered_assets_match_pre_extraction_bytes_and_parse",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0 and "1 passed" in result.stdout, result.stdout + result.stderr
 
 
 def test_native_fstring_values_are_not_reexpanded(monkeypatch) -> None:
