@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import json
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from regie.bridge.persistence import BridgePersistence
 from regie.bridge.state import BridgeStateStore
@@ -23,6 +25,14 @@ from regie.tmux.terminals import (
     terminate_terminal,
 )
 from theater.frontend import CallbackHandler, CallbackRequest, CallbackResponse
+
+type _Preflight = tuple[PaneSnapshot, dict[str, object], int, Callable[[], None]]
+
+
+@dataclass
+class _MutationAdmission:
+    value: _Preflight | dict[str, object] | CallbackResponse
+    retire_lock: bool = False
 
 
 class TmuxProviderCallbacks:
@@ -325,24 +335,10 @@ class TmuxProviderCallbacks:
         return await self._mutation(request, apply)
 
     async def terminate(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
-        operation_id = str(request.params["operation_id"])
-        cached = await self._cached_mutation(request)
-        if cached is not None:
-            return cached
-        terminal_id = str(request.params["terminal_id"])
-        lock = self._terminal_locks.setdefault(terminal_id, asyncio.Lock())
-        with phase("lock_wait"):
-            await lock.acquire()
-        terminated = False
-        try:
-            cached = await self._cached_mutation(request)
-            if cached is not None:
-                return cached
-            with phase("preflight"):
-                inspected = await self._mutation_preflight(request)
-            if isinstance(inspected, CallbackResponse):
-                return inspected
-            snapshot, identity, revision, before_effect = inspected
+        async with self._mutation_admission(request) as admission:
+            if not isinstance(admission.value, tuple):
+                return admission.value
+            snapshot, identity, revision, before_effect = admission.value
             stale = self._stale(request)
             if stale is not None:
                 return stale
@@ -356,18 +352,11 @@ class TmuxProviderCallbacks:
                 return _error("human_present", str(exc))
             if not exit_confirmed:
                 raise TmuxError("tmux did not confirm exit of the exact terminal")
-            result = self._delivery_result(request, identity, revision)
-            result["exit_confirmed"] = True
-            with phase("receipt"):
-                await self._persistence.run(
-                    self._state.write_receipt, request.method, operation_id, result
-                )
-            terminated = True
+            result = await self._accepted_mutation(
+                request, identity, revision, extra={"exit_confirmed": True}
+            )
+            admission.retire_lock = True
             return result
-        finally:
-            lock.release()
-            if terminated:
-                self._evict_lock(self._terminal_locks, terminal_id)
 
     async def _mutation(
         self,
@@ -375,22 +364,11 @@ class TmuxProviderCallbacks:
         apply: Callable[[str, Callable[[], None]], Awaitable[None]],
     ) -> Mapping[str, object] | CallbackResponse:
         operation_id = str(request.params["operation_id"])
-        cached = await self._cached_mutation(request)
-        if cached is not None:
-            return cached
-        terminal_id = str(request.params["terminal_id"])
-        lock = self._terminal_locks.setdefault(terminal_id, asyncio.Lock())
-        with phase("lock_wait"):
-            await lock.acquire()
-        try:
-            cached = await self._cached_mutation(request)
-            if cached is not None:
-                return cached
-            with phase("preflight"):
-                inspected = await self._mutation_preflight(request)
-            if isinstance(inspected, CallbackResponse):
-                return inspected
-            snapshot, identity, revision, before_effect = inspected
+        async with self._mutation_admission(request) as admission:
+            if not isinstance(admission.value, tuple):
+                return admission.value
+            terminal_id = str(request.params["terminal_id"])
+            snapshot, identity, revision, before_effect = admission.value
             current = await pane_snapshot(terminal_id)
             if current != snapshot:
                 return _error(
@@ -422,14 +400,53 @@ class TmuxProviderCallbacks:
                     ),
                 )
                 raise
-            result = self._delivery_result(request, identity, revision)
-            with phase("receipt"):
-                await self._persistence.run(
-                    self._state.write_receipt, request.method, operation_id, result
-                )
-            return result
+            return await self._accepted_mutation(request, identity, revision)
+
+    @asynccontextmanager
+    async def _mutation_admission(
+        self, request: CallbackRequest
+    ) -> AsyncIterator[_MutationAdmission]:
+        cached = await self._cached_mutation(request)
+        if cached is not None:
+            yield _MutationAdmission(cached)
+            return
+        terminal_id = str(request.params["terminal_id"])
+        lock = self._terminal_locks.setdefault(terminal_id, asyncio.Lock())
+        with phase("lock_wait"):
+            await lock.acquire()
+        admission: _MutationAdmission | None = None
+        try:
+            cached = await self._cached_mutation(request)
+            if cached is not None:
+                admission = _MutationAdmission(cached)
+            else:
+                with phase("preflight"):
+                    admission = _MutationAdmission(await self._mutation_preflight(request))
+            yield admission
         finally:
             lock.release()
+            if admission is not None and admission.retire_lock:
+                self._evict_lock(self._terminal_locks, terminal_id)
+
+    async def _accepted_mutation(
+        self,
+        request: CallbackRequest,
+        identity: dict[str, object],
+        revision: int,
+        *,
+        extra: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        result = self._delivery_result(request, identity, revision)
+        if extra is not None:
+            result.update(extra)
+        with phase("receipt"):
+            await self._persistence.run(
+                self._state.write_receipt,
+                request.method,
+                str(request.params["operation_id"]),
+                result,
+            )
+        return result
 
     async def _cached_mutation(self, request: CallbackRequest) -> dict | CallbackResponse | None:
         stale = self._stale(request)
