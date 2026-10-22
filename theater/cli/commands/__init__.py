@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from argparse import Namespace
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum, auto
+
 from theater.cli.commands.bus import cmd_bus
 from theater.cli.commands.controls import (
     cmd_controls,
@@ -24,7 +29,7 @@ from theater.cli.commands.introspection import (
     cmd_plugins,
     cmd_stats,
 )
-from theater.cli.commands.launch import cmd_launch
+from theater.cli.commands.launch import cmd_launch as cmd_launch
 from theater.cli.commands.maintenance import (
     cmd_gc,
     cmd_restart,
@@ -55,39 +60,55 @@ from theater.cli.commands.reload import cmd_reload
 from theater.cli.commands.skills import cmd_skills
 from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 
-COMMANDS = {
-    None: cmd_launch,
-    "daemon": cmd_daemon,
-    "mcp": cmd_mcp,
-    "plugin": cmd_plugin_call,
-    TRANSCRIPT_RECEIPT_COMMAND: cmd_transcript_receipt,
-    "claude-receipt": cmd_claude_receipt,
-    "harness-event": cmd_harness_event,
-    "ls": cmd_ls,
-    "bus": cmd_bus,
-    "spawn": cmd_spawn,
-    "steer": cmd_steer,
-    "queue": cmd_queue,
-    "settings": cmd_settings,
-    "controls": cmd_controls,
-    "interrupt": cmd_interrupt,
-    "kill": cmd_kill,
-    "name": cmd_name,
-    "candidates": cmd_candidates,
-    "bind": cmd_bind,
-    "adopt": cmd_adopt,
-    "harnesses": cmd_harnesses,
-    "plugins": cmd_plugins,
-    "skills": cmd_skills,
-    "stats": cmd_stats,
-    "gc": cmd_gc,
-    "config": cmd_config,
-    "models": cmd_models,
-    "providers": cmd_providers,
-    "workspaces": cmd_workspaces,
-    "control-transfer": cmd_control_transfer,
-    "regie": cmd_regie,
-    "stop": cmd_stop,
-    "restart": cmd_restart,
-    "reload": cmd_reload,
+
+class Initialization(Enum):
+    NONE = auto()
+    HOME = auto()
+    HARNESSES = auto()
+
+
+@dataclass(frozen=True, slots=True)
+class CommandSpec:
+    handler: Callable[[Namespace], int]
+    initialization: Initialization
+
+
+COMMAND_SPECS = {
+    "daemon": CommandSpec(cmd_daemon, Initialization.HOME),
+    "mcp": CommandSpec(cmd_mcp, Initialization.HOME),
+    "plugin": CommandSpec(cmd_plugin_call, Initialization.HOME),
+    TRANSCRIPT_RECEIPT_COMMAND: CommandSpec(cmd_transcript_receipt, Initialization.HARNESSES),
+    "claude-receipt": CommandSpec(cmd_claude_receipt, Initialization.HARNESSES),
+    "harness-event": CommandSpec(cmd_harness_event, Initialization.HOME),
+    "ls": CommandSpec(cmd_ls, Initialization.HARNESSES),
+    "bus": CommandSpec(cmd_bus, Initialization.HARNESSES),
+    "spawn": CommandSpec(cmd_spawn, Initialization.HARNESSES),
+    "steer": CommandSpec(cmd_steer, Initialization.HARNESSES),
+    "queue": CommandSpec(cmd_queue, Initialization.HARNESSES),
+    "settings": CommandSpec(cmd_settings, Initialization.HARNESSES),
+    "controls": CommandSpec(cmd_controls, Initialization.HARNESSES),
+    "interrupt": CommandSpec(cmd_interrupt, Initialization.HARNESSES),
+    "kill": CommandSpec(cmd_kill, Initialization.HARNESSES),
+    "name": CommandSpec(cmd_name, Initialization.HARNESSES),
+    "candidates": CommandSpec(cmd_candidates, Initialization.HARNESSES),
+    "bind": CommandSpec(cmd_bind, Initialization.HARNESSES),
+    "adopt": CommandSpec(cmd_adopt, Initialization.HARNESSES),
+    "harnesses": CommandSpec(cmd_harnesses, Initialization.HARNESSES),
+    "plugins": CommandSpec(cmd_plugins, Initialization.HOME),
+    "skills": CommandSpec(cmd_skills, Initialization.HOME),
+    "stats": CommandSpec(cmd_stats, Initialization.HARNESSES),
+    "gc": CommandSpec(cmd_gc, Initialization.HARNESSES),
+    "config": CommandSpec(cmd_config, Initialization.HOME),
+    "models": CommandSpec(cmd_models, Initialization.HARNESSES),
+    "providers": CommandSpec(cmd_providers, Initialization.HARNESSES),
+    "workspaces": CommandSpec(cmd_workspaces, Initialization.HARNESSES),
+    "control-transfer": CommandSpec(cmd_control_transfer, Initialization.HARNESSES),
+    "regie": CommandSpec(cmd_regie, Initialization.NONE),
+    "stop": CommandSpec(cmd_stop, Initialization.HARNESSES),
+    "restart": CommandSpec(cmd_restart, Initialization.HARNESSES),
+    # The daemon reads and validates its own configuration during reload.
+    "reload": CommandSpec(cmd_reload, Initialization.HOME),
 }
+
+# Keep the existing callable dispatch map available to direct callers and test overrides.
+COMMANDS = {name: spec.handler for name, spec in COMMAND_SPECS.items()}
