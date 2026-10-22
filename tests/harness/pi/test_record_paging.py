@@ -216,6 +216,29 @@ async def test_pi_large_records_retain_semantics_and_original_stream_positions(
     assert not (await restarted.read()).events
 
 
+def test_pi_history_seed_io_error_is_source_unavailable(tmp_path, monkeypatch) -> None:
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    append(
+        transcript,
+        session_record(session_id="native-id", cwd=workdir),
+        message_record("user-1", {"role": "user", "content": "continue"}),
+    )
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+
+    def unreadable_seed(self, stream, start):
+        raise OSError("seed read failed")
+
+    monkeypatch.setattr(PiObserver, "_seed_history_context", unreadable_seed)
+    failed = asyncio.run(source.history_page(limit=2))
+    assert failed.error_code == "transcript_source_unavailable"
+
+
 def test_pi_history_reader_keeps_live_turn_context_and_resume_forks_into_new_session_dir(
     tmp_path, monkeypatch
 ) -> None:

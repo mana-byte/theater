@@ -14,7 +14,7 @@ from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import Attachment, Batch, StreamPoint
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import TranscriptSource
-from theater.harness.transcript.discovery import stateful_history_reader
+from theater.harness.transcript.history import HistoryParseContext
 from theater.models import Status
 from theater.resume_floor import decode_floor
 
@@ -198,13 +198,13 @@ class PiTranscriptSource(TranscriptSource):
         self._clear_live_buffers()
         self._seed_live_context()
 
-    def _history_reader(self):
+    def _history_parse_context(self) -> HistoryParseContext:
         from .observer import PiObserver
 
-        return stateful_history_reader(
-            clone=lambda: PiObserver(root=self._observer.root, isolated=self._observer.isolated),
-            seed_of=lambda observer: observer._seed_history_context,
-            decorate=self._decorate_parsed,
+        reader = PiObserver(root=self._observer.root, isolated=self._observer.isolated)
+        return HistoryParseContext(
+            parse_record=lambda line, index: reader.parse_record(line, index, clip_text=False),
+            prepare_history_parse=reader._seed_history_context,
         )
 
     async def _locate(self, *, session_id: str | None) -> Path | None:

@@ -50,6 +50,19 @@ def _observer(root: Path, *, adopted: bool) -> CodexObserver:
     return CodexObserver(root=root, pane_pid=PID, participant_scoped=True, adopted=adopted)
 
 
+def test_rollout_filename_fact_keeps_distinct_discovery_and_process_depths(tmp_path):
+    root = tmp_path / "sessions"
+    root.mkdir()
+    path = root / f"rollout-2026-08-17T01-19-02-{SESSION}.jsonl"
+    reader = CodexObserver(root=root)
+
+    assert reader.session_id(path) == SESSION
+    assert reader._is_rollout(path, root)
+    assert not reader._is_rollout_shape(path)
+    assert reader.session_id(path.with_suffix(".txt")) == SESSION
+    assert not reader._is_rollout(path.with_suffix(".txt"), root)
+
+
 @pytest.fixture
 def codex_tree(tmp_path):
     root = tmp_path / ".codex" / "sessions"
