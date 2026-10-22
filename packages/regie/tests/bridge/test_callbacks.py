@@ -14,7 +14,7 @@ from regie.bridge.callbacks import TmuxProviderCallbacks
 from regie.bridge.runtime import TmuxBridge
 from regie.bridge.state import BridgeStateStore
 from regie.contracts import BridgeConfig
-from regie.tmux.command import TmuxError
+from regie.tmux.command import TmuxError, TmuxOutcomeUnknown
 from regie.tmux.identity import PaneSnapshot
 from regie.tmux.presence import PresenceChanged, PresenceEvidence
 from regie.tmux.terminals import managed_inventory
@@ -511,6 +511,85 @@ async def test_post_effect_disconnect_keeps_receipt_without_replay(
             "terminal.terminate",
             {"type": "response", "id": "callback-a", "result": historical},
         )
+    finally:
+        state.release()
+
+
+@pytest.mark.parametrize("failure", ["changed_snapshot", "uncertain", "cancelled", "presence"])
+async def test_terminate_failure_keeps_its_error_and_receipt_policy(
+    tmp_path: Path, monkeypatch, failure: str
+) -> None:
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+
+    def validate(_presence: PresenceEvidence) -> None:
+        if failure == "presence":
+            raise PresenceChanged("focus changed before termination")
+
+    callbacks = TmuxProviderCallbacks(
+        state,
+        generation_usable=lambda generation: generation == 3,
+        presence_validator=validate,
+    )
+
+    async def snapshot(_pane_id: str) -> PaneSnapshot:
+        return _pane()
+
+    async def changed_snapshot(_pane_id: str) -> PaneSnapshot:
+        return replace(_pane(), pane_pid=43)
+
+    async def inspect(**_kwargs):
+        return _identity(), PresenceEvidence("absent", "test", None), None, True
+
+    async def terminate(_snapshot: PaneSnapshot, *, before_effect) -> bool:
+        before_effect()
+        if failure == "uncertain":
+            raise TmuxOutcomeUnknown("termination uncertain")
+        if failure == "cancelled":
+            raise asyncio.CancelledError
+        raise AssertionError("presence must block termination before the effect")
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+    monkeypatch.setattr("regie.tmux.terminals.pane_snapshot", changed_snapshot)
+    if failure != "changed_snapshot":
+        monkeypatch.setattr("regie.bridge.callbacks.terminate_terminal", terminate)
+    try:
+        request = _request("terminal.terminate")
+        if failure == "presence":
+            result = await callbacks.terminate(request)
+            assert isinstance(result, CallbackResponse)
+            assert result.error is not None and result.error["code"] == "human_present"
+        else:
+            error = {
+                "changed_snapshot": TmuxError,
+                "uncertain": TmuxOutcomeUnknown,
+                "cancelled": asyncio.CancelledError,
+            }[failure]
+            with pytest.raises(error):
+                await callbacks.terminate(request)
+        assert state.receipt("terminal.terminate", "operation-a") is None
+        assert "%7" in callbacks._terminal_locks
+    finally:
+        state.release()
+
+
+async def test_terminate_callback_rejects_a_dead_snapshot(tmp_path: Path, monkeypatch) -> None:
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    callbacks = TmuxProviderCallbacks(state, generation_usable=lambda generation: generation == 3)
+
+    async def dead(_pane_id: str) -> PaneSnapshot:
+        return replace(_pane(), dead=True)
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", dead)
+    try:
+        result = await callbacks.terminate(_request("terminal.terminate"))
+        assert isinstance(result, CallbackResponse)
+        assert result.error is not None and result.error["code"] == "stale_terminal"
+        assert state.receipts() == ()
     finally:
         state.release()
 
