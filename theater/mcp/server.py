@@ -482,75 +482,8 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         return await tools.adopt_session(session, target=target)
 
 
-def _client_lifespan(session: Session):
-    @asynccontextmanager
-    async def lifespan(server):
-        try:
-            yield
-        finally:
-            await session.client.aclose()
-
-    return lifespan
-
-
-class _TheaterServer(MCPServer):
-    """Refusals become envelopes in the harness's delivery mode; unknown arguments are named."""
-
-    def __init__(self, *args: Any, error_delivery: ErrorDelivery, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.error_delivery: ErrorDelivery = error_delivery
-        #: tool name -> accepted parameter names
-        self.tool_parameters: dict[str, frozenset[str]] = {}
-
-    async def call_tool(self, name: str, arguments: dict[str, Any], context=None):
-        try:
-            result = await super().call_tool(name, arguments, context)
-        except Exception as exc:
-            envelope = refusal_envelope(exc)
-            if envelope is None:
-                raise
-            return refusal_result(envelope, self.error_delivery)
-        accepted = self.tool_parameters.get(name)
-        if accepted is None or not isinstance(result, CallToolResult):
-            return result
-        result = with_ignored_arguments(result, ignored_arguments(arguments, accepted))
-        return with_structured_object(result, tool_name=name)
-
-
-def build(
-    participant_id: str | None = None,
-    harness: str = "unknown",
-    toolset: str = "all",
-) -> MCPServer:
-    if toolset not in _TOOLSETS:
-        choices = ", ".join(sorted(_TOOLSETS))
-        raise ValueError(f"unknown MCP toolset {toolset!r}; expected one of: {choices}")
-    session = Session(
-        participant_id=participant_id or os.environ.get("THEATER_ID"),
-        harness=harness,
-        client=DaemonClientPool(),
-    )
-    mcp = _TheaterServer(
-        HARNESS_MCP_SERVER_NAME,
-        instructions=_instructions(toolset),
-        lifespan=_client_lifespan(session),
-        error_delivery=mcp_error_delivery(harness),
-    )
-    tool_names: set[str] = set()
-
-    def mcp_tool(*, description: str | None = None):
-        """Register a tool when it belongs to this lane."""
-
-        def decorator(fn):
-            if _includes_tool(toolset, fn.__name__):
-                tool_names.add(fn.__name__)
-                mcp.tool_parameters[fn.__name__] = frozenset(inspect.signature(fn).parameters)
-                # cleandoc: indented docstrings would otherwise ship their margin on every line.
-                doc = description if description is not None else fn.__doc__
-                return mcp.tool(description=inspect.cleandoc(doc) if doc else None)(fn)
-            return fn
-
-        return decorator
+def _register_discovery_tools(mcp_tool, session: Session) -> None:
+    """Register identity, participant, harness and skill tools."""
 
     @mcp_tool()
     async def whoami(include_git: bool = False) -> dict:
@@ -698,6 +631,12 @@ def build(
         """
         return await tools.load_skill(session, name=name, preview=preview)
 
+
+def _register_delegation_tools(
+    mcp: MCPServer, mcp_tool, session: Session, ceiling: float | None
+) -> None:
+    """Register delegation, wait and runtime controls."""
+
     @mcp_tool(description=_spawn_description())
     async def spawn_session(
         harness: str,
@@ -765,8 +704,6 @@ def build(
             name=name,
             description=description,
         )
-
-    ceiling = mcp_foreground_ceiling(harness)
 
     @mcp_tool(description=_await_doc(ceiling))
     async def await_sessions(
@@ -886,6 +823,10 @@ def build(
 
     _register_runtime_controls(mcp, mcp_tool, session)
 
+
+def _register_scratchpad_tools(mcp_tool, session: Session) -> None:
+    """Register machine-wide coordination tools."""
+
     @mcp_tool()
     async def scratchpad_write(value: str, namespace: str, key: str | None = None) -> dict:
         """Write a small machine-wide TTL-bound scratchpad entry; daemon mints the key.
@@ -972,6 +913,10 @@ def build(
         return await tools.scratchpad_delete(
             session, namespace=namespace, keys=keys, digests=digests, clear=clear
         )
+
+
+def _register_history_tools(mcp_tool, session: Session) -> None:
+    """Register transcript, lifecycle and recall tools."""
 
     @mcp_tool()
     async def read_transcript(
@@ -1071,6 +1016,83 @@ def build(
         the point that matters.
         """
         return await tools.recall_read(session, segment_id=segment_id)
+
+
+def _client_lifespan(session: Session):
+    @asynccontextmanager
+    async def lifespan(server):
+        try:
+            yield
+        finally:
+            await session.client.aclose()
+
+    return lifespan
+
+
+class _TheaterServer(MCPServer):
+    """Refusals become envelopes in the harness's delivery mode; unknown arguments are named."""
+
+    def __init__(self, *args: Any, error_delivery: ErrorDelivery, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.error_delivery: ErrorDelivery = error_delivery
+        #: tool name -> accepted parameter names
+        self.tool_parameters: dict[str, frozenset[str]] = {}
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context=None):
+        try:
+            result = await super().call_tool(name, arguments, context)
+        except Exception as exc:
+            envelope = refusal_envelope(exc)
+            if envelope is None:
+                raise
+            return refusal_result(envelope, self.error_delivery)
+        accepted = self.tool_parameters.get(name)
+        if accepted is None or not isinstance(result, CallToolResult):
+            return result
+        result = with_ignored_arguments(result, ignored_arguments(arguments, accepted))
+        return with_structured_object(result, tool_name=name)
+
+
+def build(
+    participant_id: str | None = None,
+    harness: str = "unknown",
+    toolset: str = "all",
+) -> MCPServer:
+    if toolset not in _TOOLSETS:
+        choices = ", ".join(sorted(_TOOLSETS))
+        raise ValueError(f"unknown MCP toolset {toolset!r}; expected one of: {choices}")
+    session = Session(
+        participant_id=participant_id or os.environ.get("THEATER_ID"),
+        harness=harness,
+        client=DaemonClientPool(),
+    )
+    mcp = _TheaterServer(
+        HARNESS_MCP_SERVER_NAME,
+        instructions=_instructions(toolset),
+        lifespan=_client_lifespan(session),
+        error_delivery=mcp_error_delivery(harness),
+    )
+    tool_names: set[str] = set()
+
+    def mcp_tool(*, description: str | None = None):
+        """Register a tool when it belongs to this lane."""
+
+        def decorator(fn):
+            if _includes_tool(toolset, fn.__name__):
+                tool_names.add(fn.__name__)
+                mcp.tool_parameters[fn.__name__] = frozenset(inspect.signature(fn).parameters)
+                # cleandoc: indented docstrings would otherwise ship their margin on every line.
+                doc = description if description is not None else fn.__doc__
+                return mcp.tool(description=inspect.cleandoc(doc) if doc else None)(fn)
+            return fn
+
+        return decorator
+
+    ceiling = mcp_foreground_ceiling(harness)
+    _register_discovery_tools(mcp_tool, session)
+    _register_delegation_tools(mcp, mcp_tool, session, ceiling)
+    _register_scratchpad_tools(mcp_tool, session)
+    _register_history_tools(mcp_tool, session)
 
     mcp.middleware.append(ToolTiming(frozenset(tool_names), toolset))
     return mcp

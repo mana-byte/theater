@@ -78,71 +78,7 @@ async def spawn_session(
     task_kind: str | None = None,
     skills: list[str] | None = None,
 ) -> dict:
-    """Create a child agent through a selected terminal provider and return its record.
-
-    The prompt is delivered on the child's argv by the selected provider, so
-    this path does not depend on keystroke injection working at all.
-
-    If `worktree` is True, a git worktree is created for the child so it has
-    its own isolated index and HEAD. Its unique branch name is
-    reported in the result so the parent can merge it explicitly.
-
-    If `worktree` is a non-empty string, a named shared linked worktree is
-    created or joined. Multiple live children spawned with the same name in
-    the same canonical main repository run in the same directory and on the
-    same branch. This is an expert-mode collaboration primitive, not
-    filesystem or Git isolation: the index and HEAD are shared, concurrent
-    ``git add``/``commit`` operations can interfere, and the KV store does
-    not make file claims atomic or enforce ownership. The branch name
-    `theater/named/<name>` is reported in the result.
-
-    `model` is passed to the harness unchanged, but not unchecked: it must be
-    one the config lists for that harness, and the harness must be able to
-    select a model at all. Both are refused before anything is created;
-    `list_harnesses(include_models=true)` reports them. Membership is the whole
-    of the check — Theater cannot confirm
-    the name is real or that the CLI honoured it, so a typo the user vouched for
-    surfaces as a child on the wrong model, not as an error here.
-
-    `reasoning_effort` mirrors `model`: passed to the harness unchanged, gated
-    by the same two checks (adapter capability + config allowlist). Omit it and
-    the harness uses its own default. The values a harness accepts are
-    CLI-specific (codex: none/minimal/low/medium/high/xhigh/max/ultra; claude:
-    low/medium/high/xhigh/max/auto); Theater checks membership in the
-    `[reasoning]` allowlist and nothing else.
-
-    `resume` takes a session id from `recall` — or a Theater participant id —
-    and continues that context. Harnesses with native fork support create a
-    fresh session identity; older resume-only harnesses reuse the existing one.
-    If the value matches a retained participant, the daemon resolves it to
-    that participant's harness session id internally.
-    Refused up front
-    for a harness whose `plan_launch` has no `resume` parameter. Some
-    harnesses accept resume but cannot carry a prompt through it — see
-    the tool description for the harness-specific behaviour.
-
-    `response_format` is forwarded unchanged; MCP neither serializes nor
-    injects it. A bare JSON Schema object is a hint the daemon adds to the
-    prompt guidance exactly once and later parses with ``json.loads``: no
-    validation, scraping, coercion, or retry. A ``{"$theater": ...}`` object
-    is a strict contract (presets ``review``, ``debate``, ``delegate``, or
-    ``custom`` with a name and schema) the daemon validates in full, repairs
-    where it can prove which turn answered, and otherwise ends with
-    ``structured_status`` ``unable_to_parse``. Resume plus `response_format`
-    is refused for harnesses whose resume path cannot carry a prompt.
-
-    `skills` names are forwarded unchanged; the daemon resolves, renders, and
-    bounds them. Omitted or empty means none: nothing is inherited.
-
-    The returned ``session_id`` is populated asynchronously by the observer,
-    so the compact MCP projection normally omits it for a newly spawned child.
-    Re-list later after Theater attaches to the child's transcript.
-
-    ``wiring`` selects a preference: "auto" (default) and "native" use a
-    compatible runtime when available, otherwise retain the ordinary launch;
-    "legacy" opts out. It is independent of ``approval``, which remains
-    required with no default.
-    """
+    """Request a daemon-planned spawn and project its participant and operation receipt."""
     if not session._resolved:
         await session.identify()
     record = await session.client.call(
@@ -221,35 +157,7 @@ async def send_prompt(
     after: str | None = None,
     skills: list[str] | None = None,
 ) -> dict:
-    """Send a prompt to an already-running agent on its selected transport.
-
-    Delivery follows the daemon's selected capability route. A native attempt
-    with an unknown or disconnected outcome is never silently retried into
-    the pane. The target must have a verified physical delivery route; origin
-    and ownership do not decide ordinary send admission. By default the daemon
-    delivers once when it is safe and otherwise queues the message, behind the
-    target's work or a human at its pane, under the same handle. Explicit
-    ``refuse`` is open to anyone; ``queue``, ``amend`` and ``replace`` stay
-    direct-parent-only.
-
-    ``target_id`` may be a participant id or a name. Names work only
-    while the participant is live; a dead participant's name is null and
-    cannot be resolved. Because names are recyclable, use the id for any
-    targeting that spans time or destructive consequences — a
-    recycled name can identify a successor.
-
-    `response_format` is forwarded unchanged and takes the same forms as for
-    ``spawn_session``: a bare schema is a prompt-only hint parsed with
-    ``json.loads``; a ``{"$theater": ...}`` object is a strict contract the
-    daemon validates in full and repairs where it can prove the turn.
-
-    `after` (a name or exact job handle) queues the message until that work ends and
-    adds Theater's labelled card about it; the daemon resolves and gates it.
-
-    `skills` names are forwarded unchanged and attach to this message only.
-
-    Returns a job handle that can be passed to `await_sessions`.
-    """
+    """Forward a prompt and project the daemon's job receipt."""
     if not session._resolved:
         await session.identify()
     record = await session.client.call(
@@ -294,15 +202,7 @@ async def interrupt_session(session: Session, *, target: str) -> dict:
 async def update_session_settings(
     session: Session, *, target: str, model: str | None = None, reasoning_effort: str | None = None
 ) -> dict:
-    """Change a direct child's model or reasoning effort while it is idle.
-
-    Idle-only: the daemon refuses while the child has an active turn or a
-    pending native interaction. The values must be on the existing
-    model/reasoning allowlists — ``list_harnesses(include_models=true)`` reports them — and approval
-    and sandbox policy are never changed here. Effective values are reported
-    only after the native backend confirms; an uncertain delivery stays
-    visibly uncertain in the daemon's reply, which is returned verbatim.
-    """
+    """Forward settings changes and return the daemon's authoritative result."""
     if not session._resolved:
         await session.identify()
     record = await session.client.call(
