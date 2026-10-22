@@ -25,13 +25,10 @@ from theater.frontend.dto.workspaces import WorkspaceUsage
 def test_optional_number_reads_null_numbers_and_nonfinite_floats(
     value: object, expected: float | None
 ) -> None:
-    assert optional_number(value, "job.created_at") == expected
-
-
-def test_optional_number_converts_integers_to_floats() -> None:
-    result = optional_number(7, "job.created_at")
-    assert result == 7.0
-    assert isinstance(result, float)
+    result = optional_number(value, "job.created_at")
+    assert result == expected
+    if type(value) is int:
+        assert isinstance(result, float)
 
 
 def test_optional_number_accepts_nan() -> None:

@@ -7,7 +7,7 @@ import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import TypedDict, cast
+from typing import TypedDict
 
 from theater.frontend._results import StateFollowResult
 from theater.frontend.client import FrontendClient, FrontendResponseError
@@ -265,7 +265,10 @@ def _projection_from_pages(pages: list[SnapshotPage]) -> StateProjection:
     )
 
 
-def _add_snapshot_entities[T](
+type _ProjectionEntity = Participant | Operation | Job | Provider | Workspace
+
+
+def _add_snapshot_entities[T: _ProjectionEntity](
     target: dict[str, T],
     items: tuple[T, ...],
     domain: str,
@@ -279,16 +282,26 @@ def _add_snapshot_entities[T](
         revisions[(domain, entity_id)] = _projection_revision(item)
 
 
-def _entity_id(value: object) -> str:
-    for name in ("participant_id", "operation_id", "handle", "provider_id", "workspace_id"):
-        entity_id = getattr(value, name, None)
-        if isinstance(entity_id, str) and entity_id:
-            return entity_id
+def _entity_id(value: _ProjectionEntity) -> str:
+    if isinstance(value, Participant):
+        entity_id = value.participant_id
+    elif isinstance(value, Operation):
+        entity_id = value.operation_id
+    elif isinstance(value, Job):
+        entity_id = value.handle
+    elif isinstance(value, Provider):
+        entity_id = value.provider_id
+    elif isinstance(value, Workspace):
+        entity_id = value.workspace_id
+    else:
+        raise StateSynchronizationError("snapshot entity has no stable public identifier")
+    if isinstance(entity_id, str) and entity_id:
+        return entity_id
     raise StateSynchronizationError("snapshot entity has no stable public identifier")
 
 
-def _projection_revision(value: object) -> int:
-    extra = getattr(value, "extra", None)
+def _projection_revision(value: _ProjectionEntity) -> int:
+    extra = value.extra
     if not isinstance(extra, Mapping):
         return 0
     revision = extra.get("projection_revision")
@@ -300,7 +313,11 @@ class _FollowBatch:
     """Mutable working copies for one follow batch, frozen once at the end."""
 
     cursor: EventCursor
-    collections: dict[str, dict[str, object]]
+    participants: dict[str, Participant]
+    operations: dict[str, Operation]
+    jobs: dict[str, Job]
+    providers: dict[str, Provider]
+    workspaces: dict[str, Workspace]
     revisions: dict[tuple[str, str], int]
     unapplied: list[Event]
     catalog_dirty: bool
@@ -308,20 +325,13 @@ class _FollowBatch:
 
 
 def _apply_follow(projection: StateProjection, result: StateFollowResult) -> StateProjection:
-    participants = dict(projection.participants)
-    operations = dict(projection.operations)
-    jobs = dict(projection.jobs)
-    providers = dict(projection.providers)
-    workspaces = dict(projection.workspaces)
     batch = _FollowBatch(
         cursor=projection.cursor,
-        collections={
-            "participants": cast(dict[str, object], participants),
-            "operations": cast(dict[str, object], operations),
-            "jobs": cast(dict[str, object], jobs),
-            "providers": cast(dict[str, object], providers),
-            "workspaces": cast(dict[str, object], workspaces),
-        },
+        participants=dict(projection.participants),
+        operations=dict(projection.operations),
+        jobs=dict(projection.jobs),
+        providers=dict(projection.providers),
+        workspaces=dict(projection.workspaces),
         revisions=dict(projection.entity_revisions),
         unapplied=list(projection.unapplied_events),
         catalog_dirty=projection.catalog_dirty,
@@ -333,11 +343,11 @@ def _apply_follow(projection: StateProjection, result: StateFollowResult) -> Sta
         raise StateResnapshotRequired("follow cursor is not the last complete applied transaction")
     return StateProjection(
         cursor=batch.cursor,
-        participants=MappingProxyType(participants),
-        operations=MappingProxyType(operations),
-        jobs=MappingProxyType(jobs),
-        providers=MappingProxyType(providers),
-        workspaces=MappingProxyType(workspaces),
+        participants=MappingProxyType(batch.participants),
+        operations=MappingProxyType(batch.operations),
+        jobs=MappingProxyType(batch.jobs),
+        providers=MappingProxyType(batch.providers),
+        workspaces=MappingProxyType(batch.workspaces),
         usage=projection.usage,
         snapshot_extras=projection.snapshot_extras,
         unapplied_events=tuple(batch.unapplied),
@@ -357,7 +367,6 @@ def _apply_transaction(batch: _FollowBatch, transaction: EventTransaction) -> No
         return
     if ending.sequence != cursor.sequence + len(transaction.events):
         raise StateResnapshotRequired("follow transaction leaves a cursor gap")
-    collections = batch.collections
     revisions = batch.revisions
     unapplied = batch.unapplied
     for event in transaction.events:
@@ -366,8 +375,10 @@ def _apply_transaction(batch: _FollowBatch, transaction: EventTransaction) -> No
         if event.entity_revision <= revisions.get(revision_key, -1):
             continue
         if event.kind in {"participant.removed", "job.removed"}:
-            assert domain is not None
-            collections[domain].pop(event.entity_id, None)
+            if event.kind == "participant.removed":
+                batch.participants.pop(event.entity_id, None)
+            else:
+                batch.jobs.pop(event.entity_id, None)
             revisions[revision_key] = event.entity_revision
             continue
         if event.kind == "catalog.invalidated":
@@ -379,15 +390,7 @@ def _apply_transaction(batch: _FollowBatch, transaction: EventTransaction) -> No
             unapplied.append(event)
             revisions[revision_key] = event.entity_revision
             continue
-        entity = _decode_event_entity(domain, event)
-        if _entity_id(entity) != event.entity_id:
-            raise StateResnapshotRequired(
-                "event payload identity does not match its stable entity id"
-            )
-        if _is_active_entity(domain, entity):
-            collections[domain][event.entity_id] = entity
-        else:
-            collections[domain].pop(event.entity_id, None)
+        _apply_entity_event(batch, domain, event)
         revisions[revision_key] = event.entity_revision
     batch.cursor = ending
 
@@ -413,38 +416,59 @@ def _event_domain(kind: str) -> str | None:
     return None
 
 
-def _decode_event_entity(domain: str, event: Event) -> object:
+def _apply_entity_event(batch: _FollowBatch, domain: str, event: Event) -> None:
+    """Decode and filter each public DTO in its typed batch collection."""
     try:
         if domain == "participants":
-            return Participant.from_wire(event.payload)
-        if domain == "operations":
-            return Operation.from_wire(event.payload)
-        if domain == "jobs":
-            return Job.from_wire(event.payload)
-        if domain == "providers":
-            return Provider.from_wire(event.payload)
-        if domain == "workspaces":
-            return Workspace.from_wire(event.payload)
+            participant = Participant.from_wire(event.payload)
+            _put_event_entity(
+                batch.participants,
+                event,
+                participant,
+                participant.participant_id,
+                participant.status != "dead",
+            )
+        elif domain == "operations":
+            operation = Operation.from_wire(event.payload)
+            _put_event_entity(
+                batch.operations,
+                event,
+                operation,
+                operation.operation_id,
+                operation.state not in {"succeeded", "failed"},
+            )
+        elif domain == "jobs":
+            job = Job.from_wire(event.payload)
+            _put_event_entity(batch.jobs, event, job, job.handle, job.state == "running")
+        elif domain == "providers":
+            provider = Provider.from_wire(event.payload)
+            _put_event_entity(batch.providers, event, provider, provider.provider_id, True)
+        elif domain == "workspaces":
+            workspace = Workspace.from_wire(event.payload)
+            _put_event_entity(
+                batch.workspaces,
+                event,
+                workspace,
+                workspace.workspace_id,
+                workspace.state != "removed",
+            )
+        else:
+            raise StateResnapshotRequired(f"unknown public state projection domain {domain!r}")
     except (TypeError, ValueError) as exc:
         raise StateResnapshotRequired(
             f"{event.kind} does not carry a complete public {domain} projection"
         ) from exc
-    raise StateResnapshotRequired(f"unknown public state projection domain {domain!r}")
 
 
-def _is_active_entity(domain: str, entity: object) -> bool:
-    """Mirror the public snapshot's active rows without daemon imports."""
-    if domain == "participants" and isinstance(entity, Participant):
-        return entity.status != "dead"
-    if domain == "operations" and isinstance(entity, Operation):
-        return entity.state not in {"succeeded", "failed"}
-    if domain == "jobs" and isinstance(entity, Job):
-        return entity.state == "running"
-    if domain == "providers" and isinstance(entity, Provider):
-        return True
-    if domain == "workspaces" and isinstance(entity, Workspace):
-        return entity.state != "removed"
-    raise StateResnapshotRequired(f"invalid public state projection domain {domain!r}")
+def _put_event_entity[T](
+    collection: dict[str, T], event: Event, entity: T, entity_id: str, active: bool
+) -> None:
+    if entity_id != event.entity_id:
+        raise StateResnapshotRequired("event payload identity does not match its stable entity id")
+    if active:
+        collection[event.entity_id] = entity
+    else:
+        collection.pop(event.entity_id, None)
 
 
 __all__ = [
