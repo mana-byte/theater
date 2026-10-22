@@ -1,6 +1,6 @@
-"""Central status policy: QuietClock, _apply, _on_quiet, _settle, screen status.
+"""Central status policy: QuietClock, batch apply, quiet decisions, and screen status.
 
-``_on_quiet`` ordering matters: relocate -> identity probe -> screen status -> rescue.
+Quiet ordering matters: relocate -> identity probe -> screen status -> rescue.
 """
 
 from __future__ import annotations
