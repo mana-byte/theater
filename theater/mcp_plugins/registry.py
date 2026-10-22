@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,13 +17,13 @@ from theater.mcp_plugins import builtin
 from theater.mcp_plugins.compiler import compile_manifest
 from theater.mcp_plugins.contracts import CompiledMcpPlugin
 from theater.mcp_plugins.loading import (
-    LOCAL,
     SHIPPED,
     LoadedMcpPlugin,
     McpPluginError,
     discover,
     load_plugin,
 )
+from theater.mcp_plugins.selection import select_packages
 from theater.plugins.namespace import (
     NamespaceCollision,
     PluginNameReservation,
@@ -128,7 +127,7 @@ def install(
     _check_namespace(harnesses, [*shipped, *local])
 
     enabled = set(config.mcp.enabled)
-    selected, duplicates = _select_packages(shipped, local)
+    selected, duplicates = select_packages(shipped, local)
     for duplicate in duplicates:
         _append_diagnostic(
             McpPluginDiagnostic(
@@ -252,32 +251,6 @@ def get(name: str) -> CompiledMcpPlugin:
 def diagnostics() -> tuple[McpPluginDiagnostic, ...]:
     """Return retained non-fatal omission diagnostics."""
     return tuple(_DIAGNOSTICS)
-
-
-def _select_packages(
-    shipped: list[LoadedMcpPlugin], local: list[LoadedMcpPlugin]
-) -> tuple[dict[str, LoadedMcpPlugin], tuple[LoadedMcpPlugin, ...]]:
-    by_source: dict[str, dict[str, list[LoadedMcpPlugin]]] = {
-        SHIPPED: defaultdict(list),
-        LOCAL: defaultdict(list),
-    }
-    for plugin in shipped:
-        by_source[SHIPPED][plugin.name].append(plugin)
-    for plugin in local:
-        by_source[LOCAL][plugin.name].append(plugin)
-
-    duplicates: list[LoadedMcpPlugin] = []
-    unique: dict[str, dict[str, LoadedMcpPlugin]] = {SHIPPED: {}, LOCAL: {}}
-    for source, groups in by_source.items():
-        for name, group in groups.items():
-            if len(group) != 1:
-                duplicates.extend(group)
-                continue
-            unique[source][name] = group[0]
-
-    selected = dict(unique[SHIPPED])
-    selected.update(unique[LOCAL])
-    return selected, tuple(duplicates)
 
 
 def _local_packages(
