@@ -88,6 +88,24 @@ async def test_controls_projection_is_schema_valid_and_unknown_presence_blocks(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", request)
     result = await controls_get(daemon, operator_context(), {"participant_id": participant_id})
     validator_for(METHOD_CATALOG["frontend.controls.get"].result_schema_id).validate(result)
+    assert list(result) == [
+        "actions",
+        "revision",
+        "transcript_identity",
+        "id",
+        "wiring",
+        "backend_generation",
+        "native_session_id",
+        "health",
+        "settings",
+        "active_turn",
+        "queued",
+        "human_presence",
+        "provider_id",
+        "provider_generation",
+        "terminal_id",
+        "terminal_incarnation",
+    ]
     assert result["actions"]["send"]["route_available"] is True
     assert result["actions"]["send"]["admissible"] is False
     assert result["actions"]["settings_update"]["supported"] is False

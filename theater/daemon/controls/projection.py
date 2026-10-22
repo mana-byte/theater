@@ -76,9 +76,11 @@ class ControlActionProjector:
         if capability is RuntimeCapability.INTERRUPT:
             return None, None
         if capability is RuntimeCapability.SETTINGS_UPDATE and route.is_native:
-            admission = route.native_admission
-            supported = None if admission is None else admission.get("supported_settings")
-            if not isinstance(supported, (set, frozenset)) or not supported:
+            facts = route.native_facts
+            supported = (
+                None if facts is None or facts.settings is None else facts.settings.supported_fields
+            )
+            if not supported:
                 return "unsupported", "the runtime exposes no mutable settings fields"
             blocked = self._project_idle_action_block(participant_id, route, connection=connection)
             if blocked[0] is not None:
@@ -116,8 +118,8 @@ class ControlActionProjector:
         self, participant_id: str, route: ControlRoute, *, connection=None
     ) -> tuple[str | None, str | None]:
         if route.is_native:
-            admission = route.native_admission
-            if admission is None or admission.get("native_turn_id") is None:
+            facts = route.native_facts
+            if facts is None or facts.native_turn_id is None:
                 return "stale_target", "there is no current native turn to steer"
             binding = self._store.get_runtime_binding(participant_id, connection=connection)
             if binding is None or binding.native_session_id is None:
@@ -126,7 +128,7 @@ class ControlActionProjector:
                 participant_id,
                 backend_generation=binding.backend_generation,
                 native_session_id=binding.native_session_id,
-                native_turn_id=str(admission["native_turn_id"]),
+                native_turn_id=facts.native_turn_id,
                 connection=connection,
             )
             if job is None:
@@ -145,14 +147,14 @@ class ControlActionProjector:
         self, participant_id: str, route: ControlRoute, *, connection=None
     ) -> tuple[str | None, str | None]:
         if route.is_native:
-            admission = route.native_admission
-            if admission is None:
+            facts = route.native_facts
+            if facts is None:
                 return "busy", "the native execution state has not been observed"
-            if admission.get("pending_interaction") is not None:
+            if facts.pending_interaction is not None:
                 return "awaiting_decision", "the native UI is waiting for a human decision"
             if (
-                admission.get("execution_state") is not RuntimeExecutionState.IDLE
-                or admission.get("native_turn_id") is not None
+                facts.execution_state is not RuntimeExecutionState.IDLE
+                or facts.native_turn_id is not None
             ):
                 return "busy", "the native runtime has not authoritatively reported idle"
         else:
