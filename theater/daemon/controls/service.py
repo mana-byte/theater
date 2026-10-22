@@ -239,6 +239,7 @@ class ControlService(
         native_capabilities: Callable[[str, object | None], RuntimeCapabilities | None]
         | None = None,
         native_admission: Callable[[str, object | None], CachedNativeRoute | None] | None = None,
+        native_facts: Callable[[str, object | None], CachedNativeRoute | None] | None = None,
         gate_opener=None,
         play_gate=None,
     ) -> None:
@@ -252,6 +253,19 @@ class ControlService(
         self._jobs = jobs
         self._gates = gates
         self._projection = ControlActionProjector(store, gates, self.active_job_for_native_turn)
+        if native_facts is not None:
+            # Bridge the composition contract until the typed resolver migration lands.
+            def route_from_facts(participant_id: str, binding: object | None):
+                facts = native_facts(participant_id, binding)
+                return None if facts is None else facts.to_wire()
+
+            def capabilities_from_facts(participant_id: str, binding: object | None):
+                facts = native_facts(participant_id, binding)
+                return None if facts is None else facts.capabilities
+
+            native_route = route_from_facts
+            native_capabilities = capabilities_from_facts
+            native_admission = native_facts
         self._native_identity_fencing = native_route is not None
         self._routes = route_resolver or ControlRouteResolver(
             store=store,
