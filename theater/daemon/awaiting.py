@@ -15,8 +15,8 @@ from theater.daemon.controls._common import (
     DAEMON_RESTARTED_ERROR_CODE,
     INTERRUPTED_ERROR_CODE,
 )
+from theater.daemon.persistence.repositories.operation_predicates import proven_unsent
 from theater.daemon.presence.contracts import PresenceProvider, PresenceSnapshot, PresenceState
-from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
 from theater.models import Job, JobState, Status
 
 logger = logging.getLogger("theater.awaiting")
@@ -113,14 +113,7 @@ def never_transmitted(store, job: Job) -> bool:
     if job.state not in (JobState.KILLED, JobState.CRASHED):
         return False
     operations = store.control_operations_for_job(job.handle)
-    return bool(operations) and all(
-        op.delivery_phase is ControlDeliveryPhase.SETTLED
-        and op.delivery_result is DeliveryResult.REJECTED
-        and op.error_code in _UNSENT_OPERATION_CODES
-        and op.native_turn_id is None
-        and not op.execution_barrier
-        for op in operations
-    )
+    return bool(operations) and all(proven_unsent(op, _UNSENT_OPERATION_CODES) for op in operations)
 
 
 def snapshot_for(provider: PresenceProvider | None, participant_id: str) -> PresenceSnapshot:

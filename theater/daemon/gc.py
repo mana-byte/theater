@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
+from typing import Literal
 
 from sqlalchemy import and_, delete, exists, or_, select, text, update
 from sqlalchemy.engine import ScalarResult
@@ -55,7 +57,7 @@ from theater.daemon.schema import (
 from theater.daemon.store import Store
 from theater.harness.contracts.runtime import ControlKind
 from theater.models import Job, now
-from theater.observability.catalog import GC_PHASE
+from theater.observability.catalog import GC_PHASE, GC_SWEEP
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 logger = logging.getLogger("theater.gc")
@@ -75,6 +77,22 @@ class SweepResult:
     native_evidence: int = 0
 
 
+async def sweep_daemon(
+    daemon, retention: RetentionSection, *, mode: Literal["scheduled", "manual"]
+) -> SweepResult:
+    """Sample live jobs and apply the caller's existing handoff wake policy."""
+    with timing.span(GC_SWEEP) if mode == "scheduled" else nullcontext():
+        result = await sweep(
+            daemon.store,
+            retention,
+            live_handles=daemon.jobs.live_handles(),
+        )
+    if mode == "scheduled" and result.running_marked:
+        # The sweep wrote those jobs terminal directly; wake whatever waited on them.
+        daemon.handoff.wake()
+    return result
+
+
 async def sweep(
     store: Store,
     retention: RetentionSection,
@@ -85,16 +103,7 @@ async def sweep(
     Yields between batches so status polling and await wakes are not starved. ``live_handles`` (the
     JobManager's events) must never be marked crashed behind a live await.
     """
-    result = SweepResult(
-        bus=0,
-        jobs=0,
-        touch=0,
-        participants=0,
-        running_marked=0,
-        scratchpad=0,
-        control_operations=0,
-        native_evidence=0,
-    )
+    result = SweepResult()
 
     cutoff_jobs = now() - retention.jobs_days * SECONDS_PER_DAY
     cutoff_bus = now() - retention.bus_days * SECONDS_PER_DAY
@@ -105,16 +114,7 @@ async def sweep(
     with timing.span(GC_PHASE, phase="stale_running") as fields:
         marked = _sweep_stale_running(store, stale_cutoff, retention.batch, live_handles)
         fields["updated_rows"] = marked
-    result = SweepResult(
-        bus=result.bus,
-        jobs=result.jobs,
-        touch=result.touch,
-        participants=result.participants,
-        running_marked=marked,
-        scratchpad=result.scratchpad,
-        control_operations=result.control_operations,
-        native_evidence=result.native_evidence,
-    )
+    result = replace(result, running_marked=marked)
     await asyncio.sleep(0)
 
     # Phase 2: jobs + touch.
@@ -123,16 +123,7 @@ async def sweep(
             store, cutoff_jobs, retention.batch
         )
         fields["deleted_rows"] = jobs_deleted + touch_deleted
-    result = SweepResult(
-        bus=result.bus,
-        jobs=jobs_deleted,
-        touch=touch_deleted,
-        participants=result.participants,
-        running_marked=result.running_marked,
-        scratchpad=result.scratchpad,
-        control_operations=result.control_operations,
-        native_evidence=result.native_evidence,
-    )
+    result = replace(result, jobs=jobs_deleted, touch=touch_deleted)
 
     # Phase 3: participants — after jobs so newly-eligible ones are deleted in the same sweep.
     with timing.span(GC_PHASE, phase="participants") as fields:
@@ -140,16 +131,7 @@ async def sweep(
             store, cutoff_jobs, retention.batch
         )
         fields["deleted_rows"] = part_deleted
-    result = SweepResult(
-        bus=result.bus,
-        jobs=result.jobs,
-        touch=result.touch,
-        participants=part_deleted,
-        running_marked=result.running_marked,
-        scratchpad=result.scratchpad,
-        control_operations=result.control_operations,
-        native_evidence=result.native_evidence,
-    )
+    result = replace(result, participants=part_deleted)
     await asyncio.sleep(0)
 
     # Phase 4: participant artifacts and orphaned credentials.
@@ -160,76 +142,29 @@ async def sweep(
         store.cleanup_mcp_plugin_credentials()
     await asyncio.sleep(0)
 
-    result = SweepResult(
-        bus=result.bus,
-        jobs=result.jobs,
-        touch=result.touch,
-        participants=result.participants,
-        running_marked=result.running_marked,
-        scratchpad=result.scratchpad,
-        control_operations=result.control_operations,
-        native_evidence=result.native_evidence,
-    )
-
     # Phase 5: scratchpad — physical expiry follows the stored global TTL.
     with timing.span(GC_PHASE, phase="scratchpad") as fields:
         kv_deleted = await _sweep_scratchpad(store, retention.batch)
         fields["deleted_rows"] = kv_deleted
-    result = SweepResult(
-        bus=result.bus,
-        jobs=result.jobs,
-        touch=result.touch,
-        participants=result.participants,
-        running_marked=result.running_marked,
-        scratchpad=kv_deleted,
-        control_operations=result.control_operations,
-        native_evidence=result.native_evidence,
-    )
+    result = replace(result, scratchpad=kv_deleted)
 
     # Phase 6: bus.
     with timing.span(GC_PHASE, phase="bus") as fields:
         bus_deleted = await _sweep_bus(store, cutoff_bus, retention.batch, retention.refused_cap)
         fields["deleted_rows"] = bus_deleted
-    result = SweepResult(
-        bus=bus_deleted,
-        jobs=result.jobs,
-        touch=result.touch,
-        participants=result.participants,
-        running_marked=result.running_marked,
-        scratchpad=result.scratchpad,
-        control_operations=result.control_operations,
-        native_evidence=result.native_evidence,
-    )
+    result = replace(result, bus=bus_deleted)
 
     # Phase 7: settled control operations (job retention window).
     with timing.span(GC_PHASE, phase="control_operations") as fields:
         ops_deleted = await _sweep_control_operations(store, cutoff_jobs, retention.batch)
         fields["deleted_rows"] = ops_deleted
-    result = SweepResult(
-        bus=result.bus,
-        jobs=result.jobs,
-        touch=result.touch,
-        participants=result.participants,
-        running_marked=result.running_marked,
-        scratchpad=result.scratchpad,
-        control_operations=ops_deleted,
-        native_evidence=result.native_evidence,
-    )
+    result = replace(result, control_operations=ops_deleted)
 
     # Phase 8: native terminal evidence older than the same window.
     with timing.span(GC_PHASE, phase="native_evidence") as fields:
         evidence_deleted = await _sweep_native_evidence(store, cutoff_jobs, retention.batch)
         fields["deleted_rows"] = evidence_deleted
-    result = SweepResult(
-        bus=result.bus,
-        jobs=result.jobs,
-        touch=result.touch,
-        participants=result.participants,
-        running_marked=result.running_marked,
-        scratchpad=result.scratchpad,
-        control_operations=result.control_operations,
-        native_evidence=evidence_deleted,
-    )
+    result = replace(result, native_evidence=evidence_deleted)
 
     await _sweep_journal(store, cutoff_events, retention.batch)
 

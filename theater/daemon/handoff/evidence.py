@@ -5,7 +5,7 @@ from __future__ import annotations
 from theater.constants.handoff import ANSWER_MAX_CHARS
 from theater.daemon.handoff.gitfacts import pin_git_facts
 from theater.daemon.handoff.models import GitFacts, JobEvidence
-from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
+from theater.daemon.persistence.repositories.operation_predicates import may_have_reached_target
 from theater.models import Job, WorkspaceOwnershipKind, now
 
 _NO_ANSWER = "none"
@@ -33,14 +33,7 @@ class EvidencePinner:
         operations = self._store.control_operations_for_job(job.handle)
         if not operations:
             return True
-        return any(
-            operation.delivery_phase is ControlDeliveryPhase.DISPATCHED
-            or (
-                operation.delivery_phase is ControlDeliveryPhase.SETTLED
-                and operation.delivery_result is not DeliveryResult.REJECTED
-            )
-            for operation in operations
-        )
+        return any(may_have_reached_target(operation) for operation in operations)
 
     def required(self, job: Job) -> bool:
         if job.target_id is None or not self.delivered(job):

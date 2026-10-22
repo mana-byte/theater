@@ -18,17 +18,13 @@ async def _gc(daemon, params: dict) -> dict:
     Deleting rows never shrinks the file (measured: -94% of bus rows, file grew via WAL);
     only ``VACUUM`` does, so before/after sizes and ``vacuum_ran`` report what was reclaimed.
     """
-    from theater.daemon.gc import sweep, vacuum
+    from theater.daemon.gc import sweep_daemon, vacuum
     from theater.daemon.rpc.usage import _retention_floor
 
     db_path = paths.db_path()
     db_bytes_before = db_path.stat().st_size if db_path.exists() else 0
 
-    result = await sweep(
-        daemon.store,
-        daemon.config.retention,
-        live_handles=frozenset(daemon.jobs._events),
-    )
+    result = await sweep_daemon(daemon, daemon.config.retention, mode="manual")
 
     vacuum_ran = bool(params.get("vacuum", False))
     if vacuum_ran:

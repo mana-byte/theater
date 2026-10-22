@@ -7,12 +7,14 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 
 from theater.daemon import lineage
+from theater.daemon.persistence.repositories.operation_predicates import (
+    accepted_for_play_assignment,
+    names_exact_native_prompt_turn,
+)
 from theater.daemon.persistence.repositories.plays import PlayAssignment, PlayMembership
 from theater.daemon.plays.dependencies import require_plugins
 from theater.daemon.plays.models import NO_SEAT, PlayPlan, PlayRefused, SpawnSeat
 from theater.harness.contracts.runtime import (
-    ControlKind,
-    ControlTransport,
     DeliveryResult,
     NativeTurnTerminal,
 )
@@ -20,8 +22,6 @@ from theater.models import Job, JobState, Status, now
 from theater.skills import Play, PlayRules
 
 logger = logging.getLogger("theater.plays")
-
-_PROMPT_KINDS = (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP)
 
 
 class PlayService:
@@ -302,7 +302,7 @@ class PlayService:
         """
         pending = replace(assignment, job_handle=job_handle)
         delivered = any(
-            operation.delivery_result == DeliveryResult.ACCEPTED
+            accepted_for_play_assignment(operation)
             for operation in self.store.control_operations_for_job(job_handle)
         )
         job = self.store.get_job(job_handle)
@@ -355,13 +355,7 @@ class PlayService:
         if job is None:
             return False
         for operation in self.store.control_operations_for_job(job.handle):
-            if (
-                operation.kind not in _PROMPT_KINDS
-                or operation.transport is not ControlTransport.NATIVE_RUNTIME
-                or operation.backend_generation is None
-                or operation.native_session_id is None
-                or operation.native_turn_id is None
-            ):
+            if not names_exact_native_prompt_turn(operation):
                 continue
             evidence = self.store.get_native_terminal_evidence(
                 participant_id=operation.participant_id,
