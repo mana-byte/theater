@@ -13,8 +13,7 @@ from theater.mcp.session import Session
 
 async def recall(session: Session, *, paths: list[str], depth: int = 5) -> dict[str, dict]:
     """Request per-file timelines and remove private job handles."""
-    if not session._resolved:
-        await session.identify()
+    await session.caller_id()
     result = await session.client.call(
         "recall",
         paths=paths,
@@ -30,8 +29,7 @@ async def recall(session: Session, *, paths: list[str], depth: int = 5) -> dict[
 
 async def recall_read(session: Session, *, segment_id: str) -> dict:
     """Request one bounded transcript or Git-history segment."""
-    if not session._resolved:
-        await session.identify()
+    await session.caller_id()
     result = await session.client.call(
         "recall_read",
         segment_id=segment_id,

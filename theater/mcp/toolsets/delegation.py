@@ -79,15 +79,14 @@ async def spawn_session(
     skills: list[str] | None = None,
 ) -> dict:
     """Request a daemon-planned spawn and project its participant and operation receipt."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     record = await session.client.call(
         "spawn",
         harness=harness,
         prompt=prompt,
         approval=approval,
         cwd=cwd or str(Path.cwd()),
-        parent_id=session.participant_id,
+        parent_id=caller_id,
         worktree=worktree,
         base_branch=base_branch,
         provider=provider,
@@ -130,8 +129,7 @@ async def await_sessions(
     ceiling: float | None = None,
 ) -> list[dict]:
     """Forward presence-aware awaits, projecting each entry to what the caller acts on."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     if ceiling is not None:
         # Past the client's own threshold the call is backgrounded and its result lost.
         max_wait = min(max_wait, ceiling)
@@ -140,7 +138,7 @@ async def await_sessions(
         "jobs.await",
         handles=handles,
         max_wait=max_wait,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(jobs, list)
     return [job_entry(job) for job in jobs]
@@ -158,13 +156,12 @@ async def send_prompt(
     skills: list[str] | None = None,
 ) -> dict:
     """Forward a prompt and project the daemon's job receipt."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     record = await session.client.call(
         "send",
         target=target_id,
         prompt=prompt,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
         response_format=response_format,
         if_busy=if_busy,
         job_handle=job_handle,
@@ -177,23 +174,19 @@ async def send_prompt(
 
 async def cancel_job(session: Session, *, handle: str) -> dict:
     """Withdraw work the requester made that was provably never started."""
-    if not session._resolved:
-        await session.identify()
-    result = await session.client.call(
-        "jobs.cancel", handle=handle, caller_id=session.participant_id
-    )
+    caller_id = await session.caller_id()
+    result = await session.client.call("jobs.cancel", handle=handle, caller_id=caller_id)
     assert isinstance(result, dict)
     return result
 
 
 async def interrupt_session(session: Session, *, target: str) -> dict:
     """Cancel one direct child's active turn and undelivered queued followups."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     result = await session.client.call(
         "participant.interrupt",
         target=target,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     return result
@@ -203,14 +196,13 @@ async def update_session_settings(
     session: Session, *, target: str, model: str | None = None, reasoning_effort: str | None = None
 ) -> dict:
     """Forward settings changes and return the daemon's authoritative result."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     record = await session.client.call(
         "participant.settings.update",
         target=target,
         model=model,
         reasoning_effort=reasoning_effort,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(record, dict)
     return record
@@ -218,12 +210,11 @@ async def update_session_settings(
 
 async def get_session_controls(session: Session, *, target: str) -> dict:
     """Compact diagnostics without changing the daemon's availability decisions."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     record = await session.client.call(
         "participant.controls",
         target=target,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(record, dict)
     record = dict(record)
@@ -277,14 +268,13 @@ async def get_session_controls(session: Session, *, target: str) -> dict:
 async def scratchpad_write(
     session: Session, *, value: str, namespace: str, key: str | None = None
 ) -> dict:
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     result = await session.client.call(
         "scratchpad.write",
         namespace=namespace,
         value=value,
         key=key,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     return result
@@ -298,8 +288,7 @@ async def scratchpad_get(
     after_key: str | None = None,
     keys_only: bool | None = None,
 ) -> dict:
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     metadata = keys is None if keys_only is None else keys_only
     result = await session.client.call(
         "scratchpad.get",
@@ -307,7 +296,7 @@ async def scratchpad_get(
         keys=keys,
         after_key=after_key,
         keys_only=metadata,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     # Plugin sidecars read the daemon reply as is; only the agent's copy drops what it echoed.
@@ -326,15 +315,14 @@ async def scratchpad_delete(
     digests: list[str] | None = None,
     clear: bool = False,
 ) -> dict:
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     result = await session.client.call(
         "scratchpad.delete",
         namespace=namespace,
         keys=keys,
         digests=digests,
         clear=clear,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     return result
@@ -342,13 +330,12 @@ async def scratchpad_delete(
 
 async def terminate_session(session: Session, *, target: str, forget: bool = False) -> dict:
     """Forward a direct-child kill to the daemon with the caller identity."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     params = {"forget": True} if forget else {}
     result = await session.client.call(
         "participant.kill",
         id=target,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
         **params,
     )
     assert isinstance(result, dict)
@@ -357,12 +344,11 @@ async def terminate_session(session: Session, *, target: str, forget: bool = Fal
 
 async def adopt_session(session: Session, *, target: str) -> dict:
     """Forward a sibling adoption to the daemon with the caller identity."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     result = await session.client.call(
         "participant.adopt",
         id=target,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     return result

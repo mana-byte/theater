@@ -45,10 +45,9 @@ def _summarise(p: dict) -> dict:
 
 
 async def whoami(session: Session, *, include_git: bool = False) -> dict:
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     # The self view adds what this agent may spawn in its live play.
-    params: dict[str, object] = {"id": session.participant_id, "self_view": True}
+    params: dict[str, object] = {"id": caller_id, "self_view": True}
     if include_git:
         params["include_git"] = True
     record = await session.client.call("participants.get", **params)
@@ -79,12 +78,11 @@ async def list_participants(
     limit: int | None = None,
     after_id: str | None = None,
 ) -> list[dict]:
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     params: dict[str, object] = {
         "include_dead": include_dead,
         "ids": ids,
-        "parent_id": session.participant_id if children_only else None,
+        "parent_id": caller_id if children_only else None,
     }
     if include_dead:
         params["order"] = "newest"
@@ -96,7 +94,7 @@ async def list_participants(
         params["after_id"] = after_id
     rows = await session.client.call("participants.list", **params)
     assert isinstance(rows, list)
-    me = session.participant_id
+    me = caller_id
     out = []
     for p in rows:
         row = _summarise(p)
@@ -122,11 +120,10 @@ async def update_participant(
     description: str | None = None,
 ) -> dict:
     """Update this participant or one direct child through the daemon."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     record = await session.client.call(
         "participant.update",
-        caller_id=session.participant_id,
+        caller_id=caller_id,
         target=target,
         name=name,
         description=description,

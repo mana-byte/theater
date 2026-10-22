@@ -35,8 +35,7 @@ async def read_transcript(
     roles: list[str] | None = None,
 ) -> dict:
     """Request and project one bounded transcript page."""
-    if not session._resolved:
-        await session.identify()
+    await session.caller_id()
     params: dict[str, object] = {"id": target}
     if cursor is not None:
         params["cursor"] = cursor
