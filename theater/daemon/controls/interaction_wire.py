@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
-
-from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.harness.contracts.runtime import NativeHumanInteraction
 
 
@@ -21,20 +17,14 @@ def interaction_to_wire(interaction: NativeHumanInteraction | None) -> dict[str,
     return entry
 
 
-def cached_control_details(
-    daemon, binding: ParticipantRuntimeBinding | None
-) -> Mapping[str, Any] | None:
-    """Read only cached facts matching the durable runtime generation and session."""
+def cached_pending_interaction(daemon, participant_id: str) -> dict[str, object] | None:
+    """Read an exact cached interaction without extending the await deadline."""
+    binding = daemon.store.get_runtime_binding(participant_id)
     if binding is None:
         return None
-    return daemon.runtime_manager.cached_native_details(
-        binding.participant_id,
+    facts = daemon.runtime_manager.cached_native_facts(
+        participant_id,
         backend_generation=binding.backend_generation,
         native_session_id=binding.native_session_id,
     )
-
-
-def cached_pending_interaction(daemon, participant_id: str) -> dict[str, object] | None:
-    """Read an exact cached interaction without extending the await deadline."""
-    cached = cached_control_details(daemon, daemon.store.get_runtime_binding(participant_id))
-    return None if cached is None else interaction_to_wire(cached["pending_interaction"])
+    return None if facts is None else interaction_to_wire(facts.pending_interaction)

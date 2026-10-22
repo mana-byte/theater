@@ -686,11 +686,13 @@ async def test_frontend_connection_persists_and_caches_its_exact_session(
             "native_session_id": "frontend-session-a",
             "health": "connected",
         }
-        capabilities = daemon.runtime_manager.cached_native_capabilities(
+        facts = daemon.runtime_manager.cached_native_facts(
             participant.id,
             backend_generation=binding.backend_generation,
             native_session_id="frontend-session-a",
         )
+        assert facts is not None
+        capabilities = facts.capabilities
         assert capabilities is not None
         assert capabilities.supports(RuntimeCapability.SEND)
     finally:
