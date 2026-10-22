@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.launch_preparation import prepare_provider_reservation
 from tests.support.pi_transcripts import append, session_record
 from theater import paths
 from theater.daemon.spawner import Spawner, SpawnRequest
@@ -174,14 +175,15 @@ async def test_pi_resume_spawn_forks_to_fresh_native_identity_and_domain(
     registry.store.upsert_participant(predecessor)
     registry.mark_dead(predecessor.id)
 
-    reservation = await Spawner(registry).reserve(
+    reservation = await prepare_provider_reservation(
+        Spawner(registry),
         SpawnRequest(
             harness="pi",
             prompt="continue",
             cwd=str(tmp_path / "ignored-cwd"),
             approval="yolo",
             resume="old-native-id",
-        )
+        ),
     )
 
     successor = reservation.participant

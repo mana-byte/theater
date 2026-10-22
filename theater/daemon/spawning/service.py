@@ -1,20 +1,15 @@
-"""Spawner orchestration: reserve, prepare, launch, rollback, and teardown."""
+"""Provider launch preparation, execution, and participant teardown."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import shutil
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
-from sqlalchemy.exc import IntegrityError
-
 from theater import paths, timing
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
-from theater.daemon import workers
-from theater.daemon import worktrees as worktree_mod
 from theater.daemon.operations import (
     OperationOutcome,
 )
@@ -63,23 +58,9 @@ from theater.observability.catalog import (
     KILL_TEARDOWN,
     LIFECYCLE_STAGE,
     SPAWN_LAUNCH,
-    SPAWN_WORKTREE,
 )
 
 logger = logging.getLogger("theater.spawner")
-
-
-async def _uncancellable(fn, /, *args, reconcile=None, **kwargs):
-    """Await ``fn`` so cancellation does not release the caller's lock until
-    the worker finishes and state is reconciled."""
-    task = asyncio.create_task(fn(*args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        result = await task
-        if reconcile is not None:
-            reconcile(result)
-        raise
 
 
 class Spawner:
@@ -109,94 +90,6 @@ class Spawner:
         # bound. ``None`` keeps a spawner composed without observation live.
         self.live_hub = live_hub
         self.workspace_service = workspace_service
-        self._named_locks: dict[str, asyncio.Lock] = {}
-        self._provisional_named_worktrees: set[str] = set()
-        self._joined_named_worktrees: set[str] = set()
-
-    def _named_lock(self, repo_root: str) -> asyncio.Lock:
-        return self._named_locks.setdefault(repo_root, asyncio.Lock())
-
-    async def reserve(self, req: SpawnRequest) -> Reservation:
-        """Create the participant, worktree, plan, and config files.
-
-        On failure the participant is marked DEAD and any worktree retired.
-        """
-        harness = get_harness(req.harness)
-        if shutil.which(harness.binary) is None:
-            raise BadRequest(f"{harness.binary!r} is not on PATH")
-        req = self._resolve_resume_reference(req)
-        resume_predecessor, resume_overlay, _ = await self._validate_before_create(req, harness)
-        if resume_overlay is not None and resume_overlay.cwd is not None:
-            req = replace(req, cwd=resume_overlay.cwd)
-        description = req.description
-        if description is None and resume_predecessor is not None:
-            description = resume_predecessor.description
-        try:
-            participant = self.registry.create_spawned(
-                harness=req.harness,
-                cwd=req.cwd,
-                parent_id=req.parent_id,
-                has_prompt=bool(req.prompt),
-                resumed_from_id=resume_predecessor.id if resume_predecessor is not None else None,
-                name=req.name,
-                description=description,
-            )
-        except IntegrityError:
-            if resume_predecessor is None:
-                raise
-            raise BadRequest(
-                f"cannot resume participant {resume_predecessor.id!r}: a live successor already "
-                "claims this recovery"
-            ) from None
-
-        native: NativeSpawnSelection | None = None
-        legacy_plan: LaunchPlan | None = None
-        try:
-            with timing.span(SPAWN_WORKTREE, id=participant.id, kind=req.worktree or None):
-                child_cwd = await self._prepare_worktree(req, participant)
-            native = await self._select_native_wiring(req, harness, participant, resume_predecessor)
-            plan, native, legacy_plan = await self._plan_for_wiring(
-                req,
-                participant,
-                resume_overlay,
-                harness,
-                native,
-            )
-            paths.ensure_home()
-            if native is None or native.runtime.host is RuntimeHost.FRONTEND:
-                self._record_plan_artifacts(participant, plan)
-                self._record_launch_identity(participant, plan, harness.observer)
-                self._write_plan_files(plan)
-            if resume_predecessor is not None:
-                # The resume floor is durable-observation policy, shared by
-                # both wirings: a fork's observer attaches at the predecessor's
-                # stream position, whatever transport delivered the prompt.
-                participant.resume_floor = self._capture_resume_floor(harness, resume_predecessor)
-                self.registry.store.upsert_participant(participant)
-
-            session = ""
-            name = req.window_name or f"{req.harness}-{participant.id[:6]}"
-        except BaseException:
-            if native is not None:
-                # A reservation that never reached launch transmitted nothing;
-                # the intent row is verified participant-owned state.
-                self.registry.store.delete_runtime_binding(participant.id)
-            await self.cleanup_reservation(participant)
-            raise
-
-        self._provisional_named_worktrees.discard(participant.id)
-        self._joined_named_worktrees.discard(participant.id)
-        return Reservation(
-            participant=participant,
-            plan=plan,
-            child_cwd=child_cwd,
-            session=session,
-            name=name,
-            req=req,
-            resume_predecessor=resume_predecessor,
-            native=native,
-            legacy_plan=legacy_plan,
-        )
 
     async def prepare_provider_launch(
         self,
@@ -571,51 +464,6 @@ class Spawner:
             )
         return provider.bind_terminal(terminal)
 
-    async def spawn(self, req: SpawnRequest) -> Participant:
-        """Reserve then launch in one call."""
-        reservation = await self.reserve(req)
-        return await self.launch(reservation)
-
-    async def _prepare_worktree(self, req: SpawnRequest, participant: Participant) -> str:
-        """Create the worktree (if requested) and return the child cwd."""
-        child_cwd = req.cwd
-        if not req.worktree:
-            return child_cwd
-
-        root = await workers.to_thread(worktree_mod.repo_root, req.cwd, label="spawn.repo_root")
-        if root is None:
-            raise BadRequest(f"cannot create worktree: {req.cwd!r} is not in a git repo")
-        if isinstance(req.worktree, str):
-            child_cwd, participant.branch = await self._spawn_named_worktree(
-                root=root,
-                name=req.worktree,
-                base_branch=req.base_branch,
-                reservation_id=participant.id,
-            )
-        else:
-            child_cwd = await workers.to_thread(
-                worktree_mod.create_worktree,
-                repo_root=root,
-                child_id=participant.id,
-                base_branch=req.base_branch,
-                label="spawn.create_worktree",
-            )
-            participant.branch = worktree_mod.branch_name(participant.id)
-        participant.cwd = child_cwd
-        self.registry.store.upsert_participant(participant)
-        self.registry.store.bus_append(
-            "participant.worktree",
-            to_id=participant.id,
-            payload={
-                "path": child_cwd,
-                "branch": participant.branch,
-                "root": root,
-                "named": isinstance(req.worktree, str),
-                "name": req.worktree if isinstance(req.worktree, str) else None,
-            },
-        )
-        return child_cwd
-
     def _validate_receipt_plan(self, plan: LaunchPlan, participant: Participant) -> str | None:
         """Pre-flight receipt plan validation via the planning module."""
         return validate_receipt_plan(plan, participant)
@@ -779,81 +627,11 @@ class Spawner:
     async def cleanup_reservation(self, participant: Participant) -> None:
         """Retire only the participant; durable workspaces require explicit cleanup."""
         participant = self.registry.store.get_participant(participant.id) or participant
-        self._provisional_named_worktrees.discard(participant.id)
-        self._joined_named_worktrees.discard(participant.id)
         self.registry.mark_dead(participant.id)
 
     def _preserve_failed_launch(self, participant: Participant) -> None:
         """Retain resources once terminal dispatch may have begun."""
-        self._provisional_named_worktrees.discard(participant.id)
-        self._joined_named_worktrees.discard(participant.id)
         self.registry.mark_dead(participant.id)
-
-    async def _spawn_named_worktree(
-        self,
-        *,
-        root: str,
-        name: str,
-        base_branch: str | None,
-        reservation_id: str | None = None,
-    ) -> tuple[str, str]:
-        """Create or join a named shared worktree, serialized per repo."""
-        canonical_root = (
-            await workers.to_thread(
-                worktree_mod.main_repo_root, root, label="spawn.named.main_repo_root"
-            )
-            or root
-        )
-
-        async with self._named_lock(canonical_root):
-            store = self.registry.store
-            existing = store.get_named_worktree(repo_root=canonical_root, name=name)
-
-            if existing is not None:
-                if base_branch is not None:
-                    persisted_base = existing["base_branch"]
-                    if persisted_base is None or base_branch != persisted_base:
-                        raise BadRequest(
-                            f"named worktree {name!r} was created with "
-                            f"base_branch={persisted_base!r}; cannot join with "
-                            f"base_branch={base_branch!r}"
-                        )
-
-                await _uncancellable(
-                    workers.to_thread,
-                    worktree_mod.verify_named_worktree,
-                    label="spawn.named.verify",
-                    repo_root=canonical_root,
-                    name=name,
-                    expected_path=existing["path"],
-                    expected_branch=existing["branch"],
-                )
-                if reservation_id is not None:
-                    self._joined_named_worktrees.add(reservation_id)
-                return existing["path"], existing["branch"]
-
-            def record_created(result: tuple[str, str]) -> None:
-                store.upsert_named_worktree(
-                    repo_root=canonical_root,
-                    name=name,
-                    branch=result[1],
-                    path=result[0],
-                    base_branch=base_branch,
-                )
-                if reservation_id is not None:
-                    self._provisional_named_worktrees.add(reservation_id)
-
-            path, branch = await _uncancellable(
-                workers.to_thread,
-                worktree_mod.create_named_worktree,
-                label="spawn.named.create",
-                repo_root=canonical_root,
-                name=name,
-                base_branch=base_branch,
-                reconcile=record_created,
-            )
-            record_created((path, branch))
-            return path, branch
 
     async def teardown(self, p: Participant) -> None:
         """Retire participant state after every physical exit is verified."""

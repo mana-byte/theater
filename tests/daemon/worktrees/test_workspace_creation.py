@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import update
 
 from tests.support.workspace_services import (
     external_params,
@@ -19,6 +22,8 @@ from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.workspace_handlers import WORKSPACE_HANDLERS, workspaces_register
 from theater.daemon.operations import OperationService
 from theater.daemon.persistence.store import Store
+from theater.daemon.schema import workspaces as workspaces_table
+from theater.daemon.worktrees.paths import named_branch_name, named_worktree_path
 from theater.daemon.worktrees.service import (
     WorkspaceDeleting,
     WorkspaceInUse,
@@ -250,6 +255,135 @@ async def test_named_workspace_joins_then_retained_branch_blocks_recreation(
             WorkspaceRequest(cwd=repository, worktree="shared"),
             reservation_id="reservation-named-c",
         )
+
+
+async def test_named_workspace_uses_canonical_repository_and_resolved_base(
+    repository: str, workspace_services
+) -> None:
+    _store, _operations, service = workspace_services
+    linked = Path(repository).parent / "linked-source"
+    git(repository, "worktree", "add", "-b", "linked-source", str(linked), "HEAD")
+    first = await service.reserve(
+        WorkspaceRequest(cwd=str(linked), worktree="shared-linked", base_ref="main"),
+        reservation_id="linked-first",
+    )
+    assert first.workspace.canonical_repository_root == repository
+    assert first.workspace.path.startswith(repository)
+    joined = await service.reserve(
+        WorkspaceRequest(cwd=repository, worktree="shared-linked", base_ref="HEAD"),
+        reservation_id="linked-join",
+    )
+    assert joined.workspace.workspace_id == first.workspace.workspace_id
+
+    git(repository, "checkout", "-b", "different")
+    (Path(repository) / "different.txt").write_text("different\n")
+    git(repository, "add", "different.txt")
+    git(repository, "commit", "-m", "different")
+    with pytest.raises(WorkspaceOwnershipConflict, match="named_base_mismatch"):
+        await service.reserve(
+            WorkspaceRequest(cwd=repository, worktree="shared-linked", base_ref="different"),
+            reservation_id="linked-conflict",
+        )
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("missing", "does not exist"),
+        ("checked_out_branch", "checked out"),
+        ("persisted_path", "expected Theater-managed path"),
+        ("persisted_branch", "expected Theater-managed branch"),
+    ],
+)
+async def test_named_workspace_join_refuses_changed_identity(
+    repository: str, workspace_services, change: str, message: str
+) -> None:
+    store, _operations, service = workspace_services
+    first = await service.reserve(
+        WorkspaceRequest(cwd=repository, worktree="identity"), reservation_id="identity-first"
+    )
+    workspace = first.workspace
+    service.release_usage(first.usage.usage_id, reason="seed_complete")
+    if change == "missing":
+        shutil.rmtree(workspace.path)
+    elif change == "checked_out_branch":
+        git(workspace.path, "checkout", "-b", "hijacked")
+    else:
+        column = (
+            workspaces_table.c.path if change == "persisted_path" else workspaces_table.c.branch
+        )
+        with store.write_unit() as unit:
+            unit.connection.execute(
+                update(workspaces_table)
+                .where(workspaces_table.c.workspace_id == workspace.workspace_id)
+                .values({column.key: "wrong"})
+            )
+    with pytest.raises(BadRequest, match=message):
+        await service.reserve(
+            WorkspaceRequest(cwd=repository, worktree="identity"), reservation_id="identity-join"
+        )
+
+
+async def test_concurrent_named_workspace_creation_has_one_durable_owner(
+    repository: str, workspace_services
+) -> None:
+    _store, _operations, service = workspace_services
+    request = WorkspaceRequest(cwd=repository, worktree="concurrent")
+    results = await asyncio.gather(
+        service.reserve(request, reservation_id="concurrent-a"),
+        service.reserve(request, reservation_id="concurrent-b"),
+        return_exceptions=True,
+    )
+    created = [result for result in results if not isinstance(result, BaseException)]
+    assert created
+    assert {result.workspace.workspace_id for result in created} == {
+        created[0].workspace.workspace_id
+    }
+    failures = [result for result in results if isinstance(result, BaseException)]
+    assert all(isinstance(result, (WorkspaceOwnershipConflict, BadRequest)) for result in failures)
+    joined = await service.reserve(request, reservation_id="concurrent-retry")
+    assert joined.workspace.workspace_id == created[0].workspace.workspace_id
+
+
+async def test_historical_named_worktree_row_survives_new_workspace_reservation(
+    repository: str, tmp_path: Path
+) -> None:
+    with open_workspace_services(tmp_path) as (store, _operations, service):
+        store.upsert_named_worktree(
+            repo_root=repository,
+            name="legacy",
+            branch=named_branch_name("legacy"),
+            path=named_worktree_path(repository, "legacy"),
+            base_branch=None,
+        )
+        await service.reserve(
+            WorkspaceRequest(cwd=repository, worktree="current"), reservation_id="current-first"
+        )
+    reopened = Store(tmp_path / "workspaces.db")
+    try:
+        row = reopened.get_named_worktree(repo_root=repository, name="legacy")
+        assert row is not None and row["created_at"] > 0
+        assert {key: value for key, value in row.items() if key != "created_at"} == {
+            "repo_root": repository,
+            "name": "legacy",
+            "branch": named_branch_name("legacy"),
+            "path": named_worktree_path(repository, "legacy"),
+            "base_branch": None,
+        }
+    finally:
+        reopened.close()
+
+
+async def test_named_workspace_joins_after_service_restart(repository: str, tmp_path: Path) -> None:
+    request = WorkspaceRequest(cwd=repository, worktree="restart-join")
+    with open_workspace_services(tmp_path) as (_store, _operations, service):
+        first = await service.reserve(request, reservation_id="restart-first")
+        workspace_id = first.workspace.workspace_id
+        path = first.workspace.path
+    with open_workspace_services(tmp_path) as (_store, _operations, service):
+        joined = await service.reserve(request, reservation_id="restart-second")
+        assert joined.workspace.workspace_id == workspace_id
+        assert joined.workspace.path == path
 
 
 async def test_named_creation_rejects_an_invalid_name_before_persisting_an_intent(

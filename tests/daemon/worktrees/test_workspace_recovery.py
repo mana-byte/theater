@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.waiting import settle_operations
 from tests.support.workspace_services import (
     git,
     make_repository,
@@ -18,12 +19,13 @@ from tests.support.workspace_services import (
     persist_creation_intent,
     settled,
 )
-from theater.daemon.operations import OperationService
+from theater.daemon.operations import OperationOutcome, OperationService
 from theater.daemon.persistence.store import Store
 from theater.daemon.runtime.public_recovery import (
     fail_proven_undispatched,
     reconcile_workspace_lifecycle,
 )
+from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.daemon.worktrees import cleanup as cleanup_module
 from theater.daemon.worktrees import identity
 from theater.daemon.worktrees.named import create_named_worktree
@@ -90,6 +92,43 @@ async def test_reconcile_promotes_a_migrated_named_workspace_from_exact_git_fact
     assert reconciled.resolved_base_commit == git(path, "rev-parse", "HEAD")
 
 
+async def test_uncertain_named_spawn_retains_workspace_for_reconciliation(
+    daemon, terminal_provider, repository: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def uncertain(*_args, **_kwargs):
+        return OperationOutcome.uncertain(
+            phase="provider_ack_lost",
+            error={"code": "provider_unavailable", "message": "response lost"},
+        )
+
+    monkeypatch.setattr(daemon.terminal_service, "dispatch_operation", uncertain)
+    service = ParticipantLaunchService(daemon)
+    params = {
+        "harness": "vibe",
+        "prompt": "continue",
+        "approval": "manual",
+        "workspace": {"cwd": repository, "worktree": "uncertain-named"},
+    }
+    accepted = await service.spawn(
+        client_id="operator-a", idempotency_key="uncertain-named", params=params
+    )
+    await settle_operations(daemon)
+    operation = daemon.operation_service.get(str(accepted["operation_id"]))
+    assert operation.state == "uncertain"
+    participant = daemon.registry.get(str(accepted["participant_id"]))
+    workspace = daemon.store.workspaces.get(participant.workspace_id)
+    assert workspace is not None and workspace.state == WorkspaceState.ACTIVE.value
+    assert Path(workspace.path).is_dir()
+    assert daemon.store.workspaces.active_usages(workspace.workspace_id)
+    assert terminal_provider.creations == []
+    assert (
+        await service.spawn(
+            client_id="operator-a", idempotency_key="uncertain-named", params=params
+        )
+        == accepted
+    )
+
+
 async def test_recovery_promotes_an_exact_created_intent_without_replaying_git(
     repository: str, workspace_services
 ) -> None:
@@ -122,14 +161,15 @@ async def test_recovery_promotes_an_exact_created_intent_without_replaying_git(
     assert reconciled.resolved_base_commit == git(workspace.path, "rev-parse", "HEAD")
 
 
+@pytest.mark.parametrize("worktree", [True, "cancelled-named"], ids=["unique", "named"])
 async def test_cancelled_creation_never_retires_an_inflight_git_worker(
-    repository: str, workspace_services, monkeypatch: pytest.MonkeyPatch
+    repository: str, workspace_services, monkeypatch: pytest.MonkeyPatch, worktree: bool | str
 ) -> None:
     store, _operations, service = workspace_services
     reservation = await persist_creation_intent(
         store,
         service,
-        WorkspaceRequest(cwd=repository, worktree=True),
+        WorkspaceRequest(cwd=repository, worktree=worktree),
         reservation_id="cancelled-creation",
     )
     workspace = reservation.workspace
