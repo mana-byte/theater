@@ -306,7 +306,9 @@ async def test_an_attach_time_turn_end_pins_git_off_the_loop(
     batch = SimpleNamespace(
         events=[], attached=SimpleNamespace(last_event=SimpleNamespace(turn_end=True))
     )
-    context = SimpleNamespace(pid="src", source=None, registration=None)
+    context = SimpleNamespace(
+        pid="src", source=None, registration=None, completion=daemon.observer._bind_completion(None)
+    )
 
     assert await daemon.observer._handle_rejected_attachment(context, batch) is False
 
@@ -322,7 +324,13 @@ async def test_an_attach_without_a_turn_end_costs_no_git(daemon, launches, tmp_p
     )
 
     await daemon.observer._handle_rejected_attachment(
-        SimpleNamespace(pid="src", source=None, registration=None), batch
+        SimpleNamespace(
+            pid="src",
+            source=None,
+            registration=None,
+            completion=daemon.observer._bind_completion(None),
+        ),
+        batch,
     )
 
     assert threads == []
