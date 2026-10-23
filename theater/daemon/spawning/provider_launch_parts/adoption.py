@@ -265,6 +265,8 @@ class ParticipantAdoption(ParticipantLaunchHost):
         operation: PublicOperationRecord,
         completed_job: Job | None = None,
     ) -> None:
+        # One group on purpose: a journal follower sees the settle together with the terminal
+        # route, so a frontend can skip its post-spawn snapshot.
         first = self.store.journal.current_sequence(connection=unit.connection) + 1
         timestamp = now()
         events = [
