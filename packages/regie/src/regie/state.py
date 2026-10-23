@@ -37,13 +37,16 @@ class StateController:
             )
 
     async def catch_up(self) -> None:
-        """Install what the daemon committed; a poll in flight is awaited, never cancelled."""
+        """Install what the daemon committed; a poll in flight is awaited, never cancelled.
+
+        A racing initialize() ends the wait early, so the worst case is the bound plus a snapshot.
+        """
         task = self._follow_task
         if task is None:
             await self.synchronize()
-            return
-        # The commit being caught up woke this poll too; cancelling it would force a resnapshot.
-        await asyncio.wait({task}, timeout=_CATCH_UP_WAIT_SECONDS)
+        else:
+            # The commit being caught up woke this poll too; cancelling it forces a resnapshot.
+            await asyncio.wait({task}, timeout=_CATCH_UP_WAIT_SECONDS)
 
     async def follow(self) -> StateProjection | None:
         """Wait on the SDK's follow lane; explicit refreshes can preempt this read."""

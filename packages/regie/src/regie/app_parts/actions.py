@@ -6,7 +6,7 @@ from functools import partial
 from time import monotonic
 
 from regie.app_parts._shared import _AppBase, logger
-from regie.app_parts.projection import attempt_catch_up, attempt_snapshot, followed_spawn
+from regie.app_parts.projection import attempt_catch_up, attempt_snapshot, holds_routed
 from regie.controllers.actions import ActionRecord
 from regie.controllers.controls import describe_action
 from regie.latency import action_phase
@@ -99,10 +99,10 @@ class ActionTracking(_AppBase):
         participant_id = record.participant_id
         if participant_id is None:
             return None
-        if (projection := followed_spawn(self._state.projection, participant_id)) is None:
+        if not holds_routed(self._state.projection, participant_id):
             await attempt_catch_up(self._state, phase=action_phase(record, "catch_up"))
-            projection = followed_spawn(self._state.projection, participant_id)
-        return projection
+        projection = self._state.projection
+        return projection if holds_routed(projection, participant_id) else None
 
     def _present_spawned(self, participant_id: str) -> None:
         """A participant spawned from Régie opens staged and focused, ready for input."""

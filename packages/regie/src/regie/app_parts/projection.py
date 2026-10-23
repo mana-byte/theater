@@ -63,15 +63,12 @@ async def attempt_catch_up(state: StateController, *, phase: AbstractContextMana
         await state.catch_up()
 
 
-def followed_spawn(
-    projection: StateProjection | None, participant_id: str
-) -> StateProjection | None:
-    """The follow lane's projection when it already holds the spawned participant, routed."""
+def holds_routed(projection: StateProjection | None, participant_id: str) -> bool:
+    """Whether a current projection already holds the participant with its terminal route."""
     if projection is None or projection.stale:
-        return None
+        return False
     participant = projection.participants.get(participant_id)
-    routed = participant is not None and participant.terminal_route is not None
-    return projection if routed else None
+    return participant is not None and participant.terminal_route is not None
 
 
 class ProjectionSync(_AppBase):

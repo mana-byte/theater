@@ -9,7 +9,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import cast
 
 import pytest
-from regie.app_parts.projection import followed_spawn
+from regie.app_parts.projection import holds_routed
 from regie.controllers.actions import ActionRecord, ActionState
 from regie.dashboard.widgets import WelcomeDashboard
 from regie.state import StateController
@@ -339,10 +339,10 @@ def _routed_spawn(*, routed: bool = True, stale: bool = False) -> StateProjectio
     ],
     ids=["held", "absent", "unrouted", "stale", "no-projection"],
 )
-def test_followed_spawn_needs_a_current_routed_participant(
+def test_holds_routed_needs_a_current_routed_participant(
     projection: StateProjection | None, participant_id: str, held: bool
 ) -> None:
-    assert followed_spawn(projection, participant_id) is (projection if held else None)
+    assert holds_routed(projection, participant_id) is held
 
 
 @pytest.mark.asyncio
