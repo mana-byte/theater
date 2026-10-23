@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from theater.daemon.frontend import provider_handlers, workspace_handlers
 from theater.daemon.plays import PlayPlan
 from theater.daemon.rpc import management, spawning
+from theater.daemon.spawning import private_operations
 from theater.daemon.terminals.service import TerminalProviderService
 from theater.daemon.worktrees.service import WorkspaceService
 from theater.harness.contracts.runtime import RuntimeWiring
@@ -205,9 +206,9 @@ async def test_private_spawn_provider_override_adapts_to_the_shared_launch_servi
         registry=Registry(),
         store=SimpleNamespace(),
     )
-    monkeypatch.setattr(spawning, "ParticipantLaunchService", lambda _daemon: launch)
-    monkeypatch.setattr(spawning, "check_depth", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(spawning, "check_budget", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(private_operations, "ParticipantLaunchService", lambda _daemon: launch)
+    monkeypatch.setattr(private_operations, "check_depth", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(private_operations, "check_budget", lambda *_args, **_kwargs: None)
 
     result = await spawning._spawn(
         daemon,
@@ -288,9 +289,11 @@ async def test_private_spawn_timeout_returns_the_correlated_accepted_operation(m
         registry=SimpleNamespace(get=lambda _participant_id: participant),
         store=SimpleNamespace(),
     )
-    monkeypatch.setattr(spawning, "ParticipantLaunchService", lambda _daemon: LaunchService())
-    monkeypatch.setattr(spawning, "check_depth", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(spawning, "check_budget", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        private_operations, "ParticipantLaunchService", lambda _daemon: LaunchService()
+    )
+    monkeypatch.setattr(private_operations, "check_depth", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(private_operations, "check_budget", lambda *_args, **_kwargs: None)
 
     result = await spawning._spawn(
         daemon,

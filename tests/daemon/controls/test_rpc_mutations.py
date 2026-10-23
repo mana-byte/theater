@@ -17,8 +17,8 @@ from tests.support.native_rpc import (
     pair,
 )
 from tests.support.waiting import until
+from theater.daemon.controls import redirect
 from theater.daemon.rails import ModelNotAllowed
-from theater.daemon.rpc import redirect
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     ControlKind,
