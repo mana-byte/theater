@@ -6,7 +6,7 @@ operation or mints a job; responses are additive (wire protocol stays version 1)
 
 from __future__ import annotations
 
-from theater.constants.refusals import NEXT_STEER_STALE
+from theater.daemon.controls import request_actions
 from theater.daemon.controls.report import (
     ControlActiveTurn,
     build_control_report,
@@ -16,23 +16,17 @@ from theater.daemon.controls.settings_policy import validate_settings
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import (
     _optional_string_param,
-    _serialized_response_format,
     _string_param,
 )
 from theater.daemon.rpc.router import method
-from theater.daemon.rpc.skill_attachments import attach_skills
 from theater.daemon.runtime.launch_policy import decode_launch_policy
-from theater.daemon.skill_cards import compose_prompt
 from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
-    ControlKind,
-    DeliveryResult,
     RuntimeCapability,
     RuntimeHost,
 )
-from theater.models import StaleTarget
 
 #: The one-word reason a pane without native wiring cannot offer a native
 #: control. The detail string says the same thing the service's refusal does.
@@ -209,111 +203,17 @@ def _runtime_host(daemon, target) -> RuntimeHost | None:
     return host if isinstance(host, RuntimeHost) else None
 
 
-def _steer_receipt(daemon, job) -> dict:
-    """The flat additive delivery facts for the steer that just finished.
-
-    Settled under the service lock and read synchronously, so no steer can overtake it. If
-    absent, report unknown delivery with a consistency reason — never optimistic success.
-    """
-    steer_operations = [
-        operation
-        for operation in daemon.store.control_operations_for_job(job.handle)
-        if operation.kind is ControlKind.STEER
-    ]
-    latest = (
-        max(steer_operations, key=lambda item: (item.updated_at, item.created_at))
-        if steer_operations
-        else None
-    )
-    if latest is None:
-        return {
-            "delivery": "unknown",
-            "phase": None,
-            "operation_id": None,
-            "reason": "steer_operation_missing",
-            "detail": (
-                f"the persisted STEER operation for job {job.handle!r} could not "
-                "be read back after the service returned; the amendment's "
-                "delivery is unknown — do not retry blindly"
-            ),
-        }
-    receipt: dict = {
-        "delivery": "accepted" if latest.delivery_result is DeliveryResult.ACCEPTED else "unknown",
-        "phase": str(latest.delivery_phase),
-        "operation_id": latest.operation_id,
-    }
-    if latest.error_code is not None:
-        receipt["reason"] = latest.error_code
-    if latest.error is not None:
-        receipt["detail"] = latest.error
-    return receipt
+_steer_receipt = request_actions.steer_receipt
 
 
 @method("participant.steer")
 async def _steer(daemon, params: dict) -> dict:
-    """Amend exactly the current Theater job's active native turn.
-
-    Returns the still-running job plus flat delivery fields read back from the persisted
-    STEER, so callers can tell an accepted amendment from an unknown delivery.
-    """
-    method_name = "participant.steer"
-    target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
-    prompt = _string_param(params, "prompt", method_name=method_name)
-    caller_id = _string_param(params, "caller_id", method_name=method_name)
-    job_handle = _optional_string_param(params, "job_handle", method_name=method_name)
-    try:
-        job = await daemon.controls.steer(
-            target.id,
-            caller_id=caller_id,
-            prompt=prompt,
-            job_handle=job_handle,
-        )
-    except StaleTarget as exc:
-        exc.details = exc.details or {"next": NEXT_STEER_STALE}
-        raise
-    result = job.to_dict()
-    result.update(_steer_receipt(daemon, job))
-    daemon.store.bus_append(
-        "agent.steer",
-        from_id=caller_id,
-        to_id=target.id,
-        payload={
-            "handle": job.handle,
-            "prompt": prompt[:200],
-            "delivery": result["delivery"],
-        },
-    )
-    return result
+    return await request_actions.steer(daemon, params)
 
 
 @method("participant.queue_followup")
 async def _queue_followup(daemon, params: dict) -> dict:
-    """Create an awaitable send job now; it dispatches on the next idle.
-
-    Response-format guidance and attached skills are injected once, at queue time, so neither
-    dispatch path re-injects them.
-    """
-    method_name = "participant.queue_followup"
-    target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
-    prompt = _string_param(params, "prompt", method_name=method_name)
-    caller_id = _string_param(params, "caller_id", method_name=method_name)
-    response_format = _serialized_response_format(daemon, params, creator_id=caller_id)
-    attachment = attach_skills(daemon, params, task=prompt, sender=caller_id)
-    assignment = daemon.plays.check_send(caller_id, target.id, attachment.plan)
-    job = await daemon.controls.queue_followup(
-        target.id,
-        caller_id=caller_id,
-        prompt=compose_prompt(prompt, skills=attachment.block, response_format=response_format),
-        response_format=response_format,
-        on_reserved=daemon.plays.holder(assignment),
-    )
-    daemon.store.bus_append(
-        "agent.queue_followup",
-        from_id=caller_id,
-        to_id=target.id,
-        payload={"handle": job.handle, "prompt": prompt[:200]},
-    )
-    return job.to_dict()
+    return await request_actions.queue_followup(daemon, params)
 
 
 @method("participant.settings.update")

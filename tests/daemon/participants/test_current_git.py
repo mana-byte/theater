@@ -10,7 +10,7 @@ import pytest
 
 from tests.support.workspace_services import git, make_repository, persist_creation_intent
 from theater.daemon.handoff import gitfacts
-from theater.daemon.rpc import participants as participants_rpc
+from theater.daemon.participants import operations as participant_operations
 from theater.daemon.worktrees import repository
 from theater.daemon.worktrees.service import WorkspaceRequest
 from theater.protocol import RemoteError
@@ -62,7 +62,7 @@ async def test_git_is_read_off_the_loop_and_only_when_asked(client, daemon, tmp_
         threads.append(threading.current_thread().name)
         return gitfacts.pin_git_facts(cwd)
 
-    monkeypatch.setattr(participants_rpc, "pin_git_facts", recording)
+    monkeypatch.setattr(participant_operations, "pin_git_facts", recording)
     me = await client.call("hello", harness="vibe", cwd=make_repository(tmp_path))
 
     await client.call("participants.list")

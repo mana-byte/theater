@@ -111,16 +111,16 @@ def _with_actor(
 
 async def _participants_list(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.participants import _list
+    from theater.daemon.participants.operations import list_participants
 
-    return await _list(daemon, params)
+    return await list_participants(daemon, params)
 
 
 async def _participants_get(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.participants import _get
+    from theater.daemon.participants.operations import get_participant
 
-    return await _get(daemon, params)
+    return await get_participant(daemon, params)
 
 
 async def _participants_read(daemon, params: dict[str, Any], actor_id: str) -> Any:
@@ -131,22 +131,22 @@ async def _participants_read(daemon, params: dict[str, Any], actor_id: str) -> A
 
 async def _participants_tree(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id, params
-    from theater.daemon.rpc.participants import _tree
+    from theater.daemon.participants.operations import tree
 
-    return await _tree(daemon, {})
+    return await tree(daemon, {})
 
 
 async def _participants_recent_dead(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.participants import _recent_dead
+    from theater.daemon.participants.operations import recent_dead
 
-    return await _recent_dead(daemon, params)
+    return await recent_dead(daemon, params)
 
 
 async def _participants_update(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.rpc.participants import _update
+    from theater.daemon.participants.operations import update
 
-    return await _update(daemon, _with_actor(params, actor_id))
+    return await update(daemon, _with_actor(params, actor_id))
 
 
 async def _catalog(daemon, params: dict[str, Any], actor_id: str) -> dict[str, Any]:
@@ -313,47 +313,47 @@ async def _analytics_bus_tail(daemon, params: dict[str, Any], actor_id: str) -> 
 
 
 async def _scratchpad_get(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.rpc.scratchpad import _scratchpad_get
+    from theater.daemon.scratchpad_operations import get
 
-    return await _scratchpad_get(daemon, _with_actor(params, actor_id))
+    return await get(daemon, _with_actor(params, actor_id))
 
 
 async def _scratchpad_write(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.rpc.scratchpad import _scratchpad_write
+    from theater.daemon.scratchpad_operations import write
 
-    return await _scratchpad_write(daemon, _with_actor(params, actor_id))
+    return await write(daemon, _with_actor(params, actor_id))
 
 
 async def _scratchpad_delete(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.rpc.scratchpad import _scratchpad_delete
+    from theater.daemon.scratchpad_operations import delete
 
-    return await _scratchpad_delete(daemon, _with_actor(params, actor_id))
+    return await delete(daemon, _with_actor(params, actor_id))
 
 
 async def _sessions_spawn(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.rpc.spawning import _spawn
+    from theater.daemon.spawning.private_operations import spawn
 
-    return await _spawn(daemon, _with_actor(params, actor_id, field="parent_id"))
+    return await spawn(daemon, _with_actor(params, actor_id, field="parent_id"))
 
 
 async def _sessions_send(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.rpc.sending import _send
+    from theater.daemon.controls.send_request import _send
 
     return await _send(daemon, _with_actor(params, actor_id))
 
 
 async def _sessions_interrupt(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.rpc.interruption import _interrupt
+    from theater.daemon.controls.interruption_request import interrupt
 
-    return await _interrupt(daemon, _with_actor(params, actor_id))
+    return await interrupt(daemon, _with_actor(params, actor_id))
 
 
 async def _sessions_kill(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.rpc.participants import _kill
+    from theater.daemon.participants.operations import kill
 
     if "id" not in params and "target" in params:
         params["id"] = params.pop("target")
-    return await _kill(daemon, _with_actor(params, actor_id))
+    return await kill(daemon, _with_actor(params, actor_id))
 
 
 def _operations() -> Mapping[str, PluginOperation]:
