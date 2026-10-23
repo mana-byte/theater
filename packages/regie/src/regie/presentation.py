@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from regie.constants import REGIE_STAGEABLE_PROVIDER_KIND
-from regie.contracts import PresentationOperations, PresentationTarget
+from regie.contracts import PresentationOperations, PresentationTarget, StageTarget
 from theater.frontend import Participant, Provider
 
 
@@ -15,6 +15,26 @@ class PresentationEligibility:
     target: PresentationTarget | None
     allowed: bool
     reason: str | None = None
+
+
+def matches_terminal_identity(target: StageTarget | None, participant: Participant) -> bool:
+    """Match the route's terminal triple without provider kind or occupant facts."""
+    route = participant.terminal_route
+    if not isinstance(target, PresentationTarget) or route is None:
+        return False
+    identity = route.identity
+    return (
+        target.provider_id == identity.provider_id
+        and target.terminal_id == identity.terminal_id
+        and target.terminal_incarnation == identity.terminal_incarnation
+    )
+
+
+def same_presentation_target(
+    candidate: PresentationTarget | None, staged: StageTarget | None
+) -> bool:
+    """Compare the full target, including provider kind and occupant facts."""
+    return candidate is not None and candidate == staged
 
 
 def target_for_participant(

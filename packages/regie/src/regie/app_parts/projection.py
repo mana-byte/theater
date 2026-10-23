@@ -11,7 +11,7 @@ from regie.contracts import LocalPresentationTarget, PresentationTarget
 from regie.controllers.surface import SurfaceMode
 from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_milestone
-from regie.presentation import stageability
+from regie.presentation import matches_terminal_identity, stageability
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_UNMANAGED_POLL_INTERVAL_SECONDS
 from regie.widgets import ParticipantTree
@@ -239,18 +239,10 @@ class ProjectionSync(_AppBase):
         target: object,
         projection: StateProjection,
     ) -> str | None:
-        if target is None:
+        if not isinstance(target, PresentationTarget):
             return None
         for participant_id, participant in projection.participants.items():
-            route = participant.terminal_route
-            if route is None:
-                continue
-            identity = route.identity
-            if (
-                identity.provider_id == getattr(target, "provider_id", None)
-                and identity.terminal_id == getattr(target, "terminal_id", None)
-                and identity.terminal_incarnation == getattr(target, "terminal_incarnation", None)
-            ):
+            if matches_terminal_identity(target, participant):
                 return participant_id
         return None
 

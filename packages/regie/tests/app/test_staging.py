@@ -382,6 +382,53 @@ async def test_termination_never_unstages_another_terminal_identity(same_pane):
 
 
 @pytest.mark.asyncio
+async def test_completed_action_currently_unstages_after_a_concurrent_stage(monkeypatch) -> None:
+    app, _client, presentation = build_app()
+    checked, release = asyncio.Event(), asyncio.Event()
+    unstage = app._staging.unstage
+
+    async def delayed_unstage() -> StageResult:
+        checked.set()
+        await release.wait()
+        return await unstage()
+
+    monkeypatch.setattr(app._staging, "unstage", delayed_unstage)
+    async with asyncio.timeout(5), app.run_test() as pilot:
+        try:
+            await pilot.pause()
+            projection = app.projection
+            assert projection is not None
+            first = projection.participants["participant-1"]
+            second = projection.participants["participant-2"]
+            assert (
+                await app._staging.stage(first, projection.providers)
+            ).outcome is StageOutcome.STAGED
+            reconciliation = asyncio.create_task(
+                app._reconcile_completed_action(
+                    ActionRecord(
+                        "terminate",
+                        "participant-1",
+                        "terminate-key",
+                        participant_id="participant-1",
+                        state=ActionState.SUCCEEDED,
+                    )
+                )
+            )
+            await checked.wait()
+            assert (
+                await app._staging.stage(second, projection.providers)
+            ).outcome is StageOutcome.STAGED
+            assert app._staging.staged_target is not None
+            assert app._staging.staged_target.terminal_id == "%2"
+            release.set()
+            await reconciliation
+            assert app._staging.staged_target is None
+            assert presentation.staged == []
+        finally:
+            release.set()
+
+
+@pytest.mark.asyncio
 async def test_terminated_trajectory_switches_immediately_when_refresh_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

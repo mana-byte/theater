@@ -9,7 +9,7 @@ from functools import partial
 from regie.app_parts._shared import _AppBase
 from regie.contracts import LocalPresentationTarget
 from regie.controllers.staging import StageOutcome, StageResult
-from regie.presentation import stageability, target_for_participant
+from regie.presentation import same_presentation_target, stageability, target_for_participant
 from regie.widgets import ParticipantTree
 from theater.frontend import (
     FrontendClientError,
@@ -139,7 +139,7 @@ class StagingActions(_AppBase):
         if participant is None:
             return False
         target = stageability(participant, projection.providers, self.presentation).target
-        return target is not None and target == self._staging.staged_target
+        return same_presentation_target(target, self._staging.staged_target)
 
     def _show_stage_result(self, result: StageResult | None) -> None:
         if not self._view_active:
