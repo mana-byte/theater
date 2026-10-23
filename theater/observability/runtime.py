@@ -7,7 +7,7 @@ import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, cast
 
 from theater.constants.observability import (
     BATCH_QUEUE_SIZE,
@@ -124,12 +124,10 @@ class _ExcludeOtelRecursion(logging.Filter):
         )
 
 
-@runtime_checkable
 class _Flushable(Protocol):
     def force_flush(self, timeout_millis: int) -> object: ...
 
 
-@runtime_checkable
 class _ShutdownResource(Protocol):
     def shutdown(self, timeout_millis: int | None = None) -> object: ...
 
@@ -139,15 +137,16 @@ def _shutdown_provider(provider: object | None, timeout_ms: int) -> None:
         return
 
     def _close() -> None:
+        # hasattr also accepts methods supplied by __getattr__ on staged resources.
         with contextlib.suppress(Exception):
-            if isinstance(provider, _Flushable):
-                provider.force_flush(timeout_millis=timeout_ms)
+            if hasattr(provider, "force_flush"):
+                cast(_Flushable, provider).force_flush(timeout_millis=timeout_ms)
         with contextlib.suppress(Exception):
-            if isinstance(provider, _ShutdownResource):
+            if hasattr(provider, "shutdown"):
                 try:
-                    provider.shutdown(timeout_millis=timeout_ms)
+                    cast(_ShutdownResource, provider).shutdown(timeout_millis=timeout_ms)
                 except TypeError:
-                    provider.shutdown()
+                    cast(_ShutdownResource, provider).shutdown()
 
     worker = threading.Thread(target=_close, name="theater-otel-shutdown", daemon=True)
     worker.start()

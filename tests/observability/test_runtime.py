@@ -90,6 +90,10 @@ def test_missing_optional_sdk_keeps_local_runtime_available():
             return real_import(name, *args, **kwargs)
         builtins.__import__ = without_optional
 
+        import theater.observability.engine
+        import theater.observability.metrics
+        import theater.observability.signals
+        import theater.observability.tracing
         from theater.observability.runtime import ObservabilityError, configure, is_configured
         try:
             configure(role="daemon", otlp_enabled=True)
@@ -104,6 +108,49 @@ def test_missing_optional_sdk_keeps_local_runtime_available():
         assert handle.closed and is_configured()
         print("OK")
     """)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_shutdown_dynamic_provider_keeps_lookup_and_fallback_order(fallback):
+    from theater.observability.runtime import _shutdown_provider
+
+    events: list[str | tuple[str, int]] = []
+
+    class DynamicProvider:
+        def __getattr__(self, name: str):
+            if name == "force_flush":
+                events.append("lookup:flush")
+
+                def flush(*, timeout_millis: int) -> None:
+                    events.append(("flush", timeout_millis))
+                    raise RuntimeError("flush failed")
+
+                return flush
+            if name == "shutdown":
+                events.append("lookup:shutdown")
+                if not fallback:
+
+                    def with_timeout(*, timeout_millis: int) -> None:
+                        events.append(("shutdown", timeout_millis))
+
+                    return with_timeout
+
+                def without_timeout() -> None:
+                    events.append("shutdown")
+
+                return without_timeout
+            raise AttributeError(name)
+
+    _shutdown_provider(DynamicProvider(), 100)
+    expected: list[str | tuple[str, int]] = [
+        "lookup:flush",
+        "lookup:flush",
+        ("flush", 100),
+        "lookup:shutdown",
+        "lookup:shutdown",
+    ]
+    expected.extend(["lookup:shutdown", "shutdown"] if fallback else [("shutdown", 100)])
+    assert events == expected
 
 
 def test_mcp_local_log_works_without_otel(tmp_path):

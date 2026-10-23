@@ -19,7 +19,7 @@ class SignalBridge:
 
     __slots__ = ("_active", "_logger", "_tracer")
 
-    def __init__(self, logger: Logger, tracer: Tracer) -> None:
+    def __init__(self, logger: Logger | None, tracer: Tracer | None) -> None:
         self._logger = logger
         self._tracer = tracer
         self._active = logger is not None and tracer is not None
@@ -41,7 +41,8 @@ class SignalBridge:
         severity_text: str = "INFO",
         context: Context | None = None,
     ) -> bool:
-        if not self._active:
+        logger = self._logger
+        if not self._active or logger is None:
             return False
         try:
             from opentelemetry._logs import SeverityNumber
@@ -51,7 +52,7 @@ class SignalBridge:
                 normalized_severity, normalized_severity
             )
             severity_number = getattr(SeverityNumber, severity_name, SeverityNumber.INFO)
-            self._logger.emit(
+            logger.emit(
                 timestamp=timestamp_ns,
                 observed_timestamp=time.time_ns(),
                 context=context,
@@ -78,7 +79,8 @@ class SignalBridge:
         error: bool = False,
         error_type: str | None = None,
     ) -> Context | None:
-        if not self._active:
+        tracer = self._tracer
+        if not self._active or tracer is None:
             return None
         span: Span | None = None
         failed = False
@@ -92,7 +94,7 @@ class SignalBridge:
                 TraceKind.SERVER: SpanKind.SERVER,
             }[kind]
 
-            span = self._tracer.start_span(
+            span = tracer.start_span(
                 name,
                 context=parent_context,
                 kind=span_kind,
