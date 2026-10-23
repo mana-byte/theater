@@ -71,7 +71,11 @@ def _major_boundary(summary: dict[str, Any]) -> str:
 
 
 def prepare_publication(
-    summary: dict[str, Any], summary_path: Path, open_failures: Sequence[str] = ()
+    summary: dict[str, Any],
+    summary_path: Path,
+    open_failures: Sequence[str] = (),
+    *,
+    results: Sequence[Result] | None = None,
 ) -> PublishReport:
     """Write PR and issue body files and append the GitHub step outputs.
 
@@ -84,7 +88,7 @@ def prepare_publication(
     failing = ("red", "tooling", "inconclusive")
     if distinct_watch is not None and distinct_watch["verdict"] in failing:
         rows.append(distinct_watch)
-    results = tuple(_result(row) for row in rows)
+    results = tuple(_result(row) for row in rows) if results is None else tuple(results)
     carried = _carried(summary, [*summary["results"], *summary["reused_results"]], open_failures)
     route_rows = [*rows]
     if distinct_watch is not None and distinct_watch["verdict"] not in failing:

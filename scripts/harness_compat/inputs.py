@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 from .contract import Adapter
@@ -27,6 +28,20 @@ CORE = (
 )
 _TRACKED = ("tests", "scripts", "theater")
 _PLUGINS = Path("theater/harness/builtin/plugins")
+
+
+@dataclass(frozen=True)
+class AdapterMetadata:
+    plugin: str
+    artifact_roots: tuple[Path, ...]
+
+
+def adapter_metadata(adapter: Adapter | None, harness: str) -> AdapterMetadata:
+    """Normalize the two optional adapter declarations with their established defaults."""
+    return AdapterMetadata(
+        plugin=getattr(adapter, "plugin", harness),
+        artifact_roots=tuple(getattr(adapter, "artifact_roots", ())),
+    )
 
 
 def _bases(root: Path) -> tuple[Path, ...]:
@@ -137,7 +152,7 @@ def qualification_inputs(root: Path, harness: str, adapter: Adapter | None = Non
     # The lockfile and pytest settings decide what the proofs run on.
     paths |= {root / "uv.lock", root / "pyproject.toml"}
     paths |= set((root / "tests/native").glob("*.py"))
-    paths |= _tree(root / _PLUGINS / getattr(adapter, "plugin", harness))
+    paths |= _tree(root / _PLUGINS / adapter_metadata(adapter, harness).plugin)
     if adapter is not None:
         paths |= _closure(root, _seed_tests(root, adapter))
         fixtures = root / "tests/fixtures"

@@ -7,10 +7,10 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .artifacts import CandidateArtifacts, stage_composed, tracked_patch
 from .contract import (
@@ -32,6 +32,7 @@ from .evidence import (
     write_evidence,
 )
 from .framework import check_bump, run_pytest
+from .inputs import adapter_metadata
 from .sandbox import make_sandbox
 from .select import newest_in_range, plan_bump, select_candidates
 from .stale import stale_warnings
@@ -44,6 +45,81 @@ RETRY_BACKOFF_SECONDS = (30.0, 90.0)
 RUN_BUDGET_SECONDS = 70 * 60
 #: What one attempt may need (a pytest invocation may take 15 min); nothing new starts without it.
 ATTEMPT_RESERVE_SECONDS = 20 * 60
+
+
+@dataclass(frozen=True)
+class _RunRow:
+    result: Result
+    routes: list[dict[str, Any]]
+    run_url: str
+    attempts: list[dict[str, Any]] | None = None
+    role: Literal["composition"] | None = None
+
+    def to_summary(self) -> dict[str, Any]:
+        row = {**self.result.to_evidence(), "routes": self.routes, "run_url": self.run_url}
+        if self.role is not None:
+            row.pop("adapter_digest")  # composition has never published this field
+            row["role"] = self.role
+        if self.attempts is not None:
+            row["attempts"] = self.attempts
+        return row
+
+
+@dataclass(frozen=True)
+class _CandidateWalk:
+    rows: list[_RunRow]
+    conflicts: list[str]
+    warnings: list[str]
+    deferred: list[str]
+
+
+@dataclass(frozen=True)
+class _Composition:
+    problems: list[str]
+    noisy: bool
+    published: bool
+    warnings: list[str]
+
+
+@dataclass(frozen=True)
+class _CompositionRun:
+    outcome: _Composition
+    attempts: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _RunState:
+    fields: dict[str, Any]
+    rows: list[_RunRow]
+    reused_rows: list[_RunRow]
+    watch: _RunRow | None
+    watch_reused: bool
+
+    @property
+    def publication_results(self) -> tuple[Result, ...]:
+        results = [row.result for row in (*self.reused_rows, *self.rows)]
+        if self.watch and not self.watch_reused and self.watch.result.verdict != "green":
+            results.append(self.watch.result)
+        return tuple(results)
+
+    def to_summary(self) -> dict[str, Any]:
+        failing = ("red", "tooling", "inconclusive")
+        issues = [row.to_summary() for row in self.rows if row.result.verdict in failing]
+        if self.watch and not self.watch_reused and self.watch.result.verdict in failing:
+            issues.append(
+                {
+                    **self.watch.to_summary(),
+                    "admitted_regression": self.watch.result.verdict == "red",
+                }
+            )
+        return {
+            **self.fields,
+            "reused_results": [row.to_summary() for row in self.reused_rows],
+            "results": [row.to_summary() for row in self.rows],
+            "watch": self.watch.to_summary() if self.watch else None,
+            "watch_reused": self.watch_reused,
+            "issues": issues,
+        }
 
 
 def _timeouts_only(checks: tuple[Check, ...]) -> bool:
@@ -225,19 +301,19 @@ def _compose(
     artifacts: CandidateArtifacts,
     *,
     publish: bool,
-) -> tuple[list[str], bool, bool, list[str]]:
+) -> _Composition:
     try:
         with _worktree(root) as tree, make_sandbox(adapter.name) as sandbox:
             artifacts.copy_into(tree, greens)
             changed = adapter.apply_bump(tree, greens)
             if not changed:
-                return [], False, False, []
+                return _Composition([], False, False, [])
             if stray := artifacts.stray_files(tree, changed):
-                return stray, False, False, []
+                return _Composition(stray, False, False, [])
             problems = check_bump(adapter, tree, greens)
             if problems:
                 # Noise only when every problem is a timeout; one deterministic problem wins.
-                return (
+                return _Composition(
                     problems,
                     all("timed out" in problem.lower() for problem in problems),
                     False,
@@ -261,17 +337,17 @@ def _compose(
             if problems:
                 # Noise only when every failing check merely errored: a fail always wins.
                 noisy = not deterministic and all(check.status == "error" for check in bad)
-                return problems, noisy, False, warnings
+                return _Composition(problems, noisy, False, warnings)
             if publish:
                 try:
                     stage_composed(tree, root, {*changed, *artifacts.owners})
                 except Exception as exc:
                     # Deterministic (dirty checkout, undeclared paths): ours, never noise.
-                    return [f"staging failed: {exc}"], False, False, warnings
-                return [], False, True, warnings
-            return [], False, False, warnings
+                    return _Composition([f"staging failed: {exc}"], False, False, warnings)
+                return _Composition([], False, True, warnings)
+            return _Composition([], False, False, warnings)
     except Exception as exc:
-        return [f"composed bump failed: {exc}"], False, False, []
+        return _Composition([f"composed bump failed: {exc}"], False, False, [])
 
 
 def _compose_retrying(
@@ -282,18 +358,18 @@ def _compose_retrying(
     *,
     publish: bool,
     deadline: float,
-) -> tuple[tuple[list[str], bool, bool, list[str]], list[dict[str, Any]]]:
+) -> _CompositionRun:
     """``_compose`` again while its only failure is infrastructure noise, with its history."""
     log: list[dict[str, Any]] = []
     for number in range(1, MAX_ATTEMPTS + 1):
         outcome = _compose(adapter, root, greens, artifacts, publish=publish)
-        problems, noisy = outcome[0], outcome[1]
+        problems, noisy = outcome.problems, outcome.noisy
         verdict = "inconclusive" if noisy else "tooling" if problems else "green"
         log.append(
             {"attempt": number, "verdict": verdict, "cause": problems[0] if problems else ""}
         )
         if not noisy or number == MAX_ATTEMPTS or not _backoff(number, deadline):
-            return outcome, log
+            return _CompositionRun(outcome, log)
     raise AssertionError("unreachable")
 
 
@@ -323,16 +399,16 @@ def _watch(
     root: Path,
     gate: VerifiedSet,
     releases: list[str],
-    rows: list[dict[str, Any]],
+    rows: list[_RunRow],
     run_url: str,
     digest: str,
     deadline: float,
-) -> tuple[dict[str, Any] | None, bool]:
+) -> tuple[_RunRow | None, bool]:
     """The daily regression watch: reuse a candidate row for the newest admitted release."""
     version = newest_in_range(adapter, gate, releases)
     if version is None:
         return None, False
-    if row := next((dict(item) for item in rows if item["version"] == version), None):
+    if row := next((item for item in rows if item.result.version == version), None):
         return row, True
 
     def attempt() -> tuple[Result, list[dict[str, Any]]]:
@@ -344,8 +420,7 @@ def _watch(
         write_evidence(root, replace(watched, adapter_digest=digest), run_url)
     else:
         drop_evidence(root, adapter.name, version)
-    row = {**watched.to_evidence(), "routes": routes, "run_url": run_url, "attempts": log}
-    return row, False
+    return _RunRow(watched, routes, run_url, log), False
 
 
 def _walk_candidates(
@@ -357,10 +432,9 @@ def _walk_candidates(
     digest: str,
     run_url: str,
     deadline: float,
-) -> tuple[list[Result], list[dict[str, Any]], list[str], list[str], list[str]]:
-    """Qualify candidates in ascending order: results, rows, conflicts, warnings, deferred."""
-    results: list[Result] = []
-    rows: list[dict[str, Any]] = []
+) -> _CandidateWalk:
+    """Qualify candidates in ascending order, retaining their results until output."""
+    rows: list[_RunRow] = []
     conflicts_seen: list[str] = []
     warnings_seen: list[str] = []
     deferred: list[str] = []
@@ -382,13 +456,12 @@ def _walk_candidates(
         else:
             drop_evidence(root, adapter.name, candidate)
             reused.pop(candidate, None)
-        results.append(result)
-        rows.append({**result.to_evidence(), "routes": routes, "run_url": run_url, "attempts": log})
+        rows.append(_RunRow(result, routes, run_url, log))
         # A candidate that was ever inconclusive ends the walk: the backlog waits for tomorrow.
         if result.verdict != "green" or len(log) > 1:
             deferred = candidates[index + 1 :]
             break
-    return results, rows, conflicts_seen, warnings_seen, deferred
+    return _CandidateWalk(rows, conflicts_seen, warnings_seen, deferred)
 
 
 def _run_with_artifacts(
@@ -401,7 +474,7 @@ def _run_with_artifacts(
     publish: bool = False,
     run_url: str = "local",
     budget_seconds: float = RUN_BUDGET_SECONDS,
-) -> dict[str, Any]:
+) -> _RunState:
     """Qualify one harness; publish only after the composed tree passes."""
     deadline = time.monotonic() + budget_seconds
     gate = adapter.verified(root)
@@ -417,26 +490,31 @@ def _run_with_artifacts(
     candidates = select_candidates(
         adapter, gate, reused, max_candidates=max_candidates, version=version, releases=releases
     )
-    results, rows, artifact_conflicts, candidate_warnings, deferred = _walk_candidates(
-        adapter, root, candidates, artifacts, reused, digest, run_url, deadline
+    walk = _walk_candidates(adapter, root, candidates, artifacts, reused, digest, run_url, deadline)
+    watch, watch_reused = _watch(
+        adapter, root, gate, releases, walk.rows, run_url, digest, deadline
     )
-    watch, watch_reused = _watch(adapter, root, gate, releases, rows, run_url, digest, deadline)
-    reused_results = [
-        Result(
-            adapter.name,
-            item,
-            "green",
-            tuple(
-                Check(check["name"], check["status"], check.get("detail", ""))
-                for check in document.get("checks", [])
+    reused_rows = [
+        _RunRow(
+            Result(
+                adapter.name,
+                item,
+                "green",
+                tuple(
+                    Check(check["name"], check["status"], check.get("detail", ""))
+                    for check in document.get("checks", [])
+                ),
+                adapter_digest=digest,
             ),
-            adapter_digest=digest,
+            [],
+            document.get("run_url", run_url),
         )
         for item, document in reused.items()
         if not gate.admits(item) and item not in candidates
     ]
-    greens = plan_bump(gate, [*reused_results, *results], releases)
-    for result in reused_results:
+    greens = plan_bump(gate, [row.result for row in (*reused_rows, *walk.rows)], releases)
+    for row in reused_rows:
+        result = row.result
         if result.version in greens:
             document = reused[result.version]
             artifacts.add_cached(
@@ -444,54 +522,43 @@ def _run_with_artifacts(
                 cache_artifacts_dir(root, adapter.name, result.version),
                 document.get("artifacts", {}),
             )
-    warnings: list[str]
     compose_log: list[dict[str, Any]] = []
-    if artifact_conflicts:
-        problems, compose_inconclusive, published, warnings = (
-            artifact_conflicts,
-            False,
-            False,
-            [],
-        )
+    if walk.conflicts:
+        composition = _Composition(walk.conflicts, False, False, [])
     elif greens:
-        (problems, compose_inconclusive, published, warnings), compose_log = _compose_retrying(
+        composed = _compose_retrying(
             adapter, root, greens, artifacts, publish=publish, deadline=deadline
         )
+        composition, compose_log = composed.outcome, composed.attempts
     else:
-        problems, compose_inconclusive, published, warnings = (
+        composition = _Composition([], False, False, [])
+    composition_row: _RunRow | None = None
+    if composition.problems:
+        composition_row = _RunRow(
+            Result(
+                adapter.name,
+                greens[-1] if greens else candidates[-1],
+                "inconclusive" if composition.noisy else "tooling",
+                tuple(
+                    Check(
+                        "consistency",
+                        "error" if composition.noisy else "fail",
+                        item,
+                    )
+                    for item in composition.problems
+                ),
+            ),
             [],
-            False,
-            False,
-            [],
+            run_url,
+            compose_log,
+            role="composition",
         )
-    if problems:
-        rows.append(
-            {
-                "harness": adapter.name,
-                "version": greens[-1] if greens else candidates[-1],
-                "verdict": "inconclusive" if compose_inconclusive else "tooling",
-                "checks": [
-                    {
-                        "name": "consistency",
-                        "status": "error" if compose_inconclusive else "fail",
-                        "detail": item,
-                    }
-                    for item in problems
-                ],
-                "routes": [],
-                "run_url": run_url,
-                "role": "composition",
-                "attempts": compose_log,
-            }
-        )
-    warnings = sorted(set(candidate_warnings) | set(warnings))
-    inconclusive = any(row["verdict"] == "inconclusive" for row in rows)
-    inconclusive |= bool(watch and watch["verdict"] == "inconclusive")
-    failing = ("red", "tooling", "inconclusive")
-    issues = [row for row in rows if row["verdict"] in failing]
-    if watch and not watch_reused and watch["verdict"] in failing:
-        issues.append({**watch, "admitted_regression": watch["verdict"] == "red"})
-    return {
+    warnings = sorted(set(walk.warnings) | set(composition.warnings))
+    inconclusive = any(row.result.verdict == "inconclusive" for row in walk.rows)
+    inconclusive |= bool(composition_row and composition_row.result.verdict == "inconclusive")
+    inconclusive |= bool(watch and watch.result.verdict == "inconclusive")
+    rows = [*walk.rows, *([composition_row] if composition_row else [])]
+    fields = {
         "harness": adapter.name,
         "gate_kind": gate.kind,
         "gate": {
@@ -501,37 +568,49 @@ def _run_with_artifacts(
         },
         "adapter_digest": digest,
         "candidates": candidates,
-        "deferred": deferred,
+        "deferred": walk.deferred,
         # Candidates that ended non-green: an open gate PR that lists one is withdrawn.
         "revoked": sorted(
             {
-                row["version"]
-                for row in rows
-                if row["verdict"] != "green"
-                and row.get("role") != "composition"
-                and not gate.admits(row["version"])
+                row.result.version
+                for row in walk.rows
+                if row.result.verdict != "green" and not gate.admits(row.result.version)
             }
         ),
         "composition_attempts": compose_log,
         "reused": sorted(reused),
-        "reused_results": [
-            {
-                **result.to_evidence(),
-                "routes": [],
-                "run_url": reused[result.version].get("run_url", run_url),
-            }
-            for result in reused_results
-        ],
-        "results": rows,
-        "watch": watch,
-        "watch_reused": watch_reused,
         "greens": greens,
-        "issues": issues,
         "inconclusive": inconclusive,
-        "published": published,
+        "published": composition.published,
         "stale_warnings": warnings,
         "run_url": run_url,
     }
+    return _RunState(fields, rows, reused_rows, watch, watch_reused)
+
+
+def run_harness_state(
+    adapter: Adapter,
+    root: Path,
+    *,
+    version: str | None = None,
+    max_candidates: int = 5,
+    publish: bool = False,
+    run_url: str = "local",
+) -> _RunState:
+    """Qualify one harness; publish only after the composed tree passes."""
+    with tempfile.TemporaryDirectory(prefix="compat-artifacts-") as temporary:
+        return _run_with_artifacts(
+            adapter,
+            root,
+            # An adapter that generates files names where; every other path is dropped.
+            CandidateArtifacts(
+                Path(temporary), adapter_metadata(adapter, adapter.name).artifact_roots
+            ),
+            version=version,
+            max_candidates=max_candidates,
+            publish=publish,
+            run_url=run_url,
+        )
 
 
 def run_harness(
@@ -543,15 +622,12 @@ def run_harness(
     publish: bool = False,
     run_url: str = "local",
 ) -> dict[str, Any]:
-    """Qualify one harness; publish only after the composed tree passes."""
-    with tempfile.TemporaryDirectory(prefix="compat-artifacts-") as temporary:
-        return _run_with_artifacts(
-            adapter,
-            root,
-            # An adapter that generates files names where; every other path is dropped.
-            CandidateArtifacts(Path(temporary), getattr(adapter, "artifact_roots", ())),
-            version=version,
-            max_candidates=max_candidates,
-            publish=publish,
-            run_url=run_url,
-        )
+    """Return the established JSON-shaped summary for callers outside the run."""
+    return run_harness_state(
+        adapter,
+        root,
+        version=version,
+        max_candidates=max_candidates,
+        publish=publish,
+        run_url=run_url,
+    ).to_summary()

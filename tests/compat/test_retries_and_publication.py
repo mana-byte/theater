@@ -135,6 +135,21 @@ def test_exhausted_inconclusive_opens_an_issue_without_a_pr(
     assert "inconclusive after 3 attempts" in report.issue_body
 
 
+def test_cli_publication_uses_the_run_results_without_changing_external_rows(
+    tmp_path: Path, sleeps: list[float]
+) -> None:
+    _repo(tmp_path)
+    state = runner.run_harness_state(ScriptedAdapter(["red"]), tmp_path, version="3.0.0")
+    summary = state.to_summary()
+    assert state.publication_results[0] is state.rows[0].result
+    assert prepare_publication(
+        summary, tmp_path / "typed.json", results=state.publication_results
+    ) == prepare_publication(summary, tmp_path / "external.json")
+    assert summary["results"][0]["checks"] == [
+        {"name": "proof", "status": "fail", "detail": "red proof"}
+    ]
+
+
 def test_red_outranks_inconclusive_and_a_green_prefix_still_publishes() -> None:
     green, red, slow = _result("green"), _result("red"), _result("inconclusive")
     summaries = [
