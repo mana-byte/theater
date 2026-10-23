@@ -22,6 +22,7 @@ from packages.regie.tests.support.app_fakes import (
 from theater.frontend import (
     AcceptedOperation,
     FrontendTransportError,
+    Operation,
     StateProjection,
 )
 
@@ -65,7 +66,16 @@ async def test_successful_durable_action_automatically_reconciles_the_tree(monke
         await finished.wait()
         return SimpleNamespace(
             value=SimpleNamespace(
-                timed_out=False, operation=SimpleNamespace(state="succeeded", error=None)
+                timed_out=False,
+                operation=Operation.from_wire(
+                    {
+                        "operation_id": "operation-new",
+                        "kind": "spawn",
+                        "state": "succeeded",
+                        "phase": "completed",
+                        "actor": {"client_id": "client-a"},
+                    }
+                ),
             )
         )
 
