@@ -11,13 +11,11 @@ from theater.daemon.controls.redirect import (
     replace,
     require_active_job,
 )
-from theater.daemon.skill_attachments import caller_name as _caller_name
 
 __all__ = [
     "IF_BUSY_MODES",
     "REPLACE_IDLE_WAIT_SECONDS",
     "ReplaceTimeout",
-    "_caller_name",
     "amend",
     "authorize_redirect",
     "if_busy_param",

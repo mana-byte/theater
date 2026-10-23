@@ -13,7 +13,6 @@ _check_transcript_send_preflight = preflight.check_transcript_send_preflight
 _refuse_send = send_request._refuse_send
 _check_pane_identity = send_request._check_pane_identity
 _check_approval_modal = send_request._check_approval_modal
-_send_after = send_request._send_after
 
 
 def _send_claim_ttl() -> float:

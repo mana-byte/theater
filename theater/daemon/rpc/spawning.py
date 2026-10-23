@@ -8,9 +8,6 @@ from theater.daemon.spawning import private_operations
 
 _PrivateSpawnMapping = private_operations._PrivateSpawnMapping
 _wiring_param = private_operations._wiring_param
-_resume_safe_skills = private_operations._resume_safe_skills
-_spawn_with_provider = private_operations._spawn_with_provider
-_defer_until_source = private_operations._defer_until_source
 
 
 @method("spawn")

@@ -203,9 +203,6 @@ def _runtime_host(daemon, target) -> RuntimeHost | None:
     return host if isinstance(host, RuntimeHost) else None
 
 
-_steer_receipt = request_actions.steer_receipt
-
-
 @method("participant.steer")
 async def _steer(daemon, params: dict) -> dict:
     return await request_actions.steer(daemon, params)

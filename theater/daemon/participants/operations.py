@@ -7,28 +7,19 @@ from dataclasses import asdict
 from theater.constants.daemon import PARTICIPANTS_LIST_MAX_LIMIT
 from theater.daemon import workers
 from theater.daemon.handoff.gitfacts import pin_git_facts
-from theater.daemon.participants import mutations, termination
+from theater.daemon.participants.mutations import (
+    update_participant_metadata,
+    update_participant_status,
+)
 from theater.daemon.participants.resume import resume_state
+from theater.daemon.participants.termination import terminate_participant
 from theater.daemon.presence import access as presence_access
 from theater.daemon.request_values import require
 from theater.harness.contracts.runtime import RuntimeCapability
 from theater.models import BadRequest, Status
 
-_resume_state = resume_state
-authorize_participant_mutation = mutations.authorize_participant_mutation
-update_participant_metadata = mutations.update_participant_metadata
-update_participant_status = mutations.update_participant_status
-persist_participant_status = mutations.persist_participant_status
-_require_verified_backend_stop = termination._require_verified_backend_stop
-_stop_verified_detached_backend = termination._stop_verified_detached_backend
-_TerminationUncertain = termination._TerminationUncertain
-_terminate_provider_terminal = termination._terminate_provider_terminal
-_authorize_termination = termination._authorize_termination
-_require_absent_or_forget_hint = termination._require_absent_or_forget_hint
-terminate_participant = termination.terminate_participant
 
-
-def _with_presence(daemon, record: dict, *, self_view: bool = False) -> dict:
+def with_presence(daemon, record: dict, *, self_view: bool = False) -> dict:
     """Attach the cached focus projection to one participant wire record.
 
     ``self_view`` is the agent reading itself: its play adds spawn options, or the live play an
@@ -48,7 +39,7 @@ def _with_presence(daemon, record: dict, *, self_view: bool = False) -> dict:
 def _tree_with_presence(daemon, nodes: list[dict]) -> list[dict]:
     """Attach presence to returned tree nodes only; no new broad queries."""
     for node in nodes:
-        _with_presence(daemon, node)
+        with_presence(daemon, node)
         _tree_with_presence(daemon, node["children"])
     return nodes
 
@@ -92,7 +83,7 @@ def _pagination(
     return after, raw_limit
 
 
-async def _hello(daemon, params: dict) -> dict:
+async def hello(daemon, params: dict) -> dict:
     """First contact; terminal identity is established only by provider binding."""
     pane = params.get("pane")
     if pane is not None:
@@ -107,7 +98,7 @@ async def _hello(daemon, params: dict) -> dict:
         session_id=params.get("session_id"),
         claimed_id=params.get("id"),
     )
-    return _with_presence(daemon, participant.to_dict())
+    return with_presence(daemon, participant.to_dict())
 
 
 async def list_participants(daemon, params: dict) -> list[dict]:
@@ -152,7 +143,7 @@ async def list_participants(daemon, params: dict) -> list[dict]:
 
     result = []
     for p in page:
-        d = _with_presence(daemon, p.to_dict())
+        d = with_presence(daemon, p.to_dict())
         d["resume_state"] = resume_state(p, live_peers)
         result.append(d)
     return result
@@ -185,9 +176,7 @@ async def get_participant(daemon, params: dict) -> dict:
     if not isinstance(include_git, bool):
         raise BadRequest("include_git must be a boolean")
     participant = daemon.registry.resolve(require(params, "id"))
-    record = _with_presence(
-        daemon, participant.to_dict(), self_view=params.get("self_view") is True
-    )
+    record = with_presence(daemon, participant.to_dict(), self_view=params.get("self_view") is True)
     if include_git:
         record["git"] = await _current_git(participant.cwd)
     return record
@@ -202,11 +191,11 @@ async def _current_git(cwd: str | None) -> dict:
     return asdict(facts)
 
 
-async def _rename(daemon, params: dict) -> dict:
+async def rename(daemon, params: dict) -> dict:
     pid = require(params, "id")
     name = require(params, "name")
     target = daemon.registry.resolve(pid)
-    return _with_presence(daemon, daemon.registry.rename(target.id, name).to_dict())
+    return with_presence(daemon, daemon.registry.rename(target.id, name).to_dict())
 
 
 async def update(daemon, params: dict) -> dict:
@@ -223,7 +212,7 @@ async def update(daemon, params: dict) -> dict:
 
     caller = daemon.registry.resolve(caller_id)
     target = daemon.registry.resolve(raw_target if raw_target is not None else caller.id)
-    return _with_presence(
+    return with_presence(
         daemon,
         update_participant_metadata(
             daemon,
@@ -235,7 +224,7 @@ async def update(daemon, params: dict) -> dict:
     )
 
 
-async def _status(daemon, params: dict) -> dict:
+async def set_status(daemon, params: dict) -> dict:
     pid = require(params, "id")
     raw = require(params, "status")
     try:
@@ -243,7 +232,7 @@ async def _status(daemon, params: dict) -> dict:
     except ValueError:
         raise BadRequest(f"unknown status {raw!r}") from None
     target = await update_participant_status(daemon, pid, caller_id=pid, status=status)
-    return _with_presence(daemon, target.to_dict())
+    return with_presence(daemon, target.to_dict())
 
 
 async def kill(daemon, params: dict) -> dict:
@@ -255,7 +244,7 @@ async def kill(daemon, params: dict) -> dict:
     )
 
 
-async def _adopt(daemon, params: dict) -> dict:
+async def reject_legacy_adopt(daemon, params: dict) -> dict:
     """Reject the retired pane-only adoption shape."""
     del daemon, params
     raise BadRequest(
@@ -264,7 +253,7 @@ async def _adopt(daemon, params: dict) -> dict:
     )
 
 
-async def _unmanaged(daemon, params: dict) -> list[dict]:
+async def list_legacy_unmanaged(daemon, params: dict) -> list[dict]:
     """Legacy private shape cannot safely express provider terminal identity."""
     del daemon, params
     return []

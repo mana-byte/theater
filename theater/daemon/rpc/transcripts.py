@@ -594,7 +594,6 @@ async def _transcript_bind(daemon, params: dict) -> dict:
 
 
 read_transcript_page = transcript_read.read_transcript_page
-_roles_param = transcript_read.roles_param
 
 
 @method("read_transcript")

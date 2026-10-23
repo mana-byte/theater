@@ -2,30 +2,18 @@
 
 from __future__ import annotations
 
-from theater.daemon.participants import operations
+from theater.daemon.participants import operations, resume, termination
 from theater.daemon.rpc.router import method
 
-_resume_state = operations._resume_state
-authorize_participant_mutation = operations.authorize_participant_mutation
-update_participant_metadata = operations.update_participant_metadata
-update_participant_status = operations.update_participant_status
-persist_participant_status = operations.persist_participant_status
-_require_verified_backend_stop = operations._require_verified_backend_stop
-_stop_verified_detached_backend = operations._stop_verified_detached_backend
-_TerminationUncertain = operations._TerminationUncertain
-_terminate_provider_terminal = operations._terminate_provider_terminal
-_authorize_termination = operations._authorize_termination
-_require_absent_or_forget_hint = operations._require_absent_or_forget_hint
-terminate_participant = operations.terminate_participant
-_with_presence = operations._with_presence
-_tree_with_presence = operations._tree_with_presence
-_pagination = operations._pagination
-_current_git = operations._current_git
+_resume_state = resume.resume_state
+_authorize_termination = termination._authorize_termination
+_stop_verified_detached_backend = termination._stop_verified_detached_backend
+terminate_participant = termination.terminate_participant
 
 
 @method("hello")
 async def _hello(daemon, params: dict) -> dict:
-    return await operations._hello(daemon, params)
+    return await operations.hello(daemon, params)
 
 
 @method("participants.list")
@@ -50,7 +38,7 @@ async def _get(daemon, params: dict) -> dict:
 
 @method("participant.rename")
 async def _rename(daemon, params: dict) -> dict:
-    return await operations._rename(daemon, params)
+    return await operations.rename(daemon, params)
 
 
 @method("participant.update")
@@ -60,7 +48,7 @@ async def _update(daemon, params: dict) -> dict:
 
 @method("participant.status")
 async def _status(daemon, params: dict) -> dict:
-    return await operations._status(daemon, params)
+    return await operations.set_status(daemon, params)
 
 
 @method("participant.kill")
@@ -70,9 +58,9 @@ async def _kill(daemon, params: dict) -> dict:
 
 @method("adopt")
 async def _adopt(daemon, params: dict) -> dict:
-    return await operations._adopt(daemon, params)
+    return await operations.reject_legacy_adopt(daemon, params)
 
 
 @method("participants.unmanaged")
 async def _unmanaged(daemon, params: dict) -> list[dict]:
-    return await operations._unmanaged(daemon, params)
+    return await operations.list_legacy_unmanaged(daemon, params)
