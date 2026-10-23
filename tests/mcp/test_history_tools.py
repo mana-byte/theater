@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from tests.support.claude_seal import claude_fragment, claude_marker, claude_record
 from tests.support.mcp_tools import resolved
 from tests.support.transcript_pages import StaticSource, page, pager
-from theater.daemon.rpc.transcript_paging import TranscriptEventChunk, TranscriptReadPage
 from theater.daemon.rpc.transcripts import _read_transcript
+from theater.daemon.transcript_paging import TranscriptEventChunk, TranscriptReadPage
 from theater.harness import HARNESSES, Event, EventKind
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.mcp import tools

@@ -20,10 +20,10 @@ from theater.daemon.rpc.transcripts import (
     complete_transcript_bind_result,
     persist_transcript_bind,
     prepare_transcript_bind,
-    read_transcript_page,
     transcript_candidates,
 )
 from theater.daemon.trajectory.responses import resync_delta
+from theater.daemon.transcript_read import read_transcript_page
 from theater.frontend.capabilities import METHOD_CATALOG, PUBLIC_LIMITS
 from theater.frontend.schemas import validator_for
 from theater.models import NotFound

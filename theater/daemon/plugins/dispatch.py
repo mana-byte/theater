@@ -172,36 +172,36 @@ async def _catalog_models(daemon, params: dict[str, Any], actor_id: str) -> Any:
 
 async def _jobs_get(daemon, params: dict[str, Any], actor_id: str) -> dict[str, Any]:
     del actor_id
-    from theater.daemon.rpc.jobs import _jobs_status
+    from theater.daemon.job_operations import job_status
 
-    return await _jobs_status(daemon, params)
+    return await job_status(daemon, params)
 
 
 async def _jobs_await(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.rpc.jobs import _jobs_await
+    from theater.daemon.job_operations import await_jobs
 
-    return await _jobs_await(daemon, _with_actor(params, actor_id))
+    return await await_jobs(daemon, _with_actor(params, actor_id))
 
 
 async def _transcripts_read(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.transcripts import _read_transcript
+    from theater.daemon.transcript_read import read_transcript
 
-    return await _read_transcript(daemon, params)
+    return await read_transcript(daemon, params)
 
 
 async def _recall(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.recall import _recall as handler
+    from theater.daemon.recall_operations import recall
 
-    return await handler(daemon, params)
+    return await recall(daemon, params)
 
 
 async def _recall_read(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.recall import _recall_read as handler
+    from theater.daemon.recall_operations import recall_read
 
-    return await handler(daemon, params)
+    return await recall_read(daemon, params)
 
 
 async def _recall_capability(daemon, params: dict[str, Any], actor_id: str) -> Any:
