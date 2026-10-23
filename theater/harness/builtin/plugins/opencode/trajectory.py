@@ -5,14 +5,14 @@ from __future__ import annotations
 import sqlite3
 from collections import OrderedDict
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.normalization.facts import tool_failure
 from theater.harness.normalization.values import json_container_format
 from theater.trajectory.content import ContentFormat, DetailField
-from theater.trajectory.enums import TrajectoryFailureCategory, TrajectoryKind, TrajectoryStatus
+from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
 from .constants import LIVE_TRAJECTORY_STATE_LIMIT
@@ -36,6 +36,69 @@ from .values import (
     _trajectory_usage,
     load_json_object,
 )
+
+
+@dataclass(frozen=True)
+class _ToolPart:
+    name: str | None
+    call_id: str | None
+    parent_id: str | None
+    fallback_id: str | None
+    result_id: str | None
+    result_fallback_id: str | None
+    call_status: TrajectoryStatus
+    call_details: tuple[DetailField, ...]
+    result_status: TrajectoryStatus | None
+    result_text: str | None
+    result_details: tuple[DetailField, ...]
+    result_failure: TrajectoryFailure | None
+    timing: Timing | None
+
+
+def _interpret_tool_part(part: dict) -> _ToolPart:
+    """Read tool identity and content once; live and history decide their own update policy."""
+    state = _table(part.get("state"))
+    state_status = state.get("status")
+    call = part.get("callID") or part.get("id")
+    call_id = call if isinstance(call, str) else None
+    fallback = part.get("id") if isinstance(part.get("id"), str) else None
+    name = part.get("tool") if isinstance(part.get("tool"), str) else None
+    parent = part.get("parentCallID") or state.get("parentCallID")
+    parent_id = parent if isinstance(parent, str) else None
+    call_details = tuple(
+        value
+        for value in (
+            _trajectory_detail("tool", name),
+            _trajectory_detail("arguments", state.get("input"), format=ContentFormat.JSON),
+        )
+        if value is not None
+    )
+    result_status = _tool_status(state_status) if state_status in ("completed", "error") else None
+    result = _tool_output(state) if result_status is not None else None
+    result_detail = (
+        _trajectory_detail("result", result, format=json_container_format(result))
+        if result is not None
+        else None
+    )
+    return _ToolPart(
+        name=name,
+        call_id=call_id,
+        parent_id=parent_id,
+        fallback_id=fallback,
+        result_id=f"{call_id}:result" if call_id else None,
+        result_fallback_id=f"{fallback}:result" if fallback else None,
+        call_status=_tool_status(state_status),
+        call_details=call_details,
+        result_status=result_status,
+        result_text=result,
+        result_details=(result_detail,) if result_detail is not None else (),
+        result_failure=(
+            tool_failure(result_status, result)
+            if result_status is not None and result is not None
+            else None
+        ),
+        timing=_part_timing(part),
+    )
 
 
 class OpenCodeTrajectory:
@@ -218,76 +281,49 @@ class OpenCodeTrajectory:
             ]
         if ptype != "tool":
             return []
-        state = _table(part.get("state"))
-        state_status = state.get("status")
-        call = part.get("callID") or part.get("id")
-        call_id = call if isinstance(call, str) else None
-        tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
-        mcp_identity = self._opencode_mcp_identity(tool_name)
+        tool = _interpret_tool_part(part)
+        mcp_identity = self._opencode_mcp_identity(tool.name)
         mcp_server, mcp_tool = mcp_identity or (None, None)
-        parent = part.get("parentCallID") or state.get("parentCallID")
-        parent_id = parent if isinstance(parent, str) else None
-        details = [
-            value
-            for value in (
-                _trajectory_detail("tool", tool_name),
-                _trajectory_detail("arguments", state.get("input"), format=ContentFormat.JSON),
-            )
-            if value is not None
-        ]
         facts = [
             _stored_fact(
                 kind=TrajectoryKind.TOOL_CALL,
-                summary=tool_name or "",
-                status=_tool_status(state_status),
-                native_id=call_id,
-                fallback_id=fallback,
+                summary=tool.name or "",
+                status=tool.call_status,
+                native_id=tool.call_id,
+                fallback_id=tool.fallback_id,
                 revision=revision,
                 raw_index=raw_index,
                 event_ordinal=ordinal_base,
                 turn_id=mid or None,
-                call_id=call_id,
-                parent_call_id=parent_id,
+                call_id=tool.call_id,
+                parent_call_id=tool.parent_id,
                 mcp_server=mcp_server,
                 mcp_tool=mcp_tool,
-                timing=_part_timing(part),
+                timing=tool.timing,
                 request_id=request_id if role == "assistant" else None,
-                details=details,
+                details=tool.call_details,
             )
         ]
-        if state_status in ("completed", "error"):
-            result = _tool_output(state)
-            result_detail = _trajectory_detail(
-                "result", result, format=json_container_format(result)
-            )
+        if tool.result_status is not None and tool.result_text is not None:
             facts.append(
                 _stored_fact(
                     kind=TrajectoryKind.TOOL_RESULT,
-                    summary=result,
-                    status=(
-                        TrajectoryStatus.ERROR
-                        if state_status == "error"
-                        else TrajectoryStatus.COMPLETED
-                    ),
-                    native_id=f"{call_id}:result" if call_id else None,
-                    fallback_id=f"{fallback}:result" if fallback else None,
+                    summary=tool.result_text,
+                    status=tool.result_status,
+                    native_id=tool.result_id,
+                    fallback_id=tool.result_fallback_id,
                     revision=revision,
                     raw_index=raw_index,
                     event_ordinal=ordinal_base + 1,
                     turn_id=mid or None,
-                    call_id=call_id,
-                    parent_call_id=parent_id,
+                    call_id=tool.call_id,
+                    parent_call_id=tool.parent_id,
                     mcp_server=mcp_server,
                     mcp_tool=mcp_tool,
-                    failure=tool_failure(
-                        TrajectoryStatus.ERROR
-                        if state_status == "error"
-                        else TrajectoryStatus.COMPLETED,
-                        result,
-                    ),
-                    timing=_part_timing(part),
+                    failure=tool.result_failure,
+                    timing=tool.timing,
                     request_id=request_id if role == "assistant" else None,
-                    details=(result_detail,) if result_detail is not None else (),
+                    details=tool.result_details,
                 )
             )
         return facts
@@ -481,72 +517,42 @@ class OpenCodeTrajectory:
         request_id: str | None,
         **common,
     ) -> list[TrajectoryFact]:
-        state = _table(part.get("state"))
-        state_status = state.get("status")
-        call = part.get("callID") or part.get("id")
-        call_id = call if isinstance(call, str) else None
-        tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
-        mcp_identity = self._opencode_mcp_identity(tool_name)
+        tool = _interpret_tool_part(part)
+        mcp_identity = self._opencode_mcp_identity(tool.name)
         mcp_server, mcp_tool = mcp_identity or (None, None)
-        parent = part.get("parentCallID") or state.get("parentCallID")
-        parent_id = parent if isinstance(parent, str) else None
-        details: list[DetailField] = []
-        tool_detail = _trajectory_detail("tool", tool_name)
-        if tool_detail is not None:
-            details.append(tool_detail)
-        input_detail = _trajectory_detail(
-            "arguments", state.get("input"), format=ContentFormat.JSON
-        )
-        if input_detail is not None:
-            details.append(input_detail)
-        call_common = {**common, "native_id": call_id}
+        call_common = {**common, "native_id": tool.call_id}
         call_fact = self._live_fact(
             kind=TrajectoryKind.TOOL_CALL,
-            summary=tool_name or "",
-            status=_tool_status(state_status),
+            summary=tool.name or "",
+            status=tool.call_status,
             request_id=request_id,
-            call_id=call_id,
-            parent_call_id=parent_id,
+            call_id=tool.call_id,
+            parent_call_id=tool.parent_id,
             mcp_server=mcp_server,
             mcp_tool=mcp_tool,
-            details=details,
+            details=tool.call_details,
             **call_common,
         )
         facts = [call_fact] if call_fact is not None else []
-        if state_status in ("completed", "error"):
-            result = _tool_output(state)
-            result_details: list[DetailField] = []
-            result_detail = _trajectory_detail(
-                "result", result, format=json_container_format(result)
-            )
-            if result_detail is not None:
-                result_details.append(result_detail)
+        if tool.result_status is not None and tool.result_text is not None:
             result_fact = self._live_fact(
                 kind=TrajectoryKind.TOOL_RESULT,
-                summary=result,
-                status=(
-                    TrajectoryStatus.ERROR
-                    if state_status == "error"
-                    else TrajectoryStatus.COMPLETED
-                ),
-                native_id=f"{call_id}:result" if call_id else None,
-                fallback_id=(f"{common['fallback_id']}:result" if common["fallback_id"] else None),
+                summary=tool.result_text,
+                status=tool.result_status,
+                native_id=tool.result_id,
+                fallback_id=tool.result_fallback_id,
                 raw_index=common["raw_index"],
                 event_ordinal=common["event_ordinal"] + 1,
                 turn_id=common["turn_id"],
                 step_id=common["step_id"],
                 request_id=request_id,
-                call_id=call_id,
-                parent_call_id=parent_id,
+                call_id=tool.call_id,
+                parent_call_id=tool.parent_id,
                 mcp_server=mcp_server,
                 mcp_tool=mcp_tool,
-                failure=(
-                    TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=result)
-                    if state_status == "error"
-                    else None
-                ),
+                failure=tool.result_failure,
                 timing=common["timing"],
-                details=result_details,
+                details=tool.result_details,
                 revision_hint=common["revision_hint"],
             )
             if result_fact is not None:
