@@ -121,18 +121,59 @@ def test_exhausted_inconclusive_opens_an_issue_without_a_pr(
 ) -> None:
     _repo(tmp_path)
     adapter = ScriptedAdapter(["inconclusive"], releases=("3.0.0", "3.0.1"))
-    summary = runner.run_harness(
+    state = runner.run_harness_state(
         adapter, tmp_path, publish=True, run_url="https://example.invalid/1"
     )
+    summary = state.to_summary()
     [row] = summary["results"]
     assert [item["verdict"] for item in row["attempts"]] == ["inconclusive"] * 3
     assert adapter.calls == 3 and sleeps == [30.0, 90.0]
     assert summary["deferred"] == ["3.0.1"] and summary["issues"] == [row]
     assert exit_code([summary]) == 2
-    report = prepare_publication(summary, tmp_path / "summary.json")
+    report = prepare_publication(state, tmp_path / "summary.json")
     assert (report.pr_needed, report.issue_action) == (False, "upsert")
     assert "inconclusive" in report.issue_labels and "tooling" not in report.issue_labels
     assert "inconclusive after 3 attempts" in report.issue_body
+
+
+def test_publication_uses_run_rows_without_changing_external_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(
+        "scripts.harness_compat.cli._adapters", lambda _name: [ScriptedAdapter(["red"])]
+    )
+    summary_path = tmp_path / "summary.json"
+    assert (
+        main(
+            [
+                "run",
+                "--harness",
+                "vibe",
+                "--publish",
+                "--summary-json",
+                str(summary_path),
+                "--version",
+                "3.0.0",
+                "--run-url",
+                "https://example.invalid/run",
+            ]
+        )
+        == 1
+    )
+    document = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary = document["harnesses"][0]
+    assert (
+        summary_path.read_text(encoding="utf-8")
+        == json.dumps(document, indent=2, sort_keys=True) + "\n"
+    )
+    assert summary["results"][0]["checks"] == [
+        {"name": "proof", "status": "fail", "detail": "red proof"}
+    ]
+    assert summary["publication"] == {"pr": False, "issue": "upsert"}
+    assert "| 3.0.0 | red |" in (tmp_path / "summary.issue.md").read_text(encoding="utf-8")
 
 
 def test_red_outranks_inconclusive_and_a_green_prefix_still_publishes() -> None:
@@ -166,15 +207,16 @@ def test_a_final_non_green_revokes_the_cached_green_and_names_the_pr_release(
     )
     cached = cache_root(tmp_path) / "vibe/3.0.0.json"
     assert cached.exists()
-    summary = runner.run_harness(adapter, tmp_path, version="3.0.0", publish=True)
+    state = runner.run_harness_state(adapter, tmp_path, version="3.0.0", publish=True)
+    summary = state.to_summary()
     assert not cached.exists()
     assert summary["revoked"] == ["3.0.0"] and summary["greens"] == []
-    assert prepare_publication(summary, tmp_path / "summary.json").pr_withdraw == "3.0.0"
+    assert prepare_publication(state, tmp_path / "summary.json").pr_withdraw == "3.0.0"
 
 
 def test_job_summary_annotations_and_overview(tmp_path: Path, sleeps: list[float]) -> None:
     _repo(tmp_path)
-    summary = runner.run_harness(ScriptedAdapter(["inconclusive"]), tmp_path)
+    summary = runner.run_harness_state(ScriptedAdapter(["inconclusive"]), tmp_path).to_summary()
     text = render_harness(summary)
     assert "### vibe — ⚠️ inconclusive" in text
     assert "inconclusive → inconclusive → inconclusive" in text
@@ -188,7 +230,7 @@ def test_summarize_fails_when_a_selected_harness_left_no_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
 ) -> None:
     _repo(tmp_path / "src")
-    summary = runner.run_harness(ScriptedAdapter(["green"]), tmp_path / "src")
+    summary = runner.run_harness_state(ScriptedAdapter(["green"]), tmp_path / "src").to_summary()
     results = tmp_path / "results/compat-result-vibe"
     results.mkdir(parents=True)
     (results / "compat-summary.json").write_text(json.dumps({"harnesses": [summary]}))
@@ -197,7 +239,9 @@ def test_summarize_fails_when_a_selected_harness_left_no_result(
     assert main(["summarize", str(tmp_path / "results"), "--expect", "vibe"]) == 0
     assert main(["summarize", str(tmp_path / "results"), "--expect", "vibe,pi"]) == 1
     assert "no result" in target.read_text()
-    red = runner.run_harness(ScriptedAdapter(["red"]), tmp_path / "src", version="3.0.0")
+    red = runner.run_harness_state(
+        ScriptedAdapter(["red"]), tmp_path / "src", version="3.0.0"
+    ).to_summary()
     (results / "compat-summary.json").write_text(json.dumps({"harnesses": [red]}))
     assert main(["summarize", str(tmp_path / "results"), "--expect", "vibe"]) == 1
 
@@ -254,7 +298,8 @@ def test_an_inconclusive_composition_is_retried_then_reported(
         return ["bump check timed out"] if 1 < len(seen) <= timeouts + 1 else []
 
     monkeypatch.setattr(runner, "check_bump", slow_check)
-    summary = runner.run_harness(GateFileAdapter(["green"]), tmp_path)
+    state = runner.run_harness_state(GateFileAdapter(["green"]), tmp_path)
+    summary = state.to_summary()
     assert len(seen) == calls + 1
     assert sleeps == [30.0, 90.0][: calls - 1]
     assert summary["greens"] == ["3.0.0"]
@@ -262,7 +307,7 @@ def test_an_inconclusive_composition_is_retried_then_reported(
     if verdict:
         [row] = summary["issues"]
         assert row["role"] == "composition" and len(row["attempts"]) == 3
-        report = prepare_publication(summary, tmp_path / "summary.json")
+        report = prepare_publication(state, tmp_path / "summary.json")
         assert "inconclusive after 3 attempts" in report.issue_body
 
 
@@ -281,7 +326,9 @@ def test_a_file_outside_the_declared_artifact_roots_never_ships(
     (tmp_path / "gate.txt").write_text("old\n")
     _repo(tmp_path)
     monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
-    summary = runner.run_harness(UnrelatedFileAdapter(["green"]), tmp_path, publish=True)
+    summary = runner.run_harness_state(
+        UnrelatedFileAdapter(["green"]), tmp_path, publish=True
+    ).to_summary()
     staged = subprocess.run(
         ["git", "diff", "--cached", "--name-only"],
         cwd=tmp_path,
@@ -324,9 +371,10 @@ def test_a_crossed_major_boundary_is_called_out_in_the_pr(
     _repo(tmp_path)
     monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
     adapter = GateFileAdapter(["green"], releases=("3.0.0", "4.0.0"))
-    summary = runner.run_harness(adapter, tmp_path)
+    state = runner.run_harness_state(adapter, tmp_path)
+    summary = state.to_summary()
     assert summary["greens"] == ["3.0.0", "4.0.0"]
-    report = prepare_publication(summary, tmp_path / "summary.json")
+    report = prepare_publication(state, tmp_path / "summary.json")
     assert "Major version boundary:** 4.0.0 crosses from 3.x" in report.pr_body
 
 
@@ -346,9 +394,10 @@ def test_a_revoked_release_is_named_even_when_other_releases_are_promoted(
     _repo(tmp_path)
     monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
     adapter = FailingNewestAdapter([], releases=("3.0.0", "3.0.1"))
-    summary = runner.run_harness(adapter, tmp_path)
+    state = runner.run_harness_state(adapter, tmp_path)
+    summary = state.to_summary()
     assert (summary["greens"], summary["revoked"]) == (["3.0.0"], ["3.0.1"])
-    assert prepare_publication(summary, tmp_path / "summary.json").pr_withdraw == "3.0.1"
+    assert prepare_publication(state, tmp_path / "summary.json").pr_withdraw == "3.0.1"
 
 
 class WatchedAdapter(ScriptedAdapter):
@@ -383,9 +432,10 @@ def test_an_issue_closes_only_when_every_release_it_lists_recovered(
     _repo(tmp_path)
     adapter = WatchedAdapter(["green"], releases=("2.8.0", "2.9.0"))
     adapter.retired = retired
-    summary = runner.run_harness(adapter, tmp_path)
+    state = runner.run_harness_state(adapter, tmp_path)
+    summary = state.to_summary()
     assert summary["watch"]["version"] == "2.9.0"
-    report = prepare_publication(summary, tmp_path / "summary.json", list(open_failures))
+    report = prepare_publication(state, tmp_path / "summary.json", list(open_failures))
     assert report.issue_action == action
     assert ("Still unresolved" in report.issue_body) is carried
 
@@ -394,8 +444,8 @@ def test_a_failing_row_and_an_unretested_failure_share_one_issue_ledger(
     tmp_path: Path, sleeps: list[float]
 ) -> None:
     _repo(tmp_path)
-    summary = runner.run_harness(ScriptedAdapter(["red"]), tmp_path)
-    report = prepare_publication(summary, tmp_path / "summary.json", ["2.8.0"])
+    state = runner.run_harness_state(ScriptedAdapter(["red"]), tmp_path)
+    report = prepare_publication(state, tmp_path / "summary.json", ["2.8.0"])
     assert report.issue_action == "upsert"
     assert "Still unresolved, not retested by this run: `2.8.0`" in report.issue_body
     assert "<!-- compat-failing: 2.8.0,3.0.0 -->" in report.issue_body
@@ -413,7 +463,7 @@ def test_a_deterministic_problem_beside_a_timeout_is_not_retried(
         return [] if len(seen) == 1 else ["bump check timed out", "probe 3.0.0: supported=False"]
 
     monkeypatch.setattr(runner, "check_bump", mixed)
-    summary = runner.run_harness(GateFileAdapter(["green"]), tmp_path)
+    summary = runner.run_harness_state(GateFileAdapter(["green"]), tmp_path).to_summary()
     [row] = summary["issues"]
     assert (row["verdict"], len(row["attempts"]), sleeps) == ("tooling", 1, [])
 
@@ -436,7 +486,7 @@ def test_a_candidate_bump_check_retries_only_pure_timeouts(
     (tmp_path / "gate.txt").write_text("old\n")
     _repo(tmp_path)
     monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: problems)
-    summary = runner.run_harness(GateFileAdapter(["green"]), tmp_path)
+    summary = runner.run_harness_state(GateFileAdapter(["green"]), tmp_path).to_summary()
     [row] = summary["issues"]
     assert (row["verdict"], len(row["attempts"])) == (verdict, attempts)
 

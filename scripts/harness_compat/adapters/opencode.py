@@ -21,6 +21,7 @@ from ..contract import (
     verdict_from_checks,
     version_key,
 )
+from ..route_facts import RouteFacts
 from . import opencode_bump, opencode_sandbox
 
 NPM_PACKAGE = "opencode-ai"
@@ -151,12 +152,9 @@ class OpenCodeAdapter:
         ):
             verdict = "inconclusive"
         if verdict != "green":
-            stray = {
-                (request.method, request.path)
-                for request in sb.mock.requests
-                if (request.method, request.path)
-                not in self.expected_routes | self.ignorable_routes
-            }
+            stray = RouteFacts(
+                sb.mock.requests, self.expected_routes, self.ignorable_routes
+            ).unexpected_routes
             if stray:
                 verdict = "tooling"
                 checks += (Check("mock routes", "error", f"unexpected={sorted(stray)!r}"),)

@@ -12,7 +12,7 @@ from typing import Any
 
 from .adapters import ADAPTER_NAMES, load_adapter
 from .publication import prepare_publication
-from .runner import run_harness
+from .runner import run_harness_state
 from .summary import error_annotation, render_harness, render_overview, workflow_annotations
 
 
@@ -103,8 +103,8 @@ def _summarize(args: argparse.Namespace) -> int:
 
 def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
     _validate_run(args)
-    summaries = [
-        run_harness(
+    states = [
+        run_harness_state(
             adapter,
             root,
             version=args.version,
@@ -114,6 +114,7 @@ def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
         )
         for adapter in adapters
     ]
+    summaries = [state.to_summary() for state in states]
     document = {"harnesses": summaries}
     summary_path = args.summary_json
     if args.publish and summary_path is None:
@@ -122,7 +123,7 @@ def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
         )
     if args.publish and summary_path:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        report = prepare_publication(summaries[0], summary_path, _open_failures())
+        report = prepare_publication(states[0], summary_path, _open_failures())
         summaries[0]["publication"] = {"pr": report.pr_needed, "issue": report.issue_action}
     if summary_path:
         summary_path.parent.mkdir(parents=True, exist_ok=True)

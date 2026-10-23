@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from scripts.harness_compat.adapters import (
     opencode_bump,
     opencode_sandbox,
 )
+from scripts.harness_compat.runner import classify_routes
 from scripts.harness_compat.sandbox import make_sandbox
 from tests.support.paths import REPO_ROOT
 
@@ -81,3 +84,32 @@ def test_install_failure_is_inconclusive_and_names_the_package(
         pytest.raises(contract.InstallFailed, match=r"@opencode/cli@2\.0\.20 did not run"),
     ):
         opencode2.ADAPTER.install(sb, "2.0.20")
+
+
+def test_mixed_proofs_and_stray_route_keep_both_adapter_and_runner_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(_root, nodeids, **_kwargs):
+        if tuple(nodeids) == opencode2.ADAPTER.consistency_tests:
+            return tuple(contract.Check(nodeid, "pass") for nodeid in nodeids)
+        statuses = ("fail", "skip", "pass", "pass")
+        return tuple(
+            contract.Check(nodeid, status) for nodeid, status in zip(nodeids, statuses, strict=True)
+        )
+
+    monkeypatch.setattr(opencode2.framework, "run_pytest", fake_run)
+    with make_sandbox("opencode2", root=tmp_path / "sandbox") as sb:
+        with pytest.raises(urllib.error.HTTPError):
+            urllib.request.urlopen(sb.mock_base_urls["anthropic"] + "/stray")
+        direct = opencode2.ADAPTER.qualify(tmp_path, "2.0.20", sb, sb.bin_dir / "opencode")
+        classified = classify_routes(opencode2.ADAPTER, direct, sb.mock.requests)
+    assert direct.verdict == classified.verdict == "tooling"
+    assert [(check.name, check.status, check.detail) for check in direct.checks[-2:]] == [
+        (opencode2.ADAPTER.green_tests[-1], "pass", ""),
+        ("mock routes", "error", "unexpected=[('GET', '/stray')]"),
+    ]
+    assert [(check.name, check.status, check.detail) for check in classified.checks[-2:]] == [
+        ("mock routes", "error", "unexpected=[('GET', '/stray')]"),
+        ("mock routes", "fail", "GET /stray body keys="),
+    ]
+    assert [check.status for check in classified.checks[2:6]] == ["fail", "skip", "pass", "pass"]
