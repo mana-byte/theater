@@ -1335,6 +1335,59 @@
       ],
       "type": "string"
     },
+    "FeedbackSaveParams": {
+      "properties": {
+        "classification": {
+          "type": "string"
+        },
+        "extraLogFiles": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "includeLogs": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "savePath": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            }
+          ],
+          "description": "Absolute, previously unused ZIP path on the app-server host. The caller owns this file, including after a disconnected RPC."
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "classification",
+        "savePath"
+      ],
+      "type": "object"
+    },
     "FeedbackUploadParams": {
       "properties": {
         "classification": {
@@ -5304,8 +5357,12 @@
           "description": "When true, return only thread metadata and live fork state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after forking. Full-history hydration is deprecated for paginated threads; use this with `thread/turns/list` and `thread/items/list` instead.",
           "type": "boolean"
         },
+        "experimentalDisablePredictionMcp": {
+          "description": "Disable MCP servers in prediction mode when the inherited window uses incremental tools on Responses Lite. Requires `experimentalPredictionMode: true`.",
+          "type": "boolean"
+        },
         "experimentalPredictionMode": {
-          "description": "Start from the loaded parent's effective config, tools, environments, and persisted history to maximize prompt-cache reuse. Requires a loaded, persisted parent and `ephemeral: true`. Enables `features.reasoning_effort_override` on the fork. Cannot be combined with configuration overrides, `path`, `lastTurnId`, or `beforeTurnId`.",
+          "description": "Start from the loaded parent's effective config, tools, environments, and persisted history to maximize prompt-cache reuse. Requires a loaded, persisted parent and `ephemeral: true`. Enables `features.reasoning_effort_override` on the fork. Only `config.thread_unload_delay_secs` may override the inherited config. Cannot be combined with `path`, `lastTurnId`, or `beforeTurnId`.",
           "type": "boolean"
         },
         "lastTurnId": {
@@ -6368,6 +6425,13 @@
               "type": "null"
             }
           ]
+        },
+        "voiceSessionId": {
+          "description": "Client-generated identifier for the product voice session. This is distinct from `realtimeSessionId`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -6648,6 +6712,69 @@
       },
       "required": [
         "beforeTurnId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadSampleCancelParams": {
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/RequestId"
+        }
+      },
+      "required": [
+        "requestId"
+      ],
+      "type": "object"
+    },
+    "ThreadSampleParams": {
+      "properties": {
+        "disableMcp": {
+          "description": "Disable MCP servers when the inherited window uses incremental tools on Responses Lite.",
+          "type": "boolean"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Applied only when the provider and model support cache-preserving reasoning-effort updates."
+        },
+        "expectedTurnId": {
+          "description": "The loaded source's latest completed, failed, or interrupted turn. Stale or active sources are rejected.",
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "responsesapiClientMetadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnTrigger": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedTurnId",
+        "prompt",
         "threadId"
       ],
       "type": "object"
@@ -7707,7 +7834,17 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata.\n\nEntries are flattened into the JSON string sent as `client_metadata[\"x-codex-turn-metadata\"]` on ResponsesAPI HTTP and websocket requests.\n\nThey are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.",
+          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata. Replaces unprotected client-provided entries when supplied; an empty map clears them.\n\nEntries are flattened into the JSON string sent as `client_metadata[\"x-codex-turn-metadata\"]` on ResponsesAPI HTTP and websocket requests.\n\nThey are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "responsesapiClientMetadataPatch": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Merge entries into the ResponsesAPI turn metadata without removing existing entries. Applied after `responsesapiClientMetadata` if both are provided; reserved keys remain protected.",
           "type": [
             "object",
             "null"
@@ -7825,7 +7962,17 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata.\n\nEntries are flattened into the JSON string sent as `client_metadata[\"x-codex-turn-metadata\"]` on ResponsesAPI HTTP and websocket requests.\n\nThey are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.",
+          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata. Replaces unprotected client-provided entries when supplied; an empty map clears them.\n\nEntries are flattened into the JSON string sent as `client_metadata[\"x-codex-turn-metadata\"]` on ResponsesAPI HTTP and websocket requests.\n\nThey are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "responsesapiClientMetadataPatch": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Merge entries into the ResponsesAPI turn metadata without removing existing entries. Applied after `responsesapiClientMetadata` if both are provided; reserved keys remain protected.",
           "type": [
             "object",
             "null"
@@ -8391,6 +8538,54 @@
         "params"
       ],
       "title": "Thread/forkRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/sample"
+          ],
+          "title": "Thread/sampleRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadSampleParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/sampleRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/sample/cancel"
+          ],
+          "title": "Thread/sample/cancelRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadSampleCancelParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/sample/cancelRequest",
       "type": "object"
     },
     {
@@ -11798,6 +11993,30 @@
         "params"
       ],
       "title": "Feedback/uploadRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "feedback/save"
+          ],
+          "title": "Feedback/saveRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/FeedbackSaveParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Feedback/saveRequest",
       "type": "object"
     },
     {
