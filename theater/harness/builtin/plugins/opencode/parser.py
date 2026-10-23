@@ -14,7 +14,7 @@ from theater.harness.source import Batch
 
 from .constants import DRAIN_LIMIT
 from .paths import _paths_from_tool
-from .store import event_rows, message_parts, message_role
+from .store import QueryNamespace, event_rows
 from .values import (
     _error_detail,
     _error_terminal,
@@ -45,6 +45,7 @@ def _step_error_event(
 
 
 class OpenCodeParser:
+    _queries: QueryNamespace
     _cursor: int
     _cwd: str | None
     _finished: set[str]
@@ -218,7 +219,8 @@ class OpenCodeParser:
                 isinstance(message_id, str)
                 and bool(message_id)
                 and _has_tool_calls(
-                    load_json_object(row[0]) for row in message_parts(conn, message_id)
+                    load_json_object(row[0])
+                    for row in self._queries.message_parts(conn, message_id)
                 )
             )
             events = self._on_message(payload, seq, has_tool_calls)
@@ -484,7 +486,7 @@ class OpenCodeParser:
         role = self._roles.get(mid)
         if role is not None:
             return role
-        row = message_role(conn, mid)
+        row = self._queries.message_role(conn, mid)
         found = load_json_object(row[0]).get("role") if row is not None else None
         if isinstance(found, str):
             self._roles[mid] = found

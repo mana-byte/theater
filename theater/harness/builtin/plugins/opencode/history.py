@@ -30,17 +30,7 @@ from theater.transcript_identity import (
 )
 
 from .constants import HISTORY_MESSAGE_BATCH
-from .store import (
-    connect,
-    history_boundary,
-    history_messages,
-    history_parts_by_session,
-    history_parts_for_messages,
-    paged_messages,
-    paged_parts,
-    recent_history_messages,
-    session_for_history,
-)
+from .store import QueryNamespace, connect, session_for_history
 from .values import _opencode_source_key, load_json_object
 
 logger = logging.getLogger("theater.harness.opencode")
@@ -50,6 +40,7 @@ type _HistoryOutput = tuple[tuple[Event, ...], tuple[TrajectoryFact, ...], int]
 
 
 class OpenCodeHistory:
+    _queries: QueryNamespace
     _after: float | None
     _cwd: str | None
     _db: Path
@@ -174,13 +165,13 @@ class OpenCodeHistory:
     def _history_events(self, conn: sqlite3.Connection, sid: str, last_n: int) -> list[Event]:
         if last_n <= 0:
             return self._replay_history_rows(
-                history_messages(conn, sid),
-                history_parts_by_session(conn, sid),
+                self._queries.history_messages(conn, sid),
+                self._queries.history_parts_by_session(conn, sid),
             )
         events: list[Event] = []
         offset = 0
         while len(events) < last_n:
-            rows = recent_history_messages(
+            rows = self._queries.recent_history_messages(
                 conn,
                 sid,
                 limit=HISTORY_MESSAGE_BATCH,
@@ -189,7 +180,7 @@ class OpenCodeHistory:
             if not rows:
                 break
             message_ids = [str(message_id) for message_id, _raw in rows]
-            parts = history_parts_for_messages(conn, sid, message_ids)
+            parts = self._queries.history_parts_for_messages(conn, sid, message_ids)
             events[0:0] = self._replay_history_rows(reversed(rows), parts)
             events = events[-last_n:]
             offset += len(rows)
@@ -224,7 +215,7 @@ class OpenCodeHistory:
                 error="OpenCode database is unavailable",
             )
         try:
-            conn = connect(self._db)
+            conn = connect(self._db, queries=self._queries)
         except sqlite3.Error as exc:
             return HistoryPage(
                 error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -273,7 +264,7 @@ class OpenCodeHistory:
         if isinstance(boundaries, HistoryPage):
             return boundaries
         boundary, snapshot_boundary = boundaries
-        rows = paged_messages(
+        rows = self._queries.paged_messages(
             conn,
             sid,
             snapshot_boundary if snapshot_boundary is not None else boundary,
@@ -673,7 +664,7 @@ class OpenCodeHistory:
         ):
             raise HistoryPageError("history_cursor_invalid", "history cursor boundary is malformed")
         created, message_id = boundary
-        row = history_boundary(conn, sid, created, message_id)
+        row = self._queries.history_boundary(conn, sid, created, message_id)
         if row is None:
             raise HistoryPageError(
                 "history_cursor_invalid", "OpenCode history boundary no longer exists"
@@ -691,7 +682,7 @@ class OpenCodeHistory:
     def _history_parts(
         self, conn: sqlite3.Connection, sid: str, message_id: str, limit: int | None
     ) -> tuple[list[tuple[object, object, object, object]], bool]:
-        found = paged_parts(conn, sid, message_id, limit)
+        found = self._queries.paged_parts(conn, sid, message_id, limit)
         truncated = limit is not None and len(found) > limit
         if limit is not None:
             found = found[:limit]
