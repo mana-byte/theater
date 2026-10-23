@@ -71,9 +71,12 @@ Issue creation, updates, labels, and closure use the GitHub REST API; an issue i
 - Vibe's floor is enforced at launch as well as displayed: a release older than
   `_FLOOR` ignores the isolated session-log directory, so launch planning refuses it.
 - An adapter that changes no gate value produces no PR.
-- Cached evidence is reused only while the framework, the adapter, the proof tests
-  with their imported helpers and conftests, and the harness plugin are unchanged; otherwise the
-  release is qualified again.
+- Bump adapters share AST literal reading and checked line replacement through
+  `scripts/harness_compat/gate_literals.py`. Each adapter keeps its own accepted
+  syntax, duplicate handling, diagnostics and release-bound policy.
+- Cached evidence covers the import closure seeded by framework and adapter
+  sources, proof tests with their helpers and conftests, and the declared plugin
+  and data inputs. Changes require qualification again.
 
 ## Retries and outcomes
 
@@ -103,8 +106,10 @@ run did not retest stays listed as still unresolved, the list shrinks as release
 entry that is not a release (a hand-edited marker) keeps the issue open. Only files under an adapter's declared
 `artifact_roots` (Codex: its candidate bundle directory) are captured and can enter a PR;
 everything else a qualification leaves in the tree is dropped. Evidence is reused only for the
-same digest: the framework, adapter, proofs and every module they import from `theater`, the
-plugin, `uv.lock` and `pyproject.toml`. A digest change empties the cache, so those proofs run again; an open
+same digest: framework and adapter source modules seed the import closure alongside
+proofs and their imports. Explicit plugin/data inputs, `uv.lock` and `pyproject.toml`
+remain included. New shared helpers therefore invalidate the affected evidence.
+A digest change empties the cache, so those proofs run again; an open
 gate PR is touched only when a release it lists ends non-green.
 
 ## Reading a run

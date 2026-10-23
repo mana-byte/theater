@@ -480,6 +480,10 @@ target or caller, no surviving participant as parent. That gate means they
 become collectable as a consequence of the job sweep rather than on a timer of
 their own, and it is why `recall` never joins to a row that is gone.
 
+Manual and scheduled sweeps share `gc.sweep_daemon`, which snapshots the job
+manager's live wait handles before collection. Only a scheduled sweep wakes
+handoffs after marking stale jobs terminal.
+
 Generated launch files and observation trees follow the participant retention
 gate. Their validated Theater-owned paths are recorded before launch files are
 written, then removed off the event loop when the participant row becomes
@@ -1288,7 +1292,7 @@ theater/
 ├── transcript_identity.py  shared transcript identity and location canonicalisation
 ├── resume_floor.py     persisted pre-launch stream-position fact for resume
 ├── plugin_client.py    typed async client for participant-scoped plugin sidecars
-├── plugins/            shared plugin catalog, loading, and diagnostics (both kinds)
+├── plugins/            shared package-name selection, catalog, loading, and diagnostics
 ├── mcp_plugins/        MCP-server plugin contracts, registry, runner, validation
 ├── pricing/            token cost estimation from usage records
 ├── daemon/
@@ -1298,7 +1302,8 @@ theater/
 │   │   │   receipts, channels, scratchpad, statistics, usage, worktrees,
 │   │   │   artifacts, mcp_plugins, runtime_bindings, control_operations,
 │   │   │   native_evidence, response_contracts, job_repairs)
-│   ├── rpc/            @method handlers, including trajectory snapshot/follow/close/locate/search
+│   ├── rpc/            @method wire adapters and entry-point-specific validation
+│   ├── operations/     idempotent operation transitions and transaction-local replacement writes
 │   ├── runtime/        socket dispatch, lifecycle, maintenance loops
 │   ├── controls/       durable control state machine: send, steer, queue, settings, interrupt,
 │   │                   and repairs (bounded native re-ask of an invalid strict answer)
@@ -1314,9 +1319,13 @@ theater/
 │   │                   compatibility facades for established import paths
 │   ├── server.py       lifecycle only: socket, pidfile, wiring
 │   ├── registry.py     tier assignment, pane eviction, lineage
-│   ├── jobs.py         JobManager, asyncio.Event per handle
+│   ├── jobs.py         JobManager, direct terminal writes, asyncio.Event per handle
+│   ├── catalogs.py · skill_catalog.py · diagnostics.py   shared read policy
+│   ├── request_values.py   shared scalar and request-value validation
+│   ├── job_operations.py · scratchpad_operations.py · participants/operations.py
+│   │                   application operations shared by RPC and plugin adapters
 │   ├── artifacts.py    validated participant-owned files and cleanup
-│   ├── gc.py           retention sweep: bus, jobs+touch, participants, artifacts
+│   ├── gc.py           sweep coordination and batched retention, with caller-owned wake policy
 │   ├── rails.py        depth, cycle, and budget guards
 │   ├── recall.py · recall_read.py   path-touch history and segment reader
 │   ├── schema.py       table metadata, the one place columns are declared
@@ -1347,6 +1356,21 @@ tool bodies into
 `toolsets/`, and moved Régie's controllers, projections, render helpers, and
 widgets into the independent `packages/regie` distribution. Compatibility
 facades remain only for established import paths.
+
+RPC, frontend and plugin adapters share catalog, diagnostic and application
+operations below the wire layer. Adapters retain their distinct validation
+phases, authenticated actor handling and wire responses; shared scalar rules
+live in `request_values.py`. Plugin dispatch does not import private RPC handlers.
+
+`OperationService.write_replacement_in_unit` returns an ungrouped event only on
+compare-and-swap success. `JobManager.write_direct_terminal_in_unit` separately
+owns direct terminal row/event writes. Their callers retain the write unit,
+clock, journal grouping and notification choice; a direct finish's wake-only
+callback does not invoke normal completion listeners.
+
+MCP tool registration is explicit in server composition. Session toolsets resolve
+caller identity lazily only when an operation needs it, preserving discovery and
+preview calls that require no participant lookup.
 
 ---
 
@@ -1855,10 +1879,11 @@ control route so a plugin update cannot reroute an existing participant.
 ### Controls: the durable state machine
 
 `ControlService` owns every Theater-originated control — ordinary send,
-steer, queued followups, settings, interrupt. Physical facts (pane ownership,
-focus-derived human presence, legacy-only copy-mode refusal, prompt limits, model
-allowlists, legacy tmux delivery) arrive through injected `ControlGates`; native delivery goes
-through one `HarnessRuntime` per participant. Exactly one `asyncio.Lock` per
+steer, queued followups, settings, interrupt. Injected `ControlGates` supplies
+authorization, fresh presence checks, transcript preflight, settings validation
+and provider control facts. Native delivery uses one `HarnessRuntime` per
+participant; terminal delivery uses fenced provider callbacks. The provider owns
+terminal I/O, including tmux execution. Exactly one `asyncio.Lock` per
 participant: participant B's controls proceed while participant A's runtime
 call blocks, and nothing global is ever held across native I/O.
 
