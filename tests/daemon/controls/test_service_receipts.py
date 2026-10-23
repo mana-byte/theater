@@ -312,6 +312,181 @@ async def test_mismatched_receipt_id_keeps_interrupt_uncertain(store: Store) -> 
     assert op["error_code"] == "delivery_unknown"
 
 
+@pytest.mark.parametrize(
+    "kind", [ControlKind.STEER, ControlKind.INTERRUPT, ControlKind.SETTINGS_UPDATE]
+)
+@pytest.mark.parametrize("pre_reserved", [False, True])
+async def test_native_action_reservation_notifies_only_for_fresh_rows(
+    store: Store, kind: ControlKind, pre_reserved: bool
+) -> None:
+    harness = Harness(store, {"p1": make_runtime("p1")})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    service = harness.service
+    state = state_of(harness, "p1")
+    job = (
+        await service.send("p1", caller_id="caller", prompt="active work")
+        if kind is not ControlKind.SETTINGS_UPDATE
+        else None
+    )
+    operation_id = f"p1#intent:{kind.value}"
+    handle = job.handle if kind is ControlKind.STEER and job is not None else None
+    original = None
+    if pre_reserved:
+        original = make_operation(
+            operation_id,
+            job_handle=handle,
+            kind=kind,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            native_session_id=state.native_session_id,
+            native_turn_id=state.native_turn_id,
+        )
+        store.reserve_control_operation(original)
+    notified: list[tuple[str, str | None, ControlDeliveryPhase]] = []
+
+    def on_reserved(control_id: str, job_handle: str | None) -> None:
+        row = store.get_control_operation(control_id)
+        assert row is not None
+        notified.append((control_id, job_handle, row.delivery_phase))
+
+    if kind is ControlKind.STEER:
+        await service.steer(
+            "p1",
+            caller_id="caller",
+            prompt="amend",
+            operation_id=operation_id,
+            on_reserved=on_reserved,
+            pre_reserved=pre_reserved,
+        )
+    elif kind is ControlKind.INTERRUPT:
+        await service.interrupt(
+            "p1",
+            caller_id="caller",
+            operation_id=operation_id,
+            on_reserved=on_reserved,
+            pre_reserved=pre_reserved,
+        )
+    else:
+        await service.update_settings(
+            "p1",
+            caller_id="caller",
+            model="m2",
+            operation_id=operation_id,
+            on_reserved=on_reserved,
+            pre_reserved=pre_reserved,
+        )
+
+    row = store.get_control_operation(operation_id)
+    assert row is not None
+    assert row.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert row.delivery_result is DeliveryResult.ACCEPTED
+    assert len(operation_rows(store, "p1", kind)) == 1
+    expected = [] if pre_reserved else [(operation_id, handle, ControlDeliveryPhase.RESERVED)]
+    assert notified == expected
+    if original is not None:
+        assert row.created_at == original.created_at
+
+
+async def test_unknown_native_receipt_counter_remains_action_specific(
+    store: Store, monkeypatch
+) -> None:
+    class UnknownActionReceipts(FakeRuntime):
+        async def steer(
+            self, *, operation_id: str, native_turn_id: str, prompt: str
+        ) -> ControlReceipt:
+            await super().steer(
+                operation_id=operation_id, native_turn_id=native_turn_id, prompt=prompt
+            )
+            return ControlReceipt(operation_id=operation_id, result=DeliveryResult.UNKNOWN)
+
+        async def interrupt(
+            self, *, operation_id: str, native_turn_id: str | None = None
+        ) -> ControlReceipt:
+            await super().interrupt(operation_id=operation_id, native_turn_id=native_turn_id)
+            return ControlReceipt(operation_id=operation_id, result=DeliveryResult.UNKNOWN)
+
+        async def update_settings(
+            self,
+            *,
+            operation_id: str,
+            model: str | None = None,
+            reasoning_effort: str | None = None,
+        ) -> ControlReceipt:
+            await super().update_settings(
+                operation_id=operation_id, model=model, reasoning_effort=reasoning_effort
+            )
+            return ControlReceipt(operation_id=operation_id, result=DeliveryResult.UNKNOWN)
+
+    harness = Harness(
+        store,
+        {pid: wrap_runtime(make_runtime(pid), UnknownActionReceipts) for pid in ("p1", "p2", "p3")},
+    )
+    for runtime in harness.runtimes.values():
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    service = harness.service
+    counted: list[tuple[ControlKind, str]] = []
+    monkeypatch.setattr(
+        service, "_count_unknown_delivery", lambda kind, reason: counted.append((kind, reason))
+    )
+
+    await service.send("p1", caller_id="caller", prompt="active work")
+    await service.steer("p1", caller_id="caller", prompt="amend")
+    await service.send("p2", caller_id="caller", prompt="active work")
+    interrupted = await service.interrupt("p2", caller_id="caller")
+    updated = await service.update_settings("p3", caller_id="caller", model="m2")
+
+    assert interrupted.interrupted is False and interrupted.reason == "refused"
+    assert updated.applied is None
+    assert counted == [
+        (ControlKind.STEER, "receipt_unknown"),
+        (ControlKind.SETTINGS_UPDATE, "receipt_unknown"),
+    ]
+
+
+@pytest.mark.parametrize("kind", [ControlKind.INTERRUPT, ControlKind.SETTINGS_UPDATE])
+async def test_native_action_cancellation_settles_uncertain_and_rethrows(
+    store: Store, kind: ControlKind
+) -> None:
+    entered = asyncio.Event()
+
+    class BlockingAction(FakeRuntime):
+        async def interrupt(
+            self, *, operation_id: str, native_turn_id: str | None = None
+        ) -> ControlReceipt:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("cancelled interrupt resumed")
+
+        async def update_settings(
+            self,
+            *,
+            operation_id: str,
+            model: str | None = None,
+            reasoning_effort: str | None = None,
+        ) -> ControlReceipt:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("cancelled settings update resumed")
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), BlockingAction)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    service = harness.service
+    if kind is ControlKind.INTERRUPT:
+        await service.send("p1", caller_id="caller", prompt="active work")
+        action = asyncio.create_task(service.interrupt("p1", caller_id="caller"))
+    else:
+        action = asyncio.create_task(service.update_settings("p1", caller_id="caller", model="m2"))
+    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    action.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await action
+
+    (row,) = operation_rows(store, "p1", kind)
+    assert row["delivery_phase"] == str(ControlDeliveryPhase.SETTLED)
+    assert row["delivery_result"] == str(DeliveryResult.UNKNOWN)
+    assert row["error_code"] == "delivery_unknown"
+    assert "cancelled after transmission began" in row["error"]
+
+
 async def test_accepted_receipt_without_turn_id_stays_uncertain(store: Store) -> None:
     """An accepted prompt with no native turn id can never correlate: uncertain."""
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,9 +11,7 @@ from theater.daemon.controls._common import (
     CONTROL_DELIVERY_UNKNOWN,
     CONTROL_TRANSPORT_UNKNOWN,
     CONTROL_UNKNOWN_ACK_LOST,
-    CONTROL_UNKNOWN_RECEIPT_MISMATCH,
     CONTROL_UNKNOWN_RECEIPT_UNKNOWN,
-    DELIVERY_UNKNOWN_ERROR_CODE,
     LABEL_STEERING,
     NativeControlContext,
     NativeControlPreparation,
@@ -22,11 +19,15 @@ from theater.daemon.controls._common import (
     prepare_native_control,
 )
 from theater.daemon.controls._host import ControlHost
+from theater.daemon.controls.native_receipt import (
+    NativeAcknowledgementLost,
+    NativeReceiptMismatch,
+    transmit_native_action,
+)
 from theater.daemon.controls.routing import ControlRoute
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
-    ControlTransport,
     DeliveryResult,
     RuntimeCapability,
 )
@@ -158,83 +159,54 @@ class SteerControls(ControlHost):
                 f"the active native turn of participant {participant_id!r} maps to "
                 f"job {job.handle!r}, which is already {job.state}; nothing to amend"
             )
-        operation_id = request.operation_id or self._mint_operation_id(
-            participant_id, ControlKind.STEER
+        intent = self._native_reservation_intent(
+            participant_id,
+            ControlKind.STEER,
+            operation_id=request.operation_id,
+            on_reserved=request.on_reserved,
+            pre_reserved=request.pre_reserved,
         )
-        if request.pre_reserved:
-            reserved = self._require_public_reservation(
-                operation_id,
-                participant_id=participant_id,
-                kind=ControlKind.STEER,
-                phase=ControlDeliveryPhase.RESERVED,
-                route=prepared.route,
-                job_handle=job.handle,
-            )
-            self._require_reserved_native_identity(reserved, snapshot)
-        else:
-            self._reserve(
-                operation_id,
-                participant_id=participant_id,
-                kind=ControlKind.STEER,
-                transport=ControlTransport.NATIVE_RUNTIME,
-                phase=ControlDeliveryPhase.RESERVED,
-                job_handle=job.handle,
-                backend_generation=snapshot.backend_generation,
-                native_session_id=snapshot.native_session_id,
-                native_turn_id=expected_turn,
-                payload=request.prompt,
-            )
-            self._notify_reserved(request.on_reserved, operation_id, job.handle)
-        self._store.mark_control_operation_dispatched(
-            operation_id,
-            native_session_id=snapshot.native_session_id,
+        operation_id = self._admit_native_action(
+            intent,
+            participant_id=participant_id,
+            kind=ControlKind.STEER,
+            route=prepared.route,
+            snapshot=snapshot,
+            job_handle=job.handle,
             native_turn_id=expected_turn,
-            updated_at=self._clock(),
+            payload=request.prompt,
         )
-        try:
-            receipt = await prepared.runtime.steer(
+        transmission = await transmit_native_action(
+            self,
+            operation_id=operation_id,
+            kind=ControlKind.STEER,
+            transmit=lambda: prepared.runtime.steer(
                 operation_id=operation_id,
                 native_turn_id=expected_turn,
                 prompt=request.prompt,
-            )
-        except asyncio.CancelledError:
-            self._settle_uncertain(
-                operation_id,
-                error=(
-                    "the steering control was cancelled after transmission began; "
-                    "its acknowledgement is unknown and it is never retried"
-                ),
-            )
-            self._count_unknown_delivery(ControlKind.STEER, CONTROL_UNKNOWN_ACK_LOST)
-            raise
-        except Exception as exc:
-            self._store.settle_control_operation(
-                operation_id,
-                result=DeliveryResult.UNKNOWN,
-                error_code=DELIVERY_UNKNOWN_ERROR_CODE,
-                error=str(exc),
-                updated_at=self._clock(),
-            )
+            ),
+            cancelled_error=(
+                "the steering control was cancelled after transmission began; "
+                "its acknowledgement is unknown and it is never retried"
+            ),
+            mismatch_error=lambda receipt: (
+                f"the steering receipt named operation {receipt.operation_id!r}, "
+                f"not {operation_id!r}; the amendment is uncertain and the "
+                "receipt is not trusted to settle it"
+            ),
+        )
+        if isinstance(transmission, NativeAcknowledgementLost):
             logger.warning(
                 "steer delivery for %s job %s is uncertain: %s",
                 participant_id,
                 job.handle,
-                exc,
+                transmission.error,
             )
             self._count_unknown_delivery(ControlKind.STEER, CONTROL_UNKNOWN_ACK_LOST)
             return job, CONTROL_DELIVERY_UNKNOWN
-        if not self._receipt_names_operation(operation_id, receipt):
-            self._settle_uncertain(
-                operation_id,
-                error=(
-                    f"the steering receipt named operation {receipt.operation_id!r}, "
-                    f"not {operation_id!r}; the amendment is uncertain and the "
-                    "receipt is not trusted to settle it"
-                ),
-            )
-            self._count_unknown_delivery(ControlKind.STEER, CONTROL_UNKNOWN_RECEIPT_MISMATCH)
+        if isinstance(transmission, NativeReceiptMismatch):
             return job, CONTROL_DELIVERY_UNKNOWN
-        self._settle_from_receipt(operation_id, receipt)
+        receipt = transmission.receipt
         if receipt.result is DeliveryResult.REJECTED:
             detail = receipt.error or "the expected turn is no longer active"
             raise StaleTarget(
