@@ -10,14 +10,15 @@ from pathlib import Path
 
 from theater.harness.loading.discovery import MANIFEST_FILENAME
 from theater.harness.loading.models import LoadedPlugin
+from theater.harness.manifests.compiler import compile_manifest
 from theater.harness.manifests.validation import ManifestValidationError
 from theater.plugins.loading import (
     cleanup_package as _cleanup_shared_package,
 )
-from theater.plugins.loading import compile_harness_manifest, manifest_facts
 from theater.plugins.loading import (
     import_manifest as _import_shared_manifest,
 )
+from theater.plugins.loading import manifest_facts
 from theater.plugins.loading import (
     synthetic_package_name as _shared_synthetic_package_name,
 )
@@ -97,7 +98,7 @@ def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
         )
 
     try:
-        harness = compile_harness_manifest(name, facts.harness)
+        harness = compile_manifest(name, facts.harness)
     except KeyboardInterrupt:
         _cleanup_package(pkg_name)
         raise

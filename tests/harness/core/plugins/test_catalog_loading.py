@@ -93,7 +93,10 @@ def test_local_catalog_cleans_harness_compilation_failure(tmp_path):
     assert not any(key == prefix or key.startswith(prefix + ".") for key in sys.modules)
 
 
-@pytest.mark.parametrize("failure", [RuntimeError("stage boom"), KeyboardInterrupt("stage boom")])
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("stage boom"), KeyboardInterrupt("stage boom"), SystemExit("stage boom")],
+)
 def test_local_catalog_post_import_exceptions_clean_package(tmp_path, monkeypatch, failure):
     root = tmp_path / "plugins"
     package = _package(root, "broken", "Broken")
@@ -107,7 +110,7 @@ def test_local_catalog_post_import_exceptions_clean_package(tmp_path, monkeypatc
             scan_user_plugins(root)
     else:
         result = scan_user_plugins(root)
-        assert "RuntimeError('stage boom')" in result.rejected[0].error
+        assert repr(failure) in result.rejected[0].error
     prefix = synthetic_package_name(package, LOCAL, prefix="theater_user_plugin_pkg_")
     assert not any(key == prefix or key.startswith(prefix + ".") for key in sys.modules)
 

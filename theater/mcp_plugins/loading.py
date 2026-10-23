@@ -8,14 +8,13 @@ from pathlib import Path
 from theater.config import ConfigError
 from theater.constants.core import HARNESS_NAME
 from theater.mcp_plugins.contracts import McpServerManifest
-from theater.mcp_plugins.validation import McpManifestValidationError
+from theater.mcp_plugins.validation import McpManifestValidationError, validate_manifest
 from theater.plugins.loading import (
     LOCAL,
     MANIFEST_FILENAME,
     SHIPPED,
     discover_packages,
     manifest_facts,
-    validate_mcp_manifest,
 )
 from theater.plugins.loading import (
     cleanup_package as _cleanup_shared_package,
@@ -113,7 +112,7 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
             f"McpServerManifest.{guidance}",
         )
     try:
-        validate_mcp_manifest(plugin.name, facts.mcp)
+        validate_manifest(plugin.name, facts.mcp)
     except KeyboardInterrupt:
         _cleanup_package(package_name)
         raise

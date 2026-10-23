@@ -7,19 +7,18 @@ from pathlib import Path
 
 from theater.constants.core import HARNESS_NAME
 from theater.harness.loading.models import LoadedPlugin
+from theater.harness.manifests.compiler import compile_manifest as compile_harness
 from theater.harness.manifests.validation import ManifestValidationError
 from theater.mcp_plugins.loading import LoadedMcpPlugin
-from theater.mcp_plugins.validation import McpManifestValidationError
+from theater.mcp_plugins.validation import McpManifestValidationError, validate_manifest
 from theater.plugins.loading import (
     LOCAL,
     MANIFEST_FILENAME,
     cleanup_package,
-    compile_harness_manifest,
     discover_packages,
     import_manifest,
     manifest_facts,
     synthetic_package_name,
-    validate_mcp_manifest,
 )
 from theater.skills.loader import load_declared_plays, load_declared_skills
 from theater.skills.models import SkillValidationError
@@ -107,7 +106,7 @@ def _load(path: Path, name: str, source: str) -> LoadedPlugin | LoadedMcpPlugin 
     if is_harness:
         assert facts.harness is not None
         try:
-            harness = compile_harness_manifest(name, facts.harness)
+            harness = compile_harness(name, facts.harness)
         except KeyboardInterrupt:
             cleanup_package(package_name)
             raise
@@ -127,7 +126,7 @@ def _load(path: Path, name: str, source: str) -> LoadedPlugin | LoadedMcpPlugin 
 
     assert facts.mcp is not None
     try:
-        validate_mcp_manifest(name, facts.mcp)
+        validate_manifest(name, facts.mcp)
         skills = load_declared_skills(path / "skills", facts.mcp.skills, provider=name)
         plays = load_declared_plays(
             path / "skills",
