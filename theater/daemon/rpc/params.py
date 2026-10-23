@@ -6,7 +6,7 @@ from theater.daemon import request_values
 from theater.daemon.response_contracts import resolve_response_format
 from theater.daemon.response_contracts.prompts import HINT_INSTRUCTION
 from theater.daemon.response_contracts.registry import reject_response_format_resume
-from theater.daemon.skill_cards import compose_prompt, prompt_with_interruption_card
+from theater.daemon.skill_cards import compose_prompt
 
 #: Kept for the ``daemon.methods`` facade; the text lives with the other contract prompts.
 _JSON_REPLY_INSTRUCTION = HINT_INSTRUCTION
@@ -17,7 +17,6 @@ _require = request_values.require
 _string_param = request_values.string_param
 _optional_string_param = request_values.optional_string_param
 _validate_worktree_param = request_values.validate_worktree_param
-_prompt_with_interruption_card = prompt_with_interruption_card
 _reject_response_format_resume = reject_response_format_resume
 
 
