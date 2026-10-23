@@ -14,6 +14,8 @@ import pytest
 
 from tests.support.cli_fakes import parse
 from theater import cli
+from theater.cli import commands as commands_mod
+from theater.cli import parser as parser_mod
 from theater.cli.commands import identity
 from theater.cli.commands import launch as launch_mod
 from theater.cli.commands import participants as participants_mod
@@ -56,29 +58,22 @@ EXPECTED_COMMANDS = {
 }
 
 
+RECEIPT_ARGS = ("transcript-receipt", "--id", "p-abc123", "--token-file", "/dev/null/token")
+CLAUDE_RECEIPT_ARGS = ("claude-receipt", "--id", "p-abc123", "--token-file", "/dev/null/token")
+EVENT_ARGS = (
+    "harness-event",
+    "tool.finished",
+    "--id",
+    "p-abc123",
+    "--channel",
+    "hooks",
+    "--token-file",
+    "/dev/null/token",
+)
 HIDDEN_HOOK_ARGS = (
-    (
-        "transcript-receipt",
-        "--id",
-        "p-abc123",
-        "--token-file",
-        "/tmp/token",
-        "--strict-exit",
-    ),
-    ("claude-receipt", "--id", "p-abc123", "--token-file", "/tmp/token"),
-    (
-        "harness-event",
-        "tool.finished",
-        "--id",
-        "p-abc123",
-        "--channel",
-        "hooks",
-        "--token-file",
-        "/tmp/token",
-        "--delivery-id",
-        "delivery-1",
-        "--strict-exit",
-    ),
+    (*RECEIPT_ARGS, "--strict-exit"),
+    CLAUDE_RECEIPT_ARGS,
+    (*EVENT_ARGS, "--delivery-id", "delivery-1", "--strict-exit"),
 )
 
 
@@ -89,6 +84,24 @@ def test_the_cli_exposes_exactly_these_subcommands():
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     ]
     assert set(subcommands.choices) == EXPECTED_COMMANDS
+    assert set(cli.COMMAND_SPECS) == set(cli._COMMANDS) == EXPECTED_COMMANDS
+    assert all(cli._COMMANDS[name] is spec.handler for name, spec in cli.COMMAND_SPECS.items())
+    assert None not in cli._COMMANDS
+
+
+def test_parser_compatibility_aliases_remain_exported():
+    aliases = (
+        ("_add_controls_parsers", "_add_control_commands"),
+        ("_add_gc_parser", "_add_gc_commands"),
+        ("_add_management_parsers", "_add_management_commands"),
+        ("_add_models_parser", "_add_model_commands"),
+        ("_add_name_parser", "_add_identity_commands"),
+        ("_add_plugin_parser", "_add_plugin_commands"),
+        ("_add_process_parsers", "_add_process_commands"),
+        ("_add_receipt_parser", "_add_receipt_commands"),
+    )
+    for old_name, current_name in aliases:
+        assert getattr(cli, old_name) is getattr(parser_mod, current_name)
 
 
 def test_hidden_hook_commands_are_absent_from_top_level_help(capsys):
@@ -141,6 +154,13 @@ def test_hidden_hook_commands_remain_parseable_and_dispatchable(monkeypatch, arg
     assert vars(dispatched[0]) == vars(parsed)
 
 
+def test_receipt_alias_keeps_its_narrower_flags():
+    assert parse(*RECEIPT_ARGS).strict_exit is False
+    assert not hasattr(parse(*CLAUDE_RECEIPT_ARGS), "strict_exit")
+    with pytest.raises(SystemExit):
+        parse(*CLAUDE_RECEIPT_ARGS, "--strict-exit")
+
+
 @pytest.mark.parametrize("flag", ["--version", "-v"])
 def test_version_flag_prints_the_version_and_exits_clean(flag, capsys):
     """Both spellings print `theater <version>` and exit before dispatch."""
@@ -178,15 +198,82 @@ def test_bare_cli_prints_help_and_the_standalone_regie_guidance(monkeypatch, cap
         "ensure_home",
         lambda: (_ for _ in ()).throw(AssertionError("help must not start Theater")),
     )
-    monkeypatch.setitem(
-        cli._COMMANDS,
-        None,
-        lambda _args: (_ for _ in ()).throw(AssertionError("legacy launcher was dispatched")),
-    )
     assert cli.main([]) == 0
     output = capsys.readouterr().out
     assert "usage: theater" in output
     assert "standalone `regie`" in output
+
+
+@pytest.mark.parametrize("argv", (["--help"], ["no-such-command"]))
+def test_help_and_unknown_command_exit_before_initialization(monkeypatch, capsys, argv):
+    monkeypatch.setattr(
+        cli.paths,
+        "ensure_home",
+        lambda: (_ for _ in ()).throw(AssertionError("parse exit must not start Theater")),
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == (0 if argv[0] == "--help" else 2)
+    output = capsys.readouterr()
+    assert "usage: theater" in (output.out if argv[0] == "--help" else output.err)
+
+
+@pytest.mark.parametrize(
+    ("argv", "events"),
+    (
+        (("regie",), ("handler",)),
+        (("skills",), ("home", "handler")),
+        (EVENT_ARGS, ("home", "handler")),
+        (("ls",), ("home", "load", "install", "handler")),
+        (RECEIPT_ARGS, ("home", "load", "install", "handler")),
+        (CLAUDE_RECEIPT_ARGS, ("home", "load", "install", "handler")),
+    ),
+)
+def test_main_initialization_order_with_real_parser(monkeypatch, argv, events):
+    observed = []
+    settings = object()
+
+    def load():
+        observed.append("load")
+        return settings
+
+    def install(actual):
+        assert actual is settings
+        observed.append("install")
+
+    def handler(args):
+        assert args.command == argv[0]
+        observed.append("handler")
+        return 27
+
+    monkeypatch.setattr(cli.paths, "ensure_home", lambda: observed.append("home"))
+    monkeypatch.setattr(cli.config, "load", load)
+    monkeypatch.setattr(cli.harness_registry, "install", install)
+    monkeypatch.setitem(cli._COMMANDS, argv[0], handler)
+
+    assert cli.main(list(argv)) == 27
+    assert observed == list(events)
+
+
+@pytest.mark.parametrize(
+    ("argv", "exit_code", "config_error"),
+    (
+        (RECEIPT_ARGS, 1, True),
+        ((*RECEIPT_ARGS, "--strict-exit"), 1, True),
+        (CLAUDE_RECEIPT_ARGS, 1, True),
+        (EVENT_ARGS, 0, False),
+        ((*EVENT_ARGS, "--strict-exit"), 1, False),
+    ),
+)
+def test_hook_entrypoints_keep_bad_config_and_strict_exit_behavior(
+    monkeypatch, capsys, argv, exit_code, config_error
+):
+    cli.paths.config_path().write_text("[rails]\nnonsense = 1\n", encoding="utf-8")
+    monkeypatch.setattr(identity.sys, "stdin", io.StringIO("{}"))
+
+    assert cli.main(list(argv)) == exit_code
+    stderr = capsys.readouterr().err
+    assert ("nonsense" in stderr) is config_error
 
 
 def test_theater_cli_never_imports_textual_or_the_retired_regie_ui() -> None:
@@ -269,6 +356,7 @@ def test_ctrl_c_out_of_a_follow_is_not_a_crash(monkeypatch):
 
 
 def test_legacy_launch_helper_only_gives_standalone_guidance(capsys):
+    assert commands_mod.cmd_launch is launch_mod.cmd_launch
     assert launch_mod.cmd_launch(object()) == 0
     assert "standalone `regie`" in capsys.readouterr().out
 
