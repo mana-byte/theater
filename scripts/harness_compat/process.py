@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import IO, Literal, overload
 
 RUN_ENV = "HARNESS_COMPAT_RUN"
 SANDBOX_ENV = "HARNESS_COMPAT_SANDBOX"
@@ -155,6 +156,55 @@ def stop_owned(name: str, token: str) -> None:
         kill_all(victims - ancestry(os.getpid(), process_table()))
 
 
+@overload
+def spawn_group(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    cwd: Path | None = None,
+    stdin: int | None = None,
+    stdout: int | IO[str] | None = None,
+    stderr: int | IO[str] | None = None,
+    text: Literal[True],
+) -> subprocess.Popen[str]: ...
+
+
+@overload
+def spawn_group(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    cwd: Path | None = None,
+    stdin: int | None = None,
+    stdout: int | IO[bytes] | None = None,
+    stderr: int | IO[bytes] | None = None,
+    text: Literal[False] = False,
+) -> subprocess.Popen[bytes]: ...
+
+
+def spawn_group(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    cwd: Path | None = None,
+    stdin: int | None = None,
+    stdout: int | IO[str] | IO[bytes] | None = None,
+    stderr: int | IO[str] | IO[bytes] | None = None,
+    text: bool = False,
+) -> subprocess.Popen[str] | subprocess.Popen[bytes]:
+    """Start a command in a private session; the caller owns its stop policy."""
+    return subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=dict(env),
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        text=text,
+        start_new_session=True,
+    )
+
+
 def run_group(
     argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float
 ) -> subprocess.CompletedProcess[str]:
@@ -165,7 +215,7 @@ def run_group(
         tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err,
     ):
         # Files, not pipes: a detached grandchild holding a pipe would stall a finished child.
-        process = subprocess.Popen(
+        process = spawn_group(
             list(argv),
             cwd=cwd,
             env={**env, RUN_ENV: token},
@@ -173,7 +223,6 @@ def run_group(
             stdout=out,
             stderr=err,
             text=True,
-            start_new_session=True,
         )
         try:
             process.wait(timeout=timeout)
@@ -196,11 +245,55 @@ def run_group(
 def terminate_group(process: subprocess.Popen[str], tree: Iterable[int] = ()) -> None:
     """Stop the leader's group plus ``tree`` (its snapshotted descendants); always reap it."""
     victims = set(tree)
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(process.pid, signal.SIGTERM)
+    with contextlib.suppress(PermissionError):
+        _signal_group(process.pid, signal.SIGTERM)
     with contextlib.suppress(subprocess.TimeoutExpired):
         process.wait(timeout=_GRACE_SECONDS)
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(process.pid, signal.SIGKILL)
+    with contextlib.suppress(PermissionError):
+        _signal_group(process.pid, signal.SIGKILL)
     process.wait()
     kill_all(victims)
+
+
+def _signal_group(pid: int, signum: signal.Signals) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pid, signum)
+
+
+def terminate_pipe_group(
+    process: subprocess.Popen[str] | subprocess.Popen[bytes], *, timeout: float = 3.0
+) -> None:
+    """Wait for the whole pipe-runner group, including a fork after leader exit."""
+    _signal_group(process.pid, signal.SIGTERM)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            break
+        time.sleep(0.05)
+    else:
+        _signal_group(process.pid, signal.SIGKILL)
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=1)
+
+
+def run_pipe_group(
+    command: Sequence[str], *, env: Mapping[str, str], timeout: float, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Capture adapter output through pipes and stop its group on every exit."""
+    process = spawn_group(
+        command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        terminate_pipe_group(process)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()

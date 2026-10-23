@@ -15,7 +15,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..contract import InstallFailed, Sandbox
-from .opencode_pi_process import run_group, terminate_group
+from ..process import run_pipe_group as run_group
+from ..process import spawn_group, terminate_pipe_group
 
 _BANNER_PREFIX = "opencode server listening on "
 _PREWARM_PASSWORD = "harness-compat-prewarm"
@@ -89,7 +90,7 @@ def prewarm_catalog(sb: Sandbox, *, plugin: Path | None = None, timeout: float =
         config["plugin"] = [str(plugin)]
     config_path = work / "prewarm.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
-    process = subprocess.Popen(
+    process = spawn_group(
         ["opencode", "serve", "--port", "0", "--hostname", "127.0.0.1"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -99,8 +100,7 @@ def prewarm_catalog(sb: Sandbox, *, plugin: Path | None = None, timeout: float =
             "OPENCODE_DB": str(work / "prewarm.sqlite"),
             "OPENCODE_CONFIG": str(config_path),
         },
-        cwd=str(work),
-        start_new_session=True,
+        cwd=work,
     )
     try:
         endpoint = _await_banner(process, timeout)
@@ -110,7 +110,7 @@ def prewarm_catalog(sb: Sandbox, *, plugin: Path | None = None, timeout: float =
             return False
         return _await_catalog(sb, timeout=_CATALOG_SECONDS)
     finally:
-        terminate_group(process)
+        terminate_pipe_group(process)
         if process.stdout is not None:
             process.stdout.close()
 

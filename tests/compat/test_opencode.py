@@ -242,7 +242,7 @@ def test_prewarm_stops_forked_serve_children(
         "    while True: time.sleep(10)\n"
         "open('serve.pids', 'w').write(f'{os.getpid()} {child}')\n"
         f"if {announce!r}:\n"
-        "    print('opencode server listening on http://127.0.0.1:12345', flush=True)\n"
+        "    os.write(1, b'opencode server listening on http://127.0.0.1:12345\\n')\n"
         "while True: time.sleep(10)\n",
         encoding="utf-8",
     )
@@ -336,14 +336,18 @@ def test_qualify_is_tooling_when_stray_routes_hit_the_mock_on_a_non_green_run(
     assert result.verdict == "tooling"
 
 
-def test_install_failure_raises_install_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class _Result:
-        returncode = 1
-        stdout = ""
-        stderr = "npm ERR! network unreachable"
-
-    monkeypatch.setattr(opencode_sandbox, "run_group", lambda *args, **kwargs: _Result())
+def test_install_failure_raises_install_failed(tmp_path: Path) -> None:
+    sb = _sandbox(tmp_path)
+    sb.bin_dir.mkdir()
+    npm = sb.bin_dir / "npm"
+    npm.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('npm ERR! network unreachable', file=sys.stderr)\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    npm.chmod(0o755)
+    sb.env["PATH"] = f"{sb.bin_dir}:{sb.env['PATH']}"
     with pytest.raises(contract.InstallFailed, match="exited 1"):
-        opencode.ADAPTER.install(_sandbox(tmp_path), _candidate())
+        opencode.ADAPTER.install(sb, _candidate())

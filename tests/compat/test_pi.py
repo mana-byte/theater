@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -132,19 +133,21 @@ def test_qualify_uses_offline_environment_and_maps_errors_to_inconclusive(
     assert all(call[1]["PATH"].split(":", 1)[0] == str(binary.parent) for call in calls)
 
 
-def test_install_failure_raises_install_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class Failed:
-        returncode = 1
-        stdout = ""
-        stderr = "fake npm failure"
-
-    monkeypatch.setattr(pi.opencode_pi_process, "run_group", lambda *args, **kwargs: Failed())
+def test_install_failure_raises_install_failed(tmp_path: Path) -> None:
     with (
         make_sandbox("pi", root=tmp_path / "sandbox") as sandbox,
         pytest.raises(InstallFailed, match="fake npm failure"),
     ):
+        npm = sandbox.bin_dir / "npm"
+        npm.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\n"
+            "print('irrelevant stdout')\n"
+            "print('fake npm failure', file=sys.stderr)\n"
+            "sys.exit(1)\n",
+            encoding="utf-8",
+        )
+        npm.chmod(0o755)
         pi.ADAPTER.install(sandbox, _current_upper(REPO_ROOT))
 
 
