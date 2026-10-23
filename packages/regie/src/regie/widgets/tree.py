@@ -20,7 +20,7 @@ from regie.render.layout import Key, RenderedLine, is_root_prefix, render_tree
 from regie.render.routing import RailArms, heavy_overlays, section_arms
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout
-from regie.tree_nodes import ParticipantNode, RawRenderNode, RenderNode, TreeNode
+from regie.tree_nodes import RawRenderNode, RenderNode, TreeNode
 from regie.ui_constants import REGIE_EMPTY_TREE_KEY, REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
 from regie.widgets.chrome import EmptyTreeState
 from regie.widgets.leaf import AgentLeaf
@@ -208,7 +208,7 @@ class ParticipantTree(VerticalScroll):
             if isinstance(widget, AgentLeaf):
                 widget.set_usage_cost(cost)
             else:
-                cast(ParticipantNode, node)["usage_cost_microcents"] = cost
+                cast(RawRenderNode, node)["usage_cost_microcents"] = cost
 
     @staticmethod
     def _add_stage_reasons(nodes: list[TreeNode], reasons: Mapping[str, str]) -> None:
@@ -299,7 +299,7 @@ class ParticipantTree(VerticalScroll):
         widget = self._key_widgets.get(key)
         if isinstance(widget, AgentLeaf):
             widget.update_node(
-                cast(ParticipantNode | RawRenderNode, node),
+                node,
                 prefix=prefix,
                 cont_prefix=cont_prefix,
                 participant_detail=self._participant_detail,
@@ -307,21 +307,21 @@ class ParticipantTree(VerticalScroll):
             )
             return widget
         if isinstance(widget, SeparatorRow):
-            widget.update_node(cast(dict, node), prefix, is_first_root=first_root)
+            widget.update_node(node, prefix, is_first_root=first_root)
             return widget
         if isinstance(widget, SpawnLeaf):
-            widget.update_node(cast(dict, node), prefix, cont_prefix=cont_prefix)
+            widget.update_node(node, prefix, cont_prefix=cont_prefix)
             return widget
         if isinstance(widget, Label):
             widget.update(label)
             return widget
         if key[0] == "s":
-            widget = SeparatorRow(cast(dict, node), prefix, key=key, is_first_root=first_root)
+            widget = SeparatorRow(node, prefix, key=key, is_first_root=first_root)
         elif key[0] == "n":
-            widget = SpawnLeaf(cast(dict, node), prefix, cont_prefix=cont_prefix, key=key)
+            widget = SpawnLeaf(node, prefix, cont_prefix=cont_prefix, key=key)
         elif _is_participant_key(key):
             widget = AgentLeaf(
-                cast(ParticipantNode | RawRenderNode, node),
+                node,
                 prefix,
                 cont_prefix=cont_prefix,
                 key=key,

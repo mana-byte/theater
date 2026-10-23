@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from rich.cells import cell_len
 from textual.content import Content
 
 from regie.render.glyphs import node_label
 from regie.render.layout import Key
+from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.widgets.name_editor import DirectoryEditor, InlineEditor
 from regie.widgets.renameable import RenameableRow
 
@@ -26,8 +28,8 @@ class SpawnLeaf(RenameableRow):
     SpawnLeaf { height: 3; padding: 0 2; background: $accent 12%; }
     """
 
-    def __init__(self, node: dict, prefix: str, *, cont_prefix: str, key: Key) -> None:
-        self._node = node
+    def __init__(self, node: RenderNode | dict, prefix: str, *, cont_prefix: str, key: Key) -> None:
+        self._node: RawRenderNode = cast(RawRenderNode, node)
         self._prefix = prefix
         self._cont_prefix = cont_prefix
         self._value = str(node.get("cwd") or Path.cwd())
@@ -36,8 +38,8 @@ class SpawnLeaf(RenameableRow):
         self.key = key
         self.update(self._render_label(), layout=False)
 
-    def update_node(self, node: dict, prefix: str, *, cont_prefix: str) -> None:
-        self._node, self._prefix, self._cont_prefix = node, prefix, cont_prefix
+    def update_node(self, node: RenderNode | dict, prefix: str, *, cont_prefix: str) -> None:
+        self._node, self._prefix, self._cont_prefix = cast(RawRenderNode, node), prefix, cont_prefix
         self.update(self._render_label(), layout=False)
         self._sync_rename_geometry()
 

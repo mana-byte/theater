@@ -23,7 +23,7 @@ from regie.ui_constants import (
 from regie.formatting import harness_icon, short_id, tilde
 from regie.motions.pulse import working_harness_style
 from regie.motions.spinner import spinner_frame
-from regie.tree_nodes import RenderNode
+from regie.tree_nodes import RawRenderNode, RenderNode
 
 #: An overlay glyph may use the default send style, or carry its own style.
 type OverlayGlyph = str | tuple[str, str]
@@ -109,7 +109,7 @@ def _append_working_harness_text(
         offset += 1
 
 
-def _status_glyph(node: RenderNode | dict, frame: int = 0) -> tuple[str, str]:
+def _status_glyph(node: RawRenderNode, frame: int = 0) -> tuple[str, str]:
     """The one-character status mark and the theme slot it renders in.
 
     Idle uses the harness's own icon so the glyph does double duty; there is no
@@ -124,22 +124,20 @@ def _status_glyph(node: RenderNode | dict, frame: int = 0) -> tuple[str, str]:
         return "✗", "$error"
     if status == "idle":
         icon = node.get("icon")
-        return (
-            icon
-            if isinstance(icon, str) and icon
-            else harness_icon(cast(str | None, node.get("harness")))
-        ), ("$text-muted")
+        return (icon if isinstance(icon, str) and icon else harness_icon(node.get("harness"))), (
+            "$text-muted"
+        )
     # Unknown / unmanaged: honest "?" rather than guessing idle.
     return "?", "$text-muted"
 
 
-def _presence_glyph_style(node: RenderNode | dict, default: str) -> str:
+def _presence_glyph_style(node: RawRenderNode, default: str) -> str:
     """Color the existing harness/status glyph only for confirmed presence."""
-    presence = cast(Mapping[str, object], node.get("human_presence") or {})
+    presence = node.get("human_presence") or {}
     return "$accent" if presence.get("state") == "present" else default
 
 
-def _id_style(node: RenderNode | dict) -> str:
+def _id_style(node: RawRenderNode) -> str:
     """A dim-italic id means the participant cannot be sent to.
 
     Replaces the old ``*`` reach mark: zero columns, and a greyed row reads right
@@ -211,14 +209,15 @@ def shown_name(node: RenderNode | dict) -> str:
 
     Unmanaged panes stuff a tmux pane id into "id" with no name, so they fall back to short id.
     """
-    return cast(str, node.get("name") or short_id(cast(str | None, node.get("id"))))
+    view = cast(RawRenderNode, node)
+    return view.get("name") or short_id(view.get("id"))
 
 
-def _row2_lead(node: RenderNode | dict, prefix: str, *, frame: int = 0) -> list:
+def _row2_lead(node: RawRenderNode, prefix: str, *, frame: int = 0) -> list:
     """Row-2 parts before the name: prefix rail, status glyph, harness text."""
     glyph, glyph_style = _status_glyph(node, frame)
     glyph_style = _presence_glyph_style(node, glyph_style)
-    harness = cast(str, node.get("harness", "?"))
+    harness = node.get("harness", "?")
     parts: list = []
     if prefix:
         parts.append((prefix, "$text dim"))
@@ -241,7 +240,7 @@ def visible_name_span(
     """
     from regie.motions.reveal import clip_parts
 
-    lead = _row2_lead(node, prefix)
+    lead = _row2_lead(cast(RawRenderNode, node), prefix)
     name = shown_name(node)
     lead_pts = sum(len(part if isinstance(part, str) else part[0]) for part in lead)
     start = _parts_width(lead)
@@ -276,13 +275,10 @@ def node_label(
     from regie.motions.reveal import clip_parts
     from regie.render.layout import shorten_path
 
-    sid = shown_name(node)
-    id_style = _id_style(node)
-    cwd = (
-        shorten_path(tilde(cast(str | None, node.get("cwd"))), keep=cwd_segments)
-        if detail is None
-        else detail
-    )
+    view = cast(RawRenderNode, node)
+    sid = shown_name(view)
+    id_style = _id_style(view)
+    cwd = shorten_path(tilde(view.get("cwd")), keep=cwd_segments) if detail is None else detail
 
     # Row 1: the rail leading into this branch; suppressed for the first root (nothing above it).
     row1_parts: list = []
@@ -292,7 +288,7 @@ def node_label(
             row1_parts.append((lead, "$text dim"))
 
     # Row 2: rails, glyph, harness, short id; the id is split out so dim-italic applies to it only.
-    row2_parts: list = _row2_lead(node, prefix, frame=frame)
+    row2_parts: list = _row2_lead(view, prefix, frame=frame)
     row2_parts.append((sid, id_style) if id_style else sid)
     if cost is not None and width is not None:
         gap = width - _parts_width(row2_parts) - _parts_width(cost)

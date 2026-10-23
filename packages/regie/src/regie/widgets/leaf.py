@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, cast
 
 from rich.cells import cell_len
 from textual import events
@@ -15,7 +15,7 @@ from regie.motions.routes import LeafOverlay
 from regie.motions.spinner import advance_spinner_frame
 from regie.render.glyphs import node_label, shown_name, visible_name_span, with_stage_marker
 from regie.render.layout import Key, shorten_path
-from regie.tree_nodes import ParticipantNode, RawRenderNode
+from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_INTERVAL,
     REGIE_LEAF_MARQUEE_INTERVAL,
@@ -26,7 +26,7 @@ from regie.widgets.animation_clock import AnimationSubscription, animation_clock
 from regie.widgets.renameable import RenameableRow
 
 type StageMarker = Literal["tmux", "trajectory"]
-type LeafNode = ParticipantNode | RawRenderNode | dict
+type LeafNode = RenderNode | dict
 
 
 def _microcents(node: LeafNode) -> int | None:
@@ -80,7 +80,7 @@ class AgentLeaf(RenameableRow):
         **kwargs,
     ) -> None:
         super().__init__("", **kwargs)
-        self._node = node
+        self._node: RawRenderNode = cast(RawRenderNode, node)
         self._prefix = prefix
         self._cont_prefix = cont_prefix
         self._key = key or ("p", node.get("id", ""))
@@ -380,7 +380,7 @@ class AgentLeaf(RenameableRow):
         if detail_changed:
             self._stop_marquee()
         previous_cost = _microcents(self._node)
-        self._node = node
+        self._node = cast(RawRenderNode, node)
         self._prefix = prefix
         self._cont_prefix = cont_prefix
         self._participant_detail = participant_detail

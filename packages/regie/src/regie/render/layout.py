@@ -8,7 +8,7 @@ from __future__ import annotations
 
 # ruff: noqa: I001
 from collections.abc import Iterable, Sequence
-from typing import Any, cast
+from typing import cast
 
 from textual.content import Content
 
@@ -114,12 +114,13 @@ def _labelled(
 ) -> RenderedLine:
     prefix, node, key, cont_prefix, is_first_root = row
     if key[0] == "s":
+        view = cast(RawRenderNode, node)
         label = separator_label(
-            str(node.get("name", "")),
+            str(view.get("name", "")),
             prefix,
-            count=int(cast(Any, node.get("count") or 0)),
-            collapsed=bool(node.get("collapsed")),
-            status=cast(str | None, node.get("folded_status")),
+            count=int(view.get("count") or 0),
+            collapsed=bool(view.get("collapsed")),
+            status=view.get("folded_status"),
             is_first_root=is_first_root,
         )
         return label, node, key, prefix, cont_prefix

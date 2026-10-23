@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from rich.cells import cell_len
 from textual import events
 from textual.content import Content
@@ -11,6 +13,7 @@ from regie.motions.routes import LeafOverlay
 from regie.motions.spinner import advance_spinner_frame
 from regie.render.glyphs import separator_label, separator_name_span, with_stage_marker
 from regie.render.layout import Key
+from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.ui_constants import REGIE_LEAF_SPINNER_INTERVAL
 from regie.widgets.animation_clock import AnimationSubscription, animation_clock
 from regie.widgets.leaf import StageMarker
@@ -34,8 +37,10 @@ class SeparatorRow(RenameableRow):
     SeparatorRow.tree-staged { padding: 0 2 0 0; }
     """
 
-    def __init__(self, node: dict, prefix: str, *, key: Key, is_first_root: bool = False) -> None:
-        self._node = node
+    def __init__(
+        self, node: RenderNode | dict, prefix: str, *, key: Key, is_first_root: bool = False
+    ) -> None:
+        self._node: RawRenderNode = cast(RawRenderNode, node)
         self._prefix = prefix
         self._is_first_root = is_first_root
         self._overlay: LeafOverlay | None = None
@@ -51,8 +56,10 @@ class SeparatorRow(RenameableRow):
     def _label_name(self) -> str:
         return str(self._node.get("name", ""))
 
-    def update_node(self, node: dict, prefix: str, *, is_first_root: bool = False) -> None:
-        self._node = node
+    def update_node(
+        self, node: RenderNode | dict, prefix: str, *, is_first_root: bool = False
+    ) -> None:
+        self._node = cast(RawRenderNode, node)
         self._prefix = prefix
         self._is_first_root = is_first_root
         self._sync_spinner()
