@@ -119,7 +119,7 @@ SERVER_SESSION_ORDER = RuntimeSessionOrder.SESSION_FIRST
 #: `server listening on` banner, `--server <url> -s <id>` attach, and a per-lineage database.
 OPENCODE_SERVER_V2_COMPATIBILITY_POLICY = "opencode-server-native-controls-2.0"
 OPENCODE_SERVER_V2_MIN_VERSION = (2, 0, 6)
-OPENCODE_SERVER_V2_MAX_VERSION = (2, 1, 0)
+OPENCODE_SERVER_V2_MAX_VERSION = (2, 1, 5)
 #: The serve banner the stock binary prints on stdout, parsed by
 #: server_discovery.parse_server_stdout_endpoint.
 SERVER_STDOUT_MAX_BYTES = 65_536
