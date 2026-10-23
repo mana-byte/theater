@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Collection, Mapping
-from typing import Literal
+from typing import Literal, cast
 
 from textual import events
 from textual.containers import Vertical, VerticalScroll
@@ -16,10 +16,11 @@ from textual.widgets import Label
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
 from regie.motions.routes import LeafOverlay
-from regie.render.layout import Key, is_root_prefix, render_tree
+from regie.render.layout import Key, RenderedLine, is_root_prefix, render_tree
 from regie.render.routing import RailArms, heavy_overlays, section_arms
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout
+from regie.tree_nodes import ParticipantNode, RawRenderNode, RenderNode, TreeNode
 from regie.ui_constants import REGIE_EMPTY_TREE_KEY, REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
 from regie.widgets.chrome import EmptyTreeState
 from regie.widgets.leaf import AgentLeaf
@@ -72,7 +73,7 @@ class ParticipantTree(VerticalScroll):
 
     def __init__(self, *args, startup_reveal: bool = True, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._lines_data: list[tuple[Content, dict, Key, str, str]] = []
+        self._lines_data: list[RenderedLine] = []
         self._key_widgets: dict[Key, Widget] = {}
         self._overlaid: set[Key] = set()
         self._reveals: dict[Key, int] = {}
@@ -122,7 +123,7 @@ class ParticipantTree(VerticalScroll):
         return tuple(key for _, _, key, _, _ in self._lines_data if _is_selectable_key(key))
 
     @property
-    def tree_lines(self) -> list[tuple[Content, dict, Key, str, str]]:
+    def tree_lines(self) -> list[RenderedLine]:
         return self._lines_data
 
     @property
@@ -207,19 +208,16 @@ class ParticipantTree(VerticalScroll):
             if isinstance(widget, AgentLeaf):
                 widget.set_usage_cost(cost)
             else:
-                node["usage_cost_microcents"] = cost
+                cast(ParticipantNode, node)["usage_cost_microcents"] = cost
 
     @staticmethod
-    def _add_stage_reasons(nodes: list[dict[str, object]], reasons: Mapping[str, str]) -> None:
+    def _add_stage_reasons(nodes: list[TreeNode], reasons: Mapping[str, str]) -> None:
         pending = list(nodes)
         while pending:
             node = pending.pop()
-            participant_id = node.get("id")
-            if isinstance(participant_id, str) and participant_id in reasons:
-                node["stage_reason"] = reasons[participant_id]
-            children = node.get("children")
-            if isinstance(children, list):
-                pending.extend(item for item in children if isinstance(item, dict))
+            if node["id"] in reasons:
+                node["stage_reason"] = reasons[node["id"]]
+            pending.extend(node["children"])
 
     def select(self, participant_id: str | None) -> str | None:
         key = ("p", participant_id or "")
@@ -263,7 +261,7 @@ class ParticipantTree(VerticalScroll):
         self._cursor_visible = visible
         self._apply_selection()
 
-    def _reconcile(self, lines: list[tuple[Content, dict, Key, str, str]]) -> None:
+    def _reconcile(self, lines: list[RenderedLine]) -> None:
         if not lines:
             self._reconcile_empty()
             return
@@ -291,7 +289,7 @@ class ParticipantTree(VerticalScroll):
     def _reconcile_row(
         self,
         label: Content,
-        node: dict,
+        node: RenderNode,
         key: Key,
         prefix: str,
         cont_prefix: str,
@@ -301,7 +299,7 @@ class ParticipantTree(VerticalScroll):
         widget = self._key_widgets.get(key)
         if isinstance(widget, AgentLeaf):
             widget.update_node(
-                node,
+                cast(ParticipantNode | RawRenderNode, node),
                 prefix=prefix,
                 cont_prefix=cont_prefix,
                 participant_detail=self._participant_detail,
@@ -309,21 +307,21 @@ class ParticipantTree(VerticalScroll):
             )
             return widget
         if isinstance(widget, SeparatorRow):
-            widget.update_node(node, prefix, is_first_root=first_root)
+            widget.update_node(cast(dict, node), prefix, is_first_root=first_root)
             return widget
         if isinstance(widget, SpawnLeaf):
-            widget.update_node(node, prefix, cont_prefix=cont_prefix)
+            widget.update_node(cast(dict, node), prefix, cont_prefix=cont_prefix)
             return widget
         if isinstance(widget, Label):
             widget.update(label)
             return widget
         if key[0] == "s":
-            widget = SeparatorRow(node, prefix, key=key, is_first_root=first_root)
+            widget = SeparatorRow(cast(dict, node), prefix, key=key, is_first_root=first_root)
         elif key[0] == "n":
-            widget = SpawnLeaf(node, prefix, cont_prefix=cont_prefix, key=key)
+            widget = SpawnLeaf(cast(dict, node), prefix, cont_prefix=cont_prefix, key=key)
         elif _is_participant_key(key):
             widget = AgentLeaf(
-                node,
+                cast(ParticipantNode | RawRenderNode, node),
                 prefix,
                 cont_prefix=cont_prefix,
                 key=key,

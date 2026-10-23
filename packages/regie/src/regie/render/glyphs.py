@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # ruff: noqa: I001
 from collections.abc import Mapping, Sequence
+from typing import cast
 
 from rich.cells import cell_len
 from textual.content import Content
@@ -22,6 +23,7 @@ from regie.ui_constants import (
 from regie.formatting import harness_icon, short_id, tilde
 from regie.motions.pulse import working_harness_style
 from regie.motions.spinner import spinner_frame
+from regie.tree_nodes import RenderNode
 
 #: An overlay glyph may use the default send style, or carry its own style.
 type OverlayGlyph = str | tuple[str, str]
@@ -107,7 +109,7 @@ def _append_working_harness_text(
         offset += 1
 
 
-def _status_glyph(node: dict, frame: int = 0) -> tuple[str, str]:
+def _status_glyph(node: RenderNode | dict, frame: int = 0) -> tuple[str, str]:
     """The one-character status mark and the theme slot it renders in.
 
     Idle uses the harness's own icon so the glyph does double duty; there is no
@@ -122,20 +124,22 @@ def _status_glyph(node: dict, frame: int = 0) -> tuple[str, str]:
         return "✗", "$error"
     if status == "idle":
         icon = node.get("icon")
-        return (icon if isinstance(icon, str) and icon else harness_icon(node.get("harness"))), (
-            "$text-muted"
-        )
+        return (
+            icon
+            if isinstance(icon, str) and icon
+            else harness_icon(cast(str | None, node.get("harness")))
+        ), ("$text-muted")
     # Unknown / unmanaged: honest "?" rather than guessing idle.
     return "?", "$text-muted"
 
 
-def _presence_glyph_style(node: dict, default: str) -> str:
+def _presence_glyph_style(node: RenderNode | dict, default: str) -> str:
     """Color the existing harness/status glyph only for confirmed presence."""
-    presence = node.get("human_presence") or {}
+    presence = cast(Mapping[str, object], node.get("human_presence") or {})
     return "$accent" if presence.get("state") == "present" else default
 
 
-def _id_style(node: dict) -> str:
+def _id_style(node: RenderNode | dict) -> str:
     """A dim-italic id means the participant cannot be sent to.
 
     Replaces the old ``*`` reach mark: zero columns, and a greyed row reads right
@@ -202,19 +206,19 @@ def _parts_width(parts: Sequence[str | tuple[str, str]]) -> int:
     return sum(cell_len(part if isinstance(part, str) else part[0]) for part in parts)
 
 
-def shown_name(node: dict) -> str:
+def shown_name(node: RenderNode | dict) -> str:
     """The row-2 name text: the live alias, or the short id when the row has none.
 
     Unmanaged panes stuff a tmux pane id into "id" with no name, so they fall back to short id.
     """
-    return node.get("name") or short_id(node.get("id"))
+    return cast(str, node.get("name") or short_id(cast(str | None, node.get("id"))))
 
 
-def _row2_lead(node: dict, prefix: str, *, frame: int = 0) -> list:
+def _row2_lead(node: RenderNode | dict, prefix: str, *, frame: int = 0) -> list:
     """Row-2 parts before the name: prefix rail, status glyph, harness text."""
     glyph, glyph_style = _status_glyph(node, frame)
     glyph_style = _presence_glyph_style(node, glyph_style)
-    harness = node.get("harness", "?")
+    harness = cast(str, node.get("harness", "?"))
     parts: list = []
     if prefix:
         parts.append((prefix, "$text dim"))
@@ -229,7 +233,7 @@ def _row2_lead(node: dict, prefix: str, *, frame: int = 0) -> list:
 
 
 def visible_name_span(
-    node: dict, prefix: str = "", *, reveal: int | None = None
+    node: RenderNode | dict, prefix: str = "", *, reveal: int | None = None
 ) -> tuple[int, int] | None:
     """Row-2 cell span of the name after the renderer's reveal clipping; None while hidden.
 
@@ -250,7 +254,7 @@ def visible_name_span(
 
 
 def node_label(
-    node: dict,
+    node: RenderNode | dict,
     prefix: str = "",
     *,
     cont_prefix: str = "",
@@ -274,7 +278,11 @@ def node_label(
 
     sid = shown_name(node)
     id_style = _id_style(node)
-    cwd = shorten_path(tilde(node.get("cwd")), keep=cwd_segments) if detail is None else detail
+    cwd = (
+        shorten_path(tilde(cast(str | None, node.get("cwd"))), keep=cwd_segments)
+        if detail is None
+        else detail
+    )
 
     # Row 1: the rail leading into this branch; suppressed for the first root (nothing above it).
     row1_parts: list = []

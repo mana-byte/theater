@@ -15,6 +15,7 @@ from regie.motions.routes import LeafOverlay
 from regie.motions.spinner import advance_spinner_frame
 from regie.render.glyphs import node_label, shown_name, visible_name_span, with_stage_marker
 from regie.render.layout import Key, shorten_path
+from regie.tree_nodes import ParticipantNode, RawRenderNode
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_INTERVAL,
     REGIE_LEAF_MARQUEE_INTERVAL,
@@ -25,9 +26,10 @@ from regie.widgets.animation_clock import AnimationSubscription, animation_clock
 from regie.widgets.renameable import RenameableRow
 
 type StageMarker = Literal["tmux", "trajectory"]
+type LeafNode = ParticipantNode | RawRenderNode | dict
 
 
-def _microcents(node: dict) -> int | None:
+def _microcents(node: LeafNode) -> int | None:
     value = node.get("usage_cost_microcents")
     return value if type(value) is int else None
 
@@ -66,7 +68,7 @@ class AgentLeaf(RenameableRow):
 
     def __init__(
         self,
-        node: dict,
+        node: LeafNode,
         prefix: str = "",
         *,
         cont_prefix: str = "",
@@ -361,7 +363,7 @@ class AgentLeaf(RenameableRow):
 
     def update_node(
         self,
-        node: dict,
+        node: LeafNode,
         prefix: str = "",
         *,
         cont_prefix: str = "",

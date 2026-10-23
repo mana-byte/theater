@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import TypeGuard, cast
 
 from regie.formatting import participant_label, shorten_path
 from regie.tree_layout import TreeLayout
+from regie.tree_nodes import ParticipantNode, PendingSpawnNode, SeparatorNode, TreeNode
 from theater.frontend import Participant, StateProjection
 
 
@@ -55,7 +57,7 @@ def _participant_node(
     *,
     harness_icons: Mapping[str, str] | None = None,
     participant_costs: Mapping[str, int] | None = None,
-) -> dict[str, object]:
+) -> ParticipantNode:
     route = participant.terminal_route
     terminal_id = route.identity.terminal_id if route is not None else None
     cost = (participant_costs or {}).get(participant.participant_id)
@@ -83,7 +85,7 @@ def _participant_node(
     }
 
 
-def _separator_node(separator_id: str, name: str, *, collapsed: bool) -> dict[str, object]:
+def _separator_node(separator_id: str, name: str, *, collapsed: bool) -> SeparatorNode:
     return {
         "id": separator_id,
         "kind": "separator",
@@ -94,35 +96,35 @@ def _separator_node(separator_id: str, name: str, *, collapsed: bool) -> dict[st
     }
 
 
-def _agent_count(node: Mapping[str, object]) -> int:
-    children = node.get("children")
-    nested = children if isinstance(children, list) else []
-    return 1 + sum(_agent_count(child) for child in nested)
+def _agent_count(node: TreeNode) -> int:
+    return 1 + sum(_agent_count(child) for child in node["children"])
 
 
-def _agents(node: Mapping[str, object]) -> list[Mapping[str, object]]:
-    children = node.get("children")
-    nested = children if isinstance(children, list) else []
-    return [node, *(agent for child in nested for agent in _agents(child))]
+def _agents(node: TreeNode) -> list[TreeNode]:
+    return [node, *(agent for child in node["children"] for agent in _agents(child))]
 
 
 #: The status a folded heading shows for its hidden agents, strongest first.
 _FOLD_STATUSES = ("awaiting_input", "working")
 
 
-def _fold_status(agents: list[Mapping[str, object]]) -> str | None:
+def _fold_status(agents: list[TreeNode]) -> str | None:
     """Awaiting input outranks working; an all-idle fold shows nothing."""
     statuses = {agent.get("status") for agent in agents}
     return next((status for status in _FOLD_STATUSES if status in statuses), None)
 
 
-def _sections(built: list[dict[str, object]]) -> list[dict[str, object]]:
+def _is_separator(node: TreeNode) -> TypeGuard[SeparatorNode]:
+    return node.get("kind") == "separator"
+
+
+def _sections(built: list[TreeNode]) -> list[TreeNode]:
     """Count each separator's agents; a collapsed one folds them away and records their ids."""
-    visible: list[dict[str, object]] = []
-    heading: dict[str, object] | None = None
+    visible: list[TreeNode] = []
+    heading: SeparatorNode | None = None
     count = 0
     for node in built:
-        if node.get("kind") == "separator":
+        if _is_separator(node):
             heading, count = node, 0
             visible.append(node)
             continue
@@ -130,9 +132,9 @@ def _sections(built: list[dict[str, object]]) -> list[dict[str, object]]:
             count += _agent_count(node)
             heading["count"] = count
             if heading["collapsed"]:
-                hidden = [*heading.get("folded_agents", ()), *_agents(node)]  # type: ignore[misc]
+                hidden = [*heading.get("folded_agents", []), *_agents(node)]
                 heading["folded_agents"] = hidden
-                heading["folded"] = [str(agent.get("id")) for agent in hidden]
+                heading["folded"] = [agent["id"] for agent in hidden]
                 heading["folded_status"] = _fold_status(hidden)
                 continue
         visible.append(node)
@@ -146,7 +148,7 @@ def tree_for_projection(
     participant_costs: Mapping[str, int] | None = None,
     layout: TreeLayout | None = None,
     pending_spawn: Mapping[str, object] | None = None,
-) -> list[dict[str, object]]:
+) -> list[TreeNode]:
     """Adapt public participants to the presentation renderer's nested forest.
 
     A pending spawn is drawn last among the roots, where Theater places a new agent.
@@ -165,9 +167,9 @@ def tree_for_projection(
 
     visited: set[str] = set()
 
-    def build(participant_id: str, ancestry: frozenset[str]) -> dict[str, object]:
+    def build(participant_id: str, ancestry: frozenset[str]) -> ParticipantNode:
         visited.add(participant_id)
-        node = dict(nodes[participant_id])
+        node = nodes[participant_id].copy()
         node["children"] = build_siblings(
             participant_id,
             groups.siblings.get(participant_id, []),
@@ -179,8 +181,8 @@ def tree_for_projection(
         parent_id: str | None,
         participant_ids: list[str],
         ancestry: frozenset[str],
-    ) -> list[dict[str, object]]:
-        built: list[dict[str, object]] = []
+    ) -> list[TreeNode]:
+        built: list[TreeNode] = []
         for item_id in active_layout.ordered(parent_id, participant_ids):
             if item_id in nodes:
                 if item_id not in ancestry and item_id not in visited:
@@ -198,7 +200,9 @@ def tree_for_projection(
         if participant_id not in visited:
             roots.append(build(participant_id, frozenset()))
     if pending_spawn is not None:
-        roots.append({**pending_spawn, "id": "new", "kind": "spawn", "children": []})
+        roots.append(
+            cast(PendingSpawnNode, {**pending_spawn, "id": "new", "kind": "spawn", "children": []})
+        )
     return roots
 
 

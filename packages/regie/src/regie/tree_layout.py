@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from regie.atomic_file import atomic_write
+from regie.tree_nodes import LayoutSeparator
 
 _VERSION = 1
 _SEPARATOR_ID = re.compile(r"sep:[0-9a-f]{8}\Z")
@@ -19,7 +20,7 @@ _SEPARATOR_ID = re.compile(r"sep:[0-9a-f]{8}\Z")
 @dataclass(slots=True)
 class TreeLayout:
     orders: dict[str, list[str]] = field(default_factory=dict)
-    separators: dict[str, dict[str, Any]] = field(default_factory=dict)
+    separators: dict[str, LayoutSeparator] = field(default_factory=dict)
     #: A separator still waiting for its first name: shown, never saved.
     pending: str | None = None
 
@@ -202,8 +203,8 @@ def _orders_from_wire(raw_orders: dict[Any, Any]) -> dict[str, list[str]]:
     return orders
 
 
-def _separators_from_wire(raw_separators: dict[Any, Any]) -> dict[str, dict[str, Any]]:
-    separators: dict[str, dict[str, Any]] = {}
+def _separators_from_wire(raw_separators: dict[Any, Any]) -> dict[str, LayoutSeparator]:
+    separators: dict[str, LayoutSeparator] = {}
     for separator_id, record in raw_separators.items():
         if not isinstance(separator_id, str) or _SEPARATOR_ID.fullmatch(separator_id) is None:
             raise ValueError("separator ids must be 'sep:' followed by eight lowercase hex digits")
@@ -214,10 +215,10 @@ def _separators_from_wire(raw_separators: dict[Any, Any]) -> dict[str, dict[str,
             raise ValueError("separator names must be non-empty strings")
         if record.get("collapsed", False) is not True and "collapsed" in record:
             raise TypeError("a separator's collapsed flag is either true or absent")
-        separators[separator_id] = {
-            "name": name.strip(),
-            **({"collapsed": True} if "collapsed" in record else {}),
-        }
+        separator: LayoutSeparator = {"name": name.strip()}
+        if "collapsed" in record:
+            separator["collapsed"] = True
+        separators[separator_id] = separator
     return separators
 
 
