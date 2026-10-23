@@ -134,10 +134,10 @@ def _bus_row(store, ts: float) -> None:
 
 
 def _floor(store):
-    """Call _retention_floor with a stand-in daemon that carries only .store."""
-    from theater.daemon.methods import _retention_floor
+    """Call retention_floor with a stand-in daemon that carries only .store."""
+    from theater.daemon.diagnostics import retention_floor
 
-    return _retention_floor(SimpleNamespace(store=store))
+    return retention_floor(SimpleNamespace(store=store))
 
 
 def test_retention_floor_on_an_empty_database(store):

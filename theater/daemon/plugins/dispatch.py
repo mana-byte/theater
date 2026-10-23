@@ -269,7 +269,7 @@ async def _trajectory_search(daemon, params: dict[str, Any], actor_id: str) -> A
 async def _analytics_stats(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
     from theater.daemon import diagnostics
-    from theater.daemon.rpc.usage import window_since
+    from theater.daemon.diagnostic_params import window_since
 
     return diagnostics.stats(daemon, since=window_since(params, "stats"))
 
@@ -277,7 +277,7 @@ async def _analytics_stats(daemon, params: dict[str, Any], actor_id: str) -> Any
 async def _analytics_usage_totals(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
     from theater.daemon import diagnostics
-    from theater.daemon.rpc.usage import window_since
+    from theater.daemon.diagnostic_params import window_since
 
     return diagnostics.usage_totals(daemon, since=window_since(params, "usage_totals"))
 
@@ -285,7 +285,7 @@ async def _analytics_usage_totals(daemon, params: dict[str, Any], actor_id: str)
 async def _analytics_usage_summary(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
     from theater.daemon import diagnostics
-    from theater.daemon.rpc.usage import summary_args
+    from theater.daemon.diagnostic_params import summary_args
 
     since, average_since, period = summary_args(params)
     return diagnostics.usage_summary(
@@ -306,7 +306,7 @@ async def _analytics_usage_by_harness(daemon, params: dict[str, Any], actor_id: 
 async def _analytics_bus_tail(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
     from theater.daemon import diagnostics
-    from theater.daemon.rpc.usage import bus_tail_args
+    from theater.daemon.diagnostic_params import bus_tail_args
 
     limit, after_id = bus_tail_args(params)
     return diagnostics.bus_tail(daemon, limit=limit, after_id=after_id)
