@@ -15,8 +15,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..contract import InstallFailed, Sandbox
-from ..process import run_pipe_group as run_group
-from ..process import spawn_group, terminate_pipe_group
+from ..process import run_pipe_group, spawn_group, terminate_pipe_group
 
 _BANNER_PREFIX = "opencode server listening on "
 _PREWARM_PASSWORD = "harness-compat-prewarm"
@@ -28,7 +27,7 @@ def npm_install(sb: Sandbox, package: str, version: str) -> Path:
     """npm-install exactly ``package@version`` and expose its ``opencode`` bin under the sandbox."""
     prefix = sb.root / "npm-opencode"
     try:
-        run = run_group(
+        run = run_pipe_group(
             ["npm", "install", "--prefix", str(prefix), f"{package}@{version}"],
             env=dict(sb.env),
             timeout=600,
@@ -47,7 +46,7 @@ def npm_install(sb: Sandbox, package: str, version: str) -> Path:
     exposed.unlink(missing_ok=True)
     exposed.symlink_to(packaged)
     try:
-        check = run_group([str(exposed), "--version"], env=sb.offline_env, timeout=60)
+        check = run_pipe_group([str(exposed), "--version"], env=sb.offline_env, timeout=60)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         raise InstallFailed(f"installed opencode version check failed: {exc}") from exc
     output = f"{check.stdout}{check.stderr}".strip()
