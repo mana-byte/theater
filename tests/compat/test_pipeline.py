@@ -93,6 +93,10 @@ def test_range_policy_evidence_reuse_routes_and_watch(tmp_path: Path) -> None:
     gate = VerifiedSet("range", floor="1.0.0", ceiling="1.2.0", known_bad=frozenset({"1.4.0"}))
     adapter = FakeAdapter()
     assert select_candidates(adapter, gate, {"1.2.0"}) == ["1.3.0", "1.5.0"]
+    assert select_candidates(adapter, gate, {"1.2.0"}, max_candidates=1) == ["1.3.0"]
+    assert select_candidates(adapter, gate, {"1.4.0"}, version="1.4.0") == ["1.4.0"]
+    with pytest.raises(ValueError, match="not a stable release"):
+        select_candidates(adapter, gate, version="1.4.0-rc1")
     assert newest_in_range(adapter, gate) == "1.1.0"
     results = [
         Result("vibe", "1.2.0", "green"),
@@ -155,11 +159,11 @@ def test_exact_candidates_exhaust_new_releases_then_holes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("candidate_verdict", "promoted", "issue_action"),
-    [("green", "2.0.0", "close"), ("red", "1.6.0", "upsert")],
+    ("candidate_verdict", "issue_action"),
+    [("green", "close"), ("red", "upsert")],
 )
-def test_exact_pr_lists_only_promoted_green_and_keeps_red_issue(
-    tmp_path: Path, candidate_verdict: str, promoted: str, issue_action: str
+def test_range_pr_lists_green_results_and_keeps_red_issue(
+    tmp_path: Path, candidate_verdict: str, issue_action: str
 ) -> None:
     cached = Result("codex", "1.6.0", "green", (Check("proof", "pass"),))
     latest = Result(
@@ -170,22 +174,22 @@ def test_exact_pr_lists_only_promoted_green_and_keeps_red_issue(
     )
     summary = {
         "harness": "codex",
-        "gate_kind": "exact",
+        "gate_kind": "range",
         "reused_results": [{**cached.to_evidence(), "run_url": "https://example.invalid/old"}],
         "results": [{**latest.to_evidence(), "run_url": "https://example.invalid/new"}],
         "watch": None,
         "watch_reused": False,
-        "greens": [promoted],
+        "greens": ["1.6.0"],
         "inconclusive": False,
         "published": True,
         "run_url": "https://example.invalid/new",
     }
     report = prepare_publication(summary, tmp_path / "summary.json")
     assert report.pr_needed is True
-    expected_run = "new" if promoted == "2.0.0" else "old"
-    assert [line for line in report.pr_body.splitlines() if line.startswith("- ✅")] == [
-        f"- ✅ `{promoted}` — green · [run](https://example.invalid/{expected_run})"
-    ]
+    expected = ["- ✅ `1.6.0` — green · [run](https://example.invalid/old)"]
+    if candidate_verdict == "green":
+        expected.append("- ✅ `2.0.0` — green · [run](https://example.invalid/new)")
+    assert [line for line in report.pr_body.splitlines() if line.startswith("- ✅")] == expected
     assert report.issue_action == issue_action
     assert ("| 2.0.0 | red |" in report.issue_body) is (candidate_verdict == "red")
 
@@ -337,10 +341,7 @@ class ArtifactAdapter:
         return ["1.2.0"]
 
     def verified(self, root: Path) -> VerifiedSet:
-        admitted = (
-            frozenset({"1.2.0"}) if (root / "gate.txt").read_text() == "1.2.0\n" else frozenset()
-        )
-        return VerifiedSet("exact", versions=admitted)
+        return VerifiedSet("range", floor="1.0.0", ceiling=(root / "gate.txt").read_text().strip())
 
     def install(self, sb: Sandbox, version: str) -> Path:
         return sb.bin_dir / version
@@ -349,14 +350,16 @@ class ArtifactAdapter:
         return version
 
     def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
-        (root / "gate.txt").write_text("1.2.0\n")
+        major, minor, patch = version_key(greens[-1])
+        (root / "gate.txt").write_text(f"{major}.{minor}.{patch + 1}\n")
         changed = [Path("gate.txt")]
-        staged = root / "candidates/1.2.0.json"
-        if staged.exists():
-            target = root / "fixtures/1.2.0.json"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(staged, target)
-            changed.append(Path("fixtures/1.2.0.json"))
+        for version in greens:
+            staged = root / f"candidates/{version}.json"
+            if staged.exists():
+                target = root / f"fixtures/{version}.json"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(staged, target)
+                changed.append(target.relative_to(root))
         return changed
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
@@ -370,23 +373,7 @@ class TwoReleaseAdapter(ArtifactAdapter):
     """Codex-shaped: qualify moves its bundle into fixtures/ itself, so capture sees that path."""
 
     def discover(self) -> list[str]:
-        return ["1.2.0", "1.3.0"]
-
-    def verified(self, root: Path) -> VerifiedSet:
-        return VerifiedSet("exact", versions=frozenset((root / "gate.txt").read_text().split()))
-
-    def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
-        gate = set((root / "gate.txt").read_text().split()) | set(greens)
-        (root / "gate.txt").write_text("".join(f"{item}\n" for item in sorted(gate)))
-        changed = [Path("gate.txt")]
-        for version in greens:
-            staged = root / f"candidates/{version}.json"
-            if staged.exists():
-                target = root / f"fixtures/{version}.json"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(staged, target)
-                changed.append(target.relative_to(root))
-        return changed
+        return ["1.2.0", "1.2.1", "1.3.0"]
 
     def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
         staged = root / f"candidates/{version}.json"
@@ -520,7 +507,7 @@ def _artifact_repo(root: Path, gate: str, monkeypatch: pytest.MonkeyPatch) -> No
 def test_green_candidate_artifact_is_composed_and_staged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _artifact_repo(tmp_path, "none\n", monkeypatch)
+    _artifact_repo(tmp_path, "1.2.0\n", monkeypatch)
 
     summary = runner.run_harness(ArtifactAdapter(), tmp_path, publish=True)
 
@@ -567,21 +554,56 @@ def test_green_candidate_artifact_is_composed_and_staged(
     ) == ["candidate wrote forbidden evidence path: tests/fixtures/harness_compat/vibe/1.2.0.json"]
 
 
+def test_range_artifact_watch_and_deferral_keep_only_the_promoted_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _artifact_repo(tmp_path, "1.2.0\n", monkeypatch)
+    calls: list[str] = []
+
+    class WatchingArtifactAdapter(ArtifactAdapter):
+        def discover(self) -> list[str]:
+            return ["1.1.0", "1.2.0", "1.3.0", "1.4.0"]
+
+        def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+            calls.append(version)
+            if version == "1.2.0":
+                return super().qualify(root, version, sb, binary)
+            status = "fail" if version == "1.3.0" else "pass"
+            return Result(
+                self.name,
+                version,
+                "red" if status == "fail" else "green",
+                (Check("proof", status),),
+            )
+
+    summary = runner.run_harness(WatchingArtifactAdapter(), tmp_path, publish=True)
+
+    assert calls == ["1.2.0", "1.3.0", "1.1.0"]
+    assert summary["candidates"] == ["1.2.0", "1.3.0", "1.4.0"]
+    assert summary["deferred"] == ["1.4.0"]
+    assert (summary["greens"], summary["published"]) == (["1.2.0"], True)
+    assert summary["watch"]["version"] == "1.1.0"
+    assert summary["watch"]["verdict"] == "green" and not summary["watch_reused"]
+    assert [row["version"] for row in summary["issues"]] == ["1.3.0"]
+    assert (tmp_path / "fixtures/1.2.0.json").is_file()
+    assert not (tmp_path / "fixtures/1.3.0.json").exists()
+
+
 def test_unpromoted_candidate_artifacts_stay_out_of_the_composed_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Issue #37: an older green candidate must not ride along with the promoted release."""
-    _artifact_repo(tmp_path, "", monkeypatch)
+    """A cached green above an unproved gap must not bring its bundle into the gate PR."""
+    _artifact_repo(tmp_path, "1.2.0\n", monkeypatch)
     adapter = TwoReleaseAdapter()
-    older, newer = sorted(adapter.discover(), key=version_key)
-    assert runner.run_harness(adapter, tmp_path, publish=True)["greens"] == [newer]
-    _git(tmp_path, "checkout", "-b", "rolling")
-    _git(tmp_path, "commit", "-m", "rolling gate")
-    _git(tmp_path, "checkout", "main")
+    older, gap, newer = adapter.discover()
+    first = runner.run_harness(adapter, tmp_path, version=newer, publish=True)
+    assert (first["candidates"], first["greens"], first["published"]) == ([newer], [], False)
+    assert (cache_artifacts_dir(tmp_path, "vibe", newer) / f"fixtures/{newer}.json").is_file()
 
-    second = runner.run_harness(adapter, tmp_path, publish=True)
+    second = runner.run_harness(adapter, tmp_path, max_candidates=1, publish=True)
 
-    assert (second["candidates"], second["greens"], second["published"]) == ([older], [newer], True)
+    assert (second["candidates"], second["greens"], second["published"]) == ([older], [older], True)
+    assert second["reused"] == [newer] and gap not in second["reused"]
     staged = subprocess.run(
         ["git", "diff", "--cached", "--name-only"],
         cwd=tmp_path,
@@ -589,8 +611,13 @@ def test_unpromoted_candidate_artifacts_stay_out_of_the_composed_tree(
         text=True,
         check=True,
     ).stdout.splitlines()
-    assert staged == [f"fixtures/{newer}.json", "gate.txt"]
-    assert not (tmp_path / f"fixtures/{older}.json").exists()
+    assert staged == [f"fixtures/{older}.json", "gate.txt"]
+    assert not (tmp_path / f"fixtures/{newer}.json").exists()
+    report = prepare_publication(second, tmp_path / "summary.json")
+    assert [line for line in report.pr_body.splitlines() if line.startswith("- ✅")] == [
+        f"- ✅ `{older}` — green · [run](local)",
+        f"- ✅ `{newer}` — green · [run](local)",
+    ]
 
 
 class RetainedBundleAdapter(ArtifactAdapter):
