@@ -19,7 +19,15 @@ _close_await = job_operations._close_await
 
 @method("jobs.await")
 async def _jobs_await(daemon, params: dict) -> list[dict]:
-    return await job_operations.await_jobs(daemon, params, clock=time)
+    from theater.daemon import methods as _facade
+
+    return await job_operations.await_jobs(
+        daemon,
+        params,
+        clock=time,
+        max_await=lambda: _facade.MAX_AWAIT,
+        announce_after=lambda: _facade.AWAIT_ANNOUNCE_AFTER,
+    )
 
 
 @method("jobs.status")

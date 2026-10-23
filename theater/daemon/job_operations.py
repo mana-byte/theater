@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 
 from theater.constants.daemon import (
     BUS_KIND_JOB_AWAIT_END,
@@ -14,15 +15,15 @@ from theater.constants.daemon import (
     TMUX_RESTART_JOB_ERROR_CODE,
 )
 
-# Definitions re-exported by the methods facade; runtime reads the facade for legacy patches.
+# Definitions re-exported by the methods facade.
 from theater.constants.daemon import (
-    RPC_AWAIT_ANNOUNCE_DELAY_SECONDS as AWAIT_ANNOUNCE_AFTER,  # noqa: F401
+    RPC_AWAIT_ANNOUNCE_DELAY_SECONDS as AWAIT_ANNOUNCE_AFTER,
 )
 from theater.constants.daemon import (
     RPC_DEFAULT_MAX_WAIT_SECONDS as DEFAULT_MAX_WAIT,
 )
 from theater.constants.daemon import (
-    RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,  # noqa: F401
+    RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,
 )
 from theater.constants.handoff import (
     ERROR_CANCELLED,
@@ -61,16 +62,12 @@ from theater.transcript_identity import (
 logger = logging.getLogger(__name__)
 
 
-def _max_await() -> float:
-    from theater.daemon import methods as _facade
-
-    return _facade.MAX_AWAIT
+def _production_max_await() -> float:
+    return MAX_AWAIT
 
 
-def _await_announce_after() -> float:
-    from theater.daemon import methods as _facade
-
-    return _facade.AWAIT_ANNOUNCE_AFTER
+def _production_announce_after() -> float:
+    return AWAIT_ANNOUNCE_AFTER
 
 
 _JOB_ERROR_MESSAGES = {
@@ -275,7 +272,14 @@ def _missing_hint(daemon, handle: str) -> str:
     return repr(handle)
 
 
-async def await_jobs(daemon, params: dict, *, clock=time) -> list[dict]:
+async def await_jobs(
+    daemon,
+    params: dict,
+    *,
+    clock=time,
+    max_await: Callable[[], float] = _production_max_await,
+    announce_after: Callable[[], float] = _production_announce_after,
+) -> list[dict]:
     """Wait for job completion, an input request, or departure within max_wait."""
     # A handle nobody knows is an error: `[]` sent agents into retry loops.
     # Presence-only handles (a participant id with no job) are legitimate now.
@@ -285,7 +289,7 @@ async def await_jobs(daemon, params: dict, *, clock=time) -> list[dict]:
     raw_max_wait = params.get("max_wait", DEFAULT_MAX_WAIT)
     max_wait = min(
         max(finite_number_param(raw_max_wait, "max_wait", method_name="jobs.await"), 0.0),
-        _max_await(),
+        max_await(),
     )
     caller_id = params.get("caller_id")
 
@@ -329,6 +333,7 @@ async def await_jobs(daemon, params: dict, *, clock=time) -> list[dict]:
                     token=await_token,
                     announced=announced,
                     clock=clock,
+                    announce_after=announce_after,
                 )
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -360,6 +365,7 @@ async def _await_announced(
     token: str,
     announced: list[tuple[str, str, float]],
     clock=time,
+    announce_after: Callable[[], float] = _production_announce_after,
 ) -> dict[str, str]:
     """Run the wait, announcing it only if it lasts past the delay."""
     blocked = asyncio.Event()
@@ -374,7 +380,7 @@ async def _await_announced(
                 {waiter, blockage}, return_when=asyncio.FIRST_COMPLETED
             )
             if blockage in finished:
-                delay = max(0.0, _await_announce_after() - (clock.monotonic() - started))
+                delay = max(0.0, announce_after() - (clock.monotonic() - started))
                 if delay == 0:
                     _open_await(daemon, caller_id, edges, token, announced, clock=clock)
                 else:
