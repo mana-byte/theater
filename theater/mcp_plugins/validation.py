@@ -12,6 +12,11 @@ from typing import NoReturn
 from theater.constants.core import HARNESS_NAME
 from theater.constants.plugins import MCP_PLUGIN_CONFIG_MAX_FIELDS, MCP_PLUGIN_DESCRIPTION_MAX_CHARS
 from theater.constants.skills import SKILL_MAX_COUNT, SKILL_NAME
+from theater.mcp_plugins.constraints import (
+    item_count_constraint_error,
+    numeric_constraint_error,
+    string_constraint_error,
+)
 from theater.mcp_plugins.contracts import (
     MANIFEST_API_VERSION,
     MISSING,
@@ -265,19 +270,22 @@ def _validate_default(name: str, path: str, spec: McpConfigField, value: object)
 def _validate_string_default(name: str, path: str, spec: McpConfigField, value: object) -> None:
     if not isinstance(value, str):
         _fail(name, path, "must be a string")
-    _check_string_constraints(name, path, spec, value)
+    if error := string_constraint_error(spec, value):
+        _fail(name, path, error)
 
 
 def _validate_integer_default(name: str, path: str, spec: McpConfigField, value: object) -> None:
     if type(value) is not int:
         _fail(name, path, "must be an integer")
-    _check_numeric_constraints(name, path, spec, value)
+    if error := numeric_constraint_error(spec, value):
+        _fail(name, path, error)
 
 
 def _validate_float_default(name: str, path: str, spec: McpConfigField, value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
         _fail(name, path, "must be a finite number")
-    _check_numeric_constraints(name, path, spec, float(value))
+    if error := numeric_constraint_error(spec, float(value)):
+        _fail(name, path, error)
 
 
 def _validate_boolean_default(
@@ -302,13 +310,15 @@ def _validate_list_default(name: str, path: str, spec: McpConfigField, value: ob
         _fail(name, path, "must be a sequence of strings")
     if any(not isinstance(item, str) for item in value):
         _fail(name, path, "must contain only strings")
-    _check_item_constraints(name, path, spec, len(value))
+    if error := item_count_constraint_error(spec, len(value)):
+        _fail(name, path, error)
 
 
 def _validate_table_list_default(name: str, path: str, spec: McpConfigField, value: object) -> None:
     if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
         _fail(name, path, "must be a sequence of tables")
-    _check_item_constraints(name, path, spec, len(value))
+    if error := item_count_constraint_error(spec, len(value)):
+        _fail(name, path, error)
     item_schema = spec.item_schema
     if not isinstance(item_schema, McpConfigSchema):
         _fail(name, path, "must declare a valid item_schema")
@@ -345,34 +355,6 @@ def _validate_secret_default(
     _value: object,
 ) -> None:
     _fail(name, path, "secret fields may not declare defaults")
-
-
-def _check_string_constraints(name: str, path: str, spec: McpConfigField, value: str) -> None:
-    if spec.min_length is not None and len(value) < spec.min_length:
-        _fail(name, path, f"must be at least {spec.min_length} characters")
-    if spec.max_length is not None and len(value) > spec.max_length:
-        _fail(name, path, f"must be at most {spec.max_length} characters")
-    if spec.choices is not None and value not in spec.choices:
-        _fail(name, path, "must be one of the declared choices")
-
-
-def _check_numeric_constraints(
-    name: str,
-    path: str,
-    spec: McpConfigField,
-    value: int | float,
-) -> None:
-    if spec.minimum is not None and value < spec.minimum:
-        _fail(name, path, f"must be >= {spec.minimum}")
-    if spec.maximum is not None and value > spec.maximum:
-        _fail(name, path, f"must be <= {spec.maximum}")
-
-
-def _check_item_constraints(name: str, path: str, spec: McpConfigField, count: int) -> None:
-    if spec.min_items is not None and count < spec.min_items:
-        _fail(name, path, f"must contain at least {spec.min_items} items")
-    if spec.max_items is not None and count > spec.max_items:
-        _fail(name, path, f"must contain at most {spec.max_items} items")
 
 
 def _validate_launch(name: str, launch: object) -> None:
