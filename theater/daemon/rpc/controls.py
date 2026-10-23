@@ -12,8 +12,8 @@ from theater.daemon.controls.report import (
     build_control_report,
     control_report_to_wire,
 )
+from theater.daemon.controls.settings_policy import validate_settings
 from theater.daemon.presence import access as presence_access
-from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
 from theater.daemon.rpc.params import (
     _optional_string_param,
     _serialized_response_format,
@@ -327,10 +327,7 @@ async def _settings_update(daemon, params: dict) -> dict:
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     model = _optional_string_param(params, "model", method_name=method_name)
     reasoning_effort = _optional_string_param(params, "reasoning_effort", method_name=method_name)
-    check_model_allowed(target.harness, model, daemon.config.models_for(target.harness))
-    check_reasoning_allowed(
-        target.harness, reasoning_effort, daemon.config.reasoning_for(target.harness)
-    )
+    validate_settings(daemon.config, target.harness, model, reasoning_effort)
     outcome = await daemon.controls.update_settings(
         target.id,
         caller_id=caller_id,

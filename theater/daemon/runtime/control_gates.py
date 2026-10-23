@@ -12,6 +12,7 @@ from typing import NoReturn
 
 from theater import protocol
 from theater.constants.refusals import NEXT_NOT_YOUR_CHILD
+from theater.daemon.controls import settings_policy
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.preflight import (
     check_transcript_send_preflight,
@@ -58,6 +59,14 @@ def build_control_gates(daemon) -> ControlGates:
         send_claim_ttl=send_claim_ttl,
         check_prompt=check_prompt,
         check_settings=check_settings,
+        check_settings_for=lambda participant_id, model, reasoning_effort: (
+            settings_policy.validate_settings(
+                daemon.config,
+                daemon.registry.get(participant_id).harness,
+                model,
+                reasoning_effort,
+            )
+        ),
         cwd_for=_cwd_for(daemon),
         provider_health=lambda provider_id, generation: (
             daemon.terminal_service.connections.health(provider_id)
@@ -213,8 +222,7 @@ def check_prompt(prompt) -> None:
 def check_settings(model, reasoning_effort) -> None:
     """Shape validation for settings updates.
 
-    The signature lacks the target, so per-harness allowlists are revalidated by the routing
-    RPC. Approval and sandbox have no gate anywhere: the service cannot set them.
+    Approval and sandbox have no gate anywhere: the service cannot set them.
     """
     for name, value in (("model", model), ("reasoning_effort", reasoning_effort)):
         if value is None:

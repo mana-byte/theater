@@ -9,6 +9,7 @@ from theater.daemon.controls.report import (
     build_control_report,
     control_report_to_wire,
 )
+from theater.daemon.controls.settings_policy import validate_settings
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
 from theater.daemon.operations.error_values import operation_error as _error
@@ -249,18 +250,12 @@ def _submit(
                 assert operation is not None
                 return _stored_outcome(operation)
             else:
-                from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
-
                 target = daemon.registry.get(participant_id)
-                check_model_allowed(
+                validate_settings(
+                    daemon.config,
                     target.harness,
                     params.get("model"),
-                    daemon.config.models_for(target.harness),
-                )
-                check_reasoning_allowed(
-                    target.harness,
                     params.get("reasoning_effort"),
-                    daemon.config.reasoning_for(target.harness),
                 )
                 await daemon.controls.update_settings(
                     participant_id,

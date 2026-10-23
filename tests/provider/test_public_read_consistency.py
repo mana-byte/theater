@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.support.builders import operator_context
+from tests.support.control_service import operation_rows
 from tests.support.presence import AbsentPresence, UnknownPresence
 from tests.support.provider_controls import online, provider_target
 from tests.support.provider_native import bind_native_participant
@@ -23,6 +24,7 @@ from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     ConnectionHealth,
     ControlDeliveryPhase,
+    ControlKind,
     ControlTransport,
     RuntimeCapabilities,
     RuntimeCapability,
@@ -224,6 +226,28 @@ async def test_public_native_settings_reservation_precedes_detached_dispatch(
     assert control.backend_generation == 7
     assert control.native_session_id == "native-session-settings"
     assert started == [operation.operation_id]
+
+
+async def test_public_settings_allowlist_refusal_keeps_accepted_reservation(daemon) -> None:
+    participant, runtime, state = await bind_native_participant(
+        daemon, generation=8, session_id="native-session-settings-refusal"
+    )
+    assert daemon.runtime_manager.record_snapshot(participant.id, runtime, await runtime.snapshot())
+
+    accepted = await controls_settings_update(
+        daemon,
+        operator_context(),
+        {"participant_id": participant.id, "model": "not-configured"},
+        idempotency_key="native-settings-allowlist-refusal",
+    )
+    assert daemon.operation_service.get(accepted["operation_id"]).state == "accepted"
+
+    await settle_operations(daemon)
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.state == PublicOperationState.FAILED.value
+    assert operation.error is not None and operation.error["code"] == "model_not_allowed"
+    assert len(operation_rows(daemon.store, participant.id, ControlKind.SETTINGS_UPDATE)) == 1
+    assert state.settings == {}
 
 
 async def test_cached_native_route_is_consistent_across_public_read_and_admission(
