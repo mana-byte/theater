@@ -20,17 +20,16 @@ class ExactCheckpoint:
 @dataclass(frozen=True, slots=True)
 class LegacyFloor:
     point: StreamPoint
-    raw: str
 
 
 @dataclass(frozen=True, slots=True)
 class ColdResume:
-    raw: None = None
+    pass
 
 
 @dataclass(frozen=True, slots=True)
 class UnknownResume:
-    raw: str
+    pass
 
 
 ResumeInput = ExactCheckpoint | LegacyFloor | ColdResume | UnknownResume
@@ -92,8 +91,8 @@ def decode_resume(raw: str | None) -> ResumeInput:
         return checkpoint
     floor = decode_floor(raw)
     if floor is not None and _complete_file_point(floor, require_records=True):
-        return LegacyFloor(floor, raw)
-    return UnknownResume(raw)
+        return LegacyFloor(floor)
+    return UnknownResume()
 
 
 def _complete_file_point(point: StreamPoint, *, require_records: bool) -> bool:
