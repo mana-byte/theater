@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from theater.daemon.observation.failures import FailureTracker
+from theater.daemon.observation.completion_gate import BoundCompletionGate
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.observation.reducer import QuietClock, Reducer
 from theater.daemon.observation.rollback import rollback_observation_state
 from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.persistence.transactions import active_write_unit
 from theater.harness import Event, HarnessObserver
-from theater.harness.contracts.source import NativeTurnState
 from theater.harness.source import Batch, Source
 from theater.models import Status, now
 
@@ -26,20 +24,9 @@ logger = logging.getLogger("theater.observer")
 
 class BatchApplication:
     if TYPE_CHECKING:
-        _failures: FailureTracker
         _reducer: Reducer
         store: Store
-        _accept_attachment: Callable[..., Any]
-        _answer_turn: Callable[..., Any]
-        _confirm_identity_loss: Callable[..., Any]
-        _evidence_is_bound_to_another_live_participant: Callable[..., Any]
-        _finish: Callable[..., Any]
-        _is_untrusted_rotation: Callable[..., Any]
-        mark_transcript_identity_lost: Callable[..., Any]
-        _pinned_for: Callable[..., Any]
-        _rescue_jobs: Callable[..., Any]
-        _reset_identity_loss_confirmation: Callable[..., Any]
-        _validate_batch: Callable[..., Any]
+        _bind_completion: Callable[[LiveRegistration | None], BoundCompletionGate]
 
     def _path_target(
         self,
@@ -66,17 +53,6 @@ class BatchApplication:
     def _record_usage(self, pid: str, event: Event) -> bool:
         return self._reducer.record_usage(pid, event)
 
-    def _apply(self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator) -> bool:
-        return self._reducer.apply(
-            pid,
-            batch,
-            clock,
-            turns,
-            answer_turn_fn=self._answer_turn,
-            settle_fn=self._settle,
-            turn_result_fn=self._turn_result,
-        )
-
     def _apply_source_batch(
         self,
         pid: str,
@@ -86,6 +62,7 @@ class BatchApplication:
         turns: TurnAccumulator,
         *,
         registration: LiveRegistration | None = None,
+        completion: BoundCompletionGate | None = None,
     ) -> bool:
         """Apply once, then persist its cursor without replaying applied semantics.
 
@@ -99,7 +76,9 @@ class BatchApplication:
             if registration is not None and registration.active_job_for_turn is not None
             else None
         )
-        answer_turn_fn = partial(self._answer_turn, registration=registration)
+        answer_turn_fn = (
+            completion if completion is not None else self._bind_completion(registration)
+        ).answer_turn
         promoted = turns.promotions(batch.turn_state)
         try:
             if (
@@ -157,16 +136,18 @@ class BatchApplication:
         turns: TurnAccumulator,
         routed_batches: list[Batch],
         registration: LiveRegistration | None,
+        completion: BoundCompletionGate,
     ) -> bool:
         """Apply an inner (quiet-time) batch and remember it for evidence routing."""
         routed_batches.append(batch)
-        return self._apply_source_batch(pid, source, batch, clock, turns, registration=registration)
+        return self._apply_source_batch(
+            pid, source, batch, clock, turns, registration=registration, completion=completion
+        )
 
     def _persist_pending_source_checkpoint(
         self, pid: str, source: Source, *, connection=None
     ) -> bool:
-        pending_evidence = getattr(source, "pending_terminal_evidence", None)
-        if callable(pending_evidence) and pending_evidence():
+        if source.pending_terminal_evidence():
             # Exact terminal evidence owns this checkpoint's acknowledgement:
             # until the evidence sink has durably routed every held outcome,
             # the cursor stays unacknowledged and the evidence stays retained,
@@ -200,55 +181,19 @@ class BatchApplication:
     def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
         return self._reducer.turn_result(event, turn)
 
-    def _unblock(self, pid: str) -> None:
-        self._reducer._unblock(pid)
-
-    async def _on_quiet(
-        self,
-        pid: str,
-        observer: HarnessObserver,
-        source: Source,
-        clock: QuietClock,
-        turns: TurnAccumulator,
-        *,
-        source_status: Status | None = None,
-        turn_state: NativeTurnState | None = None,
-    ) -> None:
-        await self._reducer.on_quiet(
-            pid,
-            observer,
-            source,
-            clock,
-            turns,
-            source_status=source_status,
-            turn_state=turn_state,
-            validate_batch_fn=self._validate_batch,
-            report_source_error_fn=lambda p, b: self._failures.report_source_error(
-                p, b, finish_fn=self._finish
-            ),
-            accept_attachment_fn=self._accept_attachment,
-            apply_fn=lambda p, b, c, t: self._apply_source_batch(p, source, b, c, t),
-            on_progress_fn=self._reducer.on_progress,
-            evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
-            confirm_identity_loss_fn=self._confirm_identity_loss,
-            mark_identity_lost_fn=self.mark_transcript_identity_lost,
-            reset_identity_loss_fn=self._reset_identity_loss_confirmation,
-            is_untrusted_rotation_fn=self._is_untrusted_rotation,
-            rescue_jobs_fn=self._rescue_jobs,
-            pinned_fn=self._pinned_for,
-        )
-
     def _settle_from_event(
         self,
         pid: str,
         event: Event,
         *,
-        registration: LiveRegistration | None = None,
+        completion: BoundCompletionGate | None = None,
     ) -> None:
         self._reducer.settle_from_event(
             pid,
             event,
-            answer_turn_fn=partial(self._answer_turn, registration=registration),
+            answer_turn_fn=(
+                completion if completion is not None else self._bind_completion(None)
+            ).answer_turn,
             turn_result_fn=self._turn_result,
         )
 

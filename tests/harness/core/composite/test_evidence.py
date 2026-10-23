@@ -144,3 +144,80 @@ async def test_inflight_refresh_forwards_primary_evidence_snapshot_after_cancel(
     with pytest.raises(asyncio.CancelledError):
         await refreshing
     assert composite.terminal_evidence_snapshot() == (_outcome("refresh-turn"),)
+
+
+class _EmptySource(Source):
+    """A source implementing only the abstract seam, so every default applies."""
+
+    async def read(self) -> Batch:
+        return Batch()
+
+
+class _SnapshotOnlySource(_EmptySource):
+    """A snapshot-only source: it retains evidence without the pending flag."""
+
+    def __init__(self) -> None:
+        self.held: tuple[NativeTurnOutcome, ...] = ()
+
+    def terminal_evidence_snapshot(self) -> tuple[NativeTurnOutcome, ...]:
+        return self.held
+
+
+def test_default_source_lifecycle_defaults_forward_through_composite() -> None:
+    composite = CompositeSource(primary=_EmptySource())
+
+    assert composite.pending_terminal_evidence() is False
+    assert composite.terminal_evidence_snapshot() == ()
+
+    # Default delivered is a no-op, and the optional replay hook stays optional.
+    composite.terminal_evidence_delivered()
+    composite.arm_terminal_evidence_replay()
+
+    assert composite.pending_terminal_evidence() is False
+
+
+def test_snapshot_only_primary_holds_the_composite_checkpoint_by_snapshot() -> None:
+    primary = _SnapshotOnlySource()
+    primary.held = (_outcome("snapshot-turn"),)
+    composite = CompositeSource(primary=primary)
+
+    # The direct snapshot-only source keeps the contract's default answer.
+    assert primary.pending_terminal_evidence() is False
+    # The wrapper still holds the checkpoint: retained evidence counts as
+    # pending even though the primary's own flag is False.
+    assert composite.pending_terminal_evidence() is True
+    assert composite.terminal_evidence_snapshot() == (_outcome("snapshot-turn"),)
+
+
+def test_explicit_false_pending_with_snapshot_still_holds_the_composite_checkpoint() -> None:
+    class ExplicitFalseSnapshot(_SnapshotOnlySource):
+        def pending_terminal_evidence(self) -> bool:
+            return False
+
+    primary = ExplicitFalseSnapshot()
+    primary.held = (_outcome("explicit-false-turn"),)
+    composite = CompositeSource(primary=primary)
+
+    assert composite.pending_terminal_evidence() is True
+
+    primary.held = ()
+    assert composite.pending_terminal_evidence() is False
+
+
+@pytest.mark.asyncio
+async def test_nested_wrappers_forward_the_evidence_lifecycle() -> None:
+    class EvidencePrimary(_EmptySource):
+        async def read(self) -> Batch:
+            return Batch(terminal_evidence=(_outcome("nested-turn"),))
+
+    inner = CompositeSource(primary=EvidencePrimary())
+    await inner.read()
+    outer = CompositeSource(primary=inner)
+
+    assert outer.pending_terminal_evidence() is True
+    assert outer.terminal_evidence_snapshot() == (_outcome("nested-turn"),)
+
+    outer.terminal_evidence_delivered()
+
+    assert outer.pending_terminal_evidence() is False
+    assert inner.pending_terminal_evidence() is False

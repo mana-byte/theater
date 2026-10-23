@@ -142,7 +142,7 @@ async def test_reconnect_pages_old_terminal_history_with_bounded_backpressure(
         # The second page is blocked trying to enqueue while the first
         # outcome is unread; it cannot fetch an unbounded third page.
         assert len(server.requested("thread/turns/list")) == 2
-        assert runtime._outcomes.qsize() == 1
+        assert runtime._outcome_buffer.queued_count == 1
 
         (newest,) = (await source.read()).terminal_evidence
         assert newest.native_turn_id == "human-new"

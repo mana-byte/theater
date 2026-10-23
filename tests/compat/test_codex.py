@@ -71,6 +71,19 @@ def test_bump_edits_only_the_ceiling_line_and_fails_closed(tmp_path: Path) -> No
             adapter.apply_bump(root, ["1.5.0"])
 
 
+def test_annotated_ceiling_keeps_its_comment_when_bumped(tmp_path: Path) -> None:
+    source = _PLAN_SOURCE.replace(
+        "CODEX_RUNTIME_QUALIFIED_CEILING = (1, 5, 0)",
+        "CODEX_RUNTIME_QUALIFIED_CEILING: tuple[int, int, int] = (1, 5, 0)  # gate",
+    )
+    root = _tree(tmp_path, source)
+    assert codex.ADAPTER.apply_bump(root, ["1.5.0"]) == [codex_bump.PLAN]
+    assert (
+        "CODEX_RUNTIME_QUALIFIED_CEILING: tuple[int, int, int] = (1, 5, 1)  # gate"
+        in (root / codex_bump.PLAN).read_text()
+    )
+
+
 def test_bump_refreshes_latest_only_when_the_capture_differs(tmp_path: Path) -> None:
     root = _tree(tmp_path)
     latest = root / codex._LATEST

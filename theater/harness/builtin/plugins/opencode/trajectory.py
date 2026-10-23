@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections import OrderedDict
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.normalization.facts import tool_failure
 from theater.harness.normalization.values import json_container_format
 from theater.trajectory.content import ContentFormat, DetailField
-from theater.trajectory.enums import TrajectoryFailureCategory, TrajectoryKind, TrajectoryStatus
+from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
 from .constants import LIVE_TRAJECTORY_STATE_LIMIT
 from .mcp import OpenCodeMcpCatalog
-from .store import live_revision_row, message_coordinate, part_ordinal
+from .store import QueryConnection
 from .values import (
     _assistant_request_id,
     _finish_status,
@@ -38,6 +37,69 @@ from .values import (
 )
 
 
+@dataclass(frozen=True)
+class _ToolPart:
+    name: str | None
+    call_id: str | None
+    parent_id: str | None
+    fallback_id: str | None
+    result_id: str | None
+    result_fallback_id: str | None
+    call_status: TrajectoryStatus
+    call_details: tuple[DetailField, ...]
+    result_status: TrajectoryStatus | None
+    result_text: str | None
+    result_details: tuple[DetailField, ...]
+    result_failure: TrajectoryFailure | None
+    timing: Timing | None
+
+
+def _interpret_tool_part(part: dict) -> _ToolPart:
+    """Read tool identity and content once; live and history decide their own update policy."""
+    state = _table(part.get("state"))
+    state_status = state.get("status")
+    call = part.get("callID") or part.get("id")
+    call_id = call if isinstance(call, str) else None
+    fallback = part.get("id") if isinstance(part.get("id"), str) else None
+    name = part.get("tool") if isinstance(part.get("tool"), str) else None
+    parent = part.get("parentCallID") or state.get("parentCallID")
+    parent_id = parent if isinstance(parent, str) else None
+    call_details = tuple(
+        value
+        for value in (
+            _trajectory_detail("tool", name),
+            _trajectory_detail("arguments", state.get("input"), format=ContentFormat.JSON),
+        )
+        if value is not None
+    )
+    result_status = _tool_status(state_status) if state_status in ("completed", "error") else None
+    result = _tool_output(state) if result_status is not None else None
+    result_detail = (
+        _trajectory_detail("result", result, format=json_container_format(result))
+        if result is not None
+        else None
+    )
+    return _ToolPart(
+        name=name,
+        call_id=call_id,
+        parent_id=parent_id,
+        fallback_id=fallback,
+        result_id=f"{call_id}:result" if call_id else None,
+        result_fallback_id=f"{fallback}:result" if fallback else None,
+        call_status=_tool_status(state_status),
+        call_details=call_details,
+        result_status=result_status,
+        result_text=result,
+        result_details=(result_detail,) if result_detail is not None else (),
+        result_failure=(
+            tool_failure(result_status, result)
+            if result_status is not None and result is not None
+            else None
+        ),
+        timing=_part_timing(part),
+    )
+
+
 class OpenCodeTrajectory:
     _mcp_catalog: OpenCodeMcpCatalog
     _mcp_catalog_generation: int
@@ -50,7 +112,7 @@ class OpenCodeTrajectory:
 
         def _history_revision(self, updated: object, created: object) -> int: ...
 
-        def _role(self, conn: sqlite3.Connection, mid: str) -> str | None: ...
+        def _role(self, conn: QueryConnection, mid: str) -> str | None: ...
 
         def _stored_revision(self, data: dict, updated: object, created: object) -> int: ...
 
@@ -217,76 +279,49 @@ class OpenCodeTrajectory:
             ]
         if ptype != "tool":
             return []
-        state = _table(part.get("state"))
-        state_status = state.get("status")
-        call = part.get("callID") or part.get("id")
-        call_id = call if isinstance(call, str) else None
-        tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
-        mcp_identity = self._opencode_mcp_identity(tool_name)
+        tool = _interpret_tool_part(part)
+        mcp_identity = self._opencode_mcp_identity(tool.name)
         mcp_server, mcp_tool = mcp_identity or (None, None)
-        parent = part.get("parentCallID") or state.get("parentCallID")
-        parent_id = parent if isinstance(parent, str) else None
-        details = [
-            value
-            for value in (
-                _trajectory_detail("tool", tool_name),
-                _trajectory_detail("arguments", state.get("input"), format=ContentFormat.JSON),
-            )
-            if value is not None
-        ]
         facts = [
             _stored_fact(
                 kind=TrajectoryKind.TOOL_CALL,
-                summary=tool_name or "",
-                status=_tool_status(state_status),
-                native_id=call_id,
-                fallback_id=fallback,
+                summary=tool.name or "",
+                status=tool.call_status,
+                native_id=tool.call_id,
+                fallback_id=tool.fallback_id,
                 revision=revision,
                 raw_index=raw_index,
                 event_ordinal=ordinal_base,
                 turn_id=mid or None,
-                call_id=call_id,
-                parent_call_id=parent_id,
+                call_id=tool.call_id,
+                parent_call_id=tool.parent_id,
                 mcp_server=mcp_server,
                 mcp_tool=mcp_tool,
-                timing=_part_timing(part),
+                timing=tool.timing,
                 request_id=request_id if role == "assistant" else None,
-                details=details,
+                details=tool.call_details,
             )
         ]
-        if state_status in ("completed", "error"):
-            result = _tool_output(state)
-            result_detail = _trajectory_detail(
-                "result", result, format=json_container_format(result)
-            )
+        if tool.result_status is not None and tool.result_text is not None:
             facts.append(
                 _stored_fact(
                     kind=TrajectoryKind.TOOL_RESULT,
-                    summary=result,
-                    status=(
-                        TrajectoryStatus.ERROR
-                        if state_status == "error"
-                        else TrajectoryStatus.COMPLETED
-                    ),
-                    native_id=f"{call_id}:result" if call_id else None,
-                    fallback_id=f"{fallback}:result" if fallback else None,
+                    summary=tool.result_text,
+                    status=tool.result_status,
+                    native_id=tool.result_id,
+                    fallback_id=tool.result_fallback_id,
                     revision=revision,
                     raw_index=raw_index,
                     event_ordinal=ordinal_base + 1,
                     turn_id=mid or None,
-                    call_id=call_id,
-                    parent_call_id=parent_id,
+                    call_id=tool.call_id,
+                    parent_call_id=tool.parent_id,
                     mcp_server=mcp_server,
                     mcp_tool=mcp_tool,
-                    failure=tool_failure(
-                        TrajectoryStatus.ERROR
-                        if state_status == "error"
-                        else TrajectoryStatus.COMPLETED,
-                        result,
-                    ),
-                    timing=_part_timing(part),
+                    failure=tool.result_failure,
+                    timing=tool.timing,
                     request_id=request_id if role == "assistant" else None,
-                    details=(result_detail,) if result_detail is not None else (),
+                    details=tool.result_details,
                 )
             )
         return facts
@@ -355,7 +390,7 @@ class OpenCodeTrajectory:
 
     def _live_revision(
         self,
-        conn: sqlite3.Connection,
+        conn: QueryConnection,
         table: str,
         record_id: str | None,
         *fallbacks: object,
@@ -364,23 +399,21 @@ class OpenCodeTrajectory:
         if table not in {"message", "part"}:
             raise ValueError("unsupported OpenCode revision table")
         if record_id:
-            row = live_revision_row(conn, table, record_id)
+            row = conn.queries.live_revision_row(conn, table, record_id)
             if row is not None:
                 values[:0] = row
         revisions = [self._history_revision(value, 0) for value in values]
         return max(revisions, default=0)
 
-    def _message_coordinate(
-        self, conn: sqlite3.Connection, message_id: object, fallback: int
-    ) -> int:
+    def _message_coordinate(self, conn: QueryConnection, message_id: object, fallback: int) -> int:
         if isinstance(message_id, str) and message_id:
-            row = message_coordinate(conn, message_id)
+            row = conn.queries.message_coordinate(conn, message_id)
             if row is not None:
                 return self._history_coordinate(row[0])
         return max(0, fallback)
 
     def _trajectory_for_part(
-        self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+        self, conn: QueryConnection, payload: dict, seq: int, *, raw_index: int
     ) -> list[TrajectoryFact]:
         part = payload.get("part")
         if not isinstance(part, dict):
@@ -393,7 +426,7 @@ class OpenCodeTrajectory:
         timing = _part_timing(part)
         part_id = part.get("id")
         fallback = part_id if isinstance(part_id, str) else None
-        ordinal_base = part_ordinal(conn, fallback) * 2 if fallback else 0
+        ordinal_base = conn.queries.part_ordinal(conn, fallback) * 2 if fallback else 0
         revision_hint = self._live_revision(
             conn,
             "part",
@@ -480,72 +513,42 @@ class OpenCodeTrajectory:
         request_id: str | None,
         **common,
     ) -> list[TrajectoryFact]:
-        state = _table(part.get("state"))
-        state_status = state.get("status")
-        call = part.get("callID") or part.get("id")
-        call_id = call if isinstance(call, str) else None
-        tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
-        mcp_identity = self._opencode_mcp_identity(tool_name)
+        tool = _interpret_tool_part(part)
+        mcp_identity = self._opencode_mcp_identity(tool.name)
         mcp_server, mcp_tool = mcp_identity or (None, None)
-        parent = part.get("parentCallID") or state.get("parentCallID")
-        parent_id = parent if isinstance(parent, str) else None
-        details: list[DetailField] = []
-        tool_detail = _trajectory_detail("tool", tool_name)
-        if tool_detail is not None:
-            details.append(tool_detail)
-        input_detail = _trajectory_detail(
-            "arguments", state.get("input"), format=ContentFormat.JSON
-        )
-        if input_detail is not None:
-            details.append(input_detail)
-        call_common = {**common, "native_id": call_id}
+        call_common = {**common, "native_id": tool.call_id}
         call_fact = self._live_fact(
             kind=TrajectoryKind.TOOL_CALL,
-            summary=tool_name or "",
-            status=_tool_status(state_status),
+            summary=tool.name or "",
+            status=tool.call_status,
             request_id=request_id,
-            call_id=call_id,
-            parent_call_id=parent_id,
+            call_id=tool.call_id,
+            parent_call_id=tool.parent_id,
             mcp_server=mcp_server,
             mcp_tool=mcp_tool,
-            details=details,
+            details=tool.call_details,
             **call_common,
         )
         facts = [call_fact] if call_fact is not None else []
-        if state_status in ("completed", "error"):
-            result = _tool_output(state)
-            result_details: list[DetailField] = []
-            result_detail = _trajectory_detail(
-                "result", result, format=json_container_format(result)
-            )
-            if result_detail is not None:
-                result_details.append(result_detail)
+        if tool.result_status is not None and tool.result_text is not None:
             result_fact = self._live_fact(
                 kind=TrajectoryKind.TOOL_RESULT,
-                summary=result,
-                status=(
-                    TrajectoryStatus.ERROR
-                    if state_status == "error"
-                    else TrajectoryStatus.COMPLETED
-                ),
-                native_id=f"{call_id}:result" if call_id else None,
-                fallback_id=(f"{common['fallback_id']}:result" if common["fallback_id"] else None),
+                summary=tool.result_text,
+                status=tool.result_status,
+                native_id=tool.result_id,
+                fallback_id=tool.result_fallback_id,
                 raw_index=common["raw_index"],
                 event_ordinal=common["event_ordinal"] + 1,
                 turn_id=common["turn_id"],
                 step_id=common["step_id"],
                 request_id=request_id,
-                call_id=call_id,
-                parent_call_id=parent_id,
+                call_id=tool.call_id,
+                parent_call_id=tool.parent_id,
                 mcp_server=mcp_server,
                 mcp_tool=mcp_tool,
-                failure=(
-                    TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=result)
-                    if state_status == "error"
-                    else None
-                ),
+                failure=tool.result_failure,
                 timing=common["timing"],
-                details=result_details,
+                details=tool.result_details,
                 revision_hint=common["revision_hint"],
             )
             if result_fact is not None:
@@ -586,7 +589,7 @@ class OpenCodeTrajectory:
 
     def _trajectory_for_message(
         self,
-        conn: sqlite3.Connection,
+        conn: QueryConnection,
         payload: dict,
         seq: int,
         *,
@@ -625,7 +628,7 @@ class OpenCodeTrajectory:
                         native_id=part_id,
                         fallback_id=f"{mid}:text" if mid else None,
                         raw_index=raw_index,
-                        event_ordinal=part_ordinal(conn, part_id) * 2,
+                        event_ordinal=conn.queries.part_ordinal(conn, part_id) * 2,
                         turn_id=mid or None,
                         timing=timing,
                         usage=usage,

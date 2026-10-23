@@ -21,6 +21,7 @@ from ..contract import (
     verdict_from_checks,
     version_key,
 )
+from ..route_facts import RouteFacts
 from . import opencode2_bump, opencode_sandbox
 
 NPM_PACKAGE = "@opencode/cli"
@@ -89,7 +90,9 @@ class OpenCodeV2Adapter:
         )
         verdict = verdict_from_checks(proving)
         checks = (*consistency, *proving)
-        stray = {(request.method, request.path) for request in sb.mock.requests}
+        stray = RouteFacts(
+            sb.mock.requests, self.expected_routes, self.ignorable_routes
+        ).observed_routes
         if verdict != "green" and stray:
             checks += (Check("mock routes", "error", f"unexpected={sorted(stray)!r}"),)
             verdict = "tooling"

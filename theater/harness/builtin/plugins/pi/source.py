@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 from dataclasses import replace
@@ -14,14 +13,23 @@ from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import Attachment, Batch, StreamPoint
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import TranscriptSource
-from theater.harness.transcript.discovery import stateful_history_reader
+from theater.harness.transcript.history import HistoryParseContext
 from theater.models import Status
-from theater.resume_floor import decode_floor
 
+from .checkpoint import (
+    ColdResume,
+    ExactCheckpoint,
+    LegacyFloor,
+    ResumeInput,
+    decode_resume,
+    file_point_covers,
+    make_checkpoint,
+)
 from .constants import PI_READ_BYTES, PI_RECORD_BYTES, PI_RECORDS_PER_BATCH
 from .parser import parse_live_records
 from .record_buffer import PiRecord, RecordBuffer
 from .record_projection import project_record
+from .staging import StagedAttachment
 
 if TYPE_CHECKING:
     from .observer import PiObserver, PiSwitchBoundary
@@ -32,69 +40,6 @@ class _WaitForSwitch:
 
 
 _WAIT_FOR_SWITCH = _WaitForSwitch()
-
-
-def _checkpoint_int(value: object) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
-
-
-def _encode_checkpoint(
-    path: Path, offset: int, records: int, dev: int | None, ino: int | None
-) -> str | None:
-    if dev is None or ino is None:
-        return None
-    return json.dumps(
-        {
-            "version": 1,
-            "location": str(path),
-            "offset": offset,
-            "records": records,
-            "dev": dev,
-            "ino": ino,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _decode_checkpoint(raw: str | None) -> tuple[str, int, int, int, int] | None:
-    if raw is None or len(raw) > 1024:
-        return None
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(value, dict) or value.get("version") != 1:
-        return None
-    location = value.get("location")
-    if not isinstance(location, str) or not location:
-        return None
-    offset = _checkpoint_int(value.get("offset"))
-    records = _checkpoint_int(value.get("records"))
-    dev = _checkpoint_int(value.get("dev"))
-    ino = _checkpoint_int(value.get("ino"))
-    if offset is None or records is None or dev is None or ino is None:
-        return None
-    return location, offset, records, dev, ino
-
-
-def _checkpoint_matches(
-    checkpoint: tuple[str, int, int, int, int],
-    path: Path,
-    *,
-    size: int,
-    lines: int,
-    dev: int | None,
-    ino: int | None,
-) -> bool:
-    location, offset, records, checkpoint_dev, checkpoint_ino = checkpoint
-    return (
-        location == str(path)
-        and dev == checkpoint_dev
-        and ino == checkpoint_ino
-        and size >= offset
-        and lines >= records
-    )
 
 
 def _attachment_point(path: Path) -> tuple[int, int, int, str | None, int | None, int | None]:
@@ -168,7 +113,7 @@ class PiTranscriptSource(TranscriptSource):
         _observer: PiObserver
 
     def __init__(self, *args, **kwargs) -> None:
-        self._source_checkpoint = kwargs.pop("source_checkpoint", None)
+        self._resume_input = decode_resume(kwargs.pop("source_checkpoint", None))
         super().__init__(*args, **kwargs)
         self._backlog: list[PiRecord] = []
         self._records = RecordBuffer(PI_RECORD_BYTES)
@@ -177,34 +122,31 @@ class PiTranscriptSource(TranscriptSource):
         self._read_at: float | None = None
         #: Initial restart reconciliation parses only usage through this byte offset.
         self._usage_only_until: int | None = None
-        self._pending_usage_only_until: int | None = None
-        self._pending_checkpoint: str | None = None
-        self._acknowledged_checkpoint: str | None = (
-            self._source_checkpoint
-            if _decode_checkpoint(self._source_checkpoint) is not None
-            else None
+        self._staged_attachment: StagedAttachment | None = None
+        self._pending_checkpoint: ExactCheckpoint | None = None
+        self._acknowledged_checkpoint: ExactCheckpoint | None = (
+            self._resume_input if isinstance(self._resume_input, ExactCheckpoint) else None
         )
         self._stream_dev: int | None = None
         self._stream_ino: int | None = None
-        self._pending_stream_dev: int | None = None
-        self._pending_stream_ino: int | None = None
 
     def commit_attachment(self) -> None:
         super().commit_attachment()
-        self._usage_only_until = self._pending_usage_only_until
-        self._pending_usage_only_until = None
-        self._stream_dev, self._stream_ino = self._pending_stream_dev, self._pending_stream_ino
-        self._pending_stream_dev = self._pending_stream_ino = None
+        staged = self._staged_attachment
+        assert staged is not None
+        self._usage_only_until = staged.usage_only_until
+        self._stream_dev, self._stream_ino = staged.dev, staged.ino
+        self._staged_attachment = None
         self._clear_live_buffers()
         self._seed_live_context()
 
-    def _history_reader(self):
+    def _history_parse_context(self) -> HistoryParseContext:
         from .observer import PiObserver
 
-        return stateful_history_reader(
-            clone=lambda: PiObserver(root=self._observer.root, isolated=self._observer.isolated),
-            seed_of=lambda observer: observer._seed_history_context,
-            decorate=self._decorate_parsed,
+        reader = PiObserver(root=self._observer.root, isolated=self._observer.isolated)
+        return HistoryParseContext(
+            parse_record=lambda line, index: reader.parse_record(line, index, clip_text=False),
+            prepare_history_parse=reader._seed_history_context,
         )
 
     async def _locate(self, *, session_id: str | None) -> Path | None:
@@ -220,54 +162,48 @@ class PiTranscriptSource(TranscriptSource):
     def discard_attachment(self) -> None:
         super().discard_attachment()
         self._pending_checkpoint = None
-        self._pending_usage_only_until = None
-        self._pending_stream_dev = self._pending_stream_ino = None
+        self._staged_attachment = None
         self._seed_live_context()
 
     def revoke_attachment(self) -> None:
         super().revoke_attachment()
         self._usage_only_until = None
-        self._pending_usage_only_until = None
+        self._staged_attachment = None
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
-        self._pending_stream_dev = self._pending_stream_ino = None
         self._clear_live_buffers()
         self._observer._reset_turn_context()
 
     def _detach(self) -> None:
         super()._detach()
         self._usage_only_until = None
-        self._pending_usage_only_until = None
+        self._staged_attachment = None
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
         self._stream_dev = self._stream_ino = None
-        self._pending_stream_dev = self._pending_stream_ino = None
         self._clear_live_buffers()
         self._observer._reset_turn_context()
 
     def source_checkpoint(self) -> str | None:
-        return self._acknowledged_checkpoint
+        return self._acknowledged_checkpoint.raw if self._acknowledged_checkpoint else None
 
     def pending_source_checkpoint(self) -> str | None:
-        return self._pending_checkpoint
+        return self._pending_checkpoint.raw if self._pending_checkpoint else None
 
     def acknowledge_source_checkpoint(self) -> None:
         if self._pending_checkpoint is not None:
             self._acknowledged_checkpoint = self._pending_checkpoint
-            self._source_checkpoint = self._pending_checkpoint
+            self._resume_input = self._pending_checkpoint
             self._pending_checkpoint = None
 
     def rollback_source_checkpoint(self) -> None:
         """Re-read an unpersisted batch from the most recent durable point."""
-        checkpoint = _decode_checkpoint(self._acknowledged_checkpoint) or _decode_checkpoint(
-            self._pending_checkpoint
-        )
+        checkpoint = self._acknowledged_checkpoint or self._pending_checkpoint
         self._pending_checkpoint = None
         self._clear_live_buffers()
         if checkpoint is None or self.path is None:
             return
-        location, offset, records, dev, ino = checkpoint
-        if location != str(self.path):
+        if checkpoint.location != str(self.path):
             self._detach()
             return
         try:
@@ -275,11 +211,20 @@ class PiTranscriptSource(TranscriptSource):
         except OSError:
             self._detach()
             return
-        if stat.st_dev != dev or stat.st_ino != ino or stat.st_size < offset:
+        if not file_point_covers(
+            StreamPoint(size=stat.st_size, dev=stat.st_dev, ino=stat.st_ino),
+            checkpoint.point,
+            require_records=False,
+        ):
             self._detach()
             return
-        self.offset, self.index, self.mtime = offset, records, stat.st_mtime_ns
-        self._stream_dev, self._stream_ino = dev, ino
+        assert checkpoint.point.size is not None and checkpoint.point.records is not None
+        self.offset, self.index, self.mtime = (
+            checkpoint.point.size,
+            checkpoint.point.records,
+            stat.st_mtime_ns,
+        )
+        self._stream_dev, self._stream_ino = checkpoint.point.dev, checkpoint.point.ino
         self._seed_live_context()
 
     def _seed_live_context(self) -> None:
@@ -319,9 +264,8 @@ class PiTranscriptSource(TranscriptSource):
                 last_event = semantic[-1] if semantic else None
             if not usage_only:
                 status = parsed.status
-        self._pending_usage_only_until = size if usage_only else None
-        self._pending_stream_dev, self._pending_stream_ino = dev, ino
-        self._pending_checkpoint = _encode_checkpoint(path, offset, index, dev, ino)
+        self._staged_attachment = StagedAttachment(size if usage_only else None, dev, ino)
+        self._pending_checkpoint = make_checkpoint(path, offset, index, dev, ino)
         self._pending = (path, offset, index, mtime, session_id)
         return Attachment(
             location=str(path),
@@ -350,11 +294,13 @@ class PiTranscriptSource(TranscriptSource):
         Cold and `/new` sessions replay from their trusted boundary. Restarts
         replay only usage from the durable checkpoint.
         """
-        checkpoint = _decode_checkpoint(self._source_checkpoint)
-        if checkpoint is not None:
-            if _checkpoint_matches(checkpoint, path, size=size, lines=lines, dev=dev, ino=ino):
-                return (checkpoint[1], checkpoint[2], True)
-            if checkpoint[0] != str(path):
+        resume: ResumeInput = self._resume_input
+        current = StreamPoint(size=size, records=lines, dev=dev, ino=ino)
+        if isinstance(resume, ExactCheckpoint):
+            if resume.location == str(path) and file_point_covers(current, resume.point):
+                assert resume.point.size is not None and resume.point.records is not None
+                return (resume.point.size, resume.point.records, True)
+            if resume.location != str(path):
                 return self._rotation_cursor(path)
             return None
         if not self._exact_attachments:
@@ -374,13 +320,7 @@ class PiTranscriptSource(TranscriptSource):
             if cursor is None:
                 return _WAIT_FOR_SWITCH
             return (*cursor, self._known_location is not None)
-        floor_cursor = self._floor_cursor(
-            self._source_checkpoint,
-            size=size,
-            lines=lines,
-            dev=dev,
-            ino=ino,
-        )
+        floor_cursor = self._floor_cursor(resume, current)
         if floor_cursor is None:
             return None
         offset, index = floor_cursor
@@ -405,39 +345,16 @@ class PiTranscriptSource(TranscriptSource):
 
     def _floor_cursor(
         self,
-        raw: str | None,
-        *,
-        size: int,
-        lines: int,
-        dev: int | None,
-        ino: int | None,
+        resume: ResumeInput,
+        current: StreamPoint,
     ) -> tuple[int, int] | None:
         """Return the cold or validated resumed cursor; fail closed otherwise."""
-        if raw is None:
+        if isinstance(resume, ColdResume):
             return (0, 0)
-        floor = decode_floor(raw)
-        if floor is None:
+        if not isinstance(resume, LegacyFloor) or not file_point_covers(current, resume.point):
             return None
-        floor_size, floor_records, floor_dev, floor_ino = (
-            floor.size,
-            floor.records,
-            floor.dev,
-            floor.ino,
-        )
-        if (
-            floor_size is None
-            or floor_records is None
-            or floor_dev is None
-            or floor_ino is None
-            or dev is None
-            or ino is None
-        ):
-            return None
-        if floor_dev != dev or floor_ino != ino:
-            return None
-        if size < floor_size or lines < floor_records:
-            return None
-        return (floor_size, floor_records)
+        assert resume.point.size is not None and resume.point.records is not None
+        return (resume.point.size, resume.point.records)
 
     async def _drain(self) -> Batch:
         if self._backlog:
@@ -449,7 +366,7 @@ class PiTranscriptSource(TranscriptSource):
             offset = index = 0
             self._usage_only_until = None
             self._stream_dev, self._stream_ino = stat.st_dev, stat.st_ino
-            self._pending_checkpoint = _encode_checkpoint(path, 0, 0, stat.st_dev, stat.st_ino)
+            self._pending_checkpoint = make_checkpoint(path, 0, 0, stat.st_dev, stat.st_ino)
             self._clear_live_buffers()
             self._observer._reset_turn_context()
         if stat.st_size == offset:
@@ -487,7 +404,7 @@ class PiTranscriptSource(TranscriptSource):
         trajectory: list[TrajectoryFact] = []
         trajectory_events: list[Event] = []
         status: Status | None = None
-        next_checkpoint: str | None = None
+        next_checkpoint: ExactCheckpoint | None = None
         for record, parsed in zip(records, parsed_records, strict=True):
             decorated = self._decorate_parsed(parsed, record.start)
             if self._usage_only_until is not None and record.start < self._usage_only_until:
@@ -499,7 +416,7 @@ class PiTranscriptSource(TranscriptSource):
                 status = self._advance_status_hint(status, decorated)
             self.index += 1
             assert self.path is not None
-            next_checkpoint = _encode_checkpoint(
+            next_checkpoint = make_checkpoint(
                 self.path,
                 record.end,
                 self.index,

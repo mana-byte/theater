@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from theater.harness.contracts.manifest import HarnessManifest
 from theater.harness.loading.discovery import MANIFEST_FILENAME
 from theater.harness.loading.models import LoadedPlugin
 from theater.harness.manifests.compiler import compile_manifest
@@ -19,6 +18,7 @@ from theater.plugins.loading import (
 from theater.plugins.loading import (
     import_manifest as _import_shared_manifest,
 )
+from theater.plugins.loading import manifest_facts
 from theater.plugins.loading import (
     synthetic_package_name as _shared_synthetic_package_name,
 )
@@ -60,7 +60,8 @@ def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
             error=f"{manifest_path}: {exc!r}",
         )
 
-    manifest = getattr(manifest_module, "MANIFEST", None)
+    facts = manifest_facts(manifest_module)
+    manifest = facts.value
     if manifest is None:
         _cleanup_package(pkg_name)
         return LoadedPlugin(
@@ -80,7 +81,7 @@ def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
             error=f"{manifest_path}: MANIFEST is the class {manifest.__name__}, "
             f"not an instance. Use `MANIFEST = {manifest.__name__}()`",
         )
-    if not isinstance(manifest, HarnessManifest):
+    if facts.harness is None:
         guidance = ""
         if type(manifest).__name__ == "McpServerManifest":
             guidance = (
@@ -97,7 +98,7 @@ def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
         )
 
     try:
-        harness = compile_manifest(name, manifest)
+        harness = compile_manifest(name, facts.harness)
     except KeyboardInterrupt:
         _cleanup_package(pkg_name)
         raise
@@ -123,7 +124,7 @@ def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
         source=plugin.source,
         name=name,
         harness=harness,
-        manifest=manifest,
+        manifest=facts.harness,
     )
 
 

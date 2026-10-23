@@ -15,6 +15,7 @@ from theater.constants.skills import (
     SKILL_MAX_BYTES,
     SKILL_MAX_COUNT,
 )
+from theater.daemon import skill_catalog
 from theater.daemon.rpc import skills as skills_rpc
 from theater.models import BadRequest, NotFound
 from theater.skills import (
@@ -528,9 +529,9 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
         discoveries.append(tuple(disabled))
         return snapshot
 
-    monkeypatch.setattr(skills_rpc.registry, "discover", fake_discover)
+    monkeypatch.setattr(skill_catalog.registry, "discover", fake_discover)
     monkeypatch.setattr(
-        skills_rpc.mcp_registry,
+        skill_catalog.mcp_registry,
         "catalog",
         lambda: SimpleNamespace(registered_skills=(plugin_skill,), registered_plays=()),
     )

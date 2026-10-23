@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from sqlalchemy import update
 
 from tests.support.provider_controls import queued_followup
 from theater.daemon.control_ownership import OwnershipConflict
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.participant_mutation_handlers import participants_transfer_control
 from theater.daemon.runtime.recovery import reconcile_public_control_operations
+from theater.daemon.schema import jobs as jobs_table
 from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import ControlDeliveryPhase
@@ -40,6 +42,16 @@ async def test_transfer_is_atomic_preserves_lineage_and_cancels_only_queued(daem
     successor = daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False)
     queued_id, queued_job = queued_followup(daemon, target.id, "1")
     dispatched_id, dispatched_job = queued_followup(daemon, target.id, "2", dispatched=True)
+    with daemon.store.write_unit() as unit:
+        unit.connection.execute(
+            update(jobs_table)
+            .where(jobs_table.c.handle == queued_job)
+            .values(
+                response_format="json",
+                structured_result='{"answer":"kept"}',
+                structured_status="parsed",
+            )
+        )
     timestamp = now()
     with daemon.store.write_unit() as unit:
         daemon.store.operations.create(
@@ -59,6 +71,10 @@ async def test_transfer_is_atomic_preserves_lineage_and_cancels_only_queued(daem
             connection=unit.connection,
         )
     await reconcile_public_control_operations(daemon)
+    wake = daemon.jobs._events[queued_job]
+    listeners: list[str] = []
+    daemon.jobs.add_terminal_listener(listeners.append)
+    finished_bus_before = [row for row in daemon.store.bus_tail() if row["kind"] == "job.finished"]
 
     result = await participants_transfer_control(
         daemon,
@@ -83,7 +99,18 @@ async def test_transfer_is_atomic_preserves_lineage_and_cancels_only_queued(daem
     assert changed.control_revision == 1
     assert result["cancelled_job_handles"] == [queued_job]
     assert daemon.store.get_control_operation(queued_id).error_code == "control_transferred"
-    assert daemon.store.get_job(queued_job).state == JobState.KILLED
+    cancelled_job = daemon.store.get_job(queued_job)
+    assert cancelled_job.state == JobState.KILLED
+    assert (
+        cancelled_job.response_format,
+        cancelled_job.structured_result,
+        cancelled_job.structured_status,
+    ) == ("json", '{"answer":"kept"}', "parsed")
+    assert cancelled_job.actor_client_id == "original-client"
+    assert wake.is_set() and listeners == []
+    assert [row for row in daemon.store.bus_tail() if row["kind"] == "job.finished"] == (
+        finished_bus_before
+    )
     assert daemon.operation_service.get("public-1").state == "failed"
     assert daemon.store.get_control_operation(dispatched_id).delivery_phase is (
         ControlDeliveryPhase.DISPATCHED
@@ -172,6 +199,10 @@ async def test_transfer_rolls_back_state_queue_and_journal_together(daemon, monk
     target = daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False)
     _operation_id, handle = queued_followup(daemon, target.id, "3")
     before = daemon.store.journal.current_sequence()
+    wake = daemon.jobs._events[handle]
+    listeners: list[str] = []
+    daemon.jobs.add_terminal_listener(listeners.append)
+    finished_bus_before = [row for row in daemon.store.bus_tail() if row["kind"] == "job.finished"]
 
     def fail_append(*_args, **_kwargs):
         raise RuntimeError("crash before commit")
@@ -193,3 +224,8 @@ async def test_transfer_rolls_back_state_queue_and_journal_together(daemon, monk
     )
     assert daemon.store.get_job(handle).state == JobState.RUNNING
     assert daemon.store.journal.current_sequence() == before
+    assert not wake.is_set() and handle in daemon.jobs._events
+    assert listeners == []
+    assert [row for row in daemon.store.bus_tail() if row["kind"] == "job.finished"] == (
+        finished_bus_before
+    )

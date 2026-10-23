@@ -10,8 +10,6 @@ from __future__ import annotations
 from collections import deque
 from typing import NamedTuple
 
-from textual.content import Content
-
 from regie.ui_constants import (
     REGIE_TREE_BRANCH as BRANCH,
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
@@ -19,7 +17,7 @@ from regie.ui_constants import (
     REGIE_TREE_RAIL as RAIL,
 )
 from regie.render.glyphs import LeafCell, OverlayGlyph, _rail_above, separator_prefix
-from regie.render.layout import Key, TreeLines, is_root_prefix, row_count
+from regie.render.layout import Key, RenderedLine, TreeLines, is_root_prefix, row_count
 
 #: A cell of the rail grid: ``(row, column)``, *row* counts rendered rows across the tree.
 type Cell = tuple[int, int]
@@ -57,7 +55,7 @@ class _RailEntry(NamedTuple):
 
 
 def _rail_leaves(
-    lines: list[tuple[Content, dict, Key, str, str]],
+    lines: list[RenderedLine],
 ) -> list[_RailEntry]:
     """The managed tree rows, with absolute rendered coordinates."""
     out: list[_RailEntry] = []
@@ -154,7 +152,7 @@ def _route(cells: set[Cell], start: Cell, goal: Cell) -> list[Cell] | None:
 
 
 def send_path(
-    lines: list[tuple[Content, dict, Key, str, str]], from_id: str | None, to_id: str | None
+    lines: list[RenderedLine], from_id: str | None, to_id: str | None
 ) -> list[Cell] | None:
     """The route a send takes across the drawn tree, or None if it has none.
 
@@ -177,7 +175,7 @@ def send_path(
 
 
 def await_path(
-    lines: list[tuple[Content, dict, Key, str, str]], from_id: str | None, to_id: str | None
+    lines: list[RenderedLine], from_id: str | None, to_id: str | None
 ) -> list[Cell] | None:
     """The route an await highlight takes, anchored on branch rails.
 
@@ -198,7 +196,7 @@ def await_path(
     return _route(_rail_cells(leaves), start, goal)
 
 
-def tree_glyph_at(lines: list[tuple[Content, dict, Key, str, str]], cell: Cell) -> str | None:
+def tree_glyph_at(lines: list[RenderedLine], cell: Cell) -> str | None:
     """The normal tree glyph already drawn at *cell*, or None for non-rail cells.
 
     Filters out invisible stepping-stone cells: fine for a send packet, but a
@@ -253,7 +251,7 @@ def _await_route(path: list[Cell]) -> list[Cell]:
 
 
 def await_highlight_cells(
-    lines: list[tuple[Content, dict, Key, str, str]], from_id: str | None, to_id: str | None
+    lines: list[RenderedLine], from_id: str | None, to_id: str | None
 ) -> list[AwaitCell] | None:
     """Visible tree cells to tint for an await route, with how it crosses them.
 
@@ -282,7 +280,7 @@ def await_highlight_cells(
 
 def cell_leaf(
     cell: Cell,
-    lines: list[tuple[Content, dict, Key, str, str]] | None = None,
+    lines: list[RenderedLine] | None = None,
 ) -> tuple[int, int]:
     """Split a grid row into ``(leaf index, row within that leaf)``."""
     if not isinstance(lines, TreeLines):
@@ -335,7 +333,7 @@ def heavy_rail(glyph: str, arms: frozenset[Direction]) -> str:
     return _HEAVY_RAILS.get((glyph, arms & used), glyph)
 
 
-def section_arms(lines: list[tuple[Content, dict, Key, str, str]], separator: Key) -> RailArms:
+def section_arms(lines: list[RenderedLine], separator: Key) -> RailArms:
     """The rail arms from a separator's own branch down to every agent it can fold.
 
     Its section is its later siblings and their descendants, up to its next sibling separator.
@@ -381,7 +379,7 @@ def section_arms(lines: list[tuple[Content, dict, Key, str, str]], separator: Ke
 
 
 def heavy_overlays(
-    lines: list[tuple[Content, dict, Key, str, str]], arms: RailArms
+    lines: list[RenderedLine], arms: RailArms
 ) -> dict[Key, dict[LeafCell, OverlayGlyph]]:
     """Per row, the heavy glyphs *arms* draw over its own light rails."""
     rows = {key: label.plain.split("\n") for label, _, key, _, _ in lines}

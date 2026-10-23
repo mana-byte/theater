@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import delete
 
-from tests.support.observation import bus_kinds
+from tests.support.observation import apply_batch, bus_kinds
 from tests.support.shipped import VibeHarness
 from tests.support.waiting import until
 from theater.daemon.observation.failures import FailureTracker
@@ -309,14 +309,16 @@ def test_usage_only_events_are_persisted_without_changing_status_or_bus(registry
     batch = Batch(events=[event])
     bus_before = registry.store.bus_tail()
 
-    observer._apply(
+    apply_batch(
+        observer,
         participant.id,
         batch,
         QuietClock(),
         TurnAccumulator(),
     )
     observer._unblock_on_semantic_progress(participant.id, batch)
-    observer._apply(
+    apply_batch(
+        observer,
         participant.id,
         batch,
         QuietClock(),
@@ -399,7 +401,7 @@ def test_batches_without_read_at_publish_bus_events_without_the_field(registry):
     batch = Batch(events=(Event(kind=EventKind.ASSISTANT, text="legacy"),), progressed=True)
     assert batch.read_at is None
 
-    observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
+    apply_batch(observer, p.id, batch, QuietClock(), TurnAccumulator())
 
     row = next(r for r in registry.store.bus_tail(limit=50) if r["kind"] == "agent.assistant")
     assert "read_at" not in row["payload"]

@@ -33,30 +33,6 @@ CLOSE_TIMEOUT = 2.0
 SHUTDOWN_TIMEOUT = 45.0
 
 
-def init_send_seq(daemon) -> None:
-    """Initialize the send sequence from the database.
-
-    Never reuse handle numbers; the persisted meta value survives a GC of the top job rows.
-    """
-    try:
-        persisted = daemon.store.get_send_seq()
-        highest = max(persisted, daemon.store.max_send_seq())
-        if highest:
-            daemon._send_seq = highest
-            logger.info("send sequence initialized to %d", daemon._send_seq)
-    except Exception as exc:
-        logger.debug("could not initialize send sequence: %s", exc)
-
-
-def next_send_seq(daemon) -> int:
-    daemon._send_seq += 1
-    try:
-        daemon.store.set_send_seq(daemon._send_seq)
-    except Exception:
-        logger.debug("could not persist send sequence", exc_info=True)
-    return daemon._send_seq
-
-
 async def start(daemon, *, check_path) -> None:
     """Bind the socket. Raises here, in the caller's face, if it cannot."""
     from theater.daemon.runtime import recovery
@@ -104,7 +80,6 @@ async def start(daemon, *, check_path) -> None:
     finish_provider_recovery = getattr(daemon.terminal_service, "finish_startup_recovery", None)
     if callable(finish_provider_recovery):
         finish_provider_recovery()
-    daemon._init_send_seq()
     await _start_gauge_sampler(daemon)
     daemon._reaper = asyncio.create_task(daemon._reap_loop())
     daemon._lag = asyncio.create_task(timing.lag_monitor(daemon._stopping))

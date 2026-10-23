@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 
 from regie.tmux.bootstrap import (
     REGIE_DEFAULT_SESSION,
@@ -35,6 +36,16 @@ _PROVISIONAL_WINDOW = re.compile(r"^regie-launch-[A-Za-z0-9_-]{12,64}$")
 _VERSION_PATTERN = re.compile(r"\d+(?:\.\d+)*")
 _UNPROBED = object()
 _VERSION_CACHE: list[tuple[int, ...] | object | None] = [_UNPROBED]
+
+
+@dataclass(frozen=True)
+class _LaunchFacts:
+    provider_id: str
+    participant_id: str
+    launch_id: str
+    executable: str
+    terminal_incarnation: str
+    server_identity: str
 
 
 async def ensure_server(*, cwd: str) -> str:
@@ -119,7 +130,7 @@ async def create_terminal(
             server_identity=expected_server_identity,
         )
         return terminal_identity(existing, provider_id=provider_id, generation=generation)
-    created = await _recover_or_create_pane(
+    created, provisional = await _recover_or_create_pane(
         provider_id=provider_id,
         generation=generation,
         expected_server_identity=expected_server_identity,
@@ -132,27 +143,22 @@ async def create_terminal(
         presentation=presentation,
         before_create=before_create,
     )
-    if ensure_usable is not None:
-        ensure_usable()
-    await mark_pane(
-        created.pane_id,
-        provider_id=provider_id,
-        terminal_incarnation=terminal_incarnation,
-        occupant_id=participant_id,
-        pane_pid=created.pane_pid,
-        launch_id=launch_id,
-        executable=executable,
+    snapshot, matching = await _adopt_pane(
+        created,
+        _LaunchFacts(
+            provider_id=provider_id,
+            participant_id=participant_id,
+            launch_id=launch_id,
+            executable=executable,
+            terminal_incarnation=terminal_incarnation,
+            server_identity=expected_server_identity,
+        ),
+        validate_provisional=provisional,
+        ensure_usable=ensure_usable,
     )
-    snapshot = await pane_snapshot(created.pane_id)
     if snapshot is None or snapshot.server_identity != expected_server_identity:
         raise TmuxError("created pane could not be verified on the pinned tmux server")
-    if not exact_match(
-        snapshot,
-        server_identity=expected_server_identity,
-        provider_id=provider_id,
-        terminal_incarnation=terminal_incarnation,
-        occupant_id=participant_id,
-    ):
+    if not matching:
         raise TmuxError("created pane did not retain its terminal identity")
     name = _presentation_name(presentation)
     if name != provisional_window_name:
@@ -160,6 +166,38 @@ async def create_terminal(
             ensure_usable()
         await run("rename-window", "-t", snapshot.pane_id, name, check=False)
     return terminal_identity(snapshot, provider_id=provider_id, generation=generation)
+
+
+async def _adopt_pane(
+    pane: PaneSnapshot,
+    facts: _LaunchFacts,
+    *,
+    validate_provisional: bool,
+    ensure_usable: Callable[[], None] | None,
+) -> tuple[PaneSnapshot | None, bool]:
+    if validate_provisional and (
+        pane.dead or pane.server_identity != facts.server_identity or pane.managed
+    ):
+        raise TmuxError("the recoverable launch pane no longer matches its intent")
+    if ensure_usable is not None:
+        ensure_usable()
+    await mark_pane(
+        pane.pane_id,
+        provider_id=facts.provider_id,
+        terminal_incarnation=facts.terminal_incarnation,
+        occupant_id=facts.participant_id,
+        pane_pid=pane.pane_pid,
+        launch_id=facts.launch_id,
+        executable=facts.executable,
+    )
+    snapshot = await pane_snapshot(pane.pane_id)
+    return snapshot, snapshot is not None and exact_match(
+        snapshot,
+        server_identity=facts.server_identity,
+        provider_id=facts.provider_id,
+        terminal_incarnation=facts.terminal_incarnation,
+        occupant_id=facts.participant_id,
+    )
 
 
 async def _recover_or_create_pane(
@@ -175,16 +213,10 @@ async def _recover_or_create_pane(
     environment: Mapping[str, str],
     presentation: Mapping[str, object] | None,
     before_create: Callable[[], Awaitable[None]] | None,
-) -> PaneSnapshot:
+) -> tuple[PaneSnapshot, bool]:
     provisional = await _provisional_terminal(provisional_window_name)
     if provisional is not None:
-        if (
-            provisional.dead
-            or provisional.server_identity != expected_server_identity
-            or provisional.managed
-        ):
-            raise TmuxError("the recoverable launch pane no longer matches its intent")
-        return provisional
+        return provisional, True
     if dispatch_previously_started:
         raise TmuxOutcomeUnknown(
             "terminal creation was previously dispatched but no exact pane remains"
@@ -217,7 +249,7 @@ async def _recover_or_create_pane(
     created = await pane_snapshot(pane_id)
     if created is None or created.server_identity != expected_server_identity:
         raise TmuxOutcomeUnknown("created pane could not be verified on the pinned tmux server")
-    return created
+    return created, False
 
 
 async def recover_terminal_launch(
@@ -248,32 +280,22 @@ async def recover_terminal_launch(
     provisional = await _provisional_terminal(provisional_window_name)
     if provisional is None:
         return None
-    if (
-        provisional.dead
-        or provisional.server_identity != expected_server_identity
-        or provisional.managed
-    ):
-        raise TmuxError("the recoverable launch pane no longer matches its intent")
-    if ensure_usable is not None:
-        ensure_usable()
-    await mark_pane(
-        provisional.pane_id,
-        provider_id=provider_id,
-        terminal_incarnation=terminal_incarnation,
-        occupant_id=participant_id,
-        pane_pid=provisional.pane_pid,
-        launch_id=launch_id,
-        executable=executable,
+    recovered, matching = await _adopt_pane(
+        provisional,
+        _LaunchFacts(
+            provider_id=provider_id,
+            participant_id=participant_id,
+            launch_id=launch_id,
+            executable=executable,
+            terminal_incarnation=terminal_incarnation,
+            server_identity=expected_server_identity,
+        ),
+        validate_provisional=True,
+        ensure_usable=ensure_usable,
     )
-    recovered = await pane_snapshot(provisional.pane_id)
-    if recovered is None or not exact_match(
-        recovered,
-        server_identity=expected_server_identity,
-        provider_id=provider_id,
-        terminal_incarnation=terminal_incarnation,
-        occupant_id=participant_id,
-    ):
+    if not matching:
         raise TmuxError("recoverable launch pane did not retain its terminal identity")
+    assert recovered is not None
     return recovered
 
 

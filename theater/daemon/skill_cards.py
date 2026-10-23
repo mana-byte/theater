@@ -50,3 +50,18 @@ def compose_prompt(
     """
     prompt = "\n\n".join([task, *(part for part in (card, skills) if part)])
     return prompt if response_format is None else prompt_with_guidance(prompt, response_format)
+
+
+def prompt_with_interruption_card(
+    prompt: str, *, interrupted: str | None, by: str, running: list[tuple[str, str, str]]
+) -> str:
+    """Tell a replaced child what survived the interrupt so it awaits instead of respawning."""
+    turn = f"your turn {interrupted}" if interrupted else "your turn"
+    card = f"[Theater: {turn} was interrupted by {by}."
+    if running:
+        listed = ", ".join(f"{handle} -> {name} ({state})" for handle, name, state in running)
+        card += (
+            f" Jobs you launched that are still running: {listed}. "
+            "They are still running: await them, do not respawn."
+        )
+    return f"{card}]\n\n{prompt}"

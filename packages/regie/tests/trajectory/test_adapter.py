@@ -9,11 +9,13 @@ from typing import cast
 
 import pytest
 from regie.trajectory.adapter import TrajectoryFollowAdapter, TrajectoryQueryAdapter
+from regie.trajectory.rich.controller import TrajectoryController
 from regie.trajectory.rich.models import decode_delta, decode_page
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 
 from theater.frontend import FrontendClient
 from theater.frontend.trajectory import (
+    TRAJECTORY_RESPONSE_MAX_BYTES,
     ContentFormat,
     DetailField,
     PanelState,
@@ -194,13 +196,13 @@ async def test_public_query_adapter_serializes_its_interactive_connection() -> N
             self.maximum_active = max(self.maximum_active, self.active)
             await asyncio.sleep(0)
             self.active -= 1
-            return SimpleNamespace(value={"participant_id": participant_id})
+            return SimpleNamespace(value=page_wire([]))
 
     client = SimpleNamespace(trajectory=Trajectory())
     adapter = TrajectoryQueryAdapter(cast(FrontendClient, client))
 
     await asyncio.gather(
-        adapter.call("trajectory.snapshot", id="p1", limit=30),
+        adapter.snapshot("p1", limit=30),
         adapter.call("trajectory.snapshot", id="p2", limit=30),
     )
 
@@ -226,6 +228,9 @@ async def test_public_adapters_thaw_the_sdk_immutable_json_view() -> None:
     )
 
     class Trajectory:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
         async def snapshot(self, participant_id: str, *, limit: int) -> object:
             assert participant_id == "p1"
             assert limit == 200
@@ -257,19 +262,134 @@ async def test_public_adapters_thaw_the_sdk_immutable_json_view() -> None:
                 )
             )
 
+        async def close(self, stream_id: str) -> object:
+            self.close_calls += 1
+            return SimpleNamespace(value={"released": True})
+
     client = SimpleNamespace(trajectory=Trajectory())
     query = TrajectoryQueryAdapter(cast(FrontendClient, client))
     follow = TrajectoryFollowAdapter(cast(FrontendClient, client))
 
-    page = decode_page(await query.call("trajectory.snapshot", id="p1", limit=200))
-    delta = decode_delta(
-        await follow.call(
-            "trajectory.follow",
-            stream_id="stream",
-            after="cursor-1",
-            wait=20,
-        )
+    page = await query.snapshot("p1", limit=200)
+    delta = await follow.follow("p1", "stream", "cursor-1", wait=20, limit=200)
+
+    assert isinstance(await query.call("trajectory.snapshot", id="p1", limit=200), dict)
+    assert isinstance(
+        await follow.call("trajectory.follow", stream_id="stream", after="cursor-1", wait=20),
+        dict,
     )
+    await query.release("p1", "stream")
+    await query.close()
+    await follow.close()
 
     assert page.records[0].details[0].preview.text == "hello"
     assert delta.upserts[0].record.record_id == "r1"
+    assert client.trajectory.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_named_query_rejects_oversized_sdk_response_at_adapter_boundary() -> None:
+    class Trajectory:
+        async def snapshot(self, participant_id: str, *, limit: int) -> object:
+            return SimpleNamespace(
+                value=page_wire([wire_record("r1", summary="x" * TRAJECTORY_RESPONSE_MAX_BYTES)])
+            )
+
+    adapter = TrajectoryQueryAdapter(cast(FrontendClient, SimpleNamespace(trajectory=Trajectory())))
+
+    with pytest.raises(TrajectoryValidationError, match="exceeds"):
+        await adapter.snapshot("p1", limit=1)
+
+
+@pytest.mark.asyncio
+async def test_query_noops_and_validation_wait_behind_active_request() -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Trajectory:
+        async def snapshot(self, participant_id: str, *, limit: int) -> object:
+            entered.set()
+            await release.wait()
+            return SimpleNamespace(value=page_wire([]))
+
+    adapter = TrajectoryQueryAdapter(cast(FrontendClient, SimpleNamespace(trajectory=Trajectory())))
+    snapshot = asyncio.create_task(adapter.snapshot("p1", limit=1))
+    await entered.wait()
+
+    async def queued(operation, started: asyncio.Event) -> object:
+        started.set()
+        return await operation()
+
+    starts = [asyncio.Event() for _ in range(4)]
+    waiting = [
+        asyncio.create_task(queued(lambda: adapter.release("p1"), starts[0])),
+        asyncio.create_task(queued(lambda: adapter.call("trajectory.close", id="p1"), starts[1])),
+        asyncio.create_task(
+            queued(lambda: adapter.call("trajectory.locate", id="p1", record_id=""), starts[2])
+        ),
+        asyncio.create_task(queued(lambda: adapter.call("trajectory.close", id=""), starts[3])),
+    ]
+    await asyncio.gather(*(started.wait() for started in starts))
+    assert all(not task.done() for task in waiting)
+
+    release.set()
+    await snapshot
+    results = await asyncio.gather(*waiting, return_exceptions=True)
+    assert results[:2] == [None, {"released": False}]
+    assert [str(error) for error in results[2:]] == [
+        "trajectory record_id must be a non-empty string",
+        "trajectory id must be a non-empty string",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_named_operations_retain_local_validation_and_follow_ignored_fields() -> None:
+    calls: list[str] = []
+
+    class Trajectory:
+        async def snapshot(self, participant_id: str, *, limit: int) -> object:
+            calls.append("snapshot")
+            return SimpleNamespace(value=page_wire([]))
+
+        async def locate(self, participant_id: str, record_id: str) -> object:
+            calls.append("locate")
+            return SimpleNamespace(value={})
+
+        async def search(self, participant_id: str, query: str, *, limit: int) -> object:
+            calls.append("search")
+            return SimpleNamespace(value={})
+
+        async def follow(self, stream_id: str, after: str, *, wait_seconds: float) -> object:
+            calls.append("follow")
+            return SimpleNamespace(value={"stream_id": stream_id, "upserts": []})
+
+        async def close(self, stream_id: str) -> object:
+            calls.append("close")
+            return SimpleNamespace(value={"released": True})
+
+    client = cast(FrontendClient, SimpleNamespace(trajectory=Trajectory()))
+    query, follow = TrajectoryQueryAdapter(client), TrajectoryFollowAdapter(client)
+    controller = TrajectoryController(query, follow)
+
+    with pytest.raises(ValueError, match="participant_id must be a non-empty string"):
+        await controller.open("", start_follow=False)
+    with pytest.raises(TypeError, match="trajectory id must be a non-empty string"):
+        await query.snapshot("", limit=1)
+    with pytest.raises(TypeError, match="trajectory record_id must be a non-empty string"):
+        await controller.locate("p1", "")
+    with pytest.raises(TypeError, match="trajectory id must be a non-empty string"):
+        await controller.locate("", "r1")
+    with pytest.raises(TypeError, match="trajectory query must be a non-empty string"):
+        await query.search("p1", "", limit=1)
+    with pytest.raises(TypeError, match="trajectory id must be a non-empty string"):
+        await query.release("", "stream")
+    with pytest.raises(TypeError, match="trajectory stream_id must be a non-empty string"):
+        await query.release("p1", "")
+    with pytest.raises(TypeError, match="trajectory stream_id must be a non-empty string"):
+        await follow.follow("", "", "cursor", wait=0, limit=0)
+    with pytest.raises(TypeError, match="trajectory after must be a non-empty string"):
+        await follow.follow("", "stream", "", wait=0, limit=0)
+    assert calls == []
+
+    assert (await follow.follow("", "stream", "cursor", wait=0, limit=0)).stream_id == "stream"
+    assert calls == ["follow"]
+    await controller.close()

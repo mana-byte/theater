@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from theater.harness.builtin.plugins.claude.identity import (
+    authoritative_resume_cwd,
+    materialized_resume_transcript,
+)
 from theater.harness.builtin.plugins.claude.launch import (
     resume_launch_overlay,
     resume_preflight,
@@ -113,6 +117,31 @@ def test_a_known_session_id_is_found_by_filename_without_reading_anything(root, 
     """The stem *is* the session id, so this needs no scan and no cwd guess."""
     want = write(root / "-tmp-x" / f"{SESSION}.jsonl", [{"cwd": "/somewhere/else"}])
     assert observer.find_transcript(cwd="/tmp/x", session_id=SESSION) == want
+
+
+def test_resume_escapes_metacharacter_ids_but_discovery_keeps_its_glob(root, observer):
+    exact_id = "sess[ab]"
+    exact = write(root / "project" / f"{exact_id}.jsonl", [{"cwd": "/elsewhere"}])
+    glob_match = write(root / "project" / "sessa.jsonl", [{"cwd": "/elsewhere"}])
+
+    assert (
+        materialized_resume_transcript(root=root, session_id=exact_id, known_location=None)
+        == exact.resolve()
+    )
+    assert observer.find_transcript(cwd="/tmp/x", session_id=exact_id) == glob_match
+
+
+def test_resume_checks_both_session_keys_while_receipt_uses_first(root, observer, tmp_path):
+    path = write(
+        root / "project" / f"{CONFIG_ROOT_SESSION}.jsonl",
+        [{"session_id": CONFIG_ROOT_SESSION, "sessionId": "other", "cwd": str(tmp_path)}],
+    )
+
+    assert _receipt(observer, path).location == str(path.resolve())
+    with pytest.raises(BadRequest, match="different native session id"):
+        authoritative_resume_cwd(
+            root=root, session_id=CONFIG_ROOT_SESSION, known_location=str(path)
+        )
 
 
 def test_an_unknown_session_id_falls_back_to_the_cwd_scan(root, observer):

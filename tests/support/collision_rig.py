@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.observation import apply_batch
 from tests.support.shipped import VibeHarness
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.daemon.registry import Registry
@@ -32,7 +33,7 @@ async def accept_bound_source(observer: Observer, harness: VibeHarness, particip
     batch = await source.read()
     assert batch.attached is not None
     assert observer._accept_attachment(participant.id, source, batch)
-    observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+    apply_batch(observer, participant.id, batch, QuietClock(), TurnAccumulator(), source=source)
     return source
 
 

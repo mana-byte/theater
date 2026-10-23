@@ -145,6 +145,7 @@ def test_codex_thread_settings_seed_usage_without_adding_trajectory_noise() -> N
 
 async def test_codex_history_associates_context_model_and_usage_with_the_active_turn(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     path = tmp_path / "rollout.jsonl"
     records = [
@@ -197,8 +198,17 @@ async def test_codex_history_associates_context_model_and_usage_with_the_active_
         known_location=str(path),
         session_provenance=TranscriptProvenance.OPERATOR,
     )
+    seed_calls = []
+    original_seed = source._observer._seed_history_context
+
+    def record_seed(fh, start):
+        seed_calls.append(source._observer)
+        original_seed(fh, start)
+
+    monkeypatch.setattr(source._observer, "_seed_history_context", record_seed)
 
     page = await source.history_page(limit=20)
+    assert seed_calls == [source._observer]
     usage_fact = next(fact for fact in page.trajectory if fact.usage is not None)
     canonical = tuple(
         fact_to_record(fact, participant_id="participant", source_epoch="epoch")
@@ -219,6 +229,13 @@ async def test_codex_history_associates_context_model_and_usage_with_the_active_
     assert request.provider == "azure"
     assert request.usage is not None
     assert request.usage.input_tokens == 80
+
+    def unreadable_seed(fh, start):
+        raise OSError("seed read failed")
+
+    monkeypatch.setattr(source._observer, "_seed_history_context", unreadable_seed)
+    failed = await source.history_page(limit=20)
+    assert failed.error_code == "transcript_source_unavailable"
 
 
 async def test_codex_live_attachment_seeds_model_context_for_usage(tmp_path: Path) -> None:

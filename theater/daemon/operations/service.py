@@ -146,6 +146,42 @@ class OperationService:
         self._reconciler = reconciler
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
+    def write_replacement_in_unit(
+        self,
+        unit: WriteUnit,
+        *,
+        expected_state: str,
+        expected_updated_at: float,
+        replacement: PublicOperationRecord,
+        idempotency_settled_at: float | None,
+    ) -> JournalEventRecord | None:
+        """Write one replacement and return its ungrouped event on CAS success."""
+        if not self._store.operations.replace(
+            replacement,
+            expected_state=expected_state,
+            expected_updated_at=expected_updated_at,
+            connection=unit.connection,
+        ):
+            return None
+        if idempotency_settled_at is not None:
+            self._store.operations.settle_idempotency_for_operation(
+                replacement.operation_id,
+                settled_at=idempotency_settled_at,
+                retain_until=idempotency_settled_at + IDEMPOTENCY_RETENTION_SECONDS,
+                connection=unit.connection,
+            )
+        return self._operation_event(replacement)
+
+    @staticmethod
+    def _operation_event(record: PublicOperationRecord) -> JournalEventRecord:
+        return JournalEventRecord(
+            kind="operation.updated",
+            entity_id=record.operation_id,
+            entity_revision=0,
+            payload=operation_event_payload(record),
+            recorded_at=record.updated_at,
+        )
+
     def configure_reconciler(self, reconciler: EvidenceReconciler) -> None:
         """Install the daemon evidence reader after dependent services exist."""
         self._reconciler = reconciler
@@ -208,7 +244,9 @@ class OperationService:
                     raise RuntimeError(
                         "accepted idempotency claim disappeared inside its write unit"
                     )
-                self._append_event(unit, prepared.record, preceding=prepared.events)
+                self._append_event(
+                    unit, self._operation_event(prepared.record), preceding=prepared.events
+                )
                 unit.after_commit(lambda: self._notifier.notify(operation_id))
         except IntegrityError:
             winner = self._active_idempotency(client_id, idempotency_key, self._clock())
@@ -753,28 +791,23 @@ class OperationService:
                 job_handle=job_handle if job_handle is not None else current.job_handle,
             )
             _validate_operation(updated)
-            if not self._store.operations.replace(
-                updated,
+            event = self.write_replacement_in_unit(
+                unit,
                 expected_state=current.state,
                 expected_updated_at=current.updated_at,
-                connection=unit.connection,
-            ):
+                replacement=updated,
+                idempotency_settled_at=timestamp if terminal else None,
+            )
+            if event is None:
                 raise RuntimeError("operation changed during its synchronous write unit")
-            if terminal:
-                self._store.operations.settle_idempotency_for_operation(
-                    operation_id,
-                    settled_at=timestamp,
-                    retain_until=timestamp + IDEMPOTENCY_RETENTION_SECONDS,
-                    connection=unit.connection,
-                )
-            self._append_event(unit, updated)
+            self._append_event(unit, event)
             unit.after_commit(lambda: self._notifier.notify(operation_id))
         return updated
 
     def _append_event(
         self,
         unit: WriteUnit,
-        record: PublicOperationRecord,
+        event: JournalEventRecord,
         *,
         preceding: tuple[JournalEventRecord, ...] = (),
     ) -> None:
@@ -785,13 +818,7 @@ class OperationService:
             unit,
             [
                 *preceding,
-                JournalEventRecord(
-                    kind="operation.updated",
-                    entity_id=record.operation_id,
-                    entity_revision=revision,
-                    payload=operation_event_payload(record),
-                    recorded_at=record.updated_at,
-                ),
+                replace(event, entity_revision=revision),
             ],
         )
 

@@ -206,7 +206,6 @@ class Daemon:
             self._sock_id: tuple[int, int] | None = None
             self._stopping = asyncio.Event()
             self._conns: set[asyncio.Task] = set()
-            self._send_seq = 0
         except BaseException:
             if _owned_store is not None:
                 with contextlib.suppress(Exception):
@@ -260,9 +259,7 @@ class Daemon:
             jobs=self.jobs,
             runtime_for=self.runtime_manager.get,
             gates=build_control_gates(self),
-            native_route=self._native_route_for_control,
-            native_capabilities=self._native_capabilities_for_control,
-            native_admission=self._native_admission_for_control,
+            native_facts=self._native_facts_for_control,
             gate_opener=self.handoff,
             play_gate=self.plays,
         )
@@ -309,28 +306,10 @@ class Daemon:
     def _state_transactional_route_for(self, participant_id, capability, connection):
         return self.controls.route_for(participant_id, capability, connection=connection)
 
-    def _native_route_for_control(self, participant_id: str, binding):
+    def _native_facts_for_control(self, participant_id: str, binding):
         if binding is None:
             return None
-        return self.runtime_manager.cached_native_route(
-            participant_id,
-            backend_generation=binding.backend_generation,
-            native_session_id=binding.native_session_id,
-        )
-
-    def _native_capabilities_for_control(self, participant_id: str, binding):
-        if binding is None:
-            return None
-        return self.runtime_manager.cached_native_capabilities(
-            participant_id,
-            backend_generation=binding.backend_generation,
-            native_session_id=binding.native_session_id,
-        )
-
-    def _native_admission_for_control(self, participant_id: str, binding):
-        if binding is None:
-            return None
-        return self.runtime_manager.cached_native_admission(
+        return self.runtime_manager.cached_native_facts(
             participant_id,
             backend_generation=binding.backend_generation,
             native_session_id=binding.native_session_id,
@@ -408,12 +387,6 @@ class Daemon:
 
     def _set_otel_receiver_port(self, port: int) -> None:
         self.store.set_meta(CHANNEL_OTEL_RECEIVER_PORT_META_KEY, str(port))
-
-    def _next_send_seq(self) -> int:
-        return lifecycle.next_send_seq(self)
-
-    def _init_send_seq(self) -> None:
-        lifecycle.init_send_seq(self)
 
     # ---- lifecycle -----------------------------------------------------
 

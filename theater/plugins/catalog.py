@@ -6,11 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from theater.constants.core import HARNESS_NAME
-from theater.harness.contracts.manifest import HarnessManifest
 from theater.harness.loading.models import LoadedPlugin
 from theater.harness.manifests.compiler import compile_manifest as compile_harness
 from theater.harness.manifests.validation import ManifestValidationError
-from theater.mcp_plugins.contracts import McpServerManifest
 from theater.mcp_plugins.loading import LoadedMcpPlugin
 from theater.mcp_plugins.validation import McpManifestValidationError, validate_manifest
 from theater.plugins.loading import (
@@ -19,6 +17,7 @@ from theater.plugins.loading import (
     cleanup_package,
     discover_packages,
     import_manifest,
+    manifest_facts,
     synthetic_package_name,
 )
 from theater.skills.loader import load_declared_plays, load_declared_skills
@@ -92,9 +91,10 @@ def _load(path: Path, name: str, source: str) -> LoadedPlugin | LoadedMcpPlugin 
         cleanup_package(package_name)
         return RejectedPlugin(path, source, name, f"{manifest_path}: {exc!r}")
 
-    manifest = getattr(module, "MANIFEST", None)
-    is_harness = isinstance(manifest, HarnessManifest)
-    is_mcp = isinstance(manifest, McpServerManifest)
+    facts = manifest_facts(module)
+    manifest = facts.value
+    is_harness = facts.harness is not None
+    is_mcp = facts.mcp is not None
     if is_harness == is_mcp:
         cleanup_package(package_name)
         if isinstance(manifest, type):
@@ -104,9 +104,9 @@ def _load(path: Path, name: str, source: str) -> LoadedPlugin | LoadedMcpPlugin 
         return RejectedPlugin(path, source, name, f"{manifest_path}: {detail}")
 
     if is_harness:
-        assert isinstance(manifest, HarnessManifest)
+        assert facts.harness is not None
         try:
-            harness = compile_harness(name, manifest)
+            harness = compile_harness(name, facts.harness)
         except KeyboardInterrupt:
             cleanup_package(package_name)
             raise
@@ -121,18 +121,18 @@ def _load(path: Path, name: str, source: str) -> LoadedPlugin | LoadedMcpPlugin 
             source=source,
             name=name,
             harness=harness,
-            manifest=manifest,
+            manifest=facts.harness,
         )
 
-    assert isinstance(manifest, McpServerManifest)
+    assert facts.mcp is not None
     try:
-        validate_manifest(name, manifest)
-        skills = load_declared_skills(path / "skills", manifest.skills, provider=name)
+        validate_manifest(name, facts.mcp)
+        skills = load_declared_skills(path / "skills", facts.mcp.skills, provider=name)
         plays = load_declared_plays(
             path / "skills",
-            manifest.plays,
+            facts.mcp.plays,
             provider=name,
-            play_permissions=manifest.play_permissions,
+            play_permissions=facts.mcp.play_permissions,
         )
     except KeyboardInterrupt:
         cleanup_package(package_name)
@@ -147,7 +147,7 @@ def _load(path: Path, name: str, source: str) -> LoadedPlugin | LoadedMcpPlugin 
         path=path,
         source=source,
         name=name,
-        manifest=manifest,
+        manifest=facts.mcp,
         skills=skills,
         plays=plays,
     )

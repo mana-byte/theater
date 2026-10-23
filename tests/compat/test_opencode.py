@@ -46,7 +46,6 @@ def test_verified_reads_an_exclusive_range_gate(coupled_tree: Path) -> None:
     assert gate.kind == "range"
     assert gate.floor == floor and gate.ceiling == ceiling
     assert gate.known_bad == frozenset()
-    assert gate.evidenced == frozenset()
     assert gate.admits(floor) and gate.admits(opencode_bump.previous_patch(ceiling))
     assert not gate.admits(ceiling)
     assert not gate.admits(opencode_bump.previous_patch(floor))
@@ -124,6 +123,37 @@ def test_apply_bump_fails_closed_when_ceiling_anchor_is_missing(coupled_tree: Pa
     path.write_text(source.replace("OPENCODE_TUI_MAX_VERSION =", "MISSING_MAX_VERSION ="))
     with pytest.raises(ValueError, match="unreadable"):
         opencode.ADAPTER.apply_bump(coupled_tree, [_candidate()])
+
+
+def test_rewrite_reports_missing_anchor_before_bad_release(coupled_tree: Path) -> None:
+    with pytest.raises(ValueError, match="bump anchor missing"):
+        opencode_bump.rewrite_ceiling(coupled_tree, "MISSING_MAX_VERSION", "bad-release")
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    ["OPENCODE_TUI_MAX_VERSION = [1, 2, 3]", "OPENCODE_TUI_MAX_VERSION = (1, 2)"],
+)
+def test_gate_rejects_nontriple_tuple_literals(coupled_tree: Path, replacement: str) -> None:
+    path = coupled_tree / opencode_bump.RUNTIME_PLAN
+    source = path.read_text(encoding="utf-8")
+    source = source.replace(
+        next(line for line in source.splitlines() if line.startswith("OPENCODE_TUI_MAX_VERSION =")),
+        replacement,
+    )
+    path.write_text(source, encoding="utf-8")
+    with pytest.raises(ValueError, match="the OpenCode gate is unreadable"):
+        opencode_bump.read_gate(coupled_tree)
+
+
+def test_gate_rejects_duplicate_plain_anchor_but_ignores_annotation(coupled_tree: Path) -> None:
+    path = coupled_tree / opencode_bump.RUNTIME_PLAN
+    source = path.read_text(encoding="utf-8")
+    path.write_text(source + "\nOPENCODE_TUI_MAX_VERSION: tuple = (9, 9, 9)\n")
+    assert opencode_bump.read_gate(coupled_tree) == opencode_bump.read_gate(REPO_ROOT)
+    path.write_text(source + "\nOPENCODE_TUI_MAX_VERSION = (9, 9, 9)\n")
+    with pytest.raises(ValueError, match="the OpenCode gate is unreadable"):
+        opencode_bump.read_gate(coupled_tree)
 
 
 def test_discover_keeps_only_the_1x_line(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,7 +272,7 @@ def test_prewarm_stops_forked_serve_children(
         "    while True: time.sleep(10)\n"
         "open('serve.pids', 'w').write(f'{os.getpid()} {child}')\n"
         f"if {announce!r}:\n"
-        "    print('opencode server listening on http://127.0.0.1:12345', flush=True)\n"
+        "    os.write(1, b'opencode server listening on http://127.0.0.1:12345\\n')\n"
         "while True: time.sleep(10)\n",
         encoding="utf-8",
     )
@@ -336,14 +366,18 @@ def test_qualify_is_tooling_when_stray_routes_hit_the_mock_on_a_non_green_run(
     assert result.verdict == "tooling"
 
 
-def test_install_failure_raises_install_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class _Result:
-        returncode = 1
-        stdout = ""
-        stderr = "npm ERR! network unreachable"
-
-    monkeypatch.setattr(opencode_sandbox, "run_group", lambda *args, **kwargs: _Result())
+def test_install_failure_raises_install_failed(tmp_path: Path) -> None:
+    sb = _sandbox(tmp_path)
+    sb.bin_dir.mkdir()
+    npm = sb.bin_dir / "npm"
+    npm.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('npm ERR! network unreachable', file=sys.stderr)\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    npm.chmod(0o755)
+    sb.env["PATH"] = f"{sb.bin_dir}:{sb.env['PATH']}"
     with pytest.raises(contract.InstallFailed, match="exited 1"):
-        opencode.ADAPTER.install(_sandbox(tmp_path), _candidate())
+        opencode.ADAPTER.install(sb, _candidate())

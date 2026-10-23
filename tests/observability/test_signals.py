@@ -37,6 +37,13 @@ def test_inactive_calls_do_not_touch_emitters() -> None:
     assert not bridge.active
 
 
+def test_missing_emitter_starts_inactive() -> None:
+    from theater.observability.signals import SignalBridge
+
+    assert not SignalBridge(None, _Tracer()).emit_log("agent.event", body={}, attributes={})
+    assert SignalBridge(_Logger(), None).emit_span("agent.span", attributes={}) is None
+
+
 def test_log_forwards_structured_event_and_copies_attributes(monkeypatch) -> None:
     from opentelemetry._logs import SeverityNumber
 

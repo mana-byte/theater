@@ -24,7 +24,7 @@ from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
 from theater.daemon.events.publication import job_event, next_revision
 from theater.daemon.handoff.evidence import EvidencePinner
 from theater.daemon.handoff.models import GitFacts, JobEvidence
-from theater.daemon.persistence.transactions import active_write_unit, after_commit
+from theater.daemon.persistence.transactions import WriteUnit, active_write_unit, after_commit
 from theater.daemon.response_contracts import audit, parse_stored
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
@@ -32,7 +32,7 @@ from theater.daemon.store import Store
 from theater.daemon.touch_paths import normalize_touch_path
 from theater.harness.base import EventPath
 from theater.json_values import decode_finite_json
-from theater.models import Job, JobKind, JobState, now
+from theater.models import Job, JobKind, JobState, JournalEventRecord, now
 
 logger = logging.getLogger("theater.jobs")
 
@@ -500,6 +500,52 @@ class JobManager:
         """Count of jobs whose persisted state is ``running``."""
         return self.store.active_job_count()
 
+    def live_handles(self) -> frozenset[str]:
+        """Snapshot handles whose local waiters still protect them from collection."""
+        return frozenset(self._events)
+
+    @staticmethod
+    def write_direct_terminal_in_unit(
+        store: Store,
+        unit: WriteUnit,
+        *,
+        job: Job,
+        state: JobState,
+        result: str | None,
+        error_code: str | None,
+        finished_at: float,
+    ) -> tuple[Job, JournalEventRecord] | None:
+        """Write direct terminal fields; caller owns the journal group and wakeup."""
+        if job.state != JobState.RUNNING:
+            return None
+        changed = unit.connection.execute(
+            update(jobs_table)
+            .where(jobs_table.c.handle == job.handle, jobs_table.c.state == JobState.RUNNING.value)
+            .values(
+                state=state.value,
+                result=result,
+                error_code=error_code,
+                finished_at=finished_at,
+            )
+        )
+        if changed.rowcount != 1:
+            return None
+        finished = store.get_job(job.handle, connection=unit.connection)
+        assert finished is not None
+        return finished, job_event(finished, revision=0, recorded_at=finished_at)
+
+    def wake_committed_direct_finish(self, handle: str) -> None:
+        """Wake a committed direct finish without terminal listeners or bus writes."""
+        if self.store.get_job(handle) is None:
+            return
+        self._wake_direct_finish(handle)
+
+    def _wake_direct_finish(self, handle: str) -> None:
+        event = self._events.pop(handle, None)
+        if event:
+            event.set()
+        self._accumulators.pop(handle, None)
+
     def finish(
         self,
         handle: str,
@@ -526,10 +572,7 @@ class JobManager:
             return None
         if job.state != JobState.RUNNING:
             # Already finished; event may linger after a daemon restart — set it so await wakes.
-            event = self._events.pop(handle, None)
-            if event:
-                event.set()
-            self._accumulators.pop(handle, None)
+            self._wake_direct_finish(handle)
             return job
 
         acc = self._accumulators.get(handle)

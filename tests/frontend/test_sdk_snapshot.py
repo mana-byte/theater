@@ -20,9 +20,27 @@ from tests.support.sdk_state_frames import (
 from theater.frontend import (
     FrontendClient,
     RequestUncertain,
+    SnapshotPage,
     StateSynchronizationError,
     StateSynchronizer,
 )
+from theater.frontend.state_sync import _projection_from_pages
+
+
+@pytest.mark.parametrize("revision", [None, True, "malformed", -1, 1.5])
+def test_snapshot_missing_or_invalid_projection_revision_starts_at_zero(revision: object) -> None:
+    participant = participant_frame("participant-a", "idle", 4)
+    if revision is None:
+        participant.pop("projection_revision")
+    else:
+        participant["projection_revision"] = revision
+    page = SnapshotPage.from_wire(
+        snapshot_page("snapshot-revision", 0, True, 0, participants=[participant])
+    )
+
+    projection = _projection_from_pages([page])
+
+    assert projection.entity_revisions[("participants", "participant-a")] == 0
 
 
 async def test_snapshot_assembly_is_atomic_and_recovers_from_expiry() -> None:  # noqa: PLR0915

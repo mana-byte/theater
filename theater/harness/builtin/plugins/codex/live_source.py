@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 
 from theater.harness.contracts.channels import ChannelHealth, ChannelHealthState
@@ -30,7 +29,7 @@ class CodexLiveSource(Source):
         self._runtime.set_activity_callback(callback)
 
     def buffered_terminal_evidence(self) -> tuple[NativeTurnOutcome, ...]:
-        return tuple(self._runtime._buffered_outcomes.values())
+        return self._runtime._outcome_buffer.snapshot()
 
     async def read(self) -> Batch:
         runtime = self._runtime
@@ -42,21 +41,12 @@ class CodexLiveSource(Source):
         while runtime._facts and len(facts) + len(previews) < CODEX_RUNTIME_EVENTS_PER_BATCH:
             facts.append(runtime._facts.popleft())
         facts.extend(previews)
-        evidence = []
-        while True:
-            # Each terminal removal releases one backpressured insertion; never discard exact
-            # outcomes.
-            try:
-                outcome = runtime._outcomes.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            runtime._buffered_outcomes.pop((outcome.native_session_id, outcome.native_turn_id))
-            evidence.append(outcome)
+        evidence = runtime._outcome_buffer.drain()
         status = self._status()
         status_changed = status != self._last_status
         self._last_status = status
         progressed = bool(events or facts or evidence or status_changed)
-        has_more = bool(runtime._events or runtime._facts or not runtime._outcomes.empty())
+        has_more = bool(runtime._events or runtime._facts or runtime._outcome_buffer.has_more())
         return Batch(
             events=events,
             progressed=progressed,
@@ -69,16 +59,12 @@ class CodexLiveSource(Source):
     def _drain_delta_previews(self) -> list:
         runtime = self._runtime
         previews: list = []
-        for item_id, text in list(runtime._delta_items.items()):
-            seen = runtime._delta_previewed_chars.get(item_id, 0)
-            if len(text) <= seen:
-                continue
-            runtime._delta_previewed_chars[item_id] = len(text)
+        for preview in runtime._preview_buffer.drain():
             previews.append(
                 _fact(
                     kind=TrajectoryKind.ASSISTANT,
-                    summary=ContentPreview.from_text(text).text,
-                    native_id=item_id,
+                    summary=ContentPreview.from_text(preview.text).text,
+                    native_id=preview.item_id,
                     turn_id=runtime._active_turn_id,
                     status=TrajectoryStatus.RUNNING,
                     lane=TrajectoryLane.MODEL,

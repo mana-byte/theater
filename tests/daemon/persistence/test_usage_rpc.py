@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from theater.daemon import diagnostic_params, diagnostics
 from theater.daemon.rpc import usage as usage_mod
 
 
@@ -28,7 +29,7 @@ def paris_timezone(monkeypatch):
 
 async def test_usage_summary_rpc_returns_all_three_windows(client, monkeypatch):
     timestamp = 2_000_000.0
-    monkeypatch.setattr(usage_mod, "now", lambda: timestamp)
+    monkeypatch.setattr(diagnostic_params, "now", lambda: timestamp)
     result = await client.call("usage_summary", window=24.0)
 
     assert result["since"] == timestamp - 24.0 * 3600.0
@@ -66,7 +67,7 @@ async def test_usage_summary_uses_local_calendar_period_boundaries(
 ):
     zone = ZoneInfo("Europe/Paris")
     timestamp = datetime(2026, 8, 21, 15, 30, tzinfo=zone).timestamp()
-    monkeypatch.setattr(usage_mod, "now", lambda: timestamp)
+    monkeypatch.setattr(diagnostic_params, "now", lambda: timestamp)
 
     expected = {
         "day": datetime(2026, 8, 21, tzinfo=zone).timestamp(),
@@ -88,7 +89,7 @@ async def test_usage_summary_local_midnight_is_dst_safe(client, monkeypatch, par
     zone = ZoneInfo("Europe/Paris")
     # Europe/Paris changes from +01:00 to +02:00 after midnight on this date.
     timestamp = datetime(2026, 3, 29, 12, 0, tzinfo=zone).timestamp()
-    monkeypatch.setattr(usage_mod, "now", lambda: timestamp)
+    monkeypatch.setattr(diagnostic_params, "now", lambda: timestamp)
 
     result = await client.call("usage_summary", window=24.0, period="day")
 
@@ -101,7 +102,7 @@ async def test_usage_summary_day_resets_all_footer_totals_at_midnight(
     zone = ZoneInfo("Europe/Paris")
     midnight = datetime(2026, 8, 21, tzinfo=zone).timestamp()
     timestamp = datetime(2026, 8, 21, 15, 30, tzinfo=zone).timestamp()
-    monkeypatch.setattr(usage_mod, "now", lambda: timestamp)
+    monkeypatch.setattr(diagnostic_params, "now", lambda: timestamp)
     base = {
         "participant_id": "p1",
         "tree_root_id": "p1",
@@ -212,7 +213,7 @@ async def test_usage_by_harness_covers_week_crossing_month_and_zero_fills_plugin
 
 async def test_usage_by_harness_does_not_zero_fill_plugins_that_failed_to_load(client, monkeypatch):
     monkeypatch.setattr(
-        usage_mod,
+        diagnostics,
         "describe",
         lambda: [
             {"name": "working", "error": None},

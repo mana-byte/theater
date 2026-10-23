@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.launch_preparation import prepare_provider_reservation
 from tests.support.resume_harnesses import ResumeHarness, trusted_resume
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES
@@ -33,7 +34,7 @@ async def test_resume_refuses_unknown_session_id(registry, resume_harness, monke
     )
 
     with pytest.raises(BadRequest, match="no trusted"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
 
 
 async def test_resume_refuses_heuristic_session_id(registry, resume_harness, monkeypatch):
@@ -56,7 +57,7 @@ async def test_resume_refuses_heuristic_session_id(registry, resume_harness, mon
     )
 
     with pytest.raises(BadRequest, match="no trusted"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
 
 
 async def test_resume_allows_trusted_dead_session(registry, resume_harness, monkeypatch):
@@ -71,7 +72,7 @@ async def test_resume_allows_trusted_dead_session(registry, resume_harness, monk
         resume="sess-abc",
     )
 
-    await spawner.reserve(req)
+    await prepare_provider_reservation(spawner, req)
 
     assert resume_harness.seen_resume == "sess-abc"
 
@@ -89,7 +90,7 @@ async def test_resume_refuses_live_trusted_session_id(registry, resume_harness, 
     )
 
     with pytest.raises(BadRequest, match=f"trusted owner {p.id} is still live"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
 
 
 async def test_dead_trusted_binding_remains_resumable_when_transcript_is_missing(
@@ -110,7 +111,7 @@ async def test_dead_trusted_binding_remains_resumable_when_transcript_is_missing
         resume="sess-abc",
     )
 
-    spawned = (await spawner.reserve(req)).participant
+    spawned = (await prepare_provider_reservation(spawner, req)).participant
 
     assert spawned.status.value == "idle"
     assert resume_harness.seen_resume == "sess-abc"
@@ -140,14 +141,15 @@ async def test_vibe_resume_reuses_trusted_isolated_domain(registry, tmp_path, te
     registry.store.upsert_participant(predecessor)
     registry.mark_dead(predecessor.id)
 
-    reservation = await Spawner(registry).reserve(
+    reservation = await prepare_provider_reservation(
+        Spawner(registry),
         SpawnRequest(
             harness="vibe",
             prompt="continue",
             cwd=str(project),
             approval="manual",
             resume="sessabc1-1111-2222-3333",
-        )
+        ),
     )
 
     spawned = reservation.participant
@@ -160,13 +162,14 @@ async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, termina
     project.mkdir()
     spawner = Spawner(registry)
 
-    cold_reservation = await spawner.reserve(
+    cold_reservation = await prepare_provider_reservation(
+        spawner,
         SpawnRequest(
             harness="vibe",
             prompt="start",
             cwd=str(project),
             approval="manual",
-        )
+        ),
     )
     cold = registry.get(cold_reservation.participant.id)
     assert cold.transcript_domain is not None
@@ -180,26 +183,28 @@ async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, termina
     registry.store.upsert_participant(cold)
     registry.mark_dead(cold.id)
 
-    first_reservation = await spawner.reserve(
+    first_reservation = await prepare_provider_reservation(
+        spawner,
         SpawnRequest(
             harness="vibe",
             prompt="resume once",
             cwd=str(project),
             approval="manual",
             resume="sessabc1-1111-2222-3333",
-        )
+        ),
     )
     first = first_reservation.participant
     registry.mark_dead(first.id)
 
-    second_reservation = await spawner.reserve(
+    second_reservation = await prepare_provider_reservation(
+        spawner,
         SpawnRequest(
             harness="vibe",
             prompt="resume twice",
             cwd=str(project),
             approval="manual",
             resume="sessabc1-1111-2222-3333",
-        )
+        ),
     )
 
     second = second_reservation.participant
@@ -216,13 +221,14 @@ async def test_vibe_resume_refuses_live_successor_even_with_dead_lineage(
     project.mkdir()
     spawner = Spawner(registry)
 
-    cold_reservation = await spawner.reserve(
+    cold_reservation = await prepare_provider_reservation(
+        spawner,
         SpawnRequest(
             harness="vibe",
             prompt="start",
             cwd=str(project),
             approval="manual",
-        )
+        ),
     )
     cold = registry.get(cold_reservation.participant.id)
     assert cold.transcript_domain is not None
@@ -236,26 +242,28 @@ async def test_vibe_resume_refuses_live_successor_even_with_dead_lineage(
     registry.store.upsert_participant(cold)
     registry.mark_dead(cold.id)
 
-    live_reservation = await spawner.reserve(
+    live_reservation = await prepare_provider_reservation(
+        spawner,
         SpawnRequest(
             harness="vibe",
             prompt="resume once",
             cwd=str(project),
             approval="manual",
             resume="sessabc1-1111-2222-3333",
-        )
+        ),
     )
     live = live_reservation.participant
 
     with pytest.raises(BadRequest, match=f"trusted owner {live.id} is still live"):
-        await spawner.reserve(
+        await prepare_provider_reservation(
+            spawner,
             SpawnRequest(
                 harness="vibe",
                 prompt="resume twice",
                 cwd=str(project),
                 approval="manual",
                 resume="sessabc1-1111-2222-3333",
-            )
+            ),
         )
 
 
@@ -291,14 +299,15 @@ async def test_vibe_resume_refuses_unrelated_trusted_row_for_marked_domain(
     registry.mark_dead(unrelated.id)
 
     with pytest.raises(BadRequest, match="different Theater session lineage"):
-        await Spawner(registry).reserve(
+        await prepare_provider_reservation(
+            Spawner(registry),
             SpawnRequest(
                 harness="vibe",
                 prompt="continue",
                 cwd=str(project),
                 approval="manual",
                 resume="resume-session-2222",
-            )
+            ),
         )
 
     assert terminal_provider.creations == []
@@ -321,14 +330,15 @@ async def test_vibe_resume_refuses_legacy_shared_root(registry, tmp_path, termin
     registry.mark_dead(predecessor.id)
 
     with pytest.raises(BadRequest, match="Rebind or migrate"):
-        await Spawner(registry).reserve(
+        await prepare_provider_reservation(
+            Spawner(registry),
             SpawnRequest(
                 harness="vibe",
                 prompt="continue",
                 cwd=str(project),
                 approval="manual",
                 resume="sessabc1-1111-2222-3333",
-            )
+            ),
         )
 
     assert terminal_provider.creations == []
@@ -353,7 +363,7 @@ async def test_resume_persists_floor_on_successor(registry, resume_harness, monk
         approval="edits",
         resume="sess-abc",
     )
-    spawned = (await spawner.reserve(req)).participant
+    spawned = (await prepare_provider_reservation(spawner, req)).participant
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor is not None
     assert reloaded.resume_floor != UNKNOWN_FLOOR
@@ -379,7 +389,7 @@ async def test_resume_floor_unknown_when_transcript_missing(
         approval="edits",
         resume="sess-abc",
     )
-    spawned = (await spawner.reserve(req)).participant
+    spawned = (await prepare_provider_reservation(spawner, req)).participant
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor == UNKNOWN_FLOOR
     assert reloaded.source_checkpoint is None
@@ -395,7 +405,7 @@ async def test_cold_spawn_has_no_floor(registry, resume_harness, monkeypatch):
         cwd="/tmp",
         approval="edits",
     )
-    spawned = (await spawner.reserve(req)).participant
+    spawned = (await prepare_provider_reservation(spawner, req)).participant
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor is None
     assert reloaded.source_checkpoint is None
@@ -421,7 +431,7 @@ async def test_resume_floor_unknown_when_file_unreadable(
         approval="edits",
         resume="sess-abc",
     )
-    spawned = (await spawner.reserve(req)).participant
+    spawned = (await prepare_provider_reservation(spawner, req)).participant
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor == UNKNOWN_FLOOR
     assert reloaded.source_checkpoint is None
@@ -441,7 +451,7 @@ async def test_resume_by_participant_id_resolves_to_session_id(
         approval="edits",
         resume=p.id,
     )
-    await spawner.reserve(req)
+    await prepare_provider_reservation(spawner, req)
     assert resume_harness.seen_resume == "native-sess-123"
 
 
@@ -459,7 +469,7 @@ async def test_resume_by_participant_id_wrong_harness_refused(
         resume=p.id,
     )
     with pytest.raises(BadRequest, match="belongs to harness"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
 
 
 async def test_resume_by_participant_id_live_refused(registry, resume_harness, monkeypatch):
@@ -476,7 +486,7 @@ async def test_resume_by_participant_id_live_refused(registry, resume_harness, m
         resume=p.id,
     )
     with pytest.raises(BadRequest, match="still live"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
 
 
 async def test_resume_by_participant_id_no_session_id_refused(
@@ -496,7 +506,7 @@ async def test_resume_by_participant_id_no_session_id_refused(
         resume=p.id,
     )
     with pytest.raises(BadRequest, match="has not recorded its harness session id"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
 
 
 async def test_resume_by_unknown_id_falls_through_to_native_path(
@@ -514,4 +524,4 @@ async def test_resume_by_unknown_id_falls_through_to_native_path(
         resume="not-a-participant-id",
     )
     with pytest.raises(BadRequest, match="no trusted"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)

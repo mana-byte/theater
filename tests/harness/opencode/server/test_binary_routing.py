@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.launch_preparation import prepare_provider_reservation
 from tests.support.opencode_releases import V1_RELEASE, V2_RELEASE
 from theater.daemon.runtime import wiring as wiring_mod
 from theater.daemon.spawning import planning
@@ -314,13 +315,13 @@ async def test_the_event_loop_stays_live_during_a_blocked_resume_overlay(
     _trusted_dead_predecessor(registry, "routing-safety-resume", "opencode://old")
     spawner = Spawner(registry)
 
-    reserve_task = asyncio.create_task(spawner.reserve(_resume_request()))
+    prepare_task = asyncio.create_task(prepare_provider_reservation(spawner, _resume_request()))
     await _await_condition(lambda: blocking_resume_harness.overlay_domain == "opencode://old")
     # The pure callback is blocked on a worker thread; store work still runs here.
     registry.store.get_participant("h00000000001")
-    assert not reserve_task.done()
+    assert not prepare_task.done()
     blocking_resume_harness.gate.set()
-    reservation = await asyncio.wait_for(reserve_task, timeout=10)
+    reservation = await asyncio.wait_for(prepare_task, timeout=10)
     assert reservation.resume_predecessor is not None
 
 
@@ -331,7 +332,7 @@ async def test_a_resume_overlay_computed_from_stale_identity_is_rejected(
     predecessor = _trusted_dead_predecessor(registry, "routing-safety-resume", "opencode://old")
     spawner = Spawner(registry)
 
-    reserve_task = asyncio.create_task(spawner.reserve(_resume_request()))
+    prepare_task = asyncio.create_task(prepare_provider_reservation(spawner, _resume_request()))
     await _await_condition(lambda: blocking_resume_harness.overlay_domain == "opencode://old")
     # Same participant id, but the session's identity moved while the pure
     # callback was blocked: the stale overlay must not survive the await.
@@ -340,7 +341,7 @@ async def test_a_resume_overlay_computed_from_stale_identity_is_rejected(
     registry.store.upsert_participant(predecessor)
     blocking_resume_harness.gate.set()
     with pytest.raises(BadRequest, match="resume identity changed"):
-        await asyncio.wait_for(reserve_task, timeout=10)
+        await asyncio.wait_for(prepare_task, timeout=10)
 
 
 async def test_the_event_loop_stays_live_during_a_blocked_backend_planner(

@@ -7,7 +7,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from theater.harness.contracts.source import TranscriptCandidate
 from theater.harness.transcript.diagnostics import report_discovery_matches
@@ -15,12 +15,6 @@ from theater.harness.transcript.scan import scan_domain
 
 if TYPE_CHECKING:
     from theater.harness.contracts.launch import ResumeLaunchOverlay
-    from theater.harness.contracts.trajectory import ParsedRecord
-    from theater.harness.transcript.history import HistoryReader
-
-
-class _HistoryClone(Protocol):
-    def parse_record(self, line: str, index: int, *, clip_text: bool) -> ParsedRecord: ...
 
 
 class _Predecessor(Protocol):
@@ -231,26 +225,6 @@ class GlobDiscovery:
             self.automatic_rejection_of is not None
             and self.automatic_rejection_of(path) is not None
         )
-
-
-def stateful_history_reader(
-    clone: Callable[[], _HistoryClone],
-    seed_of: Callable[[_HistoryClone], Callable[[BinaryIO, int], None]],
-    decorate: Callable[[ParsedRecord, int], ParsedRecord],
-) -> HistoryReader:
-    """Build a HistoryReader from a fresh cloned observer.
-
-    ``clone`` returns a new observer instance; ``seed_of`` extracts the
-    bound method used for ``prepare_history_parse``.
-    """
-    from theater.harness.transcript.history import HistoryReader
-
-    reader = clone()
-    return HistoryReader(
-        parse_record=lambda line, index: reader.parse_record(line, index, clip_text=False),
-        decorate_parsed=decorate,
-        prepare_history_parse=seed_of(reader),
-    )
 
 
 def root_domain_overlay(

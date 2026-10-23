@@ -226,3 +226,28 @@ async def test_concurrent_transcript_binds_receive_independent_clients() -> None
     assert len(created) == 2
     assert created[0] is not created[1]
     assert [client.closed for client in created] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_transcript_bind_snapshot_failure_stops_before_unmanaged_refresh(monkeypatch) -> None:
+    app, client, _presentation = build_app()
+    refreshed = False
+
+    async def fail_snapshot():
+        raise FrontendTransportError("snapshot offline")
+
+    async def refresh_unmanaged(*_args, **_kwargs):
+        nonlocal refreshed
+        refreshed = True
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._startup_task is not None
+        await app._startup_task
+        monkeypatch.setattr(app._state, "initialize", fail_snapshot)
+        monkeypatch.setattr(app, "_refresh_unmanaged", refresh_unmanaged)
+        await app._bind_transcript_candidate("participant-1", "/tmp/accepted.jsonl")
+
+    assert client.transcripts.bind_calls[0]["location"] == "/tmp/accepted.jsonl"
+    assert app._last_state_error == ("stale", "snapshot offline")
+    assert not refreshed

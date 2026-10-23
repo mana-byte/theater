@@ -12,16 +12,9 @@ from theater.frontend.dto._wire import (
     extras,
     integer_value,
     object_value,
+    optional_number,
     string_value,
 )
-
-
-def _optional_number(value: object, label: str) -> float | None:
-    if value is None:
-        return None
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise TypeError(f"{label} must be a number or null")
-    return float(value)
 
 
 def _optional_integer(value: object, label: str) -> int | None:
@@ -54,8 +47,8 @@ class TranscriptEvent:
                 data.get("event_position"), "transcript event.event_position"
             ),
             index=integer_value(data.get("index"), "transcript event.index"),
-            role=string_value(data.get("role"), "transcript event.role") or "",
-            text=string_value(data.get("text"), "transcript event.text") or "",
+            role=string_value(data.get("role"), "transcript event.role"),
+            text=string_value(data.get("text"), "transcript event.text"),
             text_start_byte=integer_value(
                 data.get("text_start_byte"), "transcript event.text_start_byte"
             ),
@@ -116,7 +109,7 @@ class TranscriptReadPage:
         if not isinstance(raw_events, (list, tuple)):
             raise TypeError("transcript page.events must be an array")
         return cls(
-            participant_id=string_value(data.get("id"), "transcript page.id") or "",
+            participant_id=string_value(data.get("id"), "transcript page.id"),
             events=tuple(TranscriptEvent.from_wire(item) for item in raw_events),
             path=string_value(data.get("path"), "transcript page.path", optional=True),
             cursor=string_value(data.get("cursor"), "transcript page.cursor", optional=True),
@@ -149,11 +142,11 @@ class TranscriptCandidate:
     def from_wire(cls, value: object) -> TranscriptCandidate:
         data = object_value(value, "transcript candidate")
         return cls(
-            location=string_value(data.get("location"), "transcript candidate.location") or "",
+            location=string_value(data.get("location"), "transcript candidate.location"),
             session_id=string_value(
                 data.get("session_id"), "transcript candidate.session_id", optional=True
             ),
-            mtime=_optional_number(data.get("mtime"), "transcript candidate.mtime"),
+            mtime=optional_number(data.get("mtime"), "transcript candidate.mtime"),
             size=_optional_integer(data.get("size"), "transcript candidate.size"),
             provenance=string_value(
                 data.get("provenance"), "transcript candidate.provenance", optional=True
@@ -199,9 +192,8 @@ class TranscriptBindResult:
         return cls(
             participant_id=string_value(
                 data.get("participant_id"), "transcript bind result.participant_id"
-            )
-            or "",
-            location=string_value(data.get("location"), "transcript bind result.location") or "",
+            ),
+            location=string_value(data.get("location"), "transcript bind result.location"),
             session_id=string_value(
                 data.get("session_id"), "transcript bind result.session_id", optional=True
             ),

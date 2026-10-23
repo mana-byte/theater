@@ -18,7 +18,7 @@ from theater.constants.plugins import MCP_PLUGIN_SPAWN_OMISSION_MAX
 from theater.daemon.schema import participant_mcp_plugins
 from theater.daemon.spawning import planning
 from theater.daemon.spawning.models import SpawnRequest
-from theater.daemon.spawning.service import Spawner
+from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness.base import LaunchPlan
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.launch import ChannelCredential
@@ -265,11 +265,11 @@ def test_launch_plan_repr_redacts_sidecar_and_native_credentials():
 
 async def test_sidecar_planner_receives_the_persisted_worktree_cwd(
     monkeypatch,
-    registry,
+    daemon,
+    terminal_provider,
     isolated_mcp_registry,
     rendering_sidecars,
     tmp_path,
-    available_harness_binaries,
 ):
     source = tmp_path / "source"
     init_git_repo(source)
@@ -283,24 +283,23 @@ async def test_sidecar_planner_receives_the_persisted_worktree_cwd(
     monkeypatch.setattr(
         planning,
         "plan_launch",
-        lambda _harness, **_kwargs: LaunchPlan(argv=["fake"]),
+        lambda _harness, **_kwargs: LaunchPlan(argv=[sys.executable]),
     )
-    spawner = Spawner(registry)
-    reservation = await spawner.reserve(
-        SpawnRequest(
-            harness="vibe",
-            prompt="",
-            cwd=str(source),
-            approval="manual",
-            worktree=True,
-        )
+    accepted = await ParticipantLaunchService(daemon).spawn(
+        client_id="operator-a",
+        idempotency_key="sidecar-worktree-cwd",
+        params={
+            "harness": "vibe",
+            "approval": "manual",
+            "workspace": {"cwd": str(source), "worktree": True},
+        },
     )
-    try:
-        assert Path(reservation.child_cwd) != source
-        assert planned_cwds == [Path(reservation.child_cwd)]
-        assert registry.get(reservation.participant.id).cwd == reservation.child_cwd
-    finally:
-        await spawner.cleanup_reservation(reservation.participant)
+    operation, _timed_out = await daemon.operation_service.wait(str(accepted["operation_id"]))
+    assert operation.state == "succeeded"
+    child = daemon.registry.get(str(accepted["participant_id"]))
+    assert Path(child.cwd) != source
+    assert planned_cwds == [Path(child.cwd)]
+    assert terminal_provider.creations[0]["cwd"] == child.cwd
 
 
 async def test_symlinked_or_broken_sidecars_are_omitted_without_failing_the_harness_plan(

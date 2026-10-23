@@ -511,6 +511,52 @@ async def test_delta_previews_are_coalesced_and_bounded() -> None:
     await runtime.aclose()
 
 
+async def test_delta_eviction_retains_reused_id_suppression_and_unfinished_previews() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+
+    def delta(item_id: str, text: str) -> None:
+        runtime._on_agent_message_delta(
+            {"threadId": "ui-thread-1", "itemId": item_id, "delta": text}, None
+        )
+
+    async def previews() -> list:
+        batch = await source.read()
+        return [fact for fact in batch.trajectory if fact.kind is TrajectoryKind.ASSISTANT]
+
+    delta("reused", "original")
+    assert [fact.summary for fact in await previews()] == ["original"]
+    for index in range(codex_runtime_constants.CODEX_RUNTIME_DELTA_ITEMS_MAX):
+        delta(f"other-{index}", "x")
+    assert [fact.native_id for fact in await previews()] == [
+        f"other-{index}" for index in range(codex_runtime_constants.CODEX_RUNTIME_DELTA_ITEMS_MAX)
+    ]
+    assert source.health_snapshot()[0].dropped == 1
+
+    # Eviction discards text but retains the last emitted length for this ID.
+    delta("reused", "short")
+    assert await previews() == []
+    delta("reused", "again")
+    assert [fact.summary for fact in await previews()] == ["shortagain"]
+
+    delta("unfinished", "a")
+    assert [fact.summary for fact in await previews()] == ["a"]
+    assert await previews() == []
+    delta("unfinished", "b")
+    assert [fact.summary for fact in await previews()] == ["ab"]
+    runtime._on_item_completed(
+        {
+            "threadId": "ui-thread-1",
+            "item": {"id": "unfinished", "type": "agentMessage", "text": "ab"},
+        },
+        None,
+    )
+    delta("unfinished", "new")
+    assert [fact.summary for fact in await previews()] == ["new"]
+    await runtime.aclose()
+
+
 async def test_native_cumulative_usage_never_becomes_response_usage() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)

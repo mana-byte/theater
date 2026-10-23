@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.base import Event
 from theater.harness.source import Batch, Source, TranscriptSource
-from theater.harness.transcript.discovery import stateful_history_reader
+from theater.harness.transcript.history import HistoryParseContext
 from theater.provenance import TranscriptProvenance
 from theater.transcript_identity import TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
 
@@ -76,22 +76,18 @@ class _VibeTranscriptSource(TranscriptSource):
             after=self._after,
         )
 
-    def _history_reader(self):
+    def _history_parse_context(self) -> HistoryParseContext:
         from .observer import VibeObserver
 
-        def _clone():
-            reader = VibeObserver(
-                root=self._observer.root,
-                correlation_root=self._observer.correlation_root,
-                isolated=self._observer.isolated,
-            )
-            reader._cwd = self._observer._cwd
-            return reader
-
-        return stateful_history_reader(
-            clone=_clone,
-            seed_of=lambda r: r._seed_history_context,
-            decorate=self._decorate_parsed,
+        reader = VibeObserver(
+            root=self._observer.root,
+            correlation_root=self._observer.correlation_root,
+            isolated=self._observer.isolated,
+        )
+        reader._cwd = self._observer._cwd
+        return HistoryParseContext(
+            parse_record=lambda line, index: reader.parse_record(line, index, clip_text=False),
+            prepare_history_parse=reader._seed_history_context,
         )
 
     def commit_attachment(self) -> None:

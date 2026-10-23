@@ -14,7 +14,6 @@ from theater.harness.contracts.runtime import (
     NativeHumanInteraction,
     NativeInteractionKind,
     NativeRequestId,
-    NativeTurnOutcome,
     RuntimeConnection,
     RuntimeContext,
     RuntimeSettings,
@@ -23,6 +22,7 @@ from theater.models import Status
 
 from . import runtime_constants
 from .live_source import CodexLiveSource
+from .runtime_buffers import PreviewBuffer, TerminalOutcomeBuffer
 from .runtime_connection import CodexRuntimeConnection
 from .runtime_controls import CodexRuntimeControls
 from .runtime_events import CodexRuntimeEvents
@@ -90,16 +90,11 @@ class CodexRuntime(
         # backpressure.
         self._events: deque[Event] = deque(maxlen=runtime_constants.CODEX_RUNTIME_EVENTS_BUFFER)
         self._facts: deque = deque(maxlen=runtime_constants.CODEX_RUNTIME_FACTS_BUFFER)
-        self._outcomes: asyncio.Queue[NativeTurnOutcome] = asyncio.Queue(
-            maxsize=runtime_constants.CODEX_RUNTIME_OUTCOMES_BUFFER
+        self._outcome_buffer = TerminalOutcomeBuffer(
+            runtime_constants.CODEX_RUNTIME_OUTCOMES_BUFFER
         )
-        self._buffered_outcomes: dict[tuple[str, str], NativeTurnOutcome] = {}
         self._completed_items: OrderedDict[str, None] = OrderedDict()
-        # Values are None once an outcome's enqueue committed, or the _PENDING_OUTCOME sentinel
-        # while its bounded-queue insertion is still awaiting capacity.
-        self._terminal_turns: OrderedDict[tuple[str, str], object] = OrderedDict()
-        self._delta_items: OrderedDict[str, str] = OrderedDict()
-        self._delta_previewed_chars: dict[str, int] = {}
+        self._preview_buffer = PreviewBuffer()
         self._status_hint: Status | None = None
         # Coalesce arrival-driven observer wakes; never spawn a task per message.
         self._activity_callback: Callable[[], None] | None = None

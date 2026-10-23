@@ -100,12 +100,12 @@ async def test_scratchpad_get_refuses_a_namespace_beyond_the_read_budget(
     client, tmp_path, monkeypatch
 ):
     """The echoed namespace is part of the response, so it faces the budget."""
-    from theater.daemon.rpc import scratchpad as rpc_module
+    from theater.daemon import scratchpad_operations as operations_module
 
     repo = init_repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(rpc_module, "SCRATCHPAD_READ_BUDGET_BYTES", 512)
+        mp.setattr(operations_module, "SCRATCHPAD_READ_BUDGET_BYTES", 512)
         with pytest.raises(RemoteError) as exc:
             await client.call(
                 "scratchpad.get",
@@ -129,15 +129,15 @@ async def test_scratchpad_get_reports_an_unnameable_oversized_key_by_size(
     client, tmp_path, monkeypatch
 ):
     """A legacy key too large to echo is refused by size, not by name."""
+    from theater.daemon import scratchpad_operations as operations_module
     from theater.daemon.persistence.repositories import scratchpad as repo_module
-    from theater.daemon.rpc import scratchpad as rpc_module
 
     repo = init_repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
     legacy = "k" * 1_500_000
     with pytest.MonkeyPatch.context() as mp:
         # Write while the bounds are raised, so the entry predates them.
-        mp.setattr(rpc_module, "SCRATCHPAD_MAX_NAME_LENGTH", 1_600_000)
+        mp.setattr(operations_module, "SCRATCHPAD_MAX_NAME_LENGTH", 1_600_000)
         mp.setattr(repo_module, "SCRATCHPAD_NAMESPACE_QUOTA_BYTES", 8 * 1024 * 1024)
         await client.call(
             "scratchpad.write",
@@ -172,8 +172,8 @@ async def test_scratchpad_delete_by_name_confirms_a_mega_key_by_digest(
     client, tmp_path, monkeypatch
 ):
     """Deleting a too-large key by name confirms it by digest, not echo."""
+    from theater.daemon import scratchpad_operations as operations_module
     from theater.daemon.persistence.repositories import scratchpad as repo_module
-    from theater.daemon.rpc import scratchpad as rpc_module
 
     repo = init_repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
@@ -181,7 +181,7 @@ async def test_scratchpad_delete_by_name_confirms_a_mega_key_by_digest(
     digest = hashlib.sha256(legacy.encode("utf-8")).hexdigest()
     with pytest.MonkeyPatch.context() as mp:
         # Write while the bounds are raised, so the entry predates them.
-        mp.setattr(rpc_module, "SCRATCHPAD_MAX_NAME_LENGTH", 1_600_000)
+        mp.setattr(operations_module, "SCRATCHPAD_MAX_NAME_LENGTH", 1_600_000)
         mp.setattr(repo_module, "SCRATCHPAD_NAMESPACE_QUOTA_BYTES", 8 * 1024 * 1024)
         await client.call(
             "scratchpad.write",
@@ -294,7 +294,7 @@ async def test_scratchpad_delete_validates_the_digests_parameter(client, tmp_pat
 
 async def test_scratchpad_clear_empties_an_unreadable_namespace(client, tmp_path):
     """The only remedy for a namespace too large to echo: clear it."""
-    from theater.daemon.rpc import scratchpad as rpc_module
+    from theater.daemon import scratchpad_operations as operations_module
 
     repo = init_repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
@@ -309,7 +309,7 @@ async def test_scratchpad_clear_empties_an_unreadable_namespace(client, tmp_path
         key="second",
     )
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(rpc_module, "SCRATCHPAD_READ_BUDGET_BYTES", 512)
+        mp.setattr(operations_module, "SCRATCHPAD_READ_BUDGET_BYTES", 512)
         with pytest.raises(RemoteError):
             await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
         cleared = await client.call(
@@ -359,7 +359,7 @@ async def test_scratchpad_delete_refuses_an_ambiguous_digest(client, tmp_path, m
 
 async def test_scratchpad_delete_response_stays_within_the_read_budget(client, tmp_path):
     """Names echo only while they fit; the rest are confirmed by digest."""
-    from theater.daemon.rpc import scratchpad as rpc_module
+    from theater.daemon import scratchpad_operations as operations_module
 
     repo = init_repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
@@ -375,7 +375,7 @@ async def test_scratchpad_delete_response_stays_within_the_read_budget(client, t
     )
     with pytest.MonkeyPatch.context() as mp:
         # no name can fit: both come back as digests, the echo as null
-        mp.setattr(rpc_module, "SCRATCHPAD_READ_BUDGET_BYTES", 0)
+        mp.setattr(operations_module, "SCRATCHPAD_READ_BUDGET_BYTES", 0)
         deleted = await client.call(
             "scratchpad.delete",
             caller_id=caller["id"],
@@ -442,14 +442,14 @@ async def test_scratchpad_delete_rejects_empty_strings_and_unbounded_batches(cli
 
 async def test_scratchpad_delete_accepts_a_legacy_overlong_key(client, tmp_path, monkeypatch):
     """Pre-bound keys stay deletable so they can be cleaned up."""
-    from theater.daemon.rpc import scratchpad as rpc_module
+    from theater.daemon import scratchpad_operations as operations_module
 
     repo = init_repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
     legacy = "k" * 200
     with pytest.MonkeyPatch.context() as mp:
         # Write while the bound is raised, so the entry predates it.
-        mp.setattr(rpc_module, "SCRATCHPAD_MAX_NAME_LENGTH", 300)
+        mp.setattr(operations_module, "SCRATCHPAD_MAX_NAME_LENGTH", 300)
         await client.call(
             "scratchpad.write",
             caller_id=caller["id"],
@@ -483,14 +483,14 @@ async def test_scratchpad_legacy_overlong_namespace_stays_readable_and_deletable
     client, tmp_path, monkeypatch
 ):
     """Pre-bound namespaces grandfather like keys: readable, deletable."""
-    from theater.daemon.rpc import scratchpad as rpc_module
+    from theater.daemon import scratchpad_operations as operations_module
 
     repo = init_repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
     legacy_ns = "n" * 200
     with pytest.MonkeyPatch.context() as mp:
         # Write while the bound is raised, so the namespace predates it.
-        mp.setattr(rpc_module, "SCRATCHPAD_MAX_NAME_LENGTH", 300)
+        mp.setattr(operations_module, "SCRATCHPAD_MAX_NAME_LENGTH", 300)
         await client.call(
             "scratchpad.write",
             caller_id=caller["id"],

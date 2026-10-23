@@ -17,6 +17,7 @@ from tests.support.codex_rollout_items import (
     rollout_record,
     session_meta,
 )
+from theater.constants.trajectory import TRAJECTORY_MCP_CALL_CONTEXT_LIMIT
 from theater.daemon.trajectory.project import project_events_and_facts
 from theater.harness.base import EventKind
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
@@ -225,6 +226,32 @@ def test_dual_stream_output_before_item_collapses_too():
     # The surviving result is the item's rich version.
     result_record = next(r for r in canonical if r.kind is TrajectoryKind.TOOL_RESULT)
     assert result_record.summary == "patch applied"
+
+
+def test_raw_correlation_evicts_oldest_call_before_rich_item():
+    observer = CodexObserver()
+    for index in range(TRAJECTORY_MCP_CALL_CONTEXT_LIMIT + 1):
+        observer.parse_record(json.dumps(_raw_tool_call(f"call-{index}")), index)
+
+    oldest = observer.parse_record(
+        json.dumps(
+            item_completed("turn-a", file_change_item("call-0"), started_ms=1, completed_ms=2)
+        ),
+        TRAJECTORY_MCP_CALL_CONTEXT_LIMIT + 1,
+    )
+    newest = observer.parse_record(
+        json.dumps(
+            item_completed(
+                "turn-a",
+                file_change_item(f"call-{TRAJECTORY_MCP_CALL_CONTEXT_LIMIT}"),
+                started_ms=1,
+                completed_ms=2,
+            )
+        ),
+        TRAJECTORY_MCP_CALL_CONTEXT_LIMIT + 2,
+    )
+    assert [event.kind for event in oldest.events] == [EventKind.TOOL_CALL]
+    assert newest.events == ()
 
 
 @pytest.mark.asyncio

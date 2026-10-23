@@ -125,11 +125,14 @@ def test_commit_failure_rolls_back_a_supplied_connection(tmp_path, monkeypatch) 
         store.close()
 
 
-class _CheckpointSource:
+class _CheckpointSource(Source):
     def __init__(self, checkpoint: str) -> None:
         self.checkpoint = checkpoint
         self.acknowledged = False
         self.rolled_back = False
+
+    async def read(self) -> Batch:
+        return Batch()
 
     def pending_source_checkpoint(self) -> str:
         return self.checkpoint
@@ -166,7 +169,7 @@ def test_nonterminal_observation_batch_commits_once_with_checkpoint(tmp_path) ->
         store.close()
 
 
-def test_direct_reducer_apply_restores_watcher_state_after_rollback(tmp_path, monkeypatch) -> None:
+def test_source_batch_apply_restores_watcher_state_after_rollback(tmp_path, monkeypatch) -> None:
     store = Store(tmp_path / "observer-rollback.db")
     registry = Registry(store)
     participant = registry.register(harness="codex", pane=None, cwd="/tmp")
@@ -180,8 +183,9 @@ def test_direct_reducer_apply_restores_watcher_state_after_rollback(tmp_path, mo
 
     monkeypatch.setattr(store, "set_status", fail)
     with pytest.raises(RuntimeError, match="cannot persist status"):
-        observer._apply(
+        observer._apply_source_batch(
             participant.id,
+            _CheckpointSource("cursor-a"),
             Batch(events=[Event(kind=EventKind.ASSISTANT, text="after")]),
             clock,
             turns,
@@ -377,9 +381,8 @@ def test_terminal_batch_commits_once_and_replay_never_completes_the_next_job(
         store.close()
 
 
-@pytest.mark.parametrize("entry", ["source_batch", "direct_apply"])
 def test_second_turn_touches_go_to_the_next_job_without_file_io_in_the_unit(
-    tmp_path, monkeypatch, entry
+    tmp_path, monkeypatch
 ) -> None:
     from sqlalchemy import select
 
@@ -427,12 +430,9 @@ def test_second_turn_touches_go_to_the_next_job_without_file_io_in_the_unit(
         ]
     )
     try:
-        if entry == "source_batch":
-            observer._apply_source_batch(
-                participant.id, _CheckpointSource("c"), batch, QuietClock(), TurnAccumulator()
-            )
-        else:
-            observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+        observer._apply_source_batch(
+            participant.id, _CheckpointSource("c"), batch, QuietClock(), TurnAccumulator()
+        )
 
         rows = store.conn.execute(select(touch.c.job_handle, touch.c.path)).fetchall()
         assert sorted(tuple(r) for r in rows) == [("job-a", "a.txt"), ("job-b", "b.txt")]
@@ -476,7 +476,9 @@ def test_each_job_spends_only_its_own_touch_hash_budget(tmp_path, monkeypatch) -
         ]
     )
     try:
-        observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+        observer._apply_source_batch(
+            participant.id, _CheckpointSource("c"), batch, QuietClock(), TurnAccumulator()
+        )
 
         rows = store.conn.execute(
             select(
@@ -521,7 +523,9 @@ def test_dot_slash_touch_path_completes_the_job(tmp_path) -> None:
         ]
     )
     try:
-        observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+        observer._apply_source_batch(
+            participant.id, _CheckpointSource("c"), batch, QuietClock(), TurnAccumulator()
+        )
 
         assert store.get_job("job-a").state == "done"
         rows = store.conn.execute(select(touch.c.job_handle, touch.c.path)).fetchall()

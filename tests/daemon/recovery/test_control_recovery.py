@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -148,6 +149,58 @@ async def test_historical_control_receipt_settles_after_real_database_reopen(
         recovered.report("provider-a", generation, 2, {"receipts": []})
     await recovered.aclose()
     reopened.close()
+
+
+def test_receipt_job_rejection_keeps_strict_fields_and_only_wakes(store) -> None:
+    job = Job(
+        handle="receipt-job",
+        caller_id="cli",
+        target_id="participant-a",
+        kind="send",
+        prompt="work",
+        state=JobState.RUNNING.value,
+        result=None,
+        error_code=None,
+        created_at=1.0,
+        finished_at=None,
+        response_format="json",
+        actor_client_id="operator-a",
+    )
+    store.create_job(job)
+    jobs = JobManager(store)
+    jobs.track(job.handle)
+    wake = jobs._events[job.handle]
+    listeners: list[str] = []
+    jobs.add_terminal_listener(listeners.append)
+    reconciler = ProviderReceiptReconciler(store, OperationService(store))
+    reconciler.configure_runtime(controls=None, jobs=jobs)
+    bus_before = store.bus_tail()
+    with store.write_unit() as unit:
+        events: list[JournalEventRecord] = []
+        reconciler._finish_job(
+            job.handle,
+            state=JobState.CRASHED,
+            error_code="provider_unavailable",
+            result="receipt rejected",
+            timestamp=20.0,
+            unit=unit,
+            events=events,
+        )
+        assert len(events) == 1 and events[0].recorded_at == 20.0
+        store.journal.append_group(
+            unit,
+            [
+                replace(
+                    events[0],
+                    entity_revision=store.journal.current_sequence(connection=unit.connection) + 1,
+                )
+            ],
+        )
+    finished = store.get_job(job.handle)
+    assert finished.state == JobState.CRASHED and finished.result == "receipt rejected"
+    assert finished.response_format == "json" and finished.structured_status is None
+    assert finished.actor_client_id == "operator-a"
+    assert wake.is_set() and listeners == [] and store.bus_tail() == bus_before
 
 
 async def test_private_control_receipt_advances_report_and_settles_exact_control(

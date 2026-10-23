@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import Callable
 
+    from theater.daemon.controls.admission import NativeReservationIntent
     from theater.daemon.controls.busy import BusyOperation
     from theater.daemon.controls.dispatch import QueueDispatchOutcome
     from theater.daemon.controls.gates import ControlGates
@@ -167,9 +168,6 @@ if TYPE_CHECKING:
         def _clock(self) -> float: ...
         def _mint_sequence(self, *, connection=None) -> int: ...
         def _mint_operation_id(self, participant_id: str, kind: ControlKind) -> str: ...
-        def _record_legacy_send(
-            self, participant_id: str, *, caller_id: str, job: Job, prompt: str
-        ) -> None: ...
         def _disconnected_native_refusal(
             self, participant_id: str, control: str
         ) -> StaleTarget: ...
@@ -194,6 +192,27 @@ if TYPE_CHECKING:
             operation_id: str,
             job_handle: str | None,
         ) -> None: ...
+        def _native_reservation_intent(
+            self,
+            participant_id: str,
+            kind: ControlKind,
+            *,
+            operation_id: str | None,
+            on_reserved: Callable[[str, str | None], None] | None,
+            pre_reserved: bool,
+        ) -> NativeReservationIntent: ...
+        def _admit_native_action(
+            self,
+            intent: NativeReservationIntent,
+            *,
+            participant_id: str,
+            kind: ControlKind,
+            route: ControlRoute,
+            snapshot: RuntimeSnapshot,
+            job_handle: str | None = None,
+            native_turn_id: str | None = None,
+            payload: str | None = None,
+        ) -> str: ...
         def _reserve(
             self,
             operation_id: str,

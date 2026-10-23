@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from tests.support.pi_transcripts import (
     append,
     mark_switch,
@@ -14,6 +16,7 @@ from tests.support.pi_transcripts import (
 from theater.daemon.store import Store
 from theater.harness.builtin.plugins.pi.observer import PiObserver
 from theater.harness.contracts.events import TokenUsage
+from theater.harness.contracts.source import StreamPoint
 from theater.models import Participant
 from theater.pricing import usage_cost_microcents
 from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
@@ -161,7 +164,16 @@ def test_pi_resumed_source_accepts_a_legacy_floor_checkpoint(tmp_path) -> None:
     assert [event.input_tokens for event in usage] == [7]
 
 
-def test_pi_unknown_resume_checkpoint_fails_closed(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        UNKNOWN_FLOOR,
+        "{}",
+        '{"records":1,"size":1}',
+        encode_floor(StreamPoint(stream_id="pi", position=1)),
+    ],
+)
+def test_pi_unknown_resume_checkpoint_fails_closed(tmp_path, checkpoint) -> None:
     workdir = tmp_path / "work"
     sessions = tmp_path / "sessions"
     workdir.mkdir()
@@ -181,7 +193,7 @@ def test_pi_unknown_resume_checkpoint_fails_closed(tmp_path) -> None:
         ),
     )
     source = PiObserver(root=sessions, isolated=True).open_source(
-        cwd=str(workdir), session_id="native-id", source_checkpoint=UNKNOWN_FLOOR
+        cwd=str(workdir), session_id="native-id", source_checkpoint=checkpoint
     )
 
     attached = asyncio.run(source.read()).attached
@@ -346,6 +358,59 @@ def test_pi_restart_resumes_from_the_current_source_checkpoint(tmp_path) -> None
     assert [event.usage.input_tokens for event in batch.events if event.usage] == [7]
     assert all(event.usage_only for event in batch.events)
     assert batch.trajectory == ()
+
+
+def test_pi_revoke_retains_raw_resume_input_for_exact_reattachment(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    append(transcript, session_record(session_id="native-id", cwd=workdir))
+    first = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+    assert asyncio.run(first.read()).attached is not None
+    first.commit_attachment()
+    first.acknowledge_source_checkpoint()
+    checkpoint = first.source_checkpoint()
+    assert checkpoint is not None
+    raw = json.dumps(json.loads(checkpoint), indent=2)
+    append(
+        transcript,
+        message_record(
+            "after-checkpoint",
+            {
+                "role": "assistant",
+                "content": "new",
+                "stopReason": "stop",
+                "usage": {"input": 7, "output": 1},
+            },
+        ),
+    )
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir),
+        session_id="native-id",
+        known_location=str(transcript),
+        source_checkpoint=raw,
+    )
+    assert source.source_checkpoint() == raw
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    assert [
+        event.usage.input_tokens for event in asyncio.run(source.read()).events if event.usage
+    ] == [7]
+
+    source.revoke_attachment()
+    assert source.source_checkpoint() is None
+    assert source.admit_exact_location(location=str(transcript), session_id="native-id") == "staged"
+    attached = asyncio.run(source.read()).attached
+    assert attached is not None
+    assert attached.skipped == 2
+    source.commit_attachment()
+    replayed = asyncio.run(source.read())
+    assert [event.usage.input_tokens for event in replayed.events if event.usage] == [7]
+    assert all(event.usage_only for event in replayed.events)
 
 
 def test_pi_resume_new_restart_replays_only_the_post_floor_usage(tmp_path) -> None:

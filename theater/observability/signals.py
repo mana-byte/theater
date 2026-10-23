@@ -6,6 +6,10 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from opentelemetry._logs import Logger
+from opentelemetry.context import Context
+from opentelemetry.trace import Span, SpanContext, Tracer
+
 from theater.constants.observability import MAX_ERROR_TYPE_LEN
 from theater.observability.catalog import TraceKind
 
@@ -15,7 +19,7 @@ class SignalBridge:
 
     __slots__ = ("_active", "_logger", "_tracer")
 
-    def __init__(self, logger: Any, tracer: Any) -> None:
+    def __init__(self, logger: Logger | None, tracer: Tracer | None) -> None:
         self._logger = logger
         self._tracer = tracer
         self._active = logger is not None and tracer is not None
@@ -35,9 +39,10 @@ class SignalBridge:
         attributes: Mapping[str, Any],
         timestamp_ns: int | None = None,
         severity_text: str = "INFO",
-        context: Any = None,
+        context: Context | None = None,
     ) -> bool:
-        if not self._active:
+        logger = self._logger
+        if not self._active or logger is None:
             return False
         try:
             from opentelemetry._logs import SeverityNumber
@@ -47,7 +52,7 @@ class SignalBridge:
                 normalized_severity, normalized_severity
             )
             severity_number = getattr(SeverityNumber, severity_name, SeverityNumber.INFO)
-            self._logger.emit(
+            logger.emit(
                 timestamp=timestamp_ns,
                 observed_timestamp=time.time_ns(),
                 context=context,
@@ -68,15 +73,16 @@ class SignalBridge:
         attributes: Mapping[str, Any],
         start_time_ns: int | None = None,
         end_time_ns: int | None = None,
-        parent_context: Any = None,
-        links: Sequence[Any] = (),
+        parent_context: Context | None = None,
+        links: Sequence[SpanContext] = (),
         kind: TraceKind = TraceKind.INTERNAL,
         error: bool = False,
         error_type: str | None = None,
-    ) -> Any | None:
-        if not self._active:
+    ) -> Context | None:
+        tracer = self._tracer
+        if not self._active or tracer is None:
             return None
-        span: Any = None
+        span: Span | None = None
         failed = False
         try:
             from opentelemetry.trace import Link, SpanKind, Status, StatusCode, set_span_in_context
@@ -88,7 +94,7 @@ class SignalBridge:
                 TraceKind.SERVER: SpanKind.SERVER,
             }[kind]
 
-            span = self._tracer.start_span(
+            span = tracer.start_span(
                 name,
                 context=parent_context,
                 kind=span_kind,

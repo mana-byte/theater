@@ -162,7 +162,9 @@ def test_claude_split_blocks_keep_unique_ids_and_derive_request_timing():
     )
 
 
-async def test_claude_history_seeds_parent_timing_before_the_selected_page(tmp_path: Path):
+async def test_claude_history_seeds_parent_timing_before_the_selected_page(
+    tmp_path: Path, monkeypatch
+):
     root = tmp_path / "projects"
     path = root / "-repo" / "session.jsonl"
     path.parent.mkdir(parents=True)
@@ -193,9 +195,11 @@ async def test_claude_history_seeds_parent_timing_before_the_selected_page(tmp_p
         known_location=str(path),
         session_provenance=TranscriptProvenance.OPERATOR,
     )
+    source._observer._main_turn_id = "live-turn"
 
     page = await source.history_page(limit=1)
 
+    assert source._observer._main_turn_id == "live-turn"
     assert len(page.trajectory) == 1
     assert page.trajectory[0].timing == Timing(
         start=1787479200.0,
@@ -204,6 +208,14 @@ async def test_claude_history_seeds_parent_timing_before_the_selected_page(tmp_p
         provenance=TimingProvenance.DERIVED,
         first_token=1787479202.0,
     )
+
+    def unreadable_seed(self, fh, start):
+        raise OSError("seed read failed")
+
+    monkeypatch.setattr(ClaudeCodeObserver, "_seed_mcp_context", unreadable_seed)
+    failed = await source.history_page(limit=1)
+    assert failed.error_code == "transcript_source_unavailable"
+    assert source._observer._main_turn_id == "live-turn"
 
 
 def test_claude_request_inference_does_not_change_tool_execution_timing():

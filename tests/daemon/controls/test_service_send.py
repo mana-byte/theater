@@ -520,7 +520,6 @@ async def test_unbound_send_and_queue_fail_without_reserving_or_delivering(store
     with pytest.raises(BadRequest, match="does not offer a followup transport"):
         await service.queue_followup("p1", caller_id="caller", prompt="unbound followup")
 
-    assert recorder.delivered == []
     assert operation_rows(store, "p1", ControlKind.SEND) == []
     assert store.queued_control_operations("p1") == []
 

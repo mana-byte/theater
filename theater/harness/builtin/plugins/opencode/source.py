@@ -22,7 +22,7 @@ from .history import OpenCodeHistory
 from .identity import OpenCodeIdentity, validate_receipt_session_id
 from .mcp import OpenCodeMcpCatalog
 from .parser import OpenCodeParser
-from .store import event_head, latest_message, message_parts, open_readonly
+from .store import QueryConnection, event_head, open_readonly
 from .trajectory import OpenCodeTrajectory
 from .values import _has_tool_calls, _table, _terminal_finish, load_json_object
 
@@ -59,7 +59,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
             time.monotonic() + CORRELATION_READY_TIMEOUT if receipt_expected else None
         )
         self._receipt_target: str | None = None
-        self._conn: sqlite3.Connection | None = None
+        self._conn: QueryConnection | None = None
         self._session: str | None = None
         self._cursor = -1
         self._pending: tuple[str, int] | None = None
@@ -180,12 +180,12 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
             logger.debug("reading the opencode database failed", exc_info=True)
             return self._source_unavailable_batch(f"reading OpenCode database failed: {exc}")
 
-    def _open(self) -> sqlite3.Connection | None:
+    def _open(self) -> QueryConnection | None:
         if self._conn is None:
             self._conn = open_readonly(self._db, persistent=True)
         return self._conn
 
-    def _attach(self, conn: sqlite3.Connection, sid: str) -> Batch:
+    def _attach(self, conn: QueryConnection, sid: str) -> Batch:
         row = event_head(conn, sid)
         status = self._status(conn, sid)
         self._pending = (sid, row[0])
@@ -199,8 +199,8 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
             status=status,
         )
 
-    def _status(self, conn: sqlite3.Connection, sid: str) -> Status:
-        row = latest_message(conn, sid)
+    def _status(self, conn: QueryConnection, sid: str) -> Status:
+        row = conn.queries.latest_message(conn, sid)
         if row is None:
             return Status.IDLE
         info = load_json_object(row[0])
@@ -214,7 +214,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
             isinstance(mid, str)
             and bool(mid)
             and _has_tool_calls(
-                load_json_object(part_row[0]) for part_row in message_parts(conn, mid)
+                load_json_object(part_row[0]) for part_row in conn.queries.message_parts(conn, mid)
             )
         )
         if bool(info.get("error")) or (

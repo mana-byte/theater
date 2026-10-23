@@ -387,9 +387,10 @@ class CompositeSource(Source):
             return True
         if self._primary is None:
             return False
-        pending = getattr(self._primary, "pending_terminal_evidence", None)
-        if callable(pending) and pending():
+        if self._primary.pending_terminal_evidence():
             return True
+        # A snapshot-only primary never implements the flag: its retained
+        # evidence holds the checkpoint even though its answer is False.
         return bool(self._primary.terminal_evidence_snapshot())
 
     def terminal_evidence_snapshot(self) -> tuple[NativeTurnOutcome, ...]:
@@ -404,9 +405,7 @@ class CompositeSource(Source):
         """Release exact evidence only after the observer's sink accepted it."""
         if self._primary is None:
             return
-        delivered = getattr(self._primary, "terminal_evidence_delivered", None)
-        if callable(delivered):
-            delivered()
+        self._primary.terminal_evidence_delivered()
         self._held_terminal_evidence = ()
 
     def arm_terminal_evidence_replay(self) -> None:

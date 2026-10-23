@@ -145,7 +145,6 @@ async def test_send_spawn_handle_requires_an_available_route(store: Store) -> No
         await harness.service.send(
             "p1", caller_id="caller", prompt="initial prompt", job_handle="p1"
         )
-    assert harness.gates_recorder.delivered == []
 
 
 async def test_persisted_native_binding_finishes_orphans_before_adoption(store: Store):
@@ -279,7 +278,6 @@ def _no_operations_or_jobs(store: Store, participant_id: str) -> None:
 async def test_disconnected_native_send_fails_closed_no_legacy_delivery(store: Store):
     """A persisted native binding with no runtime is not legacy: no pane send."""
     harness = disconnected_native_harness(store, "p1")
-    recorder = harness.gates_recorder
 
     try:
         await harness.service.send("p1", caller_id="caller", prompt="no fallback")
@@ -288,8 +286,7 @@ async def test_disconnected_native_send_fails_closed_no_legacy_delivery(store: S
         assert "natively wired" in str(exc)
         assert "never falls back" in str(exc)
 
-    assert ("p1", "caller", "send") in recorder.authorized  # broad authorization ran
-    assert recorder.delivered == []  # no legacy pane delivery
+    assert ("p1", "caller", "send") in harness.gates_recorder.authorized
     _no_operations_or_jobs(store, "p1")
 
 
@@ -321,7 +318,6 @@ async def test_opencode_routes_supported_controls_native_and_never_falls_back(
 
     with pytest.raises(StaleTarget, match="natively wired"):
         await harness.service.send("p1", caller_id="caller", prompt="never fall back")
-    assert harness.gates_recorder.delivered == []
     _no_operations_or_jobs(store, "p1")
 
     with pytest.raises(BadRequest, match="unavailable on its selected transport"):
@@ -338,7 +334,6 @@ async def test_disconnected_native_queue_fails_closed_no_reservation(store: Stor
     except StaleTarget as exc:
         assert "natively wired" in str(exc)
 
-    assert harness.gates_recorder.delivered == []
     assert store.queued_control_operation_count("p1") == 0
     _no_operations_or_jobs(store, "p1")
 
@@ -366,7 +361,6 @@ async def test_disconnected_native_steer_settings_interrupt_fail_closed(store: S
     except StaleTarget:
         pass
 
-    assert harness.gates_recorder.delivered == []
     _no_operations_or_jobs(store, "p1")
 
 
@@ -431,8 +425,6 @@ async def test_disconnected_native_queue_dispatch_never_falls_back_to_the_pane(s
 
     assert outcome.dispatched == () and outcome.failed == ()
     assert outcome.deferred is True
-    assert harness.gates_recorder.delivered == []
-    assert harness.gates_recorder.busy_checks == []  # the legacy path never ran
     assert store.queued_control_operation_count("p1") == 1
     (queued_op,) = store.queued_control_operations("p1")
     assert queued_op.delivery_phase is ControlDeliveryPhase.QUEUED
@@ -460,6 +452,5 @@ async def test_disconnected_native_controls_authorize_before_classification(stor
 
     # Authorization refused every control before classification: nothing was
     # revealed, delivered, reserved, queued, or finished.
-    assert harness.gates_recorder.delivered == []
     _no_operations_or_jobs(store, "p1")
     assert store.queued_control_operations("p1") == []

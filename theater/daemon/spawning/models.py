@@ -102,7 +102,7 @@ class ProviderLaunchOutcome(Exception):
 
 @dataclass(slots=True)
 class Reservation:
-    """Everything ``reserve`` produced that ``launch`` needs, without re-deriving.
+    """Provider preparation facts that ``launch`` needs without re-deriving.
 
     The daemon creates its spawn job in between, so it is RUNNING before the terminal outputs.
     """

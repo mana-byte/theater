@@ -11,7 +11,8 @@ from collections.abc import Mapping
 from typing import NoReturn
 
 from theater import protocol
-from theater.constants.refusals import NEXT_NOT_YOUR_CHILD, NEXT_SEND_BUSY
+from theater.constants.refusals import NEXT_NOT_YOUR_CHILD
+from theater.daemon.controls import settings_policy
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.preflight import (
     check_transcript_send_preflight,
@@ -21,12 +22,9 @@ from theater.daemon.controls.service import ACTION_SEND
 from theater.daemon.operations import OperationNotFound
 from theater.models import (
     BadRequest,
-    Busy,
     ControlOwnerKind,
-    JobState,
     NotYourChild,
     PublicOperationState,
-    Status,
     TheaterError,
 )
 
@@ -43,6 +41,13 @@ _NOT_YOUR_CHILD_CONTROLS = (
 def build_control_gates(daemon) -> ControlGates:
     """Wire every physical/policy fact the control service needs."""
     from theater.daemon.presence import access
+    from theater.daemon.rpc import sending as sending_mod
+
+    def send_claim_now() -> float:
+        return sending_mod.now()
+
+    def send_claim_ttl() -> float:
+        return sending_mod._send_claim_ttl()
 
     return ControlGates(
         authorize=_authorize(daemon),
@@ -50,12 +55,19 @@ def build_control_gates(daemon) -> ControlGates:
         check_absent=lambda participant_id: access.check_absent(daemon, participant_id),
         send_preflight=_send_preflight(daemon),
         provider_modal_check=_provider_modal_check(daemon),
-        legacy_copy_mode_check=_legacy_copy_mode_check(daemon),
-        legacy_busy_check=_legacy_busy_check(daemon),
+        send_claim_now=send_claim_now,
+        send_claim_ttl=send_claim_ttl,
         check_prompt=check_prompt,
         check_settings=check_settings,
+        check_settings_for=lambda participant_id, model, reasoning_effort: (
+            settings_policy.validate_settings(
+                daemon.config,
+                daemon.registry.get(participant_id).harness,
+                model,
+                reasoning_effort,
+            )
+        ),
         cwd_for=_cwd_for(daemon),
-        legacy_deliver=_legacy_deliver(daemon),
         provider_health=lambda provider_id, generation: (
             daemon.terminal_service.connections.health(provider_id)
             if daemon.terminal_service.connections.is_current(provider_id, generation)
@@ -199,57 +211,6 @@ def _provider_modal_check(daemon):
     return provider_modal_gate(daemon)
 
 
-def _legacy_copy_mode_check(daemon):
-    async def legacy_copy_mode_check(participant_id: str) -> None:
-        """Historical legacy rows cannot regain a physical route."""
-        from theater.models import NotAddressable
-
-        raise NotAddressable(
-            f"participant {participant_id!r} has no current terminal-provider route"
-        )
-
-    return legacy_copy_mode_check
-
-
-def _legacy_busy_check(daemon):
-    async def legacy_busy_check(participant_id: str) -> None:
-        """Legacy busy semantics: working status plus the send-claim window.
-
-        Only delivered jobs (or plain send claims) count: a queued followup's job is RUNNING before
-        dispatch, so counting it would busy-refuse the queue head and nothing would ever dispatch.
-        """
-        from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
-        from theater.daemon.rpc import sending as sending_mod
-
-        target = daemon.registry.get(participant_id)
-        if target.status is Status.WORKING:
-            raise Busy(
-                f"participant {participant_id!r} is working; not delivering now",
-                details={"next": NEXT_SEND_BUSY},
-            )
-        stale = sending_mod.now() - sending_mod._send_claim_ttl()
-        running_prompt_jobs = [
-            job for job in daemon.store.active_running_jobs_for_target(participant_id) if job.prompt
-        ]
-        for job in (item for item in running_prompt_jobs if item.created_at <= stale):
-            daemon.jobs.finish(
-                job.handle,
-                state=JobState.CRASHED,
-                result=(
-                    f"Send to participant {participant_id!r} was superseded after its "
-                    "delivery claim expired; await the newer send handle instead."
-                ),
-                error_code=SEND_SUPERSEDED_ERROR_CODE,
-            )
-        if any(job.created_at > stale for job in running_prompt_jobs):
-            raise Busy(
-                f"participant {participant_id!r} has a running send job",
-                details={"next": NEXT_SEND_BUSY},
-            )
-
-    return legacy_busy_check
-
-
 def check_prompt(prompt) -> None:
     """Prompt bounds reused by ordinary send and queued followups alike."""
     if not isinstance(prompt, str) or not prompt.strip():
@@ -261,8 +222,7 @@ def check_prompt(prompt) -> None:
 def check_settings(model, reasoning_effort) -> None:
     """Shape validation for settings updates.
 
-    The signature lacks the target, so per-harness allowlists are revalidated by the routing
-    RPC. Approval and sandbox have no gate anywhere: the service cannot set them.
+    Approval and sandbox have no gate anywhere: the service cannot set them.
     """
     for name, value in (("model", model), ("reasoning_effort", reasoning_effort)):
         if value is None:
@@ -277,16 +237,3 @@ def _cwd_for(daemon):
         return participant.cwd if participant is not None else None
 
     return cwd_for
-
-
-def _legacy_deliver(daemon):
-    async def legacy_deliver(participant_id: str, prompt: str) -> None:
-        """Refuse historical rows rather than replaying through an inferred route."""
-        del prompt
-        from theater.models import NotAddressable
-
-        raise NotAddressable(
-            f"participant {participant_id!r} has no current terminal-provider route"
-        )
-
-    return legacy_deliver

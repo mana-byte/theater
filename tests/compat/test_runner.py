@@ -18,7 +18,13 @@ from scripts.harness_compat.contract import (
 )
 from scripts.harness_compat.diagnostics import clip_diagnostic
 from scripts.harness_compat.framework import _check_selector, run_pytest
-from scripts.harness_compat.process import SANDBOX_ENV, new_token, owned_pids, run_group
+from scripts.harness_compat.process import (
+    SANDBOX_ENV,
+    new_token,
+    owned_pids,
+    run_group,
+    run_pipe_group,
+)
 from scripts.harness_compat.report import _checks, build_report
 from scripts.harness_compat.sandbox import make_sandbox
 
@@ -247,6 +253,28 @@ def test_run_group_reaps_a_detached_child_after_the_leader_exited(tmp_path: Path
     argv = [sys.executable, "-c", script, str(pidfile)]
     assert run_group(argv, cwd=tmp_path, env=os.environ, timeout=30).returncode == 0
     assert _gone(int(pidfile.read_text())), "the detached child outlived its finished leader"
+
+
+def test_pipe_group_captures_text_in_requested_cwd(tmp_path: Path) -> None:
+    result = run_pipe_group(
+        [sys.executable, "-c", "import os, sys; print(os.getcwd()); print('é', file=sys.stderr)"],
+        cwd=tmp_path,
+        env=os.environ,
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == str(tmp_path)
+    assert result.stderr.strip() == "é"
+
+
+def test_pipe_group_timeout_reaps_its_leader(tmp_path: Path) -> None:
+    pidfile = tmp_path / "leader.pid"
+    script = (
+        "import os, sys, time\nopen(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)\n"
+    )
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_pipe_group([sys.executable, "-c", script, str(pidfile)], env=os.environ, timeout=2)
+    assert _gone(int(pidfile.read_text())), "the timed-out pipe runner left its leader alive"
 
 
 def test_ownership_needs_an_exact_environment_entry() -> None:

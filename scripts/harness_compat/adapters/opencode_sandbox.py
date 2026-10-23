@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..contract import InstallFailed, Sandbox
-from .opencode_pi_process import run_group, terminate_group
+from ..process import run_pipe_group, spawn_group, terminate_pipe_group
 
 _BANNER_PREFIX = "opencode server listening on "
 _PREWARM_PASSWORD = "harness-compat-prewarm"
@@ -27,7 +27,7 @@ def npm_install(sb: Sandbox, package: str, version: str) -> Path:
     """npm-install exactly ``package@version`` and expose its ``opencode`` bin under the sandbox."""
     prefix = sb.root / "npm-opencode"
     try:
-        run = run_group(
+        run = run_pipe_group(
             ["npm", "install", "--prefix", str(prefix), f"{package}@{version}"],
             env=dict(sb.env),
             timeout=600,
@@ -46,7 +46,7 @@ def npm_install(sb: Sandbox, package: str, version: str) -> Path:
     exposed.unlink(missing_ok=True)
     exposed.symlink_to(packaged)
     try:
-        check = run_group([str(exposed), "--version"], env=sb.offline_env, timeout=60)
+        check = run_pipe_group([str(exposed), "--version"], env=sb.offline_env, timeout=60)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         raise InstallFailed(f"installed opencode version check failed: {exc}") from exc
     output = f"{check.stdout}{check.stderr}".strip()
@@ -89,7 +89,7 @@ def prewarm_catalog(sb: Sandbox, *, plugin: Path | None = None, timeout: float =
         config["plugin"] = [str(plugin)]
     config_path = work / "prewarm.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
-    process = subprocess.Popen(
+    process = spawn_group(
         ["opencode", "serve", "--port", "0", "--hostname", "127.0.0.1"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -99,8 +99,7 @@ def prewarm_catalog(sb: Sandbox, *, plugin: Path | None = None, timeout: float =
             "OPENCODE_DB": str(work / "prewarm.sqlite"),
             "OPENCODE_CONFIG": str(config_path),
         },
-        cwd=str(work),
-        start_new_session=True,
+        cwd=work,
     )
     try:
         endpoint = _await_banner(process, timeout)
@@ -110,7 +109,7 @@ def prewarm_catalog(sb: Sandbox, *, plugin: Path | None = None, timeout: float =
             return False
         return _await_catalog(sb, timeout=_CATALOG_SECONDS)
     finally:
-        terminate_group(process)
+        terminate_pipe_group(process)
         if process.stdout is not None:
             process.stdout.close()
 

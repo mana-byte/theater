@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 from theater import timing
 from theater.daemon.controls._common import ACTION_TERMINATE, _error_code_of, _operation_row
@@ -22,6 +23,20 @@ from theater.harness.contracts.runtime import (
 )
 from theater.models import HumanPresent, JobState, StaleTarget
 from theater.observability.catalog import LIFECYCLE_STAGE
+
+
+@dataclass(frozen=True, slots=True)
+class FreshNativeReservation:
+    operation_id: str
+    on_reserved: Callable[[str, str | None], None] | None
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedNativeReservation:
+    operation_id: str
+
+
+type NativeReservationIntent = FreshNativeReservation | AdmittedNativeReservation
 
 
 class AdmissionControls(ControlHost):
@@ -244,6 +259,66 @@ class AdmissionControls(ControlHost):
     ) -> None:
         if callback is not None:
             callback(operation_id, job_handle)
+
+    def _native_reservation_intent(
+        self,
+        participant_id: str,
+        kind: ControlKind,
+        *,
+        operation_id: str | None,
+        on_reserved: Callable[[str, str | None], None] | None,
+        pre_reserved: bool,
+    ) -> NativeReservationIntent:
+        control_id = operation_id or self._mint_operation_id(participant_id, kind)
+        if pre_reserved:
+            return AdmittedNativeReservation(control_id)
+        return FreshNativeReservation(control_id, on_reserved)
+
+    def _admit_native_action(
+        self,
+        intent: NativeReservationIntent,
+        *,
+        participant_id: str,
+        kind: ControlKind,
+        route: ControlRoute,
+        snapshot: RuntimeSnapshot,
+        job_handle: str | None = None,
+        native_turn_id: str | None = None,
+        payload: str | None = None,
+    ) -> str:
+        """Fence or reserve, then mark dispatched before any native call."""
+        operation_id = intent.operation_id
+        if isinstance(intent, AdmittedNativeReservation):
+            reserved = self._require_public_reservation(
+                operation_id,
+                participant_id=participant_id,
+                kind=kind,
+                phase=ControlDeliveryPhase.RESERVED,
+                route=route,
+                job_handle=job_handle,
+            )
+            self._require_reserved_native_identity(reserved, snapshot)
+        else:
+            self._reserve(
+                operation_id,
+                participant_id=participant_id,
+                kind=kind,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                phase=ControlDeliveryPhase.RESERVED,
+                job_handle=job_handle,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
+                native_turn_id=native_turn_id,
+                payload=payload,
+            )
+            self._notify_reserved(intent.on_reserved, operation_id, job_handle)
+        self._store.mark_control_operation_dispatched(
+            operation_id,
+            native_session_id=snapshot.native_session_id,
+            native_turn_id=native_turn_id,
+            updated_at=self._clock(),
+        )
+        return operation_id
 
     def _reserve(
         self,

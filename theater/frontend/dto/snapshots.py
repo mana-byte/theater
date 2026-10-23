@@ -58,7 +58,7 @@ class SnapshotPage:
         if type(complete) is not bool:
             raise TypeError("snapshot page.complete must be a boolean")
         return cls(
-            snapshot_id=string_value(data.get("snapshot_id"), "snapshot page.snapshot_id") or "",
+            snapshot_id=string_value(data.get("snapshot_id"), "snapshot page.snapshot_id"),
             page=integer_value(data.get("page"), "snapshot page.page"),
             complete=complete,
             ending_cursor=EventCursor.from_wire(data.get("ending_cursor")),

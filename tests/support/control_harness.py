@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tests.support.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS
 from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.jobs import JobManager
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
@@ -20,7 +21,6 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.models import (
-    Busy,
     HumanPresent,
     Job,
     NotYourChild,
@@ -59,19 +59,12 @@ class RecordingGates:
         self.authorized: list[tuple[str, str, str]] = []
         self.absence_checks: list[str] = []
         self.preflights: list[str] = []
-        self.copy_mode_checks: list[str] = []
-        self.busy_checks: list[str] = []
         self.prompt_checks: list[str] = []
         self.settings_checks: list[tuple[str | None, str | None]] = []
-        self.delivered: list[tuple[str, str]] = []
         self.refuse_dispatch_callers: set[str] = set()
         self.refuse_preflight_for: set[str] = set()
         #: Participants whose presence gate raises a temporary refusal.
         self.presence_refusals: set[str] = set()
-        #: Participants whose copy-mode check raises a temporary refusal.
-        self.copy_mode_refusals: set[str] = set()
-        #: Participants whose legacy busy check raises a temporary refusal.
-        self.busy_refusals: set[str] = set()
         #: Callers the authorize gate refuses for every action.
         self.refuse_authorize_for: set[str] = set()
 
@@ -88,19 +81,6 @@ class RecordingGates:
             self.preflights.append(participant_id)
             if participant_id in self.refuse_preflight_for:
                 raise StaleTarget(f"pane of {participant_id!r} no longer exists")
-
-        async def legacy_copy_mode_check(participant_id: str) -> None:
-            self.copy_mode_checks.append(participant_id)
-            if participant_id in self.copy_mode_refusals:
-                raise Busy(f"pane of {participant_id!r} is in copy mode")
-
-        async def legacy_busy_check(participant_id: str) -> None:
-            self.busy_checks.append(participant_id)
-            if participant_id in self.busy_refusals:
-                raise Busy(f"pane of {participant_id!r} is busy with an active job")
-
-        async def legacy_deliver(participant_id: str, prompt: str) -> None:
-            self.delivered.append((participant_id, prompt))
 
         def authorize(participant_id: str, caller_id: str, action: str) -> None:
             self.authorized.append((participant_id, caller_id, action))
@@ -129,12 +109,12 @@ class RecordingGates:
             require_absent=require_absent,
             check_absent=check_absent,
             send_preflight=send_preflight,
-            legacy_copy_mode_check=legacy_copy_mode_check,
-            legacy_busy_check=legacy_busy_check,
+            send_claim_now=now,
+            send_claim_ttl=lambda: SEND_CLAIM_TTL_SECONDS,
             check_prompt=check_prompt,
             check_settings=check_settings,
             cwd_for=cwd_for,
-            legacy_deliver=legacy_deliver,
+            check_settings_for=lambda participant_id, model, effort: None,
         )
 
 

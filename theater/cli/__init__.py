@@ -10,7 +10,7 @@ import sys
 
 from theater import config, paths
 from theater import harness as harness_registry
-from theater.cli.commands import COMMANDS
+from theater.cli.commands import COMMAND_SPECS, COMMANDS, Initialization
 
 # Re-export command functions for tests that call them directly.
 from theater.cli.commands.bus import (  # noqa: F401
@@ -112,7 +112,6 @@ from theater.observability.runtime import ObservabilityError
 from theater.protocol import RemoteError
 
 _COMMANDS = COMMANDS
-_PROCESS_COMMANDS = frozenset({None, "daemon", "mcp", "regie"})
 
 
 def _models_block(harness: str, models: list[str]) -> str:
@@ -127,19 +126,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         print("\nRégie is now the standalone `regie` command. Run `regie` to start the UI.")
         return 0
-    if args.command == "regie":
+    initialization = COMMAND_SPECS[args.command].initialization
+    if initialization is Initialization.NONE:
         return _COMMANDS[args.command](args)
     paths.ensure_home()
     try:
-        # `reload` is exempt: the daemon reads and validates its own file, not this process.
-        if args.command not in _PROCESS_COMMANDS and args.command not in {
-            "config",
-            "harness-event",
-            "plugin",
-            "plugins",
-            "reload",
-            "skills",
-        }:
+        if initialization is Initialization.HARNESSES:
             harness_registry.install(config.load())
         return _COMMANDS[args.command](args)
     except (BadUsage, config.ConfigError, ObservabilityError) as exc:

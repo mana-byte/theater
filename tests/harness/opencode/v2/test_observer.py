@@ -16,7 +16,8 @@ from tests.support.opencode_recorder_v2 import (
 from tests.support.opencode_recorder_v2 import rec as shared_rec
 from theater.harness import EventKind, TurnTerminal
 from theater.harness.base import EventPath
-from theater.harness.builtin.plugins.opencode import source_v2
+from theater.harness.builtin.plugins.opencode import source_v2, store
+from theater.harness.builtin.plugins.opencode.observer import OpenCodeObserver
 from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
 from theater.models import Status
 
@@ -50,6 +51,34 @@ def a_turn_with_a_tool(rec, workdir) -> None:
         **USAGE,
     )
     rec.idle("msg_i1", "succeeded")
+
+
+def test_v2_discovery_admission_and_history_cursor_use_selected_queries(rec, workdir):
+    observer = OpenCodeObserver(db=rec.path)
+    candidates = observer.transcript_candidates(cwd=str(workdir))
+    assert [candidate.session_id for candidate in candidates] == [rec.sid]
+    admitted = observer.admit_operator_candidate(
+        cwd=str(workdir), candidate=f"opencode://{rec.sid}"
+    )
+    assert admitted.location == f"opencode://{rec.sid}"
+
+    for index in range(3):
+        rec.user(f"msg_u{index}", f"text {index}")
+    conn = store.open_readonly(rec.path)
+    assert conn is not None
+    try:
+        assert [row[0] for row in conn.queries.history_messages(conn, rec.sid)] == [
+            f"msg_u{index}" for index in range(3)
+        ]
+    finally:
+        conn.close()
+    source = OpenCodeV2Source(rec.path, cwd=str(workdir), session_id=rec.sid)
+    newest = asyncio.run(source.history_page(limit=2))
+    assert newest.error_code is None
+    assert newest.older_cursor is not None
+    older = asyncio.run(source.history_page(before=newest.older_cursor, limit=2))
+    assert older.error_code is None
+    assert [event.raw_text for event in older.events] == ["text 0"]
 
 
 def test_a_turn_reads_as_one_user_one_tool_pair_and_one_reply(rec, workdir):

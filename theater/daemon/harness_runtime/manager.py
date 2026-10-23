@@ -142,96 +142,26 @@ class HarnessRuntimeManager:
         backend_generation: int,
         native_session_id: str | None,
     ) -> Mapping[str, object] | None:
-        route = self._native_routes.get(participant_id)
-        if (
-            route is None
-            or route.backend_generation != backend_generation
-            or route.native_session_id is None
-        ):
-            return None
-        if native_session_id is None or route.native_session_id != native_session_id:
-            return None
-        return route.to_wire()
+        route = self.cached_native_facts(
+            participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+        )
+        return None if route is None else route.to_wire()
 
-    def cached_native_capabilities(
+    def cached_native_facts(
         self,
         participant_id: str,
         *,
         backend_generation: int,
         native_session_id: str | None,
-    ) -> RuntimeCapabilities | None:
-        """Return capability facts only for the exact durable native session."""
-        route = self._exact_native_route(
+    ) -> CachedNativeRoute | None:
+        """Return the exact cached native session without converting its facts to a mapping."""
+        return self._exact_native_route(
             participant_id,
             backend_generation=backend_generation,
             native_session_id=native_session_id,
         )
-        return None if route is None else route.capabilities
-
-    def cached_native_settings(
-        self,
-        participant_id: str,
-        *,
-        backend_generation: int,
-        native_session_id: str | None,
-    ) -> RuntimeSettings | None:
-        """Return settings facts only for the exact durable native session."""
-        route = self._exact_native_route(
-            participant_id,
-            backend_generation=backend_generation,
-            native_session_id=native_session_id,
-        )
-        return None if route is None else route.settings
-
-    def cached_native_admission(
-        self,
-        participant_id: str,
-        *,
-        backend_generation: int,
-        native_session_id: str | None,
-    ) -> Mapping[str, object] | None:
-        """Return only exact cached facts needed by public admission projections."""
-        route = self._exact_native_route(
-            participant_id,
-            backend_generation=backend_generation,
-            native_session_id=native_session_id,
-        )
-        if route is None:
-            return None
-        return {
-            "health": route.health,
-            "execution_state": route.execution_state,
-            "native_turn_id": route.native_turn_id,
-            "pending_interaction": route.pending_interaction,
-            "supported_settings": (
-                frozenset() if route.settings is None else route.settings.supported_fields
-            ),
-        }
-
-    def cached_native_details(
-        self,
-        participant_id: str,
-        *,
-        backend_generation: int,
-        native_session_id: str | None,
-    ) -> Mapping[str, object] | None:
-        """Return exact cached report facts without performing runtime I/O."""
-        route = self._exact_native_route(
-            participant_id,
-            backend_generation=backend_generation,
-            native_session_id=native_session_id,
-        )
-        if route is None:
-            return None
-        return {
-            "backend_generation": route.backend_generation,
-            "native_session_id": route.native_session_id,
-            "health": route.health,
-            "health_diagnostics": route.health_diagnostics,
-            "settings": route.settings,
-            "native_turn_id": route.native_turn_id,
-            "pending_interaction": route.pending_interaction,
-        }
 
     def _exact_native_route(
         self,

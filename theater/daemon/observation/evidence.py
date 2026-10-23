@@ -181,10 +181,7 @@ class TerminalEvidenceRouting:
 
     def _ack_terminal_evidence(self, source: Source) -> None:
         """Release evidence the sink accepted; the checkpoint is acked separately."""
-        delivered = getattr(source, "terminal_evidence_delivered", None)
-        if not callable(delivered):
-            return
         try:
-            delivered()
+            source.terminal_evidence_delivered()
         except Exception:
             logger.debug("releasing terminal evidence failed", exc_info=True)

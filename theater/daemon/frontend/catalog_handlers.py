@@ -6,14 +6,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from theater.daemon import catalogs, skill_catalog
 from theater.daemon.frontend.handshake import ConnectionContext
-from theater.daemon.rpc.skills import _skills_list, _skills_load
-from theater.daemon.rpc.spawning import _harnesses, _models
 from theater.frontend.capabilities import METHOD_CATALOG, TERMINAL_PROVIDER_CAPABILITY
 from theater.frontend.schemas import validator_for
 from theater.models import ProviderRecord
 
 _DEFAULT_PROVIDER_SELECTOR = "tmux"
+
+
+async def _harnesses(daemon, _params: dict) -> list[dict]:
+    return await catalogs.harnesses(daemon)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +154,7 @@ async def catalogs_harnesses(daemon, _context: ConnectionContext, params: dict) 
 
 async def catalogs_models(daemon, _context: ConnectionContext, params: dict) -> dict:
     provider = _selected_provider(daemon, params.get("provider"))
-    rows = await _models(daemon, {})
+    rows = catalogs.models(daemon)
     return _validated(
         "frontend.catalogs.models",
         {
@@ -163,7 +166,7 @@ async def catalogs_models(daemon, _context: ConnectionContext, params: dict) -> 
 
 
 async def skills_list(daemon, _context: ConnectionContext, _params: dict) -> dict:
-    snapshot = await _skills_list(daemon, {})
+    snapshot = skill_catalog.list_skills(daemon)
     return _validated(
         "frontend.skills.list",
         {
@@ -175,7 +178,7 @@ async def skills_list(daemon, _context: ConnectionContext, _params: dict) -> dic
 
 
 async def skills_load(daemon, _context: ConnectionContext, params: dict) -> dict:
-    return _validated("frontend.skills.load", await _skills_load(daemon, {"name": params["name"]}))
+    return _validated("frontend.skills.load", skill_catalog.load_skill(daemon, params["name"]))
 
 
 CATALOG_HANDLERS = MappingProxyType(

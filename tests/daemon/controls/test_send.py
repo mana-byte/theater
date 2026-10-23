@@ -7,11 +7,15 @@ import json
 import pytest
 
 from tests.support.presence import AbsentPresence, UnknownPresence
+from tests.support.provider_controls import queued_followup
+from tests.support.runtime_storage import make_operation
 from tests.support.send_target import ready_screen, send_target, trust_target
 from tests.support.shipped import VibeHarness
+from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
 from theater.daemon.jobs import JobState
 from theater.daemon.schema import jobs
 from theater.harness import HARNESSES
+from theater.harness.contracts.runtime import ControlDeliveryPhase, ControlKind, ControlTransport
 from theater.harness.source import Batch
 from theater.models import Status, Tier
 from theater.protocol import RemoteError
@@ -310,6 +314,67 @@ async def test_send_to_working_target_without_a_job_is_rejected(client, terminal
     assert "not delivering now" in exc.value.message
     assert terminal_provider.deliveries == []
     assert daemon.store.running_jobs_for_target(target["id"]) == []
+
+
+async def test_working_target_does_not_expire_an_old_send_claim(
+    client, terminal_provider, daemon, monkeypatch
+):
+    import theater.daemon.rpc.sending as sending_mod
+
+    target = await send_target(client, daemon)
+    old = daemon.jobs.create(
+        handle="old-working-claim",
+        caller_id="cli",
+        target_id=target["id"],
+        kind="send",
+        prompt="old",
+    )
+    daemon.registry.set_status(target["id"], Status.WORKING)
+    monkeypatch.setattr(sending_mod, "now", lambda: old.created_at + SEND_CLAIM_TTL_SECONDS + 1)
+
+    with pytest.raises(RemoteError, match="not delivering now"):
+        await client.call("send", target=target["id"], prompt="new", if_busy="refuse")
+
+    assert daemon.jobs.get(old.handle).state == JobState.RUNNING
+    assert terminal_provider.deliveries == []
+
+
+async def test_expiry_precedes_barrier_then_queue_refusals(
+    client, terminal_provider, daemon, monkeypatch
+):
+    import theater.daemon.rpc.sending as sending_mod
+
+    target = await send_target(client, daemon)
+    participant_id = target["id"]
+    expired = daemon.jobs.create(
+        handle="old-barrier-claim",
+        caller_id="cli",
+        target_id=participant_id,
+        kind="send",
+        prompt="old",
+    )
+    daemon.store.reserve_control_operation(
+        make_operation(
+            "old-barrier",
+            participant_id=participant_id,
+            kind=ControlKind.SEND,
+            transport=ControlTransport.PROVIDER_TERMINAL,
+            delivery_phase=ControlDeliveryPhase.DISPATCHED,
+            execution_barrier=True,
+        )
+    )
+    queued_followup(daemon, participant_id, "41")
+    monkeypatch.setattr(sending_mod, "now", lambda: expired.created_at + SEND_CLAIM_TTL_SECONDS + 1)
+
+    with pytest.raises(RemoteError, match="unresolved delivery"):
+        await client.call("send", target=participant_id, prompt="new", if_busy="refuse")
+    assert daemon.jobs.get(expired.handle).error_code == SEND_SUPERSEDED_ERROR_CODE
+    daemon.store.set_control_execution_barrier(
+        "old-barrier", active=False, updated_at=sending_mod.now()
+    )
+    with pytest.raises(RemoteError, match="queued followup"):
+        await client.call("send", target=participant_id, prompt="new", if_busy="refuse")
+    assert terminal_provider.deliveries == []
 
 
 async def test_send_allowed_after_job_exceeds_ttl(client, terminal_provider, daemon, monkeypatch):

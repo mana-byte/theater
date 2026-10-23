@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from tests.support.control_service import operation_rows
 from tests.support.fake_runtime import FakeRuntime
 from tests.support.native_rpc import (
     GUIDANCE,
@@ -16,9 +17,11 @@ from tests.support.native_rpc import (
     pair,
 )
 from tests.support.waiting import until
-from theater.daemon.rpc import redirect
+from theater.daemon.controls import redirect
+from theater.daemon.rails import ModelNotAllowed
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
+    ControlKind,
     RuntimeCapability,
 )
 from theater.models import Status
@@ -334,6 +337,7 @@ async def test_settings_update_enforces_the_configured_allowlists(client, daemon
             model="gpt-5.6-sol",
         )
     assert raised.value.code == "model_not_allowed"
+    assert operation_rows(daemon.store, child.id, ControlKind.SETTINGS_UPDATE) == []
 
     with pytest.raises(RemoteError) as raised:
         await client.call(
@@ -343,6 +347,17 @@ async def test_settings_update_enforces_the_configured_allowlists(client, daemon
             reasoning_effort="high",
         )
     assert raised.value.code == "reasoning_not_allowed"
+    assert operation_rows(daemon.store, child.id, ControlKind.SETTINGS_UPDATE) == []
+
+
+async def test_settings_service_enforces_participant_allowlist_without_a_wire_adapter(daemon):
+    parent, child, state = await native_pair(daemon)
+
+    with pytest.raises(ModelNotAllowed):
+        await daemon.controls.update_settings(child.id, caller_id=parent.id, model="not-configured")
+
+    assert state.settings == {}
+    assert operation_rows(daemon.store, child.id, ControlKind.SETTINGS_UPDATE) == []
 
 
 async def test_settings_update_requires_idle_and_authorization(client, daemon):

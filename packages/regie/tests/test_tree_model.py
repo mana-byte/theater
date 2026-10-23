@@ -86,6 +86,31 @@ def test_tree_projection_preserves_public_transcript_identity() -> None:
     assert node["icon"] == "◈"
 
 
+def test_internal_nodes_keep_participant_kind_absent_and_pending_extras() -> None:
+    participant = _participant("participant-a")
+    projection = StateProjection(
+        cursor=EventCursor("stream-a", 1),
+        participants=MappingProxyType({participant.participant_id: participant}),
+        operations=MappingProxyType({}),
+        jobs=MappingProxyType({}),
+        providers=MappingProxyType({}),
+        workspaces=MappingProxyType({}),
+    )
+
+    participant_node, pending_node = tree_for_projection(
+        projection, pending_spawn={"id": "old", "kind": "other", "cwd": "/tmp", "extra": 17}
+    )
+
+    assert "kind" not in participant_node
+    assert pending_node == {
+        "id": "new",
+        "kind": "spawn",
+        "cwd": "/tmp",
+        "extra": 17,
+        "children": [],
+    }
+
+
 def test_tree_layout_round_trips_order_and_preserves_unknown_ids(tmp_path) -> None:
     path = tmp_path / "tree-layout.json"
     layout = TreeLayout(

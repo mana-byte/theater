@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -217,6 +218,54 @@ def test_table_lists_require_table_items_and_honor_bounds(channels, field):
             {"channels": channels},
         )
     assert error.value.field == field
+
+
+@pytest.mark.parametrize(
+    "field, value, message",
+    [
+        (
+            McpConfigField(McpConfigKind.STRING, min_length=2, choices=frozenset({"abc"})),
+            "x",
+            "must be at least 2 characters",
+        ),
+        (
+            McpConfigField(McpConfigKind.STRING, max_length=3),
+            "abcd",
+            "must be at most 3 characters",
+        ),
+        (
+            McpConfigField(McpConfigKind.STRING, choices=frozenset({"abc"})),
+            "other",
+            "must be one of the declared choices",
+        ),
+        (McpConfigField(McpConfigKind.INTEGER, minimum=2), 1, "must be >= 2"),
+        (McpConfigField(McpConfigKind.FLOAT, maximum=2), 3.0, "must be <= 2"),
+        (
+            McpConfigField(McpConfigKind.STRING_LIST, min_items=2),
+            ["one"],
+            "must contain at least 2 items",
+        ),
+        (
+            McpConfigField(McpConfigKind.STRING_LIST, max_items=1),
+            ["one", "two"],
+            "must contain at most 1 items",
+        ),
+    ],
+)
+def test_value_constraints_keep_default_and_runtime_error_context(field, value, message):
+    default_schema = McpConfigSchema({"value": replace(field, default=value)})
+    with pytest.raises(McpManifestValidationError) as default_error:
+        compile_manifest("acme", manifest_with_config(default_schema))
+    assert default_error.value.path == "config.value.default"
+    assert default_error.value.message == message
+    assert str(default_error.value) == f"manifest 'acme'.config.value.default: {message}"
+
+    runtime_schema = McpConfigSchema({"value": field})
+    with pytest.raises(McpConfigResolutionError) as runtime_error:
+        compile_manifest("acme", manifest_with_config(runtime_schema), {"value": value})
+    assert runtime_error.value.field == "value"
+    assert runtime_error.value.message == message
+    assert str(runtime_error.value) == f"MCP plugin config acme.value: {message}"
 
 
 def test_table_list_schemas_require_valid_acyclic_item_schemas():

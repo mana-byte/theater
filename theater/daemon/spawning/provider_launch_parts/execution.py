@@ -271,12 +271,14 @@ class SpawnExecution(ParticipantLaunchHost):
             dispatch_provider_generation=None,
             updated_at=timestamp,
         )
-        if not self.store.operations.replace(
-            updated,
+        event = self.operations.write_replacement_in_unit(
+            unit,
             expected_state=operation.state,
             expected_updated_at=operation.updated_at,
-            connection=unit.connection,
-        ):
+            replacement=updated,
+            idempotency_settled_at=None,
+        )
+        if event is None:
             raise RuntimeError("public operation changed during launch rollback")
         return updated
 

@@ -1,23 +1,29 @@
-"""Restart reconciliation and teardown of persisted runtime bindings.
+"""Startup and live recovery of persisted native runtime bindings.
 
-Fixed order: fail undispatched work; adopt only if pid + start identity verify; reconnect
-the exact session (never a cwd guess); consume evidence; close ambiguity without replay.
+Adopt only if pid + start identity verify; reconnect the exact session (never a cwd
+guess); consume evidence; close ambiguity without replay.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, cast
 
 from theater import timing
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
+from theater.daemon.harness_runtime.manager import RecoveryCallback, RuntimeFactory
 from theater.daemon.observation.live import LiveRegistration
-from theater.daemon.operations import DispatchIntent, OperationOutcome
+from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.runtime.evidence import persist_buffered_evidence
+from theater.daemon.runtime.launch_policy import decode_launch_policy
+from theater.daemon.runtime.native_teardown import (
+    sweep_dead_participant_backends,
+    teardown_participant_runtime,
+)
 from theater.daemon.runtime.public_recovery import (
-    fail_proven_undispatched,
-    reconcile_workspace_lifecycle,
+    prepare_provider_control_recovery,
+    reconcile_public_control_operations,
 )
 from theater.daemon.spawning.frontend import (
     close_frontend_runtime,
@@ -25,18 +31,24 @@ from theater.daemon.spawning.frontend import (
     restore_frontend_listener,
 )
 from theater.daemon.spawning.runtime_identity import validate_runtime_binding
-from theater.frontend.capabilities import MAX_ERROR_CODE_CHARS, MAX_ERROR_MESSAGE_CHARS
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import (
-    ControlDeliveryPhase,
-    DeliveryResult,
+    HarnessRuntime,
+    RuntimeBinding,
     RuntimeContext,
     RuntimeLifecyclePhase,
+    RuntimeManifest,
     SessionOpenMode,
 )
-from theater.models import JobState, Participant, PublicOperationState, Status, now
+from theater.models import JobState, Participant, Status, now
 from theater.observability.catalog import RUNTIME_RECONNECT
 from theater.provenance import TranscriptProvenance
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from theater.daemon.server import Daemon
+    from theater.harness.contracts.harness import Harness
 
 logger = logging.getLogger("theater.daemon.runtime")
 
@@ -49,322 +61,7 @@ class _RecoveryLeaseRevoked(Exception):
     """An in-flight live recovery lost authority while awaiting native I/O."""
 
 
-def prepare_provider_control_recovery(daemon) -> None:
-    """Restore provider-only barriers before native or provider admission."""
-    native_ids = {
-        binding.participant_id for binding in daemon.store.runtime_bindings_for_recovery()
-    }
-    provider_ids = {
-        participant.id
-        for participant in daemon.registry.list()
-        if daemon.store.terminal_bindings.get(participant.id) is not None
-    }
-    provider_only = sorted(provider_ids - native_ids)
-    if provider_only:
-        daemon.controls.fail_undelivered_followups(provider_only)
-
-
-async def reconcile_public_control_operations(daemon) -> None:
-    """Reconnect public operation state to durable control rows after a crash."""
-    await reconcile_workspace_lifecycle(daemon)
-    cursor: str | None = None
-    while True:
-        records, cursor = daemon.store.operations.list_page(
-            cursor=cursor,
-            limit=500,
-            unsettled_only=True,
-        )
-        for operation in records:
-            await _reconcile_public_control_operation(daemon, operation)
-        if cursor is None:
-            break
-
-
-async def _reconcile_public_control_operation(daemon, operation) -> None:
-    if operation.kind == "workspace_cleanup" and operation.state in {
-        PublicOperationState.RUNNING.value,
-        PublicOperationState.UNCERTAIN.value,
-    }:
-        if operation.state == PublicOperationState.RUNNING.value:
-            _mark_operation_uncertain(
-                daemon,
-                operation.operation_id,
-                "workspace_cleanup_recovery_pending",
-                error_code="daemon_restarted",
-                message=(
-                    "the daemon restarted after workspace cleanup may have begun; "
-                    "durable workspace evidence is required"
-                ),
-            )
-        await daemon.operation_service.reconcile(operation.operation_id)
-        return
-    launch = (
-        daemon.store.operations.get_launch(operation.operation_id)
-        if operation.kind == "spawn"
-        else None
-    )
-    if launch is not None and launch.dispatch_marker is not None:
-        _restore_launch_provider_target(daemon, operation, launch)
-        _mark_operation_uncertain(
-            daemon, operation.operation_id, "terminal_create_recovery_pending"
-        )
-        return
-    operation, control = _control_for_public_operation(daemon, operation)
-    if control is None:
-        if operation.state == PublicOperationState.ACCEPTED.value:
-            if not await fail_proven_undispatched(daemon, operation):
-                _mark_operation_uncertain(
-                    daemon, operation.operation_id, "dispatch_recovery_pending"
-                )
-            return
-        await _mark_crash_ambiguous_provider_operation(daemon, operation)
-        return
-    _reconcile_public_from_control(daemon, operation, control)
-
-
-def _reconcile_public_from_control(daemon, operation, control) -> None:
-    if control.delivery_phase not in {
-        ControlDeliveryPhase.RESERVED,
-        ControlDeliveryPhase.QUEUED,
-    }:
-        operation = _restore_control_dispatch_target(daemon, operation, control)
-    if control.delivery_phase is ControlDeliveryPhase.QUEUED:
-        operation = _ensure_running_for_recovery(daemon, operation)
-        daemon.operation_service.resume(
-            operation.operation_id,
-            side_effect=lambda: _wait_for_recovered_control(daemon, control.operation_id),
-        )
-        return
-    if control.delivery_phase is ControlDeliveryPhase.RESERVED:
-        daemon.controls.fail_undelivered_followups([control.participant_id])
-        settled = daemon.store.get_control_operation(control.operation_id)
-        if settled is not None and settled.delivery_phase is ControlDeliveryPhase.SETTLED:
-            if settled.delivery_result is DeliveryResult.REJECTED:
-                _settle_public_from_control(
-                    daemon, operation.operation_id, accepted=False, control=settled
-                )
-            else:
-                _mark_operation_uncertain(
-                    daemon, operation.operation_id, "delivery_recovery_pending"
-                )
-        return
-    if control.delivery_phase is ControlDeliveryPhase.DISPATCHED:
-        _mark_operation_uncertain(daemon, operation.operation_id, "delivery_recovery_pending")
-        return
-    if control.delivery_result is DeliveryResult.ACCEPTED:
-        _settle_public_from_control(daemon, operation.operation_id, accepted=True, control=control)
-    elif control.delivery_result is DeliveryResult.REJECTED:
-        _settle_public_from_control(daemon, operation.operation_id, accepted=False, control=control)
-    else:
-        _mark_operation_uncertain(daemon, operation.operation_id, "delivery_recovery_pending")
-
-
-def _control_for_public_operation(daemon, operation):
-    control_id = operation.control_operation_id
-    if control_id is None and operation.kind.startswith("controls."):
-        candidate = f"{operation.operation_id}:control"
-        if daemon.store.get_control_operation(candidate) is not None:
-            if operation.state in {
-                PublicOperationState.ACCEPTED.value,
-                PublicOperationState.RUNNING.value,
-            }:
-                operation = daemon.operation_service.link(
-                    operation.operation_id,
-                    phase="control_recovered",
-                    control_operation_id=candidate,
-                )
-            control_id = candidate
-    control = None if control_id is None else daemon.store.get_control_operation(control_id)
-    return operation, control
-
-
-def _restore_launch_provider_target(daemon, operation, launch) -> None:
-    generation = launch.launch_facts.get("provider_generation")
-    if operation.dispatch_provider_id is not None or type(generation) is not int or generation < 0:
-        return
-    current = _ensure_running_for_recovery(daemon, operation)
-    daemon.operation_service.mark_provider_dispatch_target(
-        current.operation_id,
-        provider_id=launch.provider_id,
-        provider_generation=generation,
-        phase="terminal_create_dispatch_recovered",
-    )
-
-
-def _restore_control_dispatch_target(daemon, operation, control):
-    if operation.state == PublicOperationState.ACCEPTED.value:
-        binding = daemon.store.terminal_bindings.get(control.participant_id)
-        exact_terminal = binding is not None and (
-            binding.provider_id,
-            binding.provider_generation,
-            binding.terminal_id,
-            binding.terminal_incarnation,
-        ) == (
-            control.provider_id,
-            control.provider_generation,
-            control.terminal_id,
-            control.terminal_incarnation,
-        )
-        return daemon.operation_service.mark_dispatch_intent(
-            operation.operation_id,
-            DispatchIntent(
-                phase="control_dispatch_recovered",
-                provider_id=control.provider_id,
-                provider_generation=control.provider_generation,
-                terminal_id=control.terminal_id if exact_terminal else None,
-                terminal_incarnation=(control.terminal_incarnation if exact_terminal else None),
-                occupant_evidence=(binding.occupant_evidence if exact_terminal else None),
-                process_facts=(binding.process_facts if exact_terminal else None),
-                backend_generation=control.backend_generation,
-                native_session_id=control.native_session_id,
-                native_turn_id=control.native_turn_id,
-            ),
-        )
-    if (
-        operation.dispatch_provider_id is not None
-        or control.provider_id is None
-        or control.provider_generation is None
-    ):
-        return operation
-    current = _ensure_running_for_recovery(daemon, operation)
-    return daemon.operation_service.mark_provider_dispatch_target(
-        current.operation_id,
-        provider_id=control.provider_id,
-        provider_generation=control.provider_generation,
-        phase="control_dispatch_recovered",
-    )
-
-
-def _ensure_running_for_recovery(daemon, operation):
-    if operation.state == PublicOperationState.ACCEPTED.value:
-        return daemon.operation_service.mark_running(
-            operation.operation_id, phase="dispatch_recovered"
-        )
-    return operation
-
-
-async def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
-    if operation.state != PublicOperationState.RUNNING.value:
-        return
-    dispatched = operation.dispatch_provider_id is not None
-    if operation.kind == "spawn":
-        launch = daemon.store.operations.get_launch(operation.operation_id)
-        dispatched = launch is not None and launch.dispatch_marker is not None
-        if not dispatched:
-            await fail_proven_undispatched(daemon, operation)
-            return
-    if operation.kind == "adopt":
-        participant_id = operation.target_ids[0] if len(operation.target_ids) == 1 else None
-        binding = (
-            daemon.store.terminal_bindings.get(participant_id)
-            if participant_id is not None
-            else None
-        )
-        if binding is not None:
-            daemon.operation_service.succeed(
-                operation.operation_id,
-                phase="terminal_adopted_recovered",
-                result={"participant_id": participant_id},
-            )
-        else:
-            await fail_proven_undispatched(daemon, operation)
-        return
-    if dispatched:
-        _mark_operation_uncertain(daemon, operation.operation_id, "provider_recovery_pending")
-        return
-    _mark_operation_uncertain(
-        daemon,
-        operation.operation_id,
-        "mutation_recovery_pending",
-        error_code="daemon_restarted",
-        message=(
-            "the daemon restarted after mutation execution may have begun; "
-            "authoritative completion evidence is required"
-        ),
-    )
-
-
-def _mark_operation_uncertain(
-    daemon,
-    operation_id: str,
-    phase: str,
-    *,
-    error_code: str = "provider_unavailable",
-    message: str = "the daemon restarted after dispatch; exact provider evidence is required",
-) -> None:
-    current = daemon.operation_service.get(operation_id)
-    current = _ensure_running_for_recovery(daemon, current)
-    if current.state == PublicOperationState.RUNNING.value:
-        daemon.operation_service.mark_uncertain(
-            operation_id,
-            phase=phase,
-            error={
-                "code": error_code,
-                "message": message,
-            },
-        )
-
-
-def _settle_public_from_control(daemon, operation_id: str, *, accepted: bool, control) -> None:
-    current = daemon.operation_service.get(operation_id)
-    if accepted:
-        current = _ensure_running_for_recovery(daemon, current)
-    if current.state not in {
-        PublicOperationState.ACCEPTED.value,
-        PublicOperationState.RUNNING.value,
-        PublicOperationState.UNCERTAIN.value,
-    }:
-        return
-    if accepted:
-        daemon.operation_service.succeed(
-            operation_id,
-            phase="delivery_recovered",
-            result={"delivery": "accepted"},
-        )
-        return
-    daemon.operation_service.fail(
-        operation_id,
-        phase="delivery_recovered",
-        error={
-            "code": (control.error_code or "dispatch_failed")[:MAX_ERROR_CODE_CHARS],
-            "message": (control.error or "the control was rejected before restart")[
-                :MAX_ERROR_MESSAGE_CHARS
-            ],
-        },
-    )
-
-
-async def _wait_for_recovered_control(daemon, control_id: str) -> OperationOutcome:
-    control = await daemon.controls.wait_control_settled(control_id)
-    if control is None:
-        return OperationOutcome.failed(
-            phase="control_missing",
-            error={"code": "internal", "message": "control reservation disappeared"},
-        )
-    if control.delivery_result is DeliveryResult.ACCEPTED:
-        return OperationOutcome.succeeded(
-            phase="delivery_recovered", result={"delivery": "accepted"}
-        )
-    if control.delivery_result is DeliveryResult.REJECTED:
-        return OperationOutcome.failed(
-            phase="delivery_recovered",
-            error={
-                "code": (control.error_code or "dispatch_failed")[:MAX_ERROR_CODE_CHARS],
-                "message": (control.error or "the control was rejected")[:MAX_ERROR_MESSAGE_CHARS],
-            },
-        )
-    return OperationOutcome.uncertain(
-        phase="delivery_recovery_pending",
-        error={
-            "code": (control.error_code or "delivery_unknown")[:MAX_ERROR_CODE_CHARS],
-            "message": (control.error or "the delivery outcome remains unknown")[
-                :MAX_ERROR_MESSAGE_CHARS
-            ],
-        },
-    )
-
-
-async def reconcile_runtime_bindings(daemon) -> None:
+async def reconcile_runtime_bindings(daemon: Daemon) -> None:
     """Startup: reconcile persisted runtime bindings before ordinary observation."""
     bindings = daemon.store.runtime_bindings_for_recovery()
     if not bindings:
@@ -390,7 +87,7 @@ async def reconcile_runtime_bindings(daemon) -> None:
             )
 
 
-async def _reconcile_one_binding(daemon, binding) -> None:
+async def _reconcile_one_binding(daemon: Daemon, binding: ParticipantRuntimeBinding) -> None:
     store = daemon.store
     participant_id = binding.participant_id
     participant = store.get_participant(participant_id)
@@ -424,7 +121,7 @@ async def _reconcile_one_binding(daemon, binding) -> None:
             backend_generation=binding.backend_generation,
             pid=binding.backend_pid,
             started_at=binding.backend_started_at,
-            endpoint=binding.endpoint,
+            endpoint=cast(str, binding.endpoint),
         )
     except BackendIdentityMismatch:
         _backend_gone(daemon, binding)
@@ -539,7 +236,9 @@ async def _reconcile_one_binding(daemon, binding) -> None:
     await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
 
 
-async def _reconnect_runtime(daemon, binding, participant: Participant):
+async def _reconnect_runtime(
+    daemon: Daemon, binding: ParticipantRuntimeBinding, participant: Participant
+) -> tuple[HarnessRuntime, RuntimeManifest] | None:
     """Create the participant's one runtime for the adopted generation, with its manifest.
 
     ``None`` (manifest gone): keep the backend and binding, expose a diagnostic, and let
@@ -565,7 +264,9 @@ async def _reconnect_runtime(daemon, binding, participant: Participant):
         return runtime, manifest
 
 
-def _runtime_factory(daemon, binding, participant: Participant):
+def _runtime_factory(
+    daemon: Daemon, binding: ParticipantRuntimeBinding, participant: Participant
+) -> tuple[RuntimeManifest, RuntimeFactory] | None:
     """The manifest plus create callback for one persisted binding.
 
     Shared by startup and live recovery so every reconnect rebuilds the exact persisted
@@ -580,11 +281,11 @@ def _runtime_factory(daemon, binding, participant: Participant):
     manifest = wiring_mod.runtime_manifest_of(harness) if harness is not None else None
     if manifest is None:
         return None
-    launch_policy = _launch_policy(binding.launch_policy)
+    launch_policy = decode_launch_policy(binding.launch_policy).fields
     io = daemon.runtime_io
     token_file = _runtime_token_file(daemon, binding, manifest)
 
-    async def create():
+    async def create() -> HarnessRuntime:
         context = RuntimeContext(
             participant_id=binding.participant_id,
             cwd=participant.cwd,
@@ -592,18 +293,20 @@ def _runtime_factory(daemon, binding, participant: Participant):
             backend_generation=binding.backend_generation,
             endpoint=binding.endpoint,
             token_file=token_file,
-            approval=launch_policy.get("approval"),
-            model=launch_policy.get("model"),
-            reasoning_effort=launch_policy.get("reasoning_effort"),
+            approval=cast(str | None, launch_policy.get("approval")),
+            model=cast(str | None, launch_policy.get("model")),
+            reasoning_effort=cast(str | None, launch_policy.get("reasoning_effort")),
             native_session_id=binding.native_session_id,
-            binary=harness.binary,
+            binary=cast("Harness", harness).binary,
         )
         return manifest.factory(context)
 
     return manifest, create
 
 
-def _runtime_token_file(daemon, binding, manifest):
+def _runtime_token_file(
+    daemon: Daemon, binding: ParticipantRuntimeBinding, manifest: RuntimeManifest
+) -> Path | None:
     """Locate this binding's persisted runtime credential, if declared.
 
     Recovery never mints a secret: a missing record fails closed (the backend holds the old one).
@@ -633,7 +336,7 @@ def _runtime_token_file(daemon, binding, manifest):
 
 
 async def recover_live_runtime(
-    daemon,
+    daemon: Daemon,
     participant_id: str,
     backend_generation: int,
     *,
@@ -762,8 +465,12 @@ async def recover_live_runtime(
 
 
 def _current_recovery_binding(
-    daemon, participant_id: str, backend_generation: int, runtime, expected_session: str
-):
+    daemon: Daemon,
+    participant_id: str,
+    backend_generation: int,
+    runtime: HarnessRuntime,
+    expected_session: str,
+) -> ParticipantRuntimeBinding | None:
     """The persisted binding iff the recovered candidate is still exact.
 
     ``None`` means a replacement owns the participant: never register, close, or unregister.
@@ -781,7 +488,7 @@ def _current_recovery_binding(
 
 
 def _recovery_owner_is_current(
-    daemon,
+    daemon: Daemon,
     recovery_owner: Callable[[str, int], Awaitable[bool]] | None,
 ) -> bool:
     """Whether a live-recovery attempt still owns the manager's callback lease."""
@@ -791,10 +498,10 @@ def _recovery_owner_is_current(
 
 
 async def _require_recovery_owner(
-    daemon,
+    daemon: Daemon,
     recovery_owner: Callable[[str, int], Awaitable[bool]] | None,
     participant_id: str,
-    runtime=None,
+    runtime: HarnessRuntime | None = None,
 ) -> None:
     """Reject revoked recovery and disconnect only its exact candidate."""
     if _recovery_owner_is_current(daemon, recovery_owner):
@@ -810,9 +517,9 @@ async def _require_recovery_owner(
 
 
 async def _discard_recovered_candidate(
-    daemon,
+    daemon: Daemon,
     participant_id: str,
-    runtime,
+    runtime: HarnessRuntime,
     *,
     recovery_owner: Callable[[str, int], Awaitable[bool]] | None = None,
 ) -> None:
@@ -835,7 +542,9 @@ async def _discard_recovered_candidate(
         )
 
 
-async def _require_cached_recovered_session(daemon, participant_id: str, runtime, binding) -> None:
+async def _require_cached_recovered_session(
+    daemon: Daemon, participant_id: str, runtime: HarnessRuntime, binding: RuntimeBinding
+) -> None:
     """Cache only the candidate that still owns this participant's runtime slot."""
     if daemon.runtime_manager.mark_session_open(participant_id, runtime, binding):
         return
@@ -845,7 +554,7 @@ async def _require_cached_recovered_session(daemon, participant_id: str, runtime
     )
 
 
-def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
+def live_recovery_callback(daemon: Daemon) -> RecoveryCallback:
     """The generic recovery callback the daemon composition injects.
 
     The manager stays harness-neutral: it only reports ``(participant_id, generation)``.
@@ -884,7 +593,12 @@ def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
     return recover
 
 
-def _register_live(daemon, binding, runtime, manifest) -> None:
+def _register_live(
+    daemon: Daemon,
+    binding: ParticipantRuntimeBinding,
+    runtime: HarnessRuntime,
+    manifest: RuntimeManifest,
+) -> None:
     """Register the reconnected runtime's live channel with the observer hub.
 
     Without a live hub the daemon keeps its durable-only behaviour.
@@ -905,18 +619,7 @@ def _register_live(daemon, binding, runtime, manifest) -> None:
     )
 
 
-def _launch_policy(raw: str | None) -> dict:
-    """The persisted launch-policy facts (approval/model selection, no secrets)."""
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _backend_gone(daemon, binding) -> None:
+def _backend_gone(daemon: Daemon, binding: ParticipantRuntimeBinding) -> None:
     """A persisted backend whose pid no longer verifies: fail affected work.
 
     The process exited (pid possibly reused), so nothing is signalled; jobs fail
@@ -962,7 +665,7 @@ def _backend_gone(daemon, binding) -> None:
     )
 
 
-def _orphan_diagnostic(daemon, binding, detail: str) -> None:
+def _orphan_diagnostic(daemon: Daemon, binding: ParticipantRuntimeBinding, detail: str) -> None:
     logger.warning("runtime orphan for %s: %s", binding.participant_id, detail)
     daemon.store.bus_append(
         _ORPHAN_BUS_KIND,
@@ -971,97 +674,12 @@ def _orphan_diagnostic(daemon, binding, detail: str) -> None:
     )
 
 
-async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id: str) -> bool:
-    """Explicit kill / confirmed exit: stop the verified backend; ``True`` allows pane retirement.
-
-    ``False`` keeps the binding for retry (the backend may still use pane/worktree); a pid
-    without strong start identity is not ours and never signalled.
-    """
-    binding = daemon.store.get_runtime_binding(participant_id)
-    if binding is None:
-        return True
-    if is_frontend_binding(binding):
-        await close_frontend_runtime(daemon, participant_id)
-        daemon.store.delete_runtime_binding(participant_id)
-        return True
-    try:
-        # Gate-free queue cancel: the pane is already gone here, so a presence refresh could only
-        # refuse on kill wake churn or pass on stale facts. The backend stops below anyway.
-        await daemon.controls.cancel_queued_followups(participant_id)
-    except Exception:
-        logger.exception(
-            "queue cancellation for %s failed; backend teardown continues",
-            participant_id,
-        )
-    if binding.backend_pid is None or binding.backend_started_at is None:
-        logger.warning(
-            "cannot terminate the backend of %s: no verified process identity was "
-            "ever persisted, so no signal may be sent and no retirement may "
-            "proceed; the binding is kept and any live process is left for "
-            "manual inspection",
-            participant_id,
-        )
-        return False
-    if daemon.runtime_manager.backend(participant_id) is None:
-        try:
-            await daemon.runtime_manager.adopt_backend(
-                participant_id,
-                backend_generation=binding.backend_generation,
-                pid=binding.backend_pid,
-                started_at=binding.backend_started_at,
-                endpoint=binding.endpoint,
-            )
-        except BackendIdentityMismatch:
-            # The persisted identity is the authority: a pid that no longer
-            # verifies is a backend that exited, positively — safe.
-            _unregister_live(daemon, participant_id)
-            daemon.store.delete_runtime_binding(participant_id)
-            return True
-        except Exception:
-            logger.exception(
-                "could not adopt the persisted backend of %s for teardown; "
-                "the binding is kept and retirement must not proceed",
-                participant_id,
-            )
-            return False
-    try:
-        await daemon.runtime_manager.teardown(
-            participant_id, backend_generation=binding.backend_generation
-        )
-    except Exception:
-        logger.exception(
-            "backend teardown for %s failed; the binding is kept and "
-            "retirement must not proceed — a backend may still be running",
-            participant_id,
-        )
-        return False
-    _unregister_live(daemon, participant_id)
-    daemon.store.delete_runtime_binding(participant_id)
-    return True
-
-
-def _unregister_live(daemon, participant_id: str) -> None:
-    """Return a retired participant to durable-only observation."""
-    hub = getattr(daemon.observer, "live", None)
-    if hub is not None:
-        hub.unregister(participant_id)
-
-
-async def sweep_dead_participant_backends(daemon) -> None:
-    """Reaper pass: a dead participant owns no live backend.
-
-    Catches endings outside the kill flow and retries failed teardowns (in-flight kills are
-    left to it); releases workspace usage once a stop is proved, files stay until cleanup.
-    """
-    for binding in daemon.store.runtime_bindings_for_recovery():
-        if binding.participant_id in daemon._explicit_kills:
-            continue
-        participant = daemon.store.get_participant(binding.participant_id)
-        if participant is not None and participant.status is not Status.DEAD:
-            continue
-        stopped = await teardown_participant_runtime(
-            daemon, binding.participant_id, caller_id="cli"
-        )
-        if not stopped or participant is None:
-            continue
-        daemon.spawner.release_workspace_usage(participant, reason="participant_exit")
+__all__ = [
+    "live_recovery_callback",
+    "prepare_provider_control_recovery",
+    "reconcile_public_control_operations",
+    "reconcile_runtime_bindings",
+    "recover_live_runtime",
+    "sweep_dead_participant_backends",
+    "teardown_participant_runtime",
+]

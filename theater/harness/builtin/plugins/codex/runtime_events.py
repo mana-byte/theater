@@ -22,12 +22,8 @@ from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
 from ._runtime_host import CodexRuntimeHost
 from .runtime_constants import (
-    _PENDING_OUTCOME,
     _TERMINAL_BY_STATUS,
     CODEX_RUNTIME_COMPLETED_ITEMS_MAX,
-    CODEX_RUNTIME_DELTA_ITEMS_MAX,
-    CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS,
-    CODEX_RUNTIME_TERMINAL_TURNS_MAX,
 )
 from .runtime_interactions import CodexRuntimeInteractions, _waiting_flags_of
 from .runtime_messages import (
@@ -203,18 +199,10 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         delta = params.get("delta")
         if item_id is None or not isinstance(delta, str):
             return
-        buffer = self._delta_items.get(item_id)
-        if buffer is None:
-            if len(self._delta_items) >= CODEX_RUNTIME_DELTA_ITEMS_MAX:
-                self._delta_items.popitem(last=False)
-                self._dropped += 1
-            buffer = ""
-        if len(buffer) >= CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS:
+        dropped = self._preview_buffer.append(item_id, delta)
+        if dropped is None:
             return
-        buffer += delta
-        if len(buffer) > CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS:
-            buffer = buffer[:CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS]
-        self._delta_items[item_id] = buffer
+        self._dropped += dropped
         self._notify_activity()
 
     def _on_item_completed(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
@@ -260,8 +248,7 @@ class CodexRuntimeEvents(CodexRuntimeHost):
                     revision=_native_revision(item),
                 )
             )
-            self._delta_items.pop(item_id, None)
-            self._delta_previewed_chars.pop(item_id, None)
+            self._preview_buffer.complete(item_id)
             return
         # Tool-shaped and unknown items are normalized as bounded trajectory
         # facts; the durable parser remains authoritative for history.
@@ -302,14 +289,10 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         from_history: bool = False,
         completed_at: float | None = None,
     ) -> None:
-        key = (session, turn_id)
-        if key in self._terminal_turns:
+        if not self._outcome_buffer.reserve(session, turn_id):
             # A pending (in-flight) or committed insert for this exact turn
             # never inserts a second outcome, whichever paths race here.
             return
-        self._terminal_turns[key] = _PENDING_OUTCOME
-        if len(self._terminal_turns) > CODEX_RUNTIME_TERMINAL_TURNS_MAX:
-            self._terminal_turns.popitem(last=False)
         # Truncated results must remain PARTIAL; trajectory previews have a separate limit.
         result_text = result
         completeness_final = completeness
@@ -334,18 +317,7 @@ class CodexRuntimeEvents(CodexRuntimeHost):
             from_history=from_history,
             completed_at=completed_at,
         )
-        # Bounded with real backpressure: a full queue awaits the live Source's cooperative drain —
-        # terminal evidence is never silently discarded.
-        try:
-            await self._outcomes.put(outcome)
-        except BaseException:
-            # The dedupe key commits only with a successful enqueue: a cancellation while awaiting
-            # queue capacity must not strand a key that later replays would be deduped against.
-            if self._terminal_turns.get(key) is _PENDING_OUTCOME:
-                del self._terminal_turns[key]
-            raise
-        self._terminal_turns[key] = None
-        self._buffered_outcomes[key] = outcome
+        await self._outcome_buffer.enqueue(outcome)
         self._notify_activity()
 
     def set_activity_callback(self, callback: Callable[[], None] | None) -> None:

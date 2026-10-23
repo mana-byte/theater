@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -22,7 +21,7 @@ from theater.harness.contracts.source import (
     Source,
     StreamPoint,
 )
-from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
+from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import Status
 from theater.provenance import TranscriptProvenance, is_trusted_provenance, normalize_provenance
 from theater.trajectory.enums import CostProvenance
@@ -34,6 +33,7 @@ from theater.transcript_identity import (
 )
 
 from .trajectory import session_usage_fact
+from .unified_history import UnifiedHistoryReader, _entries, _nonnegative_int, _runtime_metadata
 from .unified_projection import (
     entry_fingerprint,
     entry_identity,
@@ -68,24 +68,36 @@ class _ReaderReplaced(Exception):
 
 
 @dataclass(frozen=True, slots=True)
-class _HistoryWindow:
-    view: UnifiedStoreView
-    end: int
-    pinned: bool
+class _DecodedCheckpoint:
+    raw: str
+    location: str
+    session_id: str
+    generation: str
+    snapshot_sequence: int
+    sequence: int
+    watermark: int
+    usage: tuple[int, int, int]
 
 
 @dataclass(frozen=True, slots=True)
-class _HistorySelection:
-    start: int
-    events: list[Event]
-    facts: list[TrajectoryFact]
+class _StagedAdvancement:
+    view: UnifiedStoreView
+    checkpoint: str
+    decoded_checkpoint: _DecodedCheckpoint | None
+
+    @classmethod
+    def for_view(cls, view: UnifiedStoreView) -> _StagedAdvancement:
+        raw = _encode_checkpoint(view)
+        return cls(view, raw, _checkpoint(raw))
 
 
-def _nonnegative_int(value: object) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+@dataclass(frozen=True, slots=True)
+class _StagedAttachment:
+    baseline: UnifiedStoreView
+    unproven: bool = False
 
 
-def _checkpoint(raw: str | None) -> dict | None:
+def _checkpoint(raw: str | None) -> _DecodedCheckpoint | None:
     if raw is None or len(raw.encode("utf-8", errors="ignore")) > _CHECKPOINT_MAX_BYTES:
         return None
     try:
@@ -111,20 +123,16 @@ def _checkpoint(raw: str | None) -> dict | None:
         return None
     if any(_nonnegative_int(item) is None for item in usage):
         return None
-    return value
-
-
-def _entries(view: UnifiedStoreView) -> list[dict]:
-    history = view.snapshot.get("history")
-    values = history.get("entries") if isinstance(history, dict) else None
-    return (
-        [entry for entry in values if isinstance(entry, dict)] if isinstance(values, list) else []
+    return _DecodedCheckpoint(
+        raw=raw,
+        location=value["location"],
+        session_id=value["session_id"],
+        generation=value["generation"],
+        snapshot_sequence=value["snapshot_sequence"],
+        sequence=value["sequence"],
+        watermark=value["watermark"],
+        usage=tuple(value["usage"]),
     )
-
-
-def _runtime_metadata(view: UnifiedStoreView) -> dict:
-    value = view.runtime_state.get("session_metadata")
-    return value if isinstance(value, dict) else {}
 
 
 def _session(view: UnifiedStoreView) -> dict:
@@ -267,22 +275,6 @@ def _encode_checkpoint(view: UnifiedStoreView) -> str:
     )
 
 
-def _cursor(payload: dict) -> str:
-    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return base64.urlsafe_b64encode(body).decode().rstrip("=")
-
-
-def _decode_cursor(raw: str) -> dict | None:
-    try:
-        body = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
-        value = json.loads(body)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(value, dict) or value.get("version") != 1:
-        return None
-    return value
-
-
 class UnifiedVibeSource(Source):
     """A durable diff over Vibe's mutable public projection."""
 
@@ -309,26 +301,25 @@ class UnifiedVibeSource(Source):
             if self._known_location is not None
             else TranscriptProvenance.HEURISTIC
         )
-        self._source_checkpoint = source_checkpoint
+        self._resume_checkpoint = _checkpoint(source_checkpoint)
+        self._acknowledged_checkpoint = (
+            source_checkpoint if self._resume_checkpoint is not None else None
+        )
         self._count_initial = count_initial
+        # Restaging or discarding an attachment does not settle initial usage.
         self._initial_usage_inflight = False
         self._view: UnifiedStoreView | None = None
         self._reader = UnifiedStoreReader()
         self._rows_view: UnifiedStoreView | None = None
         self._rows_cache: list[tuple[str, dict, int]] | None = None
-        self._history_location: Path | None = None
-        self._pending_view: UnifiedStoreView | None = None
-        self._pending_attachment: UnifiedStoreView | None = None
-        self._pending_checkpoint: str | None = None
-        self._acknowledged_checkpoint = (
-            source_checkpoint if _checkpoint(source_checkpoint) is not None else None
-        )
+        self._pending_advancement: _StagedAdvancement | None = None
+        self._pending_attachment: _StagedAttachment | None = None
         self._checkpoint_gap = False
         #: Turn ends since the acknowledged point could not be replayed; every batch says so,
         #: and stages a checkpoint, until the observer has applied one and acknowledged it.
         self._unproven = False
-        self._attach_unproven = False
         self.collision_domain = str(observer.root.resolve())
+        self._history = UnifiedHistoryReader(self)
 
     @property
     def path(self) -> Path | None:
@@ -362,10 +353,7 @@ class UnifiedVibeSource(Source):
     def correlation_for(self, path: Path, session_id: str | None) -> str:
         return self._correlation(path, session_id or self._session_id or "")
 
-    async def _load(self, path: Path, **kwargs) -> UnifiedStoreView | None:
-        """Use incremental state for active loads and shared chunks for history."""
-        if kwargs:
-            return await self._load_fresh(path, **kwargs)
+    async def _load_current(self, path: Path) -> UnifiedStoreView | None:
         return (await self._load_update(path)).view
 
     async def _load_update(self, path: Path) -> UnifiedStoreUpdate:
@@ -377,12 +365,18 @@ class UnifiedVibeSource(Source):
             raise _ReaderReplaced
         return update
 
-    async def _load_fresh(self, path: Path, **kwargs) -> UnifiedStoreView | None:
+    async def _load_recovery(
+        self, path: Path, *, at_sequence: int | None, generation_hint: str | None
+    ) -> UnifiedStoreView | None:
         import asyncio
 
         reader = self._reader
         view = await asyncio.to_thread(
-            load_unified_store, path, chunk_cache=reader.chunk_cache, **kwargs
+            load_unified_store,
+            path,
+            chunk_cache=reader.chunk_cache,
+            at_sequence=at_sequence,
+            generation_hint=generation_hint,
         )
         if reader is not self._reader:
             raise _ReaderReplaced
@@ -423,7 +417,7 @@ class UnifiedVibeSource(Source):
     def _before_read(self) -> Batch | None:
         if self._pending_attachment is not None:
             raise RuntimeError("attachment must be committed or discarded before reading again")
-        if self._pending_view is not None:
+        if self._pending_advancement is not None:
             raise RuntimeError("source checkpoint must be acknowledged before reading again")
         if self._checkpoint_gap:
             self._checkpoint_gap = False
@@ -438,8 +432,7 @@ class UnifiedVibeSource(Source):
             self._count_initial = False
             return None
         usage_fact = self._durable_usage_fact(self._view, previous=None)
-        self._pending_checkpoint = _encode_checkpoint(self._view)
-        self._pending_view = self._view
+        self._pending_advancement = _StagedAdvancement.for_view(self._view)
         self._initial_usage_inflight = True
         return Batch(
             events=[usage_event],
@@ -461,7 +454,7 @@ class UnifiedVibeSource(Source):
         if path_error is not None:
             return path_error
         try:
-            current = await self._load(path)
+            current = await self._load_current(path)
             if current is None:
                 return Batch(waiting=True)
             return await self._stage_attachment(current)
@@ -493,8 +486,7 @@ class UnifiedVibeSource(Source):
             )
         if current.sequence == self._view.sequence and current.watermark == self._view.watermark:
             if self._unproven:
-                self._pending_view = current
-                self._pending_checkpoint = _encode_checkpoint(current)
+                self._pending_advancement = _StagedAdvancement.for_view(current)
             return Batch(
                 status=_pending_input_status(current),
                 turn_state=_turn_state(current, complete=not self._unproven),
@@ -522,49 +514,43 @@ class UnifiedVibeSource(Source):
 
     async def _stage_attachment(self, current: UnifiedStoreView) -> Batch:
         baseline = current
-        saved = _checkpoint(self._source_checkpoint)
+        saved = self._resume_checkpoint
         last_event: Event | None = None
         status: Status | None = None
+        attach_unproven = False
         if saved is not None and (
-            same_location(saved["location"], str(current.current))
-            and saved["session_id"] == current.session_id
+            same_location(saved.location, str(current.current))
+            and saved.session_id == current.session_id
         ):
-            saved_watermark = int(saved["watermark"])
-            if saved_watermark > current.watermark or int(saved["sequence"]) > current.sequence:
+            saved_watermark = saved.watermark
+            if saved_watermark > current.watermark or saved.sequence > current.sequence:
                 return Batch(
                     waiting=True,
                     error_code="vibe_unified_store_invalid",
                     error="Unified Vibe projection watermark moved backwards",
                 )
             if saved_watermark < current.watermark:
-                restored = await self._load(
+                restored = await self._load_recovery(
                     current.current,
-                    at_sequence=int(saved["sequence"]),
-                    generation_hint=str(saved["generation"]),
+                    at_sequence=saved.sequence,
+                    generation_hint=saved.generation,
                 )
                 if restored is not None and restored.watermark == saved_watermark:
                     baseline = restored
                 else:
                     # Reported on the attachment itself, before any checkpoint can advance.
-                    self._checkpoint_gap = True
-                    self._attach_unproven = True
-                    self._pending_checkpoint = _encode_checkpoint(current)
-                    self._pending_view = current
-            elif (
-                int(saved["sequence"]) != current.sequence
-                or str(saved["generation"]) != current.generation
-            ):
+                    attach_unproven = True
+                    self._pending_advancement = _StagedAdvancement.for_view(current)
+            elif saved.sequence != current.sequence or saved.generation != current.generation:
                 # Non-projection journal records still advance the durable recovery point.
-                self._pending_checkpoint = _encode_checkpoint(current)
-                self._pending_view = current
+                self._pending_advancement = _StagedAdvancement.for_view(current)
             # Do not replay attach-time events; pending input is still a current state.
             status = _pending_input_status(baseline)
         else:
             last_event = self._turn_boundary(current, previous=None)
             status = _source_status(current)
-            self._pending_checkpoint = _encode_checkpoint(current)
-            self._pending_view = current
-        self._pending_attachment = baseline
+            self._pending_advancement = _StagedAdvancement.for_view(current)
+        self._pending_attachment = _StagedAttachment(baseline, unproven=attach_unproven)
         return Batch(
             attached=Attachment(
                 location=str(current.current),
@@ -579,7 +565,9 @@ class UnifiedVibeSource(Source):
                 correlation=self._correlation(current.current, current.session_id),
                 collision_domain=self.collision_domain,
             ),
-            turn_state=_turn_state(current, complete=not (self._unproven or self._attach_unproven)),
+            turn_state=_turn_state(
+                current, complete=not (self._unproven or self._pending_attachment.unproven)
+            ),
         )
 
     def _diff(
@@ -639,8 +627,7 @@ class UnifiedVibeSource(Source):
         old_status = _source_status(previous)
         new_status = _source_status(current)
         status = new_status if new_status != old_status else _pending_input_status(current)
-        self._pending_view = current
-        self._pending_checkpoint = _encode_checkpoint(current)
+        self._pending_advancement = _StagedAdvancement.for_view(current)
         return Batch(
             events=events,
             progressed=current.sequence != previous.sequence
@@ -849,7 +836,7 @@ class UnifiedVibeSource(Source):
         if candidate is None or candidate == self._view.current:
             return Batch()
         try:
-            view = await self._load(candidate)
+            view = await self._load_current(candidate)
             return await self._stage_attachment(view) if view is not None else Batch()
         except _ReaderReplaced:
             return Batch()
@@ -859,36 +846,33 @@ class UnifiedVibeSource(Source):
     def commit_attachment(self) -> None:
         if self._pending_attachment is None:
             raise RuntimeError("no Unified Vibe attachment is pending")
-        self._view = self._pending_attachment
+        self._view = self._pending_attachment.baseline
         self._known_location = self._view.current
         self._session_id = self._view.session_id
         self._known_provenance = normalize_provenance(
             self._correlation(self._view.current, self._view.session_id)
         )
+        self._unproven = self._unproven or self._pending_attachment.unproven
+        self._checkpoint_gap = self._checkpoint_gap or self._pending_attachment.unproven
         self._pending_attachment = None
-        self._unproven = self._unproven or self._attach_unproven
-        self._attach_unproven = False
 
     def discard_attachment(self) -> None:
         if self._pending_attachment is None:
             raise RuntimeError("no Unified Vibe attachment is pending")
         self._pending_attachment = None
-        self._pending_view = None
-        self._pending_checkpoint = None
+        self._pending_advancement = None
         self._checkpoint_gap = False
-        self._attach_unproven = False
 
     def revoke_attachment(self) -> None:
         self._view = None
-        self._pending_view = None
+        self._pending_advancement = None
         self._pending_attachment = None
         self._known_location = None
         self._session_id = None
-        self._history_location = None
-        self._pending_checkpoint = None
+        self._history.reset()
         self._acknowledged_checkpoint = None
         self._checkpoint_gap = False
-        self._unproven = self._attach_unproven = False
+        self._unproven = False
         self._initial_usage_inflight = False
         self._reader = UnifiedStoreReader()
         self._rows_view = None
@@ -899,7 +883,7 @@ class UnifiedVibeSource(Source):
         self._session_id = session_id
         self._session_provenance = TranscriptProvenance.EXACT
         self._known_location = path
-        self._history_location = None
+        self._history.reset()
         self._known_provenance = TranscriptProvenance.EXACT
         if self._view is not None and self._view.current == path:
             return "accepted"
@@ -913,65 +897,34 @@ class UnifiedVibeSource(Source):
         return self._acknowledged_checkpoint
 
     def pending_source_checkpoint(self) -> str | None:
-        return self._pending_checkpoint
+        pending = self._pending_advancement
+        return pending.checkpoint if pending is not None else None
 
     def acknowledge_source_checkpoint(self) -> None:
-        if self._pending_checkpoint is None:
+        pending = self._pending_advancement
+        if pending is None:
             return
-        self._acknowledged_checkpoint = self._pending_checkpoint
-        self._source_checkpoint = self._pending_checkpoint
-        self._pending_checkpoint = None
+        self._acknowledged_checkpoint = pending.checkpoint
+        self._resume_checkpoint = pending.decoded_checkpoint
+        self._pending_advancement = None
         # Only an applied batch is acknowledged, and one carrying the unproven fact has had its
         # delivered jobs ended unverified first.
         self._unproven = False
-        if self._pending_view is not None:
-            self._view = self._pending_view
-            self._pending_view = None
+        self._view = pending.view
         if self._initial_usage_inflight:
             self._count_initial = False
             self._initial_usage_inflight = False
 
     def rollback_source_checkpoint(self) -> None:
-        self._pending_checkpoint = None
-        self._pending_view = None
+        self._pending_advancement = None
         self._initial_usage_inflight = False
 
-    async def _history_view(self) -> tuple[UnifiedStoreView | None, bool, str | None]:
-        pinned = self._known_location is not None
-        path = self.path or self._known_location or self._history_location
-        if path is None:
-            path = await self._observer.find_unified_transcript_async(
-                cwd=self._cwd, session_id=self._session_id, after=self._after
-            )
-        if path is None:
-            return None, pinned, None
-        try:
-            view = await self._load(path)
-        except _ReaderReplaced:
-            return None, pinned, None
-        except (OSError, UnifiedStoreError, ValueError) as exc:
-            return None, pinned, str(exc)
-        if view is not None:
-            self._history_location = view.current
-            self._session_id = view.session_id
-        return view, pinned, None
-
     async def history(self, *, last_n: int) -> History:
-        view, pinned, error = await self._history_view()
-        if view is None:
-            return History(
-                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE if error else None,
-                error=error,
-                pinned=pinned,
-            )
-        events, _facts = self._project_history(view, 0, len(_entries(view)), clip_text=False)
-        return History(
-            location=str(view.current),
-            events=events[-last_n:] if last_n > 0 else events,
-            correlation=self._correlation(view.current, view.session_id),
-            collision_domain=self.collision_domain,
-            pinned=pinned,
-        )
+        pinned = self._known_location is not None
+        try:
+            return await self._history.history(last_n=last_n)
+        except _ReaderReplaced:
+            return History(pinned=pinned)
 
     async def history_page(
         self,
@@ -981,206 +934,16 @@ class UnifiedVibeSource(Source):
         limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
         include_full_text: bool = False,
     ) -> HistoryPage:
-        request = self._history_request(before, snapshot, limit)
-        if isinstance(request, HistoryPage):
-            return request
-        bounded_limit, payload = request
-        window = await self._history_window(payload)
-        if isinstance(window, HistoryPage):
-            return window
-        view, end, pinned = window.view, window.end, window.pinned
-        durable_usage = self._durable_usage_fact(view, previous=None) if before is None else None
-        selection = self._select_history_records(
-            view, end, bounded_limit, reserve_fact=durable_usage is not None, pinned=pinned
-        )
-        if isinstance(selection, HistoryPage):
-            return selection
-        facts = selection.facts
-        if durable_usage is not None:
-            facts.append(durable_usage)
-        full_events = None
-        if include_full_text:
-            full_events, _ = self._project_history(view, selection.start, end, clip_text=False)
-        return self._history_page_result(
-            view,
-            end,
-            selection.start,
-            selection.events,
-            facts,
-            full_events,
-            pinned,
-        )
-
-    @staticmethod
-    def _history_request(
-        before: str | None, snapshot: str | None, limit: int
-    ) -> tuple[int, dict | None] | HistoryPage:
-        if type(limit) is not int or limit <= 0:
-            return HistoryPage(
-                error_code="invalid_limit", error="history page limit must be positive"
-            )
-        if before is not None and snapshot is not None:
-            return HistoryPage(
-                error_code="history_cursor_invalid",
-                error="history page accepts either an older cursor or a snapshot cursor",
-            )
-        raw_cursor = before if before is not None else snapshot
-        payload = _decode_cursor(raw_cursor) if raw_cursor is not None else None
-        if raw_cursor is not None and payload is None:
-            return HistoryPage(error_code="history_cursor_invalid", error="invalid history cursor")
-        return min(limit, TRAJECTORY_PAGE_RECORD_LIMIT), payload
-
-    async def _history_window(self, payload: dict | None) -> _HistoryWindow | HistoryPage:
         pinned = self._known_location is not None
-        if payload is None:
-            view, pinned, error = await self._history_view()
-            if view is None:
-                return HistoryPage(
-                    error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE if error else None,
-                    error=error,
-                    pinned=pinned,
-                )
-            return _HistoryWindow(view, len(_entries(view)), pinned)
-        return await self._history_cursor_window(payload, pinned)
-
-    async def _history_cursor_window(
-        self, payload: dict, pinned: bool
-    ) -> _HistoryWindow | HistoryPage:
-        path = self.path or self._known_location or self._history_location
-        if path is None or payload.get("session_id") != self._session_id:
-            return HistoryPage(
-                error_code="history_cursor_invalid", error="history cursor session mismatch"
-            )
         try:
-            view = await self._load(
-                path,
-                at_sequence=_nonnegative_int(payload.get("sequence")),
-                generation_hint=payload.get("generation"),
+            return await self._history.history_page(
+                before=before,
+                snapshot=snapshot,
+                limit=limit,
+                include_full_text=include_full_text,
             )
         except _ReaderReplaced:
             return HistoryPage(pinned=pinned)
-        except (OSError, UnifiedStoreError, ValueError) as exc:
-            return HistoryPage(error_code="history_cursor_invalid", error=str(exc), pinned=pinned)
-        if view is None or view.watermark != payload.get("watermark"):
-            return HistoryPage(
-                error_code="history_snapshot_expired",
-                error="Unified Vibe history snapshot is no longer retained",
-                pinned=pinned,
-            )
-        end = _nonnegative_int(payload.get("before"))
-        if end is None or end > len(_entries(view)):
-            return HistoryPage(
-                error_code="history_cursor_invalid", error="history cursor boundary is invalid"
-            )
-        return _HistoryWindow(view, end, pinned)
-
-    def _select_history_records(
-        self,
-        view: UnifiedStoreView,
-        end: int,
-        limit: int,
-        *,
-        reserve_fact: bool,
-        pinned: bool,
-    ) -> _HistorySelection | HistoryPage:
-        selected_start = end
-        event_count = fact_count = 0
-        indexed = {row[2]: row for row in self._rows(view)}
-        selected: list[ParsedRecord] = []
-        for row_start in range(end - 1, -1, -1):
-            row = indexed.get(row_start)
-            parsed = (
-                self._project_history_entry(view, row, clip_text=True)
-                if row is not None
-                else ParsedRecord()
-            )
-            row_events, row_facts = parsed.events, parsed.trajectory
-            row_too_large = len(row_events) > limit or len(row_facts) > limit
-            would_overflow = (
-                event_count + len(row_events) > limit
-                or fact_count + len(row_facts) + int(reserve_fact) > limit
-            )
-            if row_too_large:
-                if selected_start == end:
-                    return HistoryPage(
-                        error_code="history_record_too_large",
-                        error="one Unified Vibe entry exceeds the history page limit",
-                        pinned=pinned,
-                    )
-                break
-            if would_overflow:
-                break
-            selected_start = row_start
-            selected.append(parsed)
-            event_count += len(row_events)
-            fact_count += len(row_facts)
-        events = [event for parsed in reversed(selected) for event in parsed.events]
-        facts = [fact for parsed in reversed(selected) for fact in parsed.trajectory]
-        return _HistorySelection(selected_start, events, facts)
-
-    def _history_page_result(
-        self,
-        view: UnifiedStoreView,
-        end: int,
-        start: int,
-        events: list[Event],
-        facts: list[TrajectoryFact],
-        full_events: list[Event] | None,
-        pinned: bool,
-    ) -> HistoryPage:
-        base = {
-            "version": 1,
-            "session_id": view.session_id,
-            "generation": view.generation,
-            "sequence": view.sequence,
-            "watermark": view.watermark,
-        }
-        snapshot_cursor = _cursor({**base, "before": end})
-        older = _cursor({**base, "before": start}) if start > 0 else None
-        return HistoryPage(
-            location=str(view.current),
-            events=events,
-            complete_events=full_events,
-            trajectory=facts,
-            trajectory_events=(),
-            cursor=snapshot_cursor,
-            snapshot_cursor=snapshot_cursor,
-            older_cursor=older,
-            has_older=start > 0,
-            provenance=self._correlation(view.current, view.session_id),
-            collision_domain=self.collision_domain,
-            pinned=pinned,
-        )
-
-    def _project_history(
-        self, view: UnifiedStoreView, start: int, end: int, *, clip_text: bool
-    ) -> tuple[list[Event], list[TrajectoryFact]]:
-        events: list[Event] = []
-        facts: list[TrajectoryFact] = []
-        for row in self._rows(view):
-            if row[2] >= end:
-                break
-            if row[2] < start:
-                continue
-            parsed = self._project_history_entry(view, row, clip_text=clip_text)
-            events.extend(parsed.events)
-            facts.extend(parsed.trajectory)
-        return events, facts
-
-    def _project_history_entry(
-        self, view: UnifiedStoreView, row: tuple[str, dict, int], *, clip_text: bool
-    ) -> ParsedRecord:
-        identity, entry, index = row
-        cwd = _runtime_metadata(view).get("cwd")
-        return project_unified_entry(
-            entry,
-            identity=identity,
-            index=index,
-            watermark=view.watermark,
-            source_sequence=view.sequence,
-            cwd=cwd if isinstance(cwd, str) else self._cwd,
-            clip_text=clip_text,
-        )
 
     async def aclose(self) -> None:
         return

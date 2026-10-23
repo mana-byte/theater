@@ -21,7 +21,11 @@ from theater.daemon.harness_runtime.errors import (
     BackendIdentityMismatch,
     RuntimeGenerationMismatch,
 )
-from theater.daemon.harness_runtime.manager import HarnessRuntimeManager, ManagedRuntime
+from theater.daemon.harness_runtime.manager import (
+    CachedNativeRoute,
+    HarnessRuntimeManager,
+    ManagedRuntime,
+)
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -92,14 +96,13 @@ async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None
         "native_session_id": "session-4",
         "health": "connected",
     }
-    capabilities = manager.cached_native_capabilities(
-        "p1", backend_generation=4, native_session_id="session-4"
-    )
+    facts = manager.cached_native_facts("p1", backend_generation=4, native_session_id="session-4")
+    assert isinstance(facts, CachedNativeRoute)
+    assert facts.health is ConnectionHealth.CONNECTED
+    capabilities = facts.capabilities
     assert capabilities is not None
     assert not capabilities.supports(RuntimeCapability.SETTINGS_UPDATE)
-    settings = manager.cached_native_settings(
-        "p1", backend_generation=4, native_session_id="session-4"
-    )
+    settings = facts.settings
     assert settings is not None
     assert settings.supported_fields == frozenset({RuntimeSettingField.MODEL})
     assert (
@@ -108,6 +111,10 @@ async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None
     )
     assert (
         manager.cached_native_route("p1", backend_generation=4, native_session_id="replacement")
+        is None
+    )
+    assert (
+        manager.cached_native_facts("p1", backend_generation=4, native_session_id="replacement")
         is None
     )
     assert not manager.record_snapshot("p1", runtime, replace(snapshot, backend_generation=5))
@@ -120,12 +127,10 @@ async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None
         "p1", backend_generation=4, native_session_id="session-4"
     )
     assert disconnected is not None and disconnected["health"] == "disconnected"
-    assert (
-        manager.cached_native_capabilities(
-            "p1", backend_generation=4, native_session_id="session-4"
-        )
-        is capabilities
+    disconnected_facts = manager.cached_native_facts(
+        "p1", backend_generation=4, native_session_id="session-4"
     )
+    assert disconnected_facts is not None and disconnected_facts.capabilities is capabilities
     await manager.aclose()
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.claude_seal import claude_fragment, claude_marker, claude_record
+from tests.support.observation import apply_batch
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
@@ -58,7 +59,7 @@ async def test_job_finishes_on_the_marker_with_the_final_text_split_across_reads
     turns = TurnAccumulator()
 
     async def read_and_apply() -> None:
-        observer._apply(participant.id, await source.read(), clock, turns)
+        apply_batch(observer, participant.id, await source.read(), clock, turns, source=source)
 
     _append(path, claude_fragment("u1", "u0", {"type": "thinking", "thinking": "hm"}))
     await read_and_apply()

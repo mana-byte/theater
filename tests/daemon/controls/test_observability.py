@@ -19,6 +19,7 @@ from tests.support.control_harness import (
 from tests.support.fake_runtime import FakeRuntime
 from tests.support.observation import Rig, bus_kinds
 from tests.support.waiting import until
+from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS
 from theater.constants.observability import CONTROL_QUEUE_DEPTH_GAUGE
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.runtime import (
@@ -387,12 +388,12 @@ async def test_control_service_registers_counter_on_the_one_bridge(store, spy) -
         require_absent=noop,
         check_absent=lambda participant_id: None,
         send_preflight=noop,
-        legacy_copy_mode_check=noop,
-        legacy_busy_check=noop,
+        send_claim_now=now,
+        send_claim_ttl=lambda: SEND_CLAIM_TTL_SECONDS,
         check_prompt=lambda prompt: None,
         check_settings=lambda model, effort: None,
         cwd_for=lambda participant_id: "/tmp",
-        legacy_deliver=noop,
+        check_settings_for=lambda participant_id, model, effort: None,
     )
     jobs = JobManager(store)
     for _ in range(3):

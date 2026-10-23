@@ -78,80 +78,15 @@ async def spawn_session(
     task_kind: str | None = None,
     skills: list[str] | None = None,
 ) -> dict:
-    """Create a child agent through a selected terminal provider and return its record.
-
-    The prompt is delivered on the child's argv by the selected provider, so
-    this path does not depend on keystroke injection working at all.
-
-    If `worktree` is True, a git worktree is created for the child so it has
-    its own isolated index and HEAD. Its unique branch name is
-    reported in the result so the parent can merge it explicitly.
-
-    If `worktree` is a non-empty string, a named shared linked worktree is
-    created or joined. Multiple live children spawned with the same name in
-    the same canonical main repository run in the same directory and on the
-    same branch. This is an expert-mode collaboration primitive, not
-    filesystem or Git isolation: the index and HEAD are shared, concurrent
-    ``git add``/``commit`` operations can interfere, and the KV store does
-    not make file claims atomic or enforce ownership. The branch name
-    `theater/named/<name>` is reported in the result.
-
-    `model` is passed to the harness unchanged, but not unchecked: it must be
-    one the config lists for that harness, and the harness must be able to
-    select a model at all. Both are refused before anything is created;
-    `list_harnesses(include_models=true)` reports them. Membership is the whole
-    of the check — Theater cannot confirm
-    the name is real or that the CLI honoured it, so a typo the user vouched for
-    surfaces as a child on the wrong model, not as an error here.
-
-    `reasoning_effort` mirrors `model`: passed to the harness unchanged, gated
-    by the same two checks (adapter capability + config allowlist). Omit it and
-    the harness uses its own default. The values a harness accepts are
-    CLI-specific (codex: none/minimal/low/medium/high/xhigh/max/ultra; claude:
-    low/medium/high/xhigh/max/auto); Theater checks membership in the
-    `[reasoning]` allowlist and nothing else.
-
-    `resume` takes a session id from `recall` — or a Theater participant id —
-    and continues that context. Harnesses with native fork support create a
-    fresh session identity; older resume-only harnesses reuse the existing one.
-    If the value matches a retained participant, the daemon resolves it to
-    that participant's harness session id internally.
-    Refused up front
-    for a harness whose `plan_launch` has no `resume` parameter. Some
-    harnesses accept resume but cannot carry a prompt through it — see
-    the tool description for the harness-specific behaviour.
-
-    `response_format` is forwarded unchanged; MCP neither serializes nor
-    injects it. A bare JSON Schema object is a hint the daemon adds to the
-    prompt guidance exactly once and later parses with ``json.loads``: no
-    validation, scraping, coercion, or retry. A ``{"$theater": ...}`` object
-    is a strict contract (presets ``review``, ``debate``, ``delegate``, or
-    ``custom`` with a name and schema) the daemon validates in full, repairs
-    where it can prove which turn answered, and otherwise ends with
-    ``structured_status`` ``unable_to_parse``. Resume plus `response_format`
-    is refused for harnesses whose resume path cannot carry a prompt.
-
-    `skills` names are forwarded unchanged; the daemon resolves, renders, and
-    bounds them. Omitted or empty means none: nothing is inherited.
-
-    The returned ``session_id`` is populated asynchronously by the observer,
-    so the compact MCP projection normally omits it for a newly spawned child.
-    Re-list later after Theater attaches to the child's transcript.
-
-    ``wiring`` selects a preference: "auto" (default) and "native" use a
-    compatible runtime when available, otherwise retain the ordinary launch;
-    "legacy" opts out. It is independent of ``approval``, which remains
-    required with no default.
-    """
-    if not session._resolved:
-        await session.identify()
+    """Request a daemon-planned spawn and project its participant and operation receipt."""
+    caller_id = await session.caller_id()
     record = await session.client.call(
         "spawn",
         harness=harness,
         prompt=prompt,
         approval=approval,
         cwd=cwd or str(Path.cwd()),
-        parent_id=session.participant_id,
+        parent_id=caller_id,
         worktree=worktree,
         base_branch=base_branch,
         provider=provider,
@@ -194,8 +129,7 @@ async def await_sessions(
     ceiling: float | None = None,
 ) -> list[dict]:
     """Forward presence-aware awaits, projecting each entry to what the caller acts on."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     if ceiling is not None:
         # Past the client's own threshold the call is backgrounded and its result lost.
         max_wait = min(max_wait, ceiling)
@@ -204,7 +138,7 @@ async def await_sessions(
         "jobs.await",
         handles=handles,
         max_wait=max_wait,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(jobs, list)
     return [job_entry(job) for job in jobs]
@@ -221,42 +155,13 @@ async def send_prompt(
     after: str | None = None,
     skills: list[str] | None = None,
 ) -> dict:
-    """Send a prompt to an already-running agent on its selected transport.
-
-    Delivery follows the daemon's selected capability route. A native attempt
-    with an unknown or disconnected outcome is never silently retried into
-    the pane. The target must have a verified physical delivery route; origin
-    and ownership do not decide ordinary send admission. By default the daemon
-    delivers once when it is safe and otherwise queues the message, behind the
-    target's work or a human at its pane, under the same handle. Explicit
-    ``refuse`` is open to anyone; ``queue``, ``amend`` and ``replace`` stay
-    direct-parent-only.
-
-    ``target_id`` may be a participant id or a name. Names work only
-    while the participant is live; a dead participant's name is null and
-    cannot be resolved. Because names are recyclable, use the id for any
-    targeting that spans time or destructive consequences — a
-    recycled name can identify a successor.
-
-    `response_format` is forwarded unchanged and takes the same forms as for
-    ``spawn_session``: a bare schema is a prompt-only hint parsed with
-    ``json.loads``; a ``{"$theater": ...}`` object is a strict contract the
-    daemon validates in full and repairs where it can prove the turn.
-
-    `after` (a name or exact job handle) queues the message until that work ends and
-    adds Theater's labelled card about it; the daemon resolves and gates it.
-
-    `skills` names are forwarded unchanged and attach to this message only.
-
-    Returns a job handle that can be passed to `await_sessions`.
-    """
-    if not session._resolved:
-        await session.identify()
+    """Forward a prompt and project the daemon's job receipt."""
+    caller_id = await session.caller_id()
     record = await session.client.call(
         "send",
         target=target_id,
         prompt=prompt,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
         response_format=response_format,
         if_busy=if_busy,
         job_handle=job_handle,
@@ -269,23 +174,19 @@ async def send_prompt(
 
 async def cancel_job(session: Session, *, handle: str) -> dict:
     """Withdraw work the requester made that was provably never started."""
-    if not session._resolved:
-        await session.identify()
-    result = await session.client.call(
-        "jobs.cancel", handle=handle, caller_id=session.participant_id
-    )
+    caller_id = await session.caller_id()
+    result = await session.client.call("jobs.cancel", handle=handle, caller_id=caller_id)
     assert isinstance(result, dict)
     return result
 
 
 async def interrupt_session(session: Session, *, target: str) -> dict:
     """Cancel one direct child's active turn and undelivered queued followups."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     result = await session.client.call(
         "participant.interrupt",
         target=target,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     return result
@@ -294,23 +195,14 @@ async def interrupt_session(session: Session, *, target: str) -> dict:
 async def update_session_settings(
     session: Session, *, target: str, model: str | None = None, reasoning_effort: str | None = None
 ) -> dict:
-    """Change a direct child's model or reasoning effort while it is idle.
-
-    Idle-only: the daemon refuses while the child has an active turn or a
-    pending native interaction. The values must be on the existing
-    model/reasoning allowlists — ``list_harnesses(include_models=true)`` reports them — and approval
-    and sandbox policy are never changed here. Effective values are reported
-    only after the native backend confirms; an uncertain delivery stays
-    visibly uncertain in the daemon's reply, which is returned verbatim.
-    """
-    if not session._resolved:
-        await session.identify()
+    """Forward settings changes and return the daemon's authoritative result."""
+    caller_id = await session.caller_id()
     record = await session.client.call(
         "participant.settings.update",
         target=target,
         model=model,
         reasoning_effort=reasoning_effort,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(record, dict)
     return record
@@ -318,12 +210,11 @@ async def update_session_settings(
 
 async def get_session_controls(session: Session, *, target: str) -> dict:
     """Compact diagnostics without changing the daemon's availability decisions."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     record = await session.client.call(
         "participant.controls",
         target=target,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(record, dict)
     record = dict(record)
@@ -377,14 +268,13 @@ async def get_session_controls(session: Session, *, target: str) -> dict:
 async def scratchpad_write(
     session: Session, *, value: str, namespace: str, key: str | None = None
 ) -> dict:
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     result = await session.client.call(
         "scratchpad.write",
         namespace=namespace,
         value=value,
         key=key,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     return result
@@ -398,8 +288,7 @@ async def scratchpad_get(
     after_key: str | None = None,
     keys_only: bool | None = None,
 ) -> dict:
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     metadata = keys is None if keys_only is None else keys_only
     result = await session.client.call(
         "scratchpad.get",
@@ -407,7 +296,7 @@ async def scratchpad_get(
         keys=keys,
         after_key=after_key,
         keys_only=metadata,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     # Plugin sidecars read the daemon reply as is; only the agent's copy drops what it echoed.
@@ -426,15 +315,14 @@ async def scratchpad_delete(
     digests: list[str] | None = None,
     clear: bool = False,
 ) -> dict:
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     result = await session.client.call(
         "scratchpad.delete",
         namespace=namespace,
         keys=keys,
         digests=digests,
         clear=clear,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     return result
@@ -442,13 +330,12 @@ async def scratchpad_delete(
 
 async def terminate_session(session: Session, *, target: str, forget: bool = False) -> dict:
     """Forward a direct-child kill to the daemon with the caller identity."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     params = {"forget": True} if forget else {}
     result = await session.client.call(
         "participant.kill",
         id=target,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
         **params,
     )
     assert isinstance(result, dict)
@@ -457,12 +344,11 @@ async def terminate_session(session: Session, *, target: str, forget: bool = Fal
 
 async def adopt_session(session: Session, *, target: str) -> dict:
     """Forward a sibling adoption to the daemon with the caller identity."""
-    if not session._resolved:
-        await session.identify()
+    caller_id = await session.caller_id()
     result = await session.client.call(
         "participant.adopt",
         id=target,
-        caller_id=session.participant_id,
+        caller_id=caller_id,
     )
     assert isinstance(result, dict)
     return result

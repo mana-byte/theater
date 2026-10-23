@@ -6,9 +6,8 @@ import asyncio
 import contextlib
 import logging
 
-from theater import paths, timing
+from theater import paths
 from theater.daemon.lock import file_id
-from theater.observability.catalog import GC_SWEEP
 
 logger = logging.getLogger("theater.daemon")
 
@@ -58,7 +57,7 @@ async def gc_loop(daemon) -> None:
     It waits before the first sweep because GC writes while startup recovery
     may still be settling.
     """
-    from theater.daemon.gc import sweep
+    from theater.daemon.gc import sweep_daemon
 
     retention = daemon.config.retention
     while not daemon._stopping.is_set():
@@ -67,15 +66,7 @@ async def gc_loop(daemon) -> None:
         if daemon._stopping.is_set():
             return
         try:
-            with timing.span(GC_SWEEP):
-                result = await sweep(
-                    daemon.store,
-                    retention,
-                    live_handles=frozenset(daemon.jobs._events),
-                )
-            if result.running_marked:
-                # The sweep wrote those jobs terminal directly; wake whatever waited on them.
-                daemon.handoff.wake()
+            result = await sweep_daemon(daemon, retention, mode="scheduled")
             if (
                 result.bus
                 or result.jobs

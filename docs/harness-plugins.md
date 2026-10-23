@@ -938,8 +938,8 @@ credentials.
 ### Live observation: HybridSource and terminal evidence
 
 Live observation stays `Source`/`Batch`; nothing about the durable
-`observation.primary` contract changed for legacy plugins. Three additive
-seams exist:
+`observation.primary` contract changed for legacy plugins. The evidence
+interfaces are:
 
 - `Batch.terminal_evidence` — an optional, default-empty sequence of
   `NativeTurnOutcome` values: exact native session/turn identity, the
@@ -957,6 +957,13 @@ seams exist:
   cancellation can interrupt a composed read before its `Batch` reaches the
   watch loop, so exact evidence survives a cancelled poll. Legacy and
   durable-only sources inherit the empty snapshot.
+- `Source.pending_terminal_evidence()` — reports whether retained evidence
+  holds the source checkpoint. The default is false, including for a direct
+  source that only implements snapshots. `CompositeSource` also checks its
+  held evidence and the primary's snapshot, even when the primary returns false.
+- `Source.terminal_evidence_delivered()` — releases evidence after the sink
+  accepts it durably; the default is a no-op. This acknowledgement is separate
+  from `acknowledge_source_checkpoint()`, which advances the durable cursor.
 - `Source.buffered_terminal_evidence()` — snapshots unread native outcomes,
   without consuming them, under the same 512-outcome bound. Preserve this
   snapshot after runtime close: reconnect persists it before replacing the

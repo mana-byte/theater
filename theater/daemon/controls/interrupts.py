@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from theater.daemon.controls._common import (
     ACTION_INTERRUPT,
@@ -17,7 +17,6 @@ from theater.daemon.controls._common import (
     CONTROL_TRANSFERRED_ERROR_CODE,
     CONTROL_TRANSPORT_UNKNOWN,
     CONTROL_UNKNOWN_ACK_LOST,
-    CONTROL_UNKNOWN_RECEIPT_MISMATCH,
     DELIVERY_UNKNOWN_ERROR_CODE,
     INTERRUPTED_ERROR_CODE,
     LABEL_INTERRUPTION,
@@ -26,6 +25,11 @@ from theater.daemon.controls._common import (
     prepare_native_control,
 )
 from theater.daemon.controls._host import ControlHost
+from theater.daemon.controls.native_receipt import (
+    NativeAcknowledgementLost,
+    NativeReceiptMismatch,
+    transmit_native_action,
+)
 from theater.daemon.controls.provider_interrupt import interrupt_action
 from theater.daemon.controls.routing import ControlRoute
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
@@ -37,7 +41,7 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
     RuntimeCapability,
 )
-from theater.models import BadRequest, Job, JobState
+from theater.models import BadRequest, Job, JobState, JournalEventRecord
 
 logger = logging.getLogger("theater.daemon.controls")
 
@@ -219,35 +223,20 @@ class InterruptControls(ControlHost):
             return InterruptOutcome(
                 interrupted=False, reason="already_idle", cancelled_followups=cancelled
             )
-        operation_id = request.operation_id or self._mint_operation_id(
-            participant_id, ControlKind.INTERRUPT
+        intent = self._native_reservation_intent(
+            participant_id,
+            ControlKind.INTERRUPT,
+            operation_id=request.operation_id,
+            on_reserved=request.on_reserved,
+            pre_reserved=request.pre_reserved,
         )
-        if request.pre_reserved:
-            reserved = self._require_public_reservation(
-                operation_id,
-                participant_id=participant_id,
-                kind=ControlKind.INTERRUPT,
-                phase=ControlDeliveryPhase.RESERVED,
-                route=prepared.route,
-            )
-            self._require_reserved_native_identity(reserved, snapshot)
-        else:
-            self._reserve(
-                operation_id,
-                participant_id=participant_id,
-                kind=ControlKind.INTERRUPT,
-                transport=ControlTransport.NATIVE_RUNTIME,
-                phase=ControlDeliveryPhase.RESERVED,
-                backend_generation=snapshot.backend_generation,
-                native_session_id=snapshot.native_session_id,
-                native_turn_id=turn,
-            )
-            self._notify_reserved(request.on_reserved, operation_id, None)
-        self._store.mark_control_operation_dispatched(
-            operation_id,
-            native_session_id=snapshot.native_session_id,
+        operation_id = self._admit_native_action(
+            intent,
+            participant_id=participant_id,
+            kind=ControlKind.INTERRUPT,
+            route=prepared.route,
+            snapshot=snapshot,
             native_turn_id=turn,
-            updated_at=self._clock(),
         )
         return await self._deliver_native_interrupt(
             prepared, operation_id, participant_id, turn, cancelled
@@ -261,33 +250,29 @@ class InterruptControls(ControlHost):
         turn: str,
         cancelled: tuple[str, ...],
     ) -> InterruptOutcome:
-        try:
-            receipt = await prepared.runtime.interrupt(
+        transmission = await transmit_native_action(
+            self,
+            operation_id=operation_id,
+            kind=ControlKind.INTERRUPT,
+            transmit=lambda: prepared.runtime.interrupt(
                 operation_id=operation_id, native_turn_id=turn
-            )
-        except asyncio.CancelledError:
-            self._settle_uncertain(
-                operation_id,
-                error=(
-                    "the interruption control was cancelled after transmission began; "
-                    "its acknowledgement is unknown and it is never retried"
-                ),
-            )
-            self._count_unknown_delivery(ControlKind.INTERRUPT, CONTROL_UNKNOWN_ACK_LOST)
-            raise
-        except Exception as exc:
-            self._store.settle_control_operation(
-                operation_id,
-                result=DeliveryResult.UNKNOWN,
-                error_code=DELIVERY_UNKNOWN_ERROR_CODE,
-                error=str(exc),
-                updated_at=self._clock(),
-            )
+            ),
+            cancelled_error=(
+                "the interruption control was cancelled after transmission began; "
+                "its acknowledgement is unknown and it is never retried"
+            ),
+            mismatch_error=lambda receipt: (
+                f"the interrupt receipt named operation {receipt.operation_id!r}, "
+                f"not {operation_id!r}; the interruption is uncertain and the "
+                "receipt is not trusted to settle it"
+            ),
+        )
+        if isinstance(transmission, NativeAcknowledgementLost):
             logger.warning(
                 "interrupt delivery for %s turn %s is uncertain: %s",
                 participant_id,
                 turn,
-                exc,
+                transmission.error,
             )
             self._count_unknown_delivery(ControlKind.INTERRUPT, CONTROL_UNKNOWN_ACK_LOST)
             return InterruptOutcome(
@@ -295,22 +280,13 @@ class InterruptControls(ControlHost):
                 reason=DELIVERY_UNKNOWN_ERROR_CODE,
                 cancelled_followups=cancelled,
             )
-        if not self._receipt_names_operation(operation_id, receipt):
-            self._settle_uncertain(
-                operation_id,
-                error=(
-                    f"the interrupt receipt named operation {receipt.operation_id!r}, "
-                    f"not {operation_id!r}; the interruption is uncertain and the "
-                    "receipt is not trusted to settle it"
-                ),
-            )
-            self._count_unknown_delivery(ControlKind.INTERRUPT, CONTROL_UNKNOWN_RECEIPT_MISMATCH)
+        if isinstance(transmission, NativeReceiptMismatch):
             return InterruptOutcome(
                 interrupted=False,
                 reason=DELIVERY_UNKNOWN_ERROR_CODE,
                 cancelled_followups=cancelled,
             )
-        self._settle_from_receipt(operation_id, receipt)
+        receipt = transmission.receipt
         if receipt.result is not DeliveryResult.ACCEPTED:
             return InterruptOutcome(
                 interrupted=False,
@@ -355,9 +331,9 @@ class InterruptControls(ControlHost):
         *,
         unit,
         timestamp: float,
-    ) -> tuple[Job, ...]:
+    ) -> tuple[tuple[Job, JournalEventRecord], ...]:
         """Cancel only undispatched followups inside the ownership write unit."""
-        cancelled: list[Job] = []
+        cancelled: list[tuple[Job, JournalEventRecord]] = []
         for participant_id in participant_ids:
             operations = self._store.queued_control_operations(
                 participant_id, connection=unit.connection
@@ -384,9 +360,11 @@ class InterruptControls(ControlHost):
                 job = self._store.get_job(operation.job_handle, connection=unit.connection)
                 if job is None or job.state != JobState.RUNNING:
                     continue
-                finished = replace(
-                    job,
-                    state=JobState.KILLED.value,
+                outcome = self._jobs.write_direct_terminal_in_unit(
+                    self._store,
+                    unit,
+                    job=job,
+                    state=JobState.KILLED,
                     result=(
                         "Queued followup was cancelled before dispatch because control "
                         "ownership changed. Queue it again under the new owner if needed."
@@ -394,25 +372,12 @@ class InterruptControls(ControlHost):
                     error_code=CONTROL_TRANSFERRED_ERROR_CODE,
                     finished_at=timestamp,
                 )
-                self._store.finish_job(
-                    job.handle,
-                    state=finished.state,
-                    result=finished.result,
-                    error_code=finished.error_code,
-                    finished_at=finished.finished_at,
-                    response_format=finished.response_format,
-                    structured_result=finished.structured_result,
-                    structured_status=finished.structured_status,
-                    connection=unit.connection,
-                )
+                if outcome is None:
+                    continue
                 unit.after_commit(
-                    lambda handle=job.handle: self._jobs.finish(
-                        handle,
-                        state=JobState.KILLED,
-                        error_code=CONTROL_TRANSFERRED_ERROR_CODE,
-                    )
+                    lambda handle=job.handle: self._jobs.wake_committed_direct_finish(handle)
                 )
-                cancelled.append(finished)
+                cancelled.append(outcome)
         return tuple(cancelled)
 
     async def _cancel_queued_followups(self, participant_id: str) -> tuple[str, ...]:

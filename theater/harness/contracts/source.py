@@ -344,6 +344,14 @@ class Source(ABC):
         """Rewind an unacknowledged source batch after reduction fails."""
         return
 
+    def pending_terminal_evidence(self) -> bool:
+        """Return whether source-owned evidence holds the current checkpoint."""
+        return False
+
+    def terminal_evidence_delivered(self) -> None:
+        """Release evidence after durable delivery, independently of the cursor."""
+        return
+
     def terminal_evidence_snapshot(self) -> tuple[NativeTurnOutcome, ...]:
         """Return consumed terminal evidence still awaiting durable delivery, for cancelled composed
         reads.

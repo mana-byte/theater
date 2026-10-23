@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.support.builders import operator_context
+from tests.support.control_service import operation_rows
 from tests.support.presence import AbsentPresence, UnknownPresence
 from tests.support.provider_controls import online, provider_target
 from tests.support.provider_native import bind_native_participant
@@ -16,12 +17,16 @@ from theater.daemon.frontend.control_handlers import (
     controls_settings_update,
 )
 from theater.daemon.frontend.participant_read_handlers import participant_to_wire
+from theater.daemon.harness_runtime.manager import CachedNativeRoute
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
+    ConnectionHealth,
     ControlDeliveryPhase,
+    ControlKind,
     ControlTransport,
+    RuntimeCapabilities,
     RuntimeCapability,
 )
 from theater.models import (
@@ -55,6 +60,36 @@ def test_native_route_is_not_replaced_by_terminal_binding(daemon) -> None:
     route = resolver.resolve(participant_id, RuntimeCapability.SEND)
     assert route.is_native
     assert not route.is_provider
+    assert route.route_available
+    assert route.native_facts is None
+
+
+def test_native_control_route_reads_one_typed_cache_fact(daemon) -> None:
+    participant_id = provider_target(daemon)
+    facts = CachedNativeRoute(
+        backend_generation=3,
+        native_session_id="session-3",
+        health=ConnectionHealth.DEGRADED,
+        capabilities=RuntimeCapabilities(available=frozenset({RuntimeCapability.SEND})),
+    )
+    reads: list[tuple[str, object | None]] = []
+
+    def native_facts(target_id: str, binding: object | None) -> CachedNativeRoute:
+        reads.append((target_id, binding))
+        return facts
+
+    resolver = ControlRouteResolver(
+        store=daemon.store,
+        runtime_for=lambda _participant_id: object(),
+        native_facts=native_facts,
+    )
+
+    route = resolver.resolve(participant_id, RuntimeCapability.SEND)
+
+    assert reads == [(participant_id, None)]
+    assert route.native_facts is facts
+    assert route.native_capabilities is facts.capabilities
+    assert route.route_available
 
 
 def test_historical_pane_without_binding_is_not_a_control_route(daemon) -> None:
@@ -88,6 +123,24 @@ async def test_controls_projection_is_schema_valid_and_unknown_presence_blocks(
     monkeypatch.setattr(daemon.terminal_service.connections, "request", request)
     result = await controls_get(daemon, operator_context(), {"participant_id": participant_id})
     validator_for(METHOD_CATALOG["frontend.controls.get"].result_schema_id).validate(result)
+    assert list(result) == [
+        "actions",
+        "revision",
+        "transcript_identity",
+        "id",
+        "wiring",
+        "backend_generation",
+        "native_session_id",
+        "health",
+        "settings",
+        "active_turn",
+        "queued",
+        "human_presence",
+        "provider_id",
+        "provider_generation",
+        "terminal_id",
+        "terminal_incarnation",
+    ]
     assert result["actions"]["send"]["route_available"] is True
     assert result["actions"]["send"]["admissible"] is False
     assert result["actions"]["settings_update"]["supported"] is False
@@ -173,6 +226,28 @@ async def test_public_native_settings_reservation_precedes_detached_dispatch(
     assert control.backend_generation == 7
     assert control.native_session_id == "native-session-settings"
     assert started == [operation.operation_id]
+
+
+async def test_public_settings_allowlist_refusal_keeps_accepted_reservation(daemon) -> None:
+    participant, runtime, state = await bind_native_participant(
+        daemon, generation=8, session_id="native-session-settings-refusal"
+    )
+    assert daemon.runtime_manager.record_snapshot(participant.id, runtime, await runtime.snapshot())
+
+    accepted = await controls_settings_update(
+        daemon,
+        operator_context(),
+        {"participant_id": participant.id, "model": "not-configured"},
+        idempotency_key="native-settings-allowlist-refusal",
+    )
+    assert daemon.operation_service.get(accepted["operation_id"]).state == "accepted"
+
+    await settle_operations(daemon)
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.state == PublicOperationState.FAILED.value
+    assert operation.error is not None and operation.error["code"] == "model_not_allowed"
+    assert len(operation_rows(daemon.store, participant.id, ControlKind.SETTINGS_UPDATE)) == 1
+    assert state.settings == {}
 
 
 async def test_cached_native_route_is_consistent_across_public_read_and_admission(

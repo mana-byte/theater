@@ -16,9 +16,9 @@ from ..contract import (
     Sandbox,
     Verdict,
     VerifiedSet,
-    load_evidenced,
     version_key,
 )
+from ..route_facts import RouteFacts
 from .vibe_bump import bump, gate
 from .vibe_store import reader_minor, store_check
 
@@ -62,7 +62,6 @@ class VibeAdapter:
             kind="range",
             floor=floor,
             ceiling=ceiling,
-            evidenced=load_evidenced(root, self.name),
         )
 
     def install(self, sb: Sandbox, version: str) -> Path:
@@ -175,8 +174,9 @@ class VibeAdapter:
             verdict = "inconclusive"
         else:
             verdict = "green"
-        routes = {(request.method, request.path) for request in sb.mock.requests}
-        unexpected = routes - self.expected_routes - self.ignorable_routes
+        unexpected = RouteFacts(
+            sb.mock.requests, self.expected_routes, self.ignorable_routes
+        ).unexpected_routes
         if verdict != "green" and (sb.mock.unhandled or unexpected):
             checks += (Check("mock_route", "error", f"unexpected routes: {sorted(unexpected)}"),)
             verdict = "tooling"

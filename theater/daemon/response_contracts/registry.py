@@ -14,6 +14,7 @@ from theater.constants.response_contract import (
 )
 from theater.daemon.response_contracts.contract import StrictContract, admit_schema
 from theater.daemon.response_contracts.presets import PRESET_SCHEMAS
+from theater.harness import HARNESSES, normalize
 from theater.models import BadRequest, Status, now
 
 _CUSTOM_KEYS = frozenset({CONTRACT_TAG, "name", "schema"})
@@ -37,6 +38,19 @@ def resolve_response_format(store: Any, raw: object, *, creator_id: str | None) 
     if CONTRACT_TAG not in raw:
         return json.dumps(raw, sort_keys=True, separators=(",", ":"))
     return _strict(store, raw, _session_of(store, creator_id)).envelope()
+
+
+def reject_response_format_resume(
+    harness_name: Any, resume: Any, response_format: str | None
+) -> None:
+    if response_format is None or not resume or not isinstance(harness_name, str):
+        return
+    harness = HARNESSES.get(normalize(harness_name))
+    if harness is not None and not harness.resume_takes_prompt:
+        raise BadRequest(
+            f"harness {harness_name!r} cannot resume a session with response_format; "
+            f"resume it without one and use send to deliver the task"
+        )
 
 
 def _session_of(store: Any, creator_id: str | None) -> str | None:

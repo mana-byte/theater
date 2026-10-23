@@ -8,7 +8,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from typing import Literal, TypeVar
 
 from theater import timing
@@ -61,13 +61,13 @@ from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
 from theater.daemon.controls.sending import SendControls
 from theater.daemon.controls.settings import SettingsControls, SettingsOutcome
 from theater.daemon.controls.steering import SteerControls
+from theater.daemon.harness_runtime.manager import CachedNativeRoute
 from theater.daemon.jobs import JobManager
 from theater.daemon.operations.notifications import OperationNotifier
 from theater.daemon.persistence.store import Store
 from theater.harness.contracts.runtime import (
     ControlKind,
     HarnessRuntime,
-    RuntimeCapabilities,
     RuntimeCapability,
 )
 from theater.models import Job, now
@@ -234,10 +234,7 @@ class ControlService(
         runtime_for: Callable[[str], HarnessRuntime | None],
         gates: ControlGates,
         route_resolver: ControlRouteResolver | None = None,
-        native_route: Callable[[str, object | None], Mapping[str, object] | None] | None = None,
-        native_capabilities: Callable[[str, object | None], RuntimeCapabilities | None]
-        | None = None,
-        native_admission: Callable[[str, object | None], Mapping[str, object] | None] | None = None,
+        native_facts: Callable[[str, object | None], CachedNativeRoute | None] | None = None,
         gate_opener=None,
         play_gate=None,
     ) -> None:
@@ -251,14 +248,12 @@ class ControlService(
         self._jobs = jobs
         self._gates = gates
         self._projection = ControlActionProjector(store, gates, self.active_job_for_native_turn)
-        self._native_identity_fencing = native_route is not None
+        self._native_identity_fencing = native_facts is not None
         self._routes = route_resolver or ControlRouteResolver(
             store=store,
             runtime_for=runtime_for,
             provider_health=gates.provider_health,
-            native_route=native_route,
-            native_capabilities=native_capabilities,
-            native_admission=native_admission,
+            native_facts=native_facts,
         )
         self._control_notifier = OperationNotifier()
         self._provider = ProviderControlDelivery(

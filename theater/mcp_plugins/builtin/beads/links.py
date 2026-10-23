@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from theater.json_values import decode_finite_json, finite_json_value
 
@@ -29,6 +30,55 @@ FACTS_BATCH = 50
 LINK_VERSION = 1
 MAX_HANDLE_CHARS = 256
 ROLES = ("work", "review")
+
+type LinkRole = Literal["work", "review"]
+
+
+@dataclass(frozen=True, slots=True)
+class LinkRecord:
+    handle: str
+    role: LinkRole
+    review_of: str | None
+    generation: int
+    created_at: int | float
+
+    def stored(self) -> dict[str, object]:
+        return {
+            "version": LINK_VERSION,
+            "handle": self.handle,
+            "role": self.role,
+            "review_of": self.review_of,
+            "generation": self.generation,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TaskLinkState:
+    links: tuple[LinkRecord, ...]
+    generation: int
+    boundary: int | float | None
+    boundary_fallback: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateLink:
+    record: LinkRecord
+    links_total: int
+
+
+@dataclass(frozen=True, slots=True)
+class NewLink:
+    state: TaskLinkState
+
+
+@dataclass(frozen=True, slots=True)
+class AmbiguousSelection:
+    created_at: int | float
+    handles: tuple[str, ...]
+
+    def public(self) -> dict[str, object]:
+        return {"ambiguous": True, "created_at": self.created_at, "handles": list(self.handles)}
 
 
 def _flag(value: object) -> bool:
@@ -79,10 +129,10 @@ def _corrupt(task_id: object, detail: str) -> BeadsError:
     )
 
 
-def _link_records(metadata: dict[str, Any], task_id: object) -> list[dict[str, Any]]:
+def _link_records(metadata: dict[str, Any], task_id: object) -> tuple[LinkRecord, ...]:
     """Stored links in stored order; any record we cannot trust fails closed."""
     if LINKS_KEY not in metadata:
-        return []
+        return ()
     raw = metadata[LINKS_KEY]
     if isinstance(raw, str):
         try:
@@ -93,15 +143,15 @@ def _link_records(metadata: dict[str, Any], task_id: object) -> list[dict[str, A
         raise _corrupt(task_id, f"{LINKS_KEY} is not a list")
     if len(raw) > MAX_LINKS:
         raise _corrupt(task_id, f"{LINKS_KEY} holds {len(raw)} records over the cap of {MAX_LINKS}")
-    records: list[dict[str, Any]] = []
+    records: list[LinkRecord] = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             raise _corrupt(task_id, f"{LINKS_KEY} record {index} is not an object")
         records.append(_validated_record(item, task_id, index))
-    return records
+    return tuple(records)
 
 
-def _validated_record(item: dict[str, Any], task_id: object, index: int) -> dict[str, Any]:
+def _validated_record(item: dict[str, Any], task_id: object, index: int) -> LinkRecord:
     """One stored record checked field by field; untrusted data fails closed."""
     label = f"{LINKS_KEY} record {index}"
     version = item.get("version")
@@ -124,17 +174,10 @@ def _validated_record(item: dict[str, Any], task_id: object, index: int) -> dict
     generation = _integer(item.get("generation"))
     if generation is None or generation < 0:
         raise _corrupt(task_id, f"{label} has an unusable generation")
-    return {
-        "version": LINK_VERSION,
-        "handle": handle,
-        "role": role,
-        "review_of": review_of,
-        "generation": generation,
-        "created_at": created_at,
-    }
+    return LinkRecord(handle, role, review_of, generation, created_at)
 
 
-def task_state(row: dict[str, Any]) -> dict[str, Any]:
+def task_state(row: dict[str, Any]) -> TaskLinkState:
     """Links plus the generation bookkeeping carried in this task's metadata."""
     metadata = _metadata(row)
     task_id = row.get("id")
@@ -155,12 +198,7 @@ def task_state(row: dict[str, Any]) -> dict[str, Any]:
         if isinstance(flag, bool) or flag not in (1, "1"):
             raise _corrupt(task_id, f"{BOUNDARY_FALLBACK_KEY} is unusable")
         fallback = True
-    return {
-        "links": _link_records(metadata, task_id),
-        "generation": generation,
-        "boundary": boundary,
-        "boundary_fallback": fallback,
-    }
+    return TaskLinkState(_link_records(metadata, task_id), generation, boundary, fallback)
 
 
 def close_epoch(row: dict[str, Any]) -> int | float | None:
@@ -184,30 +222,30 @@ def close_epoch(row: dict[str, Any]) -> int | float | None:
 
 
 def plan_link(
-    task_row: dict[str, Any], handle: str, role: str, review_of: str | None
-) -> dict[str, Any]:
+    task_row: dict[str, Any], handle: str, role: LinkRole, review_of: str | None
+) -> DuplicateLink | NewLink:
     """Board-only checks; a verified duplicate short-circuits before any facts read."""
     state = task_state(task_row)
-    links = state["links"]
-    for record in links:
-        if record["handle"] != handle:
+    records = state.links
+    for record in records:
+        if record.handle != handle:
             continue
-        if record["role"] == role and record["review_of"] == review_of:
-            return {"duplicate": True, "record": record, "links_total": len(links)}
-        existing = f"{record['handle']} is already linked to this task as {record['role']}"
-        if record["review_of"] is not None:
-            existing += f" of {record['review_of']}"
+        if record.role == role and record.review_of == review_of:
+            return DuplicateLink(record, len(records))
+        existing = f"{record.handle} is already linked to this task as {record.role}"
+        if record.review_of is not None:
+            existing += f" of {record.review_of}"
         raise BeadsError(existing + "; changing a stored link is not supported")
     if role == "review" and not any(
-        record["role"] == "work" and record["handle"] == review_of for record in links
+        record.role == "work" and record.handle == review_of for record in records
     ):
         raise BeadsError("review_of must name a work job already linked to this task")
-    if len(links) >= MAX_LINKS:
+    if len(records) >= MAX_LINKS:
         raise BeadsError(
             f"a task keeps at most {MAX_LINKS} job links; existing links cannot be evicted; "
             "track further work on another task"
         )
-    return {"duplicate": False, "state": state}
+    return NewLink(state)
 
 
 def authorize_new_link(fact: object, instance_id: str, handle: str) -> int | float:
@@ -230,13 +268,13 @@ def authorize_new_link(fact: object, instance_id: str, handle: str) -> int | flo
 
 def guard_new_link(
     created_at: int | float,
-    role: str,
-    state: dict[str, Any],
+    role: LinkRole,
+    state: TaskLinkState,
     row_status: object,
     known_close: int | float | None,
 ) -> None:
     """Generation and closed-task guards for a new association, after duplicates."""
-    boundary = state["boundary"]
+    boundary = state.boundary
     if boundary is not None and created_at < boundary:
         raise BeadsError(
             f"stale generation: job created at {created_at:.3f} precedes this task's "
@@ -253,8 +291,8 @@ def guard_new_link(
 def persist_link(
     board: Board,
     task_id: str,
-    links: list[dict[str, Any]],
-    record: dict[str, Any],
+    records: tuple[LinkRecord, ...],
+    record: LinkRecord,
     actor: str,
 ) -> None:
     """Append one link; --metadata merges per key, preserving all other metadata."""
@@ -262,7 +300,7 @@ def persist_link(
         "update",
         task_id,
         "--metadata",
-        json.dumps({LINKS_KEY: [*links, record]}),
+        json.dumps({LINKS_KEY: [link.stored() for link in (*records, record)]}),
         actor=actor,
     )
 
@@ -278,7 +316,7 @@ def reopen_generation_args(row: dict[str, Any], now: float | None = None) -> lis
     fallback = previous_close is None
     if fallback:
         previous_close = time.time() if now is None else now
-    generation = state["generation"] + 1
+    generation = state.generation + 1
     args = [
         "--set-metadata",
         f"{GENERATION_KEY}={generation}",
@@ -293,21 +331,17 @@ def reopen_generation_args(row: dict[str, Any], now: float | None = None) -> lis
     return args
 
 
-def _selection(links: list[dict[str, Any]], generation: int, role: str) -> dict[str, Any] | None:
+def _selection(
+    records: tuple[LinkRecord, ...], generation: int, role: LinkRole
+) -> LinkRecord | AmbiguousSelection | None:
     """Newest link of one role in the current generation, by immutable creation time."""
-    pool = [
-        record for record in links if record["role"] == role and record["generation"] == generation
-    ]
+    pool = [record for record in records if record.role == role and record.generation == generation]
     if not pool:
         return None
-    newest = max(record["created_at"] for record in pool)
-    tied = [record for record in pool if record["created_at"] == newest]
+    newest = max(record.created_at for record in pool)
+    tied = [record for record in pool if record.created_at == newest]
     if len(tied) > 1:
-        return {
-            "ambiguous": True,
-            "created_at": newest,
-            "handles": sorted(record["handle"] for record in tied),
-        }
+        return AmbiguousSelection(newest, tuple(sorted(record.handle for record in tied)))
     return tied[0]
 
 
@@ -320,13 +354,13 @@ def _git_summary(fact: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"commit_sha": git.get("commit_sha"), "clean": _flag(git.get("clean"))}
 
 
-def _job_fields(record: dict[str, Any], fact: dict[str, Any] | None) -> dict[str, Any]:
+def _job_fields(record: LinkRecord, fact: dict[str, Any] | None) -> dict[str, Any]:
     """Compact projection of one linked job; unavailable facts project as nulls."""
     if not isinstance(fact, dict) or not _flag(fact.get("available")):
         return {
-            "handle": record["handle"],
-            "created_at": record["created_at"],
-            "generation": record["generation"],
+            "handle": record.handle,
+            "created_at": record.created_at,
+            "generation": record.generation,
             "available": False,
             "state": None,
             "error_code": None,
@@ -336,9 +370,9 @@ def _job_fields(record: dict[str, Any], fact: dict[str, Any] | None) -> dict[str
             "git": None,
         }
     return {
-        "handle": record["handle"],
-        "created_at": record["created_at"],
-        "generation": record["generation"],
+        "handle": record.handle,
+        "created_at": record.created_at,
+        "generation": record.generation,
         "available": True,
         "state": fact.get("state"),
         "error_code": fact.get("error_code"),
@@ -358,7 +392,7 @@ def _pinned_clean(fact: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def artifact_relation(
-    review: dict[str, Any],
+    review: LinkRecord,
     review_fact: dict[str, Any],
     work_fact: dict[str, Any] | None,
     current_work_handle: str | None,
@@ -370,7 +404,7 @@ def artifact_relation(
     if current_work_ambiguous:
         # An undetermined current work neither supersedes nor matches this review.
         return "unverified"
-    if review["review_of"] != current_work_handle:
+    if review.review_of != current_work_handle:
         # The immutable association proves supersession, whatever became of the
         # old source's facts.
         return "stale"
@@ -393,7 +427,7 @@ def artifact_relation(
         review_created = _number(review_fact.get("created_at"))
         if work_finished is None or review_created is None or review_created <= work_finished:
             return "unverified"
-    elif not isinstance(handoff, dict) or handoff.get("source_handle") != review["review_of"]:
+    elif not isinstance(handoff, dict) or handoff.get("source_handle") != review.review_of:
         # A gate that is present but unusable or mismatched never matches.
         return "unverified"
     review_git = _pinned_clean(review_fact)
@@ -417,34 +451,34 @@ def _source_basis(fact: dict[str, Any]) -> str | None:
 
 
 def _work_entry(
-    selected: dict[str, Any] | None, facts: dict[str, dict[str, Any]]
+    selected: LinkRecord | AmbiguousSelection | None, facts: dict[str, dict[str, Any]]
 ) -> dict[str, Any] | None:
     if selected is None:
         return None
-    if selected.get("ambiguous"):
-        return dict(selected)
-    return _job_fields(selected, facts.get(selected["handle"]))
+    if isinstance(selected, AmbiguousSelection):
+        return selected.public()
+    return _job_fields(selected, facts.get(selected.handle))
 
 
 def _review_entry(
-    selected: dict[str, Any] | None,
+    selected: LinkRecord | AmbiguousSelection | None,
     facts: dict[str, dict[str, Any]],
     current_work_handle: str | None,
     current_work_ambiguous: bool = False,
 ) -> dict[str, Any] | None:
     if selected is None:
         return None
-    if selected.get("ambiguous"):
-        return dict(selected)
-    fact = facts.get(selected["handle"])
+    if isinstance(selected, AmbiguousSelection):
+        return selected.public()
+    fact = facts.get(selected.handle)
     entry = _job_fields(selected, fact)
-    entry["review_of"] = selected["review_of"]
+    entry["review_of"] = selected.review_of
     if not isinstance(fact, dict) or not _flag(fact.get("available")):
         entry["source_basis"] = None
         entry["artifact_relation"] = "unavailable"
         return entry
     entry["source_basis"] = _source_basis(fact)
-    work_fact = facts.get(selected["review_of"]) if selected["review_of"] else None
+    work_fact = facts.get(selected.review_of) if selected.review_of else None
     entry["artifact_relation"] = artifact_relation(
         selected, fact, work_fact, current_work_handle, current_work_ambiguous
     )
@@ -463,21 +497,21 @@ def progress_view(
     state = task_state(row)
     deps, children, blockers = _blockers(board, rows, task_id)
     failed = _failed_prerequisites(rows, deps, children)
-    generation = state["generation"]
-    current_work = _selection(state["links"], generation, "work")
-    work_ambiguous = current_work is not None and bool(current_work.get("ambiguous"))
-    if current_work is not None and not work_ambiguous:
-        work_handle: str | None = current_work["handle"]
+    generation = state.generation
+    current_work = _selection(state.links, generation, "work")
+    work_ambiguous = isinstance(current_work, AmbiguousSelection)
+    if isinstance(current_work, LinkRecord):
+        work_handle: str | None = current_work.handle
     else:
         work_handle = None
-    latest_review = _selection(state["links"], generation, "review")
+    latest_review = _selection(state.links, generation, "review")
     entries = []
-    for record in state["links"]:
-        fact = facts.get(record["handle"])
+    for record in state.links:
+        fact = facts.get(record.handle)
         entry = _job_fields(record, fact)
-        entry["role"] = record["role"]
-        entry["review_of"] = record["review_of"]
-        if record["role"] == "review":
+        entry["role"] = record.role
+        entry["review_of"] = record.review_of
+        if record.role == "review":
             if isinstance(fact, dict) and _flag(fact.get("available")):
                 entry["source_basis"] = _source_basis(fact)
             else:
@@ -489,8 +523,8 @@ def progress_view(
         "blockers": blockers[:200],
         "failed_prerequisites": failed[:200],
         "generation": generation,
-        "boundary": state["boundary"],
-        "boundary_fallback": state["boundary_fallback"],
+        "boundary": state.boundary,
+        "boundary_fallback": state.boundary_fallback,
         "current_work": _work_entry(current_work, facts),
         "latest_review": _review_entry(latest_review, facts, work_handle, work_ambiguous),
         "job_links": entries,
@@ -498,6 +532,6 @@ def progress_view(
     }
 
 
-def facts_handles(links: list[dict[str, Any]]) -> list[str]:
+def facts_handles(records: tuple[LinkRecord, ...]) -> list[str]:
     """Every stored handle in stored order: at most two facts batches per view."""
-    return [record["handle"] for record in links]
+    return [record.handle for record in records]

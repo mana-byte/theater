@@ -108,6 +108,44 @@ async def test_plugin_authentication_happens_on_every_call_and_denials_are_struc
     assert revoked.value.code == "plugin_auth_failed"
 
 
+async def test_plugin_catalog_skill_and_diagnostic_reads_keep_grants_and_errors(daemon, client):
+    actor = daemon.registry.create_spawned(harness="fake", cwd="/tmp")
+    credential, _path = _attach_credential(
+        daemon.store,
+        actor.id,
+        grants=frozenset(
+            {
+                PluginCapability.CATALOG_READ,
+                PluginCapability.SKILLS_READ,
+                PluginCapability.ANALYTICS_READ,
+            }
+        ),
+    )
+
+    async def call(operation: str, params: dict | None = None):
+        return await client.call(
+            "plugin.call",
+            credential=credential.credential,
+            operation=operation,
+            params={} if params is None else params,
+        )
+
+    models = await call("catalog.models")
+    assert models and all("harness" in row and "models" in row for row in models)
+    assert (await call("catalog.read"))["models"] == models
+    assert "skills" in await call("skills.list")
+    assert "coverage" in await call("analytics.stats")
+    assert "windowed" in await call("analytics.usage_summary")
+    assert isinstance(await call("analytics.bus_tail"), list)
+    with pytest.raises(RemoteError) as invalid:
+        await call("analytics.usage_totals", {"window": "bad"})
+    assert invalid.value.code == "bad_request"
+    assert invalid.value.message == "usage_totals parameter 'window' must be a finite number"
+    with pytest.raises(RemoteError) as missing:
+        await call("skills.load", {"name": ""})
+    assert missing.value.message.startswith("skills.load requires a non-empty string")
+
+
 async def test_plugin_identity_is_credential_owned_and_send_keeps_busy_protection(
     daemon, client, terminal_provider
 ):
@@ -199,6 +237,19 @@ async def test_plugin_preserves_parent_filters_but_forces_spawn_parent_identity(
         },
     )
     assert daemon.registry.get(spawned["id"]).parent_id == actor.id
+
+    typed_spawn = await typed.spawn_session(
+        harness="vibe",
+        approval="manual",
+        cwd="/tmp",
+        background=False,
+        window_name="custom-window",
+        tmux_session="custom-session",
+    )
+    assert daemon.registry.get(typed_spawn["id"]).parent_id == actor.id
+    presentation = terminal_provider.creations[-1]
+    assert presentation["background"] is True
+    assert presentation["name"] == f"vibe-{typed_spawn['id'][:6]}"
 
 
 def test_grants_survive_restart_without_widening_and_cleanup_revokes(theater_home):

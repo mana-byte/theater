@@ -25,6 +25,7 @@ from .constants import (
     _RESUME_CWD_SUFFIX_RECORDS,
 )
 from .launch import _hook_string
+from .path_facts import has_project_layout, has_session_stem, is_jsonl_transcript
 from .source import _ClaudeSource, _open_claude_source
 
 
@@ -77,7 +78,11 @@ def _materialized_candidate(root: Path, path: Path, session_id: str) -> Path | N
         relative = canonical.relative_to(root)
     except ValueError:
         return None
-    if canonical.suffix != ".jsonl" or len(relative.parts) != 2 or canonical.stem != session_id:
+    if (
+        not is_jsonl_transcript(canonical)
+        or not has_project_layout(relative)
+        or not has_session_stem(canonical, session_id)
+    ):
         return None
     return canonical
 
@@ -208,11 +213,11 @@ class ClaudeIdentity:
 
     @staticmethod
     def _session_id_of(path: Path) -> str | None:
-        return path.stem if path.suffix == ".jsonl" and path.stem else None
+        return path.stem if is_jsonl_transcript(path) and path.stem else None
 
     @staticmethod
     def _is_claude_shape(path: Path, *, root: Path) -> bool:
-        if path.suffix != ".jsonl":
+        if not is_jsonl_transcript(path):
             return False
         return path.parent.parent.resolve() == root.resolve()
 
@@ -361,12 +366,12 @@ class ClaudeIdentity:
                 f"claude receipt transcript_path {transcript_path!r} is outside "
                 "Claude's transcript root"
             ) from None
-        if canonical.suffix != ".jsonl" or len(rel.parts) != 2:
+        if not is_jsonl_transcript(canonical) or not has_project_layout(rel):
             raise ValueError(
                 "claude receipt transcript_path must name a Claude project "
                 "JSONL transcript (<project>/<session>.jsonl)"
             )
-        if canonical.stem != session_id:
+        if not has_session_stem(canonical, session_id):
             raise ValueError(
                 f"claude receipt session_id {session_id!r} does not match "
                 f"transcript_path filename stem {canonical.stem!r}"

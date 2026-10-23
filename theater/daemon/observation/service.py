@@ -7,8 +7,9 @@ import contextlib
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
+from enum import Enum
 from functools import partial
 
 from theater import timing
@@ -24,7 +25,7 @@ from theater.daemon.observation.attachment import AttachmentManager
 from theater.daemon.observation.batches import BatchApplication
 from theater.daemon.observation.binding import TranscriptBinding
 from theater.daemon.observation.completion import CompletionTracker
-from theater.daemon.observation.completion_gate import CompletionGate
+from theater.daemon.observation.completion_gate import BoundCompletionGate, CompletionGate
 from theater.daemon.observation.evidence import TerminalEvidenceRouting
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.identity_loss import IdentityLossWiring
@@ -86,7 +87,7 @@ class _WatchContext:
     source: Source
     registration: LiveRegistration | None
     opened_durable: bool
-    finish_fn: Callable
+    completion: BoundCompletionGate
     wake: WakeupSignal | None
     clock: QuietClock = field(default_factory=QuietClock)
     turns: TurnAccumulator = field(default_factory=TurnAccumulator)
@@ -103,6 +104,11 @@ class _WatchIteration:
     batch: Batch | None = None
     inner: list[Batch] = field(default_factory=list)
     applied: bool = False
+
+
+class _CheckpointDecision(Enum):
+    ADVANCE = "advance"
+    HOLD = "hold"
 
 
 class Observer(
@@ -299,17 +305,17 @@ class Observer(
             return None
         if source is None:
             return None
-        finish_fn = partial(self._finish, registration=registration)
+        completion = self._bind_completion(registration)
         self._record_channel_health(pid, source)
         if opened_durable:
-            self._restore_transcript_identity_loss(pid)
+            self._restore_transcript_identity_loss(pid, finish_fn=completion.finish)
         return _WatchContext(
             pid=pid,
             observer=observer,
             source=source,
             registration=registration,
             opened_durable=opened_durable,
-            finish_fn=finish_fn,
+            completion=completion,
             wake=self.live.wake_signal(pid),
             turns=self._restored_turns(pid),
             active_at=self._monotonic(),
@@ -333,7 +339,9 @@ class Observer(
             batch = await self._read_watch_batch(context, iteration)
             if await self._handle_waiting_batch(context, batch):
                 return True
-            self._failures.report_source_error(context.pid, batch, finish_fn=context.finish_fn)
+            self._failures.report_source_error(
+                context.pid, batch, finish_fn=context.completion.finish
+            )
             if await self._handle_live_only_batch(context, batch):
                 return True
             if await self._handle_rejected_attachment(context, batch):
@@ -376,7 +384,7 @@ class Observer(
             await self._sleep(self.poll, context.wake)
             return False
         if context.opened_durable and self.transcript_identity_lost(pid):
-            self._sweep_identity_lost_grace(pid, registration=context.registration)
+            self._sweep_identity_lost_grace(pid, finish_fn=context.completion.finish)
             await self._screen_only(pid, context.observer, context.clock)
             await self._sleep(self.search, context.wake)
             return False
@@ -433,12 +441,8 @@ class Observer(
         if not batch.waiting:
             return False
         self._capture_trajectory(context.pid, batch)
-        self._failures.update_source_error(context.pid, batch, finish_fn=context.finish_fn)
-        if await self._route_terminal_evidence(
-            context.pid, context.source, batch, context.registration
-        ):
-            self._ack_terminal_evidence(context.source)
-            self._persist_pending_source_checkpoint(context.pid, context.source)
+        self._failures.update_source_error(context.pid, batch, finish_fn=context.completion.finish)
+        await self._settle_evidence(context, (batch,), checkpoint=_CheckpointDecision.ADVANCE)
         await self._screen_only(
             context.pid, context.observer, context.clock, source_status=batch.status
         )
@@ -453,11 +457,7 @@ class Observer(
             context.active_at = self._monotonic()
             if batch.status is not None:
                 self._settle(context.pid, batch.status)
-        if await self._route_terminal_evidence(
-            context.pid, context.source, batch, context.registration
-        ):
-            self._ack_terminal_evidence(context.source)
-            self._persist_pending_source_checkpoint(context.pid, context.source)
+        await self._settle_evidence(context, (batch,), checkpoint=_CheckpointDecision.ADVANCE)
         await self._screen_only(
             context.pid, context.observer, context.clock, source_status=batch.status
         )
@@ -476,17 +476,14 @@ class Observer(
     async def _handle_rejected_attachment(self, context: _WatchContext, batch: Batch) -> bool:
         async with self._pinned_for(context.pid, batch):  # an attach-time turn end finishes a job
             accepted = self._accept_attachment(
-                context.pid, context.source, batch, registration=context.registration
+                context.pid, context.source, batch, completion=context.completion
             )
         if accepted:
             return False
         await self._screen_only(
             context.pid, context.observer, context.clock, source_status=batch.status
         )
-        if await self._route_terminal_evidence(
-            context.pid, context.source, batch, context.registration
-        ):
-            self._ack_terminal_evidence(context.source)
+        await self._settle_evidence(context, (batch,), checkpoint=_CheckpointDecision.HOLD)
         await self._sleep(self.search, context.wake)
         return True
 
@@ -497,9 +494,7 @@ class Observer(
         self._failures.clear_source_error_on_progress(context.pid, batch)
         if batch.turn_state is not None and not batch.turn_state.complete:
             # Turn ends may hide in history the source cannot replay: no job may take a guess.
-            await self._release_unproven(
-                context.pid, context.turns, batch.turn_state, context.registration
-            )
+            await context.completion.release_unproven(context.pid, context.turns, batch.turn_state)
         async with self._pinned_for(context.pid, batch):
             applied = self._apply_source_batch(
                 context.pid,
@@ -508,6 +503,7 @@ class Observer(
                 context.clock,
                 context.turns,
                 registration=context.registration,
+                completion=context.completion,
             )
         if applied:
             iteration.applied = True
@@ -515,6 +511,17 @@ class Observer(
             self._reducer.unblock_on_semantic_progress(context.pid, batch)
             await self._reducer.on_progress(context.pid, context.observer, batch, context.clock)
             return
+        await self._quiet_step(context, iteration, batch)
+        iteration.applied = True
+
+    async def _quiet_step(
+        self, context: _WatchContext, iteration: _WatchIteration, batch: Batch
+    ) -> None:
+        """The one production quiet step: relocate -> identity probe -> screen -> rescue.
+
+        Registration-bound collaborators come from the watch context, and relocated
+        batches collect into ``iteration.inner`` so routing and cancellation see them.
+        """
         await self._reducer.on_quiet(
             context.pid,
             context.observer,
@@ -525,24 +532,21 @@ class Observer(
             turn_state=context.turn_state,
             validate_batch_fn=self._validate_batch,
             report_source_error_fn=lambda p, b: self._failures.report_source_error(
-                p, b, finish_fn=context.finish_fn
+                p, b, finish_fn=context.completion.finish
             ),
-            accept_attachment_fn=partial(
-                self._accept_attachment, registration=context.registration
-            ),
+            accept_attachment_fn=partial(self._accept_attachment, completion=context.completion),
             apply_fn=lambda p, b, c, t: self._apply_inner(context, iteration, p, b, c, t),
             on_progress_fn=self._reducer.on_progress,
             evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
             confirm_identity_loss_fn=self._confirm_identity_loss,
             mark_identity_lost_fn=partial(
-                self.mark_transcript_identity_lost, registration=context.registration
+                self.mark_transcript_identity_lost, finish_fn=context.completion.finish
             ),
             reset_identity_loss_fn=self._reset_identity_loss_confirmation,
             is_untrusted_rotation_fn=self._is_untrusted_rotation,
-            rescue_jobs_fn=partial(self._rescue_jobs, registration=context.registration),
+            rescue_jobs_fn=context.completion.rescue_jobs,
             pinned_fn=self._pinned_for,
         )
-        iteration.applied = True
 
     def _apply_inner(
         self,
@@ -556,7 +560,14 @@ class Observer(
         """A quiet-time (relocation) batch that makes progress is activity like any other."""
         self._note_turn_state(context, batch)
         progressed = self._apply_and_collect(
-            pid, context.source, batch, clock, turns, iteration.inner, context.registration
+            pid,
+            context.source,
+            batch,
+            clock,
+            turns,
+            iteration.inner,
+            context.registration,
+            context.completion,
         )
         if progressed:
             context.active_at = self._monotonic()
@@ -567,11 +578,7 @@ class Observer(
     ) -> None:
         if context.registration is None:
             return
-        if iteration.batch is not None and iteration.batch.terminal_evidence:
-            self._retain_terminal_evidence(
-                context.pid, context.source, iteration.batch, context.registration
-            )
-        for batch in iteration.inner:
+        for batch in self._iteration_batches(iteration):
             if batch.terminal_evidence:
                 self._retain_terminal_evidence(
                     context.pid, context.source, batch, context.registration
@@ -579,28 +586,40 @@ class Observer(
         self._retain_source_terminal_evidence(context.pid, context.source, context.registration)
 
     async def _handle_contract_failure(self, context: _WatchContext, batch: Batch | None) -> None:
-        if batch is not None and await self._route_terminal_evidence(
-            context.pid, context.source, batch, context.registration
-        ):
-            self._ack_terminal_evidence(context.source)
+        if batch is not None:
+            await self._settle_evidence(context, (batch,), checkpoint=_CheckpointDecision.HOLD)
         logger.exception(SOURCE_CONTRACT_FAILED, context.pid)
 
     async def _finish_iteration(self, context: _WatchContext, iteration: _WatchIteration) -> None:
-        routed = True
+        checkpoint = _CheckpointDecision.ADVANCE if iteration.applied else _CheckpointDecision.HOLD
+        await self._settle_evidence(
+            context, self._iteration_batches(iteration), checkpoint=checkpoint
+        )
+        await self._sleep(self._quiet_poll(context, iteration.next_poll), context.wake)
+
+    @staticmethod
+    def _iteration_batches(iteration: _WatchIteration) -> Iterator[Batch]:
         if iteration.batch is not None:
-            routed = await self._route_terminal_evidence(
-                context.pid, context.source, iteration.batch, context.registration
-            )
-        for batch in iteration.inner:
+            yield iteration.batch
+        yield from iteration.inner
+
+    async def _settle_evidence(
+        self,
+        context: _WatchContext,
+        batches: Iterable[Batch],
+        *,
+        checkpoint: _CheckpointDecision,
+    ) -> None:
+        routed = True
+        for batch in batches:
             if not await self._route_terminal_evidence(
                 context.pid, context.source, batch, context.registration
             ):
                 routed = False
         if routed:
             self._ack_terminal_evidence(context.source)
-            if iteration.applied:
+            if checkpoint is _CheckpointDecision.ADVANCE:
                 self._persist_pending_source_checkpoint(context.pid, context.source)
-        await self._sleep(self._quiet_poll(context, iteration.next_poll), context.wake)
 
     async def _close_watch(self, context: _WatchContext) -> None:
         pid = context.pid

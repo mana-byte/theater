@@ -38,10 +38,6 @@ CODEX_RUNTIME_REVISION_MAX = 1_000_000_000
 
 _LIVE_CHANNEL_ID = "native-live"
 
-#: Deduplicate pending outcomes, committing only after enqueue; cancellation permits loss-free
-#: replay.
-_PENDING_OUTCOME = object()
-
 _APPROVAL_METHOD_SUFFIX = "requestApproval"
 _REQUEST_USER_INPUT_METHOD = "item/tool/requestUserInput"
 _CLARIFICATION_METHOD_MARKERS = ("requestUserInput", "elicitation")

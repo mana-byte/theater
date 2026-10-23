@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import shutil
+import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -43,15 +46,11 @@ def test_verified_reads_plugin_literal_and_fails_closed(tmp_path: Path) -> None:
     _copy_gate(root, tmp_path)
     expected = pi.ADAPTER.verified(tmp_path)
     upper = _current_upper(tmp_path)
-    evidence = tmp_path / f"tests/fixtures/harness_compat/pi/{upper}.json"
-    evidence.parent.mkdir(parents=True)
-    evidence.write_text("{}", encoding="utf-8")
 
     gate = pi.ADAPTER.verified(tmp_path)
     assert gate.floor == expected.floor
     assert gate.ceiling == expected.ceiling
     assert gate.known_bad == expected.known_bad
-    assert gate.evidenced == frozenset({upper})
     bad = next(iter(gate.known_bad))
     assert gate.admits(upper) and not gate.admits(bad)
 
@@ -70,6 +69,25 @@ def test_verified_reads_plugin_literal_and_fails_closed(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="missing Pi gate anchor"):
         pi.ADAPTER.verified(tmp_path)
+
+
+def test_pi_gate_ignores_annotations_rejects_duplicates_and_deduplicates_greens(
+    tmp_path: Path,
+) -> None:
+    _copy_gate(REPO_ROOT, tmp_path)
+    path = tmp_path / pi_bump._CONSTANTS
+    source = path.read_text(encoding="utf-8")
+    original = pi.ADAPTER.verified(tmp_path)
+    path.write_text(source + "\nPI_FRONTEND_QUALIFIED_MAX: tuple = (9, 9, 9)\n")
+    assert pi.ADAPTER.verified(tmp_path) == original
+    path.write_text(source + "\nPI_FRONTEND_QUALIFIED_MAX = (9, 9, 9)\n")
+    with pytest.raises(ValueError, match="duplicate Pi gate anchor"):
+        pi.ADAPTER.verified(tmp_path)
+    path.write_text(source)
+    assert original.ceiling is not None
+    assert pi.ADAPTER.apply_bump(tmp_path, [original.ceiling, original.ceiling]) == [
+        pi_bump._CONSTANTS
+    ]
 
 
 def test_apply_bump_changes_one_value_and_is_idempotent(tmp_path: Path) -> None:
@@ -132,19 +150,49 @@ def test_qualify_uses_offline_environment_and_maps_errors_to_inconclusive(
     assert all(call[1]["PATH"].split(":", 1)[0] == str(binary.parent) for call in calls)
 
 
-def test_install_failure_raises_install_failed(
+def test_mixed_proofs_and_unhandled_route_keep_pi_tooling_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class Failed:
-        returncode = 1
-        stdout = ""
-        stderr = "fake npm failure"
+    def fake_run(_root, nodeids, **_kwargs):
+        if tuple(nodeids) == pi.ADAPTER.consistency_tests:
+            return tuple(Check(nodeid, "pass") for nodeid in nodeids)
+        statuses = ("fail", "skip", "pass")
+        return tuple(
+            Check(nodeid, status) for nodeid, status in zip(nodeids, statuses, strict=True)
+        )
 
-    monkeypatch.setattr(pi.opencode_pi_process, "run_group", lambda *args, **kwargs: Failed())
+    monkeypatch.setattr(pi.framework, "run_pytest", fake_run)
+    with make_sandbox("pi", root=tmp_path / "sandbox") as sb:
+        with pytest.raises(urllib.error.HTTPError):
+            urllib.request.urlopen(sb.mock_base_urls["anthropic"] + "/stray")
+        result = pi.ADAPTER.qualify(tmp_path, "0.99.3", sb, sb.bin_dir / "pi")
+    assert result.verdict == "tooling"
+    assert [check.status for check in result.checks[: len(pi.ADAPTER.consistency_tests)]] == [
+        "pass"
+    ] * len(pi.ADAPTER.consistency_tests)
+    assert [check.status for check in result.checks[-4:-1]] == ["fail", "skip", "pass"]
+    assert result.checks[-1] == Check(
+        "mock routes",
+        "error",
+        "unexpected=[('GET', '/stray')]; unhandled=[('GET', '/stray')]",
+    )
+
+
+def test_install_failure_raises_install_failed(tmp_path: Path) -> None:
     with (
         make_sandbox("pi", root=tmp_path / "sandbox") as sandbox,
         pytest.raises(InstallFailed, match="fake npm failure"),
     ):
+        npm = sandbox.bin_dir / "npm"
+        npm.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\n"
+            "print('irrelevant stdout')\n"
+            "print('fake npm failure', file=sys.stderr)\n"
+            "sys.exit(1)\n",
+            encoding="utf-8",
+        )
+        npm.chmod(0o755)
         pi.ADAPTER.install(sandbox, _current_upper(REPO_ROOT))
 
 

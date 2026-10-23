@@ -12,13 +12,11 @@ from sqlalchemy import update
 
 from theater.daemon.events.publication import (
     control_event,
-    job_event,
     participant_event,
     terminal_binding_event,
     workspace_usage_event,
 )
-from theater.daemon.operations.projection import operation_event_payload
-from theater.daemon.operations.service import IDEMPOTENCY_RETENTION_SECONDS
+from theater.daemon.jobs import JobManager
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.schema import launch_reservations
 from theater.daemon.terminals.bindings import TerminalIdentityMismatch, ensure_terminal_unbound
@@ -244,28 +242,16 @@ class ProviderReceiptReconciler:
                 updated_at=updated_at,
                 settled_at=updated_at,
             )
-            if not self._store.operations.replace(
-                updated,
+            operation_event = self._operations.write_replacement_in_unit(
+                unit,
                 expected_state=operation.state,
                 expected_updated_at=operation.updated_at,
-                connection=unit.connection,
-            ):
+                replacement=updated,
+                idempotency_settled_at=updated_at,
+            )
+            if operation_event is None:
                 continue
-            self._store.operations.settle_idempotency_for_operation(
-                operation_id,
-                settled_at=updated_at,
-                retain_until=updated_at + IDEMPOTENCY_RETENTION_SECONDS,
-                connection=unit.connection,
-            )
-            changed.append(
-                JournalEventRecord(
-                    kind="operation.updated",
-                    entity_id=operation_id,
-                    entity_revision=0,
-                    payload=operation_event_payload(updated),
-                    recorded_at=updated_at,
-                )
-            )
+            changed.append(operation_event)
             for event in changed:
                 events.append(replace(event, entity_revision=first_revision + len(events)))
             unit.after_commit(
@@ -636,31 +622,20 @@ class ProviderReceiptReconciler:
         job = self._store.get_job(handle, connection=unit.connection)
         if job is None or job.state != JobState.RUNNING:
             return
-        finished = replace(
-            job,
-            state=state.value,
+        outcome = JobManager.write_direct_terminal_in_unit(
+            self._store,
+            unit,
+            job=job,
+            state=state,
             result=result,
             error_code=error_code,
             finished_at=timestamp,
         )
-        self._store.finish_job(
-            handle,
-            state=finished.state,
-            result=finished.result,
-            error_code=finished.error_code,
-            finished_at=timestamp,
-            response_format=finished.response_format,
-            structured_result=finished.structured_result,
-            structured_status=finished.structured_status,
-            connection=unit.connection,
-        )
-        events.append(job_event(finished, revision=0, recorded_at=timestamp))
+        if outcome is None:
+            return
+        events.append(outcome[1])
         if self._jobs is not None:
-            unit.after_commit(
-                lambda handle=handle, state=state, error_code=error_code: self._jobs.finish(
-                    handle, state=state, error_code=error_code
-                )
-            )
+            unit.after_commit(lambda handle=handle: self._jobs.wake_committed_direct_finish(handle))
 
     def _validate_launch_receipt(
         self,

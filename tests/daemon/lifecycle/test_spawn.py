@@ -3,18 +3,44 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
 import pytest
+from sqlalchemy import update
 
+from tests.support.handoff_spawn import end_source, init_repository, launch_all, start_source
 from theater import paths
+from theater.daemon.rpc.spawning import _PrivateSpawnMapping
+from theater.daemon.schema import jobs as jobs_table
 from theater.harness import HARNESSES
+from theater.harness.contracts.runtime import RuntimeWiring
+from theater.models import JobState
 from theater.protocol import RemoteError
 
 _JSON_SCHEMA_PREFIX = (
     "Return your final answer as a single bare JSON value (no code fences, no prose) "
     "matching this schema hint: {schema}"
 )
+
+
+def test_private_spawn_mapping_keeps_omission_distinct_from_null():
+    base: dict[str, object] = {"harness": "vibe", "approval": "manual", "cwd": "/tmp"}
+    omitted = _PrivateSpawnMapping(base, "vibe", False, RuntimeWiring.AUTO, None)
+    explicit = _PrivateSpawnMapping(
+        {**base, "background": None, "window_name": None, "tmux_session": None},
+        "vibe",
+        False,
+        RuntimeWiring.AUTO,
+        None,
+    )
+    assert omitted.provider_request("") == explicit.provider_request("")
+    omitted_payload = omitted.deferred_payload()
+    explicit_payload = explicit.deferred_payload()
+    for key in ("background", "window_name", "tmux_session"):
+        assert key not in omitted_payload
+        assert key in explicit_payload
+        assert explicit_payload[key] is None
 
 
 def _json_prompt(schema: str, prompt: str) -> str:
@@ -51,6 +77,35 @@ async def test_spawn_creates_an_identified_participant(client, terminal_provider
     # The id must be reachable from inside the pane, and not only via the
     # environment, which the MCP SDK filters.
     assert record["id"] in terminal["env"]["VIBE_MCP_SERVERS"]
+
+
+async def test_deferred_spawn_keeps_accepted_presentation_input_out_of_launch(
+    client, daemon, terminal_provider, tmp_path
+):
+    repo = init_repository(tmp_path)
+    start_source(daemon, repo)
+    record = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="continue",
+        approval="manual",
+        cwd=str(repo),
+        after="Writer",
+        background=False,
+        window_name="custom-window",
+        tmux_session="custom-session",
+    )
+    stored = json.loads(daemon.store.get_handoff_gate(record["handle"]).request)["params"]
+    assert "background" not in stored
+    assert "window_name" not in stored
+    assert "tmux_session" not in stored
+    assert terminal_provider.creations == []
+
+    await end_source(daemon, state=JobState.DONE, result="ready")
+    await launch_all(daemon)
+    presentation = terminal_provider.creations[0]
+    assert presentation["background"] is True
+    assert presentation["name"] == f"vibe-{record['id'][:6]}"
 
 
 async def test_spawn_response_format_augments_and_persists_prompt(client, terminal_provider):
@@ -389,7 +444,26 @@ async def test_promptless_launch_failure_leaves_crashed_job(
     so a launch failure leaves the job CRASHED with spawn_failed.
     """
 
+    wakes: list[asyncio.Event] = []
+    listeners: list[str] = []
+    daemon.jobs.add_terminal_listener(listeners.append)
+    finished_bus_before = [row for row in daemon.store.bus_tail() if row["kind"] == "job.finished"]
+
     async def reject(_provider_id, generation, _method, params):
+        handle = params["participant_id"]
+        with daemon.store.write_unit() as unit:
+            unit.connection.execute(
+                update(jobs_table)
+                .where(jobs_table.c.handle == handle)
+                .values(
+                    result="prior result",
+                    response_format="json",
+                    structured_result='{"answer":"old"}',
+                    structured_status="parsed",
+                )
+            )
+        daemon.jobs.track(handle)
+        wakes.append(daemon.jobs._events[handle])
         return {
             "operation_id": params["operation_id"],
             "provider_generation": generation,
@@ -417,3 +491,13 @@ async def test_promptless_launch_failure_leaves_crashed_job(
     assert job is not None
     assert job.state == "crashed", "promptless launch failure must CRASH the job, not DONE"
     assert job.error_code == "provider_busy"
+    assert (job.result, job.response_format, job.structured_result, job.structured_status) == (
+        "prior result",
+        "json",
+        '{"answer":"old"}',
+        "parsed",
+    )
+    assert len(wakes) == 1 and wakes[0].is_set() and listeners == []
+    assert [row for row in daemon.store.bus_tail() if row["kind"] == "job.finished"] == (
+        finished_bus_before
+    )

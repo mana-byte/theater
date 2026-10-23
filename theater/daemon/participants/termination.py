@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from theater import timing
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_KILL_REQUESTED
 from theater.constants.refusals import (
@@ -11,6 +13,13 @@ from theater.constants.refusals import (
     NO_TERMINAL_PRESENCE_REASON,
 )
 from theater.daemon.forgetting import forget_participant, forget_refusal
+from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
+from theater.daemon.harness_runtime.exact_stop import (
+    BackendAdoptionFailed,
+    BackendTeardownFailed,
+    persisted_backend_identity,
+    stop_exact_backend,
+)
 from theater.daemon.operations.termination import terminate_with_operation
 from theater.daemon.presence import access as presence_access
 from theater.daemon.worktrees.retirement import cleanup_killed_workspace
@@ -25,6 +34,10 @@ from theater.models import (
     TheaterError,
 )
 from theater.observability.catalog import LIFECYCLE_STAGE
+
+if TYPE_CHECKING:
+    from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
+    from theater.daemon.server import Daemon
 
 
 async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> None:
@@ -55,31 +68,24 @@ async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> No
         )
 
 
-async def _stop_verified_detached_backend(daemon, pid: str, binding) -> bool:
+async def _stop_verified_detached_backend(
+    daemon: Daemon, pid: str, binding: ParticipantRuntimeBinding
+) -> bool:
     """Stop one exact detached backend without mutating queued control state."""
-    from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
-
-    if binding.backend_pid is None or binding.backend_started_at is None:
+    identity = persisted_backend_identity(binding.backend_pid, binding.backend_started_at)
+    if identity is None:
         return False
-    if daemon.runtime_manager.backend(pid) is None:
-        try:
-            await daemon.runtime_manager.adopt_backend(
-                pid,
-                backend_generation=binding.backend_generation,
-                pid=binding.backend_pid,
-                started_at=binding.backend_started_at,
-                endpoint=binding.endpoint,
-            )
-        except BackendIdentityMismatch:
-            hub = getattr(daemon.observer, "live", None)
-            if hub is not None:
-                hub.unregister(pid)
-            return True
-        except Exception:
-            return False
     try:
-        await daemon.runtime_manager.teardown(pid, backend_generation=binding.backend_generation)
-    except Exception:
+        await stop_exact_backend(
+            daemon.runtime_manager,
+            pid,
+            backend_generation=binding.backend_generation,
+            identity=identity,
+            endpoint=binding.endpoint,
+        )
+    except BackendIdentityMismatch:
+        pass  # The recorded process exited or changed identity; no teardown signal was sent.
+    except (BackendAdoptionFailed, BackendTeardownFailed):
         return False
     hub = getattr(daemon.observer, "live", None)
     if hub is not None:

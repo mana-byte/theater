@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 import theater.daemon.jobs as jobs_mod
+from tests.support.observation import apply_batch
 from theater.constants.daemon import TOUCH_HASH_MAX_FILE_BYTES
 from theater.daemon.blob import BlobHash, BlobHashState, blob_sha
 from theater.daemon.jobs import JobManager, TouchAccumulator
@@ -388,7 +389,7 @@ def test_events_with_paths_produce_touch_rows(registry, tmp_path):
         tool_name="edit",
         paths=(EventPath(path="src.py", mode="write"),),
     )
-    observer._apply(pid, Batch(events=[event]), QuietClock(), TurnAccumulator())
+    apply_batch(observer, pid, Batch(events=[event]), QuietClock(), TurnAccumulator())
 
     f.write_bytes(b"modified")
     jobs.finish("job-1", state="done", result="done")
@@ -410,7 +411,8 @@ def test_unavailable_hash_remains_recallable(registry, tmp_path):
     with path.open("r+b") as stream:
         stream.truncate(TOUCH_HASH_MAX_FILE_BYTES + 1)
     observer, jobs, pid = _observer_with_jobs(registry, cwd=str(tmp_path))
-    observer._apply(
+    apply_batch(
+        observer,
         pid,
         Batch(
             events=[
@@ -441,7 +443,8 @@ def test_multiple_paths_in_one_batch_all_recorded(registry, tmp_path):
 
     observer, jobs, pid = _observer_with_jobs(registry, cwd=str(tmp_path))
 
-    observer._apply(
+    apply_batch(
+        observer,
         pid,
         Batch(
             events=[
@@ -489,7 +492,8 @@ def test_batch_with_no_paths_does_no_job_lookup(registry):
         "oldest_running_job_for_target",
         wraps=observer.store.oldest_running_job_for_target,
     ) as spy:
-        observer._apply(
+        apply_batch(
+            observer,
             pid,
             Batch(
                 events=[
@@ -519,7 +523,8 @@ def test_batch_with_paths_does_at_most_one_job_lookup(registry, tmp_path):
         "oldest_running_job_for_target",
         wraps=observer.store.oldest_running_job_for_target,
     ) as spy:
-        observer._apply(
+        apply_batch(
+            observer,
             pid,
             Batch(
                 events=[
@@ -554,4 +559,4 @@ def test_observer_without_jobs_does_not_crash_on_paths(registry, tmp_path):
         tool_name="edit",
         paths=(EventPath(path="x.py", mode="write"),),
     )
-    observer._apply(p.id, Batch(events=[event]), QuietClock(), TurnAccumulator())
+    apply_batch(observer, p.id, Batch(events=[event]), QuietClock(), TurnAccumulator())

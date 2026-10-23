@@ -12,7 +12,9 @@ from typing import Any
 
 from .. import framework, github
 from ..contract import Check, InstallFailed, Result, Sandbox, VerifiedSet, verdict_from_checks
-from . import opencode_pi_process, pi_bump, pi_pins
+from ..process import run_pipe_group
+from ..route_facts import RouteFacts
+from . import pi_bump, pi_pins
 
 _PACKAGE = "@earendil-works/pi-coding-agent"
 
@@ -82,7 +84,7 @@ class PiAdapter:
             *specs,
         )
         try:
-            completed = opencode_pi_process.run_group(command, env=dict(sb.env), timeout=300)
+            completed = run_pipe_group(command, env=dict(sb.env), timeout=300)
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             raise InstallFailed(f"npm could not install Pi {version}: {exc}") from exc
         if completed.returncode != 0:
@@ -114,13 +116,12 @@ class PiAdapter:
             expected_skips=self.expected_skips,
         )
         checks = consistency + proofs
-        observed = {(request.method, request.path) for request in sb.mock.requests}
-        unexpected = observed - self.expected_routes - self.ignorable_routes
-        unhandled = {
-            (request.method, request.path)
-            for request in sb.mock.unhandled
-            if (request.method, request.path) not in self.ignorable_routes
-        }
+        unexpected = RouteFacts(
+            sb.mock.requests, self.expected_routes, self.ignorable_routes
+        ).unexpected_routes
+        unhandled = RouteFacts(
+            sb.mock.unhandled, self.expected_routes, self.ignorable_routes
+        ).unignored_routes
         if unexpected or unhandled:
             detail = f"unexpected={sorted(unexpected)!r}; unhandled={sorted(unhandled)!r}"
             return Result(

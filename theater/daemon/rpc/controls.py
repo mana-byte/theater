@@ -6,33 +6,27 @@ operation or mints a job; responses are additive (wire protocol stays version 1)
 
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping
-
-from theater.constants.refusals import NEXT_STEER_STALE
-from theater.daemon.controls.interaction_wire import interaction_to_wire
+from theater.daemon.controls import request_actions
+from theater.daemon.controls.report import (
+    ControlActiveTurn,
+    build_control_report,
+    control_report_to_wire,
+)
+from theater.daemon.controls.settings_policy import validate_settings
 from theater.daemon.presence import access as presence_access
-from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
 from theater.daemon.rpc.params import (
     _optional_string_param,
-    _serialized_response_format,
     _string_param,
 )
 from theater.daemon.rpc.router import method
-from theater.daemon.rpc.skill_attachments import attach_skills
-from theater.daemon.skill_cards import compose_prompt
+from theater.daemon.runtime.launch_policy import decode_launch_policy
 from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
-    ConnectionHealth,
-    ControlKind,
-    DeliveryResult,
     RuntimeCapability,
     RuntimeHost,
-    RuntimeWiring,
 )
-from theater.models import StaleTarget
 
 #: The one-word reason a pane without native wiring cannot offer a native
 #: control. The detail string says the same thing the service's refusal does.
@@ -200,127 +194,23 @@ def _effective_capabilities(daemon, target, snapshot=None) -> dict:
 def _runtime_host(daemon, target) -> RuntimeHost | None:
     binding = daemon.store.get_runtime_binding(target.id)
     if binding is not None and binding.launch_policy:
-        try:
-            policy = json.loads(binding.launch_policy)
-        except ValueError:
-            policy = {}
-        value = policy.get("runtime_host") if isinstance(policy, Mapping) else None
-        if isinstance(value, str):
-            try:
-                return RuntimeHost(value)
-            except ValueError:
-                pass
+        host = decode_launch_policy(binding.launch_policy).runtime_host
+        if host is not None:
+            return host
     harness = HARNESSES.get(normalize(target.harness))
     runtime = None if harness is None else getattr(harness, "runtime", None)
     host = None if runtime is None else getattr(runtime, "host", None)
     return host if isinstance(host, RuntimeHost) else None
 
 
-def _steer_receipt(daemon, job) -> dict:
-    """The flat additive delivery facts for the steer that just finished.
-
-    Settled under the service lock and read synchronously, so no steer can overtake it. If
-    absent, report unknown delivery with a consistency reason — never optimistic success.
-    """
-    steer_operations = [
-        operation
-        for operation in daemon.store.control_operations_for_job(job.handle)
-        if operation.kind is ControlKind.STEER
-    ]
-    latest = (
-        max(steer_operations, key=lambda item: (item.updated_at, item.created_at))
-        if steer_operations
-        else None
-    )
-    if latest is None:
-        return {
-            "delivery": "unknown",
-            "phase": None,
-            "operation_id": None,
-            "reason": "steer_operation_missing",
-            "detail": (
-                f"the persisted STEER operation for job {job.handle!r} could not "
-                "be read back after the service returned; the amendment's "
-                "delivery is unknown — do not retry blindly"
-            ),
-        }
-    receipt: dict = {
-        "delivery": "accepted" if latest.delivery_result is DeliveryResult.ACCEPTED else "unknown",
-        "phase": str(latest.delivery_phase),
-        "operation_id": latest.operation_id,
-    }
-    if latest.error_code is not None:
-        receipt["reason"] = latest.error_code
-    if latest.error is not None:
-        receipt["detail"] = latest.error
-    return receipt
-
-
 @method("participant.steer")
 async def _steer(daemon, params: dict) -> dict:
-    """Amend exactly the current Theater job's active native turn.
-
-    Returns the still-running job plus flat delivery fields read back from the persisted
-    STEER, so callers can tell an accepted amendment from an unknown delivery.
-    """
-    method_name = "participant.steer"
-    target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
-    prompt = _string_param(params, "prompt", method_name=method_name)
-    caller_id = _string_param(params, "caller_id", method_name=method_name)
-    job_handle = _optional_string_param(params, "job_handle", method_name=method_name)
-    try:
-        job = await daemon.controls.steer(
-            target.id,
-            caller_id=caller_id,
-            prompt=prompt,
-            job_handle=job_handle,
-        )
-    except StaleTarget as exc:
-        exc.details = exc.details or {"next": NEXT_STEER_STALE}
-        raise
-    result = job.to_dict()
-    result.update(_steer_receipt(daemon, job))
-    daemon.store.bus_append(
-        "agent.steer",
-        from_id=caller_id,
-        to_id=target.id,
-        payload={
-            "handle": job.handle,
-            "prompt": prompt[:200],
-            "delivery": result["delivery"],
-        },
-    )
-    return result
+    return await request_actions.steer(daemon, params)
 
 
 @method("participant.queue_followup")
 async def _queue_followup(daemon, params: dict) -> dict:
-    """Create an awaitable send job now; it dispatches on the next idle.
-
-    Response-format guidance and attached skills are injected once, at queue time, so neither
-    dispatch path re-injects them.
-    """
-    method_name = "participant.queue_followup"
-    target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
-    prompt = _string_param(params, "prompt", method_name=method_name)
-    caller_id = _string_param(params, "caller_id", method_name=method_name)
-    response_format = _serialized_response_format(daemon, params, creator_id=caller_id)
-    attachment = attach_skills(daemon, params, task=prompt, sender=caller_id)
-    assignment = daemon.plays.check_send(caller_id, target.id, attachment.plan)
-    job = await daemon.controls.queue_followup(
-        target.id,
-        caller_id=caller_id,
-        prompt=compose_prompt(prompt, skills=attachment.block, response_format=response_format),
-        response_format=response_format,
-        on_reserved=daemon.plays.holder(assignment),
-    )
-    daemon.store.bus_append(
-        "agent.queue_followup",
-        from_id=caller_id,
-        to_id=target.id,
-        payload={"handle": job.handle, "prompt": prompt[:200]},
-    )
-    return job.to_dict()
+    return await request_actions.queue_followup(daemon, params)
 
 
 @method("participant.settings.update")
@@ -334,10 +224,7 @@ async def _settings_update(daemon, params: dict) -> dict:
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     model = _optional_string_param(params, "model", method_name=method_name)
     reasoning_effort = _optional_string_param(params, "reasoning_effort", method_name=method_name)
-    check_model_allowed(target.harness, model, daemon.config.models_for(target.harness))
-    check_reasoning_allowed(
-        target.harness, reasoning_effort, daemon.config.reasoning_for(target.harness)
-    )
+    validate_settings(daemon.config, target.harness, model, reasoning_effort)
     outcome = await daemon.controls.update_settings(
         target.id,
         caller_id=caller_id,
@@ -371,10 +258,11 @@ async def _controls(daemon, params: dict) -> dict:
     transcript = observed_transcript_identity(target, getattr(daemon, "observer", None))
     queued = [job.handle for job in daemon.controls.queued_jobs(pid)]
     runtime = daemon.runtime_manager.get(pid)
+    snapshot = None
+    active_turn = None
     if runtime is not None:
         snapshot = await runtime.snapshot()
         daemon.runtime_manager.record_snapshot(pid, runtime, snapshot)
-        active_turn: dict | None = None
         if snapshot.native_turn_id is not None:
             job = daemon.controls.active_job_for_native_turn(
                 pid,
@@ -382,86 +270,26 @@ async def _controls(daemon, params: dict) -> dict:
                 native_session_id=snapshot.native_session_id,
                 native_turn_id=snapshot.native_turn_id,
             )
-            active_turn = {
-                "native_turn_id": snapshot.native_turn_id,
-                "job_handle": job.handle if job is not None else None,
-            }
-            interaction = interaction_to_wire(snapshot.pending_interaction)
-            if interaction is not None:
-                active_turn["pending_interaction"] = interaction
-        return {
-            "id": pid,
-            "wiring": str(RuntimeWiring.NATIVE),
-            "backend_generation": snapshot.backend_generation,
-            "native_session_id": snapshot.native_session_id,
-            "health": {
-                "connection": str(snapshot.health),
-                "diagnostics": list(snapshot.health_diagnostics),
-            },
-            "settings": {
-                "model": snapshot.settings.model,
-                "reasoning_effort": snapshot.settings.reasoning_effort,
-            },
-            "capabilities": _effective_capabilities(daemon, target, snapshot),
-            "transcript_identity": transcript,
-            "active_turn": active_turn,
-            "queued": queued,
-            "human_presence": presence,
-        }
-    binding = daemon.store.get_runtime_binding(pid)
-    if binding is not None:
-        # Native-wired, but its runtime is not connected right now (for
-        # example between a daemon restart and recovery's reconnect). Report
-        # the persisted wiring honestly instead of pretending it is legacy.
-        return {
-            "id": pid,
-            "wiring": str(binding.wiring),
-            "backend_generation": binding.backend_generation,
-            "native_session_id": binding.native_session_id,
-            "health": {
-                "connection": str(ConnectionHealth.DISCONNECTED),
-                "diagnostics": ["no runtime connection: the daemon reconnects during recovery"],
-            },
-            "settings": None,
-            "capabilities": _effective_capabilities(daemon, target),
-            "transcript_identity": transcript,
-            "active_turn": None,
-            "queued": queued,
-            "human_presence": presence,
-        }
-    terminal_route = daemon.controls.terminal_route_for(pid)
-    if terminal_route.is_provider and terminal_route.terminal is not None:
-        terminal = terminal_route.terminal
-        return {
-            "id": pid,
-            "wiring": "provider",
-            "backend_generation": None,
-            "native_session_id": None,
-            "health": {
-                "connection": terminal_route.provider_health,
-                "diagnostics": [],
-            },
-            "settings": None,
-            "capabilities": _effective_capabilities(daemon, target),
-            "transcript_identity": transcript,
-            "active_turn": None,
-            "queued": queued,
-            "human_presence": presence,
-            "provider_id": terminal.provider_id,
-            "provider_generation": terminal.provider_generation,
-            "terminal_id": terminal.terminal_id,
-            "terminal_incarnation": terminal.terminal_incarnation,
-        }
-    return {
-        "id": pid,
-        "wiring": str(RuntimeWiring.LEGACY),
-        "backend_generation": None,
-        "native_session_id": None,
-        "health": None,
-        "settings": None,
-        "capabilities": _effective_capabilities(daemon, target),
-        "transcript_identity": transcript,
-        "active_turn": None,
-        "queued": queued,
-        "human_presence": presence,
-    }
+            active_turn = ControlActiveTurn(
+                snapshot.native_turn_id,
+                job.handle if job is not None else None,
+                snapshot.pending_interaction,
+            )
+    binding = None if snapshot is not None else daemon.store.get_runtime_binding(pid)
+    terminal_route = (
+        daemon.controls.terminal_route_for(pid) if snapshot is None and binding is None else None
+    )
+    report = build_control_report(
+        pid,
+        native=snapshot,
+        binding=binding,
+        provider_route=terminal_route,
+        active_turn=active_turn,
+        queued=queued,
+        human_presence=presence,
+    )
+    return control_report_to_wire(
+        report,
+        capabilities=_effective_capabilities(daemon, target, snapshot),
+        transcript_identity=transcript,
+    )

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from tests.support.builders import operator_context
 from tests.support.provider_controls import online, provider_target
 from tests.support.provider_native import assert_result_valid
+from tests.support.queued_followups import provider_terminal_op
 from tests.support.waiting import settle_operations
 from theater.daemon.frontend.control_handlers import (
     _error,
@@ -20,16 +22,24 @@ from theater.daemon.frontend.control_handlers import (
     controls_steer,
 )
 from theater.daemon.frontend.operation_handlers import operations_reconcile
-from theater.daemon.schema import orchestration_events, terminal_bindings
+from theater.daemon.schema import (
+    control_operations,
+    orchestration_events,
+    participants,
+    terminal_bindings,
+)
 from theater.daemon.terminals import CallbackOutcomeUnknown
 from theater.frontend.schemas import validate_callback_request
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
+    ControlKind,
     ControlTransport,
+    DeliveryResult,
 )
 from theater.models import (
     BadRequest,
     JobState,
+    NotFound,
     PublicOperationState,
     Status,
     now,
@@ -157,6 +167,137 @@ async def test_second_provider_send_is_refused_while_first_job_is_running(
     assert refused.state == PublicOperationState.FAILED.value
     assert refused.error is not None and refused.error["code"] == "busy"
     assert callback_count == 1
+
+
+async def test_provider_send_missing_target_after_modal_preserves_claim(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
+    claim = daemon.jobs.create(
+        handle="stale#claim",
+        caller_id="cli",
+        target_id=participant_id,
+        kind="send",
+        prompt="older prompt",
+        cwd=None,
+    )
+    original_modal = daemon.controls._gates.provider_modal_check
+    assert original_modal is not None
+
+    async def remove_after_modal(target_id: str) -> None:
+        await original_modal(target_id)
+        removed = daemon.store.conn.execute(
+            delete(participants).where(participants.c.id == target_id)
+        )
+        assert removed.rowcount == 1
+
+    async def no_delivery(*_args):
+        pytest.fail("missing target must refuse before provider delivery")
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", no_delivery)
+    daemon.controls._gates = replace(
+        daemon.controls._gates,
+        provider_modal_check=remove_after_modal,
+        send_claim_now=lambda: claim.created_at + 60,
+        send_claim_ttl=lambda: 0.0,
+    )
+
+    with pytest.raises(NotFound) as raised:
+        await daemon.controls.send(participant_id, caller_id="cli", prompt="new prompt")
+
+    assert str(raised.value) == f"no participant {participant_id!r}"
+    assert raised.value.code == "not_found"
+    assert daemon.store.get_job(claim.handle).state == JobState.RUNNING
+    assert [job.handle for job in daemon.store.running_jobs_for_target(participant_id)] == [
+        claim.handle
+    ]
+    assert (
+        daemon.store.conn.execute(
+            select(control_operations.c.operation_id).where(
+                control_operations.c.participant_id == participant_id
+            )
+        ).first()
+        is None
+    )
+
+
+async def test_historical_unpinned_queue_refuses_after_route_selection(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
+    job = daemon.jobs.create(
+        handle="historical#queue",
+        caller_id="cli",
+        target_id=participant_id,
+        kind="send",
+        prompt="old queued prompt",
+        cwd=None,
+    )
+    operation_id = "historical#queue:followup"
+    daemon.store.reserve_control_operation(
+        provider_terminal_op(
+            operation_id,
+            participant_id,
+            kind=ControlKind.QUEUE_FOLLOWUP,
+            phase=ControlDeliveryPhase.QUEUED,
+            job_handle=job.handle,
+        )
+    )
+
+    async def no_delivery(*_args):
+        pytest.fail("a row without a pinned provider must not use the current provider")
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", no_delivery)
+    absence_checks = 0
+    original_require_absent = daemon.controls._gates.require_absent
+
+    async def require_absent(participant_id: str) -> None:
+        nonlocal absence_checks
+        absence_checks += 1
+        await original_require_absent(participant_id)
+
+    daemon.controls._gates = replace(daemon.controls._gates, require_absent=require_absent)
+    outcome = await daemon.controls.dispatch_queue(participant_id)
+
+    assert outcome.failed == ((job.handle, "not_addressable"),)
+    assert absence_checks == 2
+    control = daemon.store.get_control_operation(operation_id)
+    assert control is not None
+    assert control.transport is ControlTransport.TERMINAL_FALLBACK
+    assert control.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert control.delivery_result is DeliveryResult.REJECTED
+    assert control.error == f"participant {participant_id!r} has no current terminal-provider route"
+    assert daemon.store.get_job(job.handle).state == JobState.CRASHED
+
+
+async def test_pre_reserved_provider_send_rechecks_busy_after_modal_gate(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = provider_target(daemon)
+    online(monkeypatch, daemon)
+
+    async def become_working(_participant_id: str) -> None:
+        daemon.registry.set_status(participant_id, Status.WORKING)
+
+    async def no_delivery(*_args):
+        pytest.fail("pre-reserved send must refuse before provider delivery")
+
+    daemon.controls._gates = replace(daemon.controls._gates, provider_modal_check=become_working)
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", no_delivery)
+    accepted = await controls_send(
+        daemon,
+        operator_context(),
+        {"participant_id": participant_id, "prompt": "reserved"},
+        idempotency_key="provider-pre-reserved-busy",
+    )
+    await settle_operations(daemon)
+
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.job_handle is not None
+    assert operation.state == PublicOperationState.FAILED.value
+    assert operation.error is not None and operation.error["code"] == "busy"
 
 
 async def test_public_send_acceptance_atomically_persists_job_control_and_operation(

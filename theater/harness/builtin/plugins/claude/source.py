@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from theater.harness.channels.filesystem import WatchGate
 from theater.harness.source import Batch, ReceiptAdmission, TranscriptSource
-from theater.harness.transcript.discovery import stateful_history_reader
+from theater.harness.transcript.history import HistoryParseContext
 from theater.provenance import TranscriptProvenance
 
 if TYPE_CHECKING:
@@ -64,13 +64,14 @@ class _ClaudeSource(TranscriptSource):
         self._receipt_gate.release()
         await super().aclose()
 
-    def _history_reader(self):
+    def _history_parse_context(self) -> HistoryParseContext:
+        """History parses on a fresh clone so it never disturbs the live observer."""
         from .observer import ClaudeCodeObserver
 
-        return stateful_history_reader(
-            clone=lambda: ClaudeCodeObserver(root=self._observer.root),
-            seed_of=lambda r: r._seed_mcp_context,
-            decorate=self._decorate_parsed,
+        reader = ClaudeCodeObserver(root=self._observer.root)
+        return HistoryParseContext(
+            parse_record=lambda line, index: reader.parse_record(line, index, clip_text=False),
+            prepare_history_parse=reader._seed_mcp_context,
         )
 
     async def read(self) -> Batch:

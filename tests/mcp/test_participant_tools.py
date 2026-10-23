@@ -21,6 +21,7 @@ async def test_parallel_initial_calls_register_one_participant():
     s = tools.Session(participant_id=None, harness="vibe", client=client)
     records = await asyncio.gather(s.identify(), s.me(), s.identify())
     assert client.methods.count("hello") == 1
+    assert client.methods.count("participants.get") == 2
     assert all(record["id"] == RECORD["id"] for record in records)
 
 
@@ -35,8 +36,9 @@ async def test_identify_does_not_report_legacy_pane_identity(monkeypatch):
 async def test_identify_accepts_the_id_the_daemon_hands_back():
     """The daemon may file us under a different id than the one on argv."""
     s = session(hello={**RECORD, "id": "p-other"})
-    await s.identify()
+    assert await s.caller_id() == "p-other"
     assert s.participant_id == "p-other"
+    assert s.client.methods == ["hello"]
 
 
 async def test_me_re_reads_the_record_once_identity_is_settled():

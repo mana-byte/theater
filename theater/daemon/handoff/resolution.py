@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
+from theater.daemon.persistence.repositories.operation_predicates import started_task
 from theater.models import BadRequest, Job, NotFound, Participant
 
 _SCAN_LIMIT = 64
@@ -66,12 +66,7 @@ def _was_started(daemon, job: Job) -> bool:
     operations = daemon.store.control_operations_for_job(job.handle)
     if not operations:  # legacy sends and older jobs may have no control row
         return True
-    return any(
-        operation.delivery_phase is ControlDeliveryPhase.DISPATCHED
-        or operation.delivery_result in (DeliveryResult.ACCEPTED, DeliveryResult.UNKNOWN)
-        or operation.native_turn_id is not None
-        for operation in operations
-    )
+    return any(started_task(operation) for operation in operations)
 
 
 def participant_of(daemon, participant_id: str | None) -> Participant | None:

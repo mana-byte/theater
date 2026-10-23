@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from tests.support.frontend_wire import projection_wire, read_request
 from tests.support.sdk_fixture_server import fixture_server, send_frame
 from tests.support.sdk_state_frames import (
@@ -20,8 +22,107 @@ from tests.support.sdk_state_frames import (
 )
 from theater.frontend import (
     FrontendClient,
+    SnapshotPage,
+    StateResnapshotRequired,
     StateSynchronizer,
 )
+from theater.frontend._results import decode_state_follow
+from theater.frontend.state_sync import _apply_follow, _projection_from_pages
+
+
+def test_later_transaction_identity_error_keeps_original_projection() -> None:
+    page = SnapshotPage.from_wire(
+        snapshot_page(
+            "snapshot-base",
+            0,
+            True,
+            0,
+            participants=[participant_frame("participant-a", "idle", 0)],
+        )
+    )
+    original = _projection_from_pages([page])
+    follow = decode_state_follow(
+        follow_result(
+            2,
+            journal_transaction(
+                "valid-first",
+                1,
+                journal_event(
+                    "participant.updated",
+                    "participant-a",
+                    1,
+                    participant_frame("participant-a", "ready", 1),
+                ),
+            ),
+            journal_transaction(
+                "wrong-identity-second",
+                2,
+                journal_event(
+                    "provider.updated",
+                    "provider-a",
+                    1,
+                    {**provider_frame("healthy"), "provider_id": "provider-b"},
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(
+        StateResnapshotRequired, match="event payload identity does not match its stable entity id"
+    ):
+        _apply_follow(original, follow)
+
+    assert original.cursor.sequence == 0
+    assert original.participants["participant-a"].status == "idle"
+    assert original.providers == {}
+    assert original.entity_revisions == {("participants", "participant-a"): 0}
+
+
+def test_removed_participant_revision_blocks_stale_resurrection() -> None:
+    page = SnapshotPage.from_wire(
+        snapshot_page(
+            "snapshot-base",
+            0,
+            True,
+            0,
+            participants=[participant_frame("participant-a", "idle", 1)],
+        )
+    )
+    initial = _projection_from_pages([page])
+    removed = _apply_follow(
+        initial,
+        decode_state_follow(
+            follow_result(
+                1,
+                journal_transaction(
+                    "remove",
+                    1,
+                    journal_event("participant.removed", "participant-a", 2, {}),
+                ),
+            )
+        ),
+    )
+    replayed = _apply_follow(
+        removed,
+        decode_state_follow(
+            follow_result(
+                2,
+                journal_transaction(
+                    "stale-update",
+                    2,
+                    journal_event(
+                        "participant.updated",
+                        "participant-a",
+                        1,
+                        participant_frame("participant-a", "ready", 1),
+                    ),
+                ),
+            )
+        ),
+    )
+
+    assert replayed.participants == {}
+    assert replayed.entity_revisions[("participants", "participant-a")] == 2
 
 
 async def test_follow_applies_complete_groups_and_preserves_future_events() -> None:  # noqa: PLR0915

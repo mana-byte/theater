@@ -26,6 +26,7 @@ from theater.frontend import (
     EventCursor,
     FrontendClient,
     FrontendTransportError,
+    StateProjection,
 )
 
 
@@ -276,6 +277,46 @@ async def test_initial_snapshot_failure_leaves_navigation_and_refresh_recoverabl
         monkeypatch.setattr(state, "initialize", initialize)
         await app._tick_synchronize()
         assert app.selected_participant_id == "participant-1"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_error_deduplication_resets_after_a_success(monkeypatch, caplog) -> None:
+    app, _client, _presentation = build_app()
+    state = cast(FakeState, app._state)
+    projection = state.projection
+    assert projection is not None
+    state.projection = None
+    outcomes: list[StateProjection | Exception] = [
+        FrontendTransportError("offline"),
+        FrontendTransportError("offline"),
+        projection,
+        FrontendTransportError("offline"),
+    ]
+    messages: list[str] = []
+
+    async def initialize() -> StateProjection:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        state.projection = outcome
+        return outcome
+
+    monkeypatch.setattr(state, "initialize", initialize)
+    monkeypatch.setattr(app, "notify", lambda message, **_kwargs: messages.append(str(message)))
+    with caplog.at_level("INFO", logger="regie.latency"):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._startup_task is not None
+            await app._startup_task
+            await app._initialize_projection()
+            assert messages == ["state unavailable: offline"]
+            await app._initialize_projection()
+            assert app._last_state_error is None
+            state.projection = None
+            await app._initialize_projection()
+
+    assert messages == ["state unavailable: offline", "state unavailable: offline"]
+    assert any("startup.snapshot" in line and "result=error" in line for line in caplog.messages)
 
 
 @pytest.mark.asyncio

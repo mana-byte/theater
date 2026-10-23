@@ -120,18 +120,6 @@ class JobRepository:
         ).fetchone()
         return Job.from_row(row._mapping) if row else None
 
-    def max_send_seq(self) -> int:
-        """Highest numeric suffix across every send handle, 0 if none."""
-        rows = self._db.conn.execute(
-            select(jobs.c.handle).where(jobs.c.handle.like("%#%"))
-        ).fetchall()
-        best = 0
-        for (handle,) in rows:
-            _, _, seq = handle.rpartition("#")
-            if seq.isdigit():
-                best = max(best, int(seq))
-        return best
-
     def spawn_prompts_for_targets(self, ids: list[str]) -> dict[str, str | None]:
         if not ids:
             return {}

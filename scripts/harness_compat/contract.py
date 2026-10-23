@@ -14,11 +14,10 @@ from typing import Any, Literal, Protocol
 #: ``tooling`` means our own machinery failed (mock gap, inconsistent bump), never upstream.
 Verdict = Literal["green", "red", "inconclusive", "tooling"]
 CheckStatus = Literal["pass", "fail", "skip", "error"]
-Kind = Literal["exact", "range"]
 MockProtocol = Literal["anthropic", "openai"]
 Route = tuple[str, str]  # (HTTP method, path without query string)
 
-#: Committed evidence lives at <root>/<EVIDENCE_ROOT>/<harness>/<version>.json.
+#: Legacy evidence paths remain excluded from artifacts and stale-limit scans.
 EVIDENCE_ROOT = Path("tests/fixtures/harness_compat")
 #: The text every mock model reply carries unless a test queues another one.
 MOCK_REPLY = "MOCK-OK"
@@ -45,27 +44,18 @@ def version_key(version: str) -> tuple[int, int, int]:
 
 @dataclass(frozen=True, slots=True)
 class VerifiedSet:
-    """What a plugin admits: ``exact`` takes ``versions``, ``range`` takes [floor, ceiling).
+    """A bounded [floor, ceiling) gate; ``known_bad`` releases are never admitted."""
 
-    ``ceiling`` is the first release NOT admitted (None = open); ``known_bad`` is never admitted.
-    """
-
-    kind: Kind
-    versions: frozenset[str] = frozenset()
-    floor: str | None = None
-    ceiling: str | None = None
+    kind: Literal["range"]
+    floor: str
+    ceiling: str
     known_bad: frozenset[str] = frozenset()
-    evidenced: frozenset[str] = frozenset()  # releases with a committed evidence file
 
     def admits(self, version: str) -> bool:
         if version in self.known_bad:
             return False
-        if self.kind == "exact":
-            return version in self.versions
         key = version_key(version)
-        if self.floor is not None and key < version_key(self.floor):
-            return False
-        return self.ceiling is None or key < version_key(self.ceiling)
+        return version_key(self.floor) <= key < version_key(self.ceiling)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,18 +97,6 @@ def verdict_from_checks(checks: Sequence[Check]) -> Verdict:
     if any(check.status == "error" for check in checks):
         return "inconclusive"
     return "green" if any(check.status == "pass" for check in checks) else "inconclusive"
-
-
-def evidence_file(root: Path, harness: str, version: str) -> Path:
-    return root / EVIDENCE_ROOT / harness / f"{version}.json"
-
-
-def load_evidenced(root: Path, harness: str) -> frozenset[str]:
-    """Releases with a committed evidence file under ``root``."""
-    directory = root / EVIDENCE_ROOT / harness
-    if not directory.is_dir():
-        return frozenset()
-    return frozenset(path.stem for path in directory.glob("*.json"))
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,6 +14,7 @@ from tests.support.observation import (
     Rig,
     ScriptedDurable,
     bus_kinds,
+    make_watch_context,
     minimal_gates,
 )
 from tests.support.waiting import until
@@ -30,7 +31,8 @@ from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
     SessionOpenMode,
 )
-from theater.harness.source import Batch
+from theater.harness.contracts.source import NativeTurnState
+from theater.harness.source import Attachment, Batch
 from theater.models import JobState, Status
 
 
@@ -156,6 +158,130 @@ async def test_old_live_watcher_cannot_finish_heuristically_after_unregister(rig
 
     assert rig.job(job.handle).state == JobState.RUNNING
     assert rig.jobs.finishes == []
+
+
+async def test_bound_watch_keeps_exact_authority_through_error_attach_and_quiet_paths(
+    store, registry, monkeypatch
+):
+    from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
+
+    class AttachingSource(ScriptedDurable):
+        on_read = None
+
+        async def read(self) -> Batch:
+            batch = await super().read()
+            if self.on_read is not None:
+                self.on_read()
+                self.on_read = None
+            return batch
+
+        def commit_attachment(self) -> None:
+            return
+
+    jobs = RecordingJobs(store)
+    hub = LiveObservationHub()
+    observer = Observer(
+        registry,
+        {"fake": FakeHarness()},
+        live_hub=hub,
+        jobs=jobs,
+        failure_grace=0.0,
+        poll=0.0,
+        search=0.0,
+        relocate=999.0,
+        awaiting=999.0,
+        rescue=999.0,
+    )
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    jobs.create(handle="h1", caller_id="caller", target_id="p1", kind="send")
+    source = AttachingSource()
+    hub.register(
+        LiveRegistration(
+            participant_id="p1",
+            live_source=source,
+            channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+            backend_generation=1,
+            native_session_id="session-1",
+        )
+    )
+    context = make_watch_context(
+        observer, "p1", observer.harnesses["fake"].observer, source, QuietClock(), TurnAccumulator()
+    )
+    source.on_read = lambda: hub.unregister("p1")
+
+    source.batches.append(Batch(error_code="source_failed", error="broken read"))
+    assert await observer._watch_iteration(context)
+    assert hub.registration_for("p1") is None
+    assert jobs.get("h1").state == JobState.RUNNING
+
+    source.batches.append(
+        Batch(
+            attached=Attachment(
+                location="/tmp/attached-transcript",
+                session_id="session-1",
+                correlation="exact",
+                last_event=Event(kind=EventKind.ASSISTANT, text="stale answer", turn_end=True),
+            ),
+            progressed=True,
+        )
+    )
+    assert await observer._watch_iteration(context)
+    assert jobs.get("h1").state == JobState.RUNNING
+
+    released = False
+
+    async def release_unproven(*_args, **_kwargs):
+        nonlocal released
+        released = True
+
+    monkeypatch.setattr(observer._completion, "release_unproven", release_unproven)
+    source.batches.append(Batch(turn_state=NativeTurnState(turn_id="turn-1", complete=False)))
+    assert await observer._watch_iteration(context)
+    assert released is False
+
+    rescued = False
+
+    async def rescue_jobs(*_args, **_kwargs):
+        nonlocal rescued
+        rescued = True
+        return False
+
+    monkeypatch.setattr(observer._completion, "rescue_jobs", rescue_jobs)
+    observer.rescue = 0.0
+    context.clock.rescue_since = -1.0
+    assert await observer._watch_iteration(context)
+    assert rescued is False
+    assert jobs.get("h1").state == JobState.RUNNING
+
+
+def test_unbound_watch_checks_the_hub_each_time(store, registry):
+    from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
+
+    jobs = RecordingJobs(store)
+    hub = LiveObservationHub()
+    observer = Observer(registry, {"fake": FakeHarness()}, live_hub=hub, jobs=jobs)
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    jobs.create(handle="h1", caller_id="caller", target_id="p1", kind="send")
+    source = ScriptedDurable()
+    context = make_watch_context(
+        observer, "p1", observer.harnesses["fake"].observer, source, QuietClock(), TurnAccumulator()
+    )
+    assert context.completion.registration is None
+
+    hub.register(
+        LiveRegistration(
+            participant_id="p1",
+            live_source=source,
+            channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+            backend_generation=1,
+        )
+    )
+    context.completion.answer_turn("p1", "suppressed")
+    assert jobs.get("h1").state == JobState.RUNNING
+
+    hub.unregister("p1")
+    context.completion.answer_turn("p1", "allowed")
+    assert jobs.get("h1").state == JobState.DONE
 
 
 async def test_live_only_wiring_settles_status_without_a_durable_reader(
