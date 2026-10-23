@@ -36,7 +36,7 @@ def test_built_wheel_and_sdist_install_all_executable_assets(tmp_path: Path) -> 
     env.pop("PYTHONPATH", None)
     dist = tmp_path / "dist"
     _run(
-        ["uv", "build", "--offline", "--wheel", "--sdist", "--out-dir", str(dist)],
+        ["uv", "build", "--wheel", "--sdist", "--out-dir", str(dist)],
         cwd=REPO_ROOT,
         env=env,
     )
@@ -56,7 +56,7 @@ def test_built_wheel_and_sdist_install_all_executable_assets(tmp_path: Path) -> 
     )
     python = venv / "bin" / "python"
     _run(
-        ["uv", "pip", "install", "--offline", "--python", str(python), str(wheel)],
+        ["uv", "pip", "install", "--python", str(python), "--no-sources", str(wheel)],
         cwd=tmp_path,
         env=env,
     )
