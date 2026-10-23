@@ -6,6 +6,7 @@ import asyncio
 from functools import partial
 
 from regie.app_parts._shared import _AppBase, logger
+from regie.app_parts.projection import ProjectionSync
 from regie.controllers.startup import start_reader
 from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_milestone, startup_phase, startup_stage
@@ -15,7 +16,6 @@ from theater.frontend import (
     FrontendClientError,
     FrontendResponseError,
     FrontendTransportError,
-    StateSynchronizationError,
     local_harness_catalog,
 )
 from theater.frontend.dto.catalogs import HarnessCatalogEntry
@@ -137,19 +137,14 @@ class StartupLoading(_AppBase):
         return tuple(entry for entry in self._harnesses if entry.installed)
 
     async def _initialize_projection(self) -> None:
-        try:
-            with startup_phase("snapshot"):
-                projection = await self._state.initialize()
-        except (
-            FrontendClientError,
-            FrontendResponseError,
-            FrontendTransportError,
-            StateSynchronizationError,
-            TypeError,
-        ) as exc:
-            self._show_state_error(exc)
+        attempt = await ProjectionSync._attempt_snapshot(
+            self._state, phase=startup_phase("snapshot")
+        )
+        if isinstance(attempt, Exception):
+            self._show_state_error(attempt)
             self._finish_initial_projection()
             return
+        projection = attempt
         self._last_state_error = None
         if not self._view_active:
             return

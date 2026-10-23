@@ -6,17 +6,12 @@ from functools import partial
 from time import monotonic
 
 from regie.app_parts._shared import _AppBase, logger
+from regie.app_parts.projection import ProjectionSync
 from regie.controllers.actions import ActionRecord
 from regie.controllers.controls import describe_action
 from regie.latency import action_phase
 from regie.widgets import ParticipantTree
-from theater.frontend import (
-    FrontendClientError,
-    FrontendResponseError,
-    FrontendTransportError,
-    StateProjection,
-    StateSynchronizationError,
-)
+from theater.frontend import StateProjection
 
 
 class ActionTracking(_AppBase):
@@ -71,18 +66,13 @@ class ActionTracking(_AppBase):
                 if self._surface.trajectory_participant_id == participant_id:
                     self._surface.show_dashboard()
                     self._sync_surface()
-            try:
-                with action_phase(record, "snapshot"):
-                    projection = await self._state.initialize()
-            except (
-                FrontendClientError,
-                FrontendResponseError,
-                FrontendTransportError,
-                StateSynchronizationError,
-                TypeError,
-            ) as exc:
-                self._show_state_error(exc)
+            attempt = await ProjectionSync._attempt_snapshot(
+                self._state, phase=action_phase(record, "snapshot")
+            )
+            if isinstance(attempt, Exception):
+                self._show_state_error(attempt)
                 return
+            projection = attempt
             self._last_state_error = None
             if not self._view_active:
                 return

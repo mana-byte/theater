@@ -7,16 +7,11 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 
 from regie.app_parts._shared import _AppBase
+from regie.app_parts.projection import ProjectionSync
 from regie.contracts import LocalPresentationTarget
 from regie.controllers.staging import StageOutcome, StageResult
 from regie.presentation import same_presentation_target, stageability, target_for_participant
 from regie.widgets import ParticipantTree
-from theater.frontend import (
-    FrontendClientError,
-    FrontendResponseError,
-    FrontendTransportError,
-    StateSynchronizationError,
-)
 
 
 class StagingActions(_AppBase):
@@ -34,19 +29,13 @@ class StagingActions(_AppBase):
         if participant is None:
             return None
         if target_for_participant(participant, projection.providers) is None:
-            try:
-                projection = await self._state.initialize()
-            except (
-                FrontendClientError,
-                FrontendResponseError,
-                FrontendTransportError,
-                StateSynchronizationError,
-                TypeError,
-            ) as exc:
-                self._show_state_error(exc)
+            attempt = await ProjectionSync._attempt_snapshot(self._state)
+            if isinstance(attempt, Exception):
+                self._show_state_error(attempt)
                 return StageResult(
                     StageOutcome.UNAVAILABLE, None, "public terminal route refresh failed"
                 )
+            projection = attempt
             if self._view_active:
                 self._show_projection(projection)
             participant = projection.participants.get(participant_id)
