@@ -71,6 +71,25 @@ def test_verified_reads_plugin_literal_and_fails_closed(tmp_path: Path) -> None:
         pi.ADAPTER.verified(tmp_path)
 
 
+def test_pi_gate_ignores_annotations_rejects_duplicates_and_deduplicates_greens(
+    tmp_path: Path,
+) -> None:
+    _copy_gate(REPO_ROOT, tmp_path)
+    path = tmp_path / pi_bump._CONSTANTS
+    source = path.read_text(encoding="utf-8")
+    original = pi.ADAPTER.verified(tmp_path)
+    path.write_text(source + "\nPI_FRONTEND_QUALIFIED_MAX: tuple = (9, 9, 9)\n")
+    assert pi.ADAPTER.verified(tmp_path) == original
+    path.write_text(source + "\nPI_FRONTEND_QUALIFIED_MAX = (9, 9, 9)\n")
+    with pytest.raises(ValueError, match="duplicate Pi gate anchor"):
+        pi.ADAPTER.verified(tmp_path)
+    path.write_text(source)
+    assert original.ceiling is not None
+    assert pi.ADAPTER.apply_bump(tmp_path, [original.ceiling, original.ceiling]) == [
+        pi_bump._CONSTANTS
+    ]
+
+
 def test_apply_bump_changes_one_value_and_is_idempotent(tmp_path: Path) -> None:
     root = REPO_ROOT
     shutil.copytree(root / "theater", tmp_path / "theater")

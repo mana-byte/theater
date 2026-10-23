@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..contract import VerifiedSet, version_key
+from ..gate_literals import assignments, replace_literal_span
 
 PLAN = Path("theater/harness/builtin/plugins/codex/runtime_plan.py")
 _FLOOR = "CODEX_RUNTIME_QUALIFIED_FLOOR"
@@ -51,17 +52,10 @@ def _gate(root: Path) -> _Gate:
     """Parse the gate constants; a missing, duplicated or non-literal one fails closed."""
     source = (root / PLAN).read_text(encoding="utf-8")
     found: dict[str, ast.expr] = {}
-    for statement in ast.parse(source, filename=str(PLAN)).body:
-        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
-            target, value = statement.targets[0], statement.value
-        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
-            target, value = statement.target, statement.value
-        else:
-            continue
-        if isinstance(target, ast.Name) and target.id in (_FLOOR, _CEILING, _EXCLUDED):
-            if target.id in found:
-                raise ValueError(f"duplicate Codex gate constant {target.id} in {PLAN}")
-            found[target.id] = value
+    for assignment in assignments(source, (_FLOOR, _CEILING, _EXCLUDED), filename=str(PLAN)):
+        if assignment.name in found:
+            raise ValueError(f"duplicate Codex gate constant {assignment.name} in {PLAN}")
+        found[assignment.name] = assignment.value
     if set(found) != {_FLOOR, _CEILING, _EXCLUDED}:
         raise ValueError(f"missing Codex gate constant in {PLAN}")
     return _Gate(
@@ -100,11 +94,13 @@ def apply_bump(root: Path, greens: Sequence[str]) -> list[Path]:
     node = gate.ceiling_node
     if node.lineno != node.end_lineno or node.end_col_offset is None:
         raise ValueError(f"Codex ceiling must occupy one line in {PLAN}")
-    lines = gate.source.splitlines(keepends=True)
-    line = lines[node.lineno - 1]
-    start, end = node.col_offset, node.end_col_offset
-    if not line.isascii() or line[start:end] != str(gate.ceiling):
-        raise ValueError(f"Codex ceiling has changed shape in {PLAN}")
-    lines[node.lineno - 1] = f"{line[:start]}{new}{line[end:]}"
-    (root / PLAN).write_text("".join(lines), encoding="utf-8")
+    updated = replace_literal_span(
+        gate.source,
+        node,
+        str(gate.ceiling),
+        str(new),
+        f"Codex ceiling has changed shape in {PLAN}",
+        ascii_only=True,
+    )
+    (root / PLAN).write_text(updated, encoding="utf-8")
     return [PLAN]

@@ -198,6 +198,22 @@ def test_vibe_bump_requires_ceiling_anchor(tmp_path: Path) -> None:
     assert source.read_text() == before
 
 
+def test_vibe_gate_last_plain_assignment_and_bare_rewrite(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    path = root / COMPAT
+    source = path.read_text()
+    before = ADAPTER.verified(root).ceiling
+    assert before is not None
+    path.write_text(source + "\n_CEILING: tuple = (9, 9, 9)\n")
+    assert ADAPTER.verified(root).ceiling == before
+    path.write_text(source + "\n_CEILING = (9, 9, 9)\n")
+    assert ADAPTER.verified(root).ceiling == "9.9.9"
+    anchor = next(line for line in source.splitlines() if line.startswith("_CEILING ="))
+    path.write_text(source.replace(anchor, anchor + "  # gate"))
+    with pytest.raises(ValueError, match="Vibe ceiling assignment missing"):
+        ADAPTER.apply_bump(root, [before])
+
+
 @pytest.mark.parametrize("bumped", [True, False], ids=["candidate", "watch"])
 def test_vibe_qualify_gates_candidate_and_watch_on_consistency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bumped: bool

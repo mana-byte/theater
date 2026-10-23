@@ -52,6 +52,24 @@ def test_claude_bump_moves_only_the_max_literal(tmp_path: Path) -> None:
         ADAPTER.apply_bump(tmp_path, [newer, _version(_QUALIFIED_MAX)])
 
 
+def test_claude_gate_last_plain_assignment_and_bare_rewrite(tmp_path: Path) -> None:
+    path = tmp_path / claude_bump.COMPAT
+    path.parent.mkdir(parents=True)
+    source = (REPO_ROOT / claude_bump.COMPAT).read_text(encoding="utf-8")
+    path.write_text(source + "\n_QUALIFIED_MAX: tuple = (9, 9, 9)\n")
+    assert claude_bump.gate(tmp_path)[1] == _QUALIFIED_MAX
+    path.write_text(source + "\n_QUALIFIED_MAX = (9, 9, 9)\n")
+    assert claude_bump.gate(tmp_path)[1] == (9, 9, 9)
+    path.write_text(
+        source.replace(
+            f"_QUALIFIED_MAX = {_QUALIFIED_MAX}", f"_QUALIFIED_MAX = {_QUALIFIED_MAX}  # gate"
+        )
+    )
+    major, minor, patch = _QUALIFIED_MAX
+    with pytest.raises(ValueError, match="Claude _QUALIFIED_MAX assignment missing"):
+        claude_bump.bump(tmp_path, [_version((major, minor, patch + 1))])
+
+
 def test_claude_seed_config_uses_realpath(tmp_path: Path) -> None:
     actual = tmp_path / "actual"
     actual.mkdir()

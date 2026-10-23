@@ -29,6 +29,7 @@ from scripts.harness_compat.evidence import (
     reusable_evidence,
     write_evidence,
 )
+from scripts.harness_compat.inputs import qualification_inputs
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.report import build_report
 from scripts.harness_compat.route_facts import RouteFacts
@@ -768,8 +769,16 @@ def test_adapter_digest_covers_every_input_the_proofs_run_through(tmp_path: Path
         "scripts/harness_compat/evidence.py": "e",
         "scripts/harness_compat/mock.py": "m",
         "scripts/harness_compat/route_facts.py": "route facts",
-        "scripts/harness_compat/adapters/vibe.py": "a",
+        "scripts/harness_compat/runner.py": (
+            "from scripts.harness_compat.support import runner_helper\n"
+        ),
+        "scripts/harness_compat/adapters/vibe.py": (
+            "from scripts.harness_compat.support import adapter_helper\n"
+        ),
         "scripts/harness_compat/adapters/vibe_store.py": "h",
+        "scripts/harness_compat/support/__init__.py": "",
+        "scripts/harness_compat/support/runner_helper.py": "r = 1\n",
+        "scripts/harness_compat/support/adapter_helper.py": "a = 1\n",
         "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["tests"]\n',
         "tests/test_proof.py": "from tests.support import tables\n",
         "tests/test_table.py": "t",
@@ -800,6 +809,8 @@ def test_adapter_digest_covers_every_input_the_proofs_run_through(tmp_path: Path
         assert changed is (not outputs), name
         (tmp_path / name).write_text(original)
     assert adapter_digest(tmp_path, "vibe", Proof()) == base  # type: ignore[arg-type]
+    with pytest.raises(FileNotFoundError, match="adapter source absent: missing"):
+        qualification_inputs(tmp_path, "missing")
 
 
 def test_early_conclusive_adapter_red_is_not_demoted_to_inconclusive(tmp_path: Path) -> None:
