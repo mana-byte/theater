@@ -10,23 +10,6 @@ from pathlib import Path
 
 from .contract import Adapter
 
-#: Framework modules whose behaviour decides a verdict.
-CORE = (
-    "artifacts",
-    "contract",
-    "evidence",
-    "framework",
-    "probe",
-    "process",
-    "route_facts",
-    "cleanup",
-    "inputs",
-    "runner",
-    "sandbox",
-    "mock",
-    "select",
-    "stale",
-)
 _TRACKED = ("tests", "scripts", "theater")
 _PLUGINS = Path("theater/harness/builtin/plugins")
 
@@ -141,7 +124,7 @@ def _tree(directory: Path) -> set[Path]:
 
 
 def qualification_inputs(root: Path, harness: str, adapter: Adapter | None = None) -> set[Path]:
-    """Framework core, adapter files, proof tests with their helpers and conftests, the plugin."""
+    """Framework and adapter import closure plus explicit proof and data inputs."""
     base = root / "scripts/harness_compat"
     adapters = sorted((base / "adapters").glob("*.py"))
     package = base / "adapters" / harness
@@ -149,13 +132,14 @@ def qualification_inputs(root: Path, harness: str, adapter: Adapter | None = Non
         adapters.extend(sorted(package.rglob("*.py")))
     if not any(path.stem == harness or path.stem.startswith(f"{harness}_") for path in adapters):
         raise FileNotFoundError(f"adapter source absent: {harness}")
-    paths = {base / f"{name}.py" for name in CORE} | set(adapters)
+    sources = set(base.glob("*.py")) | set(adapters)
+    tests = _seed_tests(root, adapter) if adapter is not None else set()
+    paths = _closure(root, sources | tests)
     # The lockfile and pytest settings decide what the proofs run on.
     paths |= {root / "uv.lock", root / "pyproject.toml"}
     paths |= set((root / "tests/native").glob("*.py"))
     paths |= _tree(root / _PLUGINS / adapter_metadata(adapter, harness).plugin)
     if adapter is not None:
-        paths |= _closure(root, _seed_tests(root, adapter))
         fixtures = root / "tests/fixtures"
         if fixtures.is_dir():
             for entry in fixtures.glob(f"*{adapter.name}*"):
