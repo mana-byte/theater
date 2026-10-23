@@ -9,14 +9,11 @@ from collections.abc import Mapping
 
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
-    CapabilityUnavailableReason,
     ConnectionHealth,
     ControlReceipt,
     DeliveryResult,
     HarnessRuntime,
     RuntimeBinding,
-    RuntimeCapabilities,
-    RuntimeCapability,
     RuntimeContext,
     RuntimeExecutionState,
     RuntimeLifecyclePhase,
@@ -28,10 +25,9 @@ from theater.harness.contracts.runtime import (
 )
 
 from .live import OpenCodeTuiLiveSource
+from .runtime_policy import send_capabilities, valid_prompt
 
 _CONTROL_TIMEOUT_SECONDS = 10.0
-_PROMPT_MAX_CHARS = 60_000
-_PROMPT_MAX_BYTES = 60_000
 # The frontend wire caps one request line at 65536 bytes; JSON escaping can
 # inflate far past the raw prompt, so the exact frame is checked pre-send.
 _FRAME_MAX_BYTES = 65_536
@@ -94,7 +90,7 @@ class OpenCodeFrontendRuntime(HarnessRuntime):
         health = self._source.connection_health
         scope = self._source.control_scope()
         execution_state = self._source.current_execution_state()
-        capabilities = self._capabilities(health, scope)
+        capabilities = send_capabilities(health, scope is not None)
         return RuntimeSnapshot(
             participant_id=self.context.participant_id,
             backend_generation=self.context.backend_generation,
@@ -110,12 +106,7 @@ class OpenCodeFrontendRuntime(HarnessRuntime):
         )
 
     async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
-        if (
-            not isinstance(prompt, str)
-            or not prompt.strip()
-            or len(prompt) > _PROMPT_MAX_CHARS
-            or len(prompt.encode("utf-8")) > _PROMPT_MAX_BYTES
-        ):
+        if not valid_prompt(prompt):
             return _receipt(
                 operation_id,
                 DeliveryResult.REJECTED,
@@ -237,33 +228,6 @@ class OpenCodeFrontendRuntime(HarnessRuntime):
             self._receiver.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._receiver
-
-    def _capabilities(
-        self,
-        health: ConnectionHealth,
-        scope: tuple[str, int] | None,
-    ) -> RuntimeCapabilities:
-        available: frozenset[RuntimeCapability] = frozenset()
-        reasons: dict[RuntimeCapability, CapabilityUnavailableReason] = dict.fromkeys(
-            (
-                RuntimeCapability.INTERRUPT,
-                RuntimeCapability.STEER,
-                RuntimeCapability.SETTINGS_UPDATE,
-            ),
-            CapabilityUnavailableReason.THEATER_POLICY,
-        )
-        # Only a connected bridge with the exact trusted scope may mutate.
-        if health is ConnectionHealth.CONNECTED and scope is not None:
-            available = available | {RuntimeCapability.SEND, RuntimeCapability.QUEUE_FOLLOWUP}
-        else:
-            reason = (
-                CapabilityUnavailableReason.GATED_BY_BACKEND
-                if health in {ConnectionHealth.UNOPENED, ConnectionHealth.DISCONNECTED}
-                else CapabilityUnavailableReason.SESSION_STATE
-            )
-            reasons[RuntimeCapability.SEND] = reason
-            reasons[RuntimeCapability.QUEUE_FOLLOWUP] = reason
-        return RuntimeCapabilities(available=available, unavailable_reasons=reasons)
 
     def _start_receiver(self) -> None:
         if self._receiver is not None or self._closed:

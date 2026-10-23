@@ -11,14 +11,11 @@ from pathlib import Path
 
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
-    CapabilityUnavailableReason,
     ConnectionHealth,
     ControlReceipt,
     DeliveryResult,
     HarnessRuntime,
     RuntimeBinding,
-    RuntimeCapabilities,
-    RuntimeCapability,
     RuntimeContext,
     RuntimeExecutionState,
     RuntimeLifecyclePhase,
@@ -38,6 +35,7 @@ from .runtime_plan import (
     OPENCODE_SERVER_MIN_VERSION,
     parse_opencode_version,
 )
+from .runtime_policy import send_capabilities, server_http_refusal, valid_prompt
 from .server_live import OpenCodeServerLiveSource
 from .server_plan import SERVER_SECRET_ENV
 
@@ -49,8 +47,6 @@ _PROTOCOL = "opencode-server-http"
 #: and SessionStatus.set deletes idle sessions, so absence proves idle; any
 #: present entry outside the pinned active types is version drift (UNKNOWN).
 _TARGET_ACTIVE_TYPES = ("busy", "retry")
-_PROMPT_MAX_CHARS = 60_000
-_PROMPT_MAX_BYTES = 60_000
 #: The server's public MessageID schema is msg_ + 12 hex time bytes + 14
 #: base62 random chars; the id is the durable user-message identity upstream
 #: echoes back as info.id and assistant messages reference as parentID.
@@ -165,7 +161,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
     async def snapshot(self) -> RuntimeSnapshot:
         self._start_events()
         health = self._source.connection_health
-        capabilities = self._capabilities(health)
+        capabilities = send_capabilities(health, self._session_id is not None)
         return RuntimeSnapshot(
             participant_id=self.context.participant_id,
             backend_generation=self.context.backend_generation,
@@ -181,12 +177,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
         )
 
     async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
-        if (
-            not isinstance(prompt, str)
-            or not prompt.strip()
-            or len(prompt) > _PROMPT_MAX_CHARS
-            or len(prompt.encode("utf-8")) > _PROMPT_MAX_BYTES
-        ):
+        if not valid_prompt(prompt):
             return _receipt(
                 operation_id,
                 DeliveryResult.REJECTED,
@@ -309,28 +300,6 @@ class OpenCodeServerRuntime(HarnessRuntime):
 
     # ---- internals ----------------------------------------------------
 
-    def _capabilities(self, health: ConnectionHealth) -> RuntimeCapabilities:
-        reasons: dict[RuntimeCapability, CapabilityUnavailableReason] = dict.fromkeys(
-            (
-                RuntimeCapability.INTERRUPT,
-                RuntimeCapability.STEER,
-                RuntimeCapability.SETTINGS_UPDATE,
-            ),
-            CapabilityUnavailableReason.THEATER_POLICY,
-        )
-        available: frozenset[RuntimeCapability] = frozenset()
-        if health is ConnectionHealth.CONNECTED and self._session_id is not None:
-            available = frozenset((RuntimeCapability.SEND, RuntimeCapability.QUEUE_FOLLOWUP))
-        else:
-            reason = (
-                CapabilityUnavailableReason.GATED_BY_BACKEND
-                if health in {ConnectionHealth.UNOPENED, ConnectionHealth.DISCONNECTED}
-                else CapabilityUnavailableReason.SESSION_STATE
-            )
-            reasons[RuntimeCapability.SEND] = reason
-            reasons[RuntimeCapability.QUEUE_FOLLOWUP] = reason
-        return RuntimeCapabilities(available=available, unavailable_reasons=reasons)
-
     async def _confirm_readback(self, session_id: str) -> None:
         readback = await self._client.read_session(session_id)
         if readback.get("id") != session_id:
@@ -417,21 +386,14 @@ class OpenCodeServerRuntime(HarnessRuntime):
         return False
 
     def _map_prompt_error(self, operation_id: str, exc: OpenCodeHttpError) -> ControlReceipt:
-        if not exc.written:
-            return _receipt(
-                operation_id,
-                DeliveryResult.REJECTED,
-                error_code="server_refused",
-                error=f"the OpenCode server refused the prompt before delivery ({exc})",
-            )
-        status = exc.status
-        if status is not None and 400 <= status < 500:
-            code = "invalid_session" if status == 404 else "server_refused"
+        refusal = server_http_refusal(exc, "prompt")
+        if refusal is not None:
+            code, error = refusal
             return _receipt(
                 operation_id,
                 DeliveryResult.REJECTED,
                 error_code=code,
-                error=f"the OpenCode server refused the prompt with HTTP {status} ({exc.reason})",
+                error=error,
             )
         return _unknown(operation_id, str(exc))
 

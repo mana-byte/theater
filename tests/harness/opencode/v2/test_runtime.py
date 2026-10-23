@@ -16,6 +16,7 @@ from theater import paths
 from theater.harness.builtin.plugins.opencode import server_live_v2, server_runtime_v2
 from theater.harness.builtin.plugins.opencode.approval_v2 import PluginNotActive
 from theater.harness.builtin.plugins.opencode.dialect import v2_lineage_marker
+from theater.harness.builtin.plugins.opencode.http import OpenCodeHttpError
 from theater.harness.builtin.plugins.opencode.native_plugin_v2 import PLUGIN_ID, plugin_dir
 from theater.harness.builtin.plugins.opencode.server_plan import SERVER_SECRET_ENV
 from theater.harness.builtin.plugins.opencode.server_runtime import (
@@ -191,6 +192,42 @@ async def test_a_2x_session_takes_prompts_over_http(server: V2Fake, runtime, fak
     await _settles(runtime, RuntimeExecutionState.IDLE)
     again = await runtime.send(operation_id="op-3", prompt="again")
     assert again.result is DeliveryResult.ACCEPTED
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    ("written", "status", "result", "code"),
+    [
+        (False, 500, DeliveryResult.REJECTED, "server_refused"),
+        (True, 400, DeliveryResult.REJECTED, "server_refused"),
+        (True, 404, DeliveryResult.REJECTED, "invalid_session"),
+        (True, 500, DeliveryResult.UNKNOWN, "delivery_unknown"),
+    ],
+)
+async def test_v2_prompt_http_error_outcomes(
+    runtime, monkeypatch, written: bool, status: int, result: DeliveryResult, code: str
+) -> None:
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    error = OpenCodeHttpError(
+        "POST", "/api/session/ses_fake_1/prompt", "failure", status=status, written=written
+    )
+
+    async def fail_prompt(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(runtime._client, "prompt", fail_prompt)
+    receipt = await runtime.send(operation_id="op-http", prompt="hello")
+    assert (receipt.result, receipt.error_code) == (result, code)
+    if not written:
+        assert receipt.error == f"the OpenCode server refused the prompt before delivery ({error})"
+    elif 400 <= status < 500:
+        assert (
+            receipt.error == f"the OpenCode server refused the prompt with HTTP {status} (failure)"
+        )
+    else:
+        assert receipt.error == (
+            f"the OpenCode delivery became uncertain and Theater did not replay it ({error})"
+        )
     await runtime.aclose()
 
 
