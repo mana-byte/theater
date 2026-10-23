@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tests.support.plugin_catalog_rig import local_dir as shared_local_dir
 from tests.support.plugin_packages import install
 from theater import cli, config
@@ -36,7 +38,10 @@ from theater.harness.contracts.runtime import RuntimeCompatibility
 from theater.harness.loading.models import LoadedPlugin
 from theater.harness.registry.diagnostics import project_plugin
 from theater.mcp_plugins import registry as mcp_registry
-from theater.plugins.catalog import scan
+from theater.mcp_plugins.loading import LOCAL, SHIPPED, LoadedMcpPlugin
+from theater.mcp_plugins.loading import discover as discover_mcp
+from theater.plugins import diagnostics as plugin_diagnostics
+from theater.plugins.catalog import UserPluginCatalog, scan
 from theater.plugins.diagnostics import describe
 
 local_dir = shared_local_dir  # the shared fixture
@@ -175,6 +180,75 @@ def test_local_plugins_override_same_kind_and_cross_kind_names_conflict(tmp_path
     conflicts = [row for row in rows if row["name"] == "collision"]
     assert len(conflicts) == 2
     assert all(row["state"] == "conflict" for row in conflicts)
+
+
+def test_mcp_selection_matches_install_for_duplicates_and_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp_registry, "MCP_SERVERS", {})
+    monkeypatch.setattr(mcp_registry, "_PLUGINS", {})
+    monkeypatch.setattr(mcp_registry, "_DIAGNOSTICS", [])
+    shipped_root = tmp_path / "shipped-mcp"
+    local_root = tmp_path / "plugins"
+    _manifest(shipped_root, "shared", _mcp_manifest().replace("'fixture'", "'shipped'"))
+    _manifest(local_root, "shared", _mcp_manifest().replace("'fixture'", "'local'"))
+    shipped_duplicates = [
+        LoadedMcpPlugin(tmp_path / label, SHIPPED, "shipdup")
+        for label in ("shipdup-second", "shipdup-first")
+    ]
+    local_duplicates = [
+        LoadedMcpPlugin(tmp_path / label, LOCAL, "localdup")
+        for label in ("localdup-second", "localdup-first")
+    ]
+    shipped = [*shipped_duplicates, *discover_mcp(shipped_root, source=SHIPPED)]
+    local = [*local_duplicates, *scan(local_root).mcp_servers]
+    settings = config.Config(mcp=config.McpSection(enabled=["shared", "shipdup", "localdup"]))
+
+    monkeypatch.setattr(mcp_registry, "discover", lambda *_args, **_kwargs: shipped)
+    assert mcp_registry.install(settings, shipped_dir=shipped_root, local_plugins=local) == [
+        "shared"
+    ]
+    assert mcp_registry.get("shared").description == "local"
+    registry_duplicates = mcp_registry.diagnostics()
+    assert [item.path for item in registry_duplicates] == [
+        *(plugin.path for plugin in shipped_duplicates),
+        *(plugin.path for plugin in local_duplicates),
+    ]
+
+    monkeypatch.setattr(plugin_diagnostics, "discover_mcp", lambda *_args, **_kwargs: shipped)
+    monkeypatch.setattr(
+        plugin_diagnostics,
+        "scan_user_plugins",
+        lambda *_args, **_kwargs: UserPluginCatalog((), tuple(local), (), ()),
+    )
+    rows = describe(
+        settings,
+        local_dir=local_root,
+        harness_shipped_dir=tmp_path / "shipped-harnesses",
+        mcp_shipped_dir=shipped_root,
+    )
+    shared = {row["source"]: row for row in rows if row["name"] == "shared"}
+    assert shared[SHIPPED]["state"] == "overridden"
+    assert shared[LOCAL]["state"] == "loaded"
+    assert shared[LOCAL]["description"] == mcp_registry.get("shared").description
+    for duplicates in (shipped_duplicates, local_duplicates):
+        matching = [row for row in rows if row["name"] == duplicates[0].name]
+        assert [Path(row["path"]) for row in matching] == [plugin.path for plugin in duplicates]
+        assert all(row["state"] == "duplicate" for row in matching)
+        assert [row["error"] for row in matching] == [
+            item.error for item in registry_duplicates if item.name == duplicates[0].name
+        ]
+
+
+def test_mcp_diagnostics_rejects_unknown_package_source(tmp_path, monkeypatch):
+    unknown = LoadedMcpPlugin(tmp_path / "unknown", "unknown", "unknown")
+    monkeypatch.setattr(plugin_diagnostics, "discover_mcp", lambda *_args, **_kwargs: [unknown])
+
+    with pytest.raises(KeyError, match="unknown"):
+        describe(
+            config.Config(),
+            local_dir=tmp_path / "plugins",
+            harness_shipped_dir=tmp_path / "shipped-harnesses",
+            mcp_shipped_dir=tmp_path / "shipped-mcp",
+        )
 
 
 def test_plugins_command_is_local_and_does_not_mutate_registries(monkeypatch, capsys, tmp_path):
