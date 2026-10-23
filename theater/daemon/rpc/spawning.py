@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TypedDict
 
 from theater.daemon.rails import (
     check_budget,
@@ -52,24 +51,18 @@ from theater.models import BadRequest, PublicOperationState, Status, new_id
 logger = logging.getLogger(__name__)
 
 
-class _PresentationCompatibility(TypedDict, total=False):
-    background: object
-    window_name: object
-    tmux_session: object
-
-
 @dataclass(frozen=True, slots=True)
 class _PrivateSpawnMapping:
-    """Current private spawn mapping, including accepted but unforwarded presentation input."""
+    """Current private spawn mapping to provider and deferred launch requests."""
 
     params: dict[str, object]
     harness: str
     worktree: bool | str | None
     wiring: RuntimeWiring
     provider: str | None
-    compatibility: _PresentationCompatibility
 
     def provider_request(self, prompt: str) -> dict[str, object]:
+        # Accepted background/window_name/tmux_session inputs do not reach the provider.
         request: dict[str, object] = {
             "harness": self.harness,
             "approval": _require(self.params, "approval"),
@@ -92,7 +85,7 @@ class _PrivateSpawnMapping:
         return request
 
     def deferred_payload(self) -> dict[str, object]:
-        # Handoff admission stores its own whitelist; retain raw omission/null until then.
+        # Retain raw omission/null, including ignored presentation, until handoff admission.
         return {
             **self.params,
             "approval": _require(self.params, "approval"),
@@ -101,24 +94,6 @@ class _PrivateSpawnMapping:
             "wiring": self.wiring.value,
             "provider": self.provider,
         }
-
-
-def _private_spawn_mapping(
-    params: dict[str, object],
-    harness: str,
-    worktree: bool | str | None,
-    wiring: RuntimeWiring,
-    provider: str | None,
-) -> _PrivateSpawnMapping:
-    # These published CLI/plugin inputs are accepted; current private launch ignores them.
-    compatibility: _PresentationCompatibility = {}
-    if "background" in params:
-        compatibility["background"] = params["background"]
-    if "window_name" in params:
-        compatibility["window_name"] = params["window_name"]
-    if "tmux_session" in params:
-        compatibility["tmux_session"] = params["tmux_session"]
-    return _PrivateSpawnMapping(params, harness, worktree, wiring, provider, compatibility)
 
 
 def _wiring_param(params: dict) -> RuntimeWiring:
@@ -171,7 +146,7 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     if worktree:
         reject_worktree_outside_git(_require(params, "cwd"))
     wiring = _wiring_param(params)
-    mapping = _private_spawn_mapping(params, harness_name, worktree, wiring, provider)
+    mapping = _PrivateSpawnMapping(params, harness_name, worktree, wiring, provider)
     if params.get("after") is not None or params.get("task_kind") is not None:
         return _defer_until_source(
             daemon,
