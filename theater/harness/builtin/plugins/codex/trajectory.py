@@ -44,6 +44,7 @@ from .constants import (
     CODEX_SESSION_META_RECORD_TYPE,
     CODEX_THREAD_SETTINGS_EVENT_TYPE,
 )
+from .correlation import RichToolIdentity, ToolCorrelation
 from .paths import _patch_change_paths
 from .values import (
     _codex_block_id,
@@ -71,22 +72,10 @@ class CodexTrajectoryMixin:
         _last_provider: str | None
         _mcp_calls: dict[str, tuple[str, str]]
         _pending_patch_exec: tuple[str, float] | None
-        _raw_tool_calls: dict[str, tuple[str, int]]
-        _raw_tool_results: dict[str, tuple[str, int]]
-        _rich_tool_items: dict[str, tuple[str | None, str | None, bool, int | None, int | None]]
+        _tool_correlation: ToolCorrelation
         _usage_responses: dict[str, tuple[str, str | None, str | None]]
 
         def _mcp_result(self, result: object) -> str: ...
-
-        def _rich_covers_call(self, call_id: str | None) -> bool: ...
-
-        def _correlate_rich_item(
-            self,
-            record: dict,
-            payload: dict,
-            item: dict,
-            item_id: str | None,
-        ) -> tuple[str | None, str | None, bool, int | None, int | None]: ...
 
     def _base_record_facts(
         self,
@@ -301,10 +290,13 @@ class CodexTrajectoryMixin:
         item_id: str | None,
         item_turn: str | None,
         item_timing: Timing | None,
-        adoption: tuple[str | None, str | None, bool, int | None, int | None],
+        adoption: RichToolIdentity,
         add: FactAdder,
     ) -> None:
-        call_native, result_native, _adopted_control, call_revision, result_revision = adoption
+        call_native = adoption.call_native
+        result_native = adoption.result_native
+        call_revision = adoption.call_revision
+        result_revision = adoption.result_revision
         mcp_identity = _codex_mcp_identity(item)
         mcp_server, mcp_tool = mcp_identity or (None, None)
         tool_name = (
@@ -379,10 +371,13 @@ class CodexTrajectoryMixin:
         item_id: str | None,
         item_turn: str | None,
         item_timing: Timing | None,
-        adoption: tuple[str | None, str | None, bool, int | None, int | None],
+        adoption: RichToolIdentity,
         add: FactAdder,
     ) -> None:
-        call_native, result_native, _adopted_control, call_revision, result_revision = adoption
+        call_native = adoption.call_native
+        result_native = adoption.result_native
+        call_revision = adoption.call_revision
+        result_revision = adoption.result_revision
         paths = _patch_change_paths(item.get("changes"), cwd=self._last_cwd)
         status_name = item.get("status")
         status = (
@@ -455,9 +450,7 @@ class CodexTrajectoryMixin:
         item_id = _trajectory_id(item.get("id"))
         item_turn = _codex_trajectory_turn_id(payload) or turn_id
         item_timing = _codex_item_timing(record, payload, item, timestamp)
-        adoption = self._rich_tool_items.get(item_id) if item_id is not None else None
-        if adoption is None:
-            adoption = self._correlate_rich_item(record, payload, item, item_id)
+        adoption = self._tool_correlation.rich_identity(item, item_id)
         if item_type == "McpToolCall":
             self._rich_mcp_facts(item, item_id, item_turn, item_timing, adoption, add)
         elif item_type == "FileChange":
@@ -674,7 +667,7 @@ class CodexTrajectoryMixin:
         parent_call_id: str | None,
         add: FactAdder,
     ) -> None:
-        if self._rich_covers_call(call_id):
+        if self._tool_correlation.rich_covers_call(call_id):
             return
         name = _safe_trajectory_text(payload.get("name") or item_type)
         mcp_identity = _codex_mcp_identity(payload) if item_type == "mcp_tool_call" else None
@@ -717,10 +710,9 @@ class CodexTrajectoryMixin:
         parent_call_id: str | None,
         add: FactAdder,
     ) -> None:
-        rich = self._rich_tool_items.get(call_id) if call_id is not None else None
-        if rich is not None and rich[2]:
+        decision = self._tool_correlation.raw_result_decision(call_id)
+        if not decision.emit:
             return
-        adopted_result_native = rich[1] if rich is not None else None
         mcp_identity = _codex_mcp_identity(payload)
         if mcp_identity is None and item_type == "mcp_tool_call_output" and call_id:
             mcp_identity = self._mcp_calls.get(call_id)
@@ -732,7 +724,7 @@ class CodexTrajectoryMixin:
             TrajectoryKind.TOOL_RESULT,
             TrajectoryLane.TOOLS,
             _codex_content_text(output),
-            native_id=adopted_result_native or item_id,
+            native_id=decision.native_id or item_id,
             status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
             turn=item_turn,
             call_id=call_id,

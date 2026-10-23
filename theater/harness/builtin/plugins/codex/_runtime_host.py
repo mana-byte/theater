@@ -17,7 +17,6 @@ if TYPE_CHECKING:
         NativeHumanInteraction,
         NativeInteractionKind,
         NativeRequestId,
-        NativeTurnOutcome,
         NativeTurnTerminal,
         ResultCompleteness,
         ResultProvenance,
@@ -30,6 +29,8 @@ if TYPE_CHECKING:
     )
     from theater.harness.contracts.source import Source
     from theater.models import Status
+
+    from .runtime_buffers import PreviewBuffer, TerminalOutcomeBuffer
 
     class CodexRuntimeHost(Protocol):
         """Shared state and cross-concern methods supplied by ``CodexRuntime``."""
@@ -61,12 +62,9 @@ if TYPE_CHECKING:
         _thread_started_event: asyncio.Event
         _events: deque[Event]
         _facts: deque[object]
-        _outcomes: asyncio.Queue[NativeTurnOutcome]
-        _buffered_outcomes: dict[tuple[str, str], NativeTurnOutcome]
+        _outcome_buffer: TerminalOutcomeBuffer
         _completed_items: OrderedDict[str, None]
-        _terminal_turns: OrderedDict[tuple[str, str], object]
-        _delta_items: OrderedDict[str, str]
-        _delta_previewed_chars: dict[str, int]
+        _preview_buffer: PreviewBuffer
         _status_hint: Status | None
         _activity_callback: Callable[[], None] | None
         _accepted: int

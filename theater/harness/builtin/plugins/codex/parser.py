@@ -35,17 +35,14 @@ from .constants import (
     _CWD_PROBE_BYTES,
     CODEX_MODEL_PROVIDER_ID_KEY,
     CODEX_MODEL_PROVIDER_KEY,
-    CODEX_RAW_TOOL_CALL_TYPES,
-    CODEX_RAW_TOOL_RESULT_TYPES,
     CODEX_SESSION_META_RECORD_TYPE,
     CODEX_THREAD_SETTINGS_EVENT_TYPE,
 )
+from .correlation import ToolCorrelation
 from .paths import _apply_patch_paths, _patch_change_paths
 from .values import (
     _codex_mcp_identity,
     _codex_response_usage_key,
-    _codex_revision,
-    _codex_scoped_id,
     _codex_timing,
     _codex_trajectory_turn_id,
     _flatten,
@@ -80,9 +77,7 @@ class CodexParserMixin:
         _last_provider: str | None
         _mcp_calls: dict[str, tuple[str, str]]
         _pending_patch_exec: tuple[str, float] | None
-        _raw_tool_calls: dict[str, tuple[str, int]]
-        _raw_tool_results: dict[str, tuple[str, int]]
-        _rich_tool_items: dict[str, tuple[str | None, str | None, bool, int | None, int | None]]
+        _tool_correlation: ToolCorrelation
         _usage_responses: dict[str, tuple[str, str | None, str | None]]
 
         def _trajectory_facts(self, record: dict, index: int) -> list[TrajectoryFact]: ...
@@ -131,7 +126,7 @@ class CodexParserMixin:
     def _remember_context(self, record: dict, payload: dict) -> None:
         self._remember_patch_exec(record, payload)
         self._remember_mcp_call(record, payload)
-        self._remember_tool_correlation(record, payload)
+        self._tool_correlation.remember(record, payload)
         turn_id = _codex_trajectory_turn_id(payload)
         if turn_id is not None:
             self._active_turn_id = turn_id
@@ -224,79 +219,6 @@ class CodexParserMixin:
             if self._pending_patch_exec is not None and call_id == self._pending_patch_exec[0]:
                 self._pending_patch_exec = None
 
-    def _rich_covers_call(self, call_id: str | None) -> bool:
-        """A rich item already reported this call, so the raw side stays silent."""
-        if call_id is None:
-            return False
-        entry = self._rich_tool_items.get(call_id)
-        return entry is not None and entry[2]
-
-    def _correlate_rich_item(
-        self, record: dict, payload: dict, item: dict, item_id: str | None
-    ) -> tuple[str | None, str | None, bool, int | None, int | None]:
-        """Identity a FileChange/McpToolCall item adopts for its rich facts.
-
-        The item ``id`` is the raw ``call_id``: adopt raw ids at a higher revision to keep one pair.
-        Returns ``(call_native, result_native, provides_control, call_rev, result_rev)``.
-        """
-        if item_id is None:
-            return (None, None, True, None, None)
-        raw_call = self._raw_tool_calls.get(item_id)
-        if raw_call is None:
-            call_native = (
-                item_id if item.get("type") == "McpToolCall" else _codex_scoped_id(item_id, "call")
-            )
-            result_native = _codex_scoped_id(item_id, "result")
-            return (call_native, result_native, True, None, None)
-        call_native, call_revision = raw_call[0], raw_call[1] + 1
-        raw_result = self._raw_tool_results.get(item_id)
-        if raw_result is not None:
-            result_native, result_revision = raw_result[0], raw_result[1] + 1
-        else:
-            result_native, result_revision = _codex_scoped_id(item_id, "result"), call_revision
-        return (call_native, result_native, False, call_revision, result_revision)
-
-    def _remember_tool_correlation(self, record: dict, payload: dict) -> None:
-        """Track raw↔rich tool-call identities across the stream.
-
-        Runs from ``_remember_context``, so the bounded history seeding scan
-        repopulates it the same way live parsing does.
-        """
-        record_kind = record.get("type")
-        if record_kind == "response_item":
-            item_type = payload.get("type")
-            call_id = _trajectory_id(payload.get("call_id"))
-            if item_type in CODEX_RAW_TOOL_CALL_TYPES and not self._rich_covers_call(call_id):
-                native = _trajectory_id(payload.get("id")) or call_id
-                if call_id is not None and native is not None:
-                    self._raw_tool_calls[call_id] = (native, _codex_revision(record, payload))
-            elif item_type in CODEX_RAW_TOOL_RESULT_TYPES and call_id not in self._rich_tool_items:
-                native = _trajectory_id(payload.get("id"))
-                if call_id is not None and native is not None:
-                    self._raw_tool_results[call_id] = (
-                        native,
-                        _codex_revision(record, payload),
-                    )
-            self._bound_tool_correlation()
-            return
-        if record_kind != "event_msg" or payload.get("type") != "item_completed":
-            return
-        item = payload.get("item")
-        if not isinstance(item, dict) or item.get("type") not in {"FileChange", "McpToolCall"}:
-            return
-        item_id = _trajectory_id(item.get("id"))
-        if item_id is not None:
-            self._rich_tool_items[item_id] = self._correlate_rich_item(
-                record, payload, item, item_id
-            )
-            self._bound_tool_correlation()
-
-    def _bound_tool_correlation(self) -> None:
-        limit = TRAJECTORY_MCP_CALL_CONTEXT_LIMIT
-        for table in (self._raw_tool_calls, self._raw_tool_results, self._rich_tool_items):
-            while len(table) > limit:
-                table.pop(next(iter(table)))
-
     def _seed_history_context(self, fh: BinaryIO, start: int) -> None:
         self._active_turn_id = None
         self._last_model = None
@@ -304,9 +226,7 @@ class CodexParserMixin:
         self._last_cwd = None
         self._pending_patch_exec = None
         self._mcp_calls.clear()
-        self._raw_tool_calls.clear()
-        self._raw_tool_results.clear()
-        self._rich_tool_items.clear()
+        self._tool_correlation.clear()
         self._usage_responses.clear()
 
         fh.seek(0)
@@ -523,9 +443,8 @@ class CodexParserMixin:
                     revision=revision,
                 )
             ]
-        if (
-            item_type in {"McpToolCall", "FileChange"}
-            and _trajectory_id(item.get("id")) in self._raw_tool_calls
+        if item_type in {"McpToolCall", "FileChange"} and self._tool_correlation.raw_call_precedes(
+            _trajectory_id(item.get("id"))
         ):
             # The raw call/result records for this same logical call were
             # already parsed and keep the control events; the item contributes
@@ -646,7 +565,7 @@ class CodexParserMixin:
         ptype = payload.get("type")
 
         if ptype in ("custom_tool_call", "function_call"):
-            if self._rich_covers_call(_trajectory_id(payload.get("call_id"))):
+            if self._tool_correlation.rich_covers_call(_trajectory_id(payload.get("call_id"))):
                 return []
             name = payload.get("name")
             paths: tuple[EventPath, ...] = ()
@@ -666,7 +585,7 @@ class CodexParserMixin:
                 )
             ]
         if ptype in ("custom_tool_call_output", "function_call_output"):
-            if self._rich_covers_call(_trajectory_id(payload.get("call_id"))):
+            if self._tool_correlation.rich_covers_call(_trajectory_id(payload.get("call_id"))):
                 return []
             raw = _flatten(payload.get("output"))
             return [
