@@ -79,6 +79,33 @@ def test_disabled_no_sdk():
     """)
 
 
+def test_missing_optional_sdk_keeps_local_runtime_available():
+    _run("""
+        import builtins
+        import sys
+        real_import = builtins.__import__
+        def without_optional(name, *args, **kwargs):
+            if name.startswith(("opentelemetry.sdk", "opentelemetry.exporter")):
+                raise ImportError("optional OpenTelemetry package unavailable")
+            return real_import(name, *args, **kwargs)
+        builtins.__import__ = without_optional
+
+        from theater.observability.runtime import ObservabilityError, configure, is_configured
+        try:
+            configure(role="daemon", otlp_enabled=True)
+        except ObservabilityError as exc:
+            assert "OpenTelemetry SDK or exporters not found" in str(exc)
+        else:
+            raise AssertionError("optional setup unexpectedly succeeded")
+        assert not is_configured()
+        handle = configure(role="daemon", otlp_enabled=False)
+        assert not any(name.startswith("opentelemetry.sdk") for name in sys.modules)
+        handle.shutdown()
+        assert handle.closed and is_configured()
+        print("OK")
+    """)
+
+
 def test_mcp_local_log_works_without_otel(tmp_path):
     _run(f"""
         import logging

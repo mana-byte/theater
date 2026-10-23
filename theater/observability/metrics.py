@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from opentelemetry.metrics import CallbackOptions, Counter, Histogram, Meter, Observation
+
 from theater.constants.observability import GAUGE_NAMES
 from theater.observability.catalog import OperationSpec
 
@@ -50,11 +52,13 @@ class MetricSpec:
         object.__setattr__(self, "attribute_keys", keys)
 
 
-class _InstrumentEntry:
+class _InstrumentEntry[Instrument: (Histogram, Counter)]:
     __slots__ = ("aggregation", "description", "instrument", "unit")
 
-    def __init__(self, instrument: Any, description: str, unit: str, aggregation: str) -> None:
-        self.instrument = instrument
+    def __init__(
+        self, instrument: Instrument | None, description: str, unit: str, aggregation: str
+    ) -> None:
+        self.instrument: Instrument | None = instrument
         self.description = description
         self.unit = unit
         self.aggregation = aggregation
@@ -63,9 +67,9 @@ class _InstrumentEntry:
 class HistogramRegistry:
     """Builds and caches one histogram per unique catalog metric name."""
 
-    def __init__(self, meter: Any | None = None) -> None:
+    def __init__(self, meter: Meter | None = None) -> None:
         self._meter = meter
-        self._entries: dict[str, _InstrumentEntry] = {}
+        self._entries: dict[str, _InstrumentEntry[Histogram]] = {}
         self._lock = threading.Lock()
 
     def register_from_catalog(self, specs: tuple[OperationSpec, ...]) -> None:
@@ -76,7 +80,7 @@ class HistogramRegistry:
 
     def get_or_create(
         self, name: str, description: str, unit: str, aggregation: str = "exponential"
-    ) -> Any:
+    ) -> Histogram | None:
         with self._lock:
             entry = self._entries.get(name)
             if entry is not None:
@@ -91,7 +95,7 @@ class HistogramRegistry:
             self._entries[name] = _InstrumentEntry(instrument, description, unit, aggregation)
             return instrument
 
-    def _create_histogram(self, name: str, description: str, unit: str) -> Any:
+    def _create_histogram(self, name: str, description: str, unit: str) -> Histogram | None:
         if self._meter is None:
             return None
         return self._meter.create_histogram(name=name, description=description, unit=unit)
@@ -109,12 +113,12 @@ class HistogramRegistry:
 class CounterRegistry:
     """Builds and caches one monotonic counter per unique metric name."""
 
-    def __init__(self, meter: Any | None = None) -> None:
+    def __init__(self, meter: Meter | None = None) -> None:
         self._meter = meter
-        self._entries: dict[str, _InstrumentEntry] = {}
+        self._entries: dict[str, _InstrumentEntry[Counter]] = {}
         self._lock = threading.Lock()
 
-    def get_or_create(self, name: str, description: str, unit: str) -> Any:
+    def get_or_create(self, name: str, description: str, unit: str) -> Counter | None:
         with self._lock:
             entry = self._entries.get(name)
             if entry is not None:
@@ -127,7 +131,7 @@ class CounterRegistry:
             self._entries[name] = _InstrumentEntry(instrument, description, unit, "sum")
             return instrument
 
-    def _create_counter(self, name: str, description: str, unit: str) -> Any:
+    def _create_counter(self, name: str, description: str, unit: str) -> Counter | None:
         if self._meter is None:
             return None
         return self._meter.create_counter(name=name, description=description, unit=unit)
@@ -184,14 +188,12 @@ class GaugeCache:
     def names(self) -> tuple[str, ...]:
         return tuple(self._caches)
 
-    def make_callbacks(self) -> dict[str, Callable[[Any], list[Any]]]:
-        result: dict[str, Callable[[Any], list[Any]]] = {}
+    def make_callbacks(self) -> dict[str, Callable[[CallbackOptions], list[Observation]]]:
+        result: dict[str, Callable[[CallbackOptions], list[Observation]]] = {}
         for name, cache in self._caches.items():
 
-            def _make_cb(c: _CachedGauge) -> Callable[[Any], list[Any]]:
-                def _cb(options: Any) -> list[Any]:
-                    from opentelemetry.metrics import Observation
-
+            def _make_cb(c: _CachedGauge) -> Callable[[CallbackOptions], list[Observation]]:
+                def _cb(options: CallbackOptions) -> list[Observation]:
                     val = c.get()
                     if val is None:
                         return []
@@ -202,7 +204,7 @@ class GaugeCache:
             result[name] = _make_cb(cache)
         return result
 
-    def register_observable_gauges(self, meter: Any) -> None:
+    def register_observable_gauges(self, meter: Meter) -> None:
         for name, cb in self.make_callbacks().items():
             meter.create_observable_gauge(name=name, callbacks=[cb])
 

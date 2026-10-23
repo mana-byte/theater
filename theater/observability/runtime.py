@@ -5,8 +5,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from theater.constants.observability import (
     BATCH_QUEUE_SIZE,
@@ -29,6 +30,16 @@ from theater.constants.observability import (
 from theater.observability.metrics import MetricKind, MetricSpec
 
 if TYPE_CHECKING:
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import LogRecordExporter
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import MetricExporter
+    from opentelemetry.sdk.metrics.view import View
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SpanExporter
+
+    from theater.observability.metrics import MetricBridge
     from theater.observability.signals import SignalBridge
 
 logger = logging.getLogger("theater.observability.runtime")
@@ -113,16 +124,26 @@ class _ExcludeOtelRecursion(logging.Filter):
         )
 
 
-def _shutdown_provider(provider: Any, timeout_ms: int) -> None:
+@runtime_checkable
+class _Flushable(Protocol):
+    def force_flush(self, timeout_millis: int) -> object: ...
+
+
+@runtime_checkable
+class _ShutdownResource(Protocol):
+    def shutdown(self, timeout_millis: int | None = None) -> object: ...
+
+
+def _shutdown_provider(provider: object | None, timeout_ms: int) -> None:
     if provider is None:
         return
 
     def _close() -> None:
         with contextlib.suppress(Exception):
-            if hasattr(provider, "force_flush"):
+            if isinstance(provider, _Flushable):
                 provider.force_flush(timeout_millis=timeout_ms)
         with contextlib.suppress(Exception):
-            if hasattr(provider, "shutdown"):
+            if isinstance(provider, _ShutdownResource):
                 try:
                     provider.shutdown(timeout_millis=timeout_ms)
                 except TypeError:
@@ -166,10 +187,10 @@ class RuntimeHandle:
         self._lock = threading.Lock()
         self._handler_entries: list[_HandlerEntry] = []
         self._logger_states: dict[str, tuple[int, bool]] = {}
-        self._meter_provider: Any = None
-        self._tracer_provider: Any = None
-        self._logger_provider: Any = None
-        self._metric_bridge: Any = None
+        self._meter_provider: MeterProvider | None = None
+        self._tracer_provider: TracerProvider | None = None
+        self._logger_provider: LoggerProvider | None = None
+        self._metric_bridge: MetricBridge | None = None
         self._signal_bridge: SignalBridge | None = None
         self._otel_entry: _HandlerEntry | None = None
 
@@ -354,14 +375,14 @@ def _check_existing_provider() -> None:
         raise ObservabilityError(f"existing real tracer provider (type={type(current).__name__})")
 
 
-def _build_exporter(cls: type, endpoint: str) -> Any:
+def _build_exporter[Exporter](cls: Callable[..., Exporter], endpoint: str) -> Exporter:
     """Build a single exporter; timeout unit is seconds."""
     return cls(endpoint=endpoint, timeout=EXPORT_TIMEOUT_S)
 
 
 def _build_exporters(
     protocol: str, endpoints: tuple[str, str, str], staged: _StagedResources
-) -> tuple[Any, Any, Any]:
+) -> tuple[SpanExporter, MetricExporter, LogRecordExporter]:
     traces, metrics, logs = endpoints
     if protocol == OTLP_PROTOCOL_GRPC:
         from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
@@ -386,12 +407,12 @@ def _build_exporters(
     return trace_exporter, metric_exporter, log_exporter
 
 
-def _build_views(metric_specs: tuple[MetricSpec, ...] = ()) -> list[Any]:
+def _build_views(metric_specs: tuple[MetricSpec, ...] = ()) -> list[View]:
     from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation, View
 
     from theater.observability.catalog import OPERATIONS
 
-    views: list[Any] = []
+    views: list[View] = []
     seen: set[str] = set()
     for operation in OPERATIONS:
         if operation.metric_name is None or operation.metric_name in seen:
@@ -424,12 +445,12 @@ class _StagedResources:
     """Tracks staged OTel resources for rollback before publication."""
 
     def __init__(self) -> None:
-        self.resources: list[Any] = []
+        self.resources: list[object] = []
 
-    def add(self, resource: Any) -> None:
+    def add(self, resource: object) -> None:
         self.resources.append(resource)
 
-    def adopt(self, resource: Any) -> None:
+    def adopt(self, resource: object) -> None:
         for index, current in enumerate(self.resources):
             if current is resource:
                 self.resources.pop(index)
@@ -441,7 +462,13 @@ class _StagedResources:
             _shutdown_provider(resource, timeout_ms)
         self.resources.clear()
 
-    def transfer(self, handle: RuntimeHandle, tracer: Any, meter: Any, logger_prov: Any) -> None:
+    def transfer(
+        self,
+        handle: RuntimeHandle,
+        tracer: TracerProvider,
+        meter: MeterProvider,
+        logger_prov: LoggerProvider,
+    ) -> None:
         handle._tracer_provider = tracer
         handle._meter_provider = meter
         handle._logger_provider = logger_prov
@@ -559,13 +586,13 @@ def _stage_otel(
 
 def _stage_providers(
     staged: _StagedResources,
-    resource: Any,
-    trace_exp: Any,
-    metric_exp: Any,
-    log_exp: Any,
+    resource: Resource,
+    trace_exp: SpanExporter,
+    metric_exp: MetricExporter,
+    log_exp: LogRecordExporter,
     export_interval_ms: int,
-    views: list[Any],
-) -> tuple[Any, Any, Any]:
+    views: list[View],
+) -> tuple[TracerProvider, MeterProvider, LoggerProvider]:
     from opentelemetry.sdk._logs import LoggerProvider
     from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
     from opentelemetry.sdk.metrics import MeterProvider

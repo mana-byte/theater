@@ -7,7 +7,11 @@ import contextlib
 import logging
 import time
 from collections.abc import Iterator, MutableMapping
+from contextvars import Token
 from typing import Any, Literal
+
+from opentelemetry.context import Context
+from opentelemetry.trace import Span
 
 from theater.constants.observability import (
     DEFAULT_SLOW_MS,
@@ -205,7 +209,7 @@ class _SpanContext:
         name: str | OperationSpec,
         *,
         slow_ms: float | None = None,
-        parent_context: Any = None,
+        parent_context: Context | None = None,
         **fields: Any,
     ) -> None:
         if isinstance(name, OperationSpec):
@@ -225,8 +229,8 @@ class _SpanContext:
         self._trace_attrs: dict[str, Any] | None = None
         self._prose_name: str | None = None
         self._trace_name: str | None = None
-        self._span: Any = None
-        self._token: Any = None
+        self._span: Span | None = None
+        self._token: Token[Context] | None = None
         self._synthetic_result: tuple[str, dict[str, Any]] | None = None
 
     def _set_result(self, result: str, attrs: dict[str, Any]) -> None:
@@ -520,7 +524,7 @@ def span(
     name: str | OperationSpec,
     *,
     slow_ms: float | None = None,
-    parent_context: Any = None,
+    parent_context: Context | None = None,
     **fields: Any,
 ) -> _SpanContext:
     """Time a block, including failures, and yield fields callers may extend."""

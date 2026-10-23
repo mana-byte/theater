@@ -6,6 +6,10 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from opentelemetry._logs import Logger
+from opentelemetry.context import Context
+from opentelemetry.trace import Span, SpanContext, Tracer
+
 from theater.constants.observability import MAX_ERROR_TYPE_LEN
 from theater.observability.catalog import TraceKind
 
@@ -15,7 +19,7 @@ class SignalBridge:
 
     __slots__ = ("_active", "_logger", "_tracer")
 
-    def __init__(self, logger: Any, tracer: Any) -> None:
+    def __init__(self, logger: Logger, tracer: Tracer) -> None:
         self._logger = logger
         self._tracer = tracer
         self._active = logger is not None and tracer is not None
@@ -35,7 +39,7 @@ class SignalBridge:
         attributes: Mapping[str, Any],
         timestamp_ns: int | None = None,
         severity_text: str = "INFO",
-        context: Any = None,
+        context: Context | None = None,
     ) -> bool:
         if not self._active:
             return False
@@ -68,15 +72,15 @@ class SignalBridge:
         attributes: Mapping[str, Any],
         start_time_ns: int | None = None,
         end_time_ns: int | None = None,
-        parent_context: Any = None,
-        links: Sequence[Any] = (),
+        parent_context: Context | None = None,
+        links: Sequence[SpanContext] = (),
         kind: TraceKind = TraceKind.INTERNAL,
         error: bool = False,
         error_type: str | None = None,
-    ) -> Any | None:
+    ) -> Context | None:
         if not self._active:
             return None
-        span: Any = None
+        span: Span | None = None
         failed = False
         try:
             from opentelemetry.trace import Link, SpanKind, Status, StatusCode, set_span_in_context
