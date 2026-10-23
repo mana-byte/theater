@@ -10,6 +10,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import NoReturn
 
+from theater.mcp_plugins.constraints import (
+    item_count_constraint_error,
+    numeric_constraint_error,
+    string_constraint_error,
+)
 from theater.mcp_plugins.contracts import (
     MISSING,
     McpConfigField,
@@ -207,7 +212,8 @@ def _resolve_string(
 ) -> str:
     if not isinstance(value, str):
         _fail(plugin, name, "must be a string")
-    _check_string(plugin, name, field, value)
+    if error := string_constraint_error(field, value):
+        _fail(plugin, name, error)
     return value
 
 
@@ -220,7 +226,8 @@ def _resolve_integer(
 ) -> int:
     if type(value) is not int:
         _fail(plugin, name, "must be an integer")
-    _check_number(plugin, name, field, value)
+    if error := numeric_constraint_error(field, value):
+        _fail(plugin, name, error)
     return value
 
 
@@ -234,7 +241,8 @@ def _resolve_float(
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
         _fail(plugin, name, "must be a finite number")
     parsed = float(value)
-    _check_number(plugin, name, field, parsed)
+    if error := numeric_constraint_error(field, parsed):
+        _fail(plugin, name, error)
     return parsed
 
 
@@ -279,10 +287,8 @@ def _resolve_string_list(
     if any(not isinstance(item, str) for item in value):
         _fail(plugin, name, "must be a list of strings")
     items = tuple(value)
-    if field.min_items is not None and len(items) < field.min_items:
-        _fail(plugin, name, f"must contain at least {field.min_items} items")
-    if field.max_items is not None and len(items) > field.max_items:
-        _fail(plugin, name, f"must contain at most {field.max_items} items")
+    if error := item_count_constraint_error(field, len(items)):
+        _fail(plugin, name, error)
     return items
 
 
@@ -299,10 +305,8 @@ def _resolve_table_list(
     item_schema = field.item_schema
     if not isinstance(item_schema, McpConfigSchema):
         _fail(plugin, name, "has an invalid table item schema")
-    if field.min_items is not None and len(value) < field.min_items:
-        _fail(plugin, name, f"must contain at least {field.min_items} items")
-    if field.max_items is not None and len(value) > field.max_items:
-        _fail(plugin, name, f"must contain at most {field.max_items} items")
+    if error := item_count_constraint_error(field, len(value)):
+        _fail(plugin, name, error)
     items: list[Mapping[str, object]] = []
     for index, item in enumerate(value):
         item_path = f"{name}[{index}]"
@@ -339,22 +343,6 @@ def _resolve_secret(
     if not isinstance(value, str):
         _fail(plugin, name, "secret reference could not be resolved")
     return SecretValue(value)
-
-
-def _check_string(plugin: str, name: str, field: McpConfigField, value: str) -> None:
-    if field.min_length is not None and len(value) < field.min_length:
-        _fail(plugin, name, f"must be at least {field.min_length} characters")
-    if field.max_length is not None and len(value) > field.max_length:
-        _fail(plugin, name, f"must be at most {field.max_length} characters")
-    if field.choices is not None and value not in field.choices:
-        _fail(plugin, name, "must be one of the declared choices")
-
-
-def _check_number(plugin: str, name: str, field: McpConfigField, value: int | float) -> None:
-    if field.minimum is not None and value < field.minimum:
-        _fail(plugin, name, f"must be >= {field.minimum}")
-    if field.maximum is not None and value > field.maximum:
-        _fail(plugin, name, f"must be <= {field.maximum}")
 
 
 type _ValueResolver = Callable[
