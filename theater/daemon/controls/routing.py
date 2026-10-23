@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from theater.daemon.harness_runtime.manager import CachedNativeRoute
@@ -21,9 +21,7 @@ from theater.harness.contracts.runtime import (
 from theater.models import TerminalBindingRecord
 
 ProviderHealth = Callable[[str, int], str]
-NativeRoute = Callable[[str, object | None], Mapping[str, object] | None]
-NativeCapabilities = Callable[[str, object | None], RuntimeCapabilities | None]
-NativeAdmission = Callable[[str, object | None], CachedNativeRoute | None]
+NativeFacts = Callable[[str, object | None], CachedNativeRoute | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,9 +34,12 @@ class ControlRoute:
     unavailable_reason: CapabilityUnavailableReason | None = None
     terminal: TerminalBindingRecord | None = None
     provider_health: str | None = None
-    native_route: Mapping[str, object] | None = None
-    native_capabilities: RuntimeCapabilities | None = None
     native_facts: CachedNativeRoute | None = None
+    unfenced_runtime_available: bool = False
+
+    @property
+    def native_capabilities(self) -> RuntimeCapabilities | None:
+        return None if self.native_facts is None else self.native_facts.capabilities
 
     @property
     def is_native(self) -> bool:
@@ -61,9 +62,11 @@ class ControlRoute:
                 and self.provider_health == "online"
             )
         if self.transport is ControlTransport.NATIVE_RUNTIME:
-            return self.native_route is not None and self.native_route.get("health") in {
-                ConnectionHealth.CONNECTED.value,
-                ConnectionHealth.DEGRADED.value,
+            if self.native_facts is None:
+                return self.unfenced_runtime_available
+            return self.native_facts.health in {
+                ConnectionHealth.CONNECTED,
+                ConnectionHealth.DEGRADED,
             }
         if self.terminal is None:
             return self.transport is not None
@@ -79,16 +82,12 @@ class ControlRouteResolver:
         store,
         runtime_for,
         provider_health: ProviderHealth | None = None,
-        native_route: NativeRoute | None = None,
-        native_capabilities: NativeCapabilities | None = None,
-        native_admission: NativeAdmission | None = None,
+        native_facts: NativeFacts | None = None,
     ) -> None:
         self._store = store
         self._runtime_for = runtime_for
         self._provider_health = provider_health or (lambda _provider_id, _generation: "offline")
-        self._native_route = native_route
-        self._native_capabilities = native_capabilities
-        self._native_admission = native_admission
+        self._native_facts = native_facts
 
     def resolve(
         self, participant_id: str, capability: RuntimeCapability, *, connection=None
@@ -128,7 +127,7 @@ class ControlRouteResolver:
                     native_wiring=True,
                     unavailable_reason=CapabilityUnavailableReason.THEATER_POLICY,
                 )
-            return self._with_native_route(
+            return self._with_native_facts(
                 participant_id,
                 ControlRoute(capability, ControlTransport.NATIVE_RUNTIME, native_wiring=True),
                 binding=binding,
@@ -169,31 +168,14 @@ class ControlRouteResolver:
         self, participant_id: str, route: ControlRoute, *, binding, runtime, connection
     ) -> ControlRoute:
         if route.is_native:
-            return self._with_native_route(participant_id, route, binding=binding, runtime=runtime)
+            return self._with_native_facts(participant_id, route, binding=binding, runtime=runtime)
         return self._with_provider_fallback(participant_id, route, connection=connection)
 
-    def _with_native_route(self, participant_id: str, route: ControlRoute, *, binding, runtime):
-        current: Mapping[str, object] | None
-        if self._native_route is None:
-            current = {"health": ConnectionHealth.CONNECTED.value} if runtime is not None else None
-        else:
-            current = self._native_route(participant_id, binding)
-        capabilities = (
-            None
-            if self._native_capabilities is None
-            else self._native_capabilities(participant_id, binding)
-        )
-        facts = (
-            None
-            if self._native_admission is None
-            else self._native_admission(participant_id, binding)
-        )
-        return replace(
-            route,
-            native_route=current,
-            native_capabilities=capabilities,
-            native_facts=facts,
-        )
+    def _with_native_facts(self, participant_id: str, route: ControlRoute, *, binding, runtime):
+        if self._native_facts is None:
+            # Directly injected runtimes in tests have no durable identity to fence.
+            return replace(route, unfenced_runtime_available=runtime is not None)
+        return replace(route, native_facts=self._native_facts(participant_id, binding))
 
     def _with_provider_fallback(
         self, participant_id: str, route: ControlRoute, *, connection=None

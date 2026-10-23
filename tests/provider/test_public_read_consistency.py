@@ -16,12 +16,15 @@ from theater.daemon.frontend.control_handlers import (
     controls_settings_update,
 )
 from theater.daemon.frontend.participant_read_handlers import participant_to_wire
+from theater.daemon.harness_runtime.manager import CachedNativeRoute
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
+    ConnectionHealth,
     ControlDeliveryPhase,
     ControlTransport,
+    RuntimeCapabilities,
     RuntimeCapability,
 )
 from theater.models import (
@@ -55,6 +58,36 @@ def test_native_route_is_not_replaced_by_terminal_binding(daemon) -> None:
     route = resolver.resolve(participant_id, RuntimeCapability.SEND)
     assert route.is_native
     assert not route.is_provider
+    assert route.route_available
+    assert route.native_facts is None
+
+
+def test_native_control_route_reads_one_typed_cache_fact(daemon) -> None:
+    participant_id = provider_target(daemon)
+    facts = CachedNativeRoute(
+        backend_generation=3,
+        native_session_id="session-3",
+        health=ConnectionHealth.DEGRADED,
+        capabilities=RuntimeCapabilities(available=frozenset({RuntimeCapability.SEND})),
+    )
+    reads: list[tuple[str, object | None]] = []
+
+    def native_facts(target_id: str, binding: object | None) -> CachedNativeRoute:
+        reads.append((target_id, binding))
+        return facts
+
+    resolver = ControlRouteResolver(
+        store=daemon.store,
+        runtime_for=lambda _participant_id: object(),
+        native_facts=native_facts,
+    )
+
+    route = resolver.resolve(participant_id, RuntimeCapability.SEND)
+
+    assert reads == [(participant_id, None)]
+    assert route.native_facts is facts
+    assert route.native_capabilities is facts.capabilities
+    assert route.route_available
 
 
 def test_historical_pane_without_binding_is_not_a_control_route(daemon) -> None:

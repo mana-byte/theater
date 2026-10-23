@@ -416,15 +416,15 @@ class SendControls(ControlHost):
             )
         if not self._native_identity_fencing:
             return route
-        native = route.native_route
+        native = route.native_facts
         if native is None or (require_available and not route.route_available):
             raise StaleTarget(
                 f"the exact native runtime route for participant {participant_id!r} is unavailable"
             )
         if (
             snapshot.native_session_id is None
-            or native.get("backend_generation") != snapshot.backend_generation
-            or native.get("native_session_id") != snapshot.native_session_id
+            or native.backend_generation != snapshot.backend_generation
+            or native.native_session_id != snapshot.native_session_id
         ):
             raise StaleTarget(
                 f"the native runtime identity for participant {participant_id!r} changed "

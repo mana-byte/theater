@@ -207,9 +207,9 @@ class PublicControlAdmission:
                 )
             binding = self._store.get_runtime_binding(participant_id, connection=connection)
             if binding is not None and binding.wiring is RuntimeWiring.NATIVE:
-                cached = route.native_route or {}
-                backend_generation = cached.get("backend_generation")
-                native_session_id = cached.get("native_session_id")
+                cached = route.native_facts
+                backend_generation = None if cached is None else cached.backend_generation
+                native_session_id = None if cached is None else cached.native_session_id
                 if (
                     type(backend_generation) is not int
                     or not isinstance(native_session_id, str)

@@ -99,18 +99,10 @@ async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None
     facts = manager.cached_native_facts("p1", backend_generation=4, native_session_id="session-4")
     assert isinstance(facts, CachedNativeRoute)
     assert facts.health is ConnectionHealth.CONNECTED
-    assert (
-        manager.cached_native_admission("p1", backend_generation=4, native_session_id="session-4")
-        is facts
-    )
-    capabilities = manager.cached_native_capabilities(
-        "p1", backend_generation=4, native_session_id="session-4"
-    )
+    capabilities = facts.capabilities
     assert capabilities is not None
     assert not capabilities.supports(RuntimeCapability.SETTINGS_UPDATE)
-    settings = manager.cached_native_settings(
-        "p1", backend_generation=4, native_session_id="session-4"
-    )
+    settings = facts.settings
     assert settings is not None
     assert settings.supported_fields == frozenset({RuntimeSettingField.MODEL})
     assert (
@@ -135,12 +127,10 @@ async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None
         "p1", backend_generation=4, native_session_id="session-4"
     )
     assert disconnected is not None and disconnected["health"] == "disconnected"
-    assert (
-        manager.cached_native_capabilities(
-            "p1", backend_generation=4, native_session_id="session-4"
-        )
-        is capabilities
+    disconnected_facts = manager.cached_native_facts(
+        "p1", backend_generation=4, native_session_id="session-4"
     )
+    assert disconnected_facts is not None and disconnected_facts.capabilities is capabilities
     await manager.aclose()
 
 
