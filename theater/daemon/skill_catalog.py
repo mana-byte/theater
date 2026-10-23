@@ -1,0 +1,147 @@
+"""Daemon-owned discovery and loading of declarative skills and plays."""
+
+from __future__ import annotations
+
+from theater.mcp_plugins import registry as mcp_registry
+from theater.models import BadRequest, NotFound
+from theater.skills import is_skill_reference, registry
+from theater.skills.models import Play, UnknownSkill
+
+
+def _skill_metadata(skill) -> dict[str, str]:
+    metadata = {
+        "name": skill.name,
+        "description": skill.description,
+        "source": str(skill.source),
+    }
+    if skill.provider is not None:
+        metadata["plugin"] = skill.provider
+    if skill.play is not None:
+        metadata["play"] = skill.play
+    return metadata
+
+
+def _rejection_diagnostic(rejection) -> dict[str, str | None]:
+    diagnostic = {
+        "source": str(rejection.source),
+        "path": str(rejection.source_path),
+        "name": rejection.name,
+        "error": rejection.error,
+    }
+    if rejection.provider is not None:
+        diagnostic["plugin"] = rejection.provider
+    return diagnostic
+
+
+def _snapshot(daemon):
+    catalog = mcp_registry.catalog()
+    return registry.discover(
+        plugin_skills=catalog.registered_skills,
+        plugin_plays=catalog.registered_plays,
+        disabled=daemon.config.skills.disabled,
+    )
+
+
+def _play_view(play: Play, snapshot) -> dict[str, object]:
+    """One play with each member described once: positions with the positions they may give."""
+    rules = play.rules
+
+    def described(member: str) -> dict[str, object]:
+        return {"name": rules.qualified(member), **_member_text(snapshot, rules.qualified(member))}
+
+    return {
+        "name": play.name,
+        "description": play.description,
+        "source": str(play.source),
+        "master": play.master_skill,
+        "positions": [
+            {
+                **described(position),
+                "spawns": [rules.qualified(child) for child in rules.children(position)],
+            }
+            for position in _ordered_positions(play)
+        ],
+        "roles": [
+            {**described(role), "fits": [rules.qualified(fit) for fit in rules.roles[role]]}
+            for role in rules.roles
+        ],
+        "disposable": [rules.qualified(position) for position in rules.disposable],
+        "plugins": list(rules.plugins),
+        "plugin_permissions": {
+            plugin: {position: list(grants) for position, grants in positions.items()}
+            for plugin, positions in rules.plugin_permissions.items()
+        },
+    }
+
+
+def _member_text(snapshot, name: str) -> dict[str, str]:
+    try:
+        return {"description": snapshot.load(name).description}
+    except UnknownSkill:
+        return {}
+
+
+def _ordered_positions(play: Play) -> list[str]:
+    """The master first, then each position after the one that spawns it."""
+    rules = play.rules
+    ordered = [rules.master]
+    for position in ordered:
+        ordered.extend(child for child in rules.children(position) if child not in ordered)
+    return ordered
+
+
+def list_skills(daemon, *, play: object = None, grouped: object = False) -> dict:
+    """Flat by default for CLI and frontend; ``grouped`` puts play members under their play."""
+    snapshot = _snapshot(daemon)
+    rejections = [_rejection_diagnostic(rejection) for rejection in snapshot.rejections]
+    play_name = play
+    if play_name is not None:
+        if not isinstance(play_name, str) or snapshot.play(play_name) is None:
+            known = ", ".join(play.name for play in snapshot.plays) or "none"
+            raise NotFound(f"no play named {play_name!r}; installed plays: {known}")
+        return {"plays": [_play_view(snapshot.play(play_name), snapshot)]}
+    if grouped is True:
+        return {
+            "skills": [_skill_metadata(skill) for skill in snapshot.skills if skill.play is None],
+            "plays": [_play_view(play, snapshot) for play in snapshot.plays],
+            "rejections": rejections,
+        }
+    return {
+        "skills": [_skill_metadata(skill) for skill in snapshot.skills],
+        "rejections": rejections,
+    }
+
+
+def load_skill(daemon, name: object, *, preview: object = False, caller_id: object = None) -> dict:
+    """Read one skill; an identified participant loading a play's master skill starts it."""
+    if not isinstance(preview, bool):
+        raise BadRequest("skills.load parameter 'preview' must be a boolean")
+    if not isinstance(name, str) or not name:
+        raise BadRequest(
+            "skills.load requires a non-empty string parameter 'name'; "
+            "call skills.list and pass one returned name"
+        )
+    if not is_skill_reference(name):
+        raise BadRequest(
+            "skills.load parameter 'name' must be a canonical skill name; "
+            "call skills.list and pass one returned name"
+        )
+    snapshot = _snapshot(daemon)
+    try:
+        skill = snapshot.load(name)
+    except UnknownSkill as exc:
+        raise NotFound(
+            f"skill {name!r} is not available; call skills.list to select an installed skill"
+        ) from exc
+    loaded: dict[str, object] = {**_skill_metadata(skill), "content": skill.content}
+    # Only an agent's own load names a caller; frontend and CLI reads never start a play.
+    play = snapshot.play(skill.play) if skill.play is not None else None
+    if (
+        not preview
+        and isinstance(caller_id, str)
+        and caller_id
+        and play
+        and play.master_skill == skill.name
+    ):
+        loaded["play_start"] = daemon.plays.start_by_load(caller_id, play)
+    return loaded
