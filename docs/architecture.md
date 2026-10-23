@@ -555,8 +555,8 @@ returns a `Source` (`theater/harness/contracts/source.py`, re-exported by
 `TranscriptObserver`, is `TranscriptSource`, the file tailing that used to live
 inline in the observer. An observer that replaces it returns `Batch(events,
 progressed, status, attached, waiting)` from `read()` and the reducer's policy
-runs unchanged on top. The OpenCode adapter is the one shipped adapter that does, and
-its source keys off `event.seq` in the database instead of a file position.
+runs unchanged on top. OpenCode reads database sequence positions; Vibe's unified
+source reads published snapshots and recovery journals.
 
 Three fields in that contract are load-bearing:
 
@@ -578,6 +578,11 @@ and database sources page from their own storage cursors; the generic pager
 owns the MCP response budget and continuation chunks. The legacy
 `history(last_n)` projection remains for internal consumers, but is not the
 agent-facing transcript surface.
+
+Shared file-history paging lives in `harness/transcript/history.py`; plugins retain
+parser construction and admission policy. Attachment state and batch checkpoint state
+keep separate lifetimes. Vibe's history reader shares its source's current identity
+checks, while retained resume input survives revocation of the reported checkpoint.
 
 **Why not let a plugin bring its own observer?** Because job 2 would then be
 written once per harness, and the settling logic, the rescue and the
@@ -1258,13 +1263,18 @@ renders one span as foldable sections (`inspection/sheet.py`, rendered by
 `inspection/content.py`). This keeps native parsing in plugins, canonical
 policy in the daemon, and widget mutation at the UI edge.
 
+`controllers/actions.py` keeps active request/client lifetime separate from visible
+action history. Presentation distinguishes terminal-triple matching from full-target
+equality. `app_parts/projection.attempt_snapshot` shares expected read errors; its
+callers retain their own rendering, retry and timing order.
+
 ---
 
 ## 11. Module map
 
 ```
 theater/
-├── cli/                entry point, parser, render, command modules
+├── cli/                entry point, parser, command initialization, render
 ├── config/             loading, models, validation, describe
 ├── constants/          immutable values split by domain, including trajectory and régie
 ├── observability/      one package, one process-level lifecycle (see §13)
@@ -1446,8 +1456,9 @@ no feature package; `catalog.py` imports only dataclasses, enums, and constants;
 `runtime.py` composes logging, metrics, tracing, and direct signals. Lower modules
 never import `runtime`.
 Domain objects (`Registry`, `JobManager`, repositories) never import OpenTelemetry.
-Only setup helpers in `runtime.py` import SDK/exporter modules, and only after
-configuration says export is enabled.
+Required `opentelemetry-api` types describe spans, contexts and instruments. Optional
+SDK annotations stay under `TYPE_CHECKING`. At runtime, only setup helpers in
+`runtime.py` import SDK/exporter modules, after configuration enables export.
 
 ### Process logging roles
 

@@ -109,7 +109,7 @@ everything else a qualification leaves in the tree is dropped. Evidence is reuse
 same digest: framework and adapter source modules seed the import closure alongside
 proofs and their imports. Explicit plugin/data inputs, `uv.lock` and `pyproject.toml`
 remain included. New shared helpers therefore invalidate the affected evidence.
-A digest change empties the cache, so those proofs run again; an open
+A digest change invalidates reusable evidence, so those proofs run again; an open
 gate PR is touched only when a release it lists ends non-green.
 
 ## Reading a run
