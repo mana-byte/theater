@@ -233,37 +233,37 @@ async def _skills_read(daemon, params: dict[str, Any], actor_id: str) -> Any:
 
 async def _trajectory_snapshot(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.trajectory import _trajectory_snapshot
+    from theater.daemon.trajectory import operations
 
-    return await _trajectory_snapshot(daemon, params)
+    return (await operations.snapshot(daemon, params)).to_wire()
 
 
 async def _trajectory_follow(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.trajectory import _trajectory_follow
+    from theater.daemon.trajectory import operations
 
-    return await _trajectory_follow(daemon, params)
+    return (await operations.follow(daemon, params)).to_wire()
 
 
 async def _trajectory_close(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.trajectory import _trajectory_close
+    from theater.daemon.trajectory import operations
 
-    return await _trajectory_close(daemon, params)
+    return {"released": operations.close(daemon, params)}
 
 
 async def _trajectory_locate(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.trajectory import _trajectory_locate
+    from theater.daemon.trajectory import operations
 
-    return await _trajectory_locate(daemon, params)
+    return operations.locate(daemon, params).to_wire()
 
 
 async def _trajectory_search(daemon, params: dict[str, Any], actor_id: str) -> Any:
     del actor_id
-    from theater.daemon.rpc.trajectory import _trajectory_search
+    from theater.daemon.trajectory import operations
 
-    return await _trajectory_search(daemon, params)
+    return (await operations.search(daemon, params)).to_wire()
 
 
 async def _analytics_stats(daemon, params: dict[str, Any], actor_id: str) -> Any:
