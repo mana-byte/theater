@@ -5,6 +5,8 @@ Importing registers every handler; monkeypatch timing seams on the owning rpc su
 
 from __future__ import annotations
 
+from theater.daemon.diagnostics import calendar_period_since as _calendar_period_since
+from theater.daemon.diagnostics import retention_floor as _retention_floor
 from theater.daemon.rpc import METHODS
 from theater.daemon.rpc.hooks import HARNESS_EVENT_RPC, _harness_event
 from theater.daemon.rpc.jobs import (
@@ -49,7 +51,6 @@ from theater.daemon.rpc.transcripts import (
     _transcript_candidates,
     _transcript_receipt,
 )
-from theater.daemon.rpc.usage import _calendar_period_since, _retention_floor
 
 __all__ = [
     "AWAIT_ANNOUNCE_AFTER",

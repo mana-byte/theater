@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import math
-import numbers
 from typing import Any
 
+from theater.daemon import request_values
 from theater.daemon.response_contracts import resolve_response_format
 from theater.daemon.response_contracts.prompts import HINT_INSTRUCTION
 from theater.daemon.skill_cards import compose_prompt
@@ -14,6 +13,9 @@ from theater.models import BadRequest
 
 #: Kept for the ``daemon.methods`` facade; the text lives with the other contract prompts.
 _JSON_REPLY_INSTRUCTION = HINT_INSTRUCTION
+
+_finite_number_param = request_values.finite_number_param
+_integer_param = request_values.integer_param
 
 
 def _require(params: dict, key: str) -> Any:
@@ -40,28 +42,6 @@ def _optional_string_param(params: dict, key: str, *, method_name: str) -> str |
     if not isinstance(value, str):
         raise BadRequest(f"{method_name} parameter {key!r} must be a string or null")
     return value
-
-
-def _integer_param(value: Any, key: str, *, method_name: str) -> int:
-    """Return one strict integer RPC parameter."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise BadRequest(f"{method_name} parameter {key!r} must be an integer")
-    if not -(2**63) <= value < 2**63:
-        raise BadRequest(f"{method_name} parameter {key!r} is out of range")
-    return value
-
-
-def _finite_number_param(value: Any, key: str, *, method_name: str) -> float:
-    """Return one finite numeric RPC parameter, excluding booleans."""
-    if isinstance(value, bool) or not isinstance(value, numbers.Real):
-        raise BadRequest(f"{method_name} parameter {key!r} must be a finite number")
-    try:
-        result = float(value)
-    except (OverflowError, ValueError):
-        raise BadRequest(f"{method_name} parameter {key!r} must be a finite number") from None
-    if not math.isfinite(result):
-        raise BadRequest(f"{method_name} parameter {key!r} must be a finite number")
-    return result
 
 
 def _validate_worktree_param(value: Any) -> str | bool | None:
