@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
-from regie.trajectory.rich import controller as controller_module
+from regie.trajectory.rich.clients import (
+    LegacyFollowClient,
+    LegacyQueryClient,
+    follow_client,
+    query_client,
+)
 from regie.trajectory.rich.controller import TrajectoryController
 from regie.trajectory.rich.state import TrajectoryStateStore
 
 from theater.frontend.trajectory import (
     PanelState,
-    PanelStateInfo,
     TrajectoryLocationResolution,
     TrajectoryParticipantState,
 )
@@ -91,6 +95,126 @@ def test_controller_keeps_an_empty_injected_state_store() -> None:
 
     assert controller.state_store is states
     assert controller.state_store.page_size == 17
+
+
+def test_controller_rejects_identical_clients_before_adapting() -> None:
+    client = FakeClient(lambda _method, _params: {})
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        TrajectoryController(client, client)
+
+
+def test_dynamic_mocks_do_not_opt_in_to_typed_clients() -> None:
+    mock = MagicMock()
+    assert isinstance(query_client(mock), LegacyQueryClient)
+    assert isinstance(follow_client(mock), LegacyFollowClient)
+
+
+@pytest.mark.asyncio
+async def test_generic_call_precedes_conflicting_named_methods() -> None:
+    class Query(FakeClient):
+        def snapshot(self, *args: object, **kwargs: object) -> None:
+            pytest.fail("typed snapshot must not be selected")
+
+        locate = search = release = snapshot
+
+    class Follow(FakeClient):
+        def follow(self, *args: object, **kwargs: object) -> None:
+            pytest.fail("typed follow must not be selected")
+
+    query = Query(lambda _method, _params: page("p1", "record"))
+    seen = asyncio.Event()
+    follow = Follow(
+        lambda _method, _params: {
+            "stream_id": "stream-p1",
+            "panel_state": {"state": "waiting", "participant_state": "dead"},
+        }
+    )
+    controller = TrajectoryController(query, follow, follow_wait=0)
+    controller.subscribe(
+        lambda state: (
+            seen.set() if state.panel.participant_state is TrajectoryParticipantState.DEAD else None
+        )
+    )
+
+    assert await controller.open("p1") is not None
+    await seen.wait()
+    await controller.close()
+
+    assert query.calls[0][0] == "trajectory.snapshot"
+    assert follow.calls[0][0] == "trajectory.follow"
+
+
+@pytest.mark.asyncio
+async def test_legacy_named_sync_and_async_clients_keep_close_lifetimes() -> None:
+    class Query:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+            self.closed = False
+
+        def trajectory_snapshot(self, **params: object) -> object:
+            self.calls.append(("snapshot", params))
+            return page("p1", "record")
+
+        async def trajectory_close(self, **params: object) -> object:
+            self.calls.append(("close", params))
+            return {"released": True}
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Follow:
+        def __init__(self) -> None:
+            self.closed = False
+            self.called = asyncio.Event()
+
+        async def trajectory_follow(self, **params: object) -> object:
+            assert params == {
+                "id": "p1",
+                "stream_id": "stream-p1",
+                "after": "c1",
+                "wait": 0,
+                "limit": 200,
+            }
+            self.called.set()
+            return {
+                "stream_id": "stream-p1",
+                "panel_state": {"state": "waiting", "participant_state": "dead"},
+            }
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    query, follow = Query(), Follow()
+    controller = TrajectoryController(query, follow, follow_wait=0)
+    assert controller.query_client is query and controller.follow_client is follow
+
+    await controller.open("p1")
+    await follow.called.wait()
+    await controller.close()
+
+    assert query.calls[0] == ("snapshot", {"id": "p1", "limit": 200})
+    assert ("close", {"id": "p1", "stream_id": "stream-p1"}) in query.calls
+    assert query.closed and follow.closed
+
+
+@pytest.mark.asyncio
+async def test_legacy_synchronous_generic_call_is_supported() -> None:
+    class Query:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def call(self, method: str, **params: object) -> object:
+            self.calls.append((method, params))
+            if method == "trajectory.snapshot":
+                return page("p1", "record")
+            return {"released": True}
+
+    query = Query()
+    controller = TrajectoryController(query, FakeClient(lambda _method, _params: {}))
+    assert await controller.open("p1", start_follow=False) is not None
+    await controller.close()
+    assert query.calls[0] == ("trajectory.snapshot", {"id": "p1", "limit": 200})
 
 
 @pytest.mark.asyncio
@@ -422,19 +546,17 @@ async def test_stale_generation_resync_cannot_repaint_another_participant() -> N
 
 
 @pytest.mark.asyncio
-async def test_panel_only_follow_delta_updates_state_and_stops_following(monkeypatch) -> None:
+async def test_panel_only_follow_delta_updates_state_and_stops_following() -> None:
     applied = asyncio.Event()
-    delta = SimpleNamespace(
-        stream_id="stream-p1",
-        cursor="c2",
-        upserts=(),
-        panel_state=PanelStateInfo(PanelState.WAITING, participant_state="dead"),
-        resync_required=False,
-        reason=None,
-    )
-    monkeypatch.setattr(controller_module, "decode_delta", lambda _value: delta)
     query = FakeClient(lambda _method, _params: page("p1", "first"))
-    follow = FakeClient(lambda _method, _params: object())
+    follow = FakeClient(
+        lambda _method, _params: {
+            "stream_id": "stream-p1",
+            "cursor": "c2",
+            "upserts": [],
+            "panel_state": {"state": "waiting", "participant_state": "dead"},
+        }
+    )
     controller = TrajectoryController(query, follow, follow_wait=0)
     controller.subscribe(
         lambda state: (
