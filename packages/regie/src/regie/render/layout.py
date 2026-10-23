@@ -7,7 +7,8 @@ Rich Text, so ``$primary`` and friends resolve against the active Textual theme.
 from __future__ import annotations
 
 # ruff: noqa: I001
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from typing import cast
 
 from textual.content import Content
 
@@ -20,10 +21,11 @@ from regie.ui_constants import (
     REGIE_TREE_SEPARATOR_ROWS as SEPARATOR_ROWS,
 )
 from regie.render.glyphs import node_label, separator_label
+from regie.tree_nodes import RawRenderNode, RenderNode, TreeNode
 
 #: A stable row identity for widget reconciliation; the first element namespaces the row kind.
 type Key = tuple[str, str]
-type RenderedLine = tuple[Content, dict, Key, str, str]
+type RenderedLine = tuple[Content, RenderNode, Key, str, str]
 
 
 def row_count(key: Key) -> int:
@@ -78,14 +80,14 @@ def is_root_prefix(prefix: str) -> bool:
 
 
 def _walk(
-    nodes: list[dict], prefix: str = "", depth: int = 0, *, is_first_root: bool = False
-) -> list[tuple[str, dict, Key, str, bool]]:
+    nodes: Sequence[RenderNode], prefix: str = "", depth: int = 0, *, is_first_root: bool = False
+) -> list[tuple[str, RenderNode, Key, str, bool]]:
     """Depth-first walk that pairs each node with its drawn ancestry.
 
     Roots branch off an invisible super-root so rails connect the forest; only the
     first root blanks row 1, since a rail off the panel top reads as a missing row.
     """
-    rows: list[tuple[str, dict, Key, str, bool]] = []
+    rows: list[tuple[str, RenderNode, Key, str, bool]] = []
     last_index = len(nodes) - 1
     for i, node in enumerate(nodes):
         last = i == last_index
@@ -108,16 +110,17 @@ def _walk(
 
 
 def _labelled(
-    row: tuple[str, dict, Key, str, bool], *, cwd_segments: int = 2, frame: int = 0
-) -> tuple[Content, dict, Key, str, str]:
+    row: tuple[str, RenderNode, Key, str, bool], *, cwd_segments: int = 2, frame: int = 0
+) -> RenderedLine:
     prefix, node, key, cont_prefix, is_first_root = row
     if key[0] == "s":
+        view = cast(RawRenderNode, node)
         label = separator_label(
-            str(node.get("name", "")),
+            str(view.get("name", "")),
             prefix,
-            count=int(node.get("count") or 0),
-            collapsed=bool(node.get("collapsed")),
-            status=node.get("folded_status"),
+            count=int(view.get("count") or 0),
+            collapsed=bool(view.get("collapsed")),
+            status=view.get("folded_status"),
             is_first_root=is_first_root,
         )
         return label, node, key, prefix, cont_prefix
@@ -138,7 +141,7 @@ def _labelled(
 
 
 def render_tree(
-    tree: list[dict],
+    tree: list[TreeNode] | list[dict],
     unmanaged: list[dict] | None = None,
     *,
     cwd_segments: int = 2,
@@ -148,7 +151,9 @@ def render_tree(
     Keys are stable reconcile ids; prefixes are carried so spinner ticks re-render
     leaves without re-walking the tree.
     """
-    lines = [_labelled(row, cwd_segments=cwd_segments) for row in _walk(tree, is_first_root=True)]
+    # Raw renderer callers retain their dictionaries and missing-field fallbacks.
+    nodes = cast(Sequence[RenderNode], tree)
+    lines = [_labelled(row, cwd_segments=cwd_segments) for row in _walk(nodes, is_first_root=True)]
     if unmanaged:
         lines.append(
             (
@@ -160,7 +165,7 @@ def render_tree(
             )
         )
         for u in unmanaged:
-            fake_node = {
+            fake_node: RawRenderNode = {
                 "id": u.get("pane", "????????"),
                 "tier": "external",
                 "harness": u.get("harness", u.get("command", "?")),
@@ -176,9 +181,7 @@ def render_tree(
     return TreeLines(lines)
 
 
-def selected_participant(
-    lines: list[tuple[Content, dict, Key, str, str]], index: int
-) -> dict | None:
+def selected_participant(lines: list[RenderedLine], index: int) -> RenderNode | None:
     """The participant dict at a given line index, or None if it's a separator."""
     if 0 <= index < len(lines):
         _, node, key, _, _ = lines[index]
