@@ -10,7 +10,7 @@ from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbe
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?: \(Claude Code\))?")
 _HOOK_FLOOR = (2, 1, 119)
 #: Newest release the daily compat pipeline proved (inclusive); it is the only value it moves.
-_QUALIFIED_MAX = (2, 1, 304)
+_QUALIFIED_MAX = (2, 1, 309)
 _MESSAGING_FLOOR = (2, 1, 248)
 _POLICY = f"claude-hooks-{'.'.join(map(str, _HOOK_FLOOR))}-compatible"
 _MESSAGING_POLICY = f"claude-messaging-native-controls-{'.'.join(map(str, _MESSAGING_FLOOR))}"
