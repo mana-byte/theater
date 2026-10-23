@@ -158,28 +158,46 @@ def test_cached_artifacts_must_match_the_digest(tmp_path: Path) -> None:
     [("green", "close"), ("red", "upsert")],
 )
 def test_range_pr_lists_green_results_and_keeps_red_issue(
-    tmp_path: Path, candidate_verdict: str, issue_action: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_verdict: str,
+    issue_action: str,
 ) -> None:
-    cached = Result("codex", "1.6.0", "green", (Check("proof", "pass"),))
-    latest = Result(
-        "codex",
-        "2.0.0",
-        candidate_verdict,
-        (Check("proof", "fail" if candidate_verdict == "red" else "pass"),),
+    class PublicationAdapter(EvidenceOnlyAdapter):
+        def discover(self) -> list[str]:
+            return ["1.6.0", "2.0.0"]
+
+        def verified(self, root: Path) -> VerifiedSet:
+            return VerifiedSet("range", floor="1.0.0", ceiling="1.6.0")
+
+        def apply_bump(self, root: Path, greens: list[str]) -> list[Path]:
+            major, minor, patch = version_key(greens[-1])
+            (root / "gate.txt").write_text(f"{major}.{minor}.{patch + 1}\n")
+            return [Path("gate.txt")]
+
+        def qualify(self, root: Path, version: str, sb: Sandbox, binary: Path) -> Result:
+            status = "fail" if candidate_verdict == "red" else "pass"
+            return Result(self.name, version, candidate_verdict, (Check("proof", status),))
+
+    _evidence_only_repo(tmp_path)
+    (tmp_path / "gate.txt").write_text("1.6.0\n")
+    _git(tmp_path, "add", "gate.txt")
+    _git(tmp_path, "commit", "-m", "gate")
+    monkeypatch.setattr(runner, "check_bump", lambda adapter, root, greens: [])
+    adapter = PublicationAdapter()
+    cached = Result(
+        "claude",
+        "1.6.0",
+        "green",
+        (Check("proof", "pass"),),
+        adapter_digest=adapter_digest(tmp_path, "claude", adapter),
     )
-    summary = {
-        "harness": "codex",
-        "gate_kind": "range",
-        "reused_results": [{**cached.to_evidence(), "run_url": "https://example.invalid/old"}],
-        "results": [{**latest.to_evidence(), "run_url": "https://example.invalid/new"}],
-        "watch": None,
-        "watch_reused": False,
-        "greens": ["1.6.0"],
-        "inconclusive": False,
-        "published": True,
-        "run_url": "https://example.invalid/new",
-    }
-    report = prepare_publication(summary, tmp_path / "summary.json")
+    write_evidence(tmp_path, cached, "https://example.invalid/old")
+    state = runner.run_harness_state(
+        adapter, tmp_path, publish=True, run_url="https://example.invalid/new"
+    )
+    assert state.published is True
+    report = prepare_publication(state, tmp_path / "summary.json")
     assert report.pr_needed is True
     expected = ["- ✅ `1.6.0` — green · [run](https://example.invalid/old)"]
     if candidate_verdict == "green":
@@ -422,9 +440,10 @@ def _evidence_only_repo(root: Path) -> None:
 
 def test_no_change_green_is_cached_without_a_pr(tmp_path: Path) -> None:
     _evidence_only_repo(tmp_path)
-    summary = runner.run_harness(
+    state = runner.run_harness_state(
         EvidenceOnlyAdapter(), tmp_path, publish=True, run_url="https://example.invalid/run/1"
     )
+    summary = state.to_summary()
     assert summary["published"] is False
     assert summary["greens"] == ["3.0.0"]
     document = json.loads((cache_root(tmp_path) / "claude/3.0.0.json").read_text())
@@ -450,7 +469,7 @@ def test_no_change_green_is_cached_without_a_pr(tmp_path: Path) -> None:
         ).stdout
         == ""
     )
-    report = prepare_publication(summary, tmp_path / "summary.json")
+    report = prepare_publication(state, tmp_path / "summary.json")
     assert report.pr_needed is False
 
 
@@ -472,15 +491,16 @@ def test_forced_in_range_candidate_reuses_its_watch_result(
             return super().qualify(root, version, sb, binary)
 
     monkeypatch.setattr(runner, "check_bump", lambda adapter, root, bumped: [])
-    summary = runner.run_harness(InRangeAdapter(), tmp_path, version="3.0.0")
+    state = runner.run_harness_state(InRangeAdapter(), tmp_path, version="3.0.0")
+    summary = state.to_summary()
     assert calls == ["3.0.0"]
     assert summary["watch"] == summary["results"][0]
     assert summary["watch_reused"] is True
     assert summary["watch"]["verdict"] == "green"
     route = {"method": "POST", "path": "/v1/chat/completions"}
-    summary["results"][0]["routes"] = [route]
-    summary["watch"]["routes"] = [route]
-    report = prepare_publication(summary, tmp_path / "summary.json")
+    state.rows[0].routes[:] = [route]
+    assert state.to_summary()["watch"]["routes"] == [route]
+    report = prepare_publication(state, tmp_path / "summary.json")
     assert report.pr_needed is False
     assert "Routes:" not in report.pr_body
 
@@ -504,7 +524,7 @@ def test_green_candidate_artifact_is_composed_and_staged(
 ) -> None:
     _artifact_repo(tmp_path, "1.2.0\n", monkeypatch)
 
-    summary = runner.run_harness(ArtifactAdapter(), tmp_path, publish=True)
+    summary = runner.run_harness_state(ArtifactAdapter(), tmp_path, publish=True).to_summary()
 
     assert summary["published"] is True
     assert (tmp_path / "fixtures/1.2.0.json").read_text() == '{"proved": true}\n'
@@ -526,7 +546,7 @@ def test_green_candidate_artifact_is_composed_and_staged(
     _git(tmp_path, "checkout", "-b", "rolling")
     _git(tmp_path, "commit", "-m", "rolling gate")
     _git(tmp_path, "checkout", "main")
-    reused = runner.run_harness(ArtifactAdapter(), tmp_path, publish=True)
+    reused = runner.run_harness_state(ArtifactAdapter(), tmp_path, publish=True).to_summary()
     assert reused["candidates"] == []
     assert reused["published"] is True
     assert (tmp_path / "fixtures/1.2.0.json").read_text() == '{"proved": true}\n'
@@ -571,7 +591,9 @@ def test_range_artifact_watch_and_deferral_keep_only_the_promoted_bundle(
                 (Check("proof", status),),
             )
 
-    summary = runner.run_harness(WatchingArtifactAdapter(), tmp_path, publish=True)
+    summary = runner.run_harness_state(
+        WatchingArtifactAdapter(), tmp_path, publish=True
+    ).to_summary()
 
     assert calls == ["1.2.0", "1.3.0", "1.1.0"]
     assert summary["candidates"] == ["1.2.0", "1.3.0", "1.4.0"]
@@ -591,11 +613,12 @@ def test_unpromoted_candidate_artifacts_stay_out_of_the_composed_tree(
     _artifact_repo(tmp_path, "1.2.0\n", monkeypatch)
     adapter = TwoReleaseAdapter()
     older, gap, newer = adapter.discover()
-    first = runner.run_harness(adapter, tmp_path, version=newer, publish=True)
+    first = runner.run_harness_state(adapter, tmp_path, version=newer, publish=True).to_summary()
     assert (first["candidates"], first["greens"], first["published"]) == ([newer], [], False)
     assert (cache_artifacts_dir(tmp_path, "vibe", newer) / f"fixtures/{newer}.json").is_file()
 
-    second = runner.run_harness(adapter, tmp_path, max_candidates=1, publish=True)
+    second_state = runner.run_harness_state(adapter, tmp_path, max_candidates=1, publish=True)
+    second = second_state.to_summary()
 
     assert (second["candidates"], second["greens"], second["published"]) == ([older], [older], True)
     assert second["reused"] == [newer] and gap not in second["reused"]
@@ -608,7 +631,7 @@ def test_unpromoted_candidate_artifacts_stay_out_of_the_composed_tree(
     ).stdout.splitlines()
     assert staged == [f"fixtures/{older}.json", "gate.txt"]
     assert not (tmp_path / f"fixtures/{newer}.json").exists()
-    report = prepare_publication(second, tmp_path / "summary.json")
+    report = prepare_publication(second_state, tmp_path / "summary.json")
     assert [line for line in report.pr_body.splitlines() if line.startswith("- ✅")] == [
         f"- ✅ `{older}` — green · [run](local)",
         f"- ✅ `{newer}` — green · [run](local)",
@@ -659,12 +682,12 @@ def test_refreshed_retained_bundle_is_staged_also_when_the_green_is_reused(
             check=True,
         ).stdout.splitlines()
 
-    assert runner.run_harness(adapter, tmp_path, publish=True)["published"] is True
+    assert runner.run_harness_state(adapter, tmp_path, publish=True).published is True
     assert staged() == ["fixtures/latest.json", "gate.txt"]
     assert (tmp_path / "fixtures/latest.json").read_text() == '{"proved": true}\n'
     assert not (tmp_path / "candidates").exists()
     _git(tmp_path, "reset", "--hard", "HEAD")
-    reused = runner.run_harness(adapter, tmp_path, publish=True)
+    reused = runner.run_harness_state(adapter, tmp_path, publish=True).to_summary()
     assert (reused["candidates"], reused["published"]) == ([], True)
     assert staged() == ["fixtures/latest.json", "gate.txt"]
     assert (tmp_path / "fixtures/latest.json").read_text() == '{"proved": true}\n'

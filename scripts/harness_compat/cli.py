@@ -123,9 +123,7 @@ def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
         )
     if args.publish and summary_path:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        report = prepare_publication(
-            summaries[0], summary_path, _open_failures(), results=states[0].publication_results
-        )
+        report = prepare_publication(states[0], summary_path, _open_failures())
         summaries[0]["publication"] = {"pr": report.pr_needed, "issue": report.issue_action}
     if summary_path:
         summary_path.parent.mkdir(parents=True, exist_ok=True)

@@ -49,7 +49,7 @@ ATTEMPT_RESERVE_SECONDS = 20 * 60
 
 
 @dataclass(frozen=True)
-class _RunRow:
+class RunRow:
     result: Result
     routes: list[dict[str, Any]]
     run_url: str
@@ -68,7 +68,7 @@ class _RunRow:
 
 @dataclass(frozen=True)
 class _CandidateWalk:
-    rows: list[_RunRow]
+    rows: list[RunRow]
     conflicts: list[str]
     warnings: list[str]
     deferred: list[str]
@@ -89,19 +89,24 @@ class _CompositionRun:
 
 
 @dataclass(frozen=True)
-class _RunState:
-    fields: dict[str, Any]
-    rows: list[_RunRow]
-    reused_rows: list[_RunRow]
-    watch: _RunRow | None
+class RunState:
+    harness: str
+    gate: VerifiedSet
+    adapter_digest: str
+    candidates: list[str]
+    deferred: list[str]
+    revoked: list[str]
+    composition_attempts: list[dict[str, Any]]
+    reused: list[str]
+    reused_rows: list[RunRow]
+    rows: list[RunRow]
+    watch: RunRow | None
     watch_reused: bool
-
-    @property
-    def publication_results(self) -> tuple[Result, ...]:
-        results = [row.result for row in (*self.reused_rows, *self.rows)]
-        if self.watch and not self.watch_reused and self.watch.result.verdict != "green":
-            results.append(self.watch.result)
-        return tuple(results)
+    greens: list[str]
+    inconclusive: bool
+    published: bool
+    stale_warnings: list[str]
+    run_url: str
 
     def to_summary(self) -> dict[str, Any]:
         failing = ("red", "tooling", "inconclusive")
@@ -114,12 +119,29 @@ class _RunState:
                 }
             )
         return {
-            **self.fields,
+            "harness": self.harness,
+            "gate_kind": self.gate.kind,
+            "gate": {
+                "floor": self.gate.floor,
+                "ceiling": self.gate.ceiling,
+                "known_bad": sorted(self.gate.known_bad),
+            },
+            "adapter_digest": self.adapter_digest,
+            "candidates": self.candidates,
+            "deferred": self.deferred,
+            "revoked": self.revoked,
+            "composition_attempts": self.composition_attempts,
+            "reused": self.reused,
             "reused_results": [row.to_summary() for row in self.reused_rows],
             "results": [row.to_summary() for row in self.rows],
             "watch": self.watch.to_summary() if self.watch else None,
             "watch_reused": self.watch_reused,
+            "greens": self.greens,
             "issues": issues,
+            "inconclusive": self.inconclusive,
+            "published": self.published,
+            "stale_warnings": self.stale_warnings,
+            "run_url": self.run_url,
         }
 
 
@@ -396,11 +418,11 @@ def _watch(
     root: Path,
     gate: VerifiedSet,
     releases: list[str],
-    rows: list[_RunRow],
+    rows: list[RunRow],
     run_url: str,
     digest: str,
     deadline: float,
-) -> tuple[_RunRow | None, bool]:
+) -> tuple[RunRow | None, bool]:
     """The daily regression watch: reuse a candidate row for the newest admitted release."""
     version = newest_in_range(adapter, gate, releases)
     if version is None:
@@ -417,7 +439,7 @@ def _watch(
         write_evidence(root, replace(watched, adapter_digest=digest), run_url)
     else:
         drop_evidence(root, adapter.name, version)
-    return _RunRow(watched, routes, run_url, log), False
+    return RunRow(watched, routes, run_url, log), False
 
 
 def _walk_candidates(
@@ -431,7 +453,7 @@ def _walk_candidates(
     deadline: float,
 ) -> _CandidateWalk:
     """Qualify candidates in ascending order, retaining their results until output."""
-    rows: list[_RunRow] = []
+    rows: list[RunRow] = []
     conflicts_seen: list[str] = []
     warnings_seen: list[str] = []
     deferred: list[str] = []
@@ -453,7 +475,7 @@ def _walk_candidates(
         else:
             drop_evidence(root, adapter.name, candidate)
             reused.pop(candidate, None)
-        rows.append(_RunRow(result, routes, run_url, log))
+        rows.append(RunRow(result, routes, run_url, log))
         # A candidate that was ever inconclusive ends the walk: the backlog waits for tomorrow.
         if result.verdict != "green" or len(log) > 1:
             deferred = candidates[index + 1 :]
@@ -471,7 +493,7 @@ def _run_with_artifacts(
     publish: bool = False,
     run_url: str = "local",
     budget_seconds: float = RUN_BUDGET_SECONDS,
-) -> _RunState:
+) -> RunState:
     """Qualify one harness; publish only after the composed tree passes."""
     deadline = time.monotonic() + budget_seconds
     gate = adapter.verified(root)
@@ -492,7 +514,7 @@ def _run_with_artifacts(
         adapter, root, gate, releases, walk.rows, run_url, digest, deadline
     )
     reused_rows = [
-        _RunRow(
+        RunRow(
             Result(
                 adapter.name,
                 item,
@@ -529,9 +551,9 @@ def _run_with_artifacts(
         composition, compose_log = composed.outcome, composed.attempts
     else:
         composition = _Composition([], False, False, [])
-    composition_row: _RunRow | None = None
+    composition_row: RunRow | None = None
     if composition.problems:
-        composition_row = _RunRow(
+        composition_row = RunRow(
             Result(
                 adapter.name,
                 greens[-1] if greens else candidates[-1],
@@ -555,34 +577,32 @@ def _run_with_artifacts(
     inconclusive |= bool(composition_row and composition_row.result.verdict == "inconclusive")
     inconclusive |= bool(watch and watch.result.verdict == "inconclusive")
     rows = [*walk.rows, *([composition_row] if composition_row else [])]
-    fields = {
-        "harness": adapter.name,
-        "gate_kind": gate.kind,
-        "gate": {
-            "floor": gate.floor,
-            "ceiling": gate.ceiling,
-            "known_bad": sorted(gate.known_bad),
-        },
-        "adapter_digest": digest,
-        "candidates": candidates,
-        "deferred": walk.deferred,
+    return RunState(
+        harness=adapter.name,
+        gate=gate,
+        adapter_digest=digest,
+        candidates=candidates,
+        deferred=walk.deferred,
         # Candidates that ended non-green: an open gate PR that lists one is withdrawn.
-        "revoked": sorted(
+        revoked=sorted(
             {
                 row.result.version
                 for row in walk.rows
                 if row.result.verdict != "green" and not gate.admits(row.result.version)
             }
         ),
-        "composition_attempts": compose_log,
-        "reused": sorted(reused),
-        "greens": greens,
-        "inconclusive": inconclusive,
-        "published": composition.published,
-        "stale_warnings": warnings,
-        "run_url": run_url,
-    }
-    return _RunState(fields, rows, reused_rows, watch, watch_reused)
+        composition_attempts=compose_log,
+        reused=sorted(reused),
+        reused_rows=reused_rows,
+        rows=rows,
+        watch=watch,
+        watch_reused=watch_reused,
+        greens=greens,
+        inconclusive=inconclusive,
+        published=composition.published,
+        stale_warnings=warnings,
+        run_url=run_url,
+    )
 
 
 def run_harness_state(
@@ -593,7 +613,7 @@ def run_harness_state(
     max_candidates: int = 5,
     publish: bool = False,
     run_url: str = "local",
-) -> _RunState:
+) -> RunState:
     """Qualify one harness; publish only after the composed tree passes."""
     with tempfile.TemporaryDirectory(prefix="compat-artifacts-") as temporary:
         return _run_with_artifacts(
@@ -608,23 +628,3 @@ def run_harness_state(
             publish=publish,
             run_url=run_url,
         )
-
-
-def run_harness(
-    adapter: Adapter,
-    root: Path,
-    *,
-    version: str | None = None,
-    max_candidates: int = 5,
-    publish: bool = False,
-    run_url: str = "local",
-) -> dict[str, Any]:
-    """Return the established JSON-shaped summary for callers outside the run."""
-    return run_harness_state(
-        adapter,
-        root,
-        version=version,
-        max_candidates=max_candidates,
-        publish=publish,
-        run_url=run_url,
-    ).to_summary()
