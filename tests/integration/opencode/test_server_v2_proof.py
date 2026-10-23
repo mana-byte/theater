@@ -223,7 +223,7 @@ def test_v2_prompt_admission_is_durable_and_projects_into_the_lineage_database(
             try:
                 rows = [
                     dict(zip(("id", "info"), row, strict=True))
-                    for row in store.history_messages(conn, session_id)
+                    for row in conn.queries.history_messages(conn, session_id)
                 ]
             finally:
                 conn.close()

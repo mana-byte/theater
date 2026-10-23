@@ -67,7 +67,7 @@ def test_v2_discovery_admission_and_history_cursor_use_selected_queries(rec, wor
     conn = store.open_readonly(rec.path)
     assert conn is not None
     try:
-        assert [row[0] for row in store.history_messages(conn, rec.sid)] == [
+        assert [row[0] for row in conn.queries.history_messages(conn, rec.sid)] == [
             f"msg_u{index}" for index in range(3)
         ]
     finally:

@@ -30,7 +30,7 @@ from theater.transcript_identity import (
 )
 
 from .constants import HISTORY_MESSAGE_BATCH
-from .store import QueryNamespace, connect, session_for_history
+from .store import QueryConnection, connect, session_for_history
 from .values import _opencode_source_key, load_json_object
 
 logger = logging.getLogger("theater.harness.opencode")
@@ -40,7 +40,6 @@ type _HistoryOutput = tuple[tuple[Event, ...], tuple[TrajectoryFact, ...], int]
 
 
 class OpenCodeHistory:
-    _queries: QueryNamespace
     _after: float | None
     _cwd: str | None
     _db: Path
@@ -55,17 +54,17 @@ class OpenCodeHistory:
 
         def _attachment_provenance(self, sid: str) -> str: ...
 
-        def _correlation_problem(self, conn: sqlite3.Connection) -> Batch | None: ...
+        def _correlation_problem(self, conn: QueryConnection) -> Batch | None: ...
 
-        def _locate(self, conn: sqlite3.Connection, *, pinned: bool) -> str | None: ...
+        def _locate(self, conn: QueryConnection, *, pinned: bool) -> str | None: ...
 
-        def _open(self) -> sqlite3.Connection | None: ...
+        def _open(self) -> QueryConnection | None: ...
 
         def _pinned_sid(self) -> str | None: ...
 
         def _replay(self, info: dict, parts: list[dict]) -> list[Event]: ...
 
-        def _session_exists(self, conn: sqlite3.Connection, sid: str) -> bool: ...
+        def _session_exists(self, conn: QueryConnection, sid: str) -> bool: ...
 
         def _stored_facts_for_message(
             self,
@@ -162,16 +161,16 @@ class OpenCodeHistory:
             pinned=pinned,
         )
 
-    def _history_events(self, conn: sqlite3.Connection, sid: str, last_n: int) -> list[Event]:
+    def _history_events(self, conn: QueryConnection, sid: str, last_n: int) -> list[Event]:
         if last_n <= 0:
             return self._replay_history_rows(
-                self._queries.history_messages(conn, sid),
-                self._queries.history_parts_by_session(conn, sid),
+                conn.queries.history_messages(conn, sid),
+                conn.queries.history_parts_by_session(conn, sid),
             )
         events: list[Event] = []
         offset = 0
         while len(events) < last_n:
-            rows = self._queries.recent_history_messages(
+            rows = conn.queries.recent_history_messages(
                 conn,
                 sid,
                 limit=HISTORY_MESSAGE_BATCH,
@@ -180,7 +179,7 @@ class OpenCodeHistory:
             if not rows:
                 break
             message_ids = [str(message_id) for message_id, _raw in rows]
-            parts = self._queries.history_parts_for_messages(conn, sid, message_ids)
+            parts = conn.queries.history_parts_for_messages(conn, sid, message_ids)
             events[0:0] = self._replay_history_rows(reversed(rows), parts)
             events = events[-last_n:]
             offset += len(rows)
@@ -215,7 +214,7 @@ class OpenCodeHistory:
                 error="OpenCode database is unavailable",
             )
         try:
-            conn = connect(self._db, queries=self._queries)
+            conn = connect(self._db)
         except sqlite3.Error as exc:
             return HistoryPage(
                 error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -236,7 +235,7 @@ class OpenCodeHistory:
 
     def _history_page_with_connection(
         self,
-        conn: sqlite3.Connection,
+        conn: QueryConnection,
         before: str | None,
         snapshot: str | None,
         limit: int,
@@ -264,7 +263,7 @@ class OpenCodeHistory:
         if isinstance(boundaries, HistoryPage):
             return boundaries
         boundary, snapshot_boundary = boundaries
-        rows = self._queries.paged_messages(
+        rows = conn.queries.paged_messages(
             conn,
             sid,
             snapshot_boundary if snapshot_boundary is not None else boundary,
@@ -312,7 +311,7 @@ class OpenCodeHistory:
 
     def _history_boundaries(
         self,
-        conn: sqlite3.Connection,
+        conn: QueryConnection,
         sid: str,
         identity: dict[str, int],
         before: str | None,
@@ -345,7 +344,7 @@ class OpenCodeHistory:
 
     def _select_history_rows(
         self,
-        conn: sqlite3.Connection,
+        conn: QueryConnection,
         sid: str,
         rows: Sequence[_HistoryRow],
         limit: int,
@@ -462,7 +461,7 @@ class OpenCodeHistory:
             pinned=pinned,
         )
 
-    def _history_session(self, conn: sqlite3.Connection) -> str | None:
+    def _history_session(self, conn: QueryConnection) -> str | None:
         if self._session is not None:
             return self._session if self._session_exists(conn, self._session) else None
         if self._receipt_target is not None:
@@ -630,7 +629,7 @@ class OpenCodeHistory:
 
     def _validate_history_cursor(
         self,
-        conn: sqlite3.Connection,
+        conn: QueryConnection,
         cursor: dict[str, object],
         sid: str,
         identity: dict[str, int],
@@ -664,7 +663,7 @@ class OpenCodeHistory:
         ):
             raise HistoryPageError("history_cursor_invalid", "history cursor boundary is malformed")
         created, message_id = boundary
-        row = self._queries.history_boundary(conn, sid, created, message_id)
+        row = conn.queries.history_boundary(conn, sid, created, message_id)
         if row is None:
             raise HistoryPageError(
                 "history_cursor_invalid", "OpenCode history boundary no longer exists"
@@ -680,9 +679,9 @@ class OpenCodeHistory:
         return created, message_id, str(cursor["fingerprint"])
 
     def _history_parts(
-        self, conn: sqlite3.Connection, sid: str, message_id: str, limit: int | None
+        self, conn: QueryConnection, sid: str, message_id: str, limit: int | None
     ) -> tuple[list[tuple[object, object, object, object]], bool]:
-        found = self._queries.paged_parts(conn, sid, message_id, limit)
+        found = conn.queries.paged_parts(conn, sid, message_id, limit)
         truncated = limit is not None and len(found) > limit
         if limit is not None:
             found = found[:limit]

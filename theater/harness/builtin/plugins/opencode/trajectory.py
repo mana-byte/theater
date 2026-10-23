@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -17,7 +16,7 @@ from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsag
 
 from .constants import LIVE_TRAJECTORY_STATE_LIMIT
 from .mcp import OpenCodeMcpCatalog
-from .store import QueryNamespace
+from .store import QueryConnection
 from .values import (
     _assistant_request_id,
     _finish_status,
@@ -102,7 +101,6 @@ def _interpret_tool_part(part: dict) -> _ToolPart:
 
 
 class OpenCodeTrajectory:
-    _queries: QueryNamespace
     _mcp_catalog: OpenCodeMcpCatalog
     _mcp_catalog_generation: int
     _text: dict[str, dict[str, str]]
@@ -114,7 +112,7 @@ class OpenCodeTrajectory:
 
         def _history_revision(self, updated: object, created: object) -> int: ...
 
-        def _role(self, conn: sqlite3.Connection, mid: str) -> str | None: ...
+        def _role(self, conn: QueryConnection, mid: str) -> str | None: ...
 
         def _stored_revision(self, data: dict, updated: object, created: object) -> int: ...
 
@@ -392,7 +390,7 @@ class OpenCodeTrajectory:
 
     def _live_revision(
         self,
-        conn: sqlite3.Connection,
+        conn: QueryConnection,
         table: str,
         record_id: str | None,
         *fallbacks: object,
@@ -401,23 +399,21 @@ class OpenCodeTrajectory:
         if table not in {"message", "part"}:
             raise ValueError("unsupported OpenCode revision table")
         if record_id:
-            row = self._queries.live_revision_row(conn, table, record_id)
+            row = conn.queries.live_revision_row(conn, table, record_id)
             if row is not None:
                 values[:0] = row
         revisions = [self._history_revision(value, 0) for value in values]
         return max(revisions, default=0)
 
-    def _message_coordinate(
-        self, conn: sqlite3.Connection, message_id: object, fallback: int
-    ) -> int:
+    def _message_coordinate(self, conn: QueryConnection, message_id: object, fallback: int) -> int:
         if isinstance(message_id, str) and message_id:
-            row = self._queries.message_coordinate(conn, message_id)
+            row = conn.queries.message_coordinate(conn, message_id)
             if row is not None:
                 return self._history_coordinate(row[0])
         return max(0, fallback)
 
     def _trajectory_for_part(
-        self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+        self, conn: QueryConnection, payload: dict, seq: int, *, raw_index: int
     ) -> list[TrajectoryFact]:
         part = payload.get("part")
         if not isinstance(part, dict):
@@ -430,7 +426,7 @@ class OpenCodeTrajectory:
         timing = _part_timing(part)
         part_id = part.get("id")
         fallback = part_id if isinstance(part_id, str) else None
-        ordinal_base = self._queries.part_ordinal(conn, fallback) * 2 if fallback else 0
+        ordinal_base = conn.queries.part_ordinal(conn, fallback) * 2 if fallback else 0
         revision_hint = self._live_revision(
             conn,
             "part",
@@ -593,7 +589,7 @@ class OpenCodeTrajectory:
 
     def _trajectory_for_message(
         self,
-        conn: sqlite3.Connection,
+        conn: QueryConnection,
         payload: dict,
         seq: int,
         *,
@@ -632,7 +628,7 @@ class OpenCodeTrajectory:
                         native_id=part_id,
                         fallback_id=f"{mid}:text" if mid else None,
                         raw_index=raw_index,
-                        event_ordinal=self._queries.part_ordinal(conn, part_id) * 2,
+                        event_ordinal=conn.queries.part_ordinal(conn, part_id) * 2,
                         turn_id=mid or None,
                         timing=timing,
                         usage=usage,

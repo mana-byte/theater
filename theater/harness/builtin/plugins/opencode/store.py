@@ -61,9 +61,7 @@ def select_queries(db: Path) -> QueryNamespace:
     return store_v2 if is_v2_database(db) else store_v1
 
 
-def connect(
-    db: Path, *, persistent: bool = False, queries: QueryNamespace | None = None
-) -> QueryConnection:
+def connect(db: Path, *, persistent: bool = False) -> QueryConnection:
     conn = cast(
         QueryConnection,
         sqlite3.connect(
@@ -73,27 +71,25 @@ def connect(
             factory=QueryConnection,
         ),
     )
-    conn.queries = queries if queries is not None else select_queries(db)
+    conn.queries = select_queries(db)
     return conn
 
 
-def open_readonly(
-    db: Path, *, persistent: bool = False, queries: QueryNamespace | None = None
-) -> QueryConnection | None:
+def open_readonly(db: Path, *, persistent: bool = False) -> QueryConnection | None:
     if not db.exists():
         return None
     try:
-        return connect(db, persistent=persistent, queries=queries)
+        return connect(db, persistent=persistent)
     except sqlite3.Error:
         logger.debug("opening %s failed", db, exc_info=True)
         return None
 
 
-def _sessions(conn: sqlite3.Connection) -> str:
-    return cast(QueryConnection, conn).queries.SESSION_TABLE
+def _sessions(conn: QueryConnection) -> str:
+    return conn.queries.SESSION_TABLE
 
 
-def root_session(conn: sqlite3.Connection, sid: str) -> tuple[str] | None:
+def root_session(conn: QueryConnection, sid: str) -> tuple[str] | None:
     return cast(
         tuple[str] | None,
         conn.execute(
@@ -102,21 +98,21 @@ def root_session(conn: sqlite3.Connection, sid: str) -> tuple[str] | None:
     )
 
 
-def session(conn: sqlite3.Connection, sid: str) -> tuple[str] | None:
+def session(conn: QueryConnection, sid: str) -> tuple[str] | None:
     return cast(
         tuple[str] | None,
         conn.execute(f"SELECT id FROM {_sessions(conn)} WHERE id = ?", (sid,)).fetchone(),
     )
 
 
-def candidate_sessions(conn: sqlite3.Connection):
+def candidate_sessions(conn: QueryConnection):
     return conn.execute(
         f"SELECT id, directory, time_created FROM {_sessions(conn)} "
         "WHERE parent_id IS NULL ORDER BY time_created DESC"
     )
 
 
-def candidate_session(conn: sqlite3.Connection, sid: str) -> tuple[str, str, int | float] | None:
+def candidate_session(conn: QueryConnection, sid: str) -> tuple[str, str, int | float] | None:
     return cast(
         tuple[str, str, int | float] | None,
         conn.execute(
@@ -129,18 +125,18 @@ def candidate_session(conn: sqlite3.Connection, sid: str) -> tuple[str, str, int
 
 @overload
 def located_sessions(
-    conn: sqlite3.Connection, directory: str, after: float | None, *, count: Literal[True]
+    conn: QueryConnection, directory: str, after: float | None, *, count: Literal[True]
 ) -> tuple[int] | None: ...
 
 
 @overload
 def located_sessions(
-    conn: sqlite3.Connection, directory: str, after: float | None, *, count: Literal[False] = False
+    conn: QueryConnection, directory: str, after: float | None, *, count: Literal[False] = False
 ) -> tuple[str] | None: ...
 
 
 def located_sessions(
-    conn: sqlite3.Connection, directory: str, after: float | None, *, count: bool = False
+    conn: QueryConnection, directory: str, after: float | None, *, count: bool = False
 ) -> tuple[int] | tuple[str] | None:
     select = "SELECT COUNT(*)" if count else "SELECT id"
     sql = f"{select} FROM {_sessions(conn)} WHERE directory = ? AND parent_id IS NULL"
@@ -154,7 +150,7 @@ def located_sessions(
 
 
 def session_for_history(
-    conn: sqlite3.Connection, directory: str, after: float | None
+    conn: QueryConnection, directory: str, after: float | None
 ) -> tuple[str] | None:
     return located_sessions(conn, directory, after)
 
@@ -173,8 +169,3 @@ def event_rows(conn: sqlite3.Connection, sid: str | None, cursor: int, limit: in
         "SELECT seq, type, data FROM event WHERE aggregate_id = ? AND seq > ? ORDER BY seq LIMIT ?",
         (sid, cursor, limit),
     ).fetchall()
-
-
-def history_messages(conn: sqlite3.Connection, sid: str):
-    """Compatibility entry point used by the selected-server proof."""
-    return cast(QueryConnection, conn).queries.history_messages(conn, sid)
