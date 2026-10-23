@@ -24,4 +24,4 @@ def _send_claim_ttl() -> float:
 
 @method("send")
 async def _send(daemon, params: dict) -> dict:
-    return await send_request._send(daemon, params)
+    return await send_request.send(daemon, params)

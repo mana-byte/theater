@@ -150,7 +150,7 @@ async def _send_after(
     return result
 
 
-async def _send(daemon, params: dict) -> dict:
+async def send(daemon, params: dict) -> dict:
     """Send through the daemon's selected route: once when safe, else queued under one handle.
 
     Explicit ``refuse`` is open to anyone; ``queue``, ``amend`` and ``replace`` stay parent-only.

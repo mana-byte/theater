@@ -337,9 +337,9 @@ async def _sessions_spawn(daemon, params: dict[str, Any], actor_id: str) -> Any:
 
 
 async def _sessions_send(daemon, params: dict[str, Any], actor_id: str) -> Any:
-    from theater.daemon.controls.send_request import _send
+    from theater.daemon.controls.send_request import send
 
-    return await _send(daemon, _with_actor(params, actor_id))
+    return await send(daemon, _with_actor(params, actor_id))
 
 
 async def _sessions_interrupt(daemon, params: dict[str, Any], actor_id: str) -> Any:
