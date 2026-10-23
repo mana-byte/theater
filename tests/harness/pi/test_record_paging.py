@@ -69,6 +69,51 @@ def test_pi_oversized_record_preserves_following_indices_and_checkpoint(
     assert (checkpoint["offset"], checkpoint["records"]) == (transcript.stat().st_size, 4)
 
 
+def test_pi_truncation_stages_a_batch_checkpoint_without_an_attachment(tmp_path) -> None:
+    transcript = tmp_path / "native-id.jsonl"
+    append(transcript, session_record(session_id="native-id", cwd=tmp_path))
+    source = PiObserver(root=tmp_path, isolated=True).open_source(
+        cwd=str(tmp_path), session_id="native-id"
+    )
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+    original = source.source_checkpoint()
+    append(transcript, message_record("user", {"role": "user", "content": "read"}))
+    assert asyncio.run(source.read()).events
+    assert json.loads(source.pending_source_checkpoint())["offset"] == transcript.stat().st_size
+
+    transcript.write_bytes(b"")
+    assert asyncio.run(source.read()).attached is None
+    reset = source.pending_source_checkpoint()
+    assert reset is not None
+    assert (json.loads(reset)["offset"], json.loads(reset)["records"]) == (0, 0)
+    assert source.source_checkpoint() == original
+    source.acknowledge_source_checkpoint()
+    assert source.source_checkpoint() == reset
+
+
+def test_pi_rollback_keeps_a_same_inode_byte_floor_without_recounting_records(tmp_path) -> None:
+    transcript = tmp_path / "native-id.jsonl"
+    append(transcript, session_record(session_id="native-id", cwd=tmp_path))
+    source = PiObserver(root=tmp_path, isolated=True).open_source(
+        cwd=str(tmp_path), session_id="native-id"
+    )
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    append(transcript, message_record("user", {"role": "user", "content": "read"}))
+    assert asyncio.run(source.read()).events
+    source.acknowledge_source_checkpoint()
+    offset, index = source.offset, source.index
+
+    original = transcript.read_bytes()
+    transcript.write_bytes(original.replace(b"\n", b" ", 1))
+    assert transcript.stat().st_size == offset
+    assert transcript.read_bytes().count(b"\n") < index
+    source.rollback_source_checkpoint()
+    assert (source.path, source.offset, source.index) == (transcript, offset, index)
+
+
 @pytest.mark.asyncio
 async def test_pi_cancelled_projection_cannot_advance_live_context(tmp_path, monkeypatch) -> None:
     import threading
