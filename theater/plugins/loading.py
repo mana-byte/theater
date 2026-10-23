@@ -11,6 +11,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from re import Pattern
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from theater.harness.contracts.manifest import HarnessManifest
+    from theater.mcp_plugins.contracts import McpServerManifest
 
 MANIFEST_FILENAME = "manifest.py"
 LOCAL = "local"
@@ -25,6 +30,28 @@ class PackageCandidate:
     source: str
     name: str
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestFacts:
+    """Post-import value and the manifest kinds it satisfies."""
+
+    value: object
+    harness: HarnessManifest | None
+    mcp: McpServerManifest | None
+
+
+def manifest_facts(module: types.ModuleType) -> ManifestFacts:
+    """Classify one exported value without choosing a source-specific diagnostic."""
+    from theater.harness.contracts.manifest import HarnessManifest
+    from theater.mcp_plugins.contracts import McpServerManifest
+
+    value = getattr(module, "MANIFEST", None)
+    return ManifestFacts(
+        value,
+        value if isinstance(value, HarnessManifest) else None,
+        value if isinstance(value, McpServerManifest) else None,
+    )
 
 
 def discover_packages(
