@@ -200,6 +200,19 @@ async def test_plugin_preserves_parent_filters_but_forces_spawn_parent_identity(
     )
     assert daemon.registry.get(spawned["id"]).parent_id == actor.id
 
+    typed_spawn = await typed.spawn_session(
+        harness="vibe",
+        approval="manual",
+        cwd="/tmp",
+        background=False,
+        window_name="custom-window",
+        tmux_session="custom-session",
+    )
+    assert daemon.registry.get(typed_spawn["id"]).parent_id == actor.id
+    presentation = terminal_provider.creations[-1]
+    assert presentation["background"] is True
+    assert presentation["name"] == f"vibe-{typed_spawn['id'][:6]}"
+
 
 def test_grants_survive_restart_without_widening_and_cleanup_revokes(theater_home):
     first = Store(paths.db_path())

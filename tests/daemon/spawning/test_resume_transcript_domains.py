@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.launch_preparation import prepare_provider_reservation
 from tests.support.resume_harnesses import trusted_predecessor
 from tests.support.shipped import ClaudeCodeHarness
 from theater.daemon.spawner import Spawner, SpawnRequest
@@ -28,7 +29,7 @@ async def test_claude_refuses_mismatched_domain(registry, monkeypatch):
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="does not match the Claude observation root"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
 
 
 async def test_claude_resume_uses_latest_transcript_project_cwd(
@@ -61,14 +62,15 @@ async def test_claude_resume_uses_latest_transcript_project_cwd(
     registry.store.upsert_participant(predecessor)
     registry.mark_dead(predecessor.id)
 
-    reservation = await Spawner(registry).reserve(
+    reservation = await prepare_provider_reservation(
+        Spawner(registry),
         SpawnRequest(
             harness="claude",
             prompt="continue",
             cwd=str(original),
             approval="manual",
             resume=session_id,
-        )
+        ),
     )
 
     successor = reservation.participant
@@ -95,14 +97,15 @@ async def test_claude_resume_requires_a_materialized_native_transcript(
 
     assert _resume_state(predecessor, []) == "harness_resume_rejected"
     with pytest.raises(BadRequest, match="native transcript has not materialized"):
-        await Spawner(registry).reserve(
+        await prepare_provider_reservation(
+            Spawner(registry),
             SpawnRequest(
                 harness="claude",
                 prompt="",
                 cwd=str(tmp_path),
                 approval="manual",
                 resume=session_id,
-            )
+            ),
         )
 
     assert [p.id for p in registry.list(include_dead=True)] == [predecessor.id]
@@ -248,14 +251,15 @@ async def test_claude_resume_keeps_a_matching_transcript_cwd(
     registry.store.upsert_participant(predecessor)
     registry.mark_dead(predecessor.id)
 
-    reservation = await Spawner(registry).reserve(
+    reservation = await prepare_provider_reservation(
+        Spawner(registry),
         SpawnRequest(
             harness="claude",
             prompt="",
             cwd=str(cwd),
             approval="manual",
             resume=session_id,
-        )
+        ),
     )
 
     successor = reservation.participant
@@ -277,7 +281,7 @@ async def test_codex_refuses_mismatched_domain(registry, monkeypatch):
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="does not match the Codex observation root"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
 
 
 async def test_opencode_refuses_mismatched_domain(registry, monkeypatch):
@@ -294,4 +298,4 @@ async def test_opencode_refuses_mismatched_domain(registry, monkeypatch):
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="does not match the OpenCode"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)

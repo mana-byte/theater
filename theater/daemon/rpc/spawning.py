@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 
 from theater.daemon.rails import (
     check_budget,
@@ -48,6 +49,51 @@ from theater.harness.registry.lookup import ProbeOutcome
 from theater.models import BadRequest, PublicOperationState, Status, new_id
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _PrivateSpawnMapping:
+    """Current private spawn mapping to provider and deferred launch requests."""
+
+    params: dict[str, object]
+    harness: str
+    worktree: bool | str | None
+    wiring: RuntimeWiring
+    provider: str | None
+
+    def provider_request(self, prompt: str) -> dict[str, object]:
+        # Accepted background/window_name/tmux_session inputs do not reach the provider.
+        request: dict[str, object] = {
+            "harness": self.harness,
+            "approval": _require(self.params, "approval"),
+            "workspace": {
+                "cwd": _require(self.params, "cwd"),
+                "worktree": self.worktree,
+                "base_ref": self.params.get("base_branch"),
+            },
+            "initiating_participant_id": self.params.get("parent_id"),
+            "model": self.params.get("model"),
+            "reasoning_effort": self.params.get("reasoning_effort"),
+            "resume": self.params.get("resume"),
+            "name": self.params.get("name"),
+            "description": self.params.get("description"),
+        }
+        if prompt:
+            request["prompt"] = prompt
+        if self.provider is not None:
+            request["provider"] = self.provider
+        return request
+
+    def deferred_payload(self) -> dict[str, object]:
+        # Retain raw omission/null, including ignored presentation, until handoff admission.
+        return {
+            **self.params,
+            "approval": _require(self.params, "approval"),
+            "cwd": _require(self.params, "cwd"),
+            "worktree": self.worktree,
+            "wiring": self.wiring.value,
+            "provider": self.provider,
+        }
 
 
 def _wiring_param(params: dict) -> RuntimeWiring:
@@ -100,38 +146,18 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     if worktree:
         reject_worktree_outside_git(_require(params, "cwd"))
     wiring = _wiring_param(params)
+    mapping = _PrivateSpawnMapping(params, harness_name, worktree, wiring, provider)
     if params.get("after") is not None or params.get("task_kind") is not None:
         return _defer_until_source(
             daemon,
-            params,
+            mapping,
             response_format,
-            worktree,
-            wiring,
-            provider=provider,
             attachment=attachment,
         )
     prompt = compose_prompt(
         params.get("prompt") or "", skills=attachment.block, response_format=response_format
     )
-    request: dict[str, object] = {
-        "harness": harness_name,
-        "approval": _require(params, "approval"),
-        "workspace": {
-            "cwd": _require(params, "cwd"),
-            "worktree": worktree,
-            "base_ref": params.get("base_branch"),
-        },
-        "initiating_participant_id": params.get("parent_id"),
-        "model": params.get("model"),
-        "reasoning_effort": params.get("reasoning_effort"),
-        "resume": params.get("resume"),
-        "name": params.get("name"),
-        "description": params.get("description"),
-    }
-    if prompt:
-        request["prompt"] = prompt
-    if provider is not None:
-        request["provider"] = provider
+    request = mapping.provider_request(prompt)
     key = params.get("idempotency_key")
     if key is None:
         key = f"private-spawn-{new_id()}"
@@ -142,7 +168,7 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
         idempotency_key=key,
         params=request,
         launch_prompt=prompt or None,
-        launch_wiring=wiring,
+        launch_wiring=mapping.wiring,
         launch_response_format=response_format,
         launch_play=attachment.plan,
     )
@@ -189,20 +215,14 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
 
 
 def _defer_until_source(
-    daemon, params, response_format, worktree, wiring, *, provider, attachment: Attachment
+    daemon, mapping: _PrivateSpawnMapping, response_format, *, attachment: Attachment
 ) -> dict:
     """Reserve the task now and launch it when its source ends; nothing is created until then."""
+    params = mapping.params
     if params.get("idempotency_key") is not None:
         raise BadRequest("spawn parameter 'idempotency_key' is not supported with after")
     return daemon.handoff.admit_spawn(
-        {
-            **params,
-            "approval": _require(params, "approval"),
-            "cwd": _require(params, "cwd"),
-            "worktree": worktree,
-            "wiring": wiring.value,
-            "provider": provider,
-        },
+        mapping.deferred_payload(),
         task=params.get("prompt") or "",
         response_format=response_format,
         skills=attachment.block,

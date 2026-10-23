@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 from tests.support.builders import alias_predecessor
+from tests.support.launch_preparation import prepare_provider_reservation
 from tests.support.resume_harnesses import trusted_predecessor
 from theater.daemon.spawner import Spawner, SpawnRequest
+from theater.daemon.spawning.provider_launch import ParticipantLaunchService
+from theater.daemon.worktrees.service import WorkspaceRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
 from theater.harness.base import ResumeLaunchOverlay
 from theater.harness.builtin.plugins.vibe.constants import _MARKER_KEY, ISOLATION_MARKER
@@ -151,7 +154,7 @@ async def test_overlay_env_reaches_launch_plan(
         approval="edits",
         resume="sess-abc",
     )
-    reservation = await spawner.reserve(req)
+    reservation = await prepare_provider_reservation(spawner, req)
     assert reservation.plan.env["OVERLAY_KEY"] == "overlay"
     # Overlay wins on conflict.
     assert reservation.plan.env["PLAN_KEY"] == "overlay-wins"
@@ -159,7 +162,7 @@ async def test_overlay_env_reaches_launch_plan(
     assert overlay_harness.seen_plan_env == {"PLAN_KEY": "plan"}
 
 
-async def test_overlay_cwd_replaces_request_before_reservation(
+async def test_overlay_cwd_replaces_request_before_provider_preparation(
     registry, overlay_harness, monkeypatch, terminal_provider, tmp_path
 ):
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
@@ -170,14 +173,15 @@ async def test_overlay_cwd_replaces_request_before_reservation(
     overlay_harness.resume_cwd = str(authoritative)
     trusted_predecessor(registry, harness="overlay-test")
 
-    reservation = await Spawner(registry).reserve(
+    reservation = await prepare_provider_reservation(
+        Spawner(registry),
         SpawnRequest(
             harness="overlay-test",
             prompt="",
             cwd=str(requested),
             approval="edits",
             resume="sess-abc",
-        )
+        ),
     )
 
     spawned = reservation.participant
@@ -192,14 +196,15 @@ async def test_overlay_resume_reference_replaces_only_the_planner_input(
     overlay_harness.resume_reference = "/trusted/native/transcript.jsonl"
     predecessor = trusted_predecessor(registry, harness="overlay-test")
 
-    reservation = await Spawner(registry).reserve(
+    reservation = await prepare_provider_reservation(
+        Spawner(registry),
         SpawnRequest(
             harness="overlay-test",
             prompt="",
             cwd="/tmp",
             approval="edits",
             resume="sess-abc",
-        )
+        ),
     )
 
     spawned = reservation.participant
@@ -223,7 +228,7 @@ async def test_base_overlay_empty_for_domainless_predecessor(
         resume="sess-abc",
     )
     # Should succeed — base returns an empty overlay for domainless predecessor.
-    await spawner.reserve(req)
+    await prepare_provider_reservation(spawner, req)
 
 
 async def test_base_overlay_refuses_predecessor_with_domain(
@@ -242,7 +247,7 @@ async def test_base_overlay_refuses_predecessor_with_domain(
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="does not implement resume_launch_overlay"):
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
 
 
 async def test_overlay_env_wins_and_plan_env_not_mutated(
@@ -260,7 +265,7 @@ async def test_overlay_env_wins_and_plan_env_not_mutated(
         approval="edits",
         resume="sess-abc",
     )
-    reservation = await spawner.reserve(req)
+    reservation = await prepare_provider_reservation(spawner, req)
     # plan.env was not mutated.
     assert overlay_harness.seen_plan_env == {"PLAN_KEY": "plan"}
     assert reservation.plan.env["PLAN_KEY"] == "overlay-wins"
@@ -322,7 +327,7 @@ async def test_overlay_none_transcript_domain_preserves_plan_domain(
         approval="edits",
         resume="sess-abc",
     )
-    spawned = (await spawner.reserve(req)).participant
+    spawned = (await prepare_provider_reservation(spawner, req)).participant
     # The plan's domain was preserved, not cleared to None.
     assert registry.get(spawned.id).transcript_domain == "/tmp/plan-domain"
 
@@ -345,7 +350,7 @@ async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch,
     # but that is a *different* error than "no trusted". We assert positively:
     # the identity gate passed, meaning the predecessor was found.
     try:
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
     except BadRequest as exc:
         if "no trusted" in str(exc):
             pytest.fail("alias-stored row was not found at _validate_resume_identity: " + str(exc))
@@ -402,7 +407,7 @@ async def test_alias_resolves_at_resolve_resume_reference(registry, monkeypatch,
     # The spawn must NOT raise "belongs to harness" — the alias is
     # canonically "claude" and _resolve_resume_reference must accept it.
     try:
-        await spawner.reserve(req)
+        await prepare_provider_reservation(spawner, req)
     except BadRequest as exc:
         if "belongs to harness" in str(exc):
             pytest.fail("alias-stored row was rejected at _resolve_resume_reference: " + str(exc))
@@ -449,31 +454,34 @@ def _init_repo(path: Path) -> Path:
     return path
 
 
-async def test_rejected_plan_retains_named_workspace_for_explicit_cleanup(
-    registry, monkeypatch, tmp_path
+async def test_rejected_plan_removes_its_new_named_workspace(
+    daemon, terminal_provider, monkeypatch, tmp_path
 ):
     import subprocess
 
-    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     repo = _init_repo(tmp_path / "repo")
 
-    # Sabotage _validate_receipt_plan to reject the plan after _build_plan.
-    spawner = Spawner(registry)
-
-    def reject(plan, participant):
+    def reject(_plan, _participant):
         raise BadRequest("plan rejected by pre-flight")
 
-    monkeypatch.setattr(spawner, "_validate_receipt_plan", reject)
-
-    req = SpawnRequest(
-        harness="vibe",
-        prompt="say hello",
-        cwd=str(repo),
-        approval="edits",
-        worktree="doomed-name",
+    monkeypatch.setattr(daemon.spawner, "_validate_receipt_plan", reject)
+    accepted = await ParticipantLaunchService(daemon).spawn(
+        client_id="operator-a",
+        idempotency_key="rejected-new-named",
+        params={
+            "harness": "vibe",
+            "prompt": "say hello",
+            "approval": "edits",
+            "workspace": {"cwd": str(repo), "worktree": "doomed-name"},
+        },
     )
-    with pytest.raises(BadRequest, match="plan rejected"):
-        await spawner.reserve(req)
+    operation, _timed_out = await daemon.operation_service.wait(str(accepted["operation_id"]))
+    assert operation.state == "failed"
+    participant = daemon.registry.get(str(accepted["participant_id"]))
+    workspace = daemon.store.workspaces.get(participant.workspace_id)
+    assert workspace is not None and workspace.state == "removed"
+    assert not Path(workspace.path).exists()
+    assert terminal_provider.creations == []
 
     result = subprocess.run(  # noqa: ASYNC221
         ["git", "branch", "--list", "theater/named/*"],
@@ -482,36 +490,41 @@ async def test_rejected_plan_retains_named_workspace_for_explicit_cleanup(
         text=True,
         check=False,
     )
-    assert "theater/named/doomed-name" in result.stdout
+    assert "theater/named/doomed-name" not in result.stdout
 
 
-async def test_rejected_plan_preserves_an_existing_named_worktree(registry, monkeypatch, tmp_path):
+async def test_rejected_plan_preserves_an_existing_named_worktree(
+    daemon, terminal_provider, monkeypatch, tmp_path
+):
     import subprocess
 
-    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     repo = _init_repo(tmp_path / "repo")
-    spawner = Spawner(registry)
-    worktree, _branch = await spawner._spawn_named_worktree(
-        root=str(repo), name="retained-name", base_branch=None
+    existing = await daemon.workspace_service.reserve(
+        WorkspaceRequest(cwd=str(repo), worktree="retained-name"), reservation_id="seed-named"
     )
+    daemon.workspace_service.release_usage(existing.usage.usage_id, reason="seed_complete")
 
     def reject(_plan, _participant):
         raise BadRequest("plan rejected")
 
-    monkeypatch.setattr(spawner, "_validate_receipt_plan", reject)
+    monkeypatch.setattr(daemon.spawner, "_validate_receipt_plan", reject)
+    accepted = await ParticipantLaunchService(daemon).spawn(
+        client_id="operator-a",
+        idempotency_key="rejected-joined-named",
+        params={
+            "harness": "vibe",
+            "prompt": "say hello",
+            "approval": "edits",
+            "workspace": {"cwd": str(repo), "worktree": "retained-name"},
+        },
+    )
+    operation, _timed_out = await daemon.operation_service.wait(str(accepted["operation_id"]))
+    assert operation.state == "failed"
+    participant = daemon.registry.get(str(accepted["participant_id"]))
+    assert participant.workspace_id == existing.workspace.workspace_id
+    assert terminal_provider.creations == []
 
-    with pytest.raises(BadRequest, match="plan rejected"):
-        await spawner.reserve(
-            SpawnRequest(
-                harness="vibe",
-                prompt="say hello",
-                cwd=str(repo),
-                approval="edits",
-                worktree="retained-name",
-            )
-        )
-
-    assert Path(worktree).is_dir()
+    assert Path(existing.workspace.path).is_dir()
     result = subprocess.run(  # noqa: ASYNC221
         ["git", "rev-parse", "--verify", "theater/named/retained-name"],
         cwd=repo,
