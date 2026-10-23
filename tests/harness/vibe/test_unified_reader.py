@@ -26,7 +26,7 @@ from tests.support.vibe_store import (
     publish_default,
     sha256_json,
 )
-from theater.harness.builtin.plugins.vibe import unified_source, unified_store_io
+from theater.harness.builtin.plugins.vibe import unified_history, unified_source, unified_store_io
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
 from theater.harness.builtin.plugins.vibe.unified_store import (
     UnifiedStoreError,
@@ -385,6 +385,47 @@ async def test_revoke_does_not_restore_an_inflight_reader(store: Store, monkeypa
     assert source._reader.last_view is None
 
 
+async def test_revoke_fences_an_inflight_history_recovery(store: Store, monkeypatch) -> None:
+    publish_default(store)
+    source = make_source(store)
+    newest = await source.history_page(limit=1)
+    assert newest.snapshot_cursor is not None
+    started = threading.Event()
+    release = threading.Event()
+    original = unified_source.load_unified_store
+
+    def blocked(*args, **kwargs):
+        started.set()
+        assert release.wait(2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(unified_source, "load_unified_store", blocked)
+    task = asyncio.create_task(source.history_page(snapshot=newest.snapshot_cursor))
+    assert await asyncio.to_thread(started.wait, 2)
+    source.revoke_attachment()
+    release.set()
+    page = await task
+
+    assert page.events == () and page.trajectory == ()
+    assert page.pinned is True
+    assert source.path is None and source._reader.last_view is None
+
+
+async def test_discard_attachment_drops_its_staged_advancement(store: Store) -> None:
+    publish_default(store)
+    source = make_source(store)
+    assert (await source.read()).attached is not None
+    assert source.pending_source_checkpoint() is not None
+
+    source.discard_attachment()
+    assert source.source_checkpoint() is None
+    assert source.pending_source_checkpoint() is None
+    assert (await source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+    assert source.source_checkpoint() is not None
+
+
 # --- Source: bounded polling ----------------------------------------------------
 
 
@@ -447,7 +488,7 @@ async def test_source_generation_rollover_full_reloads(store: Store, monkeypatch
     batch = await source.read()
     assert batch.progressed is True
     assert reads.total > 0  # a new generation is a full load, not a consume
-    view = await source._load_fresh(store.current)
+    view = await source._load_recovery(store.current, at_sequence=None, generation_hint=None)
     assert view is not None
     assert view.generation == GEN2
     plain = load_unified_store(store.current)
@@ -657,8 +698,8 @@ async def test_history_page_indexes_once_and_projects_only_selected_entries(
 ):
     entries = [message_entry("same", str(index)) for index in range(1000)]
     store.publish(generation=GEN1, snapshot_sequence=0, state=make_state(entries), watermark=1)
-    original_entries = unified_source._entries
-    original_project = unified_source.project_unified_entry
+    original_entries = unified_history._entries
+    original_project = unified_history.project_unified_entry
     scans = projects = 0
 
     def counted_entries(view):
@@ -671,8 +712,8 @@ async def test_history_page_indexes_once_and_projects_only_selected_entries(
         projects += 1
         return original_project(*args, **kwargs)
 
-    monkeypatch.setattr(unified_source, "_entries", counted_entries)
-    monkeypatch.setattr(unified_source, "project_unified_entry", counted_project)
+    monkeypatch.setattr(unified_history, "_entries", counted_entries)
+    monkeypatch.setattr(unified_history, "project_unified_entry", counted_project)
     source = make_source(store)
     page = await source.history_page(limit=4)
     assert scans <= 3

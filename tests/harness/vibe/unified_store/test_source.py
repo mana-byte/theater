@@ -94,8 +94,10 @@ def test_source_projects_mutation_and_resumes_from_checkpoint(store: Store) -> N
         known_location=str(store.current),
         source_checkpoint=checkpoint,
     )
+    assert resumed.source_checkpoint() == checkpoint
     assert asyncio.run(resumed.read()).attached is not None
     resumed.commit_attachment()
+    assert resumed.source_checkpoint() == checkpoint
     resumed_update = asyncio.run(resumed.read())
     assert [event.kind for event in resumed_update.events] == [
         EventKind.TOOL_CALL,
@@ -419,6 +421,14 @@ def test_turn_ends_across_several_generations_replay_every_retained_segment(
         if retained
         else []
     )
+    if not retained:
+        source.rollback_source_checkpoint()
+        retried = asyncio.run(source.read())
+        assert retried.turn_state is not None and not retried.turn_state.complete
+        assert [end for end in ends(retried) if end[3]] == []
+        source.acknowledge_source_checkpoint()
+        settled = asyncio.run(source.read())
+        assert settled.turn_state is not None and settled.turn_state.complete
 
 
 def test_expired_checkpoint_rebaselines_without_replaying_entries(store: Store) -> None:
