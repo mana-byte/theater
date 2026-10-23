@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ from theater.mcp_plugins.compiler import compile_manifest
 from theater.mcp_plugins.loading import LOCAL, SHIPPED, LoadedMcpPlugin
 from theater.mcp_plugins.loading import discover as discover_mcp
 from theater.mcp_plugins.loading import load_plugin as load_mcp
+from theater.mcp_plugins.selection import select_packages
 from theater.plugins.catalog import RejectedPlugin, SkippedPlugin
 from theater.plugins.catalog import scan as scan_user_plugins
 
@@ -206,21 +206,10 @@ def _skipped_rows(plugins: Iterable[SkippedPlugin]) -> list[dict[str, Any]]:
 def _selected(
     plugins: Iterable[LoadedMcpPlugin],
 ) -> tuple[dict[str, LoadedMcpPlugin], tuple[LoadedMcpPlugin, ...]]:
-    by_name: dict[str, dict[str, list[LoadedMcpPlugin]]] = {
-        SHIPPED: defaultdict(list),
-        LOCAL: defaultdict(list),
-    }
+    by_source: dict[str, list[LoadedMcpPlugin]] = {SHIPPED: [], LOCAL: []}
     for plugin in plugins:
-        by_name[plugin.source][plugin.name].append(plugin)
-    selected: dict[str, LoadedMcpPlugin] = {}
-    duplicates: list[LoadedMcpPlugin] = []
-    for source in (SHIPPED, LOCAL):
-        for name, group in by_name[source].items():
-            if len(group) == 1:
-                selected[name] = group[0]
-            else:
-                duplicates.extend(group)
-    return selected, tuple(duplicates)
+        by_source[plugin.source].append(plugin)
+    return select_packages(by_source[SHIPPED], by_source[LOCAL])
 
 
 def _base_row(
