@@ -177,6 +177,7 @@ def minimal_gates() -> ControlGates:
         check_prompt=lambda prompt: None,
         check_settings=lambda model, effort: None,
         cwd_for=lambda participant_id: "/tmp",
+        check_settings_for=lambda participant_id, model, effort: None,
     )
 
 

@@ -33,7 +33,7 @@ def _rejection_diagnostic(rejection) -> dict[str, str | None]:
     return diagnostic
 
 
-def _snapshot(daemon):
+def snapshot(daemon):
     catalog = mcp_registry.catalog()
     return registry.discover(
         plugin_skills=catalog.registered_skills,
@@ -92,22 +92,24 @@ def _ordered_positions(play: Play) -> list[str]:
 
 def list_skills(daemon, *, play: object = None, grouped: object = False) -> dict:
     """Flat by default for CLI and frontend; ``grouped`` puts play members under their play."""
-    snapshot = _snapshot(daemon)
-    rejections = [_rejection_diagnostic(rejection) for rejection in snapshot.rejections]
+    catalog_snapshot = snapshot(daemon)
+    rejections = [_rejection_diagnostic(rejection) for rejection in catalog_snapshot.rejections]
     play_name = play
     if play_name is not None:
-        if not isinstance(play_name, str) or snapshot.play(play_name) is None:
-            known = ", ".join(play.name for play in snapshot.plays) or "none"
+        if not isinstance(play_name, str) or catalog_snapshot.play(play_name) is None:
+            known = ", ".join(play.name for play in catalog_snapshot.plays) or "none"
             raise NotFound(f"no play named {play_name!r}; installed plays: {known}")
-        return {"plays": [_play_view(snapshot.play(play_name), snapshot)]}
+        return {"plays": [_play_view(catalog_snapshot.play(play_name), catalog_snapshot)]}
     if grouped is True:
         return {
-            "skills": [_skill_metadata(skill) for skill in snapshot.skills if skill.play is None],
-            "plays": [_play_view(play, snapshot) for play in snapshot.plays],
+            "skills": [
+                _skill_metadata(skill) for skill in catalog_snapshot.skills if skill.play is None
+            ],
+            "plays": [_play_view(play, catalog_snapshot) for play in catalog_snapshot.plays],
             "rejections": rejections,
         }
     return {
-        "skills": [_skill_metadata(skill) for skill in snapshot.skills],
+        "skills": [_skill_metadata(skill) for skill in catalog_snapshot.skills],
         "rejections": rejections,
     }
 
@@ -126,16 +128,16 @@ def load_skill(daemon, name: object, *, preview: object = False, caller_id: obje
             "skills.load parameter 'name' must be a canonical skill name; "
             "call skills.list and pass one returned name"
         )
-    snapshot = _snapshot(daemon)
+    catalog_snapshot = snapshot(daemon)
     try:
-        skill = snapshot.load(name)
+        skill = catalog_snapshot.load(name)
     except UnknownSkill as exc:
         raise NotFound(
             f"skill {name!r} is not available; call skills.list to select an installed skill"
         ) from exc
     loaded: dict[str, object] = {**_skill_metadata(skill), "content": skill.content}
     # Only an agent's own load names a caller; frontend and CLI reads never start a play.
-    play = snapshot.play(skill.play) if skill.play is not None else None
+    play = catalog_snapshot.play(skill.play) if skill.play is not None else None
     if (
         not preview
         and isinstance(caller_id, str)
