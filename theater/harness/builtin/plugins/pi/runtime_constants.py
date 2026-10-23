@@ -3,7 +3,7 @@
 import re
 
 PI_FRONTEND_QUALIFIED_FLOOR = (0, 80, 8)
-PI_FRONTEND_QUALIFIED_MAX = (1, 3, 0)
+PI_FRONTEND_QUALIFIED_MAX = (1, 4, 0)
 # Broken published artifacts inside [FLOOR, MAX]: 0.85.0 crashes at import
 # (no ModelRuntime/agent_settled).
 PI_FRONTEND_QUALIFIED_EXCLUDED = ((0, 85, 0),)
