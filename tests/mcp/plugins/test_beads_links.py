@@ -199,6 +199,31 @@ async def test_duplicate_replays_cost_nothing_and_conflicts_refuse(
     assert FakeClient.facts_calls == 0
 
 
+async def test_new_link_keeps_the_existing_normalized_record_shape(
+    adapter: BeadsService, tmp_path: Path
+) -> None:
+    task_id = await make_task(adapter)
+    existing = seed_links(tmp_path, task_id, 1)[0]
+    existing["future_field"] = "stored but not part of this version"
+    FakeBoard(tmp_path, "instance-one").command(
+        "update", task_id, "--metadata", json.dumps({"theater_links": [existing]}), actor="author"
+    )
+    FakeClient.facts = {"work-new": fact("work-new")}
+
+    await adapter.link_task_job(task_id, "work-new", "work")
+
+    records = raw_row(tmp_path, task_id)["metadata"]["theater_links"]
+    assert records[0] == {key: value for key, value in existing.items() if key != "future_field"}
+    assert records[1] == {
+        "version": 1,
+        "handle": "work-new",
+        "role": "work",
+        "review_of": None,
+        "generation": 0,
+        "created_at": FakeClient.facts["work-new"]["created_at"],
+    }
+
+
 async def test_review_of_must_name_a_work_link_on_the_same_task(
     adapter: BeadsService, tmp_path: Path
 ) -> None:

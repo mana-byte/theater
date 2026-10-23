@@ -129,6 +129,29 @@ def test_permission_gate_precedes_backend(tmp_path: Path, monkeypatch) -> None:
     FakeClient.permissions = ["read", "write"]
 
 
+def test_permission_is_rechecked_after_board_lock(tmp_path: Path, monkeypatch) -> None:
+    FakeClient.reset()
+    monkeypatch.setattr(service, "TheaterPluginClient", FakeClient)
+    original = FakeClient.play_context
+    calls = 0
+
+    async def changed_context(client):
+        nonlocal calls
+        result = await original(client)
+        calls += 1
+        if calls == 2:
+            result["play"]["permissions"] = ["read"]
+        return result
+
+    monkeypatch.setattr(FakeClient, "play_context", changed_context)
+    monkeypatch.setattr(Board, "ensure", lambda _board: pytest.fail("backend was reached"))
+
+    with pytest.raises(BeadsError, match="no Beads write grant"):
+        asyncio.run(BeadsService(tmp_path).create_task("Permission changed"))
+    assert calls == 2
+    assert not (tmp_path / "plays").exists()
+
+
 def test_cancelled_backend_keeps_board_lock_until_worker_finishes(
     tmp_path: Path, monkeypatch
 ) -> None:
