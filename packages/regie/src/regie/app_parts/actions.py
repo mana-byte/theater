@@ -6,7 +6,7 @@ from functools import partial
 from time import monotonic
 
 from regie.app_parts._shared import _AppBase, logger
-from regie.app_parts.projection import ProjectionSync
+from regie.app_parts.projection import attempt_snapshot
 from regie.controllers.actions import ActionRecord
 from regie.controllers.controls import describe_action
 from regie.latency import action_phase
@@ -66,9 +66,7 @@ class ActionTracking(_AppBase):
                 if self._surface.trajectory_participant_id == participant_id:
                     self._surface.show_dashboard()
                     self._sync_surface()
-            attempt = await ProjectionSync._attempt_snapshot(
-                self._state, phase=action_phase(record, "snapshot")
-            )
+            attempt = await attempt_snapshot(self._state, phase=action_phase(record, "snapshot"))
             if isinstance(attempt, Exception):
                 self._show_state_error(attempt)
                 return

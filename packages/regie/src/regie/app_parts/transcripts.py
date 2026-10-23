@@ -5,7 +5,7 @@ from __future__ import annotations
 from textual.command import CommandPalette
 
 from regie.app_parts._shared import _AppBase
-from regie.app_parts.projection import ProjectionSync
+from regie.app_parts.projection import attempt_snapshot
 from regie.controllers.transcripts import TranscriptBindState
 from regie.palette import TranscriptCandidateCommands
 from theater.frontend import (
@@ -134,7 +134,7 @@ class TranscriptRecovery(_AppBase):
             self.notify(f"transcript bind refused: {record.detail}", severity="error")
             return
         self.notify("transcript identity recovered", severity="information")
-        attempt = await ProjectionSync._attempt_snapshot(self._state)
+        attempt = await attempt_snapshot(self._state)
         if isinstance(attempt, Exception):
             self._show_state_error(attempt)
             return

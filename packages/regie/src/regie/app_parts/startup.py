@@ -6,7 +6,7 @@ import asyncio
 from functools import partial
 
 from regie.app_parts._shared import _AppBase, logger
-from regie.app_parts.projection import ProjectionSync
+from regie.app_parts.projection import attempt_snapshot
 from regie.controllers.startup import start_reader
 from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_milestone, startup_phase, startup_stage
@@ -137,9 +137,7 @@ class StartupLoading(_AppBase):
         return tuple(entry for entry in self._harnesses if entry.installed)
 
     async def _initialize_projection(self) -> None:
-        attempt = await ProjectionSync._attempt_snapshot(
-            self._state, phase=startup_phase("snapshot")
-        )
+        attempt = await attempt_snapshot(self._state, phase=startup_phase("snapshot"))
         if isinstance(attempt, Exception):
             self._show_state_error(attempt)
             self._finish_initial_projection()

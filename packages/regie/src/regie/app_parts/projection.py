@@ -47,19 +47,19 @@ _STATE_READ_ERRORS = (
 )
 
 
+async def attempt_snapshot(
+    state: StateController, *, phase: AbstractContextManager[None] | None = None
+) -> StateProjection | Exception:
+    try:
+        with phase if phase is not None else nullcontext():
+            return await state.initialize()
+    except _STATE_READ_ERRORS as exc:
+        return exc
+
+
 class ProjectionSync(_AppBase):
     #: Inputs of the last completed tree render; an equal fingerprint means it is current.
     _projection_fingerprint: tuple[object, ...] | None = None
-
-    @staticmethod
-    async def _attempt_snapshot(
-        state: StateController, *, phase: AbstractContextManager[None] | None = None
-    ) -> StateProjection | Exception:
-        try:
-            with phase if phase is not None else nullcontext():
-                return await state.initialize()
-        except _STATE_READ_ERRORS as exc:
-            return exc
 
     async def _tick_synchronize(self) -> None:
         if not self._view_active:
