@@ -5,8 +5,10 @@ from __future__ import annotations
 import ast
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from ..contract import VerifiedSet, version_key
+from ..gate_literals import assignments, replace_literal_span
 
 _CONSTANTS = Path("theater/harness/builtin/plugins/pi/runtime_constants.py")
 _ANCHOR_NAMES = ("PI_FRONTEND_QUALIFIED_FLOOR", "PI_FRONTEND_QUALIFIED_MAX")
@@ -48,29 +50,29 @@ class _GateLiterals:
 
 def _gate_literals(root: Path) -> _GateLiterals:
     source = (root / _CONSTANTS).read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(_CONSTANTS))
     anchors: dict[str, tuple[int, int, int]] = {}
     excluded: tuple[tuple[int, int, int], ...] | None = None
     max_node: ast.Assign | None = None
-    for node in tree.body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+    for assignment in assignments(
+        source, (*_ANCHOR_NAMES, _EXCLUDED_NAME), filename=str(_CONSTANTS)
+    ):
+        if not isinstance(assignment.statement, ast.Assign):
             continue
-        target = node.targets[0]
-        if not isinstance(target, ast.Name):
-            continue
-        if target.id in _ANCHOR_NAMES:
-            if target.id in anchors:
-                raise ValueError(f"duplicate Pi gate anchor {target.id} in {_CONSTANTS}")
-            value = ast.literal_eval(node.value)
+        if assignment.name in _ANCHOR_NAMES:
+            if assignment.name in anchors:
+                raise ValueError(f"duplicate Pi gate anchor {assignment.name} in {_CONSTANTS}")
+            value = assignment.literal()
             if not _is_triple(value):
-                raise ValueError(f"Pi gate anchor {target.id} must be a three-integer literal")
-            anchors[target.id] = value
-            if target.id == "PI_FRONTEND_QUALIFIED_MAX":
-                max_node = node
-        elif target.id == _EXCLUDED_NAME:
+                raise ValueError(
+                    f"Pi gate anchor {assignment.name} must be a three-integer literal"
+                )
+            anchors[assignment.name] = cast(tuple[int, int, int], value)
+            if assignment.name == "PI_FRONTEND_QUALIFIED_MAX":
+                max_node = assignment.statement
+        elif assignment.name == _EXCLUDED_NAME:
             if excluded is not None:
-                raise ValueError(f"duplicate Pi gate anchor {target.id} in {_CONSTANTS}")
-            value = ast.literal_eval(node.value)
+                raise ValueError(f"duplicate Pi gate anchor {assignment.name} in {_CONSTANTS}")
+            value = assignment.literal()
             if not isinstance(value, tuple) or not all(_is_triple(entry) for entry in value):
                 raise ValueError(
                     f"Pi gate anchor {_EXCLUDED_NAME} must be a tuple of three-integer literals"
@@ -107,11 +109,13 @@ def apply_bump(root: Path, greens: Sequence[str]) -> list[Path]:
         return []
     if node.lineno != node.end_lineno:
         raise ValueError(f"Pi gate anchor must occupy one line in {_CONSTANTS}")
-    lines = source.splitlines(keepends=True)
-    old_line = lines[node.lineno - 1]
-    old_value = old_line[node.value.col_offset : node.value.end_col_offset]
-    if old_value != str(current):
-        raise ValueError(f"Pi gate anchor has changed shape in {_CONSTANTS}")
-    lines[node.lineno - 1] = old_line.replace(old_value, str(new), 1)
-    (root / _CONSTANTS).write_text("".join(lines), encoding="utf-8")
+    updated = replace_literal_span(
+        source,
+        node.value,
+        str(current),
+        str(new),
+        f"Pi gate anchor has changed shape in {_CONSTANTS}",
+        first_match=True,
+    )
+    (root / _CONSTANTS).write_text(updated, encoding="utf-8")
     return [_CONSTANTS]

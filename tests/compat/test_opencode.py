@@ -125,6 +125,37 @@ def test_apply_bump_fails_closed_when_ceiling_anchor_is_missing(coupled_tree: Pa
         opencode.ADAPTER.apply_bump(coupled_tree, [_candidate()])
 
 
+def test_rewrite_reports_missing_anchor_before_bad_release(coupled_tree: Path) -> None:
+    with pytest.raises(ValueError, match="bump anchor missing"):
+        opencode_bump.rewrite_ceiling(coupled_tree, "MISSING_MAX_VERSION", "bad-release")
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    ["OPENCODE_TUI_MAX_VERSION = [1, 2, 3]", "OPENCODE_TUI_MAX_VERSION = (1, 2)"],
+)
+def test_gate_rejects_nontriple_tuple_literals(coupled_tree: Path, replacement: str) -> None:
+    path = coupled_tree / opencode_bump.RUNTIME_PLAN
+    source = path.read_text(encoding="utf-8")
+    source = source.replace(
+        next(line for line in source.splitlines() if line.startswith("OPENCODE_TUI_MAX_VERSION =")),
+        replacement,
+    )
+    path.write_text(source, encoding="utf-8")
+    with pytest.raises(ValueError, match="the OpenCode gate is unreadable"):
+        opencode_bump.read_gate(coupled_tree)
+
+
+def test_gate_rejects_duplicate_plain_anchor_but_ignores_annotation(coupled_tree: Path) -> None:
+    path = coupled_tree / opencode_bump.RUNTIME_PLAN
+    source = path.read_text(encoding="utf-8")
+    path.write_text(source + "\nOPENCODE_TUI_MAX_VERSION: tuple = (9, 9, 9)\n")
+    assert opencode_bump.read_gate(coupled_tree) == opencode_bump.read_gate(REPO_ROOT)
+    path.write_text(source + "\nOPENCODE_TUI_MAX_VERSION = (9, 9, 9)\n")
+    with pytest.raises(ValueError, match="the OpenCode gate is unreadable"):
+        opencode_bump.read_gate(coupled_tree)
+
+
 def test_discover_keeps_only_the_1x_line(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         opencode.github,

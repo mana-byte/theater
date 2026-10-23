@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import ast
-import re
 from collections.abc import Sequence
 from pathlib import Path
 
 from ..contract import VerifiedSet, version_key
+from ..gate_literals import assignments, replace_tuple_line
 
 COMPAT = Path("theater/harness/builtin/plugins/claude/compatibility.py")
 _NAMES = ("_HOOK_FLOOR", "_QUALIFIED_MAX")
@@ -20,15 +20,13 @@ def _text(version: tuple[int, int, int]) -> str:
 def gate(root: Path) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
     """The hook floor and the inclusive qualified maximum, read without importing theater."""
     found: dict[str, tuple[int, int, int]] = {}
-    for statement in ast.parse((root / COMPAT).read_text(encoding="utf-8")).body:
-        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+    for assignment in assignments((root / COMPAT).read_text(encoding="utf-8"), _NAMES):
+        if not isinstance(assignment.statement, ast.Assign):
             continue
-        target = statement.targets[0]
-        if isinstance(target, ast.Name) and target.id in _NAMES:
-            value = ast.literal_eval(statement.value)
-            if not (isinstance(value, tuple) and len(value) == 3):
-                raise ValueError(f"invalid Claude gate {target.id}")
-            found[target.id] = value
+        value = assignment.literal()
+        if not (isinstance(value, tuple) and len(value) == 3):
+            raise ValueError(f"invalid Claude gate {assignment.name}")
+        found[assignment.name] = value
     if missing := set(_NAMES) - found.keys():
         raise ValueError(f"Claude gate assignment missing: {', '.join(sorted(missing))}")
     return found["_HOOK_FLOOR"], found["_QUALIFIED_MAX"]
@@ -56,9 +54,8 @@ def bump(root: Path, greens: Sequence[str]) -> list[Path]:
     if keys[-1] <= maximum:
         return []
     source = (root / COMPAT).read_text(encoding="utf-8")
-    anchor = re.search(r"(?m)^_QUALIFIED_MAX = \(\d+, \d+, \d+\)$", source)
-    if anchor is None:
-        raise ValueError("Claude _QUALIFIED_MAX assignment missing")
-    updated = source[: anchor.start()] + f"_QUALIFIED_MAX = {keys[-1]}" + source[anchor.end() :]
+    updated = replace_tuple_line(
+        source, "_QUALIFIED_MAX", keys[-1], "Claude _QUALIFIED_MAX assignment missing"
+    )
     (root / COMPAT).write_text(updated, encoding="utf-8")
     return [COMPAT]
