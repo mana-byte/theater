@@ -114,6 +114,7 @@ class RecordingGates:
             check_prompt=check_prompt,
             check_settings=check_settings,
             cwd_for=cwd_for,
+            check_settings_for=lambda participant_id, model, effort: None,
         )
 
 

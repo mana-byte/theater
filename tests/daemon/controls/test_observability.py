@@ -393,6 +393,7 @@ async def test_control_service_registers_counter_on_the_one_bridge(store, spy) -
         check_prompt=lambda prompt: None,
         check_settings=lambda model, effort: None,
         cwd_for=lambda participant_id: "/tmp",
+        check_settings_for=lambda participant_id, model, effort: None,
     )
     jobs = JobManager(store)
     for _ in range(3):

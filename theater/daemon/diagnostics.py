@@ -59,29 +59,8 @@ def usage_summary(
     }
 
 
-def usage_by_harness(
-    daemon, *, timestamp: float, detailed: bool = False, describe_loaded=describe
-) -> dict:
-    """Usage for each loaded or historically observed harness over three periods."""
-    day_since = calendar_period_since("day", timestamp)
-    week_since = calendar_period_since("week", timestamp)
-    month_since = calendar_period_since("month", timestamp)
-    assert day_since is not None and week_since is not None and month_since is not None
-    boundaries = {"day": day_since, "week": week_since, "month": month_since}
-    if detailed:
-        aggregated = daemon.store.usage_by_harness_detailed(
-            day_since=day_since,
-            week_since=week_since,
-            month_since=month_since,
-        )
-        observed = aggregated["harnesses"]
-    else:
-        aggregated = None
-        observed = daemon.store.usage_by_harness(
-            day_since=day_since,
-            week_since=week_since,
-            month_since=month_since,
-        )
+def _usage_rows(observed: list[dict], *, detailed: bool) -> list[dict]:
+    """Order loaded and historical harnesses, filling unloaded periods."""
     observed_by_name = {row["harness"]: row for row in observed}
     empty_period = {
         "input_tokens": 0,
@@ -93,7 +72,7 @@ def usage_by_harness(
         "active_days": 0,
     }
     # `describe` also reports plugins that failed to import.
-    loaded = [row["name"] for row in describe_loaded() if not row["error"]]
+    loaded = [row["name"] for row in describe() if not row["error"]]
     extra = sorted(set(observed_by_name) - set(loaded) - {"unknown"})
     names = [*loaded, *extra]
     unknown = observed_by_name.get("unknown")
@@ -118,9 +97,33 @@ def usage_by_harness(
         elif detailed:
             row = {**row, "models": list(row.get("models", []))}
         rows.append(row)
+    return rows
+
+
+def usage_by_harness(daemon, *, timestamp: float, detailed: bool = False) -> dict:
+    """Usage for each loaded or historically observed harness over three periods."""
+    day_since = calendar_period_since("day", timestamp)
+    week_since = calendar_period_since("week", timestamp)
+    month_since = calendar_period_since("month", timestamp)
+    assert day_since is not None and week_since is not None and month_since is not None
+    boundaries = {"day": day_since, "week": week_since, "month": month_since}
+    if detailed:
+        aggregated = daemon.store.usage_by_harness_detailed(
+            day_since=day_since,
+            week_since=week_since,
+            month_since=month_since,
+        )
+        observed = aggregated["harnesses"]
+    else:
+        aggregated = None
+        observed = daemon.store.usage_by_harness(
+            day_since=day_since,
+            week_since=week_since,
+            month_since=month_since,
+        )
     result = {
         "since": boundaries,
-        "harnesses": rows,
+        "harnesses": _usage_rows(observed, detailed=detailed),
     }
     if detailed:
         result["totals"] = aggregated["totals"]
@@ -138,38 +141,7 @@ def usage_by_harness_since(daemon, since: float, *, timestamp: float) -> dict[st
         week_since=boundaries["week"],
         month_since=boundaries["month"],
     )
-    observed_by_name = {row["harness"]: row for row in observed}
-    empty_period = {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": 0,
-        "reasoning_output_tokens": 0,
-        "cost_microcents": 0,
-        "active_days": 0,
-    }
-    loaded = [row["name"] for row in describe() if not row["error"]]
-    extra = sorted(set(observed_by_name) - set(loaded) - {"unknown"})
-    names = [*loaded, *extra]
-    unknown = observed_by_name.get("unknown")
-    if unknown is not None and any(
-        period["active_days"] > 0
-        for period in (unknown["today"], unknown["week"], unknown["month"])
-    ):
-        names.append("unknown")
-    rows = [
-        observed_by_name.get(
-            name,
-            {
-                "harness": name,
-                "today": dict(empty_period),
-                "week": dict(empty_period),
-                "month": dict(empty_period),
-            },
-        )
-        for name in names
-    ]
-    return {"since": boundaries, "harnesses": rows}
+    return {"since": boundaries, "harnesses": _usage_rows(observed, detailed=False)}
 
 
 def calendar_period_since(period: object, timestamp: float) -> float | None:

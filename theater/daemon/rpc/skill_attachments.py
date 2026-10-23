@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from theater.constants.skills import SKILL_ATTACH_MAX_BYTES
 from theater.daemon.plays import PlayPlan, plan_for
 from theater.daemon.rpc.redirect import _caller_name
-from theater.daemon.rpc.skills import _snapshot
 from theater.daemon.skill_cards import render_skills
+from theater.daemon.skill_catalog import snapshot
 from theater.harness import HARNESSES, normalize
 from theater.models import BadRequest, NotFound
 from theater.skills import is_skill_reference
@@ -52,11 +52,11 @@ def attach_skills(daemon, params: dict, *, task: str, sender: str | None) -> Att
         raise BadRequest(
             "skills needs a prompt: Theater attaches each skill after your task, so state the task"
         )
-    snapshot = _snapshot(daemon)
+    catalog_snapshot = snapshot(daemon)
     resolved = []
     for name in names:
         try:
-            resolved.append(snapshot.load(name))
+            resolved.append(catalog_snapshot.load(name))
         except UnknownSkill:
             raise NotFound(
                 f"skill {name!r} is not available: call list_skills and attach an installed, "
@@ -70,7 +70,7 @@ def attach_skills(daemon, params: dict, *, task: str, sender: str | None) -> Att
             f"the attached skills render to {size} bytes, over the {SKILL_ATTACH_MAX_BYTES}-byte "
             "bound; attach fewer or shorter skills, or ask the agent to call load_skill itself"
         )
-    return Attachment(block=block, plan=plan_for(resolved, snapshot))
+    return Attachment(block=block, plan=plan_for(resolved, catalog_snapshot))
 
 
 def reject_skills_resume(harness_name: object, resume: object, skills: str | None) -> None:

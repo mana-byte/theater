@@ -47,7 +47,7 @@ class ControlGates:
     cwd_for: Callable[[str], str | None]
 
     #: Exact participant-aware allowlist check after shape validation.
-    check_settings_for: Callable[[str, str | None, str | None], None] | None = None
+    check_settings_for: Callable[[str, str | None, str | None], None]
 
     #: ``(participant_id) -> None``. Provider-only readiness gate for prompt
     #: submission: fresh identity-fenced screen evidence must show a prompt

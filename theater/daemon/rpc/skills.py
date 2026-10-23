@@ -5,10 +5,6 @@ from __future__ import annotations
 from theater.daemon import skill_catalog
 from theater.daemon.rpc.router import method
 
-_snapshot = skill_catalog._snapshot  # attachment admission
-registry = skill_catalog.registry
-mcp_registry = skill_catalog.mcp_registry
-
 
 @method("skills.list")
 async def _skills_list(daemon, params: dict) -> dict:

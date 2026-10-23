@@ -65,6 +65,7 @@ class PresenceGates:
             check_prompt=lambda prompt: None,
             check_settings=lambda model, effort: None,
             cwd_for=lambda participant_id: None,
+            check_settings_for=lambda participant_id, model, effort: None,
         )
 
     async def _send_preflight(self, participant_id: str) -> None:

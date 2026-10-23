@@ -458,6 +458,7 @@ async def test_unrelated_participant_is_never_stalled_by_a_blocked_gate(store):
             check_prompt=lambda prompt: None,
             check_settings=lambda model, effort: None,
             cwd_for=lambda participant_id: None,
+            check_settings_for=lambda participant_id, model, effort: None,
         ),
     )
     _OWNED_SERVICES.append(blocked_service)
