@@ -233,12 +233,13 @@ class OperationController:
     async def retry(self, action: str, target_id: str) -> ActionRecord | None:
         """Explicitly replay an uncertain visible action with its retained key."""
         identity = (action, target_id)
+        record = self._records.get(identity)
         entry = self._active.get(identity)
         if entry is None:
-            return self._records.get(identity)
+            return record
         request = entry.request
-        if request is None or entry.record.state is not ActionState.UNCERTAIN:
-            return entry.record
+        if record is None or request is None or record.state is not ActionState.UNCERTAIN:
+            return record
         if request.kind == "result":
             return await self._invoke_result(identity, entry, request.send)
         return await self._invoke(identity, entry, request.send)

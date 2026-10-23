@@ -163,6 +163,55 @@ async def test_acknowledged_history_eviction_does_not_lose_an_observer_client() 
 
 
 @pytest.mark.asyncio
+async def test_retry_returns_replaced_visible_record_during_client_release(monkeypatch) -> None:
+    monkeypatch.setattr("regie.controllers.actions.REGIE_IDLE_ACTION_CLIENTS", 0)
+    closing = asyncio.Event()
+    release = asyncio.Event()
+
+    class DoneOperations:
+        async def wait(self, operation_id: str, *, wait_seconds: int) -> object:
+            assert (operation_id, wait_seconds) == ("operation-a", 30)
+            return SimpleNamespace(
+                value=SimpleNamespace(timed_out=False, operation=_operation("succeeded"))
+            )
+
+    class ClosingClient(Client):
+        async def close(self) -> None:
+            closing.set()
+            await release.wait()
+
+    action_client = ClosingClient()
+    action_client.operations = DoneOperations()
+    controller: OperationController
+    replacement: ActionRecord | None = None
+
+    def on_change(record: ActionRecord) -> None:
+        nonlocal replacement
+        if record.state is ActionState.SUCCEEDED and replacement is None:
+            replacement = controller.refuse_locally("send", "participant-a", "unavailable")
+
+    controller = OperationController(
+        cast(FrontendClient, Client()),
+        client_factory=lambda: cast(FrontendClient, action_client),
+        on_change=on_change,
+    )
+    original = await controller.send("participant-a", "hello")
+    wait = controller._active[("send", "participant-a")].wait
+    assert wait is not None
+    try:
+        await asyncio.wait_for(closing.wait(), timeout=1)
+        assert replacement is not None
+        assert controller.record("send", "participant-a") is replacement
+        assert await controller.retry("send", "participant-a") is replacement
+        assert original.state is ActionState.SUCCEEDED
+        assert len(action_client.controls.keys) == 1
+    finally:
+        release.set()
+        await asyncio.wait_for(wait, timeout=1)
+        await controller.close()
+
+
+@pytest.mark.asyncio
 async def test_pending_clicks_coalesce_on_stable_participant_id_and_retain_the_key() -> None:
     client = Client()
     controller = OperationController(cast(FrontendClient, client))
