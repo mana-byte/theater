@@ -1,9 +1,9 @@
 {
   "binary_path": "<binary on PATH; resolved per run>",
-  "binary_sha256": "399ff69c431c066e40de318fba45c2b07f45a76b19939d247ee4828fc70c4215",
-  "installed_version": "codex-cli 0.163.0",
+  "binary_sha256": "b93f6811d3f653f0fb83be4050d857fb9abbb111dfa2ce160563327daff7f306",
+  "installed_version": "codex-cli 0.164.0",
   "installed_version_command": "codex --version",
-  "installed_version_output": "codex-cli 0.163.0",
+  "installed_version_output": "codex-cli 0.164.0",
   "platform_facts": {
     "platform_arch": "x86_64",
     "platform_family": "unix",
@@ -20,7 +20,7 @@
       "JSONRPCRequest.json",
       "JSONRPCMessage.json"
     ],
-    "note": "schema files under protocol_schema/ were emitted by the installed 0.163.0 binary itself"
+    "note": "schema files under protocol_schema/ were emitted by the installed 0.164.0 binary itself"
   },
   "source": "captured against the unmodified installed release by tests/native/codex_qualify_runtime.py"
 }
