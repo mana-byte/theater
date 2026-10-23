@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -15,7 +14,6 @@ from theater.daemon.controls._common import (
     CONTROL_DELIVERY_UNKNOWN,
     CONTROL_UNKNOWN_ACK_LOST,
     CONTROL_UNKNOWN_READBACK_FAILED,
-    CONTROL_UNKNOWN_RECEIPT_MISMATCH,
     CONTROL_UNKNOWN_RECEIPT_UNKNOWN,
     DELIVERY_UNKNOWN_ERROR_CODE,
     LABEL_SETTINGS_UPDATE,
@@ -24,8 +22,12 @@ from theater.daemon.controls._common import (
 )
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.busy import BusyOperation
+from theater.daemon.controls.native_receipt import (
+    NativeAcknowledgementLost,
+    NativeReceiptMismatch,
+    transmit_native_action,
+)
 from theater.harness.contracts.runtime import (
-    ControlDeliveryPhase,
     ControlKind,
     ControlTransport,
     DeliveryResult,
@@ -154,34 +156,20 @@ class SettingsControls(ControlHost):
                     if value is not None
                 }
             )
-            operation_id = operation_id or self._mint_operation_id(
-                participant_id, ControlKind.SETTINGS_UPDATE
+            intent = self._native_reservation_intent(
+                participant_id,
+                ControlKind.SETTINGS_UPDATE,
+                operation_id=operation_id,
+                on_reserved=on_reserved,
+                pre_reserved=pre_reserved,
             )
-            if pre_reserved:
-                reserved = self._require_public_reservation(
-                    operation_id,
-                    participant_id=participant_id,
-                    kind=ControlKind.SETTINGS_UPDATE,
-                    phase=ControlDeliveryPhase.RESERVED,
-                    route=prepared.route,
-                )
-                self._require_reserved_native_identity(reserved, snapshot)
-            else:
-                self._reserve(
-                    operation_id,
-                    participant_id=participant_id,
-                    kind=ControlKind.SETTINGS_UPDATE,
-                    transport=ControlTransport.NATIVE_RUNTIME,
-                    phase=ControlDeliveryPhase.RESERVED,
-                    backend_generation=snapshot.backend_generation,
-                    native_session_id=snapshot.native_session_id,
-                    payload=payload,
-                )
-                self._notify_reserved(on_reserved, operation_id, None)
-            self._store.mark_control_operation_dispatched(
-                operation_id,
-                native_session_id=snapshot.native_session_id,
-                updated_at=self._clock(),
+            operation_id = self._admit_native_action(
+                intent,
+                participant_id=participant_id,
+                kind=ControlKind.SETTINGS_UPDATE,
+                route=prepared.route,
+                snapshot=snapshot,
+                payload=payload,
             )
             return await self._deliver_settings(
                 participant_id,
@@ -199,45 +187,32 @@ class SettingsControls(ControlHost):
         model: str | None,
         reasoning_effort: str | None,
     ) -> SettingsOutcome:
-        try:
-            receipt = await runtime.update_settings(
+        transmission = await transmit_native_action(
+            self,
+            operation_id=operation_id,
+            kind=ControlKind.SETTINGS_UPDATE,
+            transmit=lambda: runtime.update_settings(
                 operation_id=operation_id,
                 model=model,
                 reasoning_effort=reasoning_effort,
+            ),
+            cancelled_error=(
+                "the settings update was cancelled after transmission began; "
+                "its acknowledgement is unknown and it is never retried"
+            ),
+            mismatch_error=lambda receipt: (
+                f"the settings receipt named operation {receipt.operation_id!r}, "
+                f"not {operation_id!r}; the update is uncertain and the "
+                "receipt is not trusted to settle it"
+            ),
+        )
+        if isinstance(transmission, NativeAcknowledgementLost):
+            logger.warning(
+                "settings update for %s is uncertain: %s", participant_id, transmission.error
             )
-        except asyncio.CancelledError:
-            self._settle_uncertain(
-                operation_id,
-                error=(
-                    "the settings update was cancelled after transmission began; "
-                    "its acknowledgement is unknown and it is never retried"
-                ),
-            )
-            self._count_unknown_delivery(ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_ACK_LOST)
-            raise
-        except Exception as exc:
-            self._store.settle_control_operation(
-                operation_id,
-                result=DeliveryResult.UNKNOWN,
-                error_code=DELIVERY_UNKNOWN_ERROR_CODE,
-                error=str(exc),
-                updated_at=self._clock(),
-            )
-            logger.warning("settings update for %s is uncertain: %s", participant_id, exc)
             self._count_unknown_delivery(ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_ACK_LOST)
             return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
-        if not self._receipt_names_operation(operation_id, receipt):
-            self._settle_uncertain(
-                operation_id,
-                error=(
-                    f"the settings receipt named operation {receipt.operation_id!r}, "
-                    f"not {operation_id!r}; the update is uncertain and the "
-                    "receipt is not trusted to settle it"
-                ),
-            )
-            self._count_unknown_delivery(
-                ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_RECEIPT_MISMATCH
-            )
+        if isinstance(transmission, NativeReceiptMismatch):
             return SettingsOutcome(
                 applied=None,
                 model=model,
@@ -246,7 +221,7 @@ class SettingsControls(ControlHost):
                 error="the settings update stayed uncertain: the native receipt "
                 "named a different operation",
             )
-        self._settle_from_receipt(operation_id, receipt)
+        receipt = transmission.receipt
         if receipt.result is DeliveryResult.REJECTED:
             return SettingsOutcome(
                 applied=False,
