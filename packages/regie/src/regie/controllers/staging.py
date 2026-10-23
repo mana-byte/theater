@@ -11,12 +11,11 @@ from enum import StrEnum
 from regie.contracts import (
     LocalPresentationTarget,
     PresentationOperations,
-    PresentationTarget,
     RegieSettings,
     StageTarget,
 )
 from regie.controllers.session import SessionController
-from regie.presentation import stageability
+from regie.presentation import matches_terminal_identity, stageability
 from theater.frontend import Participant, Provider
 
 logger = logging.getLogger("regie")
@@ -120,15 +119,7 @@ class StageController:
         """Release only this participant's staged identity before requesting termination."""
         async with self._lock:
             target = self._session.target
-            route = participant.terminal_route
-            if not isinstance(target, PresentationTarget) or route is None:
-                return None
-            identity = route.identity
-            if (
-                target.provider_id != identity.provider_id
-                or target.terminal_id != identity.terminal_id
-                or target.terminal_incarnation != identity.terminal_incarnation
-            ):
+            if not matches_terminal_identity(target, participant):
                 return None
             return await self._unstage()
 

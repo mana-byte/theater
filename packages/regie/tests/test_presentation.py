@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from regie.contracts import PresentationTarget, RegieSettings
 from regie.controllers.presentation_queue import PresentationQueue
 from regie.controllers.session import SessionController
 from regie.controllers.staging import StageController, StageOutcome
+from regie.presentation import matches_terminal_identity, same_presentation_target
 
 from theater.frontend import Participant, Provider
 
@@ -94,6 +96,31 @@ def _provider(kind: str) -> Provider:
             "health": "healthy",
             "capabilities": [],
         }
+    )
+
+
+def test_terminal_identity_and_full_presentation_target_are_distinct() -> None:
+    participant = _participant()
+    route = participant.terminal_route
+    assert route is not None
+    target = PresentationTarget("provider-a", "tmux", "%42", "incarnation-a", {"harness": "codex"})
+
+    assert matches_terminal_identity(target, participant)
+    assert same_presentation_target(target, target)
+    changed_occupant = replace(target, occupant={"harness": "other"})
+    changed_kind = replace(target, provider_kind="ssh")
+    assert matches_terminal_identity(changed_occupant, participant)
+    assert matches_terminal_identity(changed_kind, participant)
+    assert not same_presentation_target(changed_occupant, target)
+    assert not same_presentation_target(changed_kind, target)
+    assert not matches_terminal_identity(
+        target,
+        replace(
+            participant,
+            terminal_route=replace(
+                route, identity=replace(route.identity, terminal_incarnation="new")
+            ),
+        ),
     )
 
 

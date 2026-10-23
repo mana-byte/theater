@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from time import monotonic
 
 from textual.containers import Vertical
@@ -11,7 +12,8 @@ from regie.contracts import LocalPresentationTarget, PresentationTarget
 from regie.controllers.surface import SurfaceMode
 from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_milestone
-from regie.presentation import stageability
+from regie.presentation import matches_terminal_identity, stageability
+from regie.state import StateController
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_UNMANAGED_POLL_INTERVAL_SECONDS
 from regie.widgets import ParticipantTree
@@ -36,6 +38,25 @@ def _tree_layout_fingerprint(layout: TreeLayout) -> tuple[object, ...]:
     return orders, separators, layout.pending
 
 
+_STATE_READ_ERRORS = (
+    FrontendClientError,
+    FrontendResponseError,
+    FrontendTransportError,
+    StateSynchronizationError,
+    TypeError,
+)
+
+
+async def attempt_snapshot(
+    state: StateController, *, phase: AbstractContextManager[None] | None = None
+) -> StateProjection | Exception:
+    try:
+        with phase if phase is not None else nullcontext():
+            return await state.initialize()
+    except _STATE_READ_ERRORS as exc:
+        return exc
+
+
 class ProjectionSync(_AppBase):
     #: Inputs of the last completed tree render; an equal fingerprint means it is current.
     _projection_fingerprint: tuple[object, ...] | None = None
@@ -54,13 +75,7 @@ class ProjectionSync(_AppBase):
             projection = (
                 await self._state.follow() if following else await self._state.synchronize()
             )
-        except (
-            FrontendClientError,
-            FrontendResponseError,
-            FrontendTransportError,
-            StateSynchronizationError,
-            TypeError,
-        ) as exc:
+        except _STATE_READ_ERRORS as exc:
             self._show_state_error(exc)
             stale_projection = self._state.projection
             if stale_projection is not None:
@@ -239,18 +254,10 @@ class ProjectionSync(_AppBase):
         target: object,
         projection: StateProjection,
     ) -> str | None:
-        if target is None:
+        if not isinstance(target, PresentationTarget):
             return None
         for participant_id, participant in projection.participants.items():
-            route = participant.terminal_route
-            if route is None:
-                continue
-            identity = route.identity
-            if (
-                identity.provider_id == getattr(target, "provider_id", None)
-                and identity.terminal_id == getattr(target, "terminal_id", None)
-                and identity.terminal_incarnation == getattr(target, "terminal_incarnation", None)
-            ):
+            if matches_terminal_identity(target, participant):
                 return participant_id
         return None
 
