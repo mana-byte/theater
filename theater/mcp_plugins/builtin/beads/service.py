@@ -8,6 +8,7 @@ import hashlib
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -36,14 +37,31 @@ def _text(value: str, field: str, maximum: int, *, required: bool = False) -> st
     return value
 
 
-class _NeedsFacts:
+type _Result = dict[str, Any]
+type _Facts = dict[str, dict[str, Any]]
+type _Action[T] = Callable[[Board, str, MemberSnapshot], T]
+
+
+@dataclass(frozen=True, slots=True)
+class _NeedsFacts[T]:
     """A plan's request for one bounded job-facts read before it finishes."""
 
-    __slots__ = ("context", "handles")
+    handles: list[str]
+    context: T
 
-    def __init__(self, handles: list[str], context: dict[str, Any]) -> None:
-        self.handles = handles
-        self.context = context
+
+@dataclass(frozen=True, slots=True)
+class _ProgressContext:
+    row: dict[str, Any]
+    rows: dict[str, dict[str, Any]]
+    ready: set[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _NewLinkContext:
+    row_status: object
+    close: int | float | None
+    state: links.TaskLinkState
 
 
 class BeadsService:
@@ -51,15 +69,12 @@ class BeadsService:
         self.state_dir = state_dir.resolve()
         self.bd_path = bd_path
 
-    async def _operate(
+    async def _operate[T](
         self,
         permission: str,
-        action: Callable[[Board, str, MemberSnapshot], Any],
-        finish: Callable[
-            [Board, str, MemberSnapshot, Any, dict[str, dict[str, Any]]], dict[str, Any]
-        ]
-        | None = None,
-    ) -> dict[str, Any]:
+        action: _Action[_Result | _NeedsFacts[T]],
+        finish: Callable[[Board, str, MemberSnapshot, T, _Facts], _Result] | None = None,
+    ) -> _Result:
         """Board work under one lock, with an optional job-facts phase in the middle.
 
         A plan returns _NeedsFacts to fetch one bounded facts read between two
@@ -93,14 +108,14 @@ class BeadsService:
                 # Same board and lock as the plan phase; it is already ensured.
                 return await self._run_locked(board, actor, members, complete, ensure=False)
 
-    async def _run_locked(
+    async def _run_locked[T](
         self,
         board: Board,
         actor: str,
         members: MemberSnapshot,
-        action: Callable[[Board, str, MemberSnapshot], Any],
+        action: _Action[T],
         ensure: bool = True,
-    ) -> Any:
+    ) -> T:
         """One shielded worker run; cancellation waits for bd to finish first."""
         worker = asyncio.create_task(
             asyncio.to_thread(self._run, board, actor, members, action, ensure)
@@ -112,23 +127,21 @@ class BeadsService:
             raise
 
     @staticmethod
-    def _run(
+    def _run[T](
         board: Board,
         actor: str,
         members: MemberSnapshot,
-        action: Callable[[Board, str, MemberSnapshot], Any],
+        action: _Action[T],
         ensure: bool = True,
-    ) -> Any:
+    ) -> T:
         if ensure:
             board.ensure()
         return action(board, actor, members)
 
     @staticmethod
-    async def _fetch_facts(
-        client: TheaterPluginClient, handles: list[str]
-    ) -> dict[str, dict[str, Any]]:
+    async def _fetch_facts(client: TheaterPluginClient, handles: list[str]) -> _Facts:
         """One bounded facts read per batch of stored handles."""
-        by_handle: dict[str, dict[str, Any]] = {}
+        by_handle: _Facts = {}
         try:
             for start in range(0, len(handles), links.FACTS_BATCH):
                 batch = handles[start : start + links.FACTS_BATCH]
@@ -201,20 +214,28 @@ class BeadsService:
 
             return await self._operate("read", action)
 
-        def plan(board, _actor, _members):
+        def plan(
+            board: Board, _actor: str, _members: MemberSnapshot
+        ) -> _Result | _NeedsFacts[_ProgressContext]:
             rows = board.rows()
             ready = board.ready_ids()
             board.require_id(task_id, rows)
             row = rows[task_id]
             state = links.task_state(row)
-            handles = links.facts_handles(state["links"])
+            handles = links.facts_handles(state.links)
             if not handles:
                 return links.progress_view(board, task_id, row, rows, ready, {})
-            return _NeedsFacts(handles, {"row": row, "rows": rows, "ready": ready})
+            return _NeedsFacts(handles, _ProgressContext(row, rows, ready))
 
-        def finish(board, _actor, _members, context, facts):
+        def finish(
+            board: Board,
+            _actor: str,
+            _members: MemberSnapshot,
+            context: _ProgressContext,
+            facts: _Facts,
+        ) -> _Result:
             return links.progress_view(
-                board, task_id, context["row"], context["rows"], context["ready"], facts
+                board, task_id, context.row, context.rows, context.ready, facts
             )
 
         return await self._operate("read", plan, finish)
@@ -236,42 +257,36 @@ class BeadsService:
         else:
             review_of = links.handle_text(review_of, "review_of")
 
-        def plan(board, _actor, _members):
+        def plan(
+            board: Board, _actor: str, _members: MemberSnapshot
+        ) -> _Result | _NeedsFacts[_NewLinkContext]:
             rows = board.rows()
             board.require_id(task_id, rows)
             row = rows[task_id]
             prepared = links.plan_link(row, handle, role, review_of)
-            if prepared["duplicate"]:
-                record = prepared["record"]
+            if isinstance(prepared, links.DuplicateLink):
                 return self._link_result(
-                    board, task_id, handle, record, True, prepared["links_total"]
+                    board, task_id, handle, prepared.record, True, prepared.links_total
                 )
-            state = prepared["state"]
+            state = prepared.state
             return _NeedsFacts(
                 [handle],
-                {
-                    "row_status": row.get("status"),
-                    "close": links.close_epoch(row),
-                    "state": state,
-                },
+                _NewLinkContext(row.get("status"), links.close_epoch(row), state),
             )
 
-        def finish(board, actor, _members, context, facts):
+        def finish(
+            board: Board,
+            actor: str,
+            _members: MemberSnapshot,
+            context: _NewLinkContext,
+            facts: _Facts,
+        ) -> _Result:
             created_at = links.authorize_new_link(facts.get(handle), board.instance_id, handle)
-            links.guard_new_link(
-                created_at, role, context["state"], context["row_status"], context["close"]
-            )
-            record = {
-                "version": links.LINK_VERSION,
-                "handle": handle,
-                "role": role,
-                "review_of": review_of,
-                "generation": context["state"]["generation"],
-                "created_at": created_at,
-            }
-            links.persist_link(board, task_id, context["state"]["links"], record, actor)
+            links.guard_new_link(created_at, role, context.state, context.row_status, context.close)
+            record = links.LinkRecord(handle, role, review_of, context.state.generation, created_at)
+            links.persist_link(board, task_id, context.state.links, record, actor)
             return self._link_result(
-                board, task_id, handle, record, False, len(context["state"]["links"]) + 1
+                board, task_id, handle, record, False, len(context.state.links) + 1
             )
 
         return await self._operate("write", plan, finish)
@@ -281,7 +296,7 @@ class BeadsService:
         board: Board,
         task_id: str,
         handle: str,
-        record: dict[str, Any],
+        record: links.LinkRecord,
         duplicate: bool,
         links_total: int,
     ) -> dict[str, Any]:
@@ -289,9 +304,9 @@ class BeadsService:
             "play_instance_id": board.instance_id,
             "task_id": task_id,
             "handle": handle,
-            "role": record["role"],
-            "review_of": record["review_of"],
-            "generation": record["generation"],
+            "role": record.role,
+            "review_of": record.review_of,
+            "generation": record.generation,
             "duplicate": duplicate,
             "links_total": links_total,
         }
