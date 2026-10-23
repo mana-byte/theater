@@ -5,7 +5,6 @@ Text parts are mutable replacements, so assistant output waits for its finish.
 
 from __future__ import annotations
 
-import sqlite3
 from typing import TYPE_CHECKING
 
 from theater.harness.base import Event, EventKind, TokenUsage, TurnTerminal, clip, whole
@@ -14,7 +13,7 @@ from theater.harness.source import Batch
 
 from .constants import DRAIN_LIMIT
 from .paths import _paths_from_tool
-from .store import event_rows, message_parts, message_role
+from .store import QueryConnection, event_rows
 from .values import (
     _error_detail,
     _error_terminal,
@@ -60,16 +59,16 @@ class OpenCodeParser:
     if TYPE_CHECKING:
 
         def _message_coordinate(
-            self, conn: sqlite3.Connection, message_id: object, fallback: int
+            self, conn: QueryConnection, message_id: object, fallback: int
         ) -> int: ...
 
         def _trajectory_for_part(
-            self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+            self, conn: QueryConnection, payload: dict, seq: int, *, raw_index: int
         ) -> list[TrajectoryFact]: ...
 
         def _trajectory_for_message(
             self,
-            conn: sqlite3.Connection,
+            conn: QueryConnection,
             payload: dict,
             seq: int,
             *,
@@ -172,7 +171,7 @@ class OpenCodeParser:
         )
         return out
 
-    def _drain(self, conn: sqlite3.Connection) -> Batch:
+    def _drain(self, conn: QueryConnection) -> Batch:
         rows = event_rows(conn, self._session, self._cursor, DRAIN_LIMIT + 1)
         if not rows:
             updates = self._refresh_mcp_trajectory()
@@ -199,7 +198,7 @@ class OpenCodeParser:
         )
 
     def _translate_with_trajectory(
-        self, conn: sqlite3.Connection, kind: str, payload: dict, seq: int
+        self, conn: QueryConnection, kind: str, payload: dict, seq: int
     ) -> tuple[list[Event], list[TrajectoryFact]]:
         if kind == "message.part.updated.1":
             part = payload.get("part")
@@ -218,7 +217,7 @@ class OpenCodeParser:
                 isinstance(message_id, str)
                 and bool(message_id)
                 and _has_tool_calls(
-                    load_json_object(row[0]) for row in message_parts(conn, message_id)
+                    load_json_object(row[0]) for row in conn.queries.message_parts(conn, message_id)
                 )
             )
             events = self._on_message(payload, seq, has_tool_calls)
@@ -235,7 +234,7 @@ class OpenCodeParser:
         # session.created / session.updated: progress, not conversation.
         return [], []
 
-    def _on_part(self, conn: sqlite3.Connection, payload: dict, seq: int) -> list[Event]:
+    def _on_part(self, conn: QueryConnection, payload: dict, seq: int) -> list[Event]:
         part = payload.get("part")
         if not isinstance(part, dict):
             return []
@@ -251,7 +250,7 @@ class OpenCodeParser:
         return []
 
     def _on_text(
-        self, conn: sqlite3.Connection, part: dict, ts: float | None, seq: int
+        self, conn: QueryConnection, part: dict, ts: float | None, seq: int
     ) -> list[Event]:
         mid = part.get("messageID") or ""
         text = part.get("text") or ""
@@ -479,12 +478,12 @@ class OpenCodeParser:
             )
         ]
 
-    def _role(self, conn: sqlite3.Connection, mid: str) -> str | None:
+    def _role(self, conn: QueryConnection, mid: str) -> str | None:
         """Resolve a skipped attachment event from current message state."""
         role = self._roles.get(mid)
         if role is not None:
             return role
-        row = message_role(conn, mid)
+        row = conn.queries.message_role(conn, mid)
         found = load_json_object(row[0]).get("role") if row is not None else None
         if isinstance(found, str):
             self._roles[mid] = found

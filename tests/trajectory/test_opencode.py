@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from tests.support.opencode_recorder import (
     Recorder,
@@ -109,6 +112,37 @@ def test_opencode_marks_json_tool_results_live_and_in_history(rec, workdir) -> N
         ContentFormat.JSON,
     ]
     assert all(result.details[0].preview.text == '{"ok":true,"items":[1,2]}' for result in results)
+
+
+@pytest.mark.parametrize("status,output", [("completed", '{"ok":true}'), ("error", "failed")])
+def test_opencode_completed_tool_fields_match_live_and_history_except_step_id(
+    rec, workdir, status, output
+) -> None:
+    source = _source(rec, workdir)
+    message = rec.message("message-1", "assistant")
+    state = {"status": status, "input": {"path": "note"}}
+    state["output" if status == "completed" else "error"] = output
+    rec._part(
+        {
+            "id": "part-1",
+            "messageID": message["id"],
+            "stepID": "step-1",
+            "type": "tool",
+            "callID": "call-1",
+            "parentCallID": "parent-1",
+            "tool": "theater_send",
+            "state": state,
+        }
+    )
+
+    live = asyncio.run(source.read())
+    history = asyncio.run(source.history_page(limit=10))
+    for kind in (TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT):
+        live_fact = next(fact for fact in live.trajectory if fact.kind is kind)
+        stored_fact = next(fact for fact in history.trajectory if fact.kind is kind)
+        assert live_fact.step_id == "step-1"
+        assert stored_fact.step_id is None
+        assert replace(live_fact, step_id=None) == stored_fact
 
 
 def test_opencode_live_trajectory_state_is_bounded(rec, workdir) -> None:

@@ -13,14 +13,11 @@ from pathlib import Path
 from theater import paths
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
-    CapabilityUnavailableReason,
     ConnectionHealth,
     ControlReceipt,
     DeliveryResult,
     HarnessRuntime,
     RuntimeBinding,
-    RuntimeCapabilities,
-    RuntimeCapability,
     RuntimeContext,
     RuntimeExecutionState,
     RuntimeLifecyclePhase,
@@ -44,13 +41,12 @@ from .runtime_plan import (
     OPENCODE_SERVER_V2_MIN_VERSION,
     parse_opencode_version,
 )
+from .runtime_policy import send_capabilities, server_http_refusal, valid_prompt
 from .server_live_v2 import OpenCodeV2LiveSource
 from .server_plan import SERVER_SECRET_ENV
 
 _PROTOCOL = "opencode-server-http-v2"
 _POLL_SECONDS = 0.5
-_PROMPT_MAX_CHARS = 60_000
-_PROMPT_MAX_BYTES = 60_000
 
 
 class OpenCodeServerV2Runtime(HarnessRuntime):
@@ -155,7 +151,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
             native_session_id=self._session_id,
             native_turn_id=None,
             settings=RuntimeSettings(),
-            capabilities=self._capabilities(health),
+            capabilities=send_capabilities(health, self._session_id is not None),
             health=health,
             health_diagnostics=()
             if health is ConnectionHealth.CONNECTED
@@ -164,12 +160,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
         )
 
     async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
-        if (
-            not isinstance(prompt, str)
-            or not prompt.strip()
-            or len(prompt) > _PROMPT_MAX_CHARS
-            or len(prompt.encode("utf-8")) > _PROMPT_MAX_BYTES
-        ):
+        if not valid_prompt(prompt):
             return _receipt(
                 operation_id,
                 DeliveryResult.REJECTED,
@@ -266,26 +257,6 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
 
     # ---- internals ----------------------------------------------------
 
-    def _capabilities(self, health: ConnectionHealth) -> RuntimeCapabilities:
-        reasons: dict[RuntimeCapability, CapabilityUnavailableReason] = dict.fromkeys(
-            (
-                RuntimeCapability.INTERRUPT,
-                RuntimeCapability.STEER,
-                RuntimeCapability.SETTINGS_UPDATE,
-            ),
-            CapabilityUnavailableReason.THEATER_POLICY,
-        )
-        controls = (RuntimeCapability.SEND, RuntimeCapability.QUEUE_FOLLOWUP)
-        if health is ConnectionHealth.CONNECTED and self._session_id is not None:
-            return RuntimeCapabilities(available=frozenset(controls), unavailable_reasons=reasons)
-        reason = (
-            CapabilityUnavailableReason.GATED_BY_BACKEND
-            if health in {ConnectionHealth.UNOPENED, ConnectionHealth.DISCONNECTED}
-            else CapabilityUnavailableReason.SESSION_STATE
-        )
-        reasons.update(dict.fromkeys(controls, reason))
-        return RuntimeCapabilities(available=frozenset(), unavailable_reasons=reasons)
-
     def _plugin_source(self) -> str:
         """The exact generated plugin entrypoint this participant's plan rendered."""
         config_path = self.context.config_path or paths.mcp_config_path(self.context.participant_id)
@@ -322,21 +293,14 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
 
 
 def _map_http_error(operation_id: str, exc: OpenCodeHttpError, what: str) -> ControlReceipt:
-    if not exc.written:
-        return _receipt(
-            operation_id,
-            DeliveryResult.REJECTED,
-            error_code="server_refused",
-            error=f"the OpenCode server refused the {what} before delivery ({exc})",
-        )
-    status = exc.status
-    if status is not None and 400 <= status < 500:
-        code = "invalid_session" if status == 404 else "server_refused"
+    refusal = server_http_refusal(exc, what)
+    if refusal is not None:
+        code, error = refusal
         return _receipt(
             operation_id,
             DeliveryResult.REJECTED,
             error_code=code,
-            error=f"the OpenCode server refused the {what} with HTTP {status} ({exc.reason})",
+            error=error,
         )
     return _unknown(operation_id, str(exc))
 

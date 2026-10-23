@@ -21,16 +21,9 @@ _VIEW = "type IN ('user', 'assistant', 'idle', 'compaction')"
 #: Status answers "is a turn in flight"; a compaction never is one, so it stays out.
 _TURN_VIEW = "type IN ('user', 'assistant', 'idle')"
 _COLUMNS = "id, session_id, type, seq, time_updated, data"
+SESSION_TABLE = "session_v2"
 
 type Row = tuple[str, str, str, int, int, str]
-
-
-class V2Connection(sqlite3.Connection):
-    """A read-only connection onto an OpenCode 2.x database."""
-
-
-def is_v2(conn: sqlite3.Connection) -> bool:
-    return isinstance(conn, V2Connection)
 
 
 def row_info(conn: sqlite3.Connection, row: Row) -> dict:
@@ -75,7 +68,7 @@ def message_coordinate(conn: sqlite3.Connection, message_id: str) -> tuple[objec
     return conn.execute("SELECT seq FROM session_message WHERE id = ?", (message_id,)).fetchone()
 
 
-def part_ordinal(part_id: str) -> int:
+def part_ordinal(_conn: sqlite3.Connection, part_id: str) -> int:
     found = translate_v2.split_part_id(part_id)
     return found[1] if found is not None else 0
 
