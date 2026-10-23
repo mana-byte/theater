@@ -9,6 +9,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import cast
 
 import pytest
+from regie.app_parts.projection import followed_spawn
 from regie.controllers.actions import ActionRecord, ActionState
 from regie.dashboard.widgets import WelcomeDashboard
 from regie.state import StateController
@@ -24,6 +25,7 @@ from packages.regie.tests.support.app_fakes import (
     make_projection,
 )
 from packages.regie.tests.support.waiting import wait_until
+from theater.frontend import FrontendTransportError, StateProjection
 from theater.frontend import ResumeCandidate as PublicResumeCandidate
 from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
@@ -206,6 +208,7 @@ async def test_completed_spawn_is_selected_staged_and_focused(caplog) -> None:
                 {**state.projection.participants, spawned.participant_id: spawned}
             ),
         )
+        refetches = state.initialize_calls + state.catch_up_calls
 
         await app._reconcile_completed_action(
             ActionRecord(
@@ -227,13 +230,14 @@ async def test_completed_spawn_is_selected_staged_and_focused(caplog) -> None:
         assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
         assert [target.terminal_id for target in presentation.staged] == ["%3"]
         assert [target.terminal_id for target in presentation.focused] == ["%3"]
+        # The follow lane had already delivered the spawn: neither a catch-up nor a snapshot.
+        assert state.initialize_calls + state.catch_up_calls == refetches
         phases = [
             row.message
             for row in caplog.records
             if row.name == "regie.latency" and row.message.startswith("action.spawn.")
         ]
         assert [line.split()[0] for line in phases] == [
-            "action.spawn.snapshot",
             "action.spawn.projection",
             "action.spawn.unmanaged",
         ]
@@ -243,6 +247,102 @@ async def test_completed_spawn_is_selected_staged_and_focused(caplog) -> None:
                 break
             await pilot.pause()
         assert "after_projection_ms=" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("catch_up_result", ["delivers", "lags", "fails"])
+async def test_spawn_the_follow_lane_missed_is_caught_up_before_any_snapshot(
+    catch_up_result: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="regie")
+    app, _client, presentation = build_app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        state = cast(FakeState, app._state)
+        assert state.projection is not None
+        spawned = make_participant("participant-3", name="spawned")
+        delivered = replace(
+            state.projection,
+            participants=MappingProxyType(
+                {**state.projection.participants, spawned.participant_id: spawned}
+            ),
+        )
+        refetches = state.initialize_calls
+
+        async def catch_up() -> None:
+            state.catch_up_calls += 1
+            if catch_up_result == "fails":
+                raise FrontendTransportError("lost")
+            if catch_up_result == "delivers":
+                state.projection = delivered
+
+        async def refetch() -> StateProjection:
+            state.initialize_calls += 1
+            state.projection = delivered
+            return delivered
+
+        monkeypatch.setattr(state, "catch_up", catch_up)
+        monkeypatch.setattr(state, "initialize", refetch)
+        await app._reconcile_completed_action(
+            ActionRecord(
+                "spawn",
+                "spawn-target",
+                "spawn-key",
+                participant_id=spawned.participant_id,
+                state=ActionState.SUCCEEDED,
+                operation_id="spawn-operation",
+            )
+        )
+        await app.workers.wait_for_complete()
+        for _ in range(50):  # staging runs on the presentation queue
+            if presentation.focused:
+                break
+            await pilot.pause()
+
+        phases = [
+            row.message.split()[0]
+            for row in caplog.records
+            if row.name == "regie.latency" and row.message.startswith("action.spawn.")
+        ]
+        assert [target.terminal_id for target in presentation.focused] == ["%3"]
+        assert state.catch_up_calls == 1
+        assert state.initialize_calls == refetches + (catch_up_result != "delivers")
+        assert ("action.spawn.snapshot" in phases) is (catch_up_result != "delivers")
+
+
+def _routed_spawn(*, routed: bool = True, stale: bool = False) -> StateProjection:
+    spawned = make_participant("participant-3", name="spawned")
+    projection = make_projection()
+    return replace(
+        projection,
+        participants=MappingProxyType(
+            {
+                **projection.participants,
+                spawned.participant_id: spawned
+                if routed
+                else replace(spawned, terminal_route=None),
+            }
+        ),
+        stale=stale,
+    )
+
+
+@pytest.mark.parametrize(
+    ("projection", "participant_id", "held"),
+    [
+        (_routed_spawn(), "participant-3", True),
+        (_routed_spawn(), "participant-4", False),
+        (_routed_spawn(routed=False), "participant-3", False),
+        (_routed_spawn(stale=True), "participant-3", False),
+        (None, "participant-3", False),
+    ],
+    ids=["held", "absent", "unrouted", "stale", "no-projection"],
+)
+def test_followed_spawn_needs_a_current_routed_participant(
+    projection: StateProjection | None, participant_id: str, held: bool
+) -> None:
+    assert followed_spawn(projection, participant_id) is (projection if held else None)
 
 
 @pytest.mark.asyncio

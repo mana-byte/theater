@@ -6,7 +6,7 @@ from functools import partial
 from time import monotonic
 
 from regie.app_parts._shared import _AppBase, logger
-from regie.app_parts.projection import attempt_snapshot
+from regie.app_parts.projection import attempt_catch_up, attempt_snapshot, followed_spawn
 from regie.controllers.actions import ActionRecord
 from regie.controllers.controls import describe_action
 from regie.latency import action_phase
@@ -66,11 +66,17 @@ class ActionTracking(_AppBase):
                 if self._surface.trajectory_participant_id == participant_id:
                     self._surface.show_dashboard()
                     self._sync_surface()
-            attempt = await attempt_snapshot(self._state, phase=action_phase(record, "snapshot"))
-            if isinstance(attempt, Exception):
-                self._show_state_error(attempt)
-                return
-            projection = attempt
+            projection = (
+                await self._spawned_projection(record) if record.action == "spawn" else None
+            )
+            if projection is None:
+                attempt = await attempt_snapshot(
+                    self._state, phase=action_phase(record, "snapshot")
+                )
+                if isinstance(attempt, Exception):
+                    self._show_state_error(attempt)
+                    return
+                projection = attempt
             self._last_state_error = None
             if not self._view_active:
                 return
@@ -87,6 +93,16 @@ class ActionTracking(_AppBase):
                 self._present_spawned(participant_id)
         finally:
             self._action_presentation.finish_reconciliation(record, succeeded=succeeded)
+
+    async def _spawned_projection(self, record: ActionRecord) -> StateProjection | None:
+        """The projection once the follow lane holds the spawn; None means refetch a snapshot."""
+        participant_id = record.participant_id
+        if participant_id is None:
+            return None
+        if (projection := followed_spawn(self._state.projection, participant_id)) is None:
+            await attempt_catch_up(self._state, phase=action_phase(record, "catch_up"))
+            projection = followed_spawn(self._state.projection, participant_id)
+        return projection
 
     def _present_spawned(self, participant_id: str) -> None:
         """A participant spawned from Régie opens staged and focused, ready for input."""

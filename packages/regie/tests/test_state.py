@@ -7,7 +7,7 @@ import contextlib
 import json
 import shutil
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -60,10 +60,17 @@ async def _send(writer: asyncio.StreamWriter, value: dict[str, object]) -> None:
     await writer.drain()
 
 
+type _FollowAnswer = Callable[[dict[str, object]], Awaitable[dict[str, object]]]
+
+
 @asynccontextmanager
 async def _server(
-    methods: list[str], *, follow_started: asyncio.Event | None = None
+    methods: list[str],
+    *,
+    follow_started: asyncio.Event | None = None,
+    follow: _FollowAnswer | None = None,
 ) -> AsyncIterator[Path]:
+    """Serve snapshots; a follow hangs until the client closes, unless `follow` answers it."""
     snapshots = 0
     follows = 0
 
@@ -92,6 +99,8 @@ async def _server(
                     )
                 elif method == "frontend.state.release":
                     result = {"released": True}
+                elif method == "frontend.state.follow" and follow is not None:
+                    result = await follow(request)
                 elif method == "frontend.state.follow":
                     follows += 1
                     if follow_started is not None:
@@ -179,4 +188,95 @@ async def test_waiting_follow_yields_to_refresh_but_propagates_owner_cancellatio
             if pending is not None:
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
+            await client.close()
+
+
+def _answering(release: asyncio.Event, started: asyncio.Event | None = None) -> _FollowAnswer:
+    """Answer every follow with an empty batch; the 30 s long poll first waits for `release`."""
+
+    async def answer(request: dict[str, object]) -> dict[str, object]:
+        if request["params"]["wait_seconds"] == 30:
+            if started is not None:
+                started.set()
+            await release.wait()
+        return {
+            "transactions": [],
+            "cursor": {"stream_id": "stream-a", "sequence": 1},
+            "timed_out": False,
+        }
+
+    return answer
+
+
+@pytest.mark.asyncio
+async def test_catch_up_lets_a_poll_in_flight_land_instead_of_cancelling_it() -> None:
+    methods: list[str] = []
+    started, release = asyncio.Event(), asyncio.Event()
+    async with _server(methods, follow=_answering(release, started)) as socket_path:
+        client = FrontendClient(socket_path, client_id="regie-catch-up")
+        controller = StateController(client)
+        poll = None
+        try:
+            await controller.initialize()
+            poll = asyncio.create_task(controller.follow())
+            async with asyncio.timeout(2):
+                await started.wait()
+            catching = asyncio.create_task(controller.catch_up())
+            done, _pending = await asyncio.wait({catching}, timeout=0.05)
+            assert not done  # it waits for the poll rather than racing it
+
+            release.set()
+            async with asyncio.timeout(2):
+                await catching
+                landed = await poll
+            assert landed is controller.projection and not landed.stale
+        finally:
+            release.set()
+            if poll is not None:
+                poll.cancel()
+                await asyncio.gather(poll, return_exceptions=True)
+            await client.close()
+
+    assert methods.count("frontend.state.snapshot") == 1  # no resnapshot after the poll landed
+
+
+@pytest.mark.asyncio
+async def test_catch_up_without_a_poll_makes_one_incremental_follow() -> None:
+    methods: list[str] = []
+    async with _server(methods, follow=_answering(asyncio.Event())) as socket_path:
+        client = FrontendClient(socket_path, client_id="regie-catch-up")
+        controller = StateController(client)
+        await controller.initialize()
+        await controller.catch_up()
+        assert controller.projection is not None and not controller.projection.stale
+        await client.close()
+
+    assert methods.count("frontend.state.snapshot") == 1
+    assert methods.count("frontend.state.follow") == 1
+
+
+@pytest.mark.asyncio
+async def test_catch_up_gives_up_on_a_silent_poll_without_cancelling_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("regie.state._CATCH_UP_WAIT_SECONDS", 0.05)
+    methods: list[str] = []
+    started, release = asyncio.Event(), asyncio.Event()
+    async with _server(methods, follow=_answering(release, started)) as socket_path:
+        client = FrontendClient(socket_path, client_id="regie-catch-up")
+        controller = StateController(client)
+        poll = None
+        try:
+            await controller.initialize()
+            poll = asyncio.create_task(controller.follow())
+            async with asyncio.timeout(2):
+                await started.wait()
+                await controller.catch_up()
+            assert not poll.done()  # the caller decides: a snapshot refetch cancels it as before
+            assert controller.projection is not None and not controller.projection.stale
+        finally:
+            release.set()
+            if poll is not None:
+                poll.cancel()
+                await asyncio.gather(poll, return_exceptions=True)
             await client.close()

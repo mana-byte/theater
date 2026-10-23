@@ -7,6 +7,7 @@ import asyncio
 from theater.frontend import FrontendClient, StateProjection, StateSynchronizer
 
 _FOLLOW_WAIT_SECONDS = 30.0
+_CATCH_UP_WAIT_SECONDS = 0.25
 
 
 class StateController:
@@ -34,6 +35,15 @@ class StateController:
                 page_size=page_size,
                 wait_seconds=0,
             )
+
+    async def catch_up(self) -> None:
+        """Install what the daemon committed; a poll in flight is awaited, never cancelled."""
+        task = self._follow_task
+        if task is None:
+            await self.synchronize()
+            return
+        # The commit being caught up woke this poll too; cancelling it would force a resnapshot.
+        await asyncio.wait({task}, timeout=_CATCH_UP_WAIT_SECONDS)
 
     async def follow(self) -> StateProjection | None:
         """Wait on the SDK's follow lane; explicit refreshes can preempt this read."""

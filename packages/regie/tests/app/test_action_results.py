@@ -19,6 +19,7 @@ from packages.regie.tests.support.app_fakes import (
     make_participant,
     make_projection,
 )
+from packages.regie.tests.support.waiting import wait_until
 from theater.frontend import (
     AcceptedOperation,
     FrontendTransportError,
@@ -98,14 +99,10 @@ async def test_successful_durable_action_automatically_reconciles_the_tree(monke
         await pilot.pause()
         assert state.initialize_calls == initial_snapshots
         finished.set()
-        for _ in range(20):
-            if state.initialize_calls > initial_snapshots:
-                break
-            await pilot.pause()
+        await wait_until(pilot, lambda: len(app._action_presentation.reconciled) == 1)
 
-        assert state.initialize_calls == initial_snapshots + 1
+        assert state.initialize_calls == initial_snapshots  # the follow lane already delivered it
         assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
-        assert len(app._action_presentation.reconciled) == 1
 
 
 @pytest.mark.asyncio

@@ -107,12 +107,16 @@ class FakeState:
     def __init__(self, projection: StateProjection) -> None:
         self.projection: StateProjection | None = projection
         self.initialize_calls = 0
+        self.catch_up_calls = 0
         self.catalog_acknowledgements: list[int] = []
 
     async def initialize(self) -> StateProjection:
         self.initialize_calls += 1
         assert self.projection is not None
         return self.projection
+
+    async def catch_up(self) -> None:
+        self.catch_up_calls += 1
 
     async def synchronize(self) -> StateProjection:
         assert self.projection is not None

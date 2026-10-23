@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, suppress
 from time import monotonic
 
 from textual.containers import Vertical
@@ -55,6 +55,23 @@ async def attempt_snapshot(
             return await state.initialize()
     except _STATE_READ_ERRORS as exc:
         return exc
+
+
+async def attempt_catch_up(state: StateController, *, phase: AbstractContextManager[None]) -> None:
+    """Best-effort incremental sync; a read error only makes the caller refetch a snapshot."""
+    with suppress(*_STATE_READ_ERRORS), phase:
+        await state.catch_up()
+
+
+def followed_spawn(
+    projection: StateProjection | None, participant_id: str
+) -> StateProjection | None:
+    """The follow lane's projection when it already holds the spawned participant, routed."""
+    if projection is None or projection.stale:
+        return None
+    participant = projection.participants.get(participant_id)
+    routed = participant is not None and participant.terminal_route is not None
+    return projection if routed else None
 
 
 class ProjectionSync(_AppBase):
