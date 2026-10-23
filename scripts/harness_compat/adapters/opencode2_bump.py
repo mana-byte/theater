@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..contract import VerifiedSet, load_evidenced, version_key
+from ..contract import VerifiedSet, version_key
 from . import opencode_bump
 from .opencode_bump import RUNTIME_PLAN, rewrite_ceiling
 
@@ -30,7 +30,6 @@ def verified_set(root: Path) -> VerifiedSet:
         floor=floor,
         ceiling=ceiling,
         known_bad=frozenset(),
-        evidenced=load_evidenced(root, "opencode2"),
     )
 
 

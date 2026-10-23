@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import cast
 
-from ..contract import VerifiedSet, load_evidenced, version_key
+from ..contract import VerifiedSet, version_key
 
 RUNTIME_PLAN = Path("theater/harness/builtin/plugins/opencode/runtime_plan.py")
 COUPLED_FILES: tuple[Path, ...] = (RUNTIME_PLAN,)
@@ -96,7 +96,6 @@ def verified_set(root: Path) -> VerifiedSet:
         floor=floor,
         ceiling=ceiling,
         known_bad=frozenset(),
-        evidenced=load_evidenced(root, "opencode"),
     )
 
 

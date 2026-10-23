@@ -46,7 +46,6 @@ def test_verified_reads_an_exclusive_range_gate(coupled_tree: Path) -> None:
     assert gate.kind == "range"
     assert gate.floor == floor and gate.ceiling == ceiling
     assert gate.known_bad == frozenset()
-    assert gate.evidenced == frozenset()
     assert gate.admits(floor) and gate.admits(opencode_bump.previous_patch(ceiling))
     assert not gate.admits(ceiling)
     assert not gate.admits(opencode_bump.previous_patch(floor))

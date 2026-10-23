@@ -30,7 +30,6 @@ def test_the_gate_is_an_exclusive_range_that_may_end_in_dot_zero(tree: Path) -> 
     gate = opencode2.ADAPTER.verified(tree)
     assert (gate.kind, gate.floor, gate.ceiling) == ("range", floor, ceiling)
     assert gate.admits(floor) and not gate.admits(ceiling)
-    assert gate.evidenced == frozenset()
 
 
 def test_the_bump_moves_only_the_2x_ceiling_and_not_the_1x_one(tree: Path) -> None:

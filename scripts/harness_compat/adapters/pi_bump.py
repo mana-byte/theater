@@ -6,7 +6,7 @@ import ast
 from collections.abc import Sequence
 from pathlib import Path
 
-from ..contract import VerifiedSet, load_evidenced, version_key
+from ..contract import VerifiedSet, version_key
 
 _CONSTANTS = Path("theater/harness/builtin/plugins/pi/runtime_constants.py")
 _ANCHOR_NAMES = ("PI_FRONTEND_QUALIFIED_FLOOR", "PI_FRONTEND_QUALIFIED_MAX")
@@ -88,7 +88,6 @@ def verified(root: Path) -> VerifiedSet:
         floor=_version(gate.anchors["PI_FRONTEND_QUALIFIED_FLOOR"]),
         ceiling=_next_patch(_version(gate.anchors["PI_FRONTEND_QUALIFIED_MAX"])),
         known_bad=frozenset(_version(entry) for entry in gate.excluded),
-        evidenced=load_evidenced(root, "pi"),
     )
 
 

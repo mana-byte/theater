@@ -7,7 +7,7 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from ..contract import VerifiedSet, load_evidenced, version_key
+from ..contract import VerifiedSet, version_key
 
 COMPAT = Path("theater/harness/builtin/plugins/claude/compatibility.py")
 _NAMES = ("_HOOK_FLOOR", "_QUALIFIED_MAX")
@@ -41,7 +41,6 @@ def verified(root: Path) -> VerifiedSet:
         "range",
         floor=_text(floor),
         ceiling=_text((major, minor, patch + 1)),
-        evidenced=load_evidenced(root, "claude"),
     )
 
 
