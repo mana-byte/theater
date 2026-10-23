@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Mapping
-from contextvars import Context, copy_context
+from contextvars import Context as TaskContext
+from contextvars import Token, copy_context
 from typing import Any
+
+from opentelemetry.context import Context
+from opentelemetry.trace import Span, SpanKind, Tracer
 
 from theater.observability.catalog import TraceKind
 
 
-def background_context() -> Context:
+def background_context() -> TaskContext:
     """Preserve task context without extending a finished request's trace forever."""
     from opentelemetry import context as otel_context
 
@@ -19,9 +23,7 @@ def background_context() -> Context:
     return context
 
 
-def _otel_span_kind(kind: TraceKind) -> Any:
-    from opentelemetry.trace import SpanKind
-
+def _otel_span_kind(kind: TraceKind) -> SpanKind:
     return {
         TraceKind.NONE: SpanKind.INTERNAL,
         TraceKind.INTERNAL: SpanKind.INTERNAL,
@@ -30,7 +32,7 @@ def _otel_span_kind(kind: TraceKind) -> Any:
     }[kind]
 
 
-def _get_tracer() -> Any:
+def _get_tracer() -> Tracer:
     from opentelemetry.trace import get_tracer
 
     return get_tracer("theater")
@@ -40,8 +42,8 @@ def start_span(
     name: str,
     kind: TraceKind,
     attributes: Mapping[str, Any] | None = None,
-    parent_context: Any = None,
-) -> tuple[Any | None, Any | None]:
+    parent_context: Context | None = None,
+) -> tuple[Span | None, Token[Context] | None]:
     """Start OTel span, return (span, token). Ends span if context setup fails."""
     from opentelemetry import context as otel_context
     from opentelemetry.trace import set_span_in_context
@@ -65,7 +67,7 @@ def start_span(
     return span, token
 
 
-def detach_span(token: Any) -> None:
+def detach_span(token: Token[Context] | None) -> None:
     if token is None:
         return
     from opentelemetry import context as otel_context
@@ -74,12 +76,12 @@ def detach_span(token: Any) -> None:
         otel_context.detach(token)
 
 
-def end_span(span: Any) -> None:
+def end_span(span: Span) -> None:
     with contextlib.suppress(Exception):
         span.end()
 
 
-def set_span_status(span: Any, ok: bool) -> None:
+def set_span_status(span: Span, ok: bool) -> None:
     if ok:
         return
     from opentelemetry.trace import Status, StatusCode
@@ -88,16 +90,12 @@ def set_span_status(span: Any, ok: bool) -> None:
         span.set_status(Status(StatusCode.ERROR))
 
 
-def set_span_attributes(span: Any, attrs: Mapping[str, Any]) -> None:
+def set_span_attributes(span: Span, attrs: Mapping[str, Any]) -> None:
     with contextlib.suppress(Exception):
-        if hasattr(span, "set_attributes"):
-            span.set_attributes(dict(attrs))
-        else:
-            for k, v in attrs.items():
-                span.set_attribute(k, v)
+        span.set_attributes(dict(attrs))
 
 
-def record_error(span: Any, error_type: str) -> None:
+def record_error(span: Span, error_type: str) -> None:
     from theater.constants.observability import MAX_ERROR_TYPE_LEN
 
     if not error_type:
@@ -117,7 +115,7 @@ def inject_trace_context() -> dict[str, str]:
     return carrier if carrier else {}
 
 
-def extract_trace_context(carrier: Mapping[str, Any]) -> Any:
+def extract_trace_context(carrier: Mapping[str, Any]) -> Context | None:
     """Extract W3C context; None for non-Mapping, empty, malformed, or invalid."""
     if not isinstance(carrier, Mapping) or not carrier:
         return None
