@@ -76,7 +76,7 @@ def test_install_failure_is_inconclusive_and_names_the_package(
     def broken(*args: object, **kwargs: object) -> None:
         raise OSError("npm unavailable")
 
-    monkeypatch.setattr(opencode_sandbox, "run_group", broken)
+    monkeypatch.setattr(opencode_sandbox, "run_pipe_group", broken)
     with (
         make_sandbox("opencode2", root=tmp_path) as sb,
         pytest.raises(contract.InstallFailed, match=r"@opencode/cli@2\.0\.20 did not run"),

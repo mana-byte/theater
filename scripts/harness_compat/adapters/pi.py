@@ -12,7 +12,8 @@ from typing import Any
 
 from .. import framework, github
 from ..contract import Check, InstallFailed, Result, Sandbox, VerifiedSet, verdict_from_checks
-from . import opencode_pi_process, pi_bump, pi_pins
+from ..process import run_pipe_group
+from . import pi_bump, pi_pins
 
 _PACKAGE = "@earendil-works/pi-coding-agent"
 
@@ -82,7 +83,7 @@ class PiAdapter:
             *specs,
         )
         try:
-            completed = opencode_pi_process.run_group(command, env=dict(sb.env), timeout=300)
+            completed = run_pipe_group(command, env=dict(sb.env), timeout=300)
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             raise InstallFailed(f"npm could not install Pi {version}: {exc}") from exc
         if completed.returncode != 0:
