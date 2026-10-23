@@ -18,6 +18,7 @@ CORE = (
     "framework",
     "probe",
     "process",
+    "route_facts",
     "cleanup",
     "inputs",
     "runner",

@@ -31,6 +31,7 @@ from scripts.harness_compat.evidence import (
 )
 from scripts.harness_compat.publication import prepare_publication
 from scripts.harness_compat.report import build_report
+from scripts.harness_compat.route_facts import RouteFacts
 from scripts.harness_compat.runner import _qualify, classify_routes
 from scripts.harness_compat.select import newest_in_range, plan_bump, select_candidates
 from scripts.harness_compat.stale import stale_references, stale_warnings
@@ -92,6 +93,55 @@ def test_range_policy_evidence_reuse_routes_and_watch(tmp_path: Path) -> None:
     assert classified.verdict == "tooling"
     assert "POST /unknown body keys=messages,model" in classified.checks[-1].detail
     assert classify_routes(adapter, results[-1], ()).verdict == "red"
+
+
+def test_route_facts_keep_mixed_checks_and_published_request_rows_distinct() -> None:
+    adapter = FakeAdapter()
+    requests = (
+        RecordedRequest("POST", "/v1/chat/completions", False, ("model",), True),
+        RecordedRequest("POST", "/telemetry", False, (), False),
+        RecordedRequest("GET", "/other", True, ("prompt",), True),
+    )
+    facts = RouteFacts(requests, adapter.expected_routes, adapter.ignorable_routes)
+    assert facts.gaps == (requests[0], requests[2])
+    assert facts.unexpected_routes == {("GET", "/other")}
+    result = Result("vibe", "1.0.0", "red", (Check("proof", "fail"), Check("extra", "skip")))
+    classified = classify_routes(adapter, result, requests)
+    assert classified.verdict == "tooling"
+    assert classified.checks == (
+        *result.checks,
+        Check(
+            "mock routes",
+            "fail",
+            "POST /v1/chat/completions body keys=model; GET /other body keys=prompt",
+        ),
+    )
+    assert runner._routes(adapter, requests) == [
+        {
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "body_keys": ["model"],
+            "handled": False,
+            "unexpected": False,
+            "ignorable": False,
+        },
+        {
+            "method": "POST",
+            "path": "/telemetry",
+            "body_keys": [],
+            "handled": False,
+            "unexpected": True,
+            "ignorable": True,
+        },
+        {
+            "method": "GET",
+            "path": "/other",
+            "body_keys": ["prompt"],
+            "handled": True,
+            "unexpected": True,
+            "ignorable": False,
+        },
+    ]
 
 
 def test_cached_artifacts_must_match_the_digest(tmp_path: Path) -> None:
@@ -694,6 +744,7 @@ def test_adapter_digest_covers_every_input_the_proofs_run_through(tmp_path: Path
         "scripts/harness_compat/artifacts.py": "r",
         "scripts/harness_compat/evidence.py": "e",
         "scripts/harness_compat/mock.py": "m",
+        "scripts/harness_compat/route_facts.py": "route facts",
         "scripts/harness_compat/adapters/vibe.py": "a",
         "scripts/harness_compat/adapters/vibe_store.py": "h",
         "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["tests"]\n',

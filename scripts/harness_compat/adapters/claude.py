@@ -21,6 +21,7 @@ from ..contract import (
     VerifiedSet,
     verdict_from_checks,
 )
+from ..route_facts import RouteFacts
 from . import claude_bump
 
 _PACKAGE = "@anthropic-ai/claude-code"
@@ -189,14 +190,9 @@ class ClaudeAdapter:
             for check in green_checks
         ):
             verdict = "inconclusive"
-        unexpected = [
-            request
-            for request in sb.mock.requests
-            if (request.method, request.path) not in self.expected_routes | self.ignorable_routes
-            or (not request.handled and (request.method, request.path) not in self.ignorable_routes)
-        ]
+        unexpected = RouteFacts(sb.mock.requests, self.expected_routes, self.ignorable_routes).gaps
         if verdict != "green" and unexpected:
-            routes = sorted({(request.method, request.path) for request in unexpected})
+            routes = sorted({RouteFacts.route(request) for request in unexpected})
             checks.append(Check("mock_routes", "error", f"unexpected/unhandled routes: {routes}"))
             verdict = "tooling"
         return Result(self.name, version, verdict, tuple(checks), evidence_dir=sb.evidence_dir)

@@ -33,6 +33,7 @@ from .evidence import (
 )
 from .framework import check_bump, run_pytest
 from .inputs import adapter_metadata
+from .route_facts import RouteFacts
 from .sandbox import make_sandbox
 from .select import newest_in_range, plan_bump, select_candidates
 from .stale import stale_warnings
@@ -193,14 +194,15 @@ def _worktree(root: Path) -> Iterator[Path]:
 
 
 def _routes(adapter: Adapter, requests: tuple[RecordedRequest, ...]) -> list[dict[str, Any]]:
+    facts = RouteFacts(requests, adapter.expected_routes, adapter.ignorable_routes)
     return [
         {
             "method": item.method,
             "path": item.path,
             "body_keys": list(item.body_keys),
             "handled": item.handled,
-            "unexpected": (item.method, item.path) not in adapter.expected_routes,
-            "ignorable": (item.method, item.path) in adapter.ignorable_routes,
+            "unexpected": facts.is_unexpected(item),
+            "ignorable": facts.is_ignorable(item),
         }
         for item in requests
     ]
@@ -212,12 +214,7 @@ def classify_routes(
     """A model route gap explains a failing proof as tooling, never upstream red."""
     if result.verdict == "green":
         return result
-    bad = [
-        item
-        for item in requests
-        if (item.method, item.path) not in adapter.ignorable_routes
-        and (not item.handled or (item.method, item.path) not in adapter.expected_routes)
-    ]
+    bad = RouteFacts(requests, adapter.expected_routes, adapter.ignorable_routes).gaps
     if not bad:
         return result
     details = "; ".join(
