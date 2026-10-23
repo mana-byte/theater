@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import importlib
 import json
 import os
 import threading
@@ -26,7 +27,7 @@ from tests.support.vibe_store import (
     publish_default,
     sha256_json,
 )
-from theater.harness.builtin.plugins.vibe import unified_source, unified_store_io
+from theater.harness.builtin.plugins.vibe import unified_history, unified_source, unified_store_io
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
 from theater.harness.builtin.plugins.vibe.unified_store import (
     UnifiedStoreError,
@@ -385,6 +386,109 @@ async def test_revoke_does_not_restore_an_inflight_reader(store: Store, monkeypa
     assert source._reader.last_view is None
 
 
+async def test_revoke_fences_an_inflight_history_recovery(store: Store, monkeypatch) -> None:
+    publish_default(store)
+    source = make_source(store)
+    newest = await source.history_page(limit=1)
+    assert newest.snapshot_cursor is not None
+    started = threading.Event()
+    release = threading.Event()
+    original = unified_source.load_unified_store
+
+    def blocked(*args, **kwargs):
+        started.set()
+        assert release.wait(2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(unified_source, "load_unified_store", blocked)
+    task = asyncio.create_task(source.history_page(snapshot=newest.snapshot_cursor))
+    assert await asyncio.to_thread(started.wait, 2)
+    source.revoke_attachment()
+    release.set()
+    page = await task
+
+    assert page.events == () and page.trajectory == ()
+    assert page.pinned is True
+    assert source.path is None and source._reader.last_view is None
+
+
+async def test_discard_attachment_drops_its_staged_advancement(store: Store) -> None:
+    publish_default(store)
+    source = make_source(store)
+    assert (await source.read()).attached is not None
+    assert source.pending_source_checkpoint() is not None
+
+    source.discard_attachment()
+    assert source.source_checkpoint() is None
+    assert source.pending_source_checkpoint() is None
+    assert (await source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+    assert source.source_checkpoint() is not None
+
+
+@pytest.mark.parametrize("publish_answer", [False, True])
+async def test_revoke_reattaches_from_the_last_checkpoint(
+    store: Store, publish_answer: bool
+) -> None:
+    publish_default(store)
+    source = make_source(store)
+    await attach_and_acknowledge(source)
+    previous = source.source_checkpoint()
+    assert previous is not None
+
+    source.revoke_attachment()
+    assert source.source_checkpoint() is None
+    if publish_answer:
+        store.publish(
+            generation=GEN2,
+            snapshot_sequence=1,
+            state=make_state(
+                [basic_entry("entry-0"), message_entry("answer", "answer", role="assistant")]
+            ),
+            watermark=2,
+        )
+
+    assert (
+        source.admit_exact_location(location=str(store.current), session_id=SESSION_ID) == "staged"
+    )
+    assert (await source.read()).attached is not None
+    assert source.pending_source_checkpoint() is None
+    source.commit_attachment()
+    update = await source.read()
+    assert [(event.kind, event.text) for event in update.events] == (
+        [(EventKind.ASSISTANT, "answer")] if publish_answer else []
+    )
+    assert len(update.trajectory) == int(publish_answer)
+
+
+async def test_initial_usage_survives_restage_and_discard(store: Store, monkeypatch) -> None:
+    first_state = with_usage(make_state([]), 10, 5, 2)
+    store.publish(generation=GEN1, snapshot_sequence=0, state=first_state, watermark=1)
+    source = make_source(store, count_initial=True)
+    await attach_and_acknowledge(source)
+    assert any(event.usage is not None for event in (await source.read()).events)
+
+    relocated = Store(store.session_root.parent.parent, session_id="sess-relocated")
+    relocated.publish(
+        generation=GEN1,
+        snapshot_sequence=0,
+        state=with_usage(make_state([], session_id="sess-relocated"), 20, 8, 3),
+        watermark=1,
+    )
+
+    async def find_relocated(**_kwargs):
+        return relocated.current
+
+    monkeypatch.setattr(source._observer, "find_unified_transcript_async", find_relocated)
+    assert (await source.refresh()).attached is not None
+    source.discard_attachment()
+    assert (await source.refresh()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+    assert not any(event.usage is not None for event in (await source.read()).events)
+
+
 # --- Source: bounded polling ----------------------------------------------------
 
 
@@ -447,7 +551,7 @@ async def test_source_generation_rollover_full_reloads(store: Store, monkeypatch
     batch = await source.read()
     assert batch.progressed is True
     assert reads.total > 0  # a new generation is a full load, not a consume
-    view = await source._load_fresh(store.current)
+    view = await source._load_recovery(store.current, at_sequence=None, generation_hint=None)
     assert view is not None
     assert view.generation == GEN2
     plain = load_unified_store(store.current)
@@ -498,6 +602,31 @@ async def test_new_launch_replays_usage_present_at_attachment(store: Store) -> N
     assert retried.events[0].usage == usage[0]
     source.acknowledge_source_checkpoint()
     assert batch_is_empty(await source.read())
+
+
+async def test_acknowledgement_preserves_oversized_raw_checkpoint(
+    store: Store, monkeypatch
+) -> None:
+    publish_default(store)
+    source = make_source(store)
+    await attach_and_acknowledge(source)
+    checkpoint = source.source_checkpoint()
+    assert checkpoint is not None
+    oversized = checkpoint + " " * 4097
+    assert len(oversized.encode()) > 4096
+    assert make_source(store, source_checkpoint=oversized).source_checkpoint() is None
+    assert make_source(store, source_checkpoint="{").source_checkpoint() is None
+
+    module = importlib.import_module(type(source).__module__)
+    monkeypatch.setattr(module, "_encode_checkpoint", lambda _view: oversized)
+    append_journal(
+        store,
+        projection_delta(2, {"op": "append_entry", "entry": message_entry("e1", "hello")}),
+    )
+    assert (await source.read()).progressed is True
+    assert source.pending_source_checkpoint() == oversized
+    source.acknowledge_source_checkpoint()
+    assert source.source_checkpoint() == oversized
 
 
 async def test_live_diff_and_history_agree_on_session_totals(store: Store) -> None:
@@ -657,8 +786,8 @@ async def test_history_page_indexes_once_and_projects_only_selected_entries(
 ):
     entries = [message_entry("same", str(index)) for index in range(1000)]
     store.publish(generation=GEN1, snapshot_sequence=0, state=make_state(entries), watermark=1)
-    original_entries = unified_source._entries
-    original_project = unified_source.project_unified_entry
+    original_entries = unified_history._entries
+    original_project = unified_history.project_unified_entry
     scans = projects = 0
 
     def counted_entries(view):
@@ -671,8 +800,8 @@ async def test_history_page_indexes_once_and_projects_only_selected_entries(
         projects += 1
         return original_project(*args, **kwargs)
 
-    monkeypatch.setattr(unified_source, "_entries", counted_entries)
-    monkeypatch.setattr(unified_source, "project_unified_entry", counted_project)
+    monkeypatch.setattr(unified_history, "_entries", counted_entries)
+    monkeypatch.setattr(unified_history, "project_unified_entry", counted_project)
     source = make_source(store)
     page = await source.history_page(limit=4)
     assert scans <= 3
