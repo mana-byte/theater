@@ -46,6 +46,9 @@ class ControlGates:
     #: directory, used for path-touch attribution once a job is dispatched.
     cwd_for: Callable[[str], str | None]
 
+    #: Exact participant-aware allowlist check after shape validation.
+    check_settings_for: Callable[[str, str | None, str | None], None] | None = None
+
     #: ``(participant_id) -> None``. Provider-only readiness gate for prompt
     #: submission: fresh identity-fenced screen evidence must show a prompt
     #: composer. Dialogs refuse; unproven screens fail closed. Native routes

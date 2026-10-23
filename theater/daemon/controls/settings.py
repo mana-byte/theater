@@ -110,6 +110,8 @@ class SettingsControls(ControlHost):
             self._gates.authorize(participant_id, caller_id, ACTION_SETTINGS_UPDATE)
             await self._gates.require_absent(participant_id)
             self._gates.check_settings(model, reasoning_effort)
+            if self._gates.check_settings_for is not None:
+                self._gates.check_settings_for(participant_id, model, reasoning_effort)
             route = self.route_for(participant_id, RuntimeCapability.SETTINGS_UPDATE)
             if not route.is_native:
                 if not route.native_wiring:
