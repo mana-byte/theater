@@ -8,12 +8,14 @@ from pathlib import Path
 from theater.config import ConfigError
 from theater.constants.core import HARNESS_NAME
 from theater.mcp_plugins.contracts import McpServerManifest
-from theater.mcp_plugins.validation import McpManifestValidationError, validate_manifest
+from theater.mcp_plugins.validation import McpManifestValidationError
 from theater.plugins.loading import (
     LOCAL,
     MANIFEST_FILENAME,
     SHIPPED,
     discover_packages,
+    manifest_facts,
+    validate_mcp_manifest,
 )
 from theater.plugins.loading import (
     cleanup_package as _cleanup_shared_package,
@@ -81,7 +83,8 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
         _cleanup_package(package_name)
         return _broken(plugin, f"{manifest_path}: {exc!r}")
 
-    manifest = getattr(module, "MANIFEST", None)
+    facts = manifest_facts(module)
+    manifest = facts.value
     if manifest is None:
         _cleanup_package(package_name)
         return _broken(
@@ -96,7 +99,7 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
             f"{manifest_path}: MANIFEST is the class {manifest.__name__}, not an instance. "
             f"Use `MANIFEST = {manifest.__name__}(...)`",
         )
-    if not isinstance(manifest, McpServerManifest):
+    if facts.mcp is None:
         guidance = ""
         if type(manifest).__name__ == "HarnessManifest":
             guidance = (
@@ -110,7 +113,7 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
             f"McpServerManifest.{guidance}",
         )
     try:
-        validate_manifest(plugin.name, manifest)
+        validate_mcp_manifest(plugin.name, facts.mcp)
     except KeyboardInterrupt:
         _cleanup_package(package_name)
         raise
@@ -123,13 +126,13 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
     try:
         plays = load_declared_plays(
             plugin.path / "skills",
-            manifest.plays,
+            facts.mcp.plays,
             provider=plugin.name,
-            play_permissions=manifest.play_permissions,
+            play_permissions=facts.mcp.play_permissions,
         )
         skills = load_declared_skills(
             plugin.path / "skills",
-            manifest.skills,
+            facts.mcp.skills,
             provider=plugin.name,
         )
     except SkillValidationError as exc:
@@ -139,7 +142,7 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
         path=plugin.path,
         source=plugin.source,
         name=plugin.name,
-        manifest=manifest,
+        manifest=facts.mcp,
         skills=skills,
         plays=plays,
     )

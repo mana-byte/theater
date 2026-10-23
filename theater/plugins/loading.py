@@ -11,6 +11,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from re import Pattern
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from theater.harness.contracts.harness import Harness
+    from theater.harness.contracts.manifest import HarnessManifest
+    from theater.mcp_plugins.contracts import McpServerManifest
 
 MANIFEST_FILENAME = "manifest.py"
 LOCAL = "local"
@@ -25,6 +31,42 @@ class PackageCandidate:
     source: str
     name: str
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestFacts:
+    """Post-import value and the manifest kinds it satisfies."""
+
+    value: object
+    harness: HarnessManifest | None
+    mcp: McpServerManifest | None
+
+
+def manifest_facts(module: types.ModuleType) -> ManifestFacts:
+    """Classify one exported value without choosing a source-specific diagnostic."""
+    from theater.harness.contracts.manifest import HarnessManifest
+    from theater.mcp_plugins.contracts import McpServerManifest
+
+    value = getattr(module, "MANIFEST", None)
+    return ManifestFacts(
+        value,
+        value if isinstance(value, HarnessManifest) else None,
+        value if isinstance(value, McpServerManifest) else None,
+    )
+
+
+def compile_harness_manifest(name: str, manifest: HarnessManifest) -> Harness:
+    """Run the harness compiler inside the caller's existing exception scope."""
+    from theater.harness.manifests.compiler import compile_manifest
+
+    return compile_manifest(name, manifest)
+
+
+def validate_mcp_manifest(name: str, manifest: McpServerManifest) -> None:
+    """Run MCP validation inside the caller's existing exception scope."""
+    from theater.mcp_plugins.validation import validate_manifest
+
+    validate_manifest(name, manifest)
 
 
 def discover_packages(
