@@ -8,7 +8,7 @@ from types import MappingProxyType
 from theater.constants import SECONDS_PER_DAY, USAGE_AVERAGE_WINDOW_DAYS
 from theater.daemon import diagnostics
 from theater.daemon.frontend.handshake import ConnectionContext
-from theater.daemon.rpc.params import _finite_number_param, _integer_param
+from theater.daemon.request_values import finite_number_param, integer_param
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
 from theater.models import BadRequest, now
@@ -91,9 +91,9 @@ async def stats_get(daemon, _context: ConnectionContext, _params: dict) -> dict:
 
 
 async def bus_tail(daemon, _context: ConnectionContext, params: dict) -> dict:
-    after_id = _integer_param(params.get("after_id", 0), "after_id", method_name="bus.tail")
-    limit = _integer_param(params.get("limit", 100), "limit", method_name="bus.tail")
-    wait = _finite_number_param(
+    after_id = integer_param(params.get("after_id", 0), "after_id", method_name="bus.tail")
+    limit = integer_param(params.get("limit", 100), "limit", method_name="bus.tail")
+    wait = finite_number_param(
         params.get("wait_seconds", 0), "wait_seconds", method_name="bus.tail"
     )
     kinds = params.get("kinds")

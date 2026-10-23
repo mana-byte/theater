@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from theater.daemon.rpc.transcript_paging import TranscriptPager
+from theater.daemon.transcript_paging import TranscriptPager
 from theater.harness import Event
 from theater.harness.contracts.source import Batch, HistoryPage, Source
 

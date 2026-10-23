@@ -14,8 +14,8 @@ from tests.support.shipped import OpenCodeObserver
 from tests.support.transcript_pages import StaticSource, page, pager
 from theater.constants.daemon import TRANSCRIPT_READ_RESPONSE_MAX_BYTES
 from theater.daemon import methods as methods_mod
-from theater.daemon.rpc import transcripts as transcripts_mod
-from theater.daemon.rpc.transcript_paging import TranscriptCursorError, TranscriptPager
+from theater.daemon import transcript_read as transcript_read_mod
+from theater.daemon.transcript_paging import TranscriptCursorError, TranscriptPager
 from theater.harness import Event, EventKind
 from theater.harness.contracts.events import TokenUsage
 from theater.harness.contracts.source import HistoryPage
@@ -485,7 +485,7 @@ async def test_newest_page_carries_retained_prompts_and_roles_are_validated(regi
         calls.append(kwargs)
         return {"id": kwargs["participant_id"], "events": []}
 
-    monkeypatch.setattr(transcripts_mod, "read_transcript_page", fake_page)
+    monkeypatch.setattr(transcript_read_mod, "read_transcript_page", fake_page)
     daemon = SimpleNamespace(registry=registry)
     read = methods_mod.METHODS["read_transcript"]
 

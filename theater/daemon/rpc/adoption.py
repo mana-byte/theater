@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from theater.daemon.adoption import AdoptionService
+from theater.daemon.participants.operations import with_presence
 from theater.daemon.rpc.params import _require
-from theater.daemon.rpc.participants import _with_presence
 from theater.daemon.rpc.router import method
 from theater.models import BadRequest
 
@@ -19,4 +19,4 @@ async def _adopt(daemon, params: dict) -> dict:
             "the caller is always the adopting agent itself"
         )
     target = await AdoptionService(daemon).adopt(_require(params, "id"), caller_id)
-    return _with_presence(daemon, target.to_dict())
+    return with_presence(daemon, target.to_dict())
