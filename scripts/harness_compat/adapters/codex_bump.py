@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..contract import VerifiedSet, load_evidenced, version_key
+from ..contract import VerifiedSet, version_key
 
 PLAN = Path("theater/harness/builtin/plugins/codex/runtime_plan.py")
 _FLOOR = "CODEX_RUNTIME_QUALIFIED_FLOOR"
@@ -80,7 +80,6 @@ def verified(root: Path) -> VerifiedSet:
         floor=_text(gate.floor),
         ceiling=_text(gate.ceiling),
         known_bad=frozenset(_text(entry) for entry in gate.excluded),
-        evidenced=load_evidenced(root, "codex"),
     )
 
 

@@ -56,8 +56,8 @@ def _probe(adapter: Adapter, root: Path, version: str, stub: Path) -> tuple[bool
 
 
 def _next_release(adapter: Adapter, bumped: Sequence[str], gate: VerifiedSet) -> str:
-    newest = max([*bumped, *gate.versions], key=version_key)
-    if gate.ceiling and version_key(gate.ceiling) > version_key(newest):
+    newest = max(bumped, key=version_key)
+    if version_key(gate.ceiling) > version_key(newest):
         return gate.ceiling
     future = [
         version

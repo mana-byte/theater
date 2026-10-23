@@ -16,7 +16,6 @@ from ..contract import (
     Sandbox,
     Verdict,
     VerifiedSet,
-    load_evidenced,
     version_key,
 )
 from .vibe_bump import bump, gate
@@ -62,7 +61,6 @@ class VibeAdapter:
             kind="range",
             floor=floor,
             ceiling=ceiling,
-            evidenced=load_evidenced(root, self.name),
         )
 
     def install(self, sb: Sandbox, version: str) -> Path:

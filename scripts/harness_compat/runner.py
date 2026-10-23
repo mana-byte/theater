@@ -351,7 +351,6 @@ def _watch(
 def _walk_candidates(
     adapter: Adapter,
     root: Path,
-    gate: VerifiedSet,
     candidates: list[str],
     artifacts: CandidateArtifacts,
     reused: dict[str, dict[str, Any]],
@@ -386,7 +385,7 @@ def _walk_candidates(
         results.append(result)
         rows.append({**result.to_evidence(), "routes": routes, "run_url": run_url, "attempts": log})
         # A candidate that was ever inconclusive ends the walk: the backlog waits for tomorrow.
-        if gate.kind == "range" and (result.verdict != "green" or len(log) > 1):
+        if result.verdict != "green" or len(log) > 1:
             deferred = candidates[index + 1 :]
             break
     return results, rows, conflicts_seen, warnings_seen, deferred
@@ -419,7 +418,7 @@ def _run_with_artifacts(
         adapter, gate, reused, max_candidates=max_candidates, version=version, releases=releases
     )
     results, rows, artifact_conflicts, candidate_warnings, deferred = _walk_candidates(
-        adapter, root, gate, candidates, artifacts, reused, digest, run_url, deadline
+        adapter, root, candidates, artifacts, reused, digest, run_url, deadline
     )
     watch, watch_reused = _watch(adapter, root, gate, releases, rows, run_url, digest, deadline)
     reused_results = [

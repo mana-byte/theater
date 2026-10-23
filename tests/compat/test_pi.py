@@ -44,15 +44,11 @@ def test_verified_reads_plugin_literal_and_fails_closed(tmp_path: Path) -> None:
     _copy_gate(root, tmp_path)
     expected = pi.ADAPTER.verified(tmp_path)
     upper = _current_upper(tmp_path)
-    evidence = tmp_path / f"tests/fixtures/harness_compat/pi/{upper}.json"
-    evidence.parent.mkdir(parents=True)
-    evidence.write_text("{}", encoding="utf-8")
 
     gate = pi.ADAPTER.verified(tmp_path)
     assert gate.floor == expected.floor
     assert gate.ceiling == expected.ceiling
     assert gate.known_bad == expected.known_bad
-    assert gate.evidenced == frozenset({upper})
     bad = next(iter(gate.known_bad))
     assert gate.admits(upper) and not gate.admits(bad)
 

@@ -21,8 +21,6 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _limit_tokens(gate: VerifiedSet) -> set[str]:
-    if gate.kind != "range" or gate.ceiling is None:
-        return set()
     major, minor, patch = version_key(gate.ceiling)
     tokens = {gate.ceiling}
     if patch > 0:
@@ -88,8 +86,6 @@ def _old_exclusive_bound(line: str, ceiling: str, *, source: bool) -> bool:
 def stale_references(adapter: Adapter, root: Path) -> tuple[list[str], list[str]]:
     """Return hard stale limits and soft historical references in changed files."""
     new_gate = adapter.verified(root)
-    if not _limit_tokens(new_gate):
-        return [], []
     with tempfile.TemporaryDirectory(prefix="compat-old-gate-") as temporary:
         old_root = Path(temporary) / "tree"
         added = _git(root, "worktree", "add", "--detach", str(old_root), "HEAD")

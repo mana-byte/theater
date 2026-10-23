@@ -18,9 +18,6 @@ from scripts.harness_compat.contract import (
     Result,
     Sandbox,
     VerifiedSet,
-    evidence_file,
-    is_stable,
-    load_evidenced,
     verdict_from_checks,
     version_key,
 )
@@ -48,20 +45,6 @@ class FakeAdapter:
 
     def discover(self) -> list[str]:
         return ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"]
-
-
-class ExactAdapter:
-    def discover(self) -> list[str]:
-        return [
-            "0.1.0",
-            "1.4.0",
-            "1.5.0",
-            "1.6.0",
-            "1.7.0",
-            "1.8.0",
-            "1.9.0",
-            "2.0.0",
-        ]
 
 
 def _git(root: Path, *args: str) -> None:
@@ -118,44 +101,6 @@ def test_cached_artifacts_must_match_the_digest(tmp_path: Path) -> None:
     result = Result("vibe", "1.2.0", "green", (Check("proof", "pass"),), adapter_digest="d")
     write_evidence(tmp_path, result, "local", artifacts={"generated.json": "not-the-digest"})
     assert reusable_evidence(tmp_path, "vibe", "d", required=("proof",)) == {}
-
-
-def test_exact_candidates_stay_above_oldest_admission() -> None:
-    adapter = ExactAdapter()
-    gate = VerifiedSet(
-        "exact",
-        versions=frozenset({"1.5.0", "1.7.0"}),
-        known_bad=frozenset({"1.9.0"}),
-    )
-    assert select_candidates(adapter, gate, max_candidates=2) == ["2.0.0"]
-    assert select_candidates(adapter, gate, {"2.0.0"}, max_candidates=2) == ["1.8.0"]
-    assert select_candidates(adapter, gate, {"2.0.0"}, version="1.9.0") == ["1.9.0"]
-    assert newest_in_range(adapter, gate) is None
-    assert select_candidates(
-        adapter, VerifiedSet("exact", versions=frozenset()), max_candidates=2
-    ) == ["2.0.0"]
-
-
-def test_exact_candidates_exhaust_new_releases_then_holes() -> None:
-    adapter = ExactAdapter()
-    gate = VerifiedSet(
-        "exact",
-        versions=frozenset({"1.5.0", "1.7.0"}),
-        known_bad=frozenset({"1.9.0"}),
-    )
-    evidenced = {"1.8.0", "2.0.0"}
-    assert select_candidates(adapter, gate, evidenced) == ["1.6.0"]
-    evidenced.add("1.6.0")
-    assert select_candidates(adapter, gate, evidenced) == []
-    results = [
-        Result("codex", "1.4.0", "green"),
-        Result("codex", "1.6.0", "green"),
-        Result("codex", "2.0.0", "green"),
-    ]
-    assert plan_bump(gate, results, adapter.discover()) == ["2.0.0"]
-    results[-1] = Result("codex", "2.0.0", "red")
-    assert plan_bump(gate, results, adapter.discover()) == ["1.6.0"]
-    assert plan_bump(gate, [results[-1]], adapter.discover()) == []
 
 
 @pytest.mark.parametrize(
@@ -803,13 +748,14 @@ def test_early_conclusive_adapter_red_is_not_demoted_to_inconclusive(tmp_path: P
 @pytest.mark.parametrize(
     ("gate", "version", "admitted"),
     [
-        (VerifiedSet("exact", versions=frozenset({"0.159.1"})), "0.159.1", True),
-        (VerifiedSet("exact", versions=frozenset({"0.159.1"})), "0.160.0", False),
         (VerifiedSet("range", floor="2.24.0", ceiling="2.27.0"), "2.26.9", True),
         (VerifiedSet("range", floor="2.24.0", ceiling="2.27.0"), "2.27.0", False),
         (VerifiedSet("range", floor="2.24.0", ceiling="2.27.0"), "2.23.9", False),
-        (VerifiedSet("range", floor="0.80.8", known_bad=frozenset({"0.85.0"})), "0.85.0", False),
-        (VerifiedSet("range", floor="2.1.119"), "9.9.9", True),
+        (
+            VerifiedSet("range", floor="0.80.8", ceiling="0.86.0", known_bad=frozenset({"0.85.0"})),
+            "0.85.0",
+            False,
+        ),
     ],
 )
 def test_gate_admits(gate: VerifiedSet, version: str, admitted: bool) -> None:
@@ -830,12 +776,3 @@ def test_gate_admits(gate: VerifiedSet, version: str, admitted: bool) -> None:
 def test_verdict_from_checks(statuses: tuple[str, ...], verdict: str) -> None:
     checks = [Check(f"t{index}", status) for index, status in enumerate(statuses)]  # type: ignore[arg-type]
     assert verdict_from_checks(checks) == verdict
-
-
-def test_evidence_files_define_evidenced(tmp_path) -> None:
-    assert load_evidenced(tmp_path, "vibe") == frozenset()
-    path = evidence_file(tmp_path, "vibe", "2.26.1")
-    path.parent.mkdir(parents=True)
-    path.write_text("{}")
-    assert load_evidenced(tmp_path, "vibe") == frozenset({"2.26.1"})
-    assert is_stable("2.26.1") and not is_stable("0.163.0-alpha.10")
