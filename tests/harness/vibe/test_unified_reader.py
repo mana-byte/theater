@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import importlib
 import json
 import os
 import threading
@@ -426,6 +427,68 @@ async def test_discard_attachment_drops_its_staged_advancement(store: Store) -> 
     assert source.source_checkpoint() is not None
 
 
+@pytest.mark.parametrize("publish_answer", [False, True])
+async def test_revoke_reattaches_from_the_last_checkpoint(
+    store: Store, publish_answer: bool
+) -> None:
+    publish_default(store)
+    source = make_source(store)
+    await attach_and_acknowledge(source)
+    previous = source.source_checkpoint()
+    assert previous is not None
+
+    source.revoke_attachment()
+    assert source.source_checkpoint() is None
+    if publish_answer:
+        store.publish(
+            generation=GEN2,
+            snapshot_sequence=1,
+            state=make_state(
+                [basic_entry("entry-0"), message_entry("answer", "answer", role="assistant")]
+            ),
+            watermark=2,
+        )
+
+    assert (
+        source.admit_exact_location(location=str(store.current), session_id=SESSION_ID) == "staged"
+    )
+    assert (await source.read()).attached is not None
+    assert source.pending_source_checkpoint() is None
+    source.commit_attachment()
+    update = await source.read()
+    assert [(event.kind, event.text) for event in update.events] == (
+        [(EventKind.ASSISTANT, "answer")] if publish_answer else []
+    )
+    assert len(update.trajectory) == int(publish_answer)
+
+
+async def test_initial_usage_survives_restage_and_discard(store: Store, monkeypatch) -> None:
+    first_state = with_usage(make_state([]), 10, 5, 2)
+    store.publish(generation=GEN1, snapshot_sequence=0, state=first_state, watermark=1)
+    source = make_source(store, count_initial=True)
+    await attach_and_acknowledge(source)
+    assert any(event.usage is not None for event in (await source.read()).events)
+
+    relocated = Store(store.session_root.parent.parent, session_id="sess-relocated")
+    relocated.publish(
+        generation=GEN1,
+        snapshot_sequence=0,
+        state=with_usage(make_state([], session_id="sess-relocated"), 20, 8, 3),
+        watermark=1,
+    )
+
+    async def find_relocated(**_kwargs):
+        return relocated.current
+
+    monkeypatch.setattr(source._observer, "find_unified_transcript_async", find_relocated)
+    assert (await source.refresh()).attached is not None
+    source.discard_attachment()
+    assert (await source.refresh()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+    assert not any(event.usage is not None for event in (await source.read()).events)
+
+
 # --- Source: bounded polling ----------------------------------------------------
 
 
@@ -539,6 +602,31 @@ async def test_new_launch_replays_usage_present_at_attachment(store: Store) -> N
     assert retried.events[0].usage == usage[0]
     source.acknowledge_source_checkpoint()
     assert batch_is_empty(await source.read())
+
+
+async def test_acknowledgement_preserves_oversized_raw_checkpoint(
+    store: Store, monkeypatch
+) -> None:
+    publish_default(store)
+    source = make_source(store)
+    await attach_and_acknowledge(source)
+    checkpoint = source.source_checkpoint()
+    assert checkpoint is not None
+    oversized = checkpoint + " " * 4097
+    assert len(oversized.encode()) > 4096
+    assert make_source(store, source_checkpoint=oversized).source_checkpoint() is None
+    assert make_source(store, source_checkpoint="{").source_checkpoint() is None
+
+    module = importlib.import_module(type(source).__module__)
+    monkeypatch.setattr(module, "_encode_checkpoint", lambda _view: oversized)
+    append_journal(
+        store,
+        projection_delta(2, {"op": "append_entry", "entry": message_entry("e1", "hello")}),
+    )
+    assert (await source.read()).progressed is True
+    assert source.pending_source_checkpoint() == oversized
+    source.acknowledge_source_checkpoint()
+    assert source.source_checkpoint() == oversized
 
 
 async def test_live_diff_and_history_agree_on_session_totals(store: Store) -> None:

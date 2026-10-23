@@ -83,11 +83,12 @@ class _DecodedCheckpoint:
 class _StagedAdvancement:
     view: UnifiedStoreView
     checkpoint: str
-    initial_usage: bool = False
+    decoded_checkpoint: _DecodedCheckpoint | None
 
     @classmethod
-    def for_view(cls, view: UnifiedStoreView, *, initial_usage: bool = False) -> _StagedAdvancement:
-        return cls(view, _encode_checkpoint(view), initial_usage)
+    def for_view(cls, view: UnifiedStoreView) -> _StagedAdvancement:
+        raw = _encode_checkpoint(view)
+        return cls(view, raw, _checkpoint(raw))
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,8 +301,13 @@ class UnifiedVibeSource(Source):
             if self._known_location is not None
             else TranscriptProvenance.HEURISTIC
         )
-        self._checkpoint = _checkpoint(source_checkpoint)
+        self._resume_checkpoint = _checkpoint(source_checkpoint)
+        self._acknowledged_checkpoint = (
+            source_checkpoint if self._resume_checkpoint is not None else None
+        )
         self._count_initial = count_initial
+        # Restaging or discarding an attachment does not settle initial usage.
+        self._initial_usage_inflight = False
         self._view: UnifiedStoreView | None = None
         self._reader = UnifiedStoreReader()
         self._rows_view: UnifiedStoreView | None = None
@@ -426,7 +432,8 @@ class UnifiedVibeSource(Source):
             self._count_initial = False
             return None
         usage_fact = self._durable_usage_fact(self._view, previous=None)
-        self._pending_advancement = _StagedAdvancement.for_view(self._view, initial_usage=True)
+        self._pending_advancement = _StagedAdvancement.for_view(self._view)
+        self._initial_usage_inflight = True
         return Batch(
             events=[usage_event],
             progressed=True,
@@ -507,7 +514,7 @@ class UnifiedVibeSource(Source):
 
     async def _stage_attachment(self, current: UnifiedStoreView) -> Batch:
         baseline = current
-        saved = self._checkpoint
+        saved = self._resume_checkpoint
         last_event: Event | None = None
         status: Status | None = None
         attach_unproven = False
@@ -863,9 +870,10 @@ class UnifiedVibeSource(Source):
         self._known_location = None
         self._session_id = None
         self._history.reset()
-        self._checkpoint = None
+        self._acknowledged_checkpoint = None
         self._checkpoint_gap = False
         self._unproven = False
+        self._initial_usage_inflight = False
         self._reader = UnifiedStoreReader()
         self._rows_view = None
         self._rows_cache = None
@@ -886,7 +894,7 @@ class UnifiedVibeSource(Source):
         return "staged"
 
     def source_checkpoint(self) -> str | None:
-        return self._checkpoint.raw if self._checkpoint is not None else None
+        return self._acknowledged_checkpoint
 
     def pending_source_checkpoint(self) -> str | None:
         pending = self._pending_advancement
@@ -896,17 +904,20 @@ class UnifiedVibeSource(Source):
         pending = self._pending_advancement
         if pending is None:
             return
-        self._checkpoint = _checkpoint(pending.checkpoint)
+        self._acknowledged_checkpoint = pending.checkpoint
+        self._resume_checkpoint = pending.decoded_checkpoint
         self._pending_advancement = None
         # Only an applied batch is acknowledged, and one carrying the unproven fact has had its
         # delivered jobs ended unverified first.
         self._unproven = False
         self._view = pending.view
-        if pending.initial_usage:
+        if self._initial_usage_inflight:
             self._count_initial = False
+            self._initial_usage_inflight = False
 
     def rollback_source_checkpoint(self) -> None:
         self._pending_advancement = None
+        self._initial_usage_inflight = False
 
     async def history(self, *, last_n: int) -> History:
         pinned = self._known_location is not None
