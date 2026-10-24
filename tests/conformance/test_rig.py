@@ -184,13 +184,13 @@ async def test_a_presence_refusal_on_an_unattended_rig_is_inconclusive_not_a_cli
         mock.stop()
 
 
-async def test_a_send_is_awaited_until_presence_is_reported_absent(tmp_path: Path) -> None:
+async def test_a_send_waits_for_presence_to_read_absent_and_stay_settled(tmp_path: Path) -> None:
     rig, mock = _rig(tmp_path, _Client("online"))
-    readings = iter(["unknown", "present", "absent"])
+    readings = iter(["unknown", "present"])
     reported: list[str] = []
 
     async def participant(_participant_id: str) -> Any:
-        reported.append(next(readings))
+        reported.append(next(readings, "absent"))
         return SimpleNamespace(status="idle", presence=reported[-1])
 
     async def controls(_participant_id: str) -> Any:
@@ -201,8 +201,10 @@ async def test_a_send_is_awaited_until_presence_is_reported_absent(tmp_path: Pat
     rig.participant = participant  # type: ignore[method-assign]
     rig.controls = controls  # type: ignore[method-assign]
     try:
-        await rig.ready("p1", seconds=10)
+        await rig.ready("p1", seconds=15)
     finally:
         mock.stop()
 
-    assert reported == ["unknown", "present", "absent"]
+    assert reported[:2] == ["unknown", "present"]
+    assert reported[2:] and set(reported[2:]) == {"absent"}, "readiness must hold, not flash"
+    assert len(reported) >= 2 + 1.0 / 0.25, "readiness settles for a full window of polls"

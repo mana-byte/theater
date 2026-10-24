@@ -60,6 +60,8 @@ _BOOT_SECONDS = 90.0
 #: A loaded machine can miss the bridge's own start deadline once; a second miss is inconclusive.
 _BOOT_ATTEMPTS = 2
 _STOP_SECONDS = 20.0
+#: How long a send must stay admissible before the CLI counts as ready: screen reads lag redraws.
+_READY_SETTLE_SECONDS = 1.0
 _PANE_CAPTURE_LINES = 200
 _JOB_SLICE_SECONDS = 3.0
 #: One short directory per scenario: unix socket paths cap near 100 bytes.
@@ -346,18 +348,27 @@ class LiveRig:
         return (await self.client.controls.get(participant_id)).value
 
     async def ready(self, participant_id: str, *, seconds: float = 90.0) -> None:
-        """Wait for the daemon to call a send admissible; classify why it never did."""
+        """Wait until a send has been admissible, with nobody present, for a settled moment.
+
+        A screen read lags the CLI's redraws, so the first admissible poll can precede a startup
+        redraw that makes the next send busy; readiness must hold for ``_READY_SETTLE_SECONDS``.
+        """
         deadline = time.monotonic() + seconds
         reason = "no controls reported"
+        settled_since: float | None = None
         while time.monotonic() < deadline:
             participant = await self.participant(participant_id)
             if participant.status == "dead":
                 await self._classify_exit(participant_id)
             send = (await self.controls(participant_id)).actions.get("send")
             if send is not None and send.admissible and participant.presence == "absent":
-                return
-            reason = "no send action" if send is None else f"{send.reason}: {send.detail}"
-            reason += f"; presence {participant.presence}"
+                settled_since = settled_since or time.monotonic()
+                if time.monotonic() - settled_since >= _READY_SETTLE_SECONDS:
+                    return
+            else:
+                settled_since = None
+                reason = "no send action" if send is None else f"{send.reason}: {send.detail}"
+                reason += f"; presence {participant.presence}"
             await asyncio.sleep(0.25)
         inconclusive(f"send never became admissible within {seconds:g}s ({reason})")
 
