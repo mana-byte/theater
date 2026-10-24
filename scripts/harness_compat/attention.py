@@ -14,7 +14,15 @@ from theater.version_policy import version_key
 from .adapters import ADAPTER_NAMES
 from .contract import Check, Result, Verdict
 from .policy import load_policy
-from .publish import Gh, api, check_publication_context, file_attention_issue, publish, run_gh
+from .publish import (
+    SWEEP_EVENTS,
+    Gh,
+    api,
+    check_publication_context,
+    file_attention_issue,
+    publish,
+    run_gh,
+)
 from .run import Run
 
 _WORKFLOWS = {
@@ -22,6 +30,15 @@ _WORKFLOWS = {
     "Harness compatibility canaries": ".github/workflows/harness-compat-canaries.yml",
 }
 _FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
+_RECOVERY_JOBS = {
+    label: (name, publication_required)
+    for name in ADAPTER_NAMES
+    for label, publication_required in (
+        (f"Qualify {name}", True),
+        (f"Verify {name} plugin and policy", False),
+        (f"Canaries {name}", False),
+    )
+}
 _RECOVERED: dict[str, Verdict] = {
     "red": "red",
     "inconclusive": "inconclusive",
@@ -91,19 +108,16 @@ def _superseded(run: dict[str, Any], gh: Gh) -> bool:
             if current["state"] == "closed" or current["head"]["sha"] != run["head_sha"]:
                 return True
         return False
-    if run["name"] != "Harness compatibility canaries" or run["event"] not in {
-        "schedule",
-        "workflow_dispatch",
-    }:
+    if run["name"] != "Harness compatibility canaries" or run["event"] not in SWEEP_EVENTS:
         return False
     query = urlencode({"branch": run["head_branch"], "per_page": 100})
     newer = api(gh, f"actions/workflows/{run['workflow_id']}/runs?{query}")["workflow_runs"]
     return any(
         other["id"] > run["id"]
-        and other["path"] == run["path"]
+        and other["path"].partition("@")[0] == _WORKFLOWS[run["name"]]
         and (other["head_repository"] or {}).get("full_name") == run["head_repository"]["full_name"]
         and other["head_branch"] == run["head_branch"]
-        and other["event"] in {"schedule", "workflow_dispatch"}
+        and other["event"] in SWEEP_EVENTS
         for other in newer
     )
 
@@ -129,12 +143,12 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
     run_url = failed_run["html_url"]
     failures: list[Exception] = []
     trusted_logs = (
-        failed_run["path"] == _WORKFLOWS[failed_run["name"]]
+        failed_run["path"].partition("@")[0] == _WORKFLOWS[failed_run["name"]]
         and (failed_run["head_repository"] or {}).get("full_name")
         == os.environ["GITHUB_REPOSITORY"]
     )
     superseded = False
-    if trusted_logs and failed_run["conclusion"] == "cancelled":
+    if trusted_logs and any(job["conclusion"] == "cancelled" for job in bad):
         try:
             superseded = _superseded(failed_run, gh)
         except Exception as exc:
@@ -151,40 +165,23 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
             )
         except Exception as exc:
             failures.append(exc)
-    trusted_sweep = (
-        failed_run["event"] in {"schedule", "workflow_dispatch"}
-        and failed_run["head_branch"] == "main"
-    )
-    jobs_by_name = {
-        label: (name, publication_required)
-        for name in ADAPTER_NAMES
-        for label, publication_required in (
-            (f"Qualify {name}", trusted_sweep),
-            (f"Verify {name} plugin and policy", False),
-            (f"Canaries {name}", False),
-        )
-    }
+    trusted_sweep = failed_run["event"] in SWEEP_EVENTS and failed_run["head_branch"] == "main"
     for job in bad:
         if (
             not trusted_logs
-            or job["name"] not in jobs_by_name
-            or failed_run["event"]
-            not in {
-                "schedule",
-                "workflow_dispatch",
-                "pull_request",
-            }
+            or job["name"] not in _RECOVERY_JOBS
+            or failed_run["event"] not in SWEEP_EVENTS | {"pull_request"}
         ):
             continue
-        harness, publication_required = jobs_by_name[job["name"]]
+        harness, publication_required = _RECOVERY_JOBS[job["name"]]
         try:
             log = gh("api", f"repos/{{owner}}/{{repo}}/actions/jobs/{job['id']}/logs")
             results = recover_failures(
                 log,
                 harness,
                 run_url=run_url,
-                publication_required=publication_required,
-                include_unfinished=not superseded,
+                publication_required=publication_required and trusted_sweep,
+                include_unfinished=not (superseded and job["conclusion"] == "cancelled"),
             )
             if not results:
                 continue

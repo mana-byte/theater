@@ -29,6 +29,7 @@ from .run import Run
 from .summary import failing_checks
 
 Gh = Callable[..., str]
+SWEEP_EVENTS = frozenset({"schedule", "workflow_dispatch"})
 _MEANINGS = {
     "red": "A live contract assertion failed. Investigation must determine whether the "
     "new binary, Theater's wiring or the test caused it.",
@@ -51,11 +52,9 @@ def check_publication_context(root: Path, environ: Mapping[str, str]) -> None:
     """Publication uses trusted, pinned main code in GitHub Actions."""
     if environ.get("GITHUB_ACTIONS") != "true":
         raise ValueError("publication is reserved for GitHub Actions")
-    if environ.get("GITHUB_REF") != "refs/heads/main" or environ.get("GITHUB_EVENT_NAME") not in {
-        "schedule",
-        "workflow_dispatch",
-        "workflow_run",
-    }:
+    if environ.get("GITHUB_REF") != "refs/heads/main" or environ.get(
+        "GITHUB_EVENT_NAME"
+    ) not in SWEEP_EVENTS | {"workflow_run"}:
         raise ValueError("publishing requires trusted main workflow code")
     if git.git(root, "rev-parse", "HEAD").strip() != environ.get("GITHUB_SHA"):
         raise ValueError("publication checkout differs from the workflow's pinned commit")
@@ -119,8 +118,12 @@ def _write_issue(gh: Gh, title: str, text: str, number: int | None) -> None:
 
 
 def file_attention_issue(title: str, body: str, *, gh: Gh = run_gh) -> None:
-    """Dedupe human-attention issues without a local results store."""
-    _write_issue(gh, title, body, _open_issues(gh).get(title))
+    """Dedupe workflow issues, preserving the original failure when reporting fails later."""
+    number = _open_issues(gh).get(title)
+    if number is None:
+        _write_issue(gh, title, body, None)
+    else:
+        api(gh, f"issues/{number}/comments", method="POST", body={"body": body})
 
 
 def issue_title(harness: str, version: str) -> str:

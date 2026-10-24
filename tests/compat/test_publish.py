@@ -11,7 +11,7 @@ import pytest
 from scripts.harness_compat.contract import Check, Result
 from scripts.harness_compat.diagnostics import exception_detail
 from scripts.harness_compat.git import git
-from scripts.harness_compat.policy import PolicyChangeError, load_policy
+from scripts.harness_compat.policy import PolicyChangeError, load_policy, write_policy
 from scripts.harness_compat.publish import (
     file_attention_issue,
     file_issues,
@@ -207,6 +207,18 @@ def test_dirty_checkout_blocks_publication_without_touching_github(
     assert gh.calls == []
 
 
+def test_a_clean_checkout_with_a_different_policy_snapshot_cannot_publish(
+    repo: Path, result: Make, git
+) -> None:
+    write_policy(repo, "claude", VersionPolicy("1.0.0", "1.3.0"))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "advance policy")
+    gh = _github(repo)
+    with pytest.raises(PolicyChangeError, match="policy changed during qualification"):
+        _publish(repo, gh, result("1.4.0"))
+    assert not gh.calls
+
+
 def test_pending_code_changes_are_never_overwritten(repo: Path, result: Make) -> None:
     gh = _github(repo)
     gh.seed_pending(VersionPolicy("1.0.0", "1.3.0"))
@@ -269,10 +281,10 @@ def test_paginated_issue_lookup_flattens_pages_and_does_not_treat_prs_as_issues(
                     ],
                 ]
             )
-        return ""
+        return "{}"
 
     file_attention_issue("attention", "observed failure", gh=gh)
-    assert calls[-1][:3] == ("issue", "edit", "42")
+    assert calls[-1][:2] == ("api", "repos/{owner}/{repo}/issues/42/comments")
 
 
 def test_issue_explanation_has_the_exact_check_and_run(result: Make) -> None:

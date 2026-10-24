@@ -11,8 +11,9 @@ from scripts.harness_compat import cli
 from scripts.harness_compat.contract import Check, Result
 from scripts.harness_compat.git import git
 from scripts.harness_compat.policy import derive, write_policy
-from scripts.harness_compat.publish import Published
+from scripts.harness_compat.publish import Published, file_attention_issue
 from scripts.harness_compat.run import Run, run_harness
+from tests.support.compat_github import CompatGithub
 from theater.harness.contracts.version_policy import VersionPolicy
 
 POLICY = VersionPolicy("1.0.0", "1.2.0")
@@ -187,6 +188,34 @@ def test_issue_publication_failure_is_explicitly_visible(
     monkeypatch.setattr(cli, "file_attention_issue", unavailable)
     assert _main(monkeypatch, repo, "report", "42") == 2
     assert "Failure issue publication" in capsys.readouterr().err
+
+
+def test_reporter_failure_comments_on_the_original_workflow_issue(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publishing(monkeypatch, repo)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_run")
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    gh = CompatGithub(git(repo, "rev-parse", "HEAD").strip(), POLICY)
+    title = "Harness compatibility workflow: 42"
+    original = "Run: https://github.com/o/r/actions/runs/42\n- Qualify claude: failure\n"
+
+    def broken_report(*args):
+        file_attention_issue(title, original, gh=gh)
+        raise OSError("job logs unavailable")
+
+    monkeypatch.setattr(cli, "report_workflow_failure", broken_report)
+    monkeypatch.setattr(
+        cli, "file_attention_issue", lambda *args: file_attention_issue(*args, gh=gh)
+    )
+    assert _main(monkeypatch, repo, "report", "42") == 2
+    assert gh.issue_bodies == {1: original}
+    assert len(gh.issues) == 1 and len(gh.issue_comments[1]) == 1
+    comment = gh.issue_comments[1][0]
+    assert "job logs unavailable" in comment
+    assert "Run: https://github.com/o/r/actions/runs/42" in comment
+    assert "Reporter: https://github.com/o/r/actions/runs/7" in comment
+    assert all(not path.exists() for path in gh.temporary_paths)
 
 
 def test_routine_check_does_not_depend_on_newer_upstream_heads(

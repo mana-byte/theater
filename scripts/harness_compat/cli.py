@@ -19,7 +19,7 @@ from .policy import (
     load_policy,
     policy_relative,
 )
-from .publish import check_publication_context, file_attention_issue, publish
+from .publish import SWEEP_EVENTS, check_publication_context, file_attention_issue, publish
 from .run import Run, discover_releases, run_harness
 from .summary import error_annotation, render_run
 
@@ -46,17 +46,18 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_url() -> str:
+def _run_url(run_id: int | str) -> str:
     return (
         f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
-        f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+        f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run_id}"
     )
 
 
 def _publishes() -> bool:
-    return os.environ.get("GITHUB_REF") == "refs/heads/main" and os.environ.get(
-        "GITHUB_EVENT_NAME"
-    ) in {"schedule", "workflow_dispatch"}
+    return (
+        os.environ.get("GITHUB_REF") == "refs/heads/main"
+        and os.environ.get("GITHUB_EVENT_NAME") in SWEEP_EVENTS
+    )
 
 
 def _run(args: argparse.Namespace, root: Path) -> int:
@@ -65,7 +66,7 @@ def _run(args: argparse.Namespace, root: Path) -> int:
         check_publication_context(root, os.environ)
 
     def completed(run: Run) -> None:
-        published = publish(root, run, run_url=_run_url())
+        published = publish(root, run, run_url=_run_url(os.environ["GITHUB_RUN_ID"]))
         print(f"{args.harness}: shared policy PR {published.pr}", flush=True)
 
     run = run_harness(root, load_adapter(args.harness), publish=completed if publishing else None)
@@ -158,7 +159,8 @@ def main(argv: list[str] | None = None) -> int:
                 file_attention_issue(
                     f"Harness compatibility workflow: {args.run_id}",
                     f"Failure reporting needs human attention for run {args.run_id}.\n\n"
-                    f"Reporter: {_run_url()}\n\n{message}\n",
+                    f"Run: {_run_url(args.run_id)}\n"
+                    f"Reporter: {_run_url(os.environ['GITHUB_RUN_ID'])}\n\n{message}\n",
                 )
             except Exception as reporting:
                 print(

@@ -25,6 +25,8 @@ class CompatGithub:
         self.commits = {sha: {"tree": {"sha": "tree-main"}, "parents": []}}
         self.pr: int | None = None
         self.issues: dict[str, int] = {}
+        self.issue_bodies: dict[int, str] = {}
+        self.issue_comments: dict[int, list[str]] = {}
         self.calls: list[tuple[str, ...]] = []
         self.requests: list[dict] = []
         self.bodies: list[str] = []
@@ -75,12 +77,20 @@ class CompatGithub:
         if args[:2] == ("pr", "list"):
             return json.dumps([] if self.pr is None else [{"number": self.pr}])
         if args[:2] == ("issue", "create"):
-            self.issues[args[args.index("--title") + 1]] = len(self.issues) + 1
+            number = len(self.issues) + 1
+            self.issues[args[args.index("--title") + 1]] = number
+            self.issue_bodies[number] = self.bodies[-1]
+        elif args[:2] == ("issue", "edit"):
+            self.issue_bodies[int(args[2])] = self.bodies[-1]
         if args[0] != "api":
             return ""
         if "--paginate" in args:
             return json.dumps([[{"title": title, "number": n} for title, n in self.issues.items()]])
         path = args[1].removeprefix("repos/{owner}/{repo}/")
+        if path.startswith("issues/") and path.endswith("/comments"):
+            number = int(path.split("/")[1])
+            self.issue_comments.setdefault(number, []).append(body["body"])
+            return json.dumps({"id": len(self.issue_comments[number])})
         return json.dumps(self._api(path, body))
 
     def _api(self, path: str, body: dict):

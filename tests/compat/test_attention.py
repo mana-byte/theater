@@ -13,6 +13,7 @@ import pytest
 from scripts.harness_compat import attention
 from scripts.harness_compat.codecopy import code_copy
 from scripts.harness_compat.git import git
+from scripts.harness_compat.policy import policy_relative
 from scripts.harness_compat.run import Run
 from tests.support.compat_github import assert_gh_flags
 from tests.support.paths import REPO_ROOT
@@ -61,6 +62,7 @@ def _report(
     head_repository: str | None = "o/r",
     path: str | None = None,
     superseded: bool = False,
+    additional_jobs: tuple[tuple[str, str, str], ...] = (),
 ):
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
@@ -70,6 +72,23 @@ def _report(
     issues: list[tuple[str, str]] = []
     proposals: list[Run] = []
     log_reads: list[str] = []
+    job_specs = [
+        (
+            job
+            or ("Verify claude plugin and policy" if event == "pull_request" else "Qualify claude"),
+            stage,
+            log,
+        ),
+        *additional_jobs,
+    ]
+    jobs = [
+        {"name": label, "conclusion": conclusion, "id": identifier}
+        for identifier, (label, conclusion, _) in enumerate(job_specs, start=3)
+    ]
+    logs = {
+        f"repos/{{owner}}/{{repo}}/actions/jobs/{identifier}/logs": detail
+        for identifier, (_, _, detail) in enumerate(job_specs, start=3)
+    }
 
     canaries = bool(job and job.startswith("Canaries "))
     workflow = {
@@ -93,33 +112,23 @@ def _report(
                 "head": {"sha": "new-head" if superseded else "tested-head"},
             }
         if endpoint.startswith("actions/workflows/"):
-            return {"workflow_runs": [{**workflow, "id": 43 if superseded else 42}]}
+            return {
+                "workflow_runs": [
+                    {
+                        **workflow,
+                        "id": 43 if superseded else 42,
+                        "path": workflow["path"].partition("@")[0],
+                    }
+                ]
+            }
         return workflow
 
     def gh(*args):
         assert_gh_flags(args)
         if "--paginate" in args:
-            return json.dumps(
-                [
-                    {"jobs": []},
-                    {
-                        "jobs": [
-                            {
-                                "name": job
-                                or (
-                                    "Verify claude plugin and policy"
-                                    if event == "pull_request"
-                                    else "Qualify claude"
-                                ),
-                                "conclusion": stage,
-                                "id": 3,
-                            }
-                        ]
-                    },
-                ]
-            )
+            return json.dumps([{"jobs": []}, {"jobs": jobs}])
         log_reads.append(args[1])
-        return log
+        return logs[args[1]]
 
     monkeypatch.setattr(attention, "api", api)
     monkeypatch.setattr(
@@ -204,15 +213,20 @@ def test_canary_failures_report_the_known_version_as_suite_tooling(repo: Path, m
 
 
 @pytest.mark.parametrize(
-    "event,job",
+    "event,job,path",
     [
-        ("pull_request", None),
-        ("schedule", "Canaries claude"),
-        ("workflow_dispatch", "Canaries claude"),
+        ("pull_request", None, None),
+        ("schedule", "Canaries claude", None),
+        ("workflow_dispatch", "Canaries claude", None),
+        (
+            "schedule",
+            "Canaries claude",
+            ".github/workflows/harness-compat-canaries.yml@refs/heads/main",
+        ),
     ],
 )
 def test_supersession_never_manufactures_an_unfinished_version_failure(
-    repo: Path, monkeypatch, event: str, job: str | None
+    repo: Path, monkeypatch, event: str, job: str | None, path: str | None
 ) -> None:
     log = "compat:start claude 1.3.0"
     if job is None:
@@ -225,8 +239,40 @@ def test_supersession_never_manufactures_an_unfinished_version_failure(
         stage="cancelled",
         superseded=True,
         log=log,
+        path=path,
     )
     assert not issues and not proposals
+
+
+def test_mixed_failed_and_superseded_matrix_jobs_only_exclude_genuine_unfinished_failures(
+    repo: Path, monkeypatch, git
+) -> None:
+    codex = repo / policy_relative("codex")
+    codex.parent.mkdir(parents=True)
+    codex.write_text((repo / policy_relative("claude")).read_text())
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "codex policy")
+    issues, proposals, _ = _report(
+        monkeypatch,
+        repo,
+        event="pull_request",
+        stage="failure",
+        superseded=True,
+        log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 red\ncompat:start claude 1.4.0",
+        additional_jobs=(
+            (
+                "Verify codex plugin and policy",
+                "cancelled",
+                "compat:start codex 1.3.0\ncompat:result codex 1.3.0 tooling\n"
+                "compat:start codex 1.4.0",
+            ),
+        ),
+    )
+    outcomes = [(run.harness, [(r.version, r.verdict) for r in run.results]) for run in proposals]
+    assert issues and outcomes == [
+        ("claude", [("1.3.0", "red"), ("1.4.0", "inconclusive")]),
+        ("codex", [("1.3.0", "tooling")]),
+    ]
 
 
 def test_a_completed_failure_survives_supersession_without_excluding_unfinished_versions(
@@ -271,6 +317,26 @@ def test_main_sweep_cancellation_is_a_failure_even_when_a_newer_run_exists(
         log="compat:start claude 1.3.0",
     )
     assert issues and proposals[0].results[0].verdict == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/harness-compat.yml",
+        ".github/workflows/harness-compat.yml@refs/pull/7/head",
+    ],
+)
+def test_known_workflow_paths_accept_the_optional_api_ref_suffix(
+    repo: Path, monkeypatch, path: str
+) -> None:
+    issues, proposals, log_reads = _report(
+        monkeypatch,
+        repo,
+        event="pull_request",
+        path=path,
+        log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 red",
+    )
+    assert issues and log_reads and proposals[0].results[0].version == "1.3.0"
 
 
 @pytest.mark.parametrize(

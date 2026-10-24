@@ -52,8 +52,8 @@ It recovers unfinished or failed known versions from qualification, PR verificat
 logs, then proposes exclusions through the same shared PR. Only identities from this repository's
 two expected workflow files can propose exclusions; foreign/fork source failures get a workflow
 issue without trusting their claimed versions. Reporting never executes PR code or authorizes
-a pass from logs. Concurrency supersession does not fail an unfinished version; completed failures
-are still reported, and ordinary cancellations require attention.
+a pass from logs. Superseded cancelled jobs do not fail unfinished versions; completed failures
+and genuinely failed jobs are still reported. Ordinary cancellations require attention.
 
 ## Suite and temporary data
 
