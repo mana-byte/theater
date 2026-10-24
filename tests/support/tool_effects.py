@@ -74,14 +74,14 @@ async def expect_runs(live: LiveRig, participant: str, effect: Effect) -> None:
     live.queue(MockReply(final))
 
     async def not_gated() -> None:
+        _check_fit(live, prompt, effect)
         if not effect.happened() and (await live.reading(participant)).kind is ScreenKind.APPROVAL:
             violation("the tool is waiting for approval although the approval policy allows it")
 
     job = await live.send(participant, prompt, guard=not_gated)
 
-    # A turn the CLI never took has no request to compare: its own error comes first.
-    assert job.state == "done", job.error
     _check_fit(live, prompt, effect)
+    assert job.state == "done", job.error
     assert final in str(job.result)
     assert effect.happened(), "the tool call finished without leaving its effect"
     assert any(request.last_tool_result for request in live.mock.requests), (
@@ -100,6 +100,7 @@ async def expect_gated(live: LiveRig, participant: str, effect: Effect) -> None:
     handle = accepted.job_handle
 
     async def still_waiting() -> None:
+        _check_fit(live, prompt, effect)
         job = (await live.client.jobs.get(handle)).value
         if job.state != "running":
             violation(f"the turn ended ({job.state}) before its tool met an approval: {job.error}")
@@ -115,13 +116,15 @@ async def expect_gated(live: LiveRig, participant: str, effect: Effect) -> None:
 
 
 def _check_fit(live: LiveRig, prompt: str, effect: Effect) -> None:
-    """The scripted call must use arguments the offered tool declares, or it proves nothing.
+    """Before any outcome is judged: the scripted call must fit the tool the CLI offered.
 
     Theater does not choose a CLI's tool schemas, so a misfit means the plugin's recipe is stale:
-    nothing is proven about the CLI, and the run is inconclusive rather than red.
+    nothing is proven about the CLI, and the run is inconclusive rather than red. A turn the CLI
+    never took has no offer to compare, so its own outcome is the evidence.
     """
-    request = live.turns(prompt)[0]
-    problem = _misfit(request, effect.call)
+    if not (requests := live.turns(prompt)):
+        return
+    problem = _misfit(requests[0], effect.call)
     if problem is not None:
         inconclusive(
             f"the plugin's recipe for {effect.call.name!r} does not fit the CLI's tool: {problem}"
