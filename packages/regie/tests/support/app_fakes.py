@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +19,7 @@ from theater.frontend import (
     EventCursor,
     FrontendClient,
     FrontendResponseError,
+    Operation,
     Participant,
     Provider,
     StateProjection,
@@ -77,6 +79,43 @@ def make_participant(
             "trusted_identity": trusted_identity,
             "transcript_identity": transcript_identity,
         }
+    )
+
+
+def make_operation(
+    kind: str,
+    state: str,
+    phase: str,
+    *,
+    operation_id: str = "op-1",
+    target: str = "participant-1",
+    updated_at: float | None = None,
+    error_code: str | None = None,
+) -> Operation:
+    """A public operation aimed at one participant, as the daemon would publish it."""
+    stamp = time.time() if updated_at is None else updated_at
+    return Operation.from_wire(
+        {
+            "operation_id": operation_id,
+            "kind": kind,
+            "state": state,
+            "phase": phase,
+            "actor": {"client_id": "client"},
+            "target_ids": [target],
+            "created_at": stamp,
+            "updated_at": stamp,
+            **(
+                {"error": {"code": error_code, "message": "m", "details": {}}} if error_code else {}
+            ),
+        }
+    )
+
+
+def with_operations(projection: StateProjection, *operations: Operation) -> StateProjection:
+    """*projection* with *operations* published, as a follow of the event stream would."""
+    return replace(
+        projection,
+        operations=MappingProxyType({item.operation_id: item for item in operations}),
     )
 
 

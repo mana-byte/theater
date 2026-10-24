@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, nullcontext, suppress
-from time import monotonic
+from time import monotonic, time
 
 from textual.containers import Vertical
+from textual.timer import Timer
 
 from regie.app_parts._shared import _AppBase, logger
 from regie.contracts import LocalPresentationTarget, PresentationTarget
 from regie.controllers.surface import SurfaceMode
 from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_milestone
+from regie.marks import next_expiry, row_marks
 from regie.presentation import matches_terminal_identity, stageability
 from regie.state import StateController
 from regie.tree_layout import TreeLayout
@@ -74,6 +76,10 @@ def holds_routed(projection: StateProjection | None, participant_id: str) -> boo
 class ProjectionSync(_AppBase):
     #: Inputs of the last completed tree render; an equal fingerprint means it is current.
     _projection_fingerprint: tuple[object, ...] | None = None
+    #: Operations whose failure the cursor has rested on, and the timer that redraws a mark due
+    #: to fade; both replaced, never mutated, so a class default is safe.
+    _seen_operations: frozenset[str] = frozenset()
+    _mark_expiry_timer: Timer | None = None
 
     async def _tick_synchronize(self) -> None:
         if not self._view_active:
@@ -209,6 +215,13 @@ class ProjectionSync(_AppBase):
             for pane in self._unmanaged or ()
             if pane.pane_id not in managed
         ]
+        marks = row_marks(
+            projection.operations.values(),
+            projection.participants,
+            now=time(),
+            seen=self._seen_operations,
+        )
+        self._schedule_mark_expiry(next_expiry(marks.values()))
         # Every input tree.show_projection reads: an equal fingerprint is a redundant render.
         # Providers and cursor are absent: the tree reads them only through stage_reasons.
         fingerprint = (
@@ -228,6 +241,7 @@ class ProjectionSync(_AppBase):
             self.settings.participant_detail,
             self.settings.cwd_segments,
             _tree_layout_fingerprint(self._tree_layout),
+            tuple(sorted(marks.items())),
             (
                 tuple(sorted(self._pending_spawn.items()))
                 if self._pending_spawn is not None
@@ -253,6 +267,7 @@ class ProjectionSync(_AppBase):
                 layout=self._tree_layout,
                 pending_spawn=self._pending_spawn,
                 unmanaged=unmanaged,
+                marks=marks,
             )
             self._navigation.select(selected)
             self.call_after_refresh(self._sync_ambience)  # rows changed: so did the free band
@@ -262,6 +277,27 @@ class ProjectionSync(_AppBase):
             self.call_after_refresh(
                 startup_milestone, "participants_ready", self._startup_started_at
             )
+
+    def _schedule_mark_expiry(self, expires_at: float | None) -> None:
+        """Redraw once the soonest self-fading mark is due; nothing else would."""
+        if self._mark_expiry_timer is not None:
+            self._mark_expiry_timer.stop()
+            self._mark_expiry_timer = None
+        if expires_at is not None:
+            delay = max(0.0, expires_at - time()) + 0.05
+            self._mark_expiry_timer = self.set_timer(delay, self._redraw_marks)
+
+    def _redraw_marks(self) -> None:
+        self._mark_expiry_timer = None
+        if (projection := self._state.projection) is not None:
+            self._show_projection(projection)
+
+    def on_participant_tree_mark_seen(self, message: ParticipantTree.MarkSeen) -> None:
+        """A failure the cursor has rested on stops asking for attention."""
+        message.stop()
+        self._seen_operations |= {message.operation_id}
+        if (projection := self._state.projection) is not None:
+            self._show_projection(projection)
 
     @staticmethod
     def _participant_id_for_target(

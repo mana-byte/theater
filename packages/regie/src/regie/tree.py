@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TypeGuard, cast
 
 from regie.formatting import participant_label, shorten_path
+from regie.marks import MarkKind, RowMark
 from regie.tree_layout import TreeLayout
 from regie.tree_nodes import ParticipantNode, PendingSpawnNode, SeparatorNode, TreeNode
 from theater.frontend import Participant, StateProjection
@@ -57,11 +58,12 @@ def _participant_node(
     *,
     harness_icons: Mapping[str, str] | None = None,
     participant_costs: Mapping[str, int] | None = None,
+    mark: RowMark | None = None,
 ) -> ParticipantNode:
     route = participant.terminal_route
     terminal_id = route.identity.terminal_id if route is not None else None
     cost = (participant_costs or {}).get(participant.participant_id)
-    return {
+    node: ParticipantNode = {
         "id": participant.participant_id,
         "parent_id": participant.parent_id,
         "tier": participant.origin,
@@ -83,6 +85,9 @@ def _participant_node(
         "usage_cost_microcents": cost,
         "children": [],
     }
+    if mark is not None:
+        node["mark"] = mark
+    return node
 
 
 def _separator_node(separator_id: str, name: str, *, collapsed: bool) -> SeparatorNode:
@@ -107,10 +112,21 @@ def _agents(node: TreeNode) -> list[TreeNode]:
 #: The status a folded heading shows for its hidden agents, strongest first.
 _FOLD_STATUSES = ("awaiting_input", "dead", "working")
 
+#: A hidden agent whose operation failed or is in doubt shows through as the status it reads as.
+_MARK_FOLD_STATUS = {
+    MarkKind.BLOCKED: "awaiting_input",
+    MarkKind.UNCERTAIN: "awaiting_input",
+    MarkKind.FAILED: "dead",
+}
+
 
 def _fold_status(agents: list[TreeNode]) -> str | None:
     """Needing a human outranks a dead agent, which outranks working; an all-idle fold is blank."""
     statuses = {agent.get("status") for agent in agents}
+    for agent in agents:
+        mark = agent.get("mark")
+        if isinstance(mark, RowMark) and mark.kind in _MARK_FOLD_STATUS:
+            statuses.add(_MARK_FOLD_STATUS[mark.kind])
     return next((status for status in _FOLD_STATUSES if status in statuses), None)
 
 
@@ -148,6 +164,7 @@ def tree_for_projection(
     participant_costs: Mapping[str, int] | None = None,
     layout: TreeLayout | None = None,
     pending_spawn: Mapping[str, object] | None = None,
+    marks: Mapping[str, RowMark] | None = None,
 ) -> list[TreeNode]:
     """Adapt public participants to the presentation renderer's nested forest.
 
@@ -159,6 +176,7 @@ def tree_for_projection(
             item,
             harness_icons=harness_icons,
             participant_costs=participant_costs,
+            mark=(marks or {}).get(participant_id),
         )
         for participant_id, item in participants.items()
     }

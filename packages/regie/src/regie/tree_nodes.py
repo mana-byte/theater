@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Literal, NotRequired, TypedDict
 
+from regie.marks import RowMark
+
 
 class LayoutSeparator(TypedDict):
     name: str
@@ -29,6 +31,7 @@ class ParticipantNode(TypedDict):
     usage_cost_microcents: int | None
     children: list[TreeNode]
     stage_reason: NotRequired[str]
+    mark: NotRequired[RowMark]
 
 
 class SeparatorNode(TypedDict):
@@ -71,6 +74,7 @@ class RawRenderNode(TypedDict, total=False):
     description: str | None
     stage_reason: str
     usage_cost_microcents: int | None
+    mark: RowMark | None
     collapsed: bool
     count: int
     folded: list[str]

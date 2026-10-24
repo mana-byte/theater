@@ -22,6 +22,7 @@ from regie.ui_constants import (
     REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE,
 )
 from regie.formatting import harness_icon, short_id, tilde
+from regie.marks import MarkKind, RowMark
 from regie.motions.pulse import working_harness_style
 from regie.motions.spinner import spinner_frame
 from regie.tree_nodes import RawRenderNode, RenderNode
@@ -124,6 +125,8 @@ def _status_glyph(
     in its await's colour instead: it is not computing, so it must not look like it is.
     """
     status = node.get("status", "?")
+    if (mark := _mark(node)) is not None and mark.kind is MarkKind.LAUNCHING:
+        return mark.glyph, mark.style
     if waiting is not None and status in ("working", "idle"):
         return WAITING_FRAMES[frame % len(WAITING_FRAMES)], waiting
     if status == "working":
@@ -139,6 +142,12 @@ def _status_glyph(
         )
     # Unknown / unmanaged: honest "?" rather than guessing idle.
     return "?", "$text-muted"
+
+
+def _mark(node: RawRenderNode) -> RowMark | None:
+    """What an operation aimed at this row says about it, if anything."""
+    mark = node.get("mark")
+    return mark if isinstance(mark, RowMark) else None
 
 
 def _presence_glyph_style(node: RawRenderNode, default: str) -> str:
@@ -307,6 +316,9 @@ def node_label(
     row2_parts.append((sid, id_style) if id_style else sid)
     if awaited:
         row2_parts.append((f"  ◂{awaited if awaited > 1 else ''}", "$text-muted"))
+    mark = _mark(view)
+    if mark is not None and mark.kind is not MarkKind.LAUNCHING:
+        row2_parts.append((f"  {mark.glyph}", mark.style))
     if cost is not None and width is not None:
         gap = width - _parts_width(row2_parts) - _parts_width(cost)
         if gap > 0:
@@ -316,7 +328,7 @@ def node_label(
     row3_parts: list = []
     if cont_prefix:
         row3_parts.append((cont_prefix, "$text dim"))
-    row3_parts.append((cwd, "$text dim"))
+    row3_parts.append((mark.detail, mark.style) if mark and mark.detail else (cwd, "$text dim"))
 
     if overlay:
         row1_parts = _overlay_row(row1_parts, {c: g for (r, c), g in overlay.items() if r == 0})

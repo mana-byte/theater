@@ -164,6 +164,16 @@ REGIE_ATTENTION_PULSE_INTERVAL = 0.4
 #: Hollow rotating arc: an agent that is blocked on a peer, not computing.
 REGIE_WAITING_FRAMES = "◜◠◝◞◡◟"
 
+#: How long the row of a participant wears what an operation aimed at it did: a send that
+#: arrived (a moment), one still queued or a spawn still starting (until it settles or goes
+#: stale), and a failure or doubt (until the human has seen it, or it is old news).
+REGIE_MARK_SENT_SECONDS = 3.0
+REGIE_MARK_ACTIVE_MAX_SECONDS = 1800.0
+REGIE_MARK_OUTCOME_MAX_SECONDS = 600.0
+
+#: How long the cursor must rest on a row before its failure counts as seen.
+REGIE_MARK_SEEN_SECONDS = 1.0
+
 #: Frames before a leaf's counter wraps: a whole number of turns of both the ten-frame spinner
 #: and the six-frame arc, or the wrap would stutter one of them.
 REGIE_LEAF_FRAME_CYCLE = 30

@@ -10,10 +10,12 @@ from typing import Literal, cast
 from textual import events
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
+from textual.message import Message
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Label
 
+from regie.marks import MarkKind, RowMark
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
 from regie.motions.routes import AwaitMarks, LeafOverlay
@@ -27,6 +29,7 @@ from regie.ui_constants import (
     REGIE_ATTENTION_PULSE_INTERVAL,
     REGIE_ATTENTION_PULSE_LIMIT,
     REGIE_EMPTY_TREE_KEY,
+    REGIE_MARK_SEEN_SECONDS,
     REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
     REGIE_WIPE_INTERVAL_SECONDS,
 )
@@ -51,8 +54,24 @@ def _is_selectable_key(key: Key) -> bool:
     return key[0] in {"p", "s", "u"}
 
 
+#: The sweep that announces a mark arriving on a row.
+_MARK_WIPE_COLORS = {
+    MarkKind.SENT: "$success",
+    MarkKind.BLOCKED: "$warning",
+    MarkKind.UNCERTAIN: "$warning",
+    MarkKind.FAILED: "$error",
+}
+
+
 class ParticipantTree(VerticalScroll):
     """Keep one interactive leaf per stable public participant ID."""
+
+    class MarkSeen(Message):
+        """The cursor rested on a row long enough that its failure counts as seen."""
+
+        def __init__(self, operation_id: str) -> None:
+            super().__init__()
+            self.operation_id = operation_id
 
     can_focus = False
     _EMPTY_KEY: Key = REGIE_EMPTY_TREE_KEY
@@ -114,6 +133,9 @@ class ParticipantTree(VerticalScroll):
         self._attention_phase = 0
         self._attention_timer: Timer | None = None
         self._await_marks = AwaitMarks()
+        self._mark_kinds: dict[str, MarkKind] = {}
+        self._seen_timer: Timer | None = None
+        self._seen_pending: str | None = None
 
     @property
     def selected_id(self) -> str | None:
@@ -170,6 +192,7 @@ class ParticipantTree(VerticalScroll):
         unmanaged: list[dict] | None = None,
         layout: TreeLayout | None = None,
         pending_spawn: Mapping[str, object] | None = None,
+        marks: Mapping[str, RowMark] | None = None,
     ) -> str | None:
         old_keys = self.selectable_keys
         try:
@@ -182,12 +205,14 @@ class ParticipantTree(VerticalScroll):
             participant_costs=self._participant_costs,
             layout=layout,
             pending_spawn=pending_spawn,
+            marks=marks,
         )
         reasons = stage_reasons or {}
         self._add_stage_reasons(tree, reasons)
         lines = render_tree(tree, unmanaged=unmanaged, cwd_segments=cwd_segments)
         self._sync_retirement(projection)
         self._observe_statuses(projection)
+        self._observe_marks(marks or {})
         self._participant_detail = "description" if participant_detail == "description" else "cwd"
         self._cwd_segments = cwd_segments
         self._lines_data = lines
@@ -217,6 +242,7 @@ class ParticipantTree(VerticalScroll):
         self._sync_reveal()
         self._sync_attention()
         self._apply_await_marks()
+        self._sync_mark_seen()
         return self.selected_participant_id
 
     def set_usage_costs(self, costs: Mapping[str, int]) -> None:
@@ -414,6 +440,7 @@ class ParticipantTree(VerticalScroll):
             widget.set_cursor(self._cursor_visible and key == self._selected_key)
         self._apply_branch_highlight()
         self.scroll_to_selection()
+        self._sync_mark_seen()
 
     def on_separator_row_hovered(self, message: SeparatorRow.Hovered) -> None:
         message.stop()
@@ -616,6 +643,48 @@ class ParticipantTree(VerticalScroll):
         self._statuses = current
         self._ensure_wipe_timer()
 
+    def _observe_marks(self, marks: Mapping[str, RowMark]) -> None:
+        """Sweep a row whose operation just produced something worth announcing."""
+        for participant_id, mark in marks.items():
+            if self._mark_kinds.get(participant_id) is mark.kind:
+                continue
+            if (color := _MARK_WIPE_COLORS.get(mark.kind)) is not None:
+                self._wipes.start(("p", participant_id), color)
+        self._mark_kinds = {participant_id: mark.kind for participant_id, mark in marks.items()}
+        self._ensure_wipe_timer()
+
+    def _sync_mark_seen(self) -> None:
+        """Once the cursor has rested on a failure for a moment, report it seen."""
+        key = self._selected_key
+        mark = next(
+            (
+                node.get("mark")
+                for _, node, line_key, _, _ in self._lines_data
+                if line_key == key and _is_managed_key(line_key)
+            ),
+            None,
+        )
+        wanted = mark.operation_id if isinstance(mark, RowMark) and mark.needs_seen else None
+        if wanted == self._seen_pending:
+            return
+        self._stop_mark_seen()
+        if wanted is not None:
+            self._seen_pending = wanted
+            self._seen_timer = self.set_timer(
+                REGIE_MARK_SEEN_SECONDS, lambda: self._report_seen(wanted)
+            )
+
+    def _report_seen(self, operation_id: str) -> None:
+        self._seen_timer = None
+        self._seen_pending = None
+        self.post_message(self.MarkSeen(operation_id))
+
+    def _stop_mark_seen(self) -> None:
+        if self._seen_timer is not None:
+            self._seen_timer.stop()
+            self._seen_timer = None
+        self._seen_pending = None
+
     def _ensure_wipe_timer(self) -> None:
         if self._wipes.active and self._wipe_timer is None:
             self._wipe_timer = self.set_interval(REGIE_WIPE_INTERVAL_SECONDS, self._tick_wipe)
@@ -682,6 +751,7 @@ class ParticipantTree(VerticalScroll):
         self._stop_reveal()
         self._stop_retirement()
         self._stop_attention()
+        self._stop_mark_seen()
         if self._wipe_timer is not None:
             self._wipe_timer.stop()
             self._wipe_timer = None
