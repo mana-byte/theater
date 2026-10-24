@@ -16,6 +16,7 @@ from tests.support.codex_server import (
     make_runtime,
     open_new,
     summary_turn_completed,
+    thread_status_changed,
 )
 from tests.support.observation import minimal_gates
 from tests.support.waiting import until
@@ -633,5 +634,214 @@ async def test_a_turn_left_unfinished_before_attaching_is_recorded_as_interrupte
             NativeTurnTerminal.INTERRUPTED,
             True,
         )
+    finally:
+        await runtime.aclose()
+
+
+def active_resume_response(*turns: dict) -> dict:
+    """thread/resume answering while the thread is active, newest turn first."""
+    return {
+        "thread": {"id": "ui-thread-1", "status": {"type": "active", "activeFlags": []}},
+        "initialTurnsPage": {"data": list(turns), "nextCursor": None},
+    }
+
+
+def live_completion(turn_id: str = "turn-1") -> RuntimeNotification:
+    return summary_turn_completed(
+        turn_id=turn_id,
+        items_view="summary",
+        items=[{"id": f"final-{turn_id}", "type": "agentMessage", "text": "real answer"}],
+    )
+
+
+async def read_outcomes(source: Source, *, timeout: float = 2.0) -> list:
+    """The terminal evidence the live source has produced, waiting for the first to arrive."""
+    outcomes: list = []
+
+    async def arrived() -> bool:
+        outcomes.extend((await source.read()).terminal_evidence)
+        return bool(outcomes)
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not await arrived() and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    return outcomes
+
+
+async def test_idle_processed_before_a_delayed_send_response_does_not_end_the_turn() -> None:
+    """The app-server flips the thread idle before it emits turn/completed (F1)."""
+    server = ScriptedCodexServer()
+    server.respond("thread/resume", active_resume_response(unfinished_turn_read_as_interrupted()))
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    gate = asyncio.Event()
+    server.request_gates["thread/resume"] = gate
+    entered = server.request_entered.setdefault("thread/resume", asyncio.Event())
+    try:
+        send = asyncio.create_task(runtime.send(operation_id="op-1", prompt="work"))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        server.push(thread_status_changed("idle"))
+        assert await until(lambda: runtime._thread_status == "idle")
+        gate.set()
+        await send
+
+        assert not (await source.read()).terminal_evidence
+        server.push(live_completion())
+        (outcome,) = await read_outcomes(source)
+        assert (outcome.terminal, outcome.result, outcome.from_history) == (
+            NativeTurnTerminal.COMPLETED,
+            "real answer",
+            False,
+        )
+    finally:
+        await runtime.aclose()
+
+
+async def test_a_next_turn_started_before_an_older_history_page_does_not_end_the_first() -> None:
+    """A page read while turn-1 ran can land after turn-2 became the active turn (F1)."""
+    server = ScriptedCodexServer()
+    server.respond("thread/resume", active_resume_response(unfinished_turn_read_as_interrupted()))
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    gate = asyncio.Event()
+    server.request_gates["thread/turns/list"] = gate
+    server.respond("thread/turns/list", {"data": [unfinished_turn_read_as_interrupted()]})
+    entered = server.request_entered.setdefault("thread/turns/list", asyncio.Event())
+    try:
+        await runtime.send(operation_id="op-1", prompt="work")
+        runtime._start_history_reconciliation("ui-thread-1")
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        server.push(
+            RuntimeNotification(
+                method="turn/started",
+                params={
+                    "threadId": "ui-thread-1",
+                    "turn": {"id": "turn-2", "status": "inProgress"},
+                },
+            )
+        )
+        assert await until(lambda: runtime._active_turn_id == "turn-2")
+        gate.set()
+        await asyncio.wait_for(runtime._history_reconcile_task, timeout=2)
+
+        assert not (await source.read()).terminal_evidence
+        server.push(live_completion())
+        (outcome,) = await read_outcomes(source)
+        assert (outcome.native_turn_id, outcome.terminal) == (
+            "turn-1",
+            NativeTurnTerminal.COMPLETED,
+        )
+    finally:
+        await runtime.aclose()
+
+
+async def test_an_attaching_runtime_does_not_end_a_turn_its_response_says_is_running() -> None:
+    """A fresh RECONNECT holds no active id, so the response alone must say it (F2)."""
+    server = ScriptedCodexServer()
+    server.respond("thread/resume", active_resume_response(unfinished_turn_read_as_interrupted()))
+    runtime = make_runtime(server)
+    source = runtime.live_source()
+    try:
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
+
+        assert not (await source.read()).terminal_evidence
+        server.push(live_completion())
+        (outcome,) = await read_outcomes(source)
+        assert (outcome.terminal, outcome.result, outcome.from_history) == (
+            NativeTurnTerminal.COMPLETED,
+            "real answer",
+            False,
+        )
+    finally:
+        await runtime.aclose()
+
+
+async def test_a_missed_live_completion_is_recovered_from_history_once_the_thread_is_idle() -> None:
+    """The turn really ended and only idle was seen live; history now carries its end time (F3)."""
+    server = ScriptedCodexServer()
+    server.respond("thread/resume", active_resume_response(unfinished_turn_read_as_interrupted()))
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    try:
+        await runtime.send(operation_id="op-1", prompt="work")
+        assert not (await source.read()).terminal_evidence
+
+        ended = {**unfinished_turn_read_as_interrupted(), "completedAt": 1_780_000_000.0}
+        server.respond("thread/turns/list", {"data": [ended], "nextCursor": None})
+        server.push(thread_status_changed("idle"))
+
+        (outcome,) = await read_outcomes(source)
+        assert (outcome.native_turn_id, outcome.terminal, outcome.from_history) == (
+            "turn-1",
+            NativeTurnTerminal.INTERRUPTED,
+            True,
+        )
+        assert outcome.completed_at == 1_780_000_000.0
+        assert len(server.requested("turn/start")) == 1, "recovery never replays a prompt"
+    finally:
+        await runtime.aclose()
+
+
+async def test_history_that_never_records_an_end_leaves_the_turn_to_its_live_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery re-reads a bounded number of times, never replays a prompt, then steps aside."""
+    monkeypatch.setattr(codex_runtime_constants, "CODEX_RUNTIME_RECONCILE_RETRY_SECONDS", 0.01)
+    server = ScriptedCodexServer()
+    server.respond("thread/resume", active_resume_response(unfinished_turn_read_as_interrupted()))
+    server.respond("thread/turns/list", {"data": [unfinished_turn_read_as_interrupted()]})
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    try:
+        await runtime.send(operation_id="op-1", prompt="work")
+        server.push(thread_status_changed("idle"))
+        reads = codex_runtime_constants.CODEX_RUNTIME_UNFINISHED_READS
+        assert await until(lambda: len(server.requested("thread/turns/list")) == reads)
+        assert await until(lambda: not runtime._unfinished_turns)
+        await asyncio.sleep(0.1)
+
+        assert len(server.requested("thread/turns/list")) == reads
+        assert len(server.requested("turn/start")) == 1
+        assert not (await source.read()).terminal_evidence
+        server.push(live_completion())
+        (outcome,) = await read_outcomes(source)
+        assert (outcome.terminal, outcome.from_history) == (NativeTurnTerminal.COMPLETED, False)
+    finally:
+        await runtime.aclose()
+
+
+async def test_a_turn_that_started_while_a_page_was_read_is_not_ended_by_that_page() -> None:
+    """Asked while idle, the page can still catch a turn that started during the read."""
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume",
+        {
+            "thread": {"id": "ui-thread-1", "status": {"type": "idle"}},
+            "initialTurnsPage": {"data": []},
+        },
+    )
+    runtime = make_runtime(server)
+    source = runtime.live_source()
+    gate = asyncio.Event()
+    entered = server.request_entered.setdefault("thread/turns/list", asyncio.Event())
+    server.request_gates["thread/turns/list"] = gate
+    server.respond("thread/turns/list", {"data": [unfinished_turn_read_as_interrupted()]})
+    try:
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        server.push(
+            RuntimeNotification(
+                method="turn/started",
+                params={
+                    "threadId": "ui-thread-1",
+                    "turn": {"id": "turn-1", "status": "inProgress"},
+                },
+            )
+        )
+        assert await until(lambda: runtime._active_turn_id == "turn-1")
+        gate.set()
+        await asyncio.wait_for(runtime._history_reconcile_task, timeout=2)
+
+        assert not (await source.read()).terminal_evidence
     finally:
         await runtime.aclose()
