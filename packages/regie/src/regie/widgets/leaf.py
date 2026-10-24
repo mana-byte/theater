@@ -181,7 +181,10 @@ class AgentLeaf(RenameableRow):
         return self._node.get("status") == "awaiting_input"
 
     def _sync_attention(self) -> None:
-        self.set_class(self.needs_attention, "tree-attention")
+        if self.has_class("tree-attention") != self.needs_attention:
+            self.set_class(self.needs_attention, "tree-attention")
+            # The gutter moves the content box; redraw once the padding has applied.
+            self.call_after_refresh(lambda: self.update(self._render_label(), layout=False))
         if not self.needs_attention:
             self._attention_level = 0
 

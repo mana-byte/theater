@@ -133,7 +133,7 @@ class ParticipantTree(VerticalScroll):
         self._attention_phase = 0
         self._attention_timer: Timer | None = None
         self._await_marks = AwaitMarks()
-        self._mark_kinds: dict[str, MarkKind] = {}
+        self._mark_kinds: dict[str, MarkKind] | None = None
         self._seen_timer: Timer | None = None
         self._seen_pending: str | None = None
 
@@ -679,7 +679,8 @@ class ParticipantTree(VerticalScroll):
     def _observe_marks(self, marks: Mapping[str, RowMark]) -> None:
         """Sweep a row whose operation just produced something worth announcing."""
         for participant_id, mark in marks.items():
-            if self._mark_kinds.get(participant_id) is mark.kind:
+            # What the first projection already carries happened before the human looked.
+            if self._mark_kinds is None or self._mark_kinds.get(participant_id) is mark.kind:
                 continue
             if (color := _MARK_WIPE_COLORS.get(mark.kind)) is not None:
                 self._wipes.start(("p", participant_id), color)

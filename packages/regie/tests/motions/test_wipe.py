@@ -17,7 +17,7 @@ KEY = ("p", "first")
         ("idle", "awaiting_input", "$warning"),
         ("working", "dead", "$error"),
         ("working", "idle", "$success"),
-        ("idle", "working", "$primary"),
+        ("idle", "working", None),  # the spinner starting is announcement enough
         ("awaiting_input", "idle", None),
         ("dead", "idle", None),
     ],

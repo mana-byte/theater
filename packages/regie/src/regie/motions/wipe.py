@@ -31,8 +31,6 @@ def status_wipe_color(previous: str, status: str) -> str | None:
         return "$error"
     if previous == "working" and status == "idle":
         return "$success"
-    if status == "working":
-        return "$primary"
     return None
 
 

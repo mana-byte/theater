@@ -46,8 +46,10 @@ async def test_a_status_change_sweeps_the_row_once_then_clears() -> None:
         assert leaf._wipe is None  # the first sight of a row is the reveal's, not a sweep
 
         await _change(app, pilot, "participant-1", "working")
+        assert leaf._wipe is None  # a turn starting is not announced; finishing it is
+        await _change(app, pilot, "participant-1", "idle")
         await wait_until(pilot, lambda: leaf._wipe is not None)
-        assert leaf._wipe[1] == "$primary"
+        assert leaf._wipe[1] == "$success"
         assert _leaf(tree, "participant-2")._wipe is None
         await wait_until(pilot, lambda: leaf._wipe is None)
         assert tree._wipe_timer is None  # no timer outlives the sweep
