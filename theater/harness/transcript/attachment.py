@@ -57,7 +57,7 @@ def attach_point(path: Path, tail: int = 1) -> AttachSnapshot:
     chunk straddling the oldest, and an unfinished trailing record are resident.
     """
     size = lines = last_end = 0
-    kept: deque[tuple[int, bytes, int]] = deque()  # (start offset, chunk, newlines in it)
+    kept: deque[tuple[bytes, int]] = deque()  # (chunk, newlines in it)
     kept_newlines = 0
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES), b""):
@@ -65,16 +65,16 @@ def attach_point(path: Path, tail: int = 1) -> AttachSnapshot:
             if newlines:
                 last_end = size + chunk.rfind(b"\n") + 1
             if tail:
-                kept.append((size, chunk, newlines))
+                kept.append((chunk, newlines))
                 kept_newlines += newlines
-                while kept_newlines - kept[0][2] > tail:
-                    kept_newlines -= kept.popleft()[2]
+                while kept_newlines - kept[0][1] > tail:
+                    kept_newlines -= kept.popleft()[1]
             size += len(chunk)
             lines += newlines
         st = os.fstat(fh.fileno())
     # Retained bytes either start at the top of the file or hold tail + 1 newlines, so a record cut
     # by a chunk edge can only be the piece before the last ``tail`` ones.
-    pieces = b"".join(chunk for _, chunk, _ in kept).split(b"\n")[:-1][-tail:] if tail else []
+    pieces = b"".join(chunk for chunk, _ in kept).split(b"\n")[:-1][-tail:] if tail else []
     records: list[TailRecord] = []
     end = last_end
     for raw in reversed(pieces):

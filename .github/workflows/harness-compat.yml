@@ -26,6 +26,7 @@ on:
       - "tests/compat/**"
       - "tests/conformance/**"
       - "tests/support/live_rig.py"
+      - "tests/support/live_stack.py"
       - "tests/support/obligations.py"
       - "tests/support/coverage.py"
       - "tests/support/declarations.py"
