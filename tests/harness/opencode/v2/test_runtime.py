@@ -502,3 +502,50 @@ async def test_reconnect_proves_the_plugin_at_the_persisted_session_location(ser
         await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id=sid)
     assert server.bodies("/prompt") == []
     await runtime.aclose()
+
+
+async def test_cancelled_refresh_does_not_satisfy_a_waiting_send(
+    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.send(operation_id="A", prompt="A")
+    server.end_turn(idle_at=server.prompt_created + 50)
+    real = runtime._client.active
+    captured, release, fresh = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    reads = 0
+
+    async def delayed():
+        nonlocal reads
+        reads += 1
+        index = reads
+        answer = await real()
+        if index == 2:
+            assert binding.native_session_id not in answer
+            captured.set()
+            await release.wait()
+        elif index == 3:
+            assert binding.native_session_id in answer
+            fresh.set()
+            await asyncio.Event().wait()
+        return answer
+
+    monkeypatch.setattr(runtime._client, "active", delayed)
+    poll = asyncio.create_task(runtime._poll_once())
+    await asyncio.wait_for(captured.wait(), 1)
+    server.active.add(binding.native_session_id)
+    snapshot = asyncio.create_task(runtime.snapshot())
+    sender = asyncio.create_task(runtime.send(operation_id="C", prompt="C"))
+    await asyncio.sleep(0)
+    release.set()
+    await poll
+    await asyncio.wait_for(fresh.wait(), 1)
+    assert runtime._source.current_execution_state() is RuntimeExecutionState.IDLE
+    snapshot.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await snapshot
+    try:
+        receipt = await asyncio.wait_for(sender, 1)
+        assert (receipt.result, receipt.error_code) == (DeliveryResult.REJECTED, "busy")
+        assert len(server.bodies("/prompt")) == 1
+    finally:
+        await runtime.aclose()
