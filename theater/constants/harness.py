@@ -184,8 +184,8 @@ HARNESS_RUNTIME_POLICY_MAX_CHARS = HARNESS_CHANNEL_ID_MAX_CHARS
 #: Maximum UTF-8 bytes of one encoded participant launch-policy JSON object.
 HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES = 65_536
 
-#: Maximum characters for a qualification native-edit tool name.
-HARNESS_COMPAT_EDIT_NAME_MAX_CHARS = 128
+#: Maximum characters for a qualification tool-call template's tool name.
+HARNESS_COMPAT_TOOL_NAME_MAX_CHARS = 128
 
-#: Maximum characters of one qualification native-edit payload (JSON-encoded when structured).
-HARNESS_COMPAT_EDIT_PAYLOAD_MAX_CHARS = 16_384
+#: Maximum characters of one qualification tool-call payload (JSON-encoded when structured).
+HARNESS_COMPAT_TOOL_PAYLOAD_MAX_CHARS = 16_384

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from collections import defaultdict
@@ -14,8 +13,8 @@ from theater.constants.harness import (
     HARNESS_APPROVAL_POLICIES,
     HARNESS_CHANNEL_ID_MAX_CHARS,
     HARNESS_CHANNEL_IDENTIFIER_MAX_CHARS,
-    HARNESS_COMPAT_EDIT_NAME_MAX_CHARS,
-    HARNESS_COMPAT_EDIT_PAYLOAD_MAX_CHARS,
+    HARNESS_COMPAT_TOOL_NAME_MAX_CHARS,
+    HARNESS_COMPAT_TOOL_PAYLOAD_MAX_CHARS,
     HARNESS_HOOK_IDENTIFIER_MAX_CHARS,
     HARNESS_HOOK_MAX_PAYLOAD_BYTES,
     HARNESS_HOOK_MAX_QUEUE,
@@ -43,7 +42,7 @@ from theater.harness.contracts.channels import (
     SignalKind,
     SignalOwnership,
 )
-from theater.harness.contracts.compat import CompatManifest, NativeEdit
+from theater.harness.contracts.compat import CompatManifest, McpCall, NativeEdit, ToolTemplate
 from theater.harness.contracts.manifest import (
     ControlManifest,
     HarnessManifest,
@@ -846,37 +845,46 @@ def _validate_compat(name: str, manifest: HarnessManifest) -> None:
         _fail(name, "compat", f"expected CompatManifest or null, got {type(compat).__name__}")
     if not callable(compat.provision):
         _fail(name, "compat.provision", "must be callable")
-    edit = compat.native_edit
-    if edit is None:
-        return
-    if not isinstance(edit, NativeEdit):
-        _fail(name, "compat.native_edit", f"expected NativeEdit or null, got {type(edit).__name__}")
-    if "edits" not in manifest.launch.approvals:
-        _fail(name, "compat.native_edit", "requires launch.approvals to include 'edits'")
-    _validate_text(name, "compat.native_edit.name", edit.name)
-    if len(edit.name) > HARNESS_COMPAT_EDIT_NAME_MAX_CHARS:
+    if compat.native_edit is not None:
+        if "edits" not in manifest.launch.approvals:
+            _fail(name, "compat.native_edit", "requires launch.approvals to include 'edits'")
+        _validate_tool_template(name, "compat.native_edit", compat.native_edit, NativeEdit, "path")
+    if compat.mcp_call is not None:
+        _validate_tool_template(
+            name, "compat.mcp_call", compat.mcp_call, McpCall, "tool", "arguments"
+        )
+
+
+def _validate_tool_template(
+    name: str, path: str, template: object, kind: type[ToolTemplate], *required: str
+) -> None:
+    if not isinstance(template, kind):
+        _fail(name, path, f"expected {kind.__name__} or null, got {type(template).__name__}")
+    _validate_text(name, f"{path}.name", template.name)
+    if len(template.name) > HARNESS_COMPAT_TOOL_NAME_MAX_CHARS:
         _fail(
             name,
-            "compat.native_edit.name",
-            f"must be at most {HARNESS_COMPAT_EDIT_NAME_MAX_CHARS} characters",
+            f"{path}.name",
+            f"must be at most {HARNESS_COMPAT_TOOL_NAME_MAX_CHARS} characters",
         )
-    _validate_native_edit_payload(name, edit)
-
-
-def _validate_native_edit_payload(name: str, edit: NativeEdit) -> None:
-    path = "compat.native_edit.payload"
-    payload = edit.payload
+    payload_path = f"{path}.payload"
+    payload = template.payload
     if isinstance(payload, str):
         if not payload.strip():
-            _fail(name, path, "must not be blank")
+            _fail(name, payload_path, "must not be blank")
     elif not isinstance(payload, Mapping):
-        _fail(name, path, f"must be a string or a JSON object, got {type(payload).__name__}")
-    unchanged = edit.render(path="{path}", nonce="{nonce}")
-    size = len(unchanged if isinstance(unchanged, str) else json.dumps(unchanged))
-    if size > HARNESS_COMPAT_EDIT_PAYLOAD_MAX_CHARS:
-        _fail(name, path, f"must be at most {HARNESS_COMPAT_EDIT_PAYLOAD_MAX_CHARS} characters")
-    if "path" not in edit.placeholders:
-        _fail(name, path, "must reference the {path} placeholder")
+        _fail(
+            name, payload_path, f"must be a string or a JSON object, got {type(payload).__name__}"
+        )
+    if template.size > HARNESS_COMPAT_TOOL_PAYLOAD_MAX_CHARS:
+        _fail(
+            name,
+            payload_path,
+            f"must be at most {HARNESS_COMPAT_TOOL_PAYLOAD_MAX_CHARS} characters",
+        )
+    for token in required:
+        if token not in template.placeholders:
+            _fail(name, payload_path, f"must reference the {{{token}}} placeholder")
 
 
 def _validate_models(name: str, models: object) -> None:

@@ -9,12 +9,13 @@ import pytest
 
 from tests.support.manifest_rig import manifest, plan
 from theater.constants.harness import (
-    HARNESS_COMPAT_EDIT_NAME_MAX_CHARS,
-    HARNESS_COMPAT_EDIT_PAYLOAD_MAX_CHARS,
+    HARNESS_COMPAT_TOOL_NAME_MAX_CHARS,
+    HARNESS_COMPAT_TOOL_PAYLOAD_MAX_CHARS,
 )
 from theater.harness.contracts.compat import (
     COMPAT_PROTOCOLS,
     CompatManifest,
+    McpCall,
     NativeEdit,
     ProvisionContext,
     Provisioned,
@@ -118,7 +119,7 @@ _EDIT = NativeEdit("write_file", {"path": "{path}", "content": "{nonce}"})
         pytest.param(
             CompatManifest(
                 provision=provision,
-                native_edit=NativeEdit("w" * (HARNESS_COMPAT_EDIT_NAME_MAX_CHARS + 1), "{path}"),
+                native_edit=NativeEdit("w" * (HARNESS_COMPAT_TOOL_NAME_MAX_CHARS + 1), "{path}"),
             ),
             _APPROVALS,
             "compat.native_edit.name",
@@ -143,7 +144,7 @@ _EDIT = NativeEdit("write_file", {"path": "{path}", "content": "{nonce}"})
             CompatManifest(
                 provision=provision,
                 native_edit=NativeEdit(
-                    "write", "x" * HARNESS_COMPAT_EDIT_PAYLOAD_MAX_CHARS + "{path}"
+                    "write", "x" * HARNESS_COMPAT_TOOL_PAYLOAD_MAX_CHARS + "{path}"
                 ),
             ),
             _APPROVALS,
@@ -157,6 +158,41 @@ _EDIT = NativeEdit("write_file", {"path": "{path}", "content": "{nonce}"})
             "compat.native_edit.payload",
             "{path} placeholder",
             id="edit-without-path-placeholder",
+        ),
+        pytest.param(
+            CompatManifest(provision=provision, mcp_call="run"),
+            _APPROVALS,
+            "compat.mcp_call",
+            "expected McpCall",
+            id="call-wrong-type",
+        ),
+        pytest.param(
+            CompatManifest(provision=provision, mcp_call=McpCall(" ", "{tool}{arguments}")),
+            _APPROVALS,
+            "compat.mcp_call.name",
+            "non-blank",
+            id="call-blank-name",
+        ),
+        pytest.param(
+            CompatManifest(provision=provision, mcp_call=McpCall("run", {"code": "{arguments}"})),
+            _APPROVALS,
+            "compat.mcp_call.payload",
+            "{tool} placeholder",
+            id="call-without-tool-placeholder",
+        ),
+        pytest.param(
+            CompatManifest(provision=provision, mcp_call=McpCall("run", {"code": "{tool}()"})),
+            _APPROVALS,
+            "compat.mcp_call.payload",
+            "{arguments} placeholder",
+            id="call-without-arguments-placeholder",
+        ),
+        pytest.param(
+            CompatManifest(provision=provision, mcp_call=McpCall("run", {"code": "{path}{tool}"})),
+            _APPROVALS,
+            "compat.mcp_call.payload",
+            "{arguments} placeholder",
+            id="call-foreign-token-is-literal",
         ),
     ],
 )
@@ -198,6 +234,35 @@ def test_native_edit_renders_placeholders_in_one_pass_and_leaves_other_braces() 
         "n": 3,
     }
     assert edit.placeholders == {"path", "nonce"}
+
+
+def test_a_well_formed_mcp_call_validates_without_an_edits_approval() -> None:
+    declared = CompatManifest(
+        provision=provision, mcp_call=McpCall("run", {"code": "tools.{server}.{tool}({arguments})"})
+    )
+
+    harness = compile_manifest(
+        "acme",
+        manifest(launch=LaunchManifest(planner=plan, approvals=("manual",)), compat=declared),
+    )
+
+    assert harness.compat is declared
+
+
+def test_mcp_call_substitutes_its_tokens_once_and_encodes_arguments_as_json() -> None:
+    call = McpCall("run_script", {"code": "await tools.mcp_{server}.{tool}({arguments});"})
+
+    rendered = call.render(server="probe", tool="mark", arguments={"label": "{tool}", "n": 2})
+
+    assert rendered == {
+        "code": 'await tools.mcp_probe.mark({"label": "{tool}", "n": 2});',
+    }
+    assert call.placeholders == {"server", "tool", "arguments"}
+
+
+def test_each_template_recognises_only_its_own_tokens() -> None:
+    assert NativeEdit("w", "{path}{tool}").placeholders == {"path"}
+    assert McpCall("c", "{tool}{path}{arguments}").placeholders == {"tool", "arguments"}
 
 
 def test_native_edit_freeform_payload_renders_as_text() -> None:

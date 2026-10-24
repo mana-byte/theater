@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import functools
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, Protocol
+from typing import ClassVar, Literal, Protocol
 
 from theater.harness.contracts.values import freeze_json_mapping
 
@@ -15,9 +17,6 @@ from theater.harness.contracts.values import freeze_json_mapping
 COMPAT_PROTOCOLS = ("anthropic", "openai", "openai-responses")
 
 type CompatProtocol = Literal["anthropic", "openai", "openai-responses"]
-
-#: The only tokens a native-edit payload may carry; everything else is literal.
-_PLACEHOLDER = re.compile(r"\{(path|nonce)\}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +64,14 @@ class Provisioned:
 
 
 @dataclass(frozen=True, slots=True)
-class NativeEdit:
-    """The CLI's own file-write tool, and a payload that makes it write one scratch file."""
+class ToolTemplate:
+    """A scripted tool call: the CLI's tool name and a payload with substitution tokens."""
 
     name: str
     #: JSON object arguments, or freeform text for grammar-based tools such as a patch.
     payload: str | Mapping[str, object]
+    #: The only tokens the payload may carry; everything else is literal.
+    TOKENS: ClassVar[tuple[str, ...]] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.payload, Mapping):
@@ -78,36 +79,74 @@ class NativeEdit:
 
     @property
     def placeholders(self) -> frozenset[str]:
-        """The placeholder names the payload uses (``path`` and ``nonce`` only)."""
+        """The token names the payload uses."""
         found: set[str] = set()
-        _scan(self.payload, found)
+        _scan(self.payload, _pattern(self.TOKENS), found)
         return frozenset(found)
 
-    def render(self, *, path: str, nonce: str) -> str | Mapping[str, object]:
-        """Substitute the placeholders in one pass; no other interpolation happens."""
-        rendered = _substitute(self.payload, {"path": path, "nonce": nonce})
+    @property
+    def size(self) -> int:
+        """Characters of the payload with its tokens unexpanded, JSON-encoded when structured."""
+        rendered = self._render({token: "{" + token + "}" for token in self.TOKENS})
+        return len(rendered if isinstance(rendered, str) else json.dumps(rendered))
+
+    def _render(self, values: Mapping[str, str]) -> str | Mapping[str, object]:
+        """Substitute the tokens in one pass; no other interpolation happens."""
+        rendered = _substitute(self.payload, _pattern(self.TOKENS), values)
         assert isinstance(rendered, (str, Mapping))
         return rendered
 
 
-def _scan(value: object, found: set[str]) -> None:
+@dataclass(frozen=True, slots=True)
+class NativeEdit(ToolTemplate):
+    """The CLI's own file-write tool, and a payload that makes it write one scratch file."""
+
+    TOKENS: ClassVar[tuple[str, ...]] = ("path", "nonce")
+
+    def render(self, *, path: str, nonce: str) -> str | Mapping[str, object]:
+        return self._render({"path": path, "nonce": nonce})
+
+
+@dataclass(frozen=True, slots=True)
+class McpCall(ToolTemplate):
+    """How the CLI's model calls an MCP tool when the tool is not offered under its own name.
+
+    Needed only where MCP tools sit behind another tool (a script runner or a tool search);
+    otherwise the suite finds the tool among the names the model was offered.
+    """
+
+    TOKENS: ClassVar[tuple[str, ...]] = ("server", "tool", "arguments")
+
+    def render(
+        self, *, server: str, tool: str, arguments: Mapping[str, object]
+    ) -> str | Mapping[str, object]:
+        """``arguments`` is substituted as its JSON text."""
+        return self._render({"server": server, "tool": tool, "arguments": json.dumps(arguments)})
+
+
+@functools.cache
+def _pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
+    return re.compile(r"\{(" + "|".join(map(re.escape, tokens)) + r")\}")
+
+
+def _scan(value: object, pattern: re.Pattern[str], found: set[str]) -> None:
     if isinstance(value, str):
-        found.update(_PLACEHOLDER.findall(value))
+        found.update(pattern.findall(value))
     elif isinstance(value, Mapping):
         for item in value.values():
-            _scan(item, found)
+            _scan(item, pattern, found)
     elif isinstance(value, tuple):
         for item in value:
-            _scan(item, found)
+            _scan(item, pattern, found)
 
 
-def _substitute(value: object, values: Mapping[str, str]) -> object:
+def _substitute(value: object, pattern: re.Pattern[str], values: Mapping[str, str]) -> object:
     if isinstance(value, str):
-        return _PLACEHOLDER.sub(lambda match: values[match.group(1)], value)
+        return pattern.sub(lambda match: values[match.group(1)], value)
     if isinstance(value, Mapping):
-        return {key: _substitute(item, values) for key, item in value.items()}
+        return {key: _substitute(item, pattern, values) for key, item in value.items()}
     if isinstance(value, tuple):
-        return tuple(_substitute(item, values) for item in value)
+        return tuple(_substitute(item, pattern, values) for item in value)
     return value
 
 
@@ -128,14 +167,18 @@ class CompatManifest:
     provision: Provisioner
     #: Only for harnesses declaring the ``edits`` approval.
     native_edit: NativeEdit | None = None
+    #: Only when the model cannot call an MCP tool under its own name.
+    mcp_call: McpCall | None = None
 
 
 __all__ = [
     "COMPAT_PROTOCOLS",
     "CompatManifest",
     "CompatProtocol",
+    "McpCall",
     "NativeEdit",
     "ProvisionContext",
     "Provisioned",
     "Provisioner",
+    "ToolTemplate",
 ]

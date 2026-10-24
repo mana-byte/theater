@@ -147,6 +147,10 @@ class RecordedRequest:
     tools: tuple[str, ...] = ()
     messages: int = 0
     last_user: str | None = None
+    #: Every human message in the conversation, oldest first: proves history was carried over.
+    user_texts: tuple[str, ...] = ()
+    #: The newest tool result the client returned to the model, if the conversation has one.
+    last_tool_result: str | None = None
     stream: bool = False
 
 

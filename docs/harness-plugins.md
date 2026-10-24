@@ -556,6 +556,14 @@ object or freeform text (for grammar-based tools such as a patch). The payload
 must contain the `{path}` placeholder and may contain `{nonce}`; those two
 tokens are substituted in one pass and nothing else is interpolated.
 
+`CompatManifest.mcp_call` is optional and needed only when the model cannot call
+an MCP tool under its own name, for example when MCP tools sit behind a script
+runner or a tool search. `McpCall(name, payload)` names the tool the model calls
+and a payload that invokes one MCP tool; it must contain `{tool}` and
+`{arguments}` and may contain `{server}`, substituted in one pass (`{arguments}`
+as its JSON text). Without it the suite finds the MCP tool among the tool names
+the model was offered by suffix match.
+
 ## Optional signal enrichment
 
 `CompositeSource` combines the durable primary with ordered, bounded

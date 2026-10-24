@@ -49,7 +49,8 @@ _PROTOCOLS: dict[str, MockProtocol] = {
     "/v1/chat/completions": "openai",
     "/v1/responses": "openai-responses",
 }
-_LAST_USER_CHARS = 300
+_USER_TEXT_CHARS = 300
+_MAX_USER_TEXTS = 20
 _MAX_TOOL_NAMES = 200
 
 
@@ -312,26 +313,57 @@ def _conversation(body: dict[str, Any]) -> list[Any]:
     return [items] if isinstance(items, str) else []
 
 
-def _last_user_text(body: dict[str, Any]) -> str | None:
-    """The newest human text; user messages that only carry tool results are skipped."""
+def _human_text(item: object) -> str | None:
+    """The text of a user message; one that only carries tool results has none."""
+    if not isinstance(item, dict) or item.get("role") != "user":
+        return None
+    content = item.get("content")
+    if isinstance(content, str):
+        return content or None
+    if isinstance(content, list):
+        text = "".join(
+            part["text"]
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") in ("text", "input_text")
+            and isinstance(part.get("text"), str)
+        )
+        return text or None
+    return None
+
+
+def _user_texts(body: dict[str, Any]) -> tuple[str, ...]:
+    """Every human message in the conversation, oldest first, each clipped and the list bounded."""
+    texts = [text for item in _conversation(body) if (text := _human_text(item))]
+    return tuple(text[:_USER_TEXT_CHARS] for text in texts[-_MAX_USER_TEXTS:])
+
+
+def _joined_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        part["text"]
+        for part in content
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
+    )
+
+
+def _last_tool_result(body: dict[str, Any]) -> str | None:
+    """The newest tool result the client sent back, in whichever shape the protocol carries it."""
     for item in reversed(_conversation(body)):
-        if not isinstance(item, dict) or item.get("role") != "user":
+        if not isinstance(item, dict):
             continue
+        if item.get("role") == "tool":
+            return _joined_text(item.get("content"))[:_USER_TEXT_CHARS]
+        if item.get("type") == "function_call_output":
+            return _joined_text(item.get("output"))[:_USER_TEXT_CHARS]
         content = item.get("content")
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            text = "".join(
-                part["text"]
-                for part in content
-                if isinstance(part, dict)
-                and part.get("type") in ("text", "input_text")
-                and isinstance(part.get("text"), str)
-            )
-        else:
-            continue
-        if text:
-            return text[:_LAST_USER_CHARS]
+        if item.get("role") == "user" and isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "tool_result":
+                    return _joined_text(part.get("content"))[:_USER_TEXT_CHARS]
     return None
 
 
@@ -552,7 +584,9 @@ def _make_handler(server: MockServer) -> type[BaseHTTPRequestHandler]:
                     effort=_effort(body),
                     tools=_tool_names(body),
                     messages=len(_conversation(body)),
-                    last_user=_last_user_text(body),
+                    user_texts=(texts := _user_texts(body)),
+                    last_user=texts[-1] if texts else None,
+                    last_tool_result=_last_tool_result(body),
                     stream=bool(body.get("stream")),
                 )
             )

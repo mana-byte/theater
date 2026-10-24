@@ -250,6 +250,40 @@ def test_requests_are_described_by_protocol_model_effort_tools_and_last_user_tex
     assert recorded[0]["effort"] == "high" and recorded[0]["tools"] == ["Bash", "write_file"]
 
 
+def test_requests_carry_the_conversation_humans_and_the_last_tool_result(tmp_path: Path) -> None:
+    chat_history = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "ack"},
+        {"role": "tool", "content": [{"type": "text", "text": "chat result"}]},
+        {"role": "user", "content": "two"},
+        {"role": "assistant", "content": "ack"},
+        {"role": "tool", "content": "newest chat result"},
+    ]
+    anthropic_history = [
+        {"role": "user", "content": "one"},
+        {"role": "user", "content": [{"type": "tool_result", "content": "anthropic result"}]},
+    ]
+    responses_history = [
+        {"type": "message", "role": "user", "content": "one"},
+        {"type": "function_call_output", "call_id": "c", "output": "responses result"},
+    ]
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        _request(f"{server.base_urls['openai']}/chat/completions", {"messages": chat_history})
+        _request(f"{server.base_urls['anthropic']}/v1/messages", {"messages": anthropic_history})
+        _request(
+            f"{server.base_urls['openai-responses']}/responses",
+            {"stream": True, "input": responses_history},
+        )
+        _request(f"{server.base_urls['openai']}/chat/completions", {"messages": []})
+        chat, anthropic, responses, empty = server.requests
+
+    assert (chat.user_texts, chat.last_user) == (("one", "two"), "two")
+    assert chat.last_tool_result == "newest chat result"
+    assert anthropic.last_tool_result == "anthropic result"
+    assert responses.last_tool_result == "responses result"
+    assert (empty.user_texts, empty.last_user, empty.last_tool_result) == ((), None, None)
+
+
 def test_a_held_stream_withholds_its_tail_until_released(tmp_path: Path) -> None:
     with MockServer(tmp_path / "requests.jsonl") as server:
         hold = server.hold()
