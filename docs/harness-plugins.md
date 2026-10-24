@@ -527,6 +527,35 @@ is conservative evidence: `PROMPT`, `WORKING`, `APPROVAL`, `TRUST`, and
 confidence; unknown is the safe answer when it cannot distinguish a prompt from
 a sensitive modal.
 
+## Qualification (`compat`)
+
+`HarnessManifest.compat` is optional and read only by the compatibility suite,
+never at runtime. The suite derives every scenario from the rest of the
+manifest; `compat` supplies only what cannot be derived, so a plugin declares
+no scenarios, assertions, skips or proof callbacks.
+
+`CompatManifest.provision(context) -> Provisioned` is pure. It receives a
+`ProvisionContext` (sandbox directories, the mock model's base URL per protocol,
+the binary and its version, and the logical model names the run will request)
+and returns the `Provisioned` values that make the stock CLI use the mock:
+
+- `protocol`: `"anthropic"`, `"openai"` (Chat Completions) or
+  `"openai-responses"`;
+- `env`: endpoint, dummy credential, update and telemetry opt-outs;
+- `files`: absolute config, model-catalog and onboarding or trust pre-seeding;
+- `models`: selectors the CLI accepts for the logical names, routed to the mock;
+- `efforts`: harness-native effort values worth sampling.
+
+Provisioning must not replace launch argv, approval policy or receipt commands;
+production launch planning always wins.
+
+`CompatManifest.native_edit` is optional and valid only when
+`launch.approvals` includes `edits`. `NativeEdit(name, payload)` names the CLI's
+own file-write tool and a payload that makes it write one scratch file: a JSON
+object or freeform text (for grammar-based tools such as a patch). The payload
+must contain the `{path}` placeholder and may contain `{nonce}`; those two
+tokens are substituted in one pass and nothing else is interpolated.
+
 ## Optional signal enrichment
 
 `CompositeSource` combines the durable primary with ordered, bounded

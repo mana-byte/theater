@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import NoReturn
 
 from theater.constants.core import HARNESS_NAME
@@ -12,6 +14,8 @@ from theater.constants.harness import (
     HARNESS_APPROVAL_POLICIES,
     HARNESS_CHANNEL_ID_MAX_CHARS,
     HARNESS_CHANNEL_IDENTIFIER_MAX_CHARS,
+    HARNESS_COMPAT_EDIT_NAME_MAX_CHARS,
+    HARNESS_COMPAT_EDIT_PAYLOAD_MAX_CHARS,
     HARNESS_HOOK_IDENTIFIER_MAX_CHARS,
     HARNESS_HOOK_MAX_PAYLOAD_BYTES,
     HARNESS_HOOK_MAX_QUEUE,
@@ -39,6 +43,7 @@ from theater.harness.contracts.channels import (
     SignalKind,
     SignalOwnership,
 )
+from theater.harness.contracts.compat import CompatManifest, NativeEdit
 from theater.harness.contracts.manifest import (
     ControlManifest,
     HarnessManifest,
@@ -114,6 +119,7 @@ def validate_manifest(name: str, manifest: HarnessManifest) -> None:
     _validate_observation(name, manifest.observation)
     _validate_runtime(name, manifest)
     _validate_native_compatibility(name, manifest.native_compatibility)
+    _validate_compat(name, manifest)
     _validate_models(name, manifest.models)
     _validate_mcp(name, manifest.mcp)
 
@@ -830,6 +836,47 @@ def _validate_native_compatibility(name: str, value: object) -> None:
     _validate_text(name, "native_compatibility.qualified_range", value.qualified_range)
     if not callable(value.probe):
         _fail(name, "native_compatibility.probe", "must be callable")
+
+
+def _validate_compat(name: str, manifest: HarnessManifest) -> None:
+    compat = manifest.compat
+    if compat is None:
+        return
+    if not isinstance(compat, CompatManifest):
+        _fail(name, "compat", f"expected CompatManifest or null, got {type(compat).__name__}")
+    if not callable(compat.provision):
+        _fail(name, "compat.provision", "must be callable")
+    edit = compat.native_edit
+    if edit is None:
+        return
+    if not isinstance(edit, NativeEdit):
+        _fail(name, "compat.native_edit", f"expected NativeEdit or null, got {type(edit).__name__}")
+    if "edits" not in manifest.launch.approvals:
+        _fail(name, "compat.native_edit", "requires launch.approvals to include 'edits'")
+    _validate_text(name, "compat.native_edit.name", edit.name)
+    if len(edit.name) > HARNESS_COMPAT_EDIT_NAME_MAX_CHARS:
+        _fail(
+            name,
+            "compat.native_edit.name",
+            f"must be at most {HARNESS_COMPAT_EDIT_NAME_MAX_CHARS} characters",
+        )
+    _validate_native_edit_payload(name, edit)
+
+
+def _validate_native_edit_payload(name: str, edit: NativeEdit) -> None:
+    path = "compat.native_edit.payload"
+    payload = edit.payload
+    if isinstance(payload, str):
+        if not payload.strip():
+            _fail(name, path, "must not be blank")
+    elif not isinstance(payload, Mapping):
+        _fail(name, path, f"must be a string or a JSON object, got {type(payload).__name__}")
+    unchanged = edit.render(path="{path}", nonce="{nonce}")
+    size = len(unchanged if isinstance(unchanged, str) else json.dumps(unchanged))
+    if size > HARNESS_COMPAT_EDIT_PAYLOAD_MAX_CHARS:
+        _fail(name, path, f"must be at most {HARNESS_COMPAT_EDIT_PAYLOAD_MAX_CHARS} characters")
+    if "path" not in edit.placeholders:
+        _fail(name, path, "must reference the {path} placeholder")
 
 
 def _validate_models(name: str, models: object) -> None:

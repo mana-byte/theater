@@ -51,6 +51,15 @@ from theater.harness.contracts.channels import (
     SignalKind,
     SignalOwnership,
 )
+from theater.harness.contracts.compat import (
+    COMPAT_PROTOCOLS,
+    CompatManifest,
+    CompatProtocol,
+    NativeEdit,
+    ProvisionContext,
+    Provisioned,
+    Provisioner,
+)
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
@@ -188,6 +197,7 @@ logger = logging.getLogger("theater.harness")
 
 __all__ = [
     "APPROVALS",
+    "COMPAT_PROTOCOLS",
     "HARNESSES",
     "MANIFEST_API_VERSION",
     "MAX_TEXT",
@@ -204,6 +214,8 @@ __all__ = [
     "ChannelHealth",
     "ChannelHealthState",
     "ChannelKind",
+    "CompatManifest",
+    "CompatProtocol",
     "ConnectionHealth",
     "ControlDeliveryPhase",
     "ControlKind",
@@ -235,6 +247,7 @@ __all__ = [
     "ModelDiscoveryManifest",
     "NativeChild",
     "NativeCompatibilityManifest",
+    "NativeEdit",
     "NativeRequestId",
     "NativeTurnOutcome",
     "NativeTurnTerminal",
@@ -248,6 +261,9 @@ __all__ = [
     "OtelSignal",
     "ParticipantObservationContext",
     "PluginError",
+    "ProvisionContext",
+    "Provisioned",
+    "Provisioner",
     "ResultCompleteness",
     "ResultProvenance",
     "ResumeLaunchOverlay",

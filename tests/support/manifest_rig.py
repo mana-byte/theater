@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from theater.harness.contracts.callbacks import LaunchContext, ScreenContext
 from theater.harness.contracts.channels import ChannelCapability, ChannelDeclaration, ChannelKind
+from theater.harness.contracts.compat import CompatManifest
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.manifest import (
@@ -55,6 +56,7 @@ def manifest(
     observation: ObservationManifest | None = None,
     models: ModelDiscoveryManifest | None = None,
     controls: ControlManifest | None = None,
+    compat: CompatManifest | None = None,
     aliases: tuple[str, ...] = (),
     binaries: frozenset[str] = frozenset(),
 ) -> HarnessManifest:
@@ -76,4 +78,5 @@ def manifest(
         ),
         controls=controls or ControlManifest(),
         models=models,
+        compat=compat,
     )
