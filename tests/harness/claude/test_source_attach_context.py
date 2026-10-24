@@ -5,20 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from tests.support.claude_seal import claude_fragment, claude_marker, claude_record
 from tests.support.observation import apply_batch
-from theater.constants.harness import HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
-from theater.harness.builtin.plugins.claude import source as claude_source
 from theater.harness.builtin.plugins.claude.constants import SEAL_NODE_LIMIT
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
-from theater.harness.source import StreamPoint
 from theater.models import JobState
 from theater.provenance import TranscriptProvenance
 from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
@@ -135,82 +131,41 @@ async def test_metadata_does_not_lift_an_old_answer_past_resume_floor(
 
 
 @pytest.mark.parametrize("change", ["rewrite", "truncate", "replace"])
-async def test_file_changes_during_context_read_discard_the_candidate(source, monkeypatch, change):
-    path, reader = source
-    _write(path, *INITIAL, *ANSWER, METADATA)
-    original_open = Path.open
-    changed = False
-
-    class ChangingReader:
-        def __init__(self, handle):
-            self.handle = handle
-            self.seeking = False
-
-        def __getattr__(self, name):
-            return getattr(self.handle, name)
-
-        def seek(self, offset):
-            self.seeking = True
-            return self.handle.seek(offset)
-
-        def read(self, size):
-            nonlocal changed
-            raw = self.handle.read(size)
-            if self.seeking and not changed:
-                changed = True
-                if change == "replace":
-                    replacement = path.with_suffix(".replacement")
-                    _write(replacement, *INITIAL, *ANSWER, METADATA)
-                    replacement.replace(path)
-                else:
-                    stat = path.stat()
-                    with original_open(path, "r+b") as target:
-                        if change == "truncate":
-                            target.truncate(0)
-                        else:
-                            data = target.read().replace(b"DONE", b"EVIL")
-                            target.seek(0)
-                            target.write(data)
-                    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
-            return raw
-
-    @contextmanager
-    def open_with_change(target, *args, **kwargs):
-        with original_open(target, *args, **kwargs) as handle:
-            yield ChangingReader(handle) if target == path and args == ("rb",) else handle
-
-    monkeypatch.setattr(Path, "open", open_with_change)
-    batch = await reader.read()
-
-    assert batch.attached is None
-    assert batch.error_code == TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
-    assert changed
-    _write(path, *INITIAL, *ANSWER, METADATA)
-    recovered = await reader.read()
-    assert recovered.attached.last_event.raw_text == "DONE"
-    reader.commit_attachment()
-
-
-async def test_replacement_during_context_parse_is_not_accepted(source, monkeypatch):
+async def test_file_changes_after_the_scan_are_reread_from_the_top(source, monkeypatch, change):
     path, reader = source
     _write(path, *INITIAL, *ANSWER, METADATA)
     parse = reader._observer.parse
+    changed = False
 
-    def replacing_parse(line, index, **kwargs):
-        if index == 0:
-            replacement = path.with_suffix(".replacement")
-            _write(replacement, *INITIAL, *ANSWER, METADATA)
-            replacement.replace(path)
+    def changing_parse(line, index, **kwargs):
+        nonlocal changed
+        if index == 0 and not changed:
+            changed = True
+            stat = path.stat()
+            if change == "replace":
+                replacement = path.with_suffix(".replacement")
+                _write(replacement, *INITIAL, *ANSWER, METADATA)
+                replacement.replace(path)
+            elif change == "truncate":
+                path.write_bytes(b"")
+            else:
+                path.write_bytes(path.read_bytes().replace(b"DONE", b"EVIL"))
+                os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
         return parse(line, index, **kwargs)
 
-    monkeypatch.setattr(reader._observer, "parse", replacing_parse)
+    monkeypatch.setattr(reader._observer, "parse", changing_parse)
     batch = await reader.read()
-    assert batch.attached is None
-    assert batch.error_code == TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
 
-    monkeypatch.setattr(reader._observer, "parse", parse)
-    assert (await reader.read()).attached.last_event.raw_text == "DONE"
+    # One pass produced the scan and the tail, so a later change is the live read's to detect.
+    assert changed and batch.attached is not None
     reader.commit_attachment()
+    live = await reader.read()
+    if change == "truncate":
+        assert live.events == ()
+        _write(path, *INITIAL, *ANSWER, METADATA)
+        live = await reader.read()
+    expected = "EVIL" if change == "rewrite" else "DONE"
+    assert [event.raw_text for event in live.events if event.turn_end] == [expected]
 
 
 async def test_cancelled_priming_can_retry_without_a_pending_candidate(source, monkeypatch):
@@ -257,69 +212,17 @@ async def test_large_transcript_primes_only_a_bounded_suffix(source, monkeypatch
     _write(path, *lines)
     parse = reader._observer.parse
     indices = []
-    original_open = Path.open
-    reads = []
-
-    class TrackingReader:
-        def __init__(self, handle, positions):
-            self.handle = handle
-            self.positions = positions
-
-        def __getattr__(self, name):
-            return getattr(self.handle, name)
-
-        def read(self, size):
-            offset = self.handle.tell()
-            raw = self.handle.read(size)
-            self.positions.append((offset, len(raw)))
-            return raw
-
-        def readline(self, size):
-            offset = self.handle.tell()
-            raw = self.handle.readline(size)
-            self.positions.append((offset, len(raw)))
-            return raw
-
-    @contextmanager
-    def tracking_open(target, *args, **kwargs):
-        with original_open(target, *args, **kwargs) as handle:
-            if target == path and args == ("rb",):
-                positions = []
-                reads.append(positions)
-                yield TrackingReader(handle, positions)
-            else:
-                yield handle
 
     def counting_parse(line, index, **kwargs):
         indices.append(index)
         return parse(line, index, **kwargs)
 
     monkeypatch.setattr(reader._observer, "parse", counting_parse)
-    monkeypatch.setattr(Path, "open", tracking_open)
     batch = await reader.read()
 
     assert batch.attached.last_event.raw_text == "DONE"
     assert 0 < len(indices) <= SEAL_NODE_LIMIT
     assert min(indices) >= len(lines) - SEAL_NODE_LIMIT
     assert batch.attached.last_event.raw_index == len(lines) - 2
-    context_reads = reads[-1]
-    assert context_reads and min(offset for offset, _ in context_reads) > 0
-    assert sum(size for _, size in context_reads) <= HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES
     reader.commit_attachment()
     assert (await reader.read()).events == ()
-
-
-@pytest.mark.parametrize("chunk_bytes", [7, 64, 4096])
-def test_tail_chunks_preserve_record_indices_and_byte_offsets(tmp_path, monkeypatch, chunk_bytes):
-    path = tmp_path / "records.jsonl"
-    lines = [json.dumps({"text": "é" * index}, ensure_ascii=False) for index in range(20)]
-    _write(path, *lines)
-    stat = path.stat()
-    point = StreamPoint(records=len(lines), size=stat.st_size, dev=stat.st_dev, ino=stat.st_ino)
-    monkeypatch.setattr(claude_source, "SEAL_NODE_LIMIT", 3)
-    monkeypatch.setattr(claude_source, "HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES", chunk_bytes)
-
-    context = claude_source._attachment_context(path, point, stat.st_mtime_ns)
-
-    offsets = [len("\n".join(lines[: index + 1]).encode()) + 1 for index in range(len(lines))]
-    assert context == [(index, offsets[index], lines[index]) for index in range(17, 20)]

@@ -4,22 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import os
-from collections import deque
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from theater.constants.harness import HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES
 from theater.harness.channels.filesystem import WatchGate
 from theater.harness.contracts.events import clip
 from theater.harness.normalization.timing import iso_epoch
 from theater.harness.normalization.values import decode_json_record
 from theater.harness.source import (
     Attachment,
+    AttachSnapshot,
     Batch,
     ReceiptAdmission,
-    StreamPoint,
     TranscriptSource,
 )
 from theater.harness.transcript.history import HistoryParseContext
@@ -58,48 +56,8 @@ def _open_claude_source(
 _RECEIPT_FALLBACK_SECONDS = 2.0
 
 
-def _check_attachment_snapshot(stat: os.stat_result, point: StreamPoint, mtime: int) -> None:
-    if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != (
-        point.dev,
-        point.ino,
-        point.size,
-        mtime,
-    ):
-        raise OSError(errno.ESTALE, "transcript changed during attachment")
-
-
-def _attachment_context(path: Path, point: StreamPoint, mtime: int) -> list[tuple[int, int, str]]:
-    """Read bounded causal context from the scanned prefix, refusing a changed snapshot."""
-    assert point.size is not None and point.records is not None
-    chunks: deque[bytes] = deque()
-    with path.open("rb") as handle:
-        _check_attachment_snapshot(os.fstat(handle.fileno()), point, mtime)
-        start = point.size
-        newlines = 0
-        # One extra newline proves the oldest retained record starts inside the snapshot.
-        while start > 0 and newlines <= SEAL_NODE_LIMIT:
-            length = min(start, HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES)
-            start -= length
-            handle.seek(start)
-            raw = handle.read(length)
-            if len(raw) != length:
-                raise OSError(errno.ESTALE, "transcript changed during attachment")
-            if not chunks and not raw.endswith(b"\n"):
-                raise OSError(errno.ESTALE, "transcript attachment ends in an incomplete record")
-            chunks.appendleft(raw)
-            newlines += raw.count(b"\n")
-        _check_attachment_snapshot(os.fstat(handle.fileno()), point, mtime)
-    lines = b"".join(chunks).split(b"\n")[-SEAL_NODE_LIMIT - 1 : -1]
-    offset = point.size - sum(len(line) + 1 for line in lines)
-    records = []
-    for index, raw in enumerate(lines, start=point.records - len(lines)):
-        offset += len(raw) + 1
-        records.append((index, offset, raw.decode("utf-8", errors="replace")))
-    return records
-
-
 def _live_turn_start(
-    records: list[tuple[int, int, str]], after: float | None, session_id: str | None
+    records: Sequence[tuple[int, int, str]], after: float | None, session_id: str | None
 ) -> tuple[int, int] | None:
     """Locate a launch-local user turn assuming nondecreasing same-machine wall time."""
     # No predecessor floor is supplied; copied history cannot be fenced by record index.
@@ -131,6 +89,9 @@ class _ClaudeSource(TranscriptSource):
     if TYPE_CHECKING:
         _observer: ClaudeCodeObserver
 
+    #: The seal's own node bound: all the causal context a live read could need.
+    _attach_tail = SEAL_NODE_LIMIT
+
     def __init__(self, observer: ClaudeCodeObserver, **kwargs) -> None:
         super().__init__(observer, **kwargs)
         # A restored pin is history; only an unbound launch may have an unread current turn.
@@ -139,47 +100,35 @@ class _ClaudeSource(TranscriptSource):
         #: A receipt path is stat-polled only when its directory changed or the safety net is due.
         self._receipt_gate = WatchGate(fallback_seconds=_RECEIPT_FALLBACK_SECONDS)
 
-    async def _attach(self, path: Path | None = None) -> Attachment | None:
-        attached = await super()._attach(path)
-        if attached is None:
-            return None
-        point = attached.point
-        assert point is not None and self._pending is not None
-        mtime = self._pending[3]
-        try:
-            records = await asyncio.to_thread(
-                _attachment_context, Path(attached.location), point, mtime
-            )
-            self._observer.reset_stream()
-            live_start = _live_turn_start(records, self._live_after, attached.session_id)
-            offsets = {index: offset for index, offset, _ in records}
+    async def _stage_attachment(
+        self, snapshot: AttachSnapshot, attachment: Attachment
+    ) -> Attachment:
+        """Prime the causal seal from the scanned tail; a launch-local turn stays for live reads."""
+        if snapshot.trailing_bytes:
+            raise OSError(errno.ESTALE, "transcript attachment ends in an incomplete record")
+        point = attachment.point
+        assert point is not None
+        # The base attach parsed the last record alone; restart so the seal sees the tail in order.
+        self._observer.reset_stream()
+        live_start = _live_turn_start(snapshot.tail, self._live_after, attachment.session_id)
+        ends = {record.raw_index: record.end for record in snapshot.tail}
+        last_event = None
+        for index, _, line in snapshot.tail:
+            if live_start is not None and index == live_start[0]:
+                break
+            for event in self._observer.parse(line, index, clip_text=False):
+                if not event.usage_only:
+                    last_event = replace(event, text=clip(event.text))
+                    point = replace(point, records=event.raw_index + 1, size=ends[event.raw_index])
+            if index % 32 == 0:
+                await asyncio.sleep(0)
+        if live_start is not None:
+            # Copied history primes the seal; the current turn settles only through live reads.
+            self._restage(index=live_start[0], offset=live_start[1])
+            attachment = replace(attachment, status=None)
             last_event = None
-            evidence_point = point
-            for index, _, line in records:
-                if live_start is not None and index == live_start[0]:
-                    break
-                for event in self._observer.parse(line, index, clip_text=False):
-                    if not event.usage_only:
-                        last_event = replace(event, text=clip(event.text))
-                        evidence_point = replace(
-                            point, records=event.raw_index + 1, size=offsets[event.raw_index]
-                        )
-                if index % 32 == 0:
-                    await asyncio.sleep(0)
-            stat = await asyncio.to_thread(Path(attached.location).stat)
-            _check_attachment_snapshot(stat, point, mtime)
-            if live_start is not None:
-                pending_path, _, _, mtime, session_id = self._pending
-                self._pending = (pending_path, live_start[1], live_start[0], mtime, session_id)
-                # Copied history primes the seal; the current turn settles only through live reads.
-                attached = replace(attached, status=None)
-                last_event = None
-        except (OSError, asyncio.CancelledError):
-            self._pending = None
-            self._observer.reset_stream()
-            raise
         # Metadata after a boundary must not advance that boundary past a resume floor.
-        return replace(attached, last_event=last_event, point=evidence_point)
+        return replace(attachment, last_event=last_event, point=point)
 
     def commit_attachment(self) -> None:
         super().commit_attachment()
