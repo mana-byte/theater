@@ -136,9 +136,30 @@ def _write_logs(theater_home: Path) -> None:
 
 
 def test_a_stack_that_never_started_leaves_no_evidence_directory(tmp_path: Path) -> None:
-    Stack(tmp_path, {}).capture(tmp_path / "evidence" / "boot")
+    Stack(tmp_path, {})._copy_logs(tmp_path / "evidence" / "boot")
 
     assert not (tmp_path / "evidence").exists()
+
+
+def test_capturing_evidence_copies_logs_and_every_pane_and_survives_a_missing_tmux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Capture is best effort: it runs at teardown, however far the stack got."""
+    stack, target = Stack(tmp_path, {}), tmp_path / "evidence"
+    _write_logs(tmp_path / "th")
+    monkeypatch.setattr(Stack, "panes", lambda _self: ["%1", "%2"])
+    monkeypatch.setattr(Stack, "tmux", lambda _self, *args: f"screen of {args[3]}")
+
+    stack.capture(target)
+
+    assert (target / "bridge.log").read_text(encoding="utf-8") == "bridge said this"
+    assert (target / "pane-2.txt").read_text(encoding="utf-8") == "screen of %2"
+
+    def missing(_self: Stack) -> list[str]:
+        raise FileNotFoundError("tmux")
+
+    monkeypatch.setattr(Stack, "panes", missing)
+    stack.capture(tmp_path / "other")  # must not raise: a stack that never started has no tmux
 
 
 def _scripted_boot(monkeypatch: pytest.MonkeyPatch, *outcomes: str | None) -> list[str]:
