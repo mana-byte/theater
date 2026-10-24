@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
+import errno
+import os
+from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from theater.harness.channels.filesystem import WatchGate
-from theater.harness.source import Batch, ReceiptAdmission, TranscriptSource
+from theater.harness.contracts.events import clip
+from theater.harness.source import (
+    Attachment,
+    Batch,
+    ReceiptAdmission,
+    StreamPoint,
+    TranscriptSource,
+)
 from theater.harness.transcript.history import HistoryParseContext
 from theater.provenance import TranscriptProvenance
+
+from .constants import SEAL_NODE_LIMIT
 
 if TYPE_CHECKING:
     from .observer import ClaudeCodeObserver
@@ -41,6 +55,34 @@ def _open_claude_source(
 _RECEIPT_FALLBACK_SECONDS = 2.0
 
 
+def _check_attachment_snapshot(stat: os.stat_result, point: StreamPoint, mtime: int) -> None:
+    if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != (
+        point.dev,
+        point.ino,
+        point.size,
+        mtime,
+    ):
+        raise OSError(errno.ESTALE, "transcript changed during attachment")
+
+
+def _attachment_context(path: Path, point: StreamPoint, mtime: int) -> list[tuple[int, int, str]]:
+    """Read bounded causal context from the scanned prefix, refusing a changed snapshot."""
+    assert point.size is not None
+    records: deque[tuple[int, int, str]] = deque(maxlen=SEAL_NODE_LIMIT)
+    with path.open("rb") as handle:
+        _check_attachment_snapshot(os.fstat(handle.fileno()), point, mtime)
+        offset = index = 0
+        while offset < point.size:
+            raw = handle.readline(point.size - offset)
+            if not raw.endswith(b"\n"):
+                raise OSError(errno.ESTALE, "transcript attachment ends in an incomplete record")
+            offset += len(raw)
+            records.append((index, offset, raw.decode("utf-8", errors="replace")))
+            index += 1
+        _check_attachment_snapshot(os.fstat(handle.fileno()), point, mtime)
+    return list(records)
+
+
 class _ClaudeSource(TranscriptSource):
     """Keep a receipt pending until its JSONL materializes.
 
@@ -55,6 +97,39 @@ class _ClaudeSource(TranscriptSource):
         self._expected_location: Path | None = None
         #: A receipt path is stat-polled only when its directory changed or the safety net is due.
         self._receipt_gate = WatchGate(fallback_seconds=_RECEIPT_FALLBACK_SECONDS)
+
+    async def _attach(self, path: Path | None = None) -> Attachment | None:
+        attached = await super()._attach(path)
+        if attached is None:
+            return None
+        point = attached.point
+        assert point is not None and self._pending is not None
+        mtime = self._pending[3]
+        try:
+            records = await asyncio.to_thread(
+                _attachment_context, Path(attached.location), point, mtime
+            )
+            self._observer.reset_stream()
+            offsets = {index: offset for index, offset, _ in records}
+            last_event = None
+            evidence_point = point
+            for index, _, line in records:
+                for event in self._observer.parse(line, index, clip_text=False):
+                    if not event.usage_only:
+                        last_event = replace(event, text=clip(event.text))
+                        evidence_point = replace(
+                            point, records=event.raw_index + 1, size=offsets[event.raw_index]
+                        )
+                if index % 32 == 0:
+                    await asyncio.sleep(0)
+            stat = await asyncio.to_thread(Path(attached.location).stat)
+            _check_attachment_snapshot(stat, point, mtime)
+        except (OSError, asyncio.CancelledError):
+            self._pending = None
+            self._observer.reset_stream()
+            raise
+        # Metadata after a boundary must not advance that boundary past a resume floor.
+        return replace(attached, last_event=last_event, point=evidence_point)
 
     def bind_wakeup(self, wakeup) -> None:
         super().bind_wakeup(wakeup)
