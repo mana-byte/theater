@@ -20,7 +20,7 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 
 | Directory | Purpose |
 |---|---|
-| `support/` | Shared helpers (and `test_tmux_guard.py`); import as `from tests.support.x import ...`. The live suite's rig, obligations, coverage registry, declaration walker, tool effects, mutations and probe sidecar (`compat_probe/`) live here |
+| `support/` | Shared helpers (and `test_tmux_guard.py`); import as `from tests.support.x import ...`. The live suite's rig and the stack of processes it owns (`live_rig`, `live_stack`), obligations, coverage registry, declaration walker, tool and channel oracles, process table, mutations and probe sidecar (`compat_probe/`) live here |
 | `fixtures/` | Data only: recorded transcripts, schemas, compat evidence |
 | `native/` | Qualification helpers imported by `scripts/harness_compat` |
 | `daemon/controls/` | Send, steer, follow-up and dispatch control state machine |
