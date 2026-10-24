@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -13,6 +16,8 @@ from typing import Any
 from .adapters import ADAPTER_NAMES, load_adapter
 from .publication import prepare_publication
 from .runner import run_harness_state
+from .sandbox import make_sandbox
+from .suite import run_suite
 from .summary import error_annotation, render_harness, render_overview, workflow_annotations
 
 
@@ -24,6 +29,11 @@ def _parser() -> argparse.ArgumentParser:
     summarize.add_argument(
         "--expect", default="", help="comma-separated harnesses that must report"
     )
+    suite = commands.add_parser("suite", help="run the live conformance suite on an installed CLI")
+    suite.add_argument("harness", choices=ADAPTER_NAMES)
+    suite.add_argument("--binary", type=Path, help="default: the harness name on PATH")
+    suite.add_argument("--keep", type=Path, help="copy the evidence directory here afterwards")
+    suite.add_argument("pytest_args", nargs=argparse.REMAINDER, help="after --, extra pytest args")
     for command in ("discover", "run", "check"):
         action = commands.add_parser(command)
         action.add_argument("--harness", choices=ADAPTER_NAMES)
@@ -139,6 +149,42 @@ def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
     return exit_code(summaries)
 
 
+_VERSION = re.compile(r"\d+\.\d+\.\d+")
+
+
+def _suite(args: argparse.Namespace, root: Path) -> int:
+    """Dev entry point: the suite against an installed binary, in a throwaway sandbox."""
+    binary = args.binary or shutil.which(args.harness)
+    if binary is None:
+        raise ValueError(f"no {args.harness!r} binary on PATH; pass --binary")
+    shown = subprocess.run(
+        [binary, "--version"], capture_output=True, text=True, timeout=30, check=False
+    ).stdout
+    found = _VERSION.search(shown)
+    if found is None:
+        raise ValueError(f"cannot read a version from {binary} --version: {shown.strip()!r}")
+    pytest_args = [item for item in args.pytest_args if item != "--"]
+    with make_sandbox(args.harness) as sb:
+        report = run_suite(
+            root,
+            sb,
+            harness=args.harness,
+            binary=Path(binary),
+            version=found.group(0),
+            pytest_args=pytest_args,
+        )
+        if args.keep:
+            shutil.copytree(sb.evidence_dir, args.keep, dirs_exist_ok=True)
+    for check in report.checks:
+        print(f"{check.status:5} {check.name}: {check.detail}")
+    for problem in report.problems:
+        print(f"tooling: {problem}")
+    statuses = {check.status for check in report.checks}
+    if report.problems or "error" in statuses:
+        return 2
+    return 1 if "fail" in statuses else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """0: all clear; 1: red/tooling or a missing result; 2: inconclusive or a usage error."""
     args = _parser().parse_args(argv)
@@ -146,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "summarize":
             return _summarize(args)
+        if args.command == "suite":
+            return _suite(args, root)
         adapters = _adapters(args.harness)
         if args.command == "discover":
             versions = {adapter.name: adapter.discover() for adapter in adapters}

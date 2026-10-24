@@ -117,6 +117,7 @@ def run_pytest(
     env: Mapping[str, str],
     expected_skips: Mapping[str, str],
     timeout: float = 900.0,
+    pytest_args: Sequence[str] = (),
 ) -> tuple[Check, ...]:
     """Aggregate pytest cases under each file, directory, class, or test selector.
     Failures win; missing cases, errors, and unexpected skips are errors; all pass is pass.
@@ -134,6 +135,7 @@ def run_pytest(
             "-o",
             "junit_logging=out-err",
             f"--junitxml={xml}",
+            *pytest_args,
             *nodeids,
         ]
         try:

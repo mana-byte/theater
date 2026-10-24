@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from scripts.harness_compat.contract import SUITE_DOCUMENT_SCHEMA
 from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.manifest import HookChannelManifest, OtelChannelManifest
 
-SCHEMA = 1
+SCHEMA = SUITE_DOCUMENT_SCHEMA
 
 
 @dataclass(frozen=True, slots=True)

@@ -51,6 +51,8 @@ REQUIRED = required(HARNESS)
 
 _BY_NODE: dict[str, Obligation] = {}
 _PHASES: dict[str, dict[str, str]] = {}
+_DETAILS: dict[str, str] = {}
+_DETAIL_CHARS = 400
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -88,8 +90,20 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     obligation = _BY_NODE.get(report.nodeid)
-    if obligation is not None:
-        _PHASES.setdefault(obligation.id, {})[report.when or "call"] = report.outcome
+    if obligation is None:
+        return
+    _PHASES.setdefault(obligation.id, {})[report.when or "call"] = report.outcome
+    if report.outcome != "passed":
+        _DETAILS.setdefault(obligation.id, _detail(report))
+
+
+def _detail(report: pytest.TestReport) -> str:
+    """The first failing line a human needs, from a failure, an error or a skip reason."""
+    if report.skipped and isinstance(report.longrepr, tuple):
+        return str(report.longrepr[2])[:_DETAIL_CHARS]
+    lines = [line.strip() for line in report.longreprtext.splitlines() if line.strip()]
+    causes = [line.removeprefix("E").strip() for line in lines if line.startswith("E ")]
+    return " ".join(causes or lines[-3:])[:_DETAIL_CHARS]
 
 
 def _outcome(phases: dict[str, str]) -> str | None:
@@ -116,6 +130,7 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
                 "scenario": scenarios[obligation.family],
                 "status": "executed" if outcome is not None else "unproven",
                 "outcome": outcome,
+                "detail": _DETAILS.get(obligation.id, ""),
             }
         )
     body = {

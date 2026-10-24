@@ -25,7 +25,16 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.contract import Hold, MockProtocol, MockReply
+from scripts.harness_compat.contract import (
+    SUITE_ENV_BINARY,
+    SUITE_ENV_EVIDENCE_DIR,
+    SUITE_ENV_HARNESS,
+    SUITE_ENV_SANDBOX_ROOT,
+    SUITE_ENV_VERSION,
+    Hold,
+    MockProtocol,
+    MockReply,
+)
 from scripts.harness_compat.mock import MockServer
 from scripts.harness_compat.process import SANDBOX_ENV
 from tests.support.paths import REPO_ROOT
@@ -35,11 +44,11 @@ from theater.harness.contracts.compat import ProvisionContext, Provisioned
 from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.observation import ScreenKind, ScreenReading
 
-ENV_HARNESS = "HARNESS_COMPAT_HARNESS"
-ENV_BINARY = "HARNESS_COMPAT_BINARY"
-ENV_VERSION = "HARNESS_COMPAT_VERSION"
-ENV_SANDBOX_ROOT = "HARNESS_COMPAT_SANDBOX_ROOT"
-ENV_EVIDENCE_DIR = "HARNESS_COMPAT_EVIDENCE_DIR"
+ENV_HARNESS = SUITE_ENV_HARNESS
+ENV_BINARY = SUITE_ENV_BINARY
+ENV_VERSION = SUITE_ENV_VERSION
+ENV_SANDBOX_ROOT = SUITE_ENV_SANDBOX_ROOT
+ENV_EVIDENCE_DIR = SUITE_ENV_EVIDENCE_DIR
 
 #: Logical model names the suite requests; ``provision`` makes the CLI accept them.
 LOGICAL_MODELS = ("mock-a", "mock-b")

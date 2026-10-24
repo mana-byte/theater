@@ -23,6 +23,17 @@ EVIDENCE_ROOT = Path("tests/fixtures/harness_compat")
 #: The text every mock model reply carries unless a test queues another one.
 MOCK_REPLY = "MOCK-OK"
 
+#: What the pipeline hands the live conformance suite (besides the sandbox token).
+SUITE_ENV_HARNESS = "HARNESS_COMPAT_HARNESS"
+SUITE_ENV_BINARY = "HARNESS_COMPAT_BINARY"
+SUITE_ENV_VERSION = "HARNESS_COMPAT_VERSION"
+SUITE_ENV_SANDBOX_ROOT = "HARNESS_COMPAT_SANDBOX_ROOT"
+SUITE_ENV_EVIDENCE_DIR = "HARNESS_COMPAT_EVIDENCE_DIR"
+#: Names a mutation canary (``tests/support/mutations.py``); never set for a release run.
+SUITE_ENV_MUTATION = "HARNESS_COMPAT_MUTATION"
+#: Schema of ``required.json`` and ``inventory.json`` in the evidence directory.
+SUITE_DOCUMENT_SCHEMA = 1
+
 _STABLE = re.compile(r"\d+\.\d+\.\d+")
 
 
