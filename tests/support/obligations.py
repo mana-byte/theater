@@ -131,7 +131,7 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family("mcp", _mcp, "test_mcp.py"),
     Family("edit", _edit, "test_edit.py"),
-    Family("channels", _channels, None, "scenario pending"),
+    Family("channels", _channels, "test_channels.py"),
     Family("runtime", _runtime, "test_runtime.py"),
 )
 
