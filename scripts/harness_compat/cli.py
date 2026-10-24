@@ -31,7 +31,7 @@ def _parser() -> argparse.ArgumentParser:
     suite.add_argument("harness", choices=ADAPTER_NAMES)
     suite.add_argument("--binary", type=Path, help="default: the harness name on PATH")
     suite.add_argument("--keep", type=Path, help="copy the evidence directory here afterwards")
-    suite.add_argument("pytest_args", nargs=argparse.REMAINDER, help="after --, extra pytest args")
+    suite.epilog = "arguments after a lone -- go to pytest, e.g. suite vibe -- -k mcp -x"
     for command in ("discover", "run", "check"):
         action = commands.add_parser(command)
         action.add_argument("--harness", choices=ADAPTER_NAMES)
@@ -152,7 +152,6 @@ def _suite(args: argparse.Namespace, root: Path) -> int:
     binary = args.binary or shutil.which(args.harness)
     if binary is None:
         raise ValueError(f"no {args.harness!r} binary on PATH; pass --binary")
-    pytest_args = [item for item in args.pytest_args if item != "--"]
     with make_sandbox(args.harness) as sb:
         report = run_suite(
             root,
@@ -160,7 +159,7 @@ def _suite(args: argparse.Namespace, root: Path) -> int:
             harness=args.harness,
             binary=Path(binary),
             version=installed_version(Path(binary)),
-            pytest_args=pytest_args,
+            pytest_args=args.pytest_args,
         )
         if args.keep:
             shutil.copytree(sb.evidence_dir, args.keep, dirs_exist_ok=True)
@@ -176,7 +175,13 @@ def _suite(args: argparse.Namespace, root: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """0: all clear; 1: red/tooling or a missing result; 2: inconclusive or a usage error."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    pytest_args: list[str] = []
+    if "--" in argv:
+        split = argv.index("--")
+        argv, pytest_args = argv[:split], argv[split + 1 :]
     args = _parser().parse_args(argv)
+    args.pytest_args = pytest_args
     root = Path.cwd()
     try:
         if args.command == "summarize":
