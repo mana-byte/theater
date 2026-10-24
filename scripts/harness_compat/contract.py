@@ -130,7 +130,8 @@ def verdict_from_checks(checks: Sequence[Check]) -> Verdict:
 @dataclass(frozen=True, slots=True)
 class MockToolCall:
     name: str
-    arguments: Mapping[str, Any]
+    #: JSON object arguments, or the raw input of a freeform (grammar) tool (Responses only).
+    arguments: Mapping[str, Any] | str
 
 
 class Hold(Protocol):

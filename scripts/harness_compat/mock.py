@@ -62,6 +62,15 @@ def _sse(events: list[dict[str, Any]]) -> str:
     return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events)
 
 
+def _object_arguments(call: MockToolCall) -> dict[str, Any]:
+    """A function call's arguments; a freeform input only exists on the Responses wire."""
+    if isinstance(call.arguments, str):
+        raise TypeError(
+            f"{call.name} is a freeform call, which only the Responses protocol carries"
+        )
+    return dict(call.arguments)
+
+
 def _anthropic_content(reply: MockReply) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = [{"type": "text", "text": reply.text}]
     content.extend(
@@ -69,7 +78,7 @@ def _anthropic_content(reply: MockReply) -> list[dict[str, Any]]:
             "type": "tool_use",
             "id": f"toolu_mock_{index}",
             "name": call.name,
-            "input": dict(call.arguments),
+            "input": _object_arguments(call),
         }
         for index, call in enumerate(reply.tool_calls)
     )
@@ -106,7 +115,7 @@ def _anthropic_tool_events(index: int, call: MockToolCall) -> list[dict[str, Any
             "index": index,
             "delta": {
                 "type": "input_json_delta",
-                "partial_json": json.dumps(dict(call.arguments)),
+                "partial_json": json.dumps(_object_arguments(call)),
             },
         },
         {"type": "content_block_stop", "index": index},
@@ -152,7 +161,7 @@ def _openai_tool_call(index: int, call: MockToolCall) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": call.name,
-            "arguments": json.dumps(dict(call.arguments)),
+            "arguments": json.dumps(_object_arguments(call)),
         },
     }
 
@@ -252,17 +261,12 @@ def _responses_stream(reply: MockReply) -> tuple[str, str]:
             }
         )
     for index, call in enumerate(reply.tool_calls):
-        tail.append(
-            {
-                "type": "response.output_item.done",
-                "item": {
-                    "type": "function_call",
-                    "call_id": f"call_mock_{index}",
-                    "name": call.name,
-                    "arguments": json.dumps(dict(call.arguments)),
-                },
-            }
-        )
+        item: dict[str, Any] = {"call_id": f"call_mock_{index}", "name": call.name}
+        if isinstance(call.arguments, str):
+            item |= {"type": "custom_tool_call", "input": call.arguments}
+        else:
+            item |= {"type": "function_call", "arguments": json.dumps(dict(call.arguments))}
+        tail.append({"type": "response.output_item.done", "item": item})
     tail.append(
         {
             "type": "response.completed",
@@ -393,7 +397,7 @@ def _last_tool_result(body: dict[str, Any]) -> str | None:
             continue
         if item.get("role") == "tool":
             return _joined_text(item.get("content"))[:_USER_TEXT_CHARS]
-        if item.get("type") == "function_call_output":
+        if item.get("type") in ("function_call_output", "custom_tool_call_output"):
             return _joined_text(item.get("output"))[:_USER_TEXT_CHARS]
         content = item.get("content")
         if item.get("role") == "user" and isinstance(content, list):

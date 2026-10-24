@@ -196,6 +196,26 @@ def test_responses_codec_streams_text_tool_calls_and_the_codex_side_channel(
         assert not server.unhandled
 
 
+def test_responses_codec_streams_a_freeform_tool_call_and_reads_its_output(tmp_path: Path) -> None:
+    patch = "*** Begin Patch\n*** Add File: x\n+y\n*** End Patch\n"
+    reply = MockReply("", (MockToolCall("apply_patch", patch),))
+    output = {"type": "custom_tool_call_output", "call_id": "call_mock_0", "output": "patched"}
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        server.queue("openai-responses", reply)
+        url = f"{server.base_urls['openai-responses']}/responses"
+
+        _, payload = _request(url, {"stream": True})
+        _request(url, {"stream": True, "input": [output]})
+
+    assert _sse_data(payload)[1]["item"] == {
+        "type": "custom_tool_call",
+        "call_id": "call_mock_0",
+        "name": "apply_patch",
+        "input": patch,
+    }
+    assert server.requests[1].last_tool_result == "patched"
+
+
 def test_requests_are_described_by_protocol_model_effort_tools_and_last_user_text(
     tmp_path: Path,
 ) -> None:
