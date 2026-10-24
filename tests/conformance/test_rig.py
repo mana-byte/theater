@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -208,3 +212,135 @@ async def test_a_send_waits_for_presence_to_read_absent_and_stay_settled(tmp_pat
     assert reported[:2] == ["unknown", "present"]
     assert reported[2:] and set(reported[2:]) == {"absent"}, "readiness must hold, not flash"
     assert len(reported) >= 2 + 1.0 / 0.25, "readiness settles for a full window of polls"
+
+
+def _reaped(*script: str) -> tuple[subprocess.Popen[str], int]:
+    """A process that has printed its first line, reaped on exit as the rig's daemon is."""
+    process = subprocess.Popen(
+        [sys.executable, "-c", "\n".join(script)], stdout=subprocess.PIPE, text=True
+    )
+    assert process.stdout is not None and process.stdout.readline().strip() == "ready"
+    threading.Thread(target=process.wait, daemon=True).start()
+    return process, process.pid
+
+
+@pytest.mark.parametrize(
+    ("handler", "graceful"), [("signal.SIG_DFL", True), ("signal.SIG_IGN", False)]
+)
+def test_a_daemon_that_ignores_sigterm_is_killed_and_reported_as_such(
+    monkeypatch: pytest.MonkeyPatch, handler: str, graceful: bool
+) -> None:
+    monkeypatch.setattr(live_rig, "_STOP_SECONDS", 1.0)
+    process, pid = _reaped(
+        "import signal, time",
+        f"signal.signal(signal.SIGTERM, {handler})",
+        "print('ready', flush=True)",
+        "time.sleep(60)",
+    )
+
+    assert live_rig._terminate_daemon(pid) is graceful
+
+    deadline = time.monotonic() + 5
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert process.poll() is not None
+
+
+def test_a_restarted_daemon_is_detached_with_the_rig_environment_and_the_same_start_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: dict[str, Any] = {}
+
+    class Popen:
+        def __init__(self, argv: list[str], **options: Any) -> None:
+            started.update(argv=argv, **options)
+            options["stdout"].write(b"second daemon\n")
+
+        def wait(self) -> int:
+            return 0
+
+    log = tmp_path / live_rig._DAEMON_START_LOG
+    log.parent.mkdir(parents=True)
+    log.write_text("first daemon\n", encoding="utf-8")
+    monkeypatch.setattr(live_rig.subprocess, "Popen", Popen)
+    env = {"THEATER_HOME": str(tmp_path), "HOME": str(tmp_path / "h")}
+
+    live_rig._start_daemon(env)
+
+    assert started["argv"] == [sys.executable, "-m", "theater.cli", "daemon"]
+    assert started["start_new_session"] is True and started["env"] == env
+    assert started["cwd"] == live_rig.REPO_ROOT
+    assert log.read_text(encoding="utf-8") == "first daemon\nsecond daemon\n"
+
+
+class _Daemon(_Client):
+    """A client of a daemon still starting: refuses connections, lists its provider offline."""
+
+    def __init__(self, steps: list[str], *, refusals: int = 0, offline_polls: int = 0) -> None:
+        super().__init__("online")
+        self.steps, self.refusals, self.offline_polls = steps, refusals, offline_polls
+
+    async def connect(self) -> None:
+        if self.refusals:
+            self.refusals -= 1
+            raise ConnectionRefusedError
+
+    async def close(self) -> None:
+        self.steps.append("close")
+
+    async def list(self) -> Any:
+        self._healths = ("offline",) if self.offline_polls > 0 else ("online",)
+        self.offline_polls -= 1
+        return await super().list()
+
+
+async def test_restarting_the_daemon_replaces_the_client_once_daemon_and_provider_are_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steps: list[str] = []
+    old, refusing = _Daemon(steps), _Daemon(steps, refusals=1)
+    answering = _Daemon(steps, offline_polls=2)
+    clients = [refusing, answering]
+    monkeypatch.setattr(live_rig, "_terminate_daemon", lambda pid: steps.append("stop") or True)
+    monkeypatch.setattr(live_rig, "_start_daemon", lambda env: steps.append("start"))
+    monkeypatch.setattr(live_rig, "_client", lambda socket: clients.pop(0))
+    rig, mock = _rig(tmp_path, cast(Any, old))
+    try:
+        await rig.restart_daemon()
+    finally:
+        mock.stop()
+
+    # The old client closes before the daemon stops; the refused attempt closes its own.
+    assert steps == ["close", "stop", "start", "close"]
+    assert rig.client is answering and clients == []
+    assert answering.offline_polls < 0, "the restart waited for the provider to come back"
+
+
+@pytest.mark.parametrize(
+    ("terminated", "late", "reason"),
+    [
+        pytest.param(False, {}, "did not exit on SIGTERM", id="stuck"),
+        pytest.param(True, {"refusals": 10**6}, "did not answer", id="no-daemon"),
+        pytest.param(True, {"offline_polls": 10**6}, "provider did not reconnect", id="no-bridge"),
+    ],
+)
+async def test_a_stack_that_cannot_be_restarted_is_inconclusive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminated: bool,
+    late: dict[str, int],
+    reason: str,
+) -> None:
+    steps: list[str] = []
+    monkeypatch.setattr(live_rig, "_terminate_daemon", lambda pid: terminated)
+    monkeypatch.setattr(live_rig, "_start_daemon", lambda env: steps.append("start"))
+    monkeypatch.setattr(live_rig, "_client", lambda socket: _Daemon(steps, **late))
+    monkeypatch.setattr(live_rig, "_BOOT_SECONDS", 0.3)
+    rig, mock = _rig(tmp_path, cast(Any, _Daemon(steps)))
+    try:
+        with pytest.raises(pytest.skip.Exception, match=f"inconclusive: .*{reason}"):
+            await rig.restart_daemon()
+    finally:
+        mock.stop()
+
+    assert ("start" in steps) is terminated

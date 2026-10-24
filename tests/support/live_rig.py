@@ -16,6 +16,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -63,6 +64,7 @@ _STOP_SECONDS = 20.0
 #: How long a send must stay admissible before the CLI counts as ready: screen reads lag redraws.
 _READY_SETTLE_SECONDS = 1.0
 _PANE_CAPTURE_LINES = 200
+_DAEMON_START_LOG = Path("regie") / "var" / "logs" / "daemon-start.log"
 _JOB_SLICE_SECONDS = 3.0
 #: One short directory per scenario: unix socket paths cap near 100 bytes.
 _ROOMS = itertools.count(1)
@@ -278,11 +280,7 @@ class LiveRig:
             failure = _boot_with_retry(env, theater_dir, session.evidence_dir / label)
             if failure is not None:
                 inconclusive(failure)
-            client = FrontendClient(
-                theater_dir / "var" / "run" / "daemon.sock",
-                client_id="compat-suite",
-                required_capabilities=CAPABILITIES,
-            )
+            client = _client(theater_dir / "var" / "run" / "daemon.sock")
             await client.connect()
             rig = cls(
                 session, harness, root, env, provisioned, mock, client, workdir, marker_dir, label
@@ -292,9 +290,9 @@ class LiveRig:
             finally:
                 rig.capture_evidence()
         finally:
-            if client is not None:
+            if (current := rig.client if rig is not None else client) is not None:
                 with contextlib.suppress(Exception):
-                    await client.close()
+                    await current.close()
             if rig is None:  # the stack never came up: keep what it said before it is removed
                 _copy_logs(root / "th", session.evidence_dir / label / "boot")
             _stop(env, root / "th")
@@ -525,6 +523,38 @@ class LiveRig:
     def hold(self) -> Hold:
         return self.mock.hold()
 
+    async def restart_daemon(self) -> None:
+        """SIGTERM the daemon and start another as Régie does; the bridge reconnects by itself."""
+        await self.client.close()
+        if not _terminate_daemon(_daemon_pid(self.theater_home)):
+            inconclusive("the daemon did not exit on SIGTERM")
+        _start_daemon(self.env)
+        socket = self.theater_home / "var" / "run" / "daemon.sock"
+        deadline = time.monotonic() + _BOOT_SECONDS
+        while True:
+            client = _client(socket)
+            try:
+                await client.connect()
+            except Exception:  # the new daemon is still starting: its socket is not answering yet
+                await client.close()
+                if time.monotonic() > deadline:
+                    inconclusive(f"the restarted daemon did not answer within {_BOOT_SECONDS:g}s")
+                await asyncio.sleep(0.25)
+            else:
+                self.client = client
+                break
+        while True:
+            with contextlib.suppress(Exception):  # the registry may not answer yet
+                if await self._provider_online():
+                    return
+            if time.monotonic() > deadline:
+                inconclusive("the terminal provider did not reconnect to the restarted daemon")
+            await asyncio.sleep(0.25)
+
+    async def _provider_online(self) -> bool:
+        providers = (await self.client.providers.list()).value.items
+        return any(provider.health == "online" for provider in providers)
+
     # -- health, evidence --------------------------------------------------------------------
 
     async def broken_component(self) -> str | None:
@@ -533,9 +563,8 @@ class LiveRig:
         A component that cannot be inspected counts as broken, so a stock CLI is only ever blamed
         for an exit that no suite component can explain.
         """
-        pidfile = self.theater_home / "var" / "run" / "daemon.pid"
         try:
-            os.kill(int(pidfile.read_text().split()[0]), 0)
+            os.kill(_daemon_pid(self.theater_home), 0)
         except (OSError, ValueError, IndexError):
             return "the daemon"
         if not self.client.connected:
@@ -545,12 +574,10 @@ class LiveRig:
         if not _tmux_running(self.env):
             return "the private tmux server"
         try:
-            providers = (await self.client.providers.list()).value.items
+            online = await self._provider_online()
         except Exception:  # an unreadable registry is no evidence that a provider is up
             return "the terminal provider registry"
-        if not any(provider.health == "online" for provider in providers):
-            return "the terminal provider"
-        return None
+        return None if online else "the terminal provider"
 
     def capture_evidence(self) -> None:
         """Copy logs and pane captures to the evidence directory; bounded and best effort."""
@@ -603,7 +630,7 @@ def _copy_logs(theater_home: Path, target: Path) -> None:
     """Copy the daemon and bridge logs that exist; a stack that never started leaves none."""
     for source in (
         theater_home / "var" / "logs" / "daemon" / "daemon.log",
-        theater_home / "regie" / "var" / "logs" / "daemon-start.log",
+        theater_home / _DAEMON_START_LOG,
         theater_home / "regie" / "var" / "logs" / "bridge.log",
     ):
         if source.is_file():
@@ -612,25 +639,54 @@ def _copy_logs(theater_home: Path, target: Path) -> None:
                 shutil.copyfile(source, target / source.name)
 
 
+def _client(socket: Path) -> FrontendClient:
+    return FrontendClient(socket, client_id="compat-suite", required_capabilities=CAPABILITIES)
+
+
+def _daemon_pid(theater_home: Path) -> int:
+    return int((theater_home / "var" / "run" / "daemon.pid").read_text().split()[0])
+
+
+def _terminate_daemon(pid: int) -> bool:
+    """SIGTERM ``pid`` and wait for it; SIGKILL after the deadline. Whether SIGTERM was enough."""
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + _STOP_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        time.sleep(0.1)
+    os.kill(pid, signal.SIGKILL)
+    return False
+
+
+def _start_daemon(env: Mapping[str, str]) -> None:
+    """Start a detached daemon the way Régie does, its output appended to the same start log."""
+    log = Path(env["THEATER_HOME"]) / _DAEMON_START_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("ab") as output:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "theater.cli", "daemon"],
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=output,
+            start_new_session=True,
+            env=dict(env),
+            cwd=REPO_ROOT,
+        )
+    # Reap it as init would a daemon the bridge started: a zombie still answers ``kill -0``.
+    threading.Thread(target=process.wait, daemon=True).start()
+
+
 def _stop(env: Mapping[str, str], theater_home: Path) -> None:
     """Stop the bridge, the daemon and the private tmux server; every step is attempted."""
     if not env:
         return
     with contextlib.suppress(Exception):
         _regie(env, "bridge", "stop", timeout=_STOP_SECONDS)
-    pidfile = theater_home / "var" / "run" / "daemon.pid"
     with contextlib.suppress(OSError, ValueError, IndexError):
-        pid = int(pidfile.read_text().split()[0])
-        os.kill(pid, signal.SIGTERM)
-        deadline = time.monotonic() + _STOP_SECONDS
-        while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                break
-            time.sleep(0.1)
-        else:
-            os.kill(pid, signal.SIGKILL)
+        _terminate_daemon(_daemon_pid(theater_home))
     with contextlib.suppress(Exception):
         _tmux(env, "kill-server")
 
