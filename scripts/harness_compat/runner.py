@@ -344,7 +344,11 @@ def _qualify(
             result = replace(
                 result,
                 shadow_checks=shadow_checks(
-                    root, sandbox, harness=adapter.name, binary=installed, version=version
+                    root,
+                    sandbox,
+                    harness=adapter_metadata(adapter, adapter.name).plugin,
+                    binary=installed,
+                    version=version,
                 ),
             )
         requests = sandbox.mock.requests

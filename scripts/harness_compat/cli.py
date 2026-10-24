@@ -13,6 +13,7 @@ from typing import Any
 
 from .adapters import ADAPTER_NAMES, load_adapter
 from .canaries import run_canaries
+from .inputs import adapter_metadata
 from .publication import prepare_publication
 from .runner import run_harness_state
 from .sandbox import make_sandbox
@@ -30,7 +31,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     suite = commands.add_parser("suite", help="run the live conformance suite on an installed CLI")
     suite.add_argument("harness", choices=ADAPTER_NAMES)
-    suite.add_argument("--binary", type=Path, help="default: the harness name on PATH")
+    suite.add_argument("--binary", type=Path, help="default: the harness plugin's binary on PATH")
     suite.add_argument("--keep", type=Path, help="copy the evidence directory here afterwards")
     suite.epilog = "arguments after a lone -- go to pytest, e.g. suite vibe -- -k mcp -x"
     canaries = commands.add_parser("canaries", help="prove the live suite notices broken plugins")
@@ -153,14 +154,15 @@ def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
 
 def _suite(args: argparse.Namespace, root: Path) -> int:
     """Dev entry point: the suite against an installed binary, in a throwaway sandbox."""
-    binary = args.binary or shutil.which(args.harness)
+    plugin = adapter_metadata(load_adapter(args.harness), args.harness).plugin
+    binary = args.binary or shutil.which(plugin)
     if binary is None:
-        raise ValueError(f"no {args.harness!r} binary on PATH; pass --binary")
+        raise ValueError(f"no {plugin!r} binary on PATH; pass --binary")
     with make_sandbox(args.harness) as sb:
         report = run_suite(
             root,
             sb,
-            harness=args.harness,
+            harness=plugin,
             binary=Path(binary),
             version=installed_version(Path(binary)),
             pytest_args=args.pytest_args,

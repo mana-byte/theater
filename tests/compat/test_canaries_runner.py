@@ -93,3 +93,19 @@ def test_a_harness_with_nothing_admitted_has_nothing_to_install(tmp_path: Path) 
     check = canaries.run_canaries(tmp_path, adapter)  # type: ignore[arg-type]
 
     assert check.status == "error" and adapter.installed == []
+
+
+def test_the_canaries_select_the_plugin_not_the_qualification_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Alias(Adapter):
+        name = "acme2"
+        plugin = "acme"
+
+    seen = _pytest(monkeypatch, 0, "2 passed in 9s")
+
+    check = canaries.run_canaries(tmp_path, Alias())  # type: ignore[arg-type]
+
+    assert check.status == "pass" and check.detail.startswith("acme2 ")
+    assert seen[0]["env"][canaries.ENV_HARNESS] == "acme"
+    assert seen[0]["argv"][-3:] == ["-k", "acme", canaries.CANARIES_TARGET]

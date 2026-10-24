@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .contract import Adapter, Check
 from .diagnostics import clip_diagnostic
+from .inputs import adapter_metadata
 from .process import run_group
 from .sandbox import make_sandbox
 from .select import newest_in_range
@@ -39,12 +40,14 @@ def run_canaries(
     chosen = version or newest_in_range(adapter, gate)
     if chosen is None:
         return Check("canaries", "error", f"no stable {adapter.name} release is admitted")
+    # The suite and the canary tests know plugins, not qualification aliases (opencode2).
+    plugin = adapter_metadata(adapter, adapter.name).plugin
     with make_sandbox(adapter.name) as sb:
         binary = adapter.install(sb, chosen)
         env = {
             **sb.offline_env,
             ENV_ENABLE: "1",
-            ENV_HARNESS: adapter.name,
+            ENV_HARNESS: plugin,
             ENV_BINARY: str(binary),
             "PYTHONPATH": str(root),
         }
@@ -58,7 +61,7 @@ def run_canaries(
             "-n",
             _PARALLEL_WORKERS,
             "-k",
-            adapter.name,
+            plugin,
             CANARIES_TARGET,
         ]
         run = run_group(argv, cwd=root, env=env, timeout=timeout)
