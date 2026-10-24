@@ -29,8 +29,6 @@ def provision(context: ProvisionContext) -> Provisioned:
         "share": "disabled",
         # Launches without a model selection would otherwise fall back to a hosted default.
         "model": f"{_PROVIDER}/{models[0]}",
-        # The title agent would otherwise spend the first scripted reply before the real turn.
-        "agent": {"title": {"disable": True}},
         "provider": {
             _PROVIDER: {
                 "npm": "@ai-sdk/openai-compatible",
@@ -54,8 +52,6 @@ def provision(context: ProvisionContext) -> Provisioned:
 
 COMPAT = CompatManifest(
     provision=provision,
-    # 2.x names the target `path`, 1.x `filePath`; each line ignores the key it does not know.
-    native_edit=NativeEdit(
-        "write", {"path": "{path}", "filePath": "{path}", "content": "{nonce}\n"}
-    ),
+    # 2.x's closed schema names the target `path`; 1.x's `filePath` would need its own recipe.
+    native_edit=NativeEdit("write", {"path": "{path}", "content": "{nonce}\n"}),
 )

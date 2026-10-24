@@ -46,9 +46,7 @@ def test_provision_serves_every_logical_model_from_the_mock_over_openai(
 
 
 @pytest.mark.parametrize("version", ["1.18.0", "2.0.18"])
-def test_provision_keeps_the_cli_off_the_network_and_the_title_agent_quiet(
-    tmp_path: Path, version: str
-) -> None:
+def test_provision_keeps_the_cli_off_the_network(tmp_path: Path, version: str) -> None:
     provisioned = OpenCodeHarness().compat.provision(_context(tmp_path, version=version))
 
     config = json.loads(next(iter(provisioned.files.values())))
@@ -58,7 +56,7 @@ def test_provision_keeps_the_cli_off_the_network_and_the_title_agent_quiet(
     }
     assert config["autoupdate"] is False
     assert config["share"] == "disabled"
-    assert config["agent"]["title"]["disable"] is True
+    assert "agent" not in config
 
 
 def test_provision_leaves_the_launch_owned_config_env_alone(tmp_path: Path) -> None:
@@ -74,14 +72,13 @@ def test_provision_falls_back_to_two_logical_models(tmp_path: Path) -> None:
     assert provisioned.models == ("mockprov/mock-a", "mockprov/mock-b")
 
 
-def test_native_edit_names_the_target_for_both_release_lines() -> None:
+def test_native_edit_names_the_target_as_the_2x_write_tool_declares_it() -> None:
     edit = OpenCodeHarness().compat.native_edit
 
     assert edit is not None
     assert edit.name == "write"
     assert edit.render(path="/w/x.txt", nonce="N1") == {
         "path": "/w/x.txt",
-        "filePath": "/w/x.txt",
         "content": "N1\n",
     }
 
