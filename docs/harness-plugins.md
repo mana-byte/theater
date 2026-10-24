@@ -547,14 +547,21 @@ and returns the `Provisioned` values that make the stock CLI use the mock:
 - `efforts`: harness-native effort values worth sampling.
 
 Provisioning must not replace launch argv, approval policy or receipt commands;
-production launch planning always wins.
+production launch planning always wins. Every line of it is endpoint, credential,
+model catalog or onboarding and trust setup: a retry policy, a disabled agent or
+any other change to stock behaviour is not provisioning.
 
 `CompatManifest.native_edit` is optional and valid only when
 `launch.approvals` includes `edits`. `NativeEdit(name, payload)` names the CLI's
 own file-write tool and a payload that makes it write one scratch file: a JSON
 object or freeform text (for grammar-based tools such as a patch). The payload
 must contain the `{path}` placeholder and may contain `{nonce}`; those two
-tokens are substituted in one pass and nothing else is interpolated.
+tokens are substituted in one pass and nothing else is interpolated. The suite
+checks the scripted call against the schema the CLI actually offered the tool
+with; a call that does not fit (an argument a closed schema does not declare, a
+missing required one) means the recipe is stale for that release, and the run is
+inconclusive rather than red. One static recipe cannot serve two release lines
+that name an argument differently, so declare the line the suite can prove.
 
 `CompatManifest.mcp_call` is optional and needed only when the model cannot call
 an MCP tool under its own name, for example when MCP tools sit behind a script
