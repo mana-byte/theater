@@ -138,7 +138,6 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "HookChannelManifest.bindings",
         "HookChannelManifest.installer",
         "HookChannelManifest.probe",
-        "HookChannelManifest.unavailable_reason",
         "HookBinding.event",
         "HookBinding.signals",
         "HookBinding.delivery",
@@ -154,7 +153,6 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "OtelChannelManifest.bindings",
         "OtelChannelManifest.correlation",
         "OtelChannelManifest.installer",
-        "OtelChannelManifest.unavailable_reason",
         "OtelBinding.name",
         "OtelBinding.signal",
         "OtelBinding.signal=LOGS",
@@ -167,8 +165,6 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "OtelCorrelation.delivery_id_attribute",
         "OtelCorrelation.harness_attribute",
         "OtelCorrelation.participant_attribute",
-        "UnavailableChannelManifest.declaration",
-        "UnavailableChannelManifest.reason",
     ),
     # --- runtime: native routes, reconnect, fallbacks
     _family(
@@ -265,5 +261,13 @@ COVERAGE: Mapping[str, Coverage] = _merge(
     _exempt(
         "the Process channel kind has no declaring harness; it is unit-tested with fixtures",
         "ChannelDeclaration.kind=PROCESS",
+    ),
+    _exempt(
+        "an unavailable channel wires nothing a CLI could exercise, and the day a plugin declares "
+        "it available the channels family derives channels:<id> and proves it",
+        "HookChannelManifest.unavailable_reason",
+        "OtelChannelManifest.unavailable_reason",
+        "UnavailableChannelManifest.declaration",
+        "UnavailableChannelManifest.reason",
     ),
 )
