@@ -34,6 +34,7 @@ from theater.harness.contracts.runtime import (
 )
 from theater.harness.transcript import file_stream_floor
 
+from .compat import COMPAT
 from .constants import CODEX_BINARY
 from .identity import admit_operator_candidate, transcript_candidates
 from .launch import plan_launch, resume_launch_overlay
@@ -128,6 +129,7 @@ MANIFEST = HarnessManifest(
         factory=codex_runtime_factory,
         channel=_NATIVE_LIVE,
     ),
+    compat=COMPAT,
 )
 
 
