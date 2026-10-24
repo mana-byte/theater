@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import ADAPTER_NAMES, load_adapter
+from .canaries import run_canaries
 from .publication import prepare_publication
 from .runner import run_harness_state
 from .sandbox import make_sandbox
@@ -32,6 +33,9 @@ def _parser() -> argparse.ArgumentParser:
     suite.add_argument("--binary", type=Path, help="default: the harness name on PATH")
     suite.add_argument("--keep", type=Path, help="copy the evidence directory here afterwards")
     suite.epilog = "arguments after a lone -- go to pytest, e.g. suite vibe -- -k mcp -x"
+    canaries = commands.add_parser("canaries", help="prove the live suite notices broken plugins")
+    canaries.add_argument("harness", choices=ADAPTER_NAMES)
+    canaries.add_argument("--version", help="default: the newest admitted release")
     for command in ("discover", "run", "check"):
         action = commands.add_parser(command)
         action.add_argument("--harness", choices=ADAPTER_NAMES)
@@ -173,6 +177,12 @@ def _suite(args: argparse.Namespace, root: Path) -> int:
     return 1 if "fail" in statuses else 0
 
 
+def _canaries(args: argparse.Namespace, root: Path) -> int:
+    check = run_canaries(root, load_adapter(args.harness), version=args.version)
+    print(f"{check.status:5} {check.name}: {check.detail}")
+    return {"pass": 0, "fail": 1}.get(check.status, 2)
+
+
 def main(argv: list[str] | None = None) -> int:
     """0: all clear; 1: red/tooling or a missing result; 2: inconclusive or a usage error."""
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -188,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
             return _summarize(args)
         if args.command == "suite":
             return _suite(args, root)
+        if args.command == "canaries":
+            return _canaries(args, root)
         adapters = _adapters(args.harness)
         if args.command == "discover":
             versions = {adapter.name: adapter.discover() for adapter in adapters}

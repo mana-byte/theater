@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.harness_compat.canaries import ENV_BINARY, ENV_ENABLE, ENV_HARNESS
 from scripts.harness_compat.contract import SUITE_ENV_MUTATION
 from scripts.harness_compat.sandbox import make_sandbox
 from scripts.harness_compat.suite_runner import installed_version, run_suite
@@ -23,22 +24,29 @@ from theater.harness.builtin import plugin_dir
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(
-        os.environ.get("HARNESS_COMPAT_CANARIES") != "1", reason="opt in with: make canaries"
-    ),
+    pytest.mark.skipif(os.environ.get(ENV_ENABLE) != "1", reason="opt in with: make canaries"),
 ]
 #: Read from disk: the registry is only populated after collection.
 SHIPPED = sorted(path.parent.name for path in plugin_dir().glob("*/manifest.py"))
+
+
+def _binary(name: str, command: str) -> str | None:
+    """The pipeline's installed release when it named this harness, else the one on PATH."""
+    if os.environ.get(ENV_HARNESS) == name and os.environ.get(ENV_BINARY):
+        return os.environ[ENV_BINARY]
+    return shutil.which(command)
 
 
 @pytest.mark.parametrize("mutation", MUTATIONS, ids=lambda item: item.name)
 @pytest.mark.parametrize("name", SHIPPED)
 def test_the_suite_notices_a_deliberately_broken_plugin(name: str, mutation: Mutation) -> None:
     harness = HARNESSES[name]
+    if harness.compat is None:
+        pytest.skip(f"{name} declares no compat manifest yet")
     expected = applicable(mutation, required(harness))
     if not expected:
         pytest.skip(f"{mutation.name} breaks nothing this harness declares")
-    binary = shutil.which(harness.binary)
+    binary = _binary(name, harness.binary)
     if binary is None:
         pytest.skip(f"no {harness.binary!r} binary on PATH")
 

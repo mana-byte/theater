@@ -9,7 +9,9 @@ The suite runs in a pytest subprocess inside the pipeline sandbox; this module n
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -36,6 +38,10 @@ SUITE_TARGET = "tests/conformance/live"
 SUITE_TIMEOUT_SECONDS = 20 * 60.0
 _DETAIL_LIMIT = 300
 _OUTCOMES: Mapping[str, CheckStatus] = {"passed": "pass", "failed": "fail"}
+#: Where the workflow collects diagnostics to upload as an artifact (Codex's collector uses it too).
+DIAGNOSTICS_ENV = "THEATER_COMPAT_DIAGNOSTICS"
+_KEPT_FILE_BYTES = 1_000_000
+_KEPT_TOTAL_BYTES = 20_000_000
 _NEVER_RAN = "its scenario never ran"
 _VERSION = re.compile(r"\d+\.\d+\.\d+")
 
@@ -191,6 +197,25 @@ def shadow_checks(
     """The suite's result as a second opinion: whatever goes wrong here never touches a verdict."""
     try:
         report = run_suite(root, sb, harness=harness, binary=binary, version=version)
+        if any(check.status in ("fail", "error") for check in report.checks):
+            _keep_diagnostics(sb.evidence_dir, f"{harness}-{version}-suite")
     except Exception as exc:
         return (Check("shadow", "error", clip_diagnostic(f"{type(exc).__name__}: {exc}", 300)),)
     return report.checks
+
+
+def _keep_diagnostics(evidence: Path, name: str) -> None:
+    """Copy a failing run's logs, pane captures and request records where the workflow uploads."""
+    target = os.environ.get(DIAGNOSTICS_ENV)
+    if not target:
+        return
+    kept = 0
+    for source in sorted(evidence.rglob("*")):
+        if not source.is_file() or source.stat().st_size > _KEPT_FILE_BYTES:
+            continue
+        kept += source.stat().st_size
+        if kept > _KEPT_TOTAL_BYTES:
+            break
+        destination = Path(target) / name / source.relative_to(evidence)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)

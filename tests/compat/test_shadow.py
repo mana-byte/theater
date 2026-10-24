@@ -101,6 +101,43 @@ def test_a_suite_that_crashes_leaves_one_error_check_and_no_exception(
     assert "the sandbox vanished" in check.detail
 
 
+def test_a_failing_suite_keeps_its_evidence_where_the_workflow_uploads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence = tmp_path / "e"
+    (evidence / "scenario").mkdir(parents=True)
+    (evidence / "scenario" / "daemon.log").write_text("log\n")
+    (evidence / "huge.log").write_bytes(b"x" * 1_500_000)
+    kept = tmp_path / "diagnostics"
+    monkeypatch.setenv(suite_runner.DIAGNOSTICS_ENV, str(kept))
+    sandbox = type("Sb", (), {"evidence_dir": evidence})()
+    monkeypatch.setattr(
+        suite_runner,
+        "run_suite",
+        lambda *args, **kwargs: suite_runner.SuiteReport((Check("conformance:x", "fail", "no"),)),
+    )
+
+    suite_runner.shadow_checks(tmp_path, sandbox, harness="acme", binary=tmp_path, version="1.2.3")  # type: ignore[arg-type]
+
+    assert (kept / "acme-1.2.3-suite" / "scenario" / "daemon.log").read_text() == "log\n"
+    assert not (kept / "acme-1.2.3-suite" / "huge.log").exists()
+
+
+def test_a_passing_suite_keeps_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kept = tmp_path / "diagnostics"
+    monkeypatch.setenv(suite_runner.DIAGNOSTICS_ENV, str(kept))
+    sandbox = type("Sb", (), {"evidence_dir": tmp_path})()
+    monkeypatch.setattr(
+        suite_runner,
+        "run_suite",
+        lambda *args, **kwargs: suite_runner.SuiteReport((Check("conformance:x", "pass"),)),
+    )
+
+    suite_runner.shadow_checks(tmp_path, sandbox, harness="acme", binary=tmp_path, version="1.2.3")  # type: ignore[arg-type]
+
+    assert not kept.exists()
+
+
 def test_evidence_records_the_shadow_only_when_there_is_one_and_reuse_ignores_it(
     tmp_path: Path,
 ) -> None:

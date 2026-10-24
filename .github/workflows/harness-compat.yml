@@ -24,6 +24,15 @@ on:
       - ".github/workflows/harness-compat.yml"
       - "scripts/harness_compat/**"
       - "tests/compat/**"
+      - "tests/conformance/**"
+      - "tests/support/live_rig.py"
+      - "tests/support/obligations.py"
+      - "tests/support/coverage.py"
+      - "tests/support/declarations.py"
+      - "tests/support/mutations.py"
+      - "tests/support/tool_effects.py"
+      - "tests/support/compat_probe/**"
+      - "theater/harness/contracts/compat.py"
       - "theater/harness/builtin/plugins/**/compat*.py"
       - "theater/harness/builtin/plugins/**/runtime_constants.py"
       - "theater/harness/builtin/plugins/**/runtime_plan.py"
@@ -57,6 +66,8 @@ jobs:
       - run: uv run ruff format --check scripts/harness_compat
       - run: uv run mypy
       - run: uv run pytest tests/compat --ignore=tests/compat/test_codex_collector.py -q
+      # No binaries: the completeness, guard and derivation tests; the live and canary scenarios skip.
+      - run: uv run pytest tests/conformance -q
       - run: uv run python -m scripts.harness_compat check
 
   plan:
