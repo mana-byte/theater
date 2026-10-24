@@ -50,7 +50,7 @@ class CodexRuntimeConnection(CodexRuntimeHost):
     _connection: RuntimeConnection | None
     _receive_task: asyncio.Task[None] | None
     _history_reconcile_task: asyncio.Task[None] | None
-    _subscription_recovery_task: asyncio.Task[None] | None
+    _idle_recovery_task: asyncio.Task[None] | None
     _live_source: Source | None
     _native_session_id: str | None
     _thread_status: str | None
@@ -220,14 +220,14 @@ class CodexRuntimeConnection(CodexRuntimeHost):
         self._receive_task = None
         history_task = self._history_reconcile_task
         self._history_reconcile_task = None
-        subscription_task = self._subscription_recovery_task
-        self._subscription_recovery_task = None
+        idle_task = self._idle_recovery_task
+        self._idle_recovery_task = None
         connection = self._connection
         self._connection = None
         tasks = (
             (receive_task, "receive loop"),
             (history_task, "history reconciliation"),
-            (subscription_task, "subscription recovery"),
+            (idle_task, "idle recovery"),
         )
         for task, _ in tasks:
             if task is not None and not task.done():

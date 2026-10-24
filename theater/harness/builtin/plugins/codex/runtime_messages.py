@@ -67,6 +67,24 @@ def _completed_at(turn: Mapping[str, object]) -> float | None:
     return None
 
 
+def _history_page_params(session: str, cursor: str | None) -> dict[str, object]:
+    """One bounded page of turn summaries, newest first."""
+    params: dict[str, object] = {
+        "threadId": session,
+        "limit": CODEX_RUNTIME_RECONCILE_PAGE_SIZE,
+        "itemsView": "summary",
+        "sortDirection": "desc",
+    }
+    if cursor is not None:
+        params["cursor"] = cursor
+    return params
+
+
+def _unfinished(turn: Mapping[str, object]) -> bool:
+    """How the app-server shows a turn it has not seen end: "interrupted" with no end time."""
+    return turn.get("status") == "interrupted" and turn.get("completedAt") is None
+
+
 def _history_turns(result: Mapping[str, object]) -> Sequence[object]:
     data = result.get("data")
     if not isinstance(data, (list, tuple)):

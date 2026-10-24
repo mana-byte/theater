@@ -116,9 +116,9 @@ class CodexRuntimeEvents(CodexRuntimeHost):
             # view.
             self._active_turn_id = None
             self._status_hint = Status.IDLE
-            # A send-time subscription may have been deferred by the first-turn
-            # rollout race; the idle broadcast is the bounded recovery point.
-            self._schedule_subscription_recovery()
+            # A send-time subscription may have been deferred by the first-turn rollout race and
+            # a turn's end may have gone unseen; the idle broadcast is the bounded recovery point.
+            self._schedule_idle_recovery()
         # The new status is readable without any event or fact landing, so
         # the state change itself must wake observation.
         self._notify_activity()
@@ -186,6 +186,7 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         )
         if self._active_turn_id == turn_id:
             self._active_turn_id = None
+        self._unfinished_turns.discard(turn_id)
         # A terminal turn's own requests can no longer be answered; other
         # turns' unresolved interactions are never collateral damage.
         self._drop_turn_interactions(turn_id)

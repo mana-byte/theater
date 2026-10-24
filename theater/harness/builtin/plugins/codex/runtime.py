@@ -47,9 +47,11 @@ class CodexRuntime(
         # A reconnect can page bounded historical turn summaries after the synchronous session
         # attach returns.
         self._history_reconcile_task: asyncio.Task[None] | None = None
-        # One idle-broadcast subscription recovery attempt, held so the loop
-        # cannot garbage-collect it mid-flight.
-        self._subscription_recovery_task: asyncio.Task[None] | None = None
+        # One idle-broadcast recovery attempt (a missed subscription, an unfinished turn's end),
+        # held so the loop cannot garbage-collect it mid-flight.
+        self._idle_recovery_task: asyncio.Task[None] | None = None
+        # Turns a history read showed unfinished while their thread was running.
+        self._unfinished_turns: set[str] = set()
         self._live_source: CodexLiveSource | None = None
         self._native_session_id: str | None = None
         self._active_turn_id: str | None = None

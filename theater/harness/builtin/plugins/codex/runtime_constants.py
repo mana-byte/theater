@@ -31,6 +31,9 @@ CODEX_RUNTIME_RECONCILE_MAX_PAGES = 64
 CODEX_RUNTIME_RECONCILE_PAUSE_SECONDS = 0.05
 CODEX_RUNTIME_RECONCILE_RETRY_SECONDS = 0.5
 CODEX_RUNTIME_RECONCILE_MAX_RETRY_SECONDS = 5.0
+#: How many times an idle thread's history is re-read for a turn it could not yet call over;
+#: past that the live completion alone stays in charge.
+CODEX_RUNTIME_UNFINISHED_READS = 4
 CODEX_RUNTIME_DIAGNOSTICS_MAX = 8
 #: Native item revisions are small monotonic counters; anything beyond this
 #: bound is treated as the anonymous default rather than trusted as identity.
