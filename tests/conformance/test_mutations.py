@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from tests.support.mutations import ANY, MUTATIONS, applicable, install, package_source
-from tests.support.obligations import Obligation
+from tests.support.obligations import Obligation, required
+from theater.harness import HARNESSES
 
 
 @pytest.mark.parametrize("mutation", MUTATIONS, ids=lambda item: item.name)
@@ -39,3 +40,11 @@ def test_a_blanket_mutation_applies_wherever_the_suite_runs() -> None:
     blanket = next(item for item in MUTATIONS if ANY in item.breaks)
 
     assert applicable(blanket, ()) == blanket.breaks
+
+
+def test_a_refused_native_runtime_breaks_the_route_and_what_must_survive_on_it() -> None:
+    refused = next(item for item in MUTATIONS if item.name == "native-runtime-refused")
+
+    expected = applicable(refused, required(HARNESSES["codex"]))
+
+    assert dict(expected) == {"runtime:native": "fail", "runtime:survival": "fail"}
