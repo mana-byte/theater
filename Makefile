@@ -21,6 +21,6 @@ typecheck:
 suite:         ## live conformance suite on the installed CLI (HARNESS=vibe ARGS="-- -k mcp")
 	uv run python -m scripts.harness_compat suite $(HARNESS) $(ARGS)
 canaries:      ## the live suite must notice deliberately broken plugins (slow; HARNESS=vibe to narrow)
-	HARNESS_COMPAT_CANARIES=1 uv run pytest tests/compat/test_canaries.py $(if $(HARNESS),-k $(HARNESS)) -n auto
+	HARNESS_COMPAT_CANARIES=1 uv run pytest tests/conformance/canaries $(if $(HARNESS),-k $(HARNESS)) -n auto
 compat:        ## qualify new upstream CLI releases locally, dry run (HARNESS=codex VERSION=0.162.1)
 	uv run python -m scripts.harness_compat run $(if $(HARNESS),--harness $(HARNESS)) $(if $(VERSION),--version $(VERSION))

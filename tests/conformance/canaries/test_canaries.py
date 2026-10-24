@@ -14,7 +14,7 @@ import pytest
 
 from scripts.harness_compat.contract import SUITE_ENV_MUTATION
 from scripts.harness_compat.sandbox import make_sandbox
-from scripts.harness_compat.suite import installed_version, run_suite
+from scripts.harness_compat.suite_runner import installed_version, run_suite
 from tests.support.mutations import ANY, LOADED_BANNER, MUTATIONS, Mutation, applicable
 from tests.support.obligations import required
 from tests.support.paths import REPO_ROOT

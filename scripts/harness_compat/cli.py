@@ -15,7 +15,7 @@ from .adapters import ADAPTER_NAMES, load_adapter
 from .publication import prepare_publication
 from .runner import run_harness_state
 from .sandbox import make_sandbox
-from .suite import installed_version, run_suite
+from .suite_runner import installed_version, run_suite
 from .summary import error_annotation, render_harness, render_overview, workflow_annotations
 
 

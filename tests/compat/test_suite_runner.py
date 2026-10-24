@@ -7,7 +7,7 @@ from typing import Any
 
 from scripts.harness_compat.contract import SUITE_DOCUMENT_SCHEMA, Check
 from scripts.harness_compat.sandbox import make_sandbox
-from scripts.harness_compat.suite import reconcile, suite_environment
+from scripts.harness_compat.suite_runner import reconcile, suite_environment
 
 SUITE = Check("tests/conformance/live", "pass", "10 passed")
 
