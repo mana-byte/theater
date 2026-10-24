@@ -173,17 +173,25 @@ Each obligation is `family:detail`: `launch:<approval>`, `turn:prompt`, `interru
 `steer:refused` where the runtime declares steering unavailable), `resume` (history reaches the model
 once and the daemon records the lineage), `model` and `effort` (two selections reach the wire as two
 values, a repeat is stable), `mcp:gated|call|refusal` (the approval policy gates or runs the probe
-sidecar's tool; a refusal from Theater's own MCP server reaches the model) and `edit:gated|runs` (the
-CLI's own file-write tool is gated under `manual` and runs under `edits`). The `channels` and `runtime`
-families derive obligations but have no scenario yet; they are reported as declared gaps. Every
-manifest declaration is mapped to a family or a reasoned exemption in `tests/support/coverage.py`, and
-`tests/conformance/test_completeness.py` fails when one is not.
+sidecar's tool; a refusal from Theater's own MCP server reaches the model), `edit:gated|runs` (the
+CLI's own file-write tool is gated under `manual` and runs under `edits`) and
+`runtime:native|legacy|unavailable-<capability>` (a native runtime is a connected route with a session
+identity; under a manifest variant whose probe refuses the release, which is what an unqualified release
+gets in production, the pane path still carries a turn; a capability the runtime declares unavailable is
+refused). The `channels` family derives obligations but has no scenario yet; it is reported as a declared
+gap. Every manifest declaration is mapped to a family or a reasoned exemption in
+`tests/support/coverage.py`, and `tests/conformance/test_completeness.py` fails when one is not.
 
 Oracles do not rely on the plugin's own parsers except where the plugin's screen classifier is itself the
 subject: filesystem effects, the mock's request records (model, effort, offered tools and their declared
 arguments, human messages, tool results), job results and the daemon's route and identity facts. An oracle
 violation, or a proven contract violation by the CLI, fails (red, never cancelled by a later pass); an
-environmental or unattributed failure skips as `inconclusive` and the runner retries it. The suite writes
+environmental or unattributed failure skips as `inconclusive` and the runner retries it. A CLI exit is
+blamed on the CLI only while the daemon, its connection, the mock, the private tmux server and an online
+terminal provider are all proven alive. A scripted tool call that does not fit the schema the CLI offered
+(an unknown argument on a closed schema, a missing required one) means the plugin's `native_edit` or
+`mcp_call` recipe is stale for that release: nothing is proven about the CLI, so the run is inconclusive,
+never red. The suite writes
 `required.json` before it runs and `inventory.json` after; `scripts/harness_compat/suite_runner.py`
 reconciles them, and an obligation whose scenario never ran is a `tooling` failure rather than a green.
 
@@ -204,7 +212,8 @@ scratch (dead proxy, private tmux, throwaway home), the version probe runs from 
 guards are unit-tested (`tests/conformance/test_guards.py`). The weekly `Harness compatibility canaries`
 workflow installs each harness's newest admitted release and requires the suite to fail the obligations that
 a manifest-level mutation breaks (manual mapped to yolo, edits to manual, model or resume dropped, inert
-interrupt keys, launch env dropped); it also runs when the suite changes.
+interrupt keys, launch env or files dropped, a native runtime the probe refuses); it also runs when the
+suite changes.
 
 ## Requirements and limits
 
@@ -216,6 +225,11 @@ interrupt keys, launch env dropped); it also runs when the suite changes.
   included, on success, failure and timeout. Ownership is an environment token, so a process
   that clears its environment escapes the sweep (tmux servers are stopped by socket instead).
 - `uv run python -m scripts.harness_compat check` only confirms that every adapter reads its gate.
+- The live suite proves OpenCode 2.x only. Its 1.x line needs an online prewarm of the first plugin
+  load (any `plugin` entry makes `POST /session` hang offline, which the old adapter's
+  `prewarm_catalog` supplied) and a `filePath` recipe for its write tool (2.x's closed schema names the
+  target `path`, and one static `native_edit` cannot carry both). Until the suite grows a prewarm hook
+  and per-release recipes, the 1.x gate stays with the adapter's own proofs.
 
 To add a harness, first give its plugin a `compat.py` (see `harness-plugins.md`, "Qualification") so the live
 suite can run it, then implement the frozen `Adapter` in
