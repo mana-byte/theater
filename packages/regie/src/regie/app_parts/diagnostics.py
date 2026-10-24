@@ -123,6 +123,7 @@ class DiagnosticsDisplay(_AppBase):
     ) -> None:
         tree = self.query_one(ParticipantTree)
         if self._animation.start_await(tree.tree_lines, token, handle, from_id, to_id).started:
+            tree.set_await_marks(self._animation.marks())
             self._ensure_animation_timer()
 
     def stop_await_animation(
@@ -133,8 +134,10 @@ class DiagnosticsDisplay(_AppBase):
         to_id: str | None,
     ) -> None:
         decision = self._animation.stop_await(token, handle, from_id, to_id)
+        tree = self.query_one(ParticipantTree)
+        tree.set_await_marks(self._animation.marks())
         if decision.clear_overlays:
-            self.query_one(ParticipantTree).set_overlays({})
+            tree.set_overlays({})
         if decision.stop_timer:
             self._stop_animation_timer()
 
@@ -150,8 +153,12 @@ class DiagnosticsDisplay(_AppBase):
             tree.tree_lines,
             tree.revision,
             await_highlight_cells,
+            focus=tree.selected_participant_id,
         )
         tree.set_overlays(result.overlays)
+        tree.set_await_marks(self._animation.marks())  # an expired await takes its marks with it
+        for participant_id, color in result.landed:
+            tree.flash(participant_id, color)
         if result.stop_timer:
             self._stop_animation_timer()
 

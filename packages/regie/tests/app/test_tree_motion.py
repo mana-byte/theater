@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from types import MappingProxyType
 
+from regie.ui_constants import REGIE_ROUTE_COLORS, REGIE_WAITING_FRAMES
 from regie.widgets import ParticipantTree
 from regie.widgets.leaf import AgentLeaf
 
@@ -22,6 +23,11 @@ async def _change(app, pilot, participant_id: str, status: str) -> None:
     app._state.projection = _with_status(app._state.projection, participant_id, status)
     app._show_projection(app._state.projection)
     await pilot.pause()
+
+
+def render_text(leaf: AgentLeaf) -> str:
+    """The leaf's second row as drawn, rails stripped."""
+    return leaf.render_line(1).text.strip().lstrip("├└│─ ")
 
 
 def _leaf(tree: ParticipantTree, participant_id: str) -> AgentLeaf:
@@ -107,3 +113,58 @@ async def test_reduced_motion_keeps_the_tint_but_never_sweeps_or_breathes() -> N
         assert leaf.has_class("tree-attention")
         assert leaf._wipe is None and tree._wipe_timer is None
         assert tree._attention_timer is None
+
+
+def _await_row(kind: str) -> dict:
+    return {
+        "kind": kind,
+        "from_id": "participant-1",
+        "to_id": "participant-2",
+        "payload": {"token": "token", "handle": "handle"},
+    }
+
+
+async def test_an_await_marks_both_its_ends_until_it_finishes() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        waiter, target = _leaf(tree, "participant-1"), _leaf(tree, "participant-2")
+
+        app._animate_bus_row(_await_row("job.await.start"))
+        await wait_until(pilot, lambda: waiter._waiting is not None)
+        assert target._awaited == 1
+        assert render_text(waiter)[0] in REGIE_WAITING_FRAMES  # a turning arc, not the spinner
+        assert "◂" in render_text(target)
+
+        app._animate_bus_row(_await_row("job.await.end"))
+        await wait_until(pilot, lambda: waiter._waiting is None and target._awaited == 0)
+        assert "◂" not in render_text(target)
+
+
+async def test_a_send_that_lands_sweeps_its_target() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        target = _leaf(tree, "participant-2")
+
+        app._animate_bus_row(_await_row("agent.send"))
+        await wait_until(pilot, lambda: target._wipe is not None, timeout=5)
+        assert target._wipe[1] in REGIE_ROUTE_COLORS
+        assert _leaf(tree, "participant-1")._wipe is None
+
+
+async def test_reduced_motion_sends_no_comet_and_flashes_nothing() -> None:
+    app, _client, _presentation = build_app(reduce_motion=True)
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+
+        app._animate_bus_row(_await_row("agent.send"))
+        await pilot.pause(0.3)
+        assert not app._animation.has_active()
+        assert _leaf(tree, "participant-2")._wipe is None

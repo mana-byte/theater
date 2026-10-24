@@ -218,7 +218,7 @@ class RegieApp(
             wait_seconds=REGIE_BUS_LONG_POLL_SECONDS,
             name="regie-animations",
         )
-        self._animation = RouteAnimationController()
+        self._animation = RouteAnimationController(motion=not settings.reduce_motion)
         self._animation_timer: Timer | None = None
         self._trajectory_states = TrajectoryStateStore(page_size=settings.trajectory_page_size)
         self._trajectory = TrajectoryController(

@@ -7,9 +7,10 @@ The controller never sees ``RegieApp`` or Textual; the app alone owns timers and
 from __future__ import annotations
 
 import time
+from collections import Counter
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 
-from regie.motions.pulse import advance_pulse_frame, working_harness_style
 from regie.render.glyphs import (
     LeafCell,
     OverlayGlyph,
@@ -26,8 +27,12 @@ from regie.render.routing import (
 )
 from regie.ui_constants import (
     REGIE_AWAIT_ANIM_TTL,
+    REGIE_AWAIT_COMET_GAP_FRAMES,
+    REGIE_AWAIT_FLASH_SECONDS,
     REGIE_MAX_AWAIT_ANIMS,
     REGIE_MAX_TRACE_ANIMS,
+    REGIE_ROUTE_COLORS,
+    REGIE_ROUTE_TAIL_CELLS,
 )
 
 #: Heavy trace glyphs to draw within one leaf: ``(row within the leaf, column)``.
@@ -85,6 +90,9 @@ class AwaitRouteAnim:
     def expired(self, now: float) -> bool:
         return now - self.started >= REGIE_AWAIT_ANIM_TTL
 
+    def fresh(self, now: float) -> bool:
+        return now - self.started < REGIE_AWAIT_FLASH_SECONDS
+
 
 def _send_trace_glyph(path: list[Cell], index: int) -> str:
     """A heavy line glyph matching how the route passes through *index*."""
@@ -97,13 +105,47 @@ def _send_trace_glyph(path: list[Cell], index: int) -> str:
     return _SEND_TRACE_GLYPHS.get(frozenset(directions), "━")
 
 
-def _await_route_style(frame: int, offset: int = 0) -> str:
-    """The working harness grayscale, at this cell's place along the route.
+def _comet_style(color: str, behind: int | None) -> str:
+    """The style of a route cell *behind* cells behind the head, negative when the head has yet to
+    reach it; None draws the route at rest."""
+    if behind is None:
+        return color
+    if behind < 0:
+        return f"dim {color}"
+    if behind == 0:
+        return f"bold {color}"
+    return color if behind <= REGIE_ROUTE_TAIL_CELLS else f"dim {color}"
 
-    No ``bold``: some terminals promote bold grey to bright ANSI, making the line
-    brighter than a live agent instead of dimmer.
+
+class RouteColors:
+    """Give each participant on a route one of a few colours, and keep it while it stays on one.
+
+    The least-used colour goes first, so up to four routes at once never share a colour.
     """
-    return working_harness_style(frame, offset)
+
+    def __init__(self) -> None:
+        self._assigned: dict[str, str] = {}
+
+    def color(self, participant_id: str) -> str:
+        if participant_id not in self._assigned:
+            used = Counter(self._assigned.values())
+            self._assigned[participant_id] = min(
+                REGIE_ROUTE_COLORS, key=lambda color: (used[color], REGIE_ROUTE_COLORS.index(color))
+            )
+        return self._assigned[participant_id]
+
+    def retain(self, participant_ids: Collection[str]) -> None:
+        self._assigned = {
+            pid: color for pid, color in self._assigned.items() if pid in participant_ids
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AwaitMarks:
+    """Who is blocked on a peer, in the colour of that await, and who is being waited on."""
+
+    waiting: Mapping[str, str] = field(default_factory=dict)
+    awaited: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -135,6 +177,8 @@ class TickResult:
 
     overlays: dict[Key, LeafOverlay] = field(default_factory=dict)
     stop_timer: bool = False
+    #: ``(target id, sender colour)`` of every send whose head reached its target this frame.
+    landed: list[tuple[str, str]] = field(default_factory=list)
 
 
 class RouteAnimationController:
@@ -143,11 +187,13 @@ class RouteAnimationController:
     Returns decisions only; the app performs every Textual side effect.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, motion: bool = True) -> None:
+        self._motion = motion
         self._route_anims: list[RouteAnim] = []
         self._await_anims: dict[tuple[str, str, str, str], AwaitRouteAnim] = {}
         self._await_cells: dict[tuple[str, str], list[AwaitCell] | None] = {}
         self._await_cells_revision: int = -1
+        self._colors = RouteColors()
 
     @property
     def route_anims(self) -> list[RouteAnim]:
@@ -161,6 +207,20 @@ class RouteAnimationController:
         """Whether any animation is in flight."""
         return bool(self._route_anims or self._await_anims)
 
+    def marks(self) -> AwaitMarks:
+        """The waiting and waited-on rows right now, for the end marks every await leaves."""
+        waiting: dict[str, str] = {}
+        waiters: dict[str, set[str]] = {}
+        for anim in self._await_anims.values():
+            waiting.setdefault(anim.from_id, self._colors.color(anim.from_id))
+            waiters.setdefault(anim.to_id, set()).add(anim.from_id)
+        return AwaitMarks(waiting, {target: len(who) for target, who in waiters.items()})
+
+    def _release_colors(self) -> None:
+        active = {anim.from_id for anim in self._await_anims.values()}
+        active.update(anim.from_id for anim in self._route_anims)
+        self._colors.retain(active)
+
     def start_route(
         self,
         tree_lines: list[tuple],
@@ -168,7 +228,7 @@ class RouteAnimationController:
         to_id: str | None,
     ) -> StartRouteDecision:
         """Begin a trace, if a route exists and the cap has not been reached."""
-        if len(self._route_anims) >= REGIE_MAX_TRACE_ANIMS:
+        if not self._motion or len(self._route_anims) >= REGIE_MAX_TRACE_ANIMS:
             return StartRouteDecision(started=False)
         if send_path(tree_lines, from_id, to_id) is None:
             return StartRouteDecision(started=False)
@@ -207,6 +267,7 @@ class RouteAnimationController:
         if not token or not handle or not from_id or not to_id:
             return StopAwaitDecision()
         self._await_anims.pop((str(token), str(handle), from_id, to_id), None)
+        self._release_colors()
         if self._route_anims or self._await_anims:
             return StopAwaitDecision(stopped=True)
         return StopAwaitDecision(stopped=True, clear_overlays=True, stop_timer=True)
@@ -217,6 +278,7 @@ class RouteAnimationController:
         for key, anim in list(self._await_anims.items()):
             if anim.expired(now):
                 del self._await_anims[key]
+        self._release_colors()
 
     def _await_route_cells(
         self,
@@ -244,53 +306,80 @@ class RouteAnimationController:
         tree_lines: list[tuple],
         tree_revision: int,
         highlight_fn,
+        *,
+        focus: str | None = None,
+        now: float | None = None,
     ) -> TickResult:
         """Compute overlays for the current frame and advance all anims.
 
+        Only a new await and the *focus* row's awaits draw their route; every other await is
+        left to the end marks, so a crowd of waits stays readable.
+
         ``highlight_fn`` is passed at call time to preserve the monkeypatch seam in ``regie.app``.
         """
+        current = time.monotonic() if now is None else now
         self._reap_await_anims()
         overlays: dict[Key, LeafOverlay] = {}
         for await_anim in self._await_anims.values():
-            for await_cell in (
-                self._await_route_cells(
-                    tree_lines,
-                    tree_revision,
-                    await_anim.from_id,
-                    await_anim.to_id,
-                    highlight_fn,
-                )
-                or ()
-            ):
-                col = await_cell.cell[1]
-                leaf_index, row_in_leaf = cell_leaf(await_cell.cell, tree_lines)
-                if not 0 <= leaf_index < len(tree_lines):
-                    continue
-                heavy = heavy_rail(await_cell.glyph, await_cell.directions)
-                if heavy == await_cell.glyph:
-                    continue
-                key = tree_lines[leaf_index][2]
-                overlays.setdefault(key, {})[(row_in_leaf, col)] = (
-                    heavy,
-                    _await_route_style(await_anim.frame, await_cell.offset),
-                )
-            await_anim.frame = advance_pulse_frame(await_anim.frame)
+            if focus in (await_anim.from_id, await_anim.to_id) or await_anim.fresh(current):
+                self._draw_await(overlays, tree_lines, tree_revision, await_anim, highlight_fn)
+            await_anim.frame += 1
+        landed = self._draw_sends(overlays, tree_lines)
+        stop_timer = not self._route_anims and not self._await_anims
+        return TickResult(overlays=overlays, stop_timer=stop_timer, landed=landed)
 
+    def _draw_await(
+        self,
+        overlays: dict[Key, LeafOverlay],
+        tree_lines: list[tuple],
+        tree_revision: int,
+        anim: AwaitRouteAnim,
+        highlight_fn,
+    ) -> None:
+        """One await: the route in its waiter's colour, a comet running waiter to target."""
+        cells = self._await_route_cells(
+            tree_lines, tree_revision, anim.from_id, anim.to_id, highlight_fn
+        )
+        if not cells:
+            return
+        color = self._colors.color(anim.from_id)
+        length = cells[-1].offset + 1
+        head = anim.frame % (length + REGIE_ROUTE_TAIL_CELLS + REGIE_AWAIT_COMET_GAP_FRAMES)
+        for await_cell in cells:
+            heavy = heavy_rail(await_cell.glyph, await_cell.directions)
+            leaf_index, row_in_leaf = cell_leaf(await_cell.cell, tree_lines)
+            if heavy == await_cell.glyph or not 0 <= leaf_index < len(tree_lines):
+                continue
+            style = _comet_style(color, head - await_cell.offset if self._motion else None)
+            key = tree_lines[leaf_index][2]
+            overlays.setdefault(key, {})[(row_in_leaf, await_cell.cell[1])] = (heavy, style)
+
+    def _draw_sends(
+        self, overlays: dict[Key, LeafOverlay], tree_lines: list[tuple]
+    ) -> list[tuple[str, str]]:
+        """Every travelling send as a head with a fading tail; report the ones that just landed."""
+        landed: list[tuple[str, str]] = []
         alive: list[RouteAnim] = []
         for route_anim in self._route_anims:
             path = send_path(tree_lines, route_anim.from_id, route_anim.to_id)
-            if not path or route_anim.step >= len(path):
+            if not path or route_anim.step - REGIE_ROUTE_TAIL_CELLS >= len(path):
                 continue
-            cell = path[route_anim.step]
-            leaf_index, row_in_leaf = cell_leaf(cell, tree_lines)
-            if not 0 <= leaf_index < len(tree_lines):
-                continue
-            key = tree_lines[leaf_index][2]
-            overlays.setdefault(key, {})[(row_in_leaf, cell[1])] = _send_trace_glyph(
-                path, route_anim.step
-            )
+            color = self._colors.color(route_anim.from_id)
+            for behind in range(REGIE_ROUTE_TAIL_CELLS + 1):
+                index = route_anim.step - behind
+                if not 0 <= index < len(path):
+                    continue
+                leaf_index, row_in_leaf = cell_leaf(path[index], tree_lines)
+                if 0 <= leaf_index < len(tree_lines):
+                    key = tree_lines[leaf_index][2]
+                    overlays.setdefault(key, {})[(row_in_leaf, path[index][1])] = (
+                        _send_trace_glyph(path, index),
+                        _comet_style(color, behind),
+                    )
+            if route_anim.step == len(path) - 1:
+                landed.append((route_anim.to_id, color))
             route_anim.step += 1
             alive.append(route_anim)
         self._route_anims = alive
-        stop_timer = not self._route_anims and not self._await_anims
-        return TickResult(overlays=overlays, stop_timer=stop_timer)
+        self._release_colors()
+        return landed

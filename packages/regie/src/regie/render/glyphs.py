@@ -15,6 +15,7 @@ from textual.content import Content
 
 from regie.ui_constants import (
     REGIE_SEND_TRACE_STYLE as SEND_STYLE,
+    REGIE_WAITING_FRAMES as WAITING_FRAMES,
     REGIE_TREE_BRANCH as BRANCH,
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
     REGIE_TREE_RAIL as RAIL,
@@ -113,13 +114,18 @@ def _append_working_harness_text(
         offset += 1
 
 
-def _status_glyph(node: RawRenderNode, frame: int = 0) -> tuple[str, str]:
+def _status_glyph(
+    node: RawRenderNode, frame: int = 0, *, waiting: str | None = None
+) -> tuple[str, str]:
     """The one-character status mark and the theme slot it renders in.
 
     Idle uses the harness's own icon so the glyph does double duty; there is no
-    separate harness-glyph column.
+    separate harness-glyph column. An agent blocked on a peer shows a hollow turning arc
+    in its await's colour instead: it is not computing, so it must not look like it is.
     """
     status = node.get("status", "?")
+    if waiting is not None and status in ("working", "idle"):
+        return WAITING_FRAMES[frame % len(WAITING_FRAMES)], waiting
     if status == "working":
         return spinner_frame(frame), "$primary"
     if status == "awaiting_input":
@@ -217,16 +223,18 @@ def shown_name(node: RenderNode | dict) -> str:
     return view.get("name") or short_id(view.get("id"))
 
 
-def _row2_lead(node: RawRenderNode, prefix: str, *, frame: int = 0) -> list:
+def _row2_lead(
+    node: RawRenderNode, prefix: str, *, frame: int = 0, waiting: str | None = None
+) -> list:
     """Row-2 parts before the name: prefix rail, status glyph, harness text."""
-    glyph, glyph_style = _status_glyph(node, frame)
+    glyph, glyph_style = _status_glyph(node, frame, waiting=waiting)
     glyph_style = _presence_glyph_style(node, glyph_style)
     harness = node.get("harness", "?")
     parts: list = []
     if prefix:
         parts.append((prefix, "$text dim"))
     parts.append((glyph, glyph_style))
-    if node.get("status") == "working":
+    if node.get("status") == "working" and waiting is None:
         parts.append(" ")
         _append_working_harness_text(parts, harness, frame=frame, offset=0)
         parts.append("  ")
@@ -269,11 +277,14 @@ def node_label(
     detail: str | None = None,
     cost: Sequence[str | tuple[str, str]] | None = None,
     width: int | None = None,
+    waiting: str | None = None,
+    awaited: int = 0,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
     Row 1 is a leading spacer carrying the parent rail (blank for the first root);
-    row 3 uses ``cont_prefix`` so it doesn't look like a new node.
+    row 3 uses ``cont_prefix`` so it doesn't look like a new node. *waiting* is the colour of
+    the await this agent is blocked in; *awaited* is how many peers are blocked on it.
     """
     # Function-level imports avoid layout ↔ glyphs and reveal ↔ glyphs cycles.
     from regie.motions.reveal import clip_parts
@@ -292,8 +303,10 @@ def node_label(
             row1_parts.append((lead, "$text dim"))
 
     # Row 2: rails, glyph, harness, short id; the id is split out so dim-italic applies to it only.
-    row2_parts: list = _row2_lead(view, prefix, frame=frame)
+    row2_parts: list = _row2_lead(view, prefix, frame=frame, waiting=waiting)
     row2_parts.append((sid, id_style) if id_style else sid)
+    if awaited:
+        row2_parts.append((f"  ◂{awaited if awaited > 1 else ''}", "$text-muted"))
     if cost is not None and width is not None:
         gap = width - _parts_width(row2_parts) - _parts_width(cost)
         if gap > 0:

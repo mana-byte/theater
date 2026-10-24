@@ -52,6 +52,22 @@ REGIE_MAX_AWAIT_ANIMS = 12
 #: Max seconds an await pulse may run without its end row before expiring.
 REGIE_AWAIT_ANIM_TTL = 330.0
 
+#: A new await draws its whole route this long; afterwards only the selected row's routes show.
+REGIE_AWAIT_FLASH_SECONDS = 2.0
+
+#: Cells of fading tail behind a travelling head, and idle frames between two await passes.
+REGIE_ROUTE_TAIL_CELLS = 3
+REGIE_AWAIT_COMET_GAP_FRAMES = 6
+
+#: Who a route belongs to: bright ANSI colours, so warning (yellow) and error (red) stay free for
+#: what needs the human. Bright variants read on both dark and light terminal palettes.
+REGIE_ROUTE_COLORS = (
+    "ansi_bright_cyan",
+    "ansi_bright_magenta",
+    "ansi_bright_green",
+    "ansi_bright_blue",
+)
+
 #: Footer value animation tick interval in seconds.
 REGIE_FOOTER_ANIM_INTERVAL = 0.1
 
@@ -147,6 +163,10 @@ REGIE_ATTENTION_PULSE_INTERVAL = 0.4
 
 #: Hollow rotating arc: an agent that is blocked on a peer, not computing.
 REGIE_WAITING_FRAMES = "◜◠◝◞◡◟"
+
+#: Frames before a leaf's counter wraps: a whole number of turns of both the ten-frame spinner
+#: and the six-frame arc, or the wrap would stutter one of them.
+REGIE_LEAF_FRAME_CYCLE = 30
 
 #: Hidden Textual binding targeted by the tmux return command.
 REGIE_RETURN_SIGNAL_TEXTUAL = "ctrl+g"

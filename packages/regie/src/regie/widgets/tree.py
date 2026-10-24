@@ -16,7 +16,7 @@ from textual.widgets import Label
 
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
-from regie.motions.routes import LeafOverlay
+from regie.motions.routes import AwaitMarks, LeafOverlay
 from regie.motions.wipe import LeafWipeController, status_wipe_color
 from regie.render.layout import Key, RenderedLine, is_root_prefix, render_tree
 from regie.render.routing import RailArms, heavy_overlays, section_arms
@@ -113,6 +113,7 @@ class ParticipantTree(VerticalScroll):
         self._attention_since: dict[Key, float] = {}
         self._attention_phase = 0
         self._attention_timer: Timer | None = None
+        self._await_marks = AwaitMarks()
 
     @property
     def selected_id(self) -> str | None:
@@ -215,6 +216,7 @@ class ParticipantTree(VerticalScroll):
         }
         self._sync_reveal()
         self._sync_attention()
+        self._apply_await_marks()
         return self.selected_participant_id
 
     def set_usage_costs(self, costs: Mapping[str, int]) -> None:
@@ -612,8 +614,30 @@ class ParticipantTree(VerticalScroll):
             if status == "awaiting_input"
         }
         self._statuses = current
+        self._ensure_wipe_timer()
+
+    def _ensure_wipe_timer(self) -> None:
         if self._wipes.active and self._wipe_timer is None:
             self._wipe_timer = self.set_interval(REGIE_WIPE_INTERVAL_SECONDS, self._tick_wipe)
+
+    def flash(self, participant_id: str, color: str) -> None:
+        """Sweep one row in *color* to show something just landed on it."""
+        key = ("p", participant_id)
+        if key in self._key_widgets:
+            self._wipes.start(key, color)
+            self._ensure_wipe_timer()
+
+    def set_await_marks(self, marks: AwaitMarks) -> None:
+        """Show who is blocked on a peer and who is being waited on."""
+        if marks != self._await_marks:
+            self._await_marks = marks
+            self._apply_await_marks()
+
+    def _apply_await_marks(self) -> None:
+        marks = self._await_marks
+        for key, widget in self._key_widgets.items():
+            if isinstance(widget, AgentLeaf) and _is_managed_key(key):
+                widget.set_await_marks(marks.waiting.get(key[1]), marks.awaited.get(key[1], 0))
 
     def _tick_wipe(self) -> None:
         frame = self._wipes.tick()

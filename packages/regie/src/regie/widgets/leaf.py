@@ -12,7 +12,6 @@ from regie.formatting import format_cost, tilde
 from regie.motions.footer import CountingValue
 from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.motions.routes import LeafOverlay
-from regie.motions.spinner import advance_spinner_frame
 from regie.motions.wipe import Wipe, apply_wipe
 from regie.render.glyphs import (
     node_label,
@@ -25,6 +24,7 @@ from regie.render.layout import Key, shorten_path
 from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_INTERVAL,
+    REGIE_LEAF_FRAME_CYCLE,
     REGIE_LEAF_MARQUEE_INTERVAL,
     REGIE_LEAF_SPINNER_INTERVAL,
     REGIE_TREE_USAGE_COST_STYLE,
@@ -110,6 +110,8 @@ class AgentLeaf(RenameableRow):
         self._overlay: LeafOverlay | None = None
         self._wipe: Wipe | None = None
         self._attention_level = 0
+        self._waiting: str | None = None
+        self._awaited = 0
         self._cost = CountingValue(_format_leaf_cost)
         self._cost.set_target(_microcents(node), animate=False)
         self._cost_sub: AnimationSubscription | None = None
@@ -151,12 +153,22 @@ class AgentLeaf(RenameableRow):
             detail=self._visible_detail(),
             cost=self._shown_cost(),
             width=self._label_width(),
+            waiting=self._waiting,
+            awaited=self._awaited,
         )
         if self._wipe is not None:
             content = apply_wipe(content, self._wipe, width=self._label_width())
         if self._stage_marker is None and self.needs_attention:
             return with_gutter_bar(content, _ATTENTION_BAR[self._attention_level])
         return with_stage_marker(content, self._stage_marker)
+
+    def set_await_marks(self, waiting: str | None, awaited: int) -> None:
+        """Mark this agent blocked on a peer (in that await's colour) and/or waited on by peers."""
+        if (waiting, awaited) != (self._waiting, self._awaited):
+            self._waiting, self._awaited = waiting, awaited
+            if self._mounted:
+                self._sync_timer()
+            self.update(self._render_label(), layout=False)
 
     def set_wipe(self, wipe: Wipe | None) -> None:
         """Draw one frame of the sweep that announces a change on this row, or end it."""
@@ -354,8 +366,15 @@ class AgentLeaf(RenameableRow):
         self._stop_cost_count()
 
     def _tick(self) -> None:
-        self._frame = advance_spinner_frame(self._frame)
+        self._frame = (self._frame + 1) % REGIE_LEAF_FRAME_CYCLE
         self.update(self._render_label(), layout=False)
+
+    def _sync_timer(self) -> None:
+        """Tick while something on the row turns: the working spinner or the waiting arc."""
+        if self._node.get("status") == "working" or self._waiting is not None:
+            self._start_timer()
+        else:
+            self._stop_timer()
 
     def _start_timer(self) -> None:
         if self._spinner_sub is None:
@@ -435,10 +454,7 @@ class AgentLeaf(RenameableRow):
         self._sync_attention()
         if _content_changed(previous_label, label):
             self.update(label, layout=False)
-        if node.get("status") == "working":
-            self._start_timer()
-        else:
-            self._stop_timer()
+        self._sync_timer()
         self._sync_marquee()
         self._sync_rename_geometry()
 
@@ -488,8 +504,7 @@ class AgentLeaf(RenameableRow):
             await action()
 
     def on_mount(self) -> None:
-        if self._node.get("status") == "working":
-            self._start_timer()
+        self._sync_timer()
         self._sync_marquee()
         self._mounted = True
         self._reveal_first_cost()

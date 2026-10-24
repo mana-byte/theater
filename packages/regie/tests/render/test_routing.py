@@ -17,7 +17,7 @@ from regie.render.routing import (
     cell_leaf,
     send_path,
 )
-from regie.ui_constants import REGIE_SEND_TRACE_STYLE as SEND_STYLE
+from regie.ui_constants import REGIE_ROUTE_COLORS
 
 from packages.regie.tests.support.tree_nodes import (
     PARENT,
@@ -95,7 +95,7 @@ def test_send_route_renders_through_a_separator_before_its_target():
 
     assert separator_overlay is not None
     rendered = separator_label("Backend", "├── ", overlay=separator_overlay)
-    assert SEND_STYLE in label_styles(rendered)
+    assert any(color in style for style in label_styles(rendered) for color in REGIE_ROUTE_COLORS)
 
 
 def test_send_path_is_the_same_route_in_reverse():
