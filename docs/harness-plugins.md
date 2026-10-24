@@ -973,6 +973,19 @@ backpressured `thread/turns/list` task: 16 summaries per page, yielding after
 64 pages without discarding its cursor. Transient failures retry with bounded
 backoff; the pass limit is not a permanent history cutoff.
 
+The app-server shows a turn it has not yet seen end as `interrupted` with no
+`completedAt`, whatever the thread status. The runtime therefore keeps the ids
+of turns it knows are running (acknowledged `turn/start`, `turn/started`, or
+`inProgress` in a snapshot) until positive evidence of their end — the live
+`turn/completed`, or a snapshot with a real end; no snapshot ends one earlier.
+A turn first seen unfinished in the newest position of a snapshot taken while
+the thread is not known idle is held the same way. Idle precedes
+`turn/completed` by tens of milliseconds; if turns are still held after a short
+grace on an idle thread, the history task pages again from page one with capped
+backoff until they resolve. After five idle rereads that never show an end the
+turn is taken for abandoned and recorded `interrupted`, as an attaching runtime
+does for one that ended while the daemon was down.
+
 `RuntimeBinding` carries the persisted wiring, backend generation, lifecycle
 phase, endpoint, verified pid, native session id, and protocol/version facts.
 Approval, model, and reasoning configuration are applied to the backend that

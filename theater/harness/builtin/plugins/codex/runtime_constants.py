@@ -31,6 +31,11 @@ CODEX_RUNTIME_RECONCILE_MAX_PAGES = 64
 CODEX_RUNTIME_RECONCILE_PAUSE_SECONDS = 0.05
 CODEX_RUNTIME_RECONCILE_RETRY_SECONDS = 0.5
 CODEX_RUNTIME_RECONCILE_MAX_RETRY_SECONDS = 5.0
+#: Idle precedes turn/completed by tens of ms; only a turn still in flight after this needs a read.
+CODEX_RUNTIME_RECONCILE_IDLE_GRACE_SECONDS = 0.25
+#: Reads after the first while in-flight turns stay unresolved on an idle thread; then they are
+#: taken for abandoned (about 12 s of capped backoff, far beyond a stale read).
+CODEX_RUNTIME_RECONCILE_IDLE_REREADS = 5
 CODEX_RUNTIME_DIAGNOSTICS_MAX = 8
 #: Native item revisions are small monotonic counters; anything beyond this
 #: bound is treated as the anonymous default rather than trusted as identity.

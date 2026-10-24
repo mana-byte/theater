@@ -69,6 +69,8 @@ class CodexRuntimeControls(CodexRuntimeHost):
             # this message into the already-active turn and the backend returns that same turn id.
             self._active_turn_id = turn_id
             self._thread_status = "active"
+            # The runtime knows this turn is running, whatever a snapshot says about the thread.
+            self._register_in_flight(session, turn_id)
             await self._subscribe_after_rollout()
             return ControlReceipt(
                 operation_id=operation_id,

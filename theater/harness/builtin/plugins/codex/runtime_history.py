@@ -10,6 +10,7 @@ from theater.harness.contracts.runtime import (
     ResultProvenance,
     RuntimeConnectionClosed,
     RuntimeConnectionError,
+    RuntimeExecutionState,
     RuntimeRequestError,
     RuntimeRequestTimeout,
 )
@@ -96,20 +97,22 @@ class CodexRuntimeHistory(CodexRuntimeHost):
         finally:
             self._subscription_recovery_task = None
 
-    def _defer_unfinished_turn(self, turn: Mapping[str, object]) -> None:
-        """Hold back a turn that may have been running until history shows its end."""
-        turn_id = _bounded_str(turn.get("id"), limit=512)
-        if turn_id is None:
+    def _register_in_flight(self, session: str, turn_id: str) -> None:
+        """Hold a running turn until positive evidence of its end; never one already over."""
+        if self._outcome_buffer.has_outcome(session, turn_id):
             return
         self._unfinished_turns.add(turn_id)
-        if self._thread_status != "active":
-            # Idle already went by (it precedes turn/completed), so no later idle will page again.
-            self._reread_unfinished_turns()
 
-    def _reread_unfinished_turns(self) -> None:
-        """Page history for held-back turns; a pass that ends none leaves them for the next idle."""
+    def _recover_in_flight_turns(self) -> None:
+        """Let history decide turns still in flight on an idle thread, if their live end is lost."""
         if self._unfinished_turns and self._native_session_id is not None:
-            self._start_history_reconciliation(self._native_session_id)
+            self._start_history_reconciliation(self._native_session_id, recovery=True)
+
+    def _history_owed(self) -> bool:
+        """Idle with turns in flight: their live completion is due, or was lost."""
+        return (
+            bool(self._unfinished_turns) and self._execution_state() is RuntimeExecutionState.IDLE
+        )
 
     async def _reconcile_thread(
         self,
@@ -138,42 +141,53 @@ class CodexRuntimeHistory(CodexRuntimeHost):
             recent = [
                 turn for turn in turns[-CODEX_RUNTIME_RECONCILE_TURNS:] if isinstance(turn, Mapping)
             ]
-            for turn in reversed(recent):
-                turn_id = _bounded_str(turn.get("id"), limit=512)
-                status = turn.get("status")
-                if turn_id is None or not isinstance(status, str):
-                    continue
-                if status == "inProgress":
-                    if active is None:
-                        active = turn_id
-                    continue
-                if (
-                    turn is recent[-1]
-                    and _thread_status_type(thread) == "active"
-                    and _unfinished(turn)
-                ):
-                    # An active thread cannot have its newest turn already over, whatever this
-                    # runtime has seen since: the response contradicts itself.
-                    self._defer_unfinished_turn(turn)
-                await self._record_snapshot_terminal_turn(session, turn)
+            active = await self._record_snapshot(
+                session, recent, newest=True, running=_thread_status_type(thread) == "active"
+            )
         if active is not None and (
             status_revision is None or status_revision == self._status_revision
         ):
             self._active_turn_id = active
         self._adopt_thread_settings(thread)
 
-    def _start_history_reconciliation(self, session: str) -> None:
+    def _start_history_reconciliation(self, session: str, *, recovery: bool = False) -> None:
         """Own one cooperative exact-history task across bounded passes."""
         task = self._history_reconcile_task
         if task is not None and not task.done():
             return
         self._history_reconcile_task = asyncio.create_task(
-            self._reconcile_history(session),
+            self._reconcile_history(session, recovery=recovery),
             name=f"codex-runtime-history-{self.context.participant_id}",
         )
 
-    async def _reconcile_history(self, session: str) -> None:
-        """Page older exact terminals without retaining unbounded history."""
+    async def _reconcile_history(self, session: str, *, recovery: bool = False) -> None:
+        """Page exact history; while turns stay in flight on an idle thread, page it again.
+
+        A request made during a pass needs no signal: the pass ends by looking at what is owed.
+        """
+        if recovery:
+            await asyncio.sleep(runtime_constants.CODEX_RUNTIME_RECONCILE_IDLE_GRACE_SECONDS)
+            if not self._history_owed():
+                return
+        rereads = 0
+        delay = runtime_constants.CODEX_RUNTIME_RECONCILE_RETRY_SECONDS
+        while self._native_session_id == session and self._connection is not None:
+            await self._page_history(session)
+            if not self._history_owed():
+                return
+            # The live completion may still land while waiting.
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, CODEX_RUNTIME_RECONCILE_MAX_RETRY_SECONDS)
+            if not self._history_owed():
+                return
+            rereads += 1
+            if rereads > runtime_constants.CODEX_RUNTIME_RECONCILE_IDLE_REREADS:
+                # Idle throughout and history never showed an end: the turn was abandoned. Released,
+                # the last pass records it as interrupted, as it does for an attaching runtime.
+                self._unfinished_turns.clear()
+
+    async def _page_history(self, session: str) -> None:
+        """One pass over history, paging older exact terminals without unbounded retention."""
         cursor: str | None = None
         # Brent's cursor-cycle detector needs constant memory even when a healthy session has
         # arbitrarily many pages.
@@ -184,12 +198,6 @@ class CodexRuntimeHistory(CodexRuntimeHost):
         while self._native_session_id == session and self._connection is not None:
             connection = self._connection
             try:
-                # A page has no thread status of its own: take what the runtime knew when asking.
-                asked = (
-                    self._thread_status == "active",
-                    self._active_turn_id,
-                    self._status_revision,
-                )
                 params: dict[str, object] = {
                     "threadId": session,
                     "limit": CODEX_RUNTIME_RECONCILE_PAGE_SIZE,
@@ -201,8 +209,14 @@ class CodexRuntimeHistory(CodexRuntimeHost):
                 result = await self._request("thread/turns/list", params)
                 if self._native_session_id != session or self._connection is not connection:
                     return
-                await self._record_history_page(
-                    session, _history_turns(result), asked if cursor is None else None
+                turns = [t for t in reversed(_history_turns(result)) if isinstance(t, Mapping)]
+                # A page has no thread status of its own: the first page ends with the thread's
+                # newest turn, which may be running unless the runtime knows the thread idle.
+                await self._record_snapshot(
+                    session,
+                    turns,
+                    newest=cursor is None,
+                    running=self._execution_state() is not RuntimeExecutionState.IDLE,
                 )
                 next_cursor = result.get("nextCursor") if isinstance(result, Mapping) else None
                 if next_cursor is None:
@@ -243,26 +257,37 @@ class CodexRuntimeHistory(CodexRuntimeHost):
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, CODEX_RUNTIME_RECONCILE_MAX_RETRY_SECONDS)
 
-    async def _record_history_page(
+    async def _record_snapshot(
         self,
         session: str,
-        turns: Sequence[object],
-        asked: tuple[bool, str | None, int] | None,
-    ) -> None:
-        """Record a page's exact terminals; ``asked`` is the state a first page was requested in."""
-        if asked is not None:
-            running, active_id, revision = asked
-            newest = turns[0] if turns and isinstance(turns[0], Mapping) else {}
-            # The newest turn may have been the running one: the thread was active with no other
-            # turn known to run, or its status moved while the page was being read.
-            if _unfinished(newest) and (
-                revision != self._status_revision
-                or (running and active_id in (None, newest.get("id")))
-            ):
-                self._defer_unfinished_turn(newest)
+        turns: Sequence[Mapping[str, object]],
+        *,
+        newest: bool,
+        running: bool,
+    ) -> str | None:
+        """Record a snapshot's exact ends, oldest first; return the running turn it shows.
+
+        ``newest``: the last turn is the thread's newest, the only one that can be running.
+        Oldest first lets a real end resolve its turn before the newest is judged. The newest
+        turn read as unfinished while the thread may be running it, and no other turn is known to
+        be, is held as running: nothing recorded from history may end a running turn.
+        """
+        active = None
         for turn in turns:
-            if isinstance(turn, Mapping):
-                await self._record_snapshot_terminal_turn(session, turn)
+            turn_id = _bounded_str(turn.get("id"), limit=512)
+            status = turn.get("status")
+            if turn_id is None or not isinstance(status, str):
+                continue
+            current = newest and turn is turns[-1]
+            if status == "inProgress":
+                if current:
+                    active = turn_id
+                    self._register_in_flight(session, turn_id)
+                continue
+            if current and running and _unfinished(turn) and not self._unfinished_turns:
+                self._register_in_flight(session, turn_id)
+            await self._record_snapshot_terminal_turn(session, turn)
+        return active
 
     async def _record_snapshot_terminal_turn(
         self, session: str, turn: Mapping[str, object]

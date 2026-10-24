@@ -119,8 +119,8 @@ class CodexRuntimeEvents(CodexRuntimeHost):
             # A send-time subscription may have been deferred by the first-turn
             # rollout race; the idle broadcast is the bounded recovery point.
             self._schedule_subscription_recovery()
-            # Idle also precedes the live completion, which may never arrive: page history again.
-            self._reread_unfinished_turns()
+            # Idle also precedes the live completion; if that never arrives, history decides.
+            self._recover_in_flight_turns()
         # The new status is readable without any event or fact landing, so
         # the state change itself must wake observation.
         self._notify_activity()
@@ -136,6 +136,8 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         self._active_turn_id = turn_id
         self._thread_status = "active"
         self._status_hint = Status.WORKING
+        if self._native_session_id is not None:
+            self._register_in_flight(self._native_session_id, turn_id)
         # A new turn alone is not proof that earlier clarifications resolved;
         # only exact resolutions or terminal turn evidence clear interactions.
         # The turn/state mutations are readable without any event or fact.

@@ -34,6 +34,10 @@ class TerminalOutcomeBuffer:
             self._terminal_turns.popitem(last=False)
         return True
 
+    def has_outcome(self, session: str, turn_id: str) -> bool:
+        """Whether this exact turn's outcome is reserved or recorded (and so can never change)."""
+        return (session, turn_id) in self._terminal_turns
+
     async def enqueue(self, outcome: NativeTurnOutcome) -> None:
         key = (outcome.native_session_id, outcome.native_turn_id)
         try:
