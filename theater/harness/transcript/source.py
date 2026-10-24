@@ -10,7 +10,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, ClassVar
 
 from theater.constants.observation import ROTATION_PROBE_MAX_SECONDS, ROTATION_PROBE_MIN_SECONDS
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
@@ -28,7 +28,7 @@ from theater.harness.contracts.source import (
     StreamPoint,
 )
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
-from theater.harness.transcript.attachment import attach_point
+from theater.harness.transcript.attachment import AttachSnapshot, attach_point
 from theater.harness.transcript.history import HistoryPageError, HistoryParseContext, HistoryReader
 from theater.models import Status
 from theater.provenance import (
@@ -81,6 +81,9 @@ class TranscriptSource(Source):
     Holds the byte offset, record index and mtime that used to live on the
     observer's cursor. Nothing above it knows the input is a file.
     """
+
+    #: Trailing complete records the attach scan hands to ``_stage_attachment``.
+    _attach_tail: ClassVar[int] = 1
 
     def __init__(
         self,
@@ -840,7 +843,8 @@ class TranscriptSource(Source):
                 return None
         if not self._inside_domain(path):
             return None
-        size, lines, mtime, last_line, dev, ino = await asyncio.to_thread(attach_point, path)
+        snapshot = await asyncio.to_thread(attach_point, path, self._attach_tail)
+        size, lines, last_line = snapshot.size, snapshot.lines, snapshot.last_line
         session_id = self._observer.session_id(path)
         last_event: Event | None = None
         status: Status | None = None
@@ -855,17 +859,39 @@ class TranscriptSource(Source):
             self._ends_with_tail, path, last_line, size
         ):
             offset, index = size - len(last_line.encode("utf-8")) - 1, lines - 1
-        self._pending = (path, offset, index, mtime, session_id)
-        return Attachment(
+        self._pending = (path, offset, index, snapshot.mtime, session_id)
+        attachment = Attachment(
             location=str(path),
             session_id=session_id,
             skipped=lines,
             last_event=last_event,
             status=status,
-            point=StreamPoint(records=lines, size=size, dev=dev, ino=ino),
+            point=StreamPoint(records=lines, size=size, dev=snapshot.dev, ino=snapshot.ino),
             correlation=self.correlation_for(path, session_id),
             collision_domain=self.collision_domain,
         )
+        try:
+            return await self._stage_attachment(snapshot, attachment)
+        except BaseException:
+            # A refused or cancelled refinement leaves no candidate and no half-primed stream.
+            self._pending = None
+            self._reset_stream()
+            raise
+
+    async def _stage_attachment(
+        self, snapshot: AttachSnapshot, attachment: Attachment
+    ) -> Attachment:
+        """Refine the staged attachment from the scan's tail; raise to withdraw it.
+
+        The default keeps it. A subclass may ``_restage`` the read position.
+        """
+        return attachment
+
+    def _restage(self, *, offset: int, index: int) -> None:
+        """Move the staged read position; a candidate withdrawn meanwhile stays withdrawn."""
+        if self._pending is not None:
+            path, _, _, mtime, session_id = self._pending
+            self._pending = (path, offset, index, mtime, session_id)
 
     def _ends_with_tail(self, path: Path, last_line: str, size: int) -> bool:
         """Whether the file ends exactly with a mutable-tail record, so attach stops before it."""

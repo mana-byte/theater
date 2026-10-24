@@ -19,10 +19,12 @@ def file_stream_floor(context: StreamFloorContext) -> StreamPoint | None:
     from theater.harness.transcript.attachment import attach_point
 
     try:
-        size, lines, _mtime, _last_line, dev, ino = attach_point(Path(context.location))
+        snapshot = attach_point(Path(context.location), tail=0)
     except OSError:
         return None
-    return StreamPoint(records=lines, size=size, dev=dev, ino=ino)
+    return StreamPoint(
+        records=snapshot.lines, size=snapshot.size, dev=snapshot.dev, ino=snapshot.ino
+    )
 
 
 __all__ = ["file_stream_floor"]

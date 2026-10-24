@@ -309,11 +309,11 @@ async def test_exact_rebind_during_attachment_discards_old_candidate(root, workd
     release = threading.Event()
     real_attach_point = transcript_source.attach_point
 
-    def blocked_attach_point(path):
+    def blocked_attach_point(path, *args):
         if path == old:
             started.set()
             assert release.wait(timeout=5)
-        return real_attach_point(path)
+        return real_attach_point(path, *args)
 
     monkeypatch.setattr(transcript_source, "attach_point", blocked_attach_point)
     task = asyncio.create_task(s.read())

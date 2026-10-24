@@ -16,13 +16,14 @@ from theater.harness.contracts.source import (
     StreamPoint,
     TranscriptCandidate,
 )
-from theater.harness.transcript.attachment import attach_point
+from theater.harness.transcript.attachment import AttachSnapshot, attach_point
 from theater.harness.transcript.source import TranscriptSource
 
 logger = logging.getLogger("theater.harness.source")
 
 __all__ = [
     "BATCH_TERMINAL_EVIDENCE_MAX",
+    "AttachSnapshot",
     "Attachment",
     "Batch",
     "History",
