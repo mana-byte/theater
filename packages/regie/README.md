@@ -30,8 +30,9 @@ The tree is the whole interface; every signal is a state of something it already
   dead. A turning arc `◜◠◝` is an agent blocked on a peer, in the colour of that wait; a ring
   filling `○◔◑◕●` is a spawn starting, with the daemon's phase on the row's third line.
 - **Bar.** A `▌` in the gutter marks a row that needs you; the newest three breathe.
-- **Sweep.** A block runs across a row when its status changes, a send lands on it, or an
-  operation aimed at it settles.
+- **Sweep.** A block runs across a row when the agent starts needing you, dies or finishes a
+  turn, when a send lands on it, or when an operation aimed at it is delivered, blocked or
+  fails.
 - **Sends and waits.** A send travels the rails as a comet in its sender's colour. Waits show
   `◂` on the agent being waited on (`◂2` for two); only a new wait and the selected row's waits
   draw their route.
