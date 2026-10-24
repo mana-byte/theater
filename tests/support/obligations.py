@@ -13,6 +13,11 @@ from theater.harness.contracts.runtime import RuntimeCapability
 SCHEMA = SUITE_DOCUMENT_SCHEMA
 
 
+#: Obligations proven under a plugin configured on purpose: the mutation of that name, applied as
+#: a variant of the shipped manifest (an unqualified release is a real state, not only a canary).
+_VARIANTS = {"runtime:legacy": "native-runtime-refused"}
+
+
 @dataclass(frozen=True, slots=True)
 class Obligation:
     """One thing the manifest promises, identified as ``family:detail``."""
@@ -23,6 +28,11 @@ class Obligation:
     @property
     def id(self) -> str:
         return f"{self.family}:{self.detail}"
+
+    @property
+    def variant(self) -> str | None:
+        """The mutation whose wrapper this obligation's scenario runs under, if any."""
+        return _VARIANTS.get(self.id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +104,7 @@ def _edit(harness: Harness) -> tuple[str, ...]:
 
 
 def _runtime(harness: Harness) -> tuple[str, ...]:
-    """A native route that is physical, and every non-steer capability declared unavailable."""
+    """A physical native route, the legacy path it falls back to, and each refused capability."""
     if harness.runtime is None:
         return ()
     refused = sorted(
@@ -102,7 +112,7 @@ def _runtime(harness: Harness) -> tuple[str, ...]:
         for capability in harness.runtime.unavailable_capabilities
         if capability is not RuntimeCapability.STEER  # the steer family proves its own refusal
     )
-    return ("native", *(f"unavailable-{name}" for name in refused))
+    return ("native", "legacy", *(f"unavailable-{name}" for name in refused))
 
 
 FAMILIES: tuple[Family, ...] = (

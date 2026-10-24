@@ -10,6 +10,7 @@ import pytest
 from tests.support.coverage import COVERAGE, NoLive
 from tests.support.declarations import declarations
 from tests.support.manifest_rig import manifest, plan
+from tests.support.mutations import MUTATIONS
 from tests.support.obligations import FAMILIES, document, required
 from theater.harness import HARNESSES
 from theater.harness.builtin import plugin_dir
@@ -197,9 +198,19 @@ def test_a_declared_unavailable_capability_becomes_one_refusal_obligation() -> N
     opencode = {item.id for item in required(HARNESSES["opencode"])}
     pi = {item.id for item in required(HARNESSES["pi"])}
 
-    assert {"runtime:native", "runtime:unavailable-settings_update", "steer:refused"} <= opencode
+    assert {"runtime:native", "runtime:legacy", "runtime:unavailable-settings_update"} <= opencode
+    assert "steer:refused" in opencode
     assert "runtime:unavailable-steer" not in opencode | pi, "steer is proven by its own family"
-    assert {"runtime:native", "steer:refused"} <= pi
+    assert {"runtime:native", "runtime:legacy", "steer:refused"} <= pi
     assert not any(
         item.startswith("runtime:") for item in {i.id for i in required(HARNESSES["vibe"])}
     )
+
+
+def test_the_legacy_obligation_runs_under_the_variant_that_refuses_the_native_runtime() -> None:
+    legacy = next(item for item in required(HARNESSES["codex"]) if item.id == "runtime:legacy")
+    native = next(item for item in required(HARNESSES["codex"]) if item.id == "runtime:native")
+
+    assert legacy.variant == "native-runtime-refused"
+    assert native.variant is None
+    assert legacy.variant in {mutation.name for mutation in MUTATIONS}

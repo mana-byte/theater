@@ -151,5 +151,9 @@ def harness() -> Harness:
 
 @pytest.fixture
 async def live(request: pytest.FixtureRequest, harness: Harness) -> AsyncIterator[LiveRig]:
-    async with LiveRig.open(SESSION, harness, label=request.node.name) as rig:
+    obligation = getattr(request.node, "callspec", None) and request.node.callspec.params.get(
+        "obligation"
+    )
+    variant = obligation.variant if isinstance(obligation, Obligation) else None
+    async with LiveRig.open(SESSION, harness, label=request.node.name, variant=variant) as rig:
         yield rig

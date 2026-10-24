@@ -230,7 +230,7 @@ class LiveRig:
     @classmethod
     @asynccontextmanager
     async def open(
-        cls, session: LiveSession, harness: Harness, *, label: str
+        cls, session: LiveSession, harness: Harness, *, label: str, variant: str | None = None
     ) -> AsyncIterator[LiveRig]:
         if harness.compat is None:
             raise RuntimeError(f"harness {session.harness!r} declares no compat manifest")
@@ -271,7 +271,7 @@ class LiveRig:
                 _config_toml(session.harness, provisioned, marker_dir), encoding="utf-8"
             )
             shutil.copytree(_PROBE_SOURCE, theater_dir / "plugins" / PROBE_SERVER)
-            if mutation := os.environ.get(SUITE_ENV_MUTATION):
+            if mutation := variant or os.environ.get(SUITE_ENV_MUTATION):
                 mutations.install(mutation, session.harness, theater_dir / "plugins")
             failure = _boot_with_retry(env, theater_dir, session.evidence_dir / label)
             if failure is not None:

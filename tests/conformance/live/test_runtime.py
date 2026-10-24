@@ -1,4 +1,4 @@
-"""A native runtime is a physical route, and a capability it declares unavailable is refused."""
+"""A native runtime is a physical route, falls back to the pane path, and refuses what it must."""
 
 from __future__ import annotations
 
@@ -19,12 +19,14 @@ async def test_a_native_runtime_is_proven_by_its_physical_route(live, obligation
 
     if obligation.detail == "native":
         await _native_turn(live, participant)
+    elif obligation.detail == "legacy":
+        await _legacy_turn(live, participant)
     else:
         await _refused(live, participant, obligation.detail.removeprefix("unavailable-"))
 
 
-async def _native_turn(live, participant: str) -> None:
-    nonce = f"NATIVE-{uuid.uuid4().hex[:8]}"
+async def _turn(live, participant: str):
+    nonce = f"ROUTE-{uuid.uuid4().hex[:8]}"
     live.queue(MockReply(nonce))
 
     job = await live.send(participant, f"Reply with {nonce}")
@@ -32,11 +34,24 @@ async def _native_turn(live, participant: str) -> None:
     assert job.state == "done", job.error
     assert nonce in str(job.result)
     seen = await live.participant(participant)
+    assert seen.transcript_identity is not None and seen.transcript_identity.state == "trusted"
+    return seen
+
+
+async def _native_turn(live, participant: str) -> None:
+    seen = await _turn(live, participant)
     if seen.native_route is None:
         violation("the harness declares a native runtime but the participant has no native route")
     assert seen.native_route.health == "connected", seen.native_route
     assert seen.native_route.native_session_id, "the native route carries no session identity"
-    assert seen.transcript_identity is not None and seen.transcript_identity.state == "trusted"
+
+
+async def _legacy_turn(live, participant: str) -> None:
+    """Under a plugin whose probe refuses the native runtime, the pane path still carries a turn."""
+    seen = await _turn(live, participant)
+    if seen.native_route is not None:
+        violation("a native route was bound although the runtime probe refused the release")
+    assert seen.terminal_route is not None and seen.terminal_route.health == "healthy"
 
 
 async def _refused(live, participant: str, capability: str) -> None:
