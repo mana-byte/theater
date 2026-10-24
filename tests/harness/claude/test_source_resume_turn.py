@@ -98,6 +98,57 @@ async def test_fork_turn_is_live_but_restored_history_stays_suppressed(tmp_path,
         assert heard == ["new"]
         assert reader.offset == path.stat().st_size
         assert (await reader.read()).events == ()
+        await _assert_offline_turn_after_restart(
+            reader, observer, registry, jobs, participant, path, tmp_path
+        )
+    finally:
+        await reader.aclose()
+
+
+async def _assert_offline_turn_after_restart(
+    reader, observer, registry, jobs, participant, path, cwd
+):
+    assert registry.store.get_participant(participant.id).resume_floor is None
+    await reader.aclose()
+    offline = [
+        (
+            claude_record("offline_user", "new_marker", "user", message={"content": "offline"}),
+            AFTER,
+        ),
+        (
+            claude_fragment(
+                "offline_answer",
+                "offline_user",
+                {"type": "text", "text": "OFFLINE"},
+                "msg_offline",
+            ),
+            AFTER,
+        ),
+        (claude_marker("offline_marker", "offline_answer"), AFTER),
+    ]
+    jobs.create(
+        handle="offline",
+        caller_id="caller",
+        target_id=participant.id,
+        kind="send",
+        prompt="offline",
+    )
+    _write(path, offline, append=True)
+    reader = observer.open_source_for(
+        participant_id=participant.id,
+        cwd=str(cwd),
+        session_id=SESSION,
+        session_provenance=TranscriptProvenance.EXACT,
+        after=iso_epoch(LAUNCH),
+        known_location=registry.store.get_participant(participant.id).transcript_location,
+    )
+    daemon = Observer(registry, harnesses={}, jobs=jobs)
+    try:
+        attached = await reader.read()
+        assert attached.attached.last_event.raw_text == "OFFLINE"
+        assert daemon._accept_attachment(participant.id, reader, attached)
+        assert (jobs.get("offline").state, jobs.get("offline").result) == (JobState.DONE, "OFFLINE")
+        assert (await reader.read()).events == ()
     finally:
         await reader.aclose()
 
