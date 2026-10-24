@@ -272,6 +272,7 @@ from the rest of the manifest, so a new manifest capability needs a mapping in
 `tests/support/coverage.py` (the completeness test fails until it has one) and, if it is provable,
 a scenario family. Extra generic mutation choices belong in the plugin's `compat.canaries`, not
 in shared harness-name branches. Canaries check the suite separately from release qualification.
+Non-model mock routes belong in `compat.acknowledged_routes`; they never consume scripted replies.
 
 ## When adding a skill
 

@@ -28,7 +28,7 @@ from .runtime_constants import (
 )
 from .runtime_controls import PiFrontendRuntimeControls
 from .runtime_notifications import PiFrontendRuntimeNotifications
-from .runtime_probe import parse_pi_version, probe_pi_frontend_compatibility
+from .runtime_probe import probe_pi_frontend_compatibility
 from .runtime_protocol import PiFrontendPeer, PiFrontendProtocolError, _bounded_string
 from .runtime_results import PiFrontendRuntimeResults
 from .runtime_session import PiFrontendRuntimeSession
@@ -139,7 +139,6 @@ __all__ = [
     "PiFrontendPeer",
     "PiFrontendProtocolError",
     "PiFrontendRuntime",
-    "parse_pi_version",
     "pi_frontend_runtime_factory",
     "probe_pi_frontend_compatibility",
 ]

@@ -43,7 +43,7 @@ def test_vibe_version_parse_table(sample, supported, reason, monkeypatch):
     version = _version(sample)
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=f"vibe {version}"),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=f"vibe {version}"),
     )
     result = probe_vibe_compatibility(RuntimeProbeContext())
     assert result.supported is supported
@@ -55,7 +55,9 @@ def test_vibe_version_parse_table(sample, supported, reason, monkeypatch):
 def test_malformed_version_is_refused(monkeypatch):
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=VERSION_POLICY.minimum),
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stderr="", stdout=VERSION_POLICY.minimum
+        ),
     )
     assert probe_vibe_compatibility(RuntimeProbeContext()).reason == (
         "Vibe did not report a stable CLI version"
@@ -73,7 +75,7 @@ def test_nonzero_exit_is_not_a_stable_version(monkeypatch):
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(
-            returncode=1, stdout=f"vibe {VERSION_POLICY.minimum}"
+            returncode=1, stderr="", stdout=f"vibe {VERSION_POLICY.minimum}"
         ),
     )
     result = probe_vibe_compatibility(RuntimeProbeContext())
@@ -99,7 +101,7 @@ def test_installed_vibe_stays_legacy_only_with_its_version_shown(monkeypatch):
     version = VERSION_POLICY.maximum
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=f"vibe {version}"),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=f"vibe {version}"),
     )
     validate_manifest("vibe", manifest_for_roots())
     record = harness_registry.native_compatibility_record(

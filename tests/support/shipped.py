@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 from theater.harness.builtin.plugins.claude.manifest import (
@@ -93,6 +94,7 @@ def pin_installed_vibe_version(monkeypatch, version, *, binary=None, approval_gu
     planner = HARNESSES["vibe"]._launch.planner
     while hasattr(planner, "func"):
         planner = planner.func
-    monkeypatch.setitem(planner.__globals__, "installed_vibe_version", lambda binary=None: version)
-    monkeypatch.setitem(planner.__globals__, "resolve_vibe_binary", _resolve)
-    monkeypatch.setitem(planner.__globals__, "shadowed_approval_profile", _guard)
+    loaded = importlib.import_module(planner.__module__)
+    monkeypatch.setattr(loaded, "installed_vibe_version", lambda binary=None: version)
+    monkeypatch.setattr(loaded, "resolve_vibe_binary", _resolve)
+    monkeypatch.setattr(loaded, "shadowed_approval_profile", _guard)

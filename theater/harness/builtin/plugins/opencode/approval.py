@@ -15,11 +15,11 @@ from theater.constants.harness import HARNESS_APPROVAL_POLICIES
 from theater.models import BadRequest
 
 from .constants import (
-    _APPROVAL_RULES_V2,
+    _APPROVAL_RULES,
     PLUGIN_ACTIVE_POLL_SECONDS,
     PLUGIN_ACTIVE_TIMEOUT_SECONDS,
 )
-from .http_v2 import OpenCodeV2Client
+from .session_http import OpenCodeSessionClient
 
 
 class PluginNotActive(RuntimeError):
@@ -36,7 +36,7 @@ def approval_ruleset(approval: str) -> tuple[dict[str, str], ...]:
         raise BadRequest(
             f"unknown approval {approval!r}; expected one of {', '.join(HARNESS_APPROVAL_POLICIES)}"
         )
-    return _APPROVAL_RULES_V2.get(approval, ())
+    return _APPROVAL_RULES.get(approval, ())
 
 
 def classify_plugin_state(
@@ -92,7 +92,7 @@ def classify_plugin_state(
 
 
 async def require_plugin_active(
-    client: OpenCodeV2Client,
+    client: OpenCodeSessionClient,
     *,
     plugin_id: str,
     source_path: str,

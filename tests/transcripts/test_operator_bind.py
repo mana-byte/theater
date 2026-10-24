@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import SCHEMA as OPENCODE_SCHEMA
+from tests.support.opencode_recorder import SCHEMA as OPENCODE_SCHEMA
 from tests.support.presence import PRESENT, UNKNOWN, FakePresence
 from tests.support.shipped import (
     ClaudeCodeObserver,

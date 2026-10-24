@@ -12,9 +12,9 @@ from pathlib import Path
 from theater.harness.base import theater_binary
 
 from ._assets import read_asset
-from .approval_v2 import approval_ruleset
+from .approval import approval_ruleset
 from .constants import (
-    APPROVAL_EXEMPT_ACTIONS_V2,
+    APPROVAL_EXEMPT_ACTIONS,
     MCP_CATALOG_MAX_BYTES,
     MCP_CATALOG_MAX_SERVERS,
     MCP_CATALOG_MAX_TOOLS,
@@ -23,7 +23,7 @@ from .constants import (
     RECEIPT_RETRY_DELAYS_MS,
 )
 from .mcp import catalog_path
-from .tui_recovery_v2 import render_tui_recovery_v2
+from .tui_recovery import render_tui_recovery
 
 PLUGIN_ID = "theater.opencode-session"
 _PACKAGE = {"name": "theater-opencode-session", "private": True, "type": "module"}
@@ -34,7 +34,7 @@ def plugin_dir(config_path: Path) -> Path:
     return config_path.with_suffix(".opencode")
 
 
-def render_native_plugin_v2(
+def render_native_plugin(
     participant_id: str, config_path: Path, token_path: Path, approval: str
 ) -> dict[Path, str]:
     """The plugin package's files; yolo renders no rules and so registers no approval hook."""
@@ -45,7 +45,7 @@ def render_native_plugin_v2(
         "theater": theater_binary(),
         "retryDelays": list(RECEIPT_RETRY_DELAYS_MS),
         "rules": [dict(rule) for rule in approval_ruleset(approval)],
-        "exemptActions": list(APPROVAL_EXEMPT_ACTIONS_V2),
+        "exemptActions": list(APPROVAL_EXEMPT_ACTIONS),
         "catalog": {
             "path": str(catalog_path(participant_id)),
             "version": MCP_CATALOG_VERSION,
@@ -58,11 +58,11 @@ def render_native_plugin_v2(
     directory = plugin_dir(config_path)
     return {
         directory / "package.json": json.dumps(_PACKAGE, indent=2),
-        directory / "server.js": read_asset("native_plugin_v2.js").replace(
+        directory / "server.js": read_asset("native_plugin.js").replace(
             _SETTINGS_SENTINEL, json.dumps(settings)
         ),
-        directory / "tui.js": render_tui_recovery_v2(PLUGIN_ID),
+        directory / "tui.js": render_tui_recovery(PLUGIN_ID),
     }
 
 
-__all__ = ["PLUGIN_ID", "plugin_dir", "render_native_plugin_v2"]
+__all__ = ["PLUGIN_ID", "plugin_dir", "render_native_plugin"]

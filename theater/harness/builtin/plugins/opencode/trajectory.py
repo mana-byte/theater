@@ -15,7 +15,7 @@ from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
-from . import store_v2 as queries
+from . import queries
 from .constants import LIVE_TRAJECTORY_STATE_LIMIT
 from .mcp import OpenCodeMcpCatalog
 from .values import (

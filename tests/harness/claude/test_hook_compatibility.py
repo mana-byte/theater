@@ -169,7 +169,7 @@ def test_claude_hook_version_range(sample, supported, monkeypatch):
     version = _cli_version(sample)
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=version),
     )
     result = probe_claude_hooks(RuntimeProbeContext())
     assert result.supported is supported
@@ -183,7 +183,7 @@ def test_claude_hook_version_range(sample, supported, monkeypatch):
 def test_claude_hook_rejects_malformed_version(version, monkeypatch):
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=version),
     )
     assert probe_claude_hooks(RuntimeProbeContext()).reason == (
         "Claude did not report a stable CLI version"
@@ -204,7 +204,7 @@ def test_claude_messaging_uses_the_same_bounded_policy(sample, supported, monkey
     version = _cli_version(sample)
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=version),
     )
     result = probe_claude_native_compatibility(RuntimeProbeContext())
     assert result.supported is supported

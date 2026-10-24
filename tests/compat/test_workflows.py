@@ -81,9 +81,7 @@ def test_the_gate_pr_check_retests_the_proposed_code_in_check_mode(compat: dict[
 
     assert any('run "$HARNESS" --check' in command for command in commands)
     assert verify["if"] == "needs.gate-plan.outputs.harnesses != '[]'"
-    paths = compat["on"]["pull_request"]["paths"]
-    for path in ("theater/**", "packages/regie/src/**", "tests/conftest.py", "uv.lock"):
-        assert path in paths, "plugin and shared production changes need fresh qualification"
+    assert compat["on"]["pull_request"] is None, "gate-plan alone selects affected harnesses"
     gates = " ".join(step.get("run", "") for step in _steps(compat["jobs"]["gate-plan"]))
     assert "--routine" in gates and "chore/compat-" in gates
 
@@ -99,6 +97,18 @@ def test_publishing_happens_only_in_the_qualify_job_and_only_on_main(
     assert 'if [[ "$PUBLISH" == "true" ]]; then' in run["run"] and "--publish" in run["run"]
     assert qualify["permissions"] == {"contents": "read", "issues": "write"}
     assert qualify["timeout-minutes"] <= 360
+
+
+@pytest.mark.parametrize("name", ["qualify", "verify-gate"])
+def test_release_sweeps_interrupt_before_the_job_limit(compat: dict[str, Any], name: str) -> None:
+    job = compat["jobs"][name]
+    run = next(step["run"] for step in _steps(job) if "320m" in step.get("run", ""))
+
+    assert job["timeout-minutes"] > 325
+    assert "timeout --signal=INT --kill-after=5m 320m" in run
+    assert '"$status" == 124 || "$status" == 137' in run
+    assert "::error::The full release window exceeded" in run
+    assert 'exit "$status"' in run
 
 
 def test_the_policy_pr_reads_its_body_from_a_file_and_touches_one_path(
@@ -133,23 +143,18 @@ def test_the_run_keeps_going_to_publish_after_a_red_result_and_then_fails(
     assert "steps.compat.outcome == 'failure'" in steps[-1]["if"]
 
 
-def test_the_canary_workflow_watches_the_modules_the_canary_runner_uses() -> None:
+def test_the_canary_workflow_watches_its_entire_support_and_production_tree() -> None:
     paths = _load("harness-compat-canaries.yml")["on"]["pull_request"]["paths"]
 
-    for module in (
-        "canaries",
-        "codecopy",
-        "cleanup",
-        "contract",
-        "framework",
-        "git",
-        "policy",
-        "process",
-        "qualify",
-        "sandbox",
-        "suite_runner",
+    for path in (
+        "scripts/harness_compat/**",
+        "tests/support/**",
+        "tests/conformance/**",
+        "theater/**",
+        "packages/regie/src/**",
+        "tests/conftest.py",
     ):
-        assert f"scripts/harness_compat/{module}.py" in paths
+        assert path in paths
 
 
 def test_every_invocation_rechecks_every_release_with_no_stored_state(

@@ -89,10 +89,18 @@ manifest values and require the suite to notice; they are never a release verdic
 
 ## Declared limitations
 
+Available OTel channels have no live payload scenario yet and make qualification inconclusive;
+they cannot authorize a gate. Hook channels have a correlated tool-fact scenario.
+
 Native child stimulation has no generic scripted scenario. Timing/usage and decoder payload
 details use ordinary parser regressions because the live suite has no independent accounting
 oracle. Foreground MCP timeout limits require a multi-minute held call and remain unit-tested.
 See the reasoned exemptions in `tests/support/coverage.py`.
+
+Hosted CI jobs stop the full release sweep after 320 minutes, with five minutes reserved for
+interruption cleanup inside the 350-minute job. A window that outgrows that limit fails explicitly
+and authorizes nothing; it needs a longer runner or further execution parallelism. Local runs have
+no sweep deadline.
 
 OpenCode's renderer recovery for 2.0.17–2.0.20 remains behavior-specific and independent of the
 support policy: the installed baseline 2.0.18 still needs it.

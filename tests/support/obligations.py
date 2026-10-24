@@ -34,14 +34,12 @@ class Obligation:
 
 @dataclass(frozen=True, slots=True)
 class Family:
-    """A family of obligations and the live scenario module that proves it, if one exists."""
+    """A family of obligations and the live scenario module that exercises it."""
 
     name: str
     derive: Callable[[Harness], tuple[str, ...]]
-    #: The test module under ``tests/conformance/live``; None while no scenario exists.
-    scenario: str | None
-    #: Why a family without a scenario stays unproven.
-    reason: str = ""
+    #: The test module under ``tests/conformance/live``.
+    scenario: str
 
 
 def _approvals(harness: Harness) -> tuple[str, ...]:

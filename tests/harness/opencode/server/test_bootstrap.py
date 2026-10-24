@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 from tests.support.shipped import OpenCodeHarness
-from theater.harness.builtin.plugins.opencode.legacy_bootstrap_v2 import render_legacy_bootstrap
-from theater.harness.builtin.plugins.opencode.native_plugin_v2 import plugin_dir
+from theater.harness.builtin.plugins.opencode.legacy_bootstrap import render_legacy_bootstrap
+from theater.harness.builtin.plugins.opencode.native_plugin import plugin_dir
 from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
 
 # The fake `opencode` is a Python script on PATH: `serve` announces a banner and answers /api,
@@ -350,7 +350,7 @@ def test_a_sigterm_during_startup_reaps_the_backend_and_the_credential(
 
 def test_the_launcher_survives_apostrophes_and_json_literals(tmp_path, monkeypatch):
     """A parent path with an apostrophe and JSON null/true/false all render executable."""
-    import theater.harness.builtin.plugins.opencode.legacy_bootstrap_v2 as bootstrap
+    import theater.harness.builtin.plugins.opencode.legacy_bootstrap as bootstrap
 
     weird = tmp_path / "l'oven"
     weird.mkdir()

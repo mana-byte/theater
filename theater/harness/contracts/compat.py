@@ -171,6 +171,8 @@ class CompatManifest:
     mcp_call: McpCall | None = None
     #: Extra generic mutations whose effects this plugin's provisioning cannot mask.
     canaries: tuple[str, ...] = ()
+    #: Non-model HTTP routes the mock acknowledges with 204, without consuming a reply.
+    acknowledged_routes: tuple[tuple[str, str], ...] = ()
 
 
 __all__ = [

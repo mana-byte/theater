@@ -6,8 +6,8 @@ import asyncio
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import attached, tool
-from tests.support.opencode_recorder_v2 import rec as shared_rec
+from tests.support.opencode_recorder import attached, tool
+from tests.support.opencode_recorder import rec as shared_rec
 from theater.harness import EventKind
 from theater.harness.base import EventPath
 from theater.harness.builtin.plugins.opencode import _paths_from_tool, _relativise

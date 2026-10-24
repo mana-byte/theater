@@ -12,15 +12,15 @@ import pytest
 
 from tests.support.opencode_server import PASSWORD, ServerFake
 from theater import paths
-from theater.harness.builtin.plugins.opencode import server_live_v2, server_runtime_v2
-from theater.harness.builtin.plugins.opencode.approval_v2 import PluginNotActive
-from theater.harness.builtin.plugins.opencode.dialect import v2_lineage_marker
+from theater.harness.builtin.plugins.opencode import server_live, server_runtime
+from theater.harness.builtin.plugins.opencode.approval import PluginNotActive
+from theater.harness.builtin.plugins.opencode.dialect import lineage_marker
 from theater.harness.builtin.plugins.opencode.http import OpenCodeHttpError
-from theater.harness.builtin.plugins.opencode.native_plugin_v2 import PLUGIN_ID, plugin_dir
+from theater.harness.builtin.plugins.opencode.native_plugin import PLUGIN_ID, plugin_dir
 from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
 from theater.harness.builtin.plugins.opencode.server_plan import SERVER_SECRET_ENV
-from theater.harness.builtin.plugins.opencode.server_runtime_v2 import (
-    OpenCodeServerV2Runtime,
+from theater.harness.builtin.plugins.opencode.server_runtime import (
+    OpenCodeServerRuntime,
     opencode_server_runtime_factory,
 )
 from theater.harness.contracts.runtime import (
@@ -35,7 +35,7 @@ from theater.harness.contracts.runtime import (
 )
 
 
-class V2Fake(ServerFake):
+class RuntimeFake(ServerFake):
     """`/api` routes with `{data}` bodies; a prompt keeps its session active until released."""
 
     def __init__(self) -> None:
@@ -126,7 +126,7 @@ class _IO(RuntimeIO):
 
 @pytest.fixture
 async def server():
-    fake = V2Fake()
+    fake = RuntimeFake()
     await fake.start()
     yield fake
     await fake.stop()
@@ -144,15 +144,15 @@ def fake_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-def runtime(server: V2Fake, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_opencode):
-    monkeypatch.setattr(server_runtime_v2, "_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(server_live_v2, "_ADMISSION_GRACE_SECONDS", 0.2)
+def runtime(server: RuntimeFake, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_opencode):
+    monkeypatch.setattr(server_runtime, "_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(server_live, "_ADMISSION_GRACE_SECONDS", 0.2)
     monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     token = tmp_path / "runtime.token"
     token.write_text(PASSWORD)
     token.chmod(0o600)
     # The persisted lineage marker names this participant as a native 2.x spawn.
-    marker, marker_text = v2_lineage_marker("h00000000001")
+    marker, marker_text = lineage_marker("h00000000001")
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(marker_text)
     built = opencode_server_runtime_factory(
@@ -167,11 +167,11 @@ def runtime(server: V2Fake, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fak
             model="anthropic/claude#high",
         )
     )
-    assert isinstance(built, OpenCodeServerV2Runtime)
+    assert isinstance(built, OpenCodeServerRuntime)
     return built
 
 
-async def _settles(runtime: OpenCodeServerV2Runtime, state: RuntimeExecutionState) -> None:
+async def _settles(runtime: OpenCodeServerRuntime, state: RuntimeExecutionState) -> None:
     for _ in range(400):
         if (await runtime.snapshot()).execution_state is state:
             return
@@ -179,7 +179,9 @@ async def _settles(runtime: OpenCodeServerV2Runtime, state: RuntimeExecutionStat
     raise AssertionError(f"execution state never became {state}")
 
 
-async def test_a_2x_session_takes_prompts_over_http(server: V2Fake, runtime, fake_opencode) -> None:
+async def test_a_2x_session_takes_prompts_over_http(
+    server: RuntimeFake, runtime, fake_opencode
+) -> None:
     binding = await runtime.open_session(mode=SessionOpenMode.NEW)
     assert binding.native_session_id == "ses_fake_1"
     assert binding.native_version == VERSION_POLICY.minimum
@@ -224,12 +226,12 @@ async def test_a_2x_session_takes_prompts_over_http(server: V2Fake, runtime, fak
 @pytest.fixture
 def unpolled(runtime, monkeypatch: pytest.MonkeyPatch) -> None:
     """No poll loop and no lapsing grace: only reads a call makes itself can see the server."""
-    monkeypatch.setattr(OpenCodeServerV2Runtime, "_start_polling", lambda self: None)
-    monkeypatch.setattr(server_live_v2, "_ADMISSION_GRACE_SECONDS", 3600.0)
+    monkeypatch.setattr(OpenCodeServerRuntime, "_start_polling", lambda self: None)
+    monkeypatch.setattr(server_live, "_ADMISSION_GRACE_SECONDS", 3600.0)
 
 
 async def test_a_turn_that_ended_before_any_poll_saw_it_leaves_the_session_idle(
-    server: V2Fake, runtime, unpolled
+    server: RuntimeFake, runtime, unpolled
 ) -> None:
     await runtime.open_session(mode=SessionOpenMode.NEW)
     assert (await runtime.send(operation_id="op-1", prompt="hello")).result is (
@@ -255,7 +257,7 @@ async def test_a_turn_that_ended_before_any_poll_saw_it_leaves_the_session_idle(
     ],
 )
 async def test_an_admitted_prompt_stays_busy_until_the_server_proves_its_turn_ended(
-    server: V2Fake, runtime, unpolled, prompt_created: int | None, idle_at: int | None
+    server: RuntimeFake, runtime, unpolled, prompt_created: int | None, idle_at: int | None
 ) -> None:
     server.prompt_created = prompt_created
     await runtime.open_session(mode=SessionOpenMode.NEW)
@@ -272,7 +274,7 @@ async def test_an_admitted_prompt_stays_busy_until_the_server_proves_its_turn_en
 
 
 async def test_a_snapshot_reads_the_server_rather_than_a_poll_that_may_predate_the_turn_end(
-    server: V2Fake, runtime, unpolled
+    server: RuntimeFake, runtime, unpolled
 ) -> None:
     await runtime.open_session(mode=SessionOpenMode.NEW)
     await runtime.send(operation_id="op-1", prompt="hello")
@@ -289,7 +291,7 @@ async def test_a_snapshot_reads_the_server_rather_than_a_poll_that_may_predate_t
 
 
 async def test_a_session_the_server_still_lists_is_busy_however_old_the_last_poll(
-    server: V2Fake, runtime, unpolled
+    server: RuntimeFake, runtime, unpolled
 ) -> None:
     await runtime.open_session(mode=SessionOpenMode.NEW)
     await runtime.send(operation_id="op-1", prompt="hello")
@@ -303,7 +305,7 @@ async def test_a_session_the_server_still_lists_is_busy_however_old_the_last_pol
 
 
 def _hold_first_active(
-    runtime: OpenCodeServerV2Runtime,
+    runtime: OpenCodeServerRuntime,
     monkeypatch: pytest.MonkeyPatch,
     *,
     then_fail: bool = False,
@@ -329,7 +331,7 @@ def _hold_first_active(
 
 
 async def test_a_delayed_empty_poll_does_not_hide_a_turn_that_began_after_it_was_read(
-    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
+    server: RuntimeFake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     binding = await runtime.open_session(mode=SessionOpenMode.NEW)
     await runtime.send(operation_id="op-1", prompt="hello")
@@ -351,7 +353,7 @@ async def test_a_delayed_empty_poll_does_not_hide_a_turn_that_began_after_it_was
 
 
 async def test_a_send_reads_the_server_even_when_the_last_poll_said_idle(
-    server: V2Fake, runtime, unpolled
+    server: RuntimeFake, runtime, unpolled
 ) -> None:
     binding = await runtime.open_session(mode=SessionOpenMode.NEW)
     assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
@@ -365,9 +367,9 @@ async def test_a_send_reads_the_server_even_when_the_last_poll_said_idle(
 
 
 async def test_a_slow_idle_stamp_read_does_not_extend_the_admission_grace(
-    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
+    server: RuntimeFake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server_live_v2, "_ADMISSION_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(server_live, "_ADMISSION_GRACE_SECONDS", 0.2)
     await runtime.open_session(mode=SessionOpenMode.NEW)
     await runtime.send(operation_id="op-1", prompt="hello")
     server.end_turn(idle_at=server.prompt_created + 50)
@@ -387,7 +389,7 @@ async def test_a_slow_idle_stamp_read_does_not_extend_the_admission_grace(
 
 
 async def test_concurrent_snapshots_of_a_busy_session_share_their_reads(
-    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
+    server: RuntimeFake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await runtime.open_session(mode=SessionOpenMode.NEW)
     await runtime.send(operation_id="op-1", prompt="hello")
@@ -411,7 +413,7 @@ async def test_concurrent_snapshots_of_a_busy_session_share_their_reads(
 
 @pytest.mark.parametrize("then_fail", [False, True], ids=["answered", "failed"])
 async def test_a_snapshot_in_flight_cannot_reopen_a_closed_runtime(
-    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch, then_fail: bool
+    server: RuntimeFake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch, then_fail: bool
 ) -> None:
     await runtime.open_session(mode=SessionOpenMode.NEW)
     await runtime.send(operation_id="op-1", prompt="hello")
@@ -429,7 +431,7 @@ async def test_a_snapshot_in_flight_cannot_reopen_a_closed_runtime(
 
 
 async def test_a_closed_runtime_neither_reads_the_server_nor_offers_send(
-    server: V2Fake, runtime, unpolled
+    server: RuntimeFake, runtime, unpolled
 ) -> None:
     await runtime.open_session(mode=SessionOpenMode.NEW)
     await runtime.aclose()
@@ -453,7 +455,7 @@ async def test_a_closed_runtime_neither_reads_the_server_nor_offers_send(
         (True, 500, DeliveryResult.UNKNOWN, "delivery_unknown"),
     ],
 )
-async def test_v2_prompt_http_error_outcomes(
+async def test_prompt_http_error_outcomes(
     runtime, monkeypatch, written: bool, status: int, result: DeliveryResult, code: str
 ) -> None:
     await runtime.open_session(mode=SessionOpenMode.NEW)
@@ -480,7 +482,9 @@ async def test_v2_prompt_http_error_outcomes(
     await runtime.aclose()
 
 
-async def test_a_2x_fork_is_refused_before_the_server_is_asked(server: V2Fake, runtime) -> None:
+async def test_a_2x_fork_is_refused_before_the_server_is_asked(
+    server: RuntimeFake, runtime
+) -> None:
     """The parent lives in another lineage's database; the spawn resumes on the legacy route."""
     with pytest.raises(RuntimeError, match="legacy route"):
         await runtime.open_session(mode=SessionOpenMode.FORK, native_session_id="ses_parent")
@@ -489,7 +493,7 @@ async def test_a_2x_fork_is_refused_before_the_server_is_asked(server: V2Fake, r
 
 
 async def test_a_failed_plugin_refuses_the_session_before_any_prompt(
-    server: V2Fake, runtime
+    server: RuntimeFake, runtime
 ) -> None:
     """Core swallows a plugin load failure; an unproven hook means no send access."""
     server.plugin_state = "failed"
@@ -510,7 +514,7 @@ async def test_reconnect_proves_the_plugin_at_the_persisted_session_location(ser
 
 
 async def test_cancelled_refresh_does_not_satisfy_a_waiting_send(
-    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
+    server: RuntimeFake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     binding = await runtime.open_session(mode=SessionOpenMode.NEW)
     await runtime.send(operation_id="A", prompt="A")

@@ -22,12 +22,12 @@ from theater.harness import get as get_harness
 from theater.harness.base import ResumeLaunchOverlay
 from theater.harness.builtin.plugins.opencode import dialect
 from theater.harness.builtin.plugins.opencode.dialect import (
-    is_v2_participant,
+    has_isolated_database,
 )
 from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
 from theater.harness.builtin.plugins.opencode.server_plan import plan_opencode_server
-from theater.harness.builtin.plugins.opencode.server_runtime_v2 import (
-    OpenCodeServerV2Runtime,
+from theater.harness.builtin.plugins.opencode.server_runtime import (
+    OpenCodeServerRuntime,
     opencode_server_runtime_factory,
 )
 from theater.harness.contracts.channels import (
@@ -57,11 +57,6 @@ class _IO(RuntimeIO):
         raise AssertionError("the server runtime never opens a frontend connection")
 
 
-@pytest.fixture(autouse=True)
-def _fresh_version_cache(monkeypatch):
-    monkeypatch.setattr(dialect, "_versions", {})
-
-
 def _context(tmp_path: Path, participant_id: str = "h00000000001") -> RuntimeContext:
     token = tmp_path / "runtime.token"
     token.write_text("test-password")
@@ -86,10 +81,10 @@ def test_the_factory_reconnects_without_reprobing_the_installed_binary(
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.delenv(dialect.VERSION_ENV, raising=False)
     runtime = opencode_server_runtime_factory(_context(tmp_path))
-    assert isinstance(runtime, OpenCodeServerV2Runtime)
+    assert isinstance(runtime, OpenCodeServerRuntime)
 
 
-def test_the_v2_marker_is_written_with_the_backend_plan_before_the_factory_runs(
+def test_the_lineage_marker_is_written_with_the_backend_plan_before_the_factory_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available_harness_binaries
 ) -> None:
     monkeypatch.setenv(dialect.VERSION_ENV, VERSION_POLICY.minimum)
@@ -101,13 +96,13 @@ def test_the_v2_marker_is_written_with_the_backend_plan_before_the_factory_runs(
             approval="manual",
         )
     )
-    assert not is_v2_participant("h00000000001")
+    assert not has_isolated_database("h00000000001")
     planning.write_plan_files(plan.backend)
     # The launch files exist before the runtime factory is invoked, so a reconnect
     # always finds the dialect the running backend was launched with.
-    assert is_v2_participant("h00000000001")
+    assert has_isolated_database("h00000000001")
     built = opencode_server_runtime_factory(_context(tmp_path))
-    assert isinstance(built, OpenCodeServerV2Runtime)
+    assert isinstance(built, OpenCodeServerRuntime)
 
 
 def _stub_manifest(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> None:

@@ -34,16 +34,13 @@ LIVE = Path(__file__).parent / "live"
 SHIPPED = sorted(path.parent.name for path in plugin_dir().glob("*/manifest.py"))
 
 
-def test_every_family_names_a_scenario_module_that_exists_or_says_why_not() -> None:
+def test_every_family_names_a_scenario_module_that_exists() -> None:
     for family in FAMILIES:
-        if family.scenario is None:
-            assert family.reason, f"family {family.name!r} has neither a scenario nor a reason"
-        else:
-            assert (LIVE / family.scenario).is_file(), family.scenario
+        assert (LIVE / family.scenario).is_file(), family.scenario
 
 
 def test_every_scenario_module_belongs_to_one_declared_family() -> None:
-    claimed = {family.scenario for family in FAMILIES if family.scenario}
+    claimed = {family.scenario for family in FAMILIES}
     modules = {path.name for path in LIVE.glob("test_*.py")}
 
     assert modules == claimed
@@ -51,8 +48,6 @@ def test_every_scenario_module_belongs_to_one_declared_family() -> None:
 
 def test_every_scenario_is_marked_with_its_own_family() -> None:
     for family in FAMILIES:
-        if family.scenario is None:
-            continue
         source = (LIVE / family.scenario).read_text(encoding="utf-8")
         assert f'pytest.mark.family("{family.name}")' in source, family.scenario
 

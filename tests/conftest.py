@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.shipped import pin_installed_vibe_version
 from tests.support.terminal_provider import FakeTerminalProvider
 from tests.support.tmux_guard import reap_private_server
 from theater import paths
@@ -22,9 +21,8 @@ pytest_plugins = ["tests.support.fixtures"]
 
 
 @pytest.fixture
-def available_harness_binaries(monkeypatch, shipped_harnesses) -> None:
+def available_harness_binaries(monkeypatch, shipped_harnesses, theater_home) -> None:
     """Simulated launches need executable discovery, not installed agent CLIs."""
-    from theater import harness
     from theater.harness import HARNESSES
 
     binaries = {harness.binary for harness in HARNESSES.values()}
@@ -36,48 +34,30 @@ def available_harness_binaries(monkeypatch, shipped_harnesses) -> None:
         return real_which(command, *args, **kwargs)
 
     monkeypatch.setattr(shutil, "which", which)
-    # Hermetic vibe plans: no probe of the host CLI, and no shadow-profile scan
-    # of the host filesystem; argv[0] stays the interpreter the which stub returns.
-    from theater.harness.builtin.plugins.vibe.compatibility import VERSION_POLICY
-    from theater.harness.contracts.runtime import RuntimeCompatibility
-    from theater.harness.contracts.version_policy import version_key
+    from theater.harness.contracts import version_probe
+    from theater.harness.contracts.version_policy import VersionPolicy
 
-    def pin_launches():
-        pin_installed_vibe_version(
-            monkeypatch, version_key(VERSION_POLICY.minimum), binary=sys.executable
-        )
-        for name, probe in (
-            ("claude", "probe_claude_native_compatibility"),
-            ("codex", "probe_codex_compatibility"),
-            ("pi", "probe_pi_frontend_compatibility"),
-        ):
-            module = importlib.import_module(f"theater.harness.builtin.plugins.{name}.launch")
-            scopes = [vars(module)]
-            if name in HARNESSES:
-                planner = HARNESSES[name]._launch.planner
-                while hasattr(planner, "func"):
-                    planner = planner.func
-                scopes.append(planner.__globals__)
-            for scope in scopes:
-                if probe in scope:
-                    monkeypatch.setitem(
-                        scope,
-                        probe,
-                        lambda context: RuntimeCompatibility(
-                            supported=True, policy="simulated-launch"
-                        ),
-                    )
+    releases = {}
+    for name, module_name, pattern_name in (
+        ("claude", "compatibility", "_VERSION"),
+        ("codex", "runtime_plan", "_VERSION_TOKEN"),
+        ("pi", "runtime_constants", "_VERSION_TOKEN"),
+        ("vibe", "version", "_VERSION"),
+    ):
+        module = importlib.import_module(f"theater.harness.builtin.plugins.{name}.{module_name}")
+        policy = VersionPolicy.load(Path(module.__file__).with_name("compatibility.json"))
+        releases[getattr(module, pattern_name).pattern] = policy.minimum
+    monkeypatch.setattr(
+        version_probe, "probe_release", lambda binary, pattern, **kwargs: releases[pattern.pattern]
+    )
+    monkeypatch.setenv("VIBE_HOME", str(theater_home / "vibe"))
 
-    original_install = harness.install
 
-    def install(*args, **kwargs):
-        installed = original_install(*args, **kwargs)
-        # Daemon startup reloads isolated plugin modules; re-pin their newly imported planners.
-        pin_launches()
-        return installed
+@pytest.fixture(autouse=True)
+def fresh_release_probes(monkeypatch):
+    from theater.harness.contracts import version_probe
 
-    monkeypatch.setattr(harness, "install", install)
-    pin_launches()
+    monkeypatch.setattr(version_probe, "_cache", {})
 
 
 @pytest.fixture
@@ -222,8 +202,14 @@ def clean_registry(shipped_harnesses):
     itself.
     """
     from theater import harness
+    from theater.harness.loading.importer import PACKAGE_PREFIX
     from theater.mcp_plugins import registry as mcp_registry
 
+    modules = {
+        name: module
+        for name, module in sys.modules.copy().items()
+        if name.startswith(PACKAGE_PREFIX)
+    }
     harnesses = dict(harness.HARNESSES)
     aliases = dict(harness._ALIASES)
     registered = dict(harness._PLUGINS)
@@ -232,6 +218,11 @@ def clean_registry(shipped_harnesses):
     mcp_plugins = dict(mcp_registry._PLUGINS)
     mcp_diagnostics = list(mcp_registry._DIAGNOSTICS)
     yield
+    # Registry callbacks must keep the module instances they were compiled against.
+    for name in tuple(sys.modules):
+        if name.startswith(PACKAGE_PREFIX):
+            del sys.modules[name]
+    sys.modules.update(modules)
     harness.HARNESSES.clear()
     harness.HARNESSES.update(harnesses)
     harness._ALIASES.clear()

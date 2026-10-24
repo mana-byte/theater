@@ -19,6 +19,31 @@ from tests.support.live_rig import LiveRig, LiveSession
 from tests.support.live_stack import Stack
 
 
+def test_theater_children_import_the_code_copy_with_no_inherited_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = tmp_path / "code copy"
+    cli = code / "theater" / "cli"
+    cli.mkdir(parents=True)
+    (code / "theater" / "__init__.py").write_text("")
+    (cli / "__init__.py").write_text("")
+    (cli / "__main__.py").write_text("print(__file__)\n")
+    monkeypatch.setattr(live_rig, "REPO_ROOT", code)
+    command = live_rig._install_theater_cli(tmp_path / "bin")
+
+    result = subprocess.run(
+        [str(command)],
+        cwd=tmp_path,
+        env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert Path(result.stdout.strip()) == cli / "__main__.py"
+    assert not list(code.rglob("__pycache__"))
+
+
 class _Jobs:
     """Reports whatever job state a test sets, as the SDK's await would."""
 
@@ -418,7 +443,8 @@ class _Parts:
 
 def _open(tmp_path: Path):
     session = LiveSession("acme", Path("acme"), "1", tmp_path, tmp_path / "e", "token")
-    return LiveRig.open(session, cast(Any, SimpleNamespace(compat=object())), label="scenario")
+    harness = SimpleNamespace(compat=SimpleNamespace(acknowledged_routes=()))
+    return LiveRig.open(session, cast(Any, harness), label="scenario")
 
 
 @pytest.mark.parametrize(

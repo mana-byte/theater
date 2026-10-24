@@ -11,7 +11,7 @@ import json
 import sqlite3
 from collections.abc import Sequence
 
-from . import compaction_v2, translate_v2
+from . import compaction, translate
 from .values import load_json_object
 
 #: The message types observed as conversation; the rest (instructions, switches, shell) are not
@@ -29,16 +29,16 @@ type Row = tuple[str, str, str, int, int, str]
 def row_info(conn: sqlite3.Connection, row: Row) -> dict:
     message_id, session_id, kind, seq, _updated, raw = row
     if kind == "compaction":
-        return compaction_v2.message_info(message_id, session_id, load_json_object(raw))
+        return compaction.message_info(message_id, session_id, load_json_object(raw))
     closes, cause = _idle_close(conn, session_id, seq) if kind == "idle" else (False, None)
-    return translate_v2.message_info(
+    return translate.message_info(
         message_id, kind, session_id, load_json_object(raw), closes_turn=closes, cause=cause
     )
 
 
 def row_parts(row: Row) -> list[dict]:
     message_id, session_id, kind, _seq, _updated, raw = row
-    return translate_v2.message_parts(message_id, kind, session_id, load_json_object(raw))
+    return translate.message_parts(message_id, kind, session_id, load_json_object(raw))
 
 
 def latest_message(conn: sqlite3.Connection, sid: str) -> tuple[object, ...] | None:
@@ -69,7 +69,7 @@ def message_coordinate(conn: sqlite3.Connection, message_id: str) -> tuple[objec
 
 
 def part_ordinal(_conn: sqlite3.Connection, part_id: str) -> int:
-    found = translate_v2.split_part_id(part_id)
+    found = translate.split_part_id(part_id)
     return found[1] if found is not None else 0
 
 
@@ -78,7 +78,7 @@ def live_revision_row(
 ) -> tuple[object, ...] | None:
     message_id: str | None = record_id
     if table == "part":
-        found = translate_v2.split_part_id(record_id)
+        found = translate.split_part_id(record_id)
         message_id = found[0] if found is not None else None
     if message_id is None:
         return None
@@ -256,8 +256,8 @@ def _idle_close(conn: sqlite3.Connection, sid: str, seq: int) -> tuple[bool, dic
             "AND seq > ? AND seq < ? LIMIT 1",
             (sid, previous, seq),
         ).fetchone()
-        return translate_v2.idle_closes_turn(None, prompted is not None), None
+        return translate.idle_closes_turn(None, prompted is not None), None
     data = load_json_object(assistant[1])
-    info = translate_v2.message_info(assistant[0], "assistant", sid, data)
-    parts = translate_v2.message_parts(assistant[0], "assistant", sid, data)
-    return translate_v2.idle_closes_turn((info, parts), True), info.get("stepError")
+    info = translate.message_info(assistant[0], "assistant", sid, data)
+    parts = translate.message_parts(assistant[0], "assistant", sid, data)
+    return translate.idle_closes_turn((info, parts), True), info.get("stepError")

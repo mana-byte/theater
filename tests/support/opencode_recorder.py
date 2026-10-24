@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
+from theater.harness.builtin.plugins.opencode.source import OpenCodeSource
 
 SCHEMA = """
 CREATE TABLE session_v2 (
@@ -22,7 +22,7 @@ CREATE TABLE session_message (
 """
 
 
-class RecorderV2:
+class Recorder:
     def __init__(self, path: Path, sid: str, directory: str, created: int = 1000):
         self.path = path
         self.sid = sid
@@ -84,13 +84,13 @@ USAGE = {"tokens": {"input": 3, "output": 5, "reasoning": 0, "cache": {"read": 0
 
 @pytest.fixture
 def rec(tmp_path, workdir):
-    r = RecorderV2(tmp_path / "opencode-v2.db", "ses_one", str(workdir))
+    r = Recorder(tmp_path / "opencode-v2.db", "ses_one", str(workdir))
     yield r
     r.conn.close()
 
 
-def attached(rec, workdir) -> OpenCodeV2Source:
-    src = OpenCodeV2Source(rec.path, cwd=str(workdir))
+def attached(rec, workdir) -> OpenCodeSource:
+    src = OpenCodeSource(rec.path, cwd=str(workdir))
     batch = asyncio.run(src.read())
     assert batch.attached is not None
     src.commit_attachment()

@@ -19,26 +19,8 @@ on:
         default: all
         type: choice
         options: [all, claude, codex, opencode, pi, vibe]
+  # gate-plan is the only authority for which code changes need real-binary qualification.
   pull_request:
-    paths:
-      - ".github/workflows/harness-compat.yml"
-      - "scripts/harness_compat/**"
-      - "tests/compat/**"
-      - "tests/conformance/**"
-      - "tests/support/live_rig.py"
-      - "tests/support/live_stack.py"
-      - "tests/support/obligations.py"
-      - "tests/support/coverage.py"
-      - "tests/support/declarations.py"
-      - "tests/support/mutations.py"
-      - "tests/support/tool_effects.py"
-      - "tests/support/compat_probe/**"
-      - "tests/conftest.py"
-      - "theater/**"
-      - "packages/regie/src/**"
-      - "Makefile"
-      - "pyproject.toml"
-      - "uv.lock"
 
 permissions:
   contents: read
@@ -101,8 +83,7 @@ jobs:
     name: Qualify ${{ matrix.harness }}
     needs: [static-checks, plan]
     runs-on: ubuntu-24.04
-    # One sequential process per harness: every release since the pinned minimum, each install and
-    # live run taking minutes. The hosted-runner ceiling is 360 minutes.
+    # Reserve time for setup, interruption cleanup and publication below the hosted-runner ceiling.
     timeout-minutes: 350
     permissions:
       contents: read
@@ -145,7 +126,17 @@ jobs:
           if [[ "$PUBLISH" == "true" ]]; then
             args+=(--publish)
           fi
-          uv run --no-sync --no-cache python -m scripts.harness_compat "${args[@]}"
+          echo "The complete release window has 320 minutes; an incomplete run authorizes nothing."
+          if timeout --signal=INT --kill-after=5m 320m \
+            uv run --no-sync --no-cache python -m scripts.harness_compat "${args[@]}"; then
+            exit 0
+          else
+            status=$?
+            if [[ "$status" == 124 || "$status" == 137 ]]; then
+              echo "::error::The full release window exceeded 320 minutes; no policy was authorized."
+            fi
+            exit "$status"
+          fi
       - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         id: pr
         if: steps.compat.outputs.pr_action == 'propose'
@@ -241,4 +232,15 @@ jobs:
       - name: Re-test the proposed plugin and policy against every release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: uv run --no-sync --no-cache python -m scripts.harness_compat run "$HARNESS" --check
+        run: |
+          echo "The complete release window has 320 minutes; an incomplete run authorizes nothing."
+          if timeout --signal=INT --kill-after=5m 320m \
+            uv run --no-sync --no-cache python -m scripts.harness_compat run "$HARNESS" --check; then
+            exit 0
+          else
+            status=$?
+            if [[ "$status" == 124 || "$status" == 137 ]]; then
+              echo "::error::The full release window exceeded 320 minutes; the policy check is incomplete."
+            fi
+            exit "$status"
+          fi

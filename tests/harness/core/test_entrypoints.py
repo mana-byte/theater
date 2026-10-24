@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import RecorderV2, tool
+from tests.support.opencode_recorder import Recorder, tool
 from tests.support.paths import FIXTURES
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
@@ -114,7 +114,7 @@ async def test_opencode_entrypoint_preserves_public_source_shape(tmp_path: Path)
     database = tmp_path / "opencode-v2.db"
     workdir = tmp_path / "work"
     workdir.mkdir()
-    recorder = RecorderV2(database, "ses_one", str(workdir))
+    recorder = Recorder(database, "ses_one", str(workdir))
     source = OpenCodeObserver(db=database).open_source(cwd=str(workdir))
     try:
         attached = await source.read()

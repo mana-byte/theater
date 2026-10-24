@@ -1,4 +1,4 @@
-"""The pytest runner and sandbox: result mapping, selectors, sandbox lifecycle, child reaping."""
+"""The suite runner and sandbox: verdicts, diagnostics, isolation and child reaping."""
 
 from __future__ import annotations
 
@@ -14,13 +14,12 @@ import pytest
 
 from scripts.harness_compat.contract import Check
 from scripts.harness_compat.diagnostics import clip_diagnostic
-from scripts.harness_compat.framework import _check_selector, python_path, run_pytest
+from scripts.harness_compat.framework import _suite_check, python_path, run_pytest
 from scripts.harness_compat.process import (
     SANDBOX_ENV,
     new_token,
     owned_pids,
     run_group,
-    run_pipe_group,
 )
 from scripts.harness_compat.sandbox import make_sandbox
 
@@ -34,22 +33,18 @@ def test_run_pytest_maps_skips_and_failures(tmp_path: Path) -> None:
         "def test_expected(): pytest.skip('expected')\n"
         "def test_unexpected(): pytest.skip('unexpected')\n"
     )
-    nodes = tuple(
-        f"test_sample.py::test_{name}" for name in ("pass", "fail", "expected", "unexpected")
-    )
-    checks = run_pytest(
+    check = run_pytest(
         tmp_path,
-        nodes,
+        "test_sample.py",
         env={
             "PATH": os.environ.get("PATH", ""),
             "HOME": str(tmp_path),
             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
         },
-        expected_skips={nodes[2]: "known"},
         timeout=30,
     )
-    assert [check.status for check in checks] == ["pass", "fail", "skip", "error"]
-    assert all(isinstance(check, Check) for check in checks)
+    assert isinstance(check, Check) and check.status == "fail"
+    assert check.detail.startswith("1 passed, 1 failed, 2 skipped;")
 
 
 def test_failed_pytest_diagnostics_are_bounded(tmp_path: Path) -> None:
@@ -67,86 +62,43 @@ def test_failed_pytest_diagnostics_are_bounded(tmp_path: Path) -> None:
         "HOME": str(tmp_path),
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
     }
-    failed, errored = run_pytest(
+    failed = run_pytest(
         tmp_path,
-        ("test_diagnostics.py", "test_diagnostics.py::test_setup"),
+        "test_diagnostics.py",
         env=env,
-        expected_skips={},
         timeout=30,
     )
     assert failed.status == "fail"
     assert failed.detail.startswith("1 failed, 1 errored; test_diagnostics.py::test_fail:")
     assert len(failed.detail) <= 600
     assert "[31m" not in failed.detail and "#x1B" not in failed.detail
-    assert errored.status == "error"
-    assert "test_diagnostics.py::test_setup:" in errored.detail
-    assert "RuntimeError: setup crash" in errored.detail
-    captured = ET.Element("testcase")
+    captured = ET.Element("testcase", classname="test_diagnostics", name="test_capture")
     ET.SubElement(captured, "failure", message="")
     ET.SubElement(captured, "system-out").text = "ignored " * 200 + "capture tail"
-    fallback = _check_selector(
-        "test_diagnostics.py::test_capture", {"test_diagnostics.py::test_capture": captured}, {}
-    )
+    fallback = _suite_check("test_diagnostics.py", [captured])
     assert fallback.status == "fail"
     assert "test_diagnostics.py::test_capture" in fallback.detail
     assert "capture tail" in fallback.detail
 
 
-def test_run_pytest_aggregates_file_directory_class_and_parameter_selectors(tmp_path: Path) -> None:
-    proofs = tmp_path / "proofs"
-    proofs.mkdir()
-    (proofs / "test_selectors.py").write_text(
-        "import pytest\n"
-        "def test_top(): assert True\n"
-        "class TestBundleIndexAndAllowlist:\n"
-        "    def test_first(self): assert True\n"
-        "    def test_second(self): assert True\n"
-        "@pytest.mark.parametrize('value', [1, 2])\n"
-        "def test_param(value): assert value > 0\n"
-    )
-    (tmp_path / "test_skip.py").write_text(
-        "import pytest\n"
-        "@pytest.mark.parametrize('value', [1, 2])\n"
-        "def test_skip(value): pytest.skip('unavailable')\n"
-    )
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": str(tmp_path),
-        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-    }
-    file = "proofs/test_selectors.py"
-    selectors = (
-        "proofs",
-        file,
-        f"{file}::TestBundleIndexAndAllowlist",
-        f"{file}::test_param",
-        f"{file}::test_param[1]",
-    )
-    checks = run_pytest(tmp_path, selectors, env=env, expected_skips={}, timeout=30)
-    assert [check.status for check in checks] == ["pass"] * len(selectors)
-    assert [check.detail for check in checks] == [
-        "5 passed",
-        "5 passed",
-        "2 passed",
-        "2 passed",
-        "1 passed",
-    ]
-    unknown = run_pytest(
-        tmp_path, (f"{file}::test_missing",), env=env, expected_skips={}, timeout=30
-    )
-    assert unknown[0].status == "error"
-    unexpected = run_pytest(tmp_path, ("test_skip.py",), env=env, expected_skips={}, timeout=30)
-    assert unexpected[0].status == "error"
-    assert "2 skipped" in unexpected[0].detail
-    expected = run_pytest(
-        tmp_path,
-        ("test_skip.py::test_skip",),
-        env=env,
-        expected_skips={"test_skip.py::test_skip": "known"},
-        timeout=30,
-    )
-    assert expected[0].status == "skip"
-    assert expected[0].detail == "2 skipped"
+@pytest.mark.parametrize("kind", ["error", "skipped"])
+def test_a_skip_or_setup_error_can_never_pass(kind: str) -> None:
+    case = ET.Element("testcase", classname="test_suite", name="test_unproven")
+    ET.SubElement(case, kind, message="not proven")
+
+    check = _suite_check("tests/conformance/live", [case])
+
+    assert check.status == "error"
+    assert "not proven" in check.detail
+    assert _suite_check("tests/conformance/live", []).status == "error"
+
+
+def test_a_failed_case_is_not_hidden_by_a_later_passing_duplicate() -> None:
+    failed = ET.Element("testcase", classname="test_suite", name="test_same")
+    ET.SubElement(failed, "failure", message="broken")
+    passed = ET.Element("testcase", classname="test_suite", name="test_same")
+
+    assert _suite_check("tests/conformance/live", [failed, passed]).status == "fail"
 
 
 def test_sandbox_keeps_unix_socket_paths_short(
@@ -219,7 +171,7 @@ def test_run_pytest_timeout_reaps_detached_children_it_started(tmp_path: Path) -
         "    time.sleep(60)\n"
     )
     env = {**os.environ, "CHILD_PIDFILE": str(pidfile)}
-    (check,) = run_pytest(tmp_path, ["test_hang.py"], env=env, expected_skips={}, timeout=3)
+    check = run_pytest(tmp_path, "test_hang.py", env=env, timeout=3)
     assert check.status == "error"
     assert _gone(int(pidfile.read_text())), "the sleeping child outlived the timed-out pytest run"
 
@@ -236,8 +188,8 @@ def test_run_group_reaps_a_detached_child_after_the_leader_exited(tmp_path: Path
     assert _gone(int(pidfile.read_text())), "the detached child outlived its finished leader"
 
 
-def test_pipe_group_captures_text_in_requested_cwd(tmp_path: Path) -> None:
-    result = run_pipe_group(
+def test_run_group_captures_text_in_requested_cwd(tmp_path: Path) -> None:
+    result = run_group(
         [sys.executable, "-c", "import os, sys; print(os.getcwd()); print('é', file=sys.stderr)"],
         cwd=tmp_path,
         env=os.environ,
@@ -248,13 +200,15 @@ def test_pipe_group_captures_text_in_requested_cwd(tmp_path: Path) -> None:
     assert result.stderr.strip() == "é"
 
 
-def test_pipe_group_timeout_reaps_its_leader(tmp_path: Path) -> None:
+def test_run_group_timeout_reaps_its_leader(tmp_path: Path) -> None:
     pidfile = tmp_path / "leader.pid"
     script = (
         "import os, sys, time\nopen(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)\n"
     )
     with pytest.raises(subprocess.TimeoutExpired):
-        run_pipe_group([sys.executable, "-c", script, str(pidfile)], env=os.environ, timeout=2)
+        run_group(
+            [sys.executable, "-c", script, str(pidfile)], cwd=tmp_path, env=os.environ, timeout=2
+        )
     assert _gone(int(pidfile.read_text())), "the timed-out pipe runner left its leader alive"
 
 
@@ -325,7 +279,7 @@ def test_pytest_leaves_no_bytecode_or_cache_beside_what_it_runs(tmp_path: Path) 
     (tmp_path / "test_clean.py").write_text("import helper\n\ndef test_ok(): assert helper.VALUE\n")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)}
 
-    (check,) = run_pytest(tmp_path, ("test_clean.py",), env=env, expected_skips={}, timeout=30)
+    check = run_pytest(tmp_path, "test_clean.py", env=env, timeout=30)
 
     assert check.status == "pass"
     assert not list(tmp_path.rglob("__pycache__")) and not (tmp_path / ".pytest_cache").exists()
@@ -335,7 +289,7 @@ def test_pytest_refuses_to_run_in_a_git_checkout(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
 
     with pytest.raises(ValueError, match="git checkout"):
-        run_pytest(tmp_path, ("test_x.py",), env={}, expected_skips={}, timeout=5)
+        run_pytest(tmp_path, "test_x.py", env={}, timeout=5)
 
 
 def test_the_public_pythonpath_names_the_copy_first_then_its_workspace_sources(

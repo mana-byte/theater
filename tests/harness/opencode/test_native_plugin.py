@@ -13,22 +13,22 @@ from typing import Any
 import pytest
 
 from tests.support.opencode_server import PASSWORD, ServerFake
-from theater.harness.builtin.plugins.opencode.approval_v2 import (
+from theater.harness.builtin.plugins.opencode.approval import (
     PluginNotActive,
     approval_ruleset,
     classify_plugin_state,
     require_plugin_active,
 )
 from theater.harness.builtin.plugins.opencode.http import OpenCodeClient
-from theater.harness.builtin.plugins.opencode.http_v2 import OpenCodeV2Client
-from theater.harness.builtin.plugins.opencode.native_plugin_v2 import (
+from theater.harness.builtin.plugins.opencode.native_plugin import (
     PLUGIN_ID,
     plugin_dir,
-    render_native_plugin_v2,
+    render_native_plugin,
 )
 from theater.harness.builtin.plugins.opencode.server_discovery import (
     parse_server_stdout_endpoint,
 )
+from theater.harness.builtin.plugins.opencode.session_http import OpenCodeSessionClient
 from theater.models import BadRequest
 
 # The fake records every request, so tests assert what was polled and what refused. The stock-binary
@@ -85,11 +85,11 @@ async def fake():
 
 
 @pytest.fixture
-def client(fake: PluginFake, tmp_path: Path) -> OpenCodeV2Client:
+def client(fake: PluginFake, tmp_path: Path) -> OpenCodeSessionClient:
     token = tmp_path / "credential"
     token.write_text(PASSWORD)
     token.chmod(0o600)
-    return OpenCodeV2Client(endpoint=fake.endpoint, token_file=token)
+    return OpenCodeSessionClient(endpoint=fake.endpoint, token_file=token)
 
 
 def test_a_missing_plugin_refuses():
@@ -100,7 +100,7 @@ def test_a_missing_plugin_refuses():
 @pytest.mark.parametrize("approval", ["", "automatic"])
 def test_unknown_approval_cannot_render_an_unrestricted_plugin(tmp_path, approval):
     with pytest.raises(BadRequest, match="unknown approval"):
-        render_native_plugin_v2("test", tmp_path / "config", tmp_path / "token", approval)
+        render_native_plugin("test", tmp_path / "config", tmp_path / "token", approval)
     assert approval_ruleset("yolo") == ()
 
 
@@ -177,7 +177,7 @@ async def test_stock_release_keeps_native_denies_and_tightens_saved_allows(tmp_p
     token.write_text(password)
     token.chmod(0o600)
     config = tmp_path / "config.json"
-    files = render_native_plugin_v2("stock", config, token, approval)
+    files = render_native_plugin("stock", config, token, approval)
     for path, content in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
@@ -227,7 +227,7 @@ async def test_stock_release_keeps_native_denies_and_tightens_saved_allows(tmp_p
             else:
                 raise AssertionError("the stock server never announced its endpoint")
             transport = OpenCodeClient(endpoint=endpoint, token_file=token)
-            client = OpenCodeV2Client(endpoint=endpoint, token_file=token)
+            client = OpenCodeSessionClient(endpoint=endpoint, token_file=token)
             sid = await client.create_session(directory=os.path.realpath(tmp_path))
             source = str((plugin_dir(config) / "server.js").resolve())
             await require_plugin_active(client, plugin_id=PLUGIN_ID, source_path=source)
@@ -304,7 +304,7 @@ process.exit(0)
     [("manual", "ask", "ask"), ("edits", "allow", "ask"), ("yolo", "allow", "allow")],
 )
 def test_the_plugin_only_tightens_native_decisions(tmp_path, approval, edit, shell):
-    files = render_native_plugin_v2("abc123", tmp_path / "x.json", tmp_path / "token", approval)
+    files = render_native_plugin("abc123", tmp_path / "x.json", tmp_path / "token", approval)
     for path, body in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body)
@@ -383,9 +383,7 @@ for (const version of ['2.0.17', '2.0.18', '2.0.19', '2.0.20']) {
 @pytest.mark.requires_node
 def test_generated_tui_recovers_a_failed_viewport(tmp_path: Path) -> None:
     config = tmp_path / "config.json"
-    for path, content in render_native_plugin_v2(
-        "test", config, tmp_path / "token", "manual"
-    ).items():
+    for path, content in render_native_plugin("test", config, tmp_path / "token", "manual").items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     subprocess.run(

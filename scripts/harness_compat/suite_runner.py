@@ -130,11 +130,10 @@ def run_suite(
     """Run every live scenario the harness's manifest derives; partial runs relax reconciliation."""
     env = {**suite_environment(sb, harness=harness, binary=binary, version=version)}
     env.update(extra_env or {})
-    (suite,) = run_pytest(
+    suite = run_pytest(
         root,
-        (SUITE_TARGET,),
+        SUITE_TARGET,
         env=env,
-        expected_skips={},
         timeout=timeout,
         pytest_args=pytest_args,
     )
@@ -144,7 +143,7 @@ def run_suite(
         _load(sb.evidence_dir / "inventory.json", inventory=True),
         harness=harness,
         version=version,
-        partial=bool(pytest_args),
+        partial=bool(pytest_args or extra_env),
     )
 
 
@@ -206,8 +205,6 @@ def _obligation_check(promised: SuiteRow, found: SuiteRow, *, partial: bool) -> 
     """The obligation's check, and whether its scenario was owed but never ran."""
     name = f"conformance:{promised.id}"
     if not found.executed:
-        if promised.scenario is None:
-            return Check(name, "skip", "no live scenario yet"), False
         if partial:
             return Check(name, "skip", "not selected in this partial run"), False
         return Check(name, "error", "its scenario never ran"), True

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from theater.harness.base import Event, EventKind, TokenUsage, TurnTerminal, clip, whole
 from theater.harness.contracts.trajectory import TrajectoryFact
 
-from . import store_v2 as queries
+from . import queries
 from .paths import _paths_from_tool
 from .values import (
     _error_detail,

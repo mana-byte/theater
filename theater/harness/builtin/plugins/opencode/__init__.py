@@ -2,7 +2,7 @@
 
 from .observer import OpenCodeObserver
 from .paths import _paths_from_tool, _relativise
-from .source_v2 import OpenCodeV2Source as OpenCodeSource
+from .source import OpenCodeSource
 from .values import _opencode_usage, _trajectory_usage
 
 __all__ = (

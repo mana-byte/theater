@@ -551,6 +551,10 @@ and returns the `Provisioned` values that make the stock CLI use the mock:
 - `models`: selectors the CLI accepts for the logical names, routed to the mock;
 - `efforts`: harness-native effort values worth sampling.
 
+`CompatManifest.acknowledged_routes` declares optional `(method, path)` pairs for non-model
+side channels. The mock returns 204 for them without consuming a scripted reply; they cannot
+replace model protocol routes.
+
 Provisioning must not replace launch argv, approval policy or receipt commands;
 production launch planning always wins. Every line of it is endpoint, credential,
 model catalog or onboarding and trust setup: a retry policy, a disabled agent or
@@ -1272,27 +1276,26 @@ fails closed for native-routed capabilities; only manifest-declared legacy
 fallbacks retain pane controls. Native requests with an uncertain outcome are
 never replayed, and recovering a frontend listener does not replace its stock UI.
 
-### OpenCode release dialects
+### OpenCode release policy and lineage
 
-One plugin supports OpenCode 1.x and 2.x; [dialect.py](../theater/harness/builtin/plugins/opencode/dialect.py)
-selects their protocol and CLI shapes. `THEATER_OPENCODE_VERSION` can pin the release
-when a wrapper hides the version banner. Unknown major versions are refused.
+OpenCode's plugin-local `compatibility.json` gates stable releases through `VersionPolicy`.
+`THEATER_OPENCODE_VERSION` can pin the release when a wrapper hides the version banner.
 
-OpenCode 2.x uses a lineage-owned `observations/opencode/opencode-v2.db`, because
-opening a 1.x database migrates it and clears its event log. Resumes keep the same
-lineage database; resumes between 1.x and 2.x are refused. Its `session_message` rows
-are projected onto the parser's shared shapes, with live reads following `time_updated`.
+Each participant owns an `observations/opencode/opencode-v2.db` lineage: the stock server
+resumes every session in its database at startup, so participants cannot share it. Supported
+resumes retain that database and reject foreign lineages. The observer can also read the stock
+`opencode.db`; current `session_message` rows follow `time_updated`.
 
 Approval enforcement requires proof that the exact generated plugin is active on the
 selected server before user input or a capable UI starts. OpenCode can continue after
 a plugin-load failure, so a successful launch alone is insufficient. The
-[approval plugin](../theater/harness/builtin/plugins/opencode/approval_v2.py) preserves
+[approval plugin](../theater/harness/builtin/plugins/opencode/approval.py) preserves
 native denies and tightens allows, including saved approvals, into asks for `manual`
-and `edits`. Qualified release gates remain in the implementation.
+and `edits`.
 
 Both native and guarded legacy launches use a private server and the lineage database.
 Native sends carry a client-minted message ID; interrupt retains its terminal route.
-Native 2.x resumes and forks are refused before backend mutation, so supported resumes
+Native resumes and forks are refused before backend mutation, so supported resumes
 use the legacy route. See [launch.py](../theater/harness/builtin/plugins/opencode/launch.py)
 for argv, configuration, and credential ownership.
 

@@ -9,8 +9,25 @@ from http.client import HTTPConnection, HTTPResponse
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import pytest
+
 from scripts.harness_compat.contract import MOCK_REPLY, MockReply, MockToolCall
 from scripts.harness_compat.mock import MockServer
+
+
+def test_plugin_acknowledgements_never_consume_a_model_reply(tmp_path: Path) -> None:
+    with MockServer(
+        tmp_path / "requests.jsonl", acknowledged_routes=(("POST", "/telemetry"),)
+    ) as server:
+        server.queue("openai-chat", MockReply("scripted"))
+        origin = server.base_urls["anthropic"]
+        assert _request(f"{origin}/telemetry", {}) == (204, "")
+        status, payload = _request(f"{origin}/v1/chat/completions", {})
+        assert status == 200
+        assert json.loads(payload)["choices"][0]["message"]["content"] == "scripted"
+        assert not server.unhandled
+    with pytest.raises(ValueError, match="must not replace model protocol routes"):
+        MockServer(tmp_path / "requests.jsonl", acknowledged_routes=(("POST", "/v1/responses"),))
 
 
 def _foreground(body: dict[str, object]) -> dict[str, object]:
@@ -153,7 +170,7 @@ def _wait(predicate, timeout: float = 5.0) -> bool:
     return bool(predicate())
 
 
-def test_responses_codec_streams_text_tool_calls_and_the_codex_side_channel(
+def test_responses_codec_streams_text_and_tool_calls(
     tmp_path: Path,
 ) -> None:
     reply = MockReply("hello", (MockToolCall("exec_command", {"cmd": "touch x"}),))
@@ -189,10 +206,6 @@ def test_responses_codec_streams_text_tool_calls_and_the_codex_side_channel(
             "response.completed",
         ]
 
-        status, payload = _request(
-            f"{server.base_urls['openai-chat']}/analytics/codex/turn-costs", {"cost": 1}
-        )
-        assert (status, payload) == (204, "")
         assert not server.unhandled
 
 

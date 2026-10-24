@@ -6,22 +6,23 @@ import asyncio
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import (
+from tests.support.opencode_recorder import (
     USAGE,
     attached,
     drain,
     text,
     tool,
 )
-from tests.support.opencode_recorder_v2 import rec as shared_rec
+from tests.support.opencode_recorder import rec as shared_rec
 from theater.harness import EventKind, TurnTerminal
 from theater.harness.base import EventPath
-from theater.harness.builtin.plugins.opencode import source_v2, store, store_v2
+from theater.harness.builtin.plugins.opencode import queries, store
+from theater.harness.builtin.plugins.opencode import source as source_module
 from theater.harness.builtin.plugins.opencode.observer import OpenCodeObserver
-from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
+from theater.harness.builtin.plugins.opencode.source import OpenCodeSource
 from theater.models import Status
 
-# RecorderV2 mirrors the 2.x projection: one row per message with its parts embedded, rewritten in
+# Recorder mirrors the 2.x projection: one row per message with its parts embedded, rewritten in
 # place (so time_updated moves), and one `idle` row closing every turn.
 
 rec = shared_rec  # the shared fixture
@@ -53,7 +54,7 @@ def a_turn_with_a_tool(rec, workdir) -> None:
     rec.idle("msg_i1", "succeeded")
 
 
-def test_v2_discovery_admission_and_history_cursor_use_selected_queries(rec, workdir):
+def test_discovery_admission_and_history_cursor_use_current_queries(rec, workdir):
     observer = OpenCodeObserver(db=rec.path)
     candidates = observer.transcript_candidates(cwd=str(workdir))
     assert [candidate.session_id for candidate in candidates] == [rec.sid]
@@ -67,12 +68,12 @@ def test_v2_discovery_admission_and_history_cursor_use_selected_queries(rec, wor
     conn = store.open_readonly(rec.path)
     assert conn is not None
     try:
-        assert [row[0] for row in store_v2.history_messages(conn, rec.sid)] == [
+        assert [row[0] for row in queries.history_messages(conn, rec.sid)] == [
             f"msg_u{index}" for index in range(3)
         ]
     finally:
         conn.close()
-    source = OpenCodeV2Source(rec.path, cwd=str(workdir), session_id=rec.sid)
+    source = OpenCodeSource(rec.path, cwd=str(workdir), session_id=rec.sid)
     newest = asyncio.run(source.history_page(limit=2))
     assert newest.error_code is None
     assert newest.older_cursor is not None
@@ -103,11 +104,9 @@ def test_a_turn_reads_as_one_user_one_tool_pair_and_one_reply(rec, workdir):
 
 def test_status_follows_the_idle_marker(rec, workdir):
     rec.user("msg_u1", "hello")
-    assert asyncio.run(OpenCodeV2Source(rec.path, cwd=str(workdir)).read()).status is (
-        Status.WORKING
-    )
+    assert asyncio.run(OpenCodeSource(rec.path, cwd=str(workdir)).read()).status is (Status.WORKING)
     rec.idle("msg_i1", "succeeded")
-    assert asyncio.run(OpenCodeV2Source(rec.path, cwd=str(workdir)).read()).status is Status.IDLE
+    assert asyncio.run(OpenCodeSource(rec.path, cwd=str(workdir)).read()).status is Status.IDLE
 
 
 def test_an_interrupt_between_steps_still_ends_the_turn(rec, workdir):
@@ -161,9 +160,7 @@ def test_a_retryable_step_failure_waits_for_the_idle_marker(rec, workdir):
         times={"completed": rec.tick()},
         **USAGE,
     )
-    assert asyncio.run(OpenCodeV2Source(rec.path, cwd=str(workdir)).read()).status is (
-        Status.WORKING
-    )
+    assert asyncio.run(OpenCodeSource(rec.path, cwd=str(workdir)).read()).status is (Status.WORKING)
     rec.step(
         "msg_a2",
         rec.tick(),
@@ -211,7 +208,7 @@ def test_a_retryable_step_failure_waits_for_the_idle_marker(rec, workdir):
     )
     assert drain(src) == []
 
-    cold = OpenCodeV2Source(rec.path, cwd=str(workdir))
+    cold = OpenCodeSource(rec.path, cwd=str(workdir))
     asyncio.run(cold.read())
     cold.commit_attachment()
     history = asyncio.run(cold.history(last_n=0)).events
@@ -310,16 +307,16 @@ def test_same_timestamp_batches_drain_completely(rec, workdir):
 def test_attaching_after_a_large_same_timestamp_batch_replays_nothing(rec, workdir, monkeypatch):
     at = rec.tick()
     write_users(rec, 0, 600, at)
-    src = OpenCodeV2Source(rec.path, cwd=str(workdir))
+    src = OpenCodeSource(rec.path, cwd=str(workdir))
     sizes = []
-    original = source_v2.reread_rows
+    original = source_module.reread_rows
 
     def measured(*args, **kwargs):
         rows = original(*args, **kwargs)
         sizes.append(len(rows))
         return rows
 
-    monkeypatch.setattr(source_v2, "reread_rows", measured)
+    monkeypatch.setattr(source_module, "reread_rows", measured)
     first = asyncio.run(src.read())
     assert first.attached is None and first.has_more and not first.progressed
     assert sizes == [501]
@@ -409,7 +406,7 @@ def test_attachment_pages_share_a_snapshot_while_native_writes_continue(rec, wor
     rec.conn.execute("PRAGMA journal_mode=WAL")
     at = rec.tick()
     write_steps(rec, 600, at, answer=False)
-    src = OpenCodeV2Source(rec.path, cwd=str(workdir))
+    src = OpenCodeSource(rec.path, cwd=str(workdir))
     first = asyncio.run(src.read())
     assert first.attached is None and first.has_more
     rec.step("msg_a599", at, [text("changed")], at=at, finish="stop", times={"completed": at})
@@ -424,7 +421,7 @@ def test_attachment_pages_share_a_snapshot_while_native_writes_continue(rec, wor
 
 def test_revocation_releases_an_unfinished_attachment_snapshot(rec, workdir):
     write_users(rec, 0, 600, rec.tick())
-    src = OpenCodeV2Source(rec.path, cwd=str(workdir))
+    src = OpenCodeSource(rec.path, cwd=str(workdir))
     assert asyncio.run(src.read()).has_more
     assert src._conn.in_transaction
     src.revoke_attachment()

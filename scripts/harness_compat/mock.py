@@ -35,8 +35,6 @@ HANDLED_ROUTES: frozenset[Route] = frozenset(
         ("POST", "/v1/messages/count_tokens"),
         ("POST", "/v1/chat/completions"),
         ("POST", "/v1/responses"),
-        # Codex's turn-cost side channel: answered 204, never scripted.
-        ("POST", "/v1/analytics/codex/turn-costs"),
     }
 )
 UNHANDLED_STATUS = 599
@@ -221,10 +219,9 @@ def _openai_stream(reply: MockReply, model: str) -> tuple[str, str]:
 
 
 def _responses_stream(reply: MockReply) -> tuple[str, str]:
-    """The Responses wire shape Codex consumes; a hold splits right after ``response.created``.
+    """The Responses stream, held before output text so the UI keeps its working indicator.
 
-    Codex draws its working indicator only until the first output text arrives, so a held turn
-    must still be output-less for a screen reader to see it as working.
+    A hold splits right after ``response.created``.
     """
     response_id, item_id = "resp-mock", "msg-mock"
     head: list[dict[str, Any]] = [{"type": "response.created", "response": {"id": response_id}}]
@@ -473,9 +470,18 @@ class _Response:
 class MockServer:
     """Serves scripted or default replies on 127.0.0.1 and records every request it sees."""
 
-    def __init__(self, requests_path: Path, *, models: Sequence[str] = (_MODEL,)) -> None:
+    def __init__(
+        self,
+        requests_path: Path,
+        *,
+        models: Sequence[str] = (_MODEL,),
+        acknowledged_routes: Sequence[Route] = (),
+    ) -> None:
         self._requests_path = requests_path
         self._models = tuple(models)
+        self._acknowledged_routes = frozenset(acknowledged_routes)
+        if self._acknowledged_routes & HANDLED_ROUTES:
+            raise ValueError("acknowledged routes must not replace model protocol routes")
         self._replies: dict[MockProtocol, deque[MockReply]] = {
             "anthropic": deque(),
             "openai-chat": deque(),
@@ -575,7 +581,7 @@ class MockServer:
             return _Response(200, "application/json", json.dumps(payload))
         if path == "/v1/messages/count_tokens":
             return _Response(200, "application/json", json.dumps({"input_tokens": 1}))
-        if path == "/v1/analytics/codex/turn-costs":
+        if route in self._acknowledged_routes:
             return _Response(204, "application/json", "")
         if path == "/v1/messages":
             reply = self._next_reply("anthropic", body)
@@ -640,7 +646,7 @@ def _make_handler(server: MockServer) -> type[BaseHTTPRequestHandler]:
         def _handle(self, method: str) -> None:
             body = self._body()
             route = (method, urlsplit(self.path).path)
-            handled = route in HANDLED_ROUTES
+            handled = route in HANDLED_ROUTES or route in server._acknowledged_routes
             server._record(
                 RecordedRequest(
                     method=method,

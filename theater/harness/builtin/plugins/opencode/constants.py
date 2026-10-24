@@ -6,8 +6,8 @@ OPENCODE_MODEL_ID_KEY = "modelID"
 DB_NAME = "opencode.db"
 #: 2.x servers resume every claimed session in their database at startup, so each 2.x
 #: participant lineage gets its own file and never shares OpenCode's default database.
-V2_DB_NAME = "opencode-v2.db"
-V2_MARKER_NAME = ".opencode-v2"
+LINEAGE_DB_NAME = "opencode-v2.db"
+LINEAGE_MARKER_NAME = ".opencode-v2"
 MODELS_TIMEOUT = 20
 
 WORKING_MARKERS = ("esc interrupt", "again to interrupt")
@@ -42,7 +42,7 @@ _WRITE_TOOLS = frozenset({"write", "edit"})
 #: Rules applied by the plugin's `permission.evaluate` hook: OpenCode
 #: returns configured denies before hooks run and appends saved allows after session rules, so
 #: only the hook decides last.
-_READ_RULES_V2: tuple[dict[str, str], ...] = (
+_READ_RULES: tuple[dict[str, str], ...] = (
     {"action": "*", "resource": "*", "effect": "ask"},
     {"action": "read", "resource": "*", "effect": "allow"},
     {"action": "grep", "resource": "*", "effect": "allow"},
@@ -51,16 +51,16 @@ _READ_RULES_V2: tuple[dict[str, str], ...] = (
     {"action": "read", "resource": "*.env.*", "effect": "ask"},
     {"action": "read", "resource": "*.env.example", "effect": "allow"},
 )
-_APPROVAL_RULES_V2: dict[str, tuple[dict[str, str], ...]] = {
-    "manual": _READ_RULES_V2,
-    "edits": (*_READ_RULES_V2, {"action": "edit", "resource": "*", "effect": "allow"}),
+_APPROVAL_RULES: dict[str, tuple[dict[str, str], ...]] = {
+    "manual": _READ_RULES,
+    "edits": (*_READ_RULES, {"action": "edit", "resource": "*", "effect": "allow"}),
 }
 #: Model access and the question form are not tool side effects; approval leaves them native.
-APPROVAL_EXEMPT_ACTIONS_V2 = ("provider.use", "question")
+APPROVAL_EXEMPT_ACTIONS = ("provider.use", "question")
 #: The 2.x TUI answers asks itself when `cli.json` says `session.permissions: autoaccept`;
 #: this env merges over that file for one process, so manual and edits asks reach the human.
-TUI_CONFIG_ENV_V2 = "OPENCODE_CLI_CONFIG_CONTENT"
-TUI_PROMPTED_PERMISSIONS_V2 = '{"session": {"permissions": "prompt"}}'
+TUI_CONFIG_ENV = "OPENCODE_CLI_CONFIG_CONTENT"
+TUI_PROMPTED_PERMISSIONS = '{"session": {"permissions": "prompt"}}'
 
 #: The legacy bootstrap waits this long for the private server's endpoint banner.
 BOOTSTRAP_READY_TIMEOUT_SECONDS = 20.0

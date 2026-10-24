@@ -20,7 +20,7 @@ from theater.harness.builtin.plugins.opencode import observer as opencode_observ
 from theater.harness.builtin.plugins.opencode.dialect import domain_for
 from theater.harness.builtin.plugins.opencode.mcp import catalog_path
 from theater.harness.builtin.plugins.opencode.observer import OpenCodeObserver
-from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
+from theater.harness.builtin.plugins.opencode.source import OpenCodeSource
 from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
 from theater.harness.builtin.plugins.vibe.isolation import isolation_marker_text
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
@@ -376,7 +376,7 @@ def test_opencode_context_preserves_lineage_and_public_source_shape(monkeypatch,
         return source
 
     with monkeypatch.context() as patch:
-        patch.setattr(opencode_observer, "OpenCodeV2Source", factory)
+        patch.setattr(opencode_observer, "OpenCodeSource", factory)
         assert instance.open_source_context(context) is source
     assert received == {
         "database": lineage,
@@ -390,13 +390,13 @@ def test_opencode_context_preserves_lineage_and_public_source_shape(monkeypatch,
     }
     assert source.collision_domain == domain_for(lineage)
     assert isinstance(
-        instance.open_source(cwd="/work", session_id="session", after=4), OpenCodeV2Source
+        instance.open_source(cwd="/work", session_id="session", after=4), OpenCodeSource
     )
     assert isinstance(
         instance.open_source_for(
             participant_id="participant", cwd="/work", session_id="session", after=4
         ),
-        OpenCodeV2Source,
+        OpenCodeSource,
     )
 
 

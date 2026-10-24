@@ -11,6 +11,8 @@ import zipfile
 from collections.abc import Mapping
 from pathlib import Path
 
+from ..process import run_group
+
 REPO = "openai/codex"
 _DOWNLOAD_TIMEOUT_SECONDS = 600.0
 _API_TIMEOUT_SECONDS = 60.0
@@ -51,15 +53,7 @@ def _run(
     command: list[str], *, cwd: Path, env: Mapping[str, str], timeout: float
 ) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(
-            command,
-            cwd=cwd,
-            env=dict(env),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-        )
+        return run_group(command, cwd=cwd, env=env, timeout=timeout)
     except subprocess.TimeoutExpired as error:
         raise FetchError(f"{' '.join(command)} did not finish within {timeout}s") from error
     except OSError as error:

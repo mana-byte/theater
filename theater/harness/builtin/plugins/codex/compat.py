@@ -81,4 +81,5 @@ def provision(context: ProvisionContext) -> Provisioned:
 COMPAT = CompatManifest(
     provision=provision,
     native_edit=NativeEdit("apply_patch", _ADD_FILE_PATCH),
+    acknowledged_routes=(("POST", "/v1/analytics/codex/turn-costs"),),
 )

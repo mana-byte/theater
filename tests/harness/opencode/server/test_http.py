@@ -19,8 +19,8 @@ from theater.harness.builtin.plugins.opencode.http import (
     read_client_secret,
     validate_loopback_endpoint,
 )
-from theater.harness.builtin.plugins.opencode.http_v2 import OpenCodeV2Client
 from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
+from theater.harness.builtin.plugins.opencode.session_http import OpenCodeSessionClient
 
 # A real loopback server, no transport mocking: write ambiguity and redaction only mean
 # something over a socket.
@@ -194,8 +194,8 @@ async def server():
     await fake.stop()
 
 
-def _client(server: FakeServer, token_file: Path) -> OpenCodeV2Client:
-    return OpenCodeV2Client(endpoint=server.endpoint, token_file=token_file)
+def _client(server: FakeServer, token_file: Path) -> OpenCodeSessionClient:
+    return OpenCodeSessionClient(endpoint=server.endpoint, token_file=token_file)
 
 
 def test_endpoint_validation_accepts_only_bare_loopback() -> None:
@@ -249,7 +249,7 @@ async def test_wrong_password_is_rejected(server: FakeServer, token_file: Path) 
     wrong = token_file.with_name("wrong.token")
     wrong.write_text("not-the-password")
     wrong.chmod(0o600)
-    client = OpenCodeV2Client(endpoint=server.endpoint, token_file=wrong)
+    client = OpenCodeSessionClient(endpoint=server.endpoint, token_file=wrong)
     with pytest.raises(OpenCodeHttpError) as raised:
         await client.version()
     assert raised.value.status == 401
@@ -314,7 +314,7 @@ async def test_connect_refusal_is_unwritten_and_redacted(token_file: Path) -> No
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         reserved = probe.getsockname()[1]
-    client = OpenCodeV2Client(endpoint=f"http://127.0.0.1:{reserved}", token_file=token_file)
+    client = OpenCodeSessionClient(endpoint=f"http://127.0.0.1:{reserved}", token_file=token_file)
     with pytest.raises(OpenCodeHttpError) as raised:
         await client.version()
     assert raised.value.written is False

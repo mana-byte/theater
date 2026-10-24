@@ -20,7 +20,7 @@ from scripts.harness_compat.suite_runner import _load, reconcile, suite_environm
 SUITE = Check("tests/conformance/live", "pass", "10 passed")
 
 
-def _entry(id_: str, scenario: str | None = "test_x.py") -> SuiteRow:
+def _entry(id_: str, scenario: str = "test_x.py") -> SuiteRow:
     return SuiteRow(id_, id_.split(":", maxsplit=1)[0], scenario)
 
 
@@ -69,16 +69,6 @@ def test_every_obligation_becomes_one_check_with_its_outcome() -> None:
         ("conformance:model:model", "error"),
     ]
     assert "nonce missing" in report.checks[2].detail
-
-
-def test_a_family_without_a_scenario_is_a_declared_gap_not_a_failure() -> None:
-    report = _reconcile(
-        _required(_entry("steer:steer", scenario=None)),
-        _inventory(("steer:steer", "unproven", None, "")),
-    )
-
-    assert not report.problems
-    assert report.checks[1] == Check("conformance:steer:steer", "skip", "no live scenario yet")
 
 
 def test_a_scenario_that_never_ran_is_a_tooling_problem_in_a_full_run() -> None:
@@ -183,6 +173,9 @@ def test_a_document_round_trips_through_its_one_contract() -> None:
         ),
         pytest.param(
             _body(_row("a:b", scenario=7)), False, "no scenario module name", id="odd-scenario"
+        ),
+        pytest.param(
+            _body(_row("a:b", scenario=None)), False, "no scenario module name", id="null-scenario"
         ),
     ],
 )

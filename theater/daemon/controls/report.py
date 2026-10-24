@@ -114,6 +114,7 @@ def control_report_to_wire(
         else {
             "model": report.settings.model,
             "reasoning_effort": report.settings.reasoning_effort,
+            "supported_fields": sorted(str(field) for field in report.settings.supported_fields),
         }
     )
     active_turn: dict[str, object] | None = None

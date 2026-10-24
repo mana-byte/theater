@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from tests.support.observation import apply_batch
-from tests.support.opencode_recorder_v2 import RecorderV2, text
+from tests.support.opencode_recorder import Recorder, text
 from tests.support.paths import FIXTURES
 from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from theater.daemon.jobs import JobManager
@@ -92,7 +92,7 @@ def test_vibe_uses_the_user_message_id_as_its_turn_identity():
 
 
 def test_opencode_names_the_turn_after_the_finished_message(tmp_path, workdir):
-    recorder = RecorderV2(tmp_path / "opencode.db", "ses_one", str(workdir))
+    recorder = Recorder(tmp_path / "opencode.db", "ses_one", str(workdir))
     source = OpenCodeObserver(db=recorder.path).open_source(cwd=str(workdir))
     try:
         assert asyncio.run(source.read()).attached is not None

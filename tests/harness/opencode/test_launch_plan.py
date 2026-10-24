@@ -10,14 +10,14 @@ import sys
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import rec as shared_rec
+from tests.support.opencode_recorder import rec as shared_rec
 from tests.support.shipped import OpenCodeHarness
 from theater.harness import theater_mcp_servers
 from theater.harness.builtin.plugins.opencode.dialect import (
     domain_for,
-    v2_database_path,
+    participant_database_path,
 )
-from theater.harness.builtin.plugins.opencode.native_plugin_v2 import (
+from theater.harness.builtin.plugins.opencode.native_plugin import (
     plugin_dir,
 )
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
@@ -69,7 +69,7 @@ def test_a_2x_launch_runs_a_private_server_on_its_own_database(
         mcp_servers=theater_mcp_servers("abc123", "opencode"),
     )
 
-    database = v2_database_path("abc123")
+    database = participant_database_path("abc123")
     bootstrap = config.with_suffix(".bootstrap.py")
     assert plan.argv == [sys.executable, str(bootstrap)]
     assert plan.env == {"OPENCODE_CONFIG": str(config), "OPENCODE_DB": str(database)}
@@ -195,7 +195,7 @@ def test_yolo_auto_accepts_and_a_resume_continues_its_known_session(tmp_path, fa
 
 
 def test_a_resume_stays_in_its_lineage_and_never_crosses_releases(tmp_path):
-    lineage = v2_database_path("first")
+    lineage = participant_database_path("first")
     lineage.parent.mkdir(parents=True)
     lineage.touch()
     predecessor = Participant(id="second", transcript_domain=domain_for(lineage))

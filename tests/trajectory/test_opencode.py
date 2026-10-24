@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import attached, text, tool
-from tests.support.opencode_recorder_v2 import rec as shared_rec
+from tests.support.opencode_recorder import attached, text, tool
+from tests.support.opencode_recorder import rec as shared_rec
 from tests.support.shipped import OpenCodeObserver
 from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.opencode.constants import LIVE_TRAJECTORY_STATE_LIMIT

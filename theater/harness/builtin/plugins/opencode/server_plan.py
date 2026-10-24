@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from theater import paths
+from theater.harness.contracts import version_probe
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
     RuntimeCompatibility,
@@ -20,13 +21,14 @@ from theater.harness.contracts.runtime import (
 from .constants import MODELS_TIMEOUT
 from .dialect import (
     domain_for,
+    lineage_marker,
+    participant_database_path,
     require_supported_version,
     resolve_binary,
-    v2_database_path,
-    v2_lineage_marker,
 )
-from .native_plugin_v2 import plugin_dir, render_native_plugin_v2
+from .native_plugin import plugin_dir, render_native_plugin
 from .runtime_plan import (
+    _VERSION,
     OPENCODE_SERVER_COMPATIBILITY_POLICY,
     SERVER_STDOUT_MAX_BYTES,
     VERSION_POLICY,
@@ -61,12 +63,12 @@ def plan_opencode_server(context: RuntimePlanningContext) -> RuntimePlan:
     }
     if context.model:
         config["model"] = context.model
-    database = v2_database_path(participant_id)
-    marker, marker_text = v2_lineage_marker(participant_id)
+    database = participant_database_path(participant_id)
+    marker, marker_text = lineage_marker(participant_id)
     files = {
         config_path: json.dumps(config, indent=2),
         marker: marker_text,
-        **render_native_plugin_v2(participant_id, config_path, token_path, context.approval or ""),
+        **render_native_plugin(participant_id, config_path, token_path, context.approval or ""),
     }
     backend = LaunchPlan(
         argv=[
@@ -99,13 +101,15 @@ def probe_opencode_server_compatibility(context: RuntimeProbeContext) -> Runtime
     try:
         # Both read-only checks stay mandatory; the scoped pool joins them on failure too.
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="opencode-probe") as pool:
-            version_future = pool.submit(_run_probe, [binary, "--version"])
+            version_future = pool.submit(
+                version_probe.probe_release, binary, _VERSION, timeout=MODELS_TIMEOUT
+            )
             help_future = pool.submit(_run_probe, [binary, "serve", "--help"])
-            version_run, help_run = version_future.result(), help_future.result()
+            reported, help_run = version_future.result(), help_future.result()
     except (OSError, subprocess.SubprocessError) as exc:
         return _unsupported(f"could not run read-only OpenCode server probes: {exc}")
-    version = parse_opencode_version(f"{version_run.stdout}\n{version_run.stderr}")
-    if version_run.returncode != 0 or version is None:
+    version = parse_opencode_version(reported) if reported is not None else None
+    if version is None:
         return _unsupported("opencode --version did not report a usable release")
     rendered = release_text(version)
     if not VERSION_POLICY.admits(rendered):

@@ -12,6 +12,7 @@ import itertools
 import os
 import pwd
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -183,6 +184,21 @@ def _toml_list(values: tuple[str, ...]) -> str:
     return "[" + ", ".join(f'"{value}"' for value in values) + "]"
 
 
+def _install_theater_cli(directory: Path) -> Path:
+    """MCP and hook children must import the code copy even when their CLI drops PYTHONPATH."""
+    directory.mkdir(parents=True, exist_ok=True)
+    command = directory / "theater"
+    command.write_text(
+        "#!/bin/sh\n"
+        f"export PYTHONPATH={shlex.quote(python_path(REPO_ROOT))}\n"
+        "export PYTHONDONTWRITEBYTECODE=1\n"
+        f'exec {shlex.quote(sys.executable)} -m theater.cli "$@"\n',
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    return command
+
+
 @dataclass(frozen=True)
 class HeldTurn:
     """A turn whose model answer is held open, and the job that will carry its result."""
@@ -235,7 +251,9 @@ class LiveRig:
         evidence = session.evidence_dir / label
         async with contextlib.AsyncExitStack() as cleanup:  # undone in reverse, whatever came up
             mock = MockServer(
-                session.evidence_dir / f"{label}.requests.jsonl", models=LOGICAL_MODELS
+                session.evidence_dir / f"{label}.requests.jsonl",
+                models=LOGICAL_MODELS,
+                acknowledged_routes=harness.compat.acknowledged_routes,
             )
             mock.start()
             cleanup.callback(mock.stop)
@@ -587,8 +605,11 @@ def _prepare(
         assert_isolated(session.sandbox_root, path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+    binary_dir = root / "b"
+    _install_theater_cli(binary_dir)
+    (binary_dir / harness.binary).symlink_to(session.binary)
     env = hermetic_environment(
-        root, token=session.token, binary_dir=session.binary.parent, extra=provisioned.env
+        root, token=session.token, binary_dir=binary_dir, extra=provisioned.env
     )
     assert_isolated(session.sandbox_root, Path(env["THEATER_HOME"]), Path(env["HOME"]))
     theater_dir = root / "th"

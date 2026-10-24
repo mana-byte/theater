@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from tests.support.opencode_recorder_v2 import attached, text
-from tests.support.opencode_recorder_v2 import rec as shared_rec
+from tests.support.opencode_recorder import attached, text
+from tests.support.opencode_recorder import rec as shared_rec
 from tests.support.shipped import OpenCodeObserver
 from theater.models import Status
 from theater.provenance import TranscriptProvenance

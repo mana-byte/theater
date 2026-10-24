@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 from theater.harness.contracts.version_policy import version_key
@@ -14,7 +14,7 @@ from .contract import Adapter, Check, InstallFailed, Result, Sandbox
 from .diagnostics import clip_diagnostic
 from .policy import admit_only, load_policy
 from .sandbox import make_sandbox
-from .suite_runner import SUITE_TIMEOUT_SECONDS, installed_version, run_suite, verdict
+from .suite_runner import installed_version, run_suite, verdict
 
 
 def qualify_binary(
@@ -25,14 +25,12 @@ def qualify_binary(
     version: str,
     *,
     pytest_args: Sequence[str] = (),
-    extra_env: Mapping[str, str] | None = None,
-    timeout: float = SUITE_TIMEOUT_SECONDS,
 ) -> Result:
     """Run the full live suite for ``binary`` in a disposable copy of ``root``.
 
     A release the policy does not admit would be refused by the plugin's own gate, which says
     nothing about behaviour: the copy admits just this release, and only the copy. Only a whole,
-    unfiltered run can be green: ``pytest_args`` or ``extra_env`` cap the outcome at inconclusive.
+    unfiltered run can be green; suite reconciliation enforces that rule.
     """
     version_key(version)
     binary = binary.resolve()
@@ -47,23 +45,13 @@ def qualify_binary(
                 binary=binary,
                 version=version,
                 pytest_args=pytest_args,
-                timeout=timeout,
-                extra_env=extra_env,
             )
     except CleanupFailed:
         raise
     except Exception as exc:
         detail = clip_diagnostic(f"{type(exc).__name__}: {exc}", 400, tail=True)
         return Result(name, version, "tooling", (Check("qualification", "error", detail),))
-    outcome, checks = verdict(report), report.checks
-    if pytest_args or extra_env:
-        # A filtered or mutated run proves a part of the suite at most: it can never authorize.
-        checks = (
-            *checks,
-            Check("filtered", "skip", "part of the suite ran; nothing is authorized"),
-        )
-        outcome = "inconclusive" if outcome == "green" else outcome
-    return Result(name, version, outcome, checks)
+    return Result(name, version, verdict(report), report.checks)
 
 
 def install_verified(adapter: Adapter, sb: Sandbox, version: str) -> Path:

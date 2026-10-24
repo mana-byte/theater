@@ -851,6 +851,7 @@ def _validate_compat(name: str, manifest: HarnessManifest) -> None:
         _validate_text(name, "compat.canaries", canary)
     if len(set(compat.canaries)) != len(compat.canaries):
         _fail(name, "compat.canaries", "mutation names must be unique")
+    _validate_acknowledged_routes(name, compat.acknowledged_routes)
     if compat.native_edit is not None:
         if "edits" not in manifest.launch.approvals:
             _fail(name, "compat.native_edit", "requires launch.approvals to include 'edits'")
@@ -859,6 +860,19 @@ def _validate_compat(name: str, manifest: HarnessManifest) -> None:
         _validate_tool_template(
             name, "compat.mcp_call", compat.mcp_call, McpCall, "tool", "arguments"
         )
+
+
+def _validate_acknowledged_routes(name: str, routes: object) -> None:
+    if not isinstance(routes, tuple):
+        _fail(name, "compat.acknowledged_routes", "must be a tuple of (method, path) pairs")
+    for route in routes:
+        if not isinstance(route, tuple) or len(route) != 2:
+            _fail(name, "compat.acknowledged_routes", "must contain (method, path) pairs")
+        method, path = route
+        _validate_text(name, "compat.acknowledged_routes.method", method)
+        _validate_text(name, "compat.acknowledged_routes.path", path)
+        if method not in {"GET", "POST"} or not path.startswith("/"):
+            _fail(name, "compat.acknowledged_routes", "requires GET/POST and an absolute URL path")
 
 
 def _validate_tool_template(

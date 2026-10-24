@@ -29,20 +29,20 @@ from theater.harness.contracts.runtime import (
 )
 from theater.harness.contracts.source import Source
 
-from . import ids_v2
-from .approval_v2 import require_plugin_active
+from . import ids
+from .approval import require_plugin_active
 from .dialect import resolve_binary
 from .http import OpenCodeHttpError
-from .http_v2 import OpenCodeV2Client, model_ref, server_time, session_directory
-from .launch import tui_env_v2
-from .native_plugin_v2 import PLUGIN_ID, plugin_dir
+from .launch import tui_env
+from .native_plugin import PLUGIN_ID, plugin_dir
 from .runtime_plan import (
     OPENCODE_SERVER_COMPATIBILITY_POLICY,
     VERSION_POLICY,
 )
 from .runtime_policy import send_capabilities, server_http_refusal, valid_prompt
-from .server_live_v2 import OpenCodeV2LiveSource
+from .server_live import OpenCodeLiveSource
 from .server_plan import SERVER_SECRET_ENV
+from .session_http import OpenCodeSessionClient, model_ref, server_time, session_directory
 
 _PROTOCOL = "opencode-server-http-v2"
 _POLL_SECONDS = 0.5
@@ -50,7 +50,7 @@ _POLL_SECONDS = 0.5
 _READ_SECONDS = 5.0
 
 
-class OpenCodeServerV2Runtime(HarnessRuntime):
+class OpenCodeServerRuntime(HarnessRuntime):
     """One participant's session on its own stock 2.x `opencode serve` process."""
 
     def __init__(self, context: RuntimeContext) -> None:
@@ -60,8 +60,10 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
                 "core-minted runtime credential before it connects"
             )
         self.context = context
-        self._client = OpenCodeV2Client(endpoint=context.endpoint, token_file=context.token_file)
-        self._source = OpenCodeV2LiveSource()
+        self._client = OpenCodeSessionClient(
+            endpoint=context.endpoint, token_file=context.token_file
+        )
+        self._source = OpenCodeLiveSource()
         self._session_id: str | None = None
         self._poll_task: asyncio.Task[None] | None = None
         #: Serializes reads so a late answer never lands after a newer one.
@@ -141,7 +143,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
             argv.append("--auto")
         return LaunchPlan(
             argv=argv,
-            env=tui_env_v2(self.context.approval),
+            env=tui_env(self.context.approval),
             secret_env={SERVER_SECRET_ENV: Path(self.context.token_file)},
         )
 
@@ -203,7 +205,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
                 error_code="not_ready",
                 error="the session's idle state is not proven; Theater queues the input instead",
             )
-        message_id = ids_v2.message_id()
+        message_id = ids.message_id()
         try:
             # `queue`, not the default `steer`: a turn a human started meanwhile is not amended.
             admitted = await self._client.prompt(
@@ -381,7 +383,7 @@ def _gated(operation_id: str, detail: str) -> ControlReceipt:
 
 
 def opencode_server_runtime_factory(context: RuntimeContext) -> HarnessRuntime:
-    return OpenCodeServerV2Runtime(context)
+    return OpenCodeServerRuntime(context)
 
 
-__all__ = ["OpenCodeServerV2Runtime", "opencode_server_runtime_factory"]
+__all__ = ["OpenCodeServerRuntime", "opencode_server_runtime_factory"]

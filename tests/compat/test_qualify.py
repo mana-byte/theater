@@ -211,20 +211,16 @@ def test_an_excluded_release_is_admitted_alone_too(
     assert suite.calls[0]["policy"] == VersionPolicy("1.1.0", "1.1.0")
 
 
-def test_pytest_arguments_and_the_mutation_environment_reach_the_suite(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pytest_arguments_reach_the_suite(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     suite = _Suite(_green())
     monkeypatch.setattr(qualify, "run_suite", suite)
 
     with make_sandbox("claude") as sb:
         qualify.qualify_binary(
-            repo, sb, "claude", Path("claude"), "1.1.0", pytest_args=["-k", "mcp"],
-            extra_env={"X": "1"},
-        )  # fmt: skip
+            repo, sb, "claude", Path("claude"), "1.1.0", pytest_args=["-k", "mcp"]
+        )
 
     assert suite.calls[0]["pytest_args"] == ["-k", "mcp"]
-    assert suite.calls[0]["extra_env"] == {"X": "1"}
 
 
 def test_machinery_that_breaks_is_tooling_never_a_verdict_on_the_release(
@@ -472,12 +468,16 @@ def mini_suite(repo: Path, git: Git) -> Path:
     ],
 )
 def test_a_real_suite_run_in_the_copy_reaches_its_verdict(
-    mini_suite: Path, env: dict[str, str], verdict: str
+    mini_suite: Path, env: dict[str, str], verdict: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    original = qualify.run_suite
+
+    def configured(*args, **kwargs):
+        return original(*args, **kwargs, extra_env=env)
+
+    monkeypatch.setattr(qualify, "run_suite", configured)
     with make_sandbox("claude") as sb:
-        result = qualify.qualify_binary(
-            mini_suite, sb, "claude", Path("/nowhere/claude"), "1.9.0", extra_env=env
-        )
+        result = qualify.qualify_binary(mini_suite, sb, "claude", Path("/nowhere/claude"), "1.9.0")
 
     assert result.verdict == verdict, result.checks
     assert load_policy(mini_suite, "claude") == VersionPolicy("1.0.0", "1.2.0")
@@ -486,20 +486,17 @@ def test_a_real_suite_run_in_the_copy_reaches_its_verdict(
     assert ("conformance:launch:yolo" in names) == (verdict != "tooling")
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [{"pytest_args": ["-k", "launch"]}, {"extra_env": {"HARNESS_COMPAT_MUTATION": "x"}}],
-)
-def test_a_filtered_or_mutated_qualification_can_never_authorize(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, arguments: dict
+def test_a_filtered_qualification_can_never_authorize(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(qualify, "run_suite", _Suite(_green()))
+    monkeypatch.setattr(qualify, "run_suite", _Suite(SuiteReport(_green().checks, partial=True)))
 
     with make_sandbox("claude") as sb:
-        result = qualify.qualify_binary(repo, sb, "claude", Path("claude"), "1.1.0", **arguments)
+        result = qualify.qualify_binary(
+            repo, sb, "claude", Path("claude"), "1.1.0", pytest_args=["-k", "launch"]
+        )
 
     assert result.verdict == "inconclusive"
-    assert result.checks[-1].name == "filtered"
 
 
 def test_a_filtered_qualification_that_fails_is_still_red(

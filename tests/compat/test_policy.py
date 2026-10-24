@@ -95,11 +95,16 @@ def test_admitted_releases_that_failed_and_excluded_releases_that_passed_disagre
         result("1.2.0"),
         result("1.3.0"),
         result("1.4.0", "red"),
+        result("1.5.0"),
     )
 
     found = [(item.version, item.kind) for item in mismatches(policy, results)]
 
-    assert found == [("1.1.0", "regression"), ("1.2.0", "stale-exclusion")]
+    assert found == [
+        ("1.1.0", "regression"),
+        ("1.2.0", "stale-exclusion"),
+        ("1.5.0", "advance"),
+    ]
 
 
 def test_the_file_is_one_compact_line() -> None:
@@ -269,9 +274,12 @@ def test_edits_outside_every_plugin_select_no_harness(repo: Path, git: Git) -> N
     "path",
     [
         "theater/daemon/controls/service.py",
+        "theater/harness/builtin/plugins/__init__.py",
         "packages/regie/src/regie/bridge.py",
         "scripts/harness_compat/qualify.py",
         "tests/support/live_rig.py",
+        "tests/support/channel_oracles.py",
+        "tests/support/process_table.py",
         "tests/conftest.py",
         "pyproject.toml",
     ],

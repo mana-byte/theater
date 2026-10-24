@@ -59,7 +59,7 @@ from .server_plan import (
     plan_opencode_server,
     probe_opencode_server_compatibility,
 )
-from .server_runtime_v2 import opencode_server_runtime_factory
+from .server_runtime import opencode_server_runtime_factory
 
 _NATIVE_HOOKS = HookChannelManifest(
     declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),

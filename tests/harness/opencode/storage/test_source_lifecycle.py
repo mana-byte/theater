@@ -5,14 +5,14 @@ import threading
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import rec as shared_rec
-from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
+from tests.support.opencode_recorder import rec as shared_rec
+from theater.harness.builtin.plugins.opencode.source import OpenCodeSource
 
 rec = shared_rec
 
 
 async def test_close_waits_for_a_cancelled_read_worker(rec, workdir, monkeypatch):
-    source = OpenCodeV2Source(rec.path, cwd=str(workdir), session_id=rec.sid)
+    source = OpenCodeSource(rec.path, cwd=str(workdir), session_id=rec.sid)
     assert (await source.read()).attached is not None
     source.commit_attachment()
     connection = source._conn

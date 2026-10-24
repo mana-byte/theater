@@ -12,7 +12,7 @@ OPENCODE_SERVER_COMPATIBILITY_POLICY = (
     f"opencode-server-native-controls-{VERSION_POLICY.minimum}-compatible"
 )
 SERVER_STDOUT_MAX_BYTES = 65_536
-_VERSION = re.compile(r"(?:opencode[ \t]+)?v?(\S+)")
+_VERSION = re.compile(r"\A(?:opencode[ \t]+)?v?(\S+)\Z")
 
 
 def release_text(version: tuple[int, int, int]) -> str:

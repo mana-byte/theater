@@ -42,8 +42,8 @@ class SuiteRow:
 
     id: str
     family: str
-    #: The live test module that proves the family; None while no scenario exists.
-    scenario: str | None
+    #: The live test module that exercises the family.
+    scenario: str
     #: Inventory only: whether a scenario ran for it (None in a promise), and how it ended.
     executed: bool | None = None
     outcome: str | None = None
@@ -66,11 +66,8 @@ class SuiteRow:
         name, family = body.get("id"), body.get("family")
         if not (isinstance(name, str) and name and isinstance(family, str) and family):
             raise SuiteDocumentError(f"holds a row without an id and a family: {body!r}")
-        # A missing key is not a declared gap: only an explicit null says no scenario exists yet.
-        if "scenario" not in body or not isinstance(
-            scenario := body["scenario"], (str, type(None))
-        ):
-            raise SuiteDocumentError(f"gives {name} no scenario module name (or an explicit null)")
+        if not isinstance(scenario := body.get("scenario"), str) or not scenario:
+            raise SuiteDocumentError(f"gives {name} no scenario module name")
         if not inventory:
             return cls(name, family, scenario)
         status, outcome, detail = body.get("status"), body.get("outcome"), body.get("detail", "")

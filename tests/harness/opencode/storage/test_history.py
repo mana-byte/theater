@@ -6,12 +6,12 @@ import asyncio
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import USAGE, text, tool
-from tests.support.opencode_recorder_v2 import rec as shared_rec
+from tests.support.opencode_recorder import USAGE, text, tool
+from tests.support.opencode_recorder import rec as shared_rec
 from theater.harness import EventKind, TurnTerminal
 from theater.harness.base import MAX_TEXT
 from theater.harness.builtin.plugins.opencode.constants import HISTORY_MESSAGE_BATCH
-from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
+from theater.harness.builtin.plugins.opencode.source import OpenCodeSource
 
 rec = shared_rec
 
@@ -28,7 +28,7 @@ def test_history_reads_a_tool_turn_without_polling_and_bounds_visible_events(rec
     )
     rec.step("msg_a2", rec.tick(), [text("answer")], finish="stop", times={"completed": rec.tick()})
     rec.idle("msg_i1", "succeeded")
-    src = OpenCodeV2Source(rec.path, cwd=str(workdir), session_id=rec.sid)
+    src = OpenCodeSource(rec.path, cwd=str(workdir), session_id=rec.sid)
 
     history = asyncio.run(src.history(last_n=0))
     assert history.location == "opencode://ses_one"
@@ -48,7 +48,7 @@ def test_history_reads_a_tool_turn_without_polling_and_bounds_visible_events(rec
 def test_history_does_not_clip_large_completed_text(rec, workdir):
     long = "x" * (MAX_TEXT + 500)
     rec.step("msg_a1", rec.tick(), [text(long)], finish="stop", times={"completed": rec.tick()})
-    src = OpenCodeV2Source(rec.path, cwd=str(workdir))
+    src = OpenCodeSource(rec.path, cwd=str(workdir))
     assert asyncio.run(src.history(last_n=0)).events[-1].text == long
 
 
@@ -70,7 +70,7 @@ def test_cold_history_classifies_the_idle_boundary(rec, workdir, outcome, termin
         times={"completed": rec.tick()},
     )
     rec.idle("msg_i1", outcome)
-    history = asyncio.run(OpenCodeV2Source(rec.path, cwd=str(workdir)).history(last_n=0))
+    history = asyncio.run(OpenCodeSource(rec.path, cwd=str(workdir)).history(last_n=0))
     ends = [event for event in history.events if event.turn_end]
     assert len(ends) == 1 and ends[0].turn_terminal is terminal
 
@@ -87,12 +87,12 @@ def test_bounded_history_scans_past_usage_only_batches(rec, workdir):
             **USAGE,
         )
     rec.user("new-user", "new")
-    history = asyncio.run(OpenCodeV2Source(rec.path, cwd=str(workdir)).history(last_n=2))
+    history = asyncio.run(OpenCodeSource(rec.path, cwd=str(workdir)).history(last_n=2))
     assert [event.text for event in history.events if not event.usage_only] == ["old", "new"]
 
 
 def test_history_of_a_directory_without_a_session_is_empty(rec, tmp_path):
     other = tmp_path / "elsewhere"
     other.mkdir()
-    history = asyncio.run(OpenCodeV2Source(rec.path, cwd=str(other)).history(last_n=0))
+    history = asyncio.run(OpenCodeSource(rec.path, cwd=str(other)).history(last_n=0))
     assert history.location is None and not history.events

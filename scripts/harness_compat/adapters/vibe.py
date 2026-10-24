@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .. import github
 from ..contract import InstallFailed, Sandbox
+from ..process import run_group
 
 #: Every supported release (3.0.2 and up) requires Python 3.14 (`requires-python >=3.14`).
 _PYTHON = "3.14"
@@ -40,15 +41,7 @@ class VibeAdapter:
             f"mistral-vibe=={version}",
         ]
         try:
-            run = subprocess.run(
-                command,
-                cwd=sb.root,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=240,
-                check=False,
-            )
+            run = run_group(command, cwd=sb.root, env=env, timeout=240)
         except (OSError, subprocess.SubprocessError) as exc:
             raise InstallFailed(
                 f"uv tool install mistral-vibe=={version} did not run: {exc}"

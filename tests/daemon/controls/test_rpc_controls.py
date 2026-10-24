@@ -138,7 +138,11 @@ async def test_controls_reports_the_native_snapshot(client, daemon):
     assert controls["backend_generation"] == 1
     assert controls["native_session_id"] == "thread-1"
     assert controls["health"] == {"connection": "connected", "diagnostics": []}
-    assert controls["settings"] == {"model": None, "reasoning_effort": None}
+    assert controls["settings"] == {
+        "model": None,
+        "reasoning_effort": None,
+        "supported_fields": ["model", "reasoning_effort"],
+    }
     assert controls["active_turn"]["job_handle"] == job["handle"]
     assert controls["active_turn"]["native_turn_id"] is not None
     assert controls["queued"] == []
@@ -160,10 +164,18 @@ async def test_private_controls_refreshes_snapshot_and_frontend_reads_cache(clie
     state.settings["model"] = "new-model"
 
     before = await controls_get(daemon, None, {"participant_id": child.id})
-    assert before["settings"] == {"model": None, "reasoning_effort": None}
+    assert before["settings"] == {
+        "model": None,
+        "reasoning_effort": None,
+        "supported_fields": ["model", "reasoning_effort"],
+    }
 
     private = await client.call("participant.controls", target=child.id)
-    assert private["settings"] == {"model": "new-model", "reasoning_effort": None}
+    assert private["settings"] == {
+        "model": "new-model",
+        "reasoning_effort": None,
+        "supported_fields": ["model", "reasoning_effort"],
+    }
 
     after = await controls_get(daemon, None, {"participant_id": child.id})
     assert after["settings"] == private["settings"]

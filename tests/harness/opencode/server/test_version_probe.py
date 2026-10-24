@@ -28,6 +28,7 @@ from theater.harness.builtin.plugins.opencode.runtime_plan import (
 from theater.harness.builtin.plugins.opencode.server_plan import (
     probe_opencode_server_compatibility,
 )
+from theater.harness.contracts import version_probe
 from theater.harness.contracts.runtime import (
     RuntimeProbeContext,
 )
@@ -133,11 +134,6 @@ def test_probe_rejects_noncanonical_or_unstable_releases(monkeypatch, version):
     assert not refused.supported and refused.native_version is None
 
 
-@pytest.fixture(autouse=True)
-def _fresh_version_cache(monkeypatch):
-    monkeypatch.setattr(dialect, "_versions", {})
-
-
 def test_resolve_binary_pins_the_absolute_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -205,9 +201,9 @@ def test_a_failed_probe_expires_and_recovers_on_an_unchanged_file(
     identity = binary.stat()
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.delenv(dialect.VERSION_ENV, raising=False)
-    monkeypatch.setattr(dialect, "_FAILURE_CACHE_SECONDS", 0.05)
+    monkeypatch.setattr(version_probe, "_FAILURE_BACKOFF", 0.05)
     clock = [1000.0]
-    monkeypatch.setattr(dialect.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(version_probe.time, "monotonic", lambda: clock[0])
 
     assert installed_version("opencode") is None
     assert len(counter.read_text().splitlines()) == 1

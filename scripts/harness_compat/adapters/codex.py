@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import tarfile
 import tempfile
 import urllib.error
@@ -12,6 +11,7 @@ from pathlib import Path
 
 from .. import github
 from ..contract import InstallFailed, Sandbox
+from ..process import run_group
 from . import codex_release
 
 _TAG_PREFIX = "rust-v"
@@ -28,7 +28,7 @@ def _public_git_tags() -> list[str]:
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_ASKPASS": os.devnull,
         }
-        done = subprocess.run(
+        done = run_group(
             [
                 "git",
                 "-c",
@@ -37,11 +37,9 @@ def _public_git_tags() -> list[str]:
                 "--tags",
                 f"https://github.com/{codex_release.REPO}.git",
             ],
+            cwd=Path(home),
             env=env,
-            capture_output=True,
-            text=True,
             timeout=60,
-            check=False,
         )
     if done.returncode:
         raise RuntimeError(f"Codex public tags unavailable: {done.stderr[-400:]}")

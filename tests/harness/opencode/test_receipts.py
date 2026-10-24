@@ -10,15 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import SCHEMA
-from tests.support.opencode_recorder_v2 import rec as shared_rec
+from tests.support.opencode_recorder import SCHEMA
+from tests.support.opencode_recorder import rec as shared_rec
 from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
 from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.harness.builtin.plugins.opencode.mcp import catalog_path
-from theater.harness.builtin.plugins.opencode.native_plugin_v2 import plugin_dir
+from theater.harness.builtin.plugins.opencode.native_plugin import plugin_dir
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import SourceContractError
 from theater.protocol import RemoteError

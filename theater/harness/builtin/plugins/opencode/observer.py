@@ -20,12 +20,17 @@ from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 
 from .constants import DB_NAME
-from .dialect import domain_for, is_v2_participant, v2_database_for_domain, v2_database_path
+from .dialect import (
+    database_for_domain,
+    domain_for,
+    has_isolated_database,
+    participant_database_path,
+)
 from .identity import admit_operator_candidate, transcript_candidates, validate_receipt_session_id
 from .mcp import catalog_path
-from .native_plugin_v2 import plugin_dir
+from .native_plugin import plugin_dir
 from .screen import is_idle_screen, screen_reading
-from .source_v2 import OpenCodeV2Source
+from .source import OpenCodeSource
 
 
 def data_dir() -> Path:
@@ -68,7 +73,7 @@ class OpenCodeObserver:
         session_id: str | None = None,
         after: float | None = None,
     ) -> Source:
-        return OpenCodeV2Source(self.db, cwd=cwd, session_id=session_id, after=after)
+        return OpenCodeSource(self.db, cwd=cwd, session_id=session_id, after=after)
 
     def open_source_for(
         self,
@@ -85,7 +90,7 @@ class OpenCodeObserver:
             if self.correlation_dir is not None
             else paths.mcp_config_path(participant_id)
         )
-        return OpenCodeV2Source(
+        return OpenCodeSource(
             self.db,
             cwd=cwd,
             session_id=session_id,
@@ -97,16 +102,16 @@ class OpenCodeObserver:
         )
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
-        lineage = v2_database_for_domain(context.transcript_domain)
+        lineage = database_for_domain(context.transcript_domain)
         if (
             lineage is None
             and context.participant_scoped
-            and is_v2_participant(context.participant_id)
+            and has_isolated_database(context.participant_id)
         ):
-            lineage = v2_database_path(context.participant_id)
-        return self._open_v2_source(context, lineage or self.db)
+            lineage = participant_database_path(context.participant_id)
+        return self._open_source(context, lineage or self.db)
 
-    def _open_v2_source(self, context: ParticipantObservationContext, db: Path) -> Source:
+    def _open_source(self, context: ParticipantObservationContext, db: Path) -> Source:
         """An isolated participant reads its own lineage database."""
         receipt_expected = False
         mcp_catalog = None
@@ -118,7 +123,7 @@ class OpenCodeObserver:
             )
             receipt_expected = plugin_dir(config_path).exists()
             mcp_catalog = catalog_path(context.participant_id, self.correlation_dir)
-        source = OpenCodeV2Source(
+        source = OpenCodeSource(
             db,
             cwd=context.cwd,
             session_id=context.session_id,
@@ -144,7 +149,7 @@ class OpenCodeObserver:
         domain: str | None = None,
         after: float | None = None,
     ) -> list[TranscriptCandidate]:
-        db = v2_database_for_domain(domain) or self.db
+        db = database_for_domain(domain) or self.db
         return transcript_candidates(db, cwd=cwd, domain=domain, after=after)
 
     def admit_operator_candidate(
@@ -156,7 +161,7 @@ class OpenCodeObserver:
         after: float | None = None,
     ) -> TranscriptCandidate:
         return admit_operator_candidate(
-            v2_database_for_domain(domain) or self.db,
+            database_for_domain(domain) or self.db,
             cwd=cwd,
             candidate=candidate,
             domain=domain,

@@ -22,7 +22,7 @@ _ADMISSION_GRACE_SECONDS = 5.0
 _DISCONNECTED_AFTER = 3
 
 
-class OpenCodeV2LiveSource(Source):
+class OpenCodeLiveSource(Source):
     """Polled execution state; the transcript source stays completion authority."""
 
     def __init__(self) -> None:
@@ -139,4 +139,4 @@ class OpenCodeV2LiveSource(Source):
         return None
 
 
-__all__ = ["OpenCodeV2LiveSource"]
+__all__ = ["OpenCodeLiveSource"]

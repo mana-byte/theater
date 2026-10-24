@@ -42,7 +42,7 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 | `provider/` | Terminal-provider API: fencing, controls, adoption, process |
 | `frontend/` | Public SDK, socket, schemas and handshake |
 | `harness/core/` | Harness contracts and shared behaviour, split into `channels/`, `composite/`, `launch/`, `manifests/`, `parse/`, `plugins/` |
-| `harness/<name>/` | Per-harness plugin behaviour: claude, codex (`runtime/`), opencode (`server/`, `v2/`, `storage/`, `frontend/`), pi, vibe (`unified_store/`) |
+| `harness/<name>/` | Per-harness plugin behaviour: claude, codex (`runtime/`), opencode (`server/`, `storage/`), pi, vibe (`unified_store/`) |
 | `transcripts/` | Transcript sources, identity, paging, recovery; `collision/` and `source/` hold the large suites |
 | `trajectory/` | Harness-neutral trajectory records, tools, causality, telemetry |
 | `observability/` | Metrics, tracing, logging and signals |

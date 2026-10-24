@@ -155,6 +155,10 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "HookBinding.delivery=RETRIED",
         "HookBinding.correlation",
         "HookBinding.decoder",
+    ),
+    _exempt(
+        "available OTel channels have no live payload scenario and make qualification "
+        "inconclusive; the channels family keeps their required obligation",
         "OtelChannelManifest.declaration",
         "OtelChannelManifest.protocol",
         "OtelChannelManifest.protocol=OTLP_HTTP_JSON",
@@ -241,8 +245,12 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "CompatManifest.canaries",
     ),
     _exempt(
-        "declared v1 gap: stimulating a native child needs a CLI-specific task the mock cannot "
-        "script generically",
+        "mock acknowledgements for non-model side channels; protocol routes cannot be replaced "
+        "and these requests never consume a scripted model reply",
+        "CompatManifest.acknowledged_routes",
+    ),
+    _exempt(
+        "stimulating a native child needs a CLI-specific task the mock cannot script generically",
         "ObservationManifest.lineage",
         "LineageManifest.native_children",
         "ChannelCapability.signal=LINEAGE",
@@ -314,7 +322,7 @@ COVERAGE: Mapping[str, Coverage] = _merge(
     ),
     _exempt(
         "an unavailable channel wires nothing a CLI could exercise, and the day a plugin declares "
-        "it available the channels family derives channels:<id> and proves it",
+        "it available the channels family derives a required obligation",
         "HookChannelManifest.unavailable_reason",
         "OtelChannelManifest.unavailable_reason",
         "UnavailableChannelManifest.declaration",

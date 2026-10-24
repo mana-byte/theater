@@ -374,7 +374,9 @@ async def test_provider_preparation_keeps_participant_unbound(
     assert reservation.req == req
 
 
-async def test_provider_preparation_writes_config_files(registry, monkeypatch):
+async def test_provider_preparation_writes_config_files(
+    registry, monkeypatch, available_harness_binaries
+):
     """Config files are written during preparation, before terminal creation.
 
     Uses the claude harness, which writes its MCP config into plan.files.

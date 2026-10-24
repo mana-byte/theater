@@ -9,6 +9,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from theater.harness.contracts import version_probe
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
     RuntimeCompatibility,
@@ -90,27 +91,23 @@ def codex_endpoint_url(endpoint: str) -> str:
     return f"unix://{endpoint}"
 
 
-def parse_codex_version(output: str) -> str | None:
-    """Extract the exact installed codex-cli version from ``--version`` output."""
-    match = _VERSION_TOKEN.search(output)
-    if match is None:
-        return None
-    return match.group(1)
-
-
 def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
     """Read-only probe of installed codex-cli against the qualified release range."""
     binary = context.binary or CODEX_BINARY
     version: str | None = None
     try:
-        completed = subprocess.run(
-            [binary, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=CODEX_RUNTIME_PROBE_TIMEOUT_SECONDS,
-            check=False,
+        version = version_probe.probe_release(
+            binary, _VERSION_TOKEN, timeout=CODEX_RUNTIME_PROBE_TIMEOUT_SECONDS
         )
-        output = f"{completed.stdout}\n{completed.stderr}"
+    except subprocess.CalledProcessError as error:
+        return RuntimeCompatibility(
+            supported=False,
+            policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
+            reason=(
+                f"codex --version exited with {error.returncode}; "
+                "refusing an unverified CLI release"
+            ),
+        )
     except (OSError, subprocess.SubprocessError) as error:
         return RuntimeCompatibility(
             supported=False,
@@ -121,24 +118,13 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
                 "refusing an unverified CLI release"
             ),
         )
-    if completed.returncode != 0:
-        return RuntimeCompatibility(
-            supported=False,
-            policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
-            native_version=None,
-            reason=(
-                f"codex --version exited with {completed.returncode}; "
-                "refusing an unverified CLI release"
-            ),
-        )
-    version = parse_codex_version(output)
     if version is None:
         return RuntimeCompatibility(
             supported=False,
             policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
             native_version=None,
             reason=(
-                f"codex --version output did not name a codex-cli version: {output.strip()!r}; "
+                "codex --version output did not name a codex-cli version; "
                 "refusing an unverified CLI release"
             ),
         )

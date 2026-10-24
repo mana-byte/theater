@@ -52,6 +52,6 @@ def provision(context: ProvisionContext) -> Provisioned:
 
 COMPAT = CompatManifest(
     provision=provision,
-    # 2.x's closed schema names the target `path`; 1.x's `filePath` would need its own recipe.
+    # The closed write-tool schema names its target `path`.
     native_edit=NativeEdit("write", {"path": "{path}", "content": "{nonce}\n"}),
 )

@@ -34,7 +34,7 @@ class Mismatch:
     """A release whose current outcome disagrees with what the policy says about it."""
 
     version: str
-    kind: Literal["regression", "stale-exclusion"]
+    kind: Literal["regression", "stale-exclusion", "advance"]
     verdict: str
 
 
@@ -63,17 +63,20 @@ def admit_only(root: Path, name: str, version: str) -> None:
 
 
 def mismatches(policy: VersionPolicy, results: tuple[Result, ...]) -> list[Mismatch]:
-    """Releases inside the policy's bounds whose admission and verdict disagree."""
+    """Every fresh outcome whose admission disagrees with the policy."""
     low, high = version_key(policy.minimum), version_key(policy.maximum)
     found: list[Mismatch] = []
     for result in sorted(results, key=lambda item: version_key(item.version)):
-        if not low <= version_key(result.version) <= high:
+        if version_key(result.version) < low:
             continue
         green = result.verdict == "green"
         if policy.admits(result.version) and not green:
             found.append(Mismatch(result.version, "regression", result.verdict))
         elif not policy.admits(result.version) and green:
-            found.append(Mismatch(result.version, "stale-exclusion", result.verdict))
+            kind: Literal["stale-exclusion", "advance"] = (
+                "stale-exclusion" if version_key(result.version) <= high else "advance"
+            )
+            found.append(Mismatch(result.version, kind, result.verdict))
     return found
 
 
@@ -149,7 +152,7 @@ def affected_harnesses(root: Path, base: str) -> list[str]:
     if any(
         path in shared_files or path.startswith(shared_prefixes)
         for path in changed
-        if not Path(path).is_relative_to(PLUGINS)
+        if not any(Path(path).is_relative_to(PLUGINS / name) for name in ADAPTER_NAMES)
     ):
         return list(ADAPTER_NAMES)
     return [

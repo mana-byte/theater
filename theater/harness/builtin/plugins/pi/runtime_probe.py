@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 
+from theater.harness.contracts import version_probe
 from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
 from theater.harness.contracts.version_policy import version_key
 
@@ -15,23 +16,6 @@ from .runtime_constants import (
     PI_FRONTEND_RUNTIME_PROBE_TIMEOUT_SECONDS,
     VERSION_POLICY,
 )
-
-
-def parse_pi_version(output: str) -> str | None:
-    """Extract a Pi release version from ``pi --version``."""
-    match = _VERSION_TOKEN.search(output)
-    if match is None:
-        return None
-    version = match.group("version")
-    try:
-        version_key(version)
-    except ValueError:
-        return None
-    return version
-
-
-def _version_in_supported_range(version: str) -> bool:
-    return VERSION_POLICY.admits(version)
 
 
 def _unsupported_probe(reason: str, *, version: str | None = None) -> RuntimeCompatibility:
@@ -50,23 +34,22 @@ def probe_pi_frontend_compatibility(context: RuntimeProbeContext) -> RuntimeComp
     """
     binary = context.binary or PI_BINARY
     try:
-        version_result = subprocess.run(
-            [binary, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=PI_FRONTEND_RUNTIME_PROBE_TIMEOUT_SECONDS,
-            check=False,
+        version = version_probe.probe_release(
+            binary, _VERSION_TOKEN, timeout=PI_FRONTEND_RUNTIME_PROBE_TIMEOUT_SECONDS
         )
+    except subprocess.CalledProcessError as exc:
+        return _unsupported_probe(f"Pi --version exited with {exc.returncode}")
     except (OSError, subprocess.SubprocessError) as exc:
         return _unsupported_probe(
             f"Pi compatibility probe could not run {binary!r} --version: {exc}"
         )
-    if version_result.returncode != 0:
-        return _unsupported_probe(f"Pi --version exited with {version_result.returncode}")
-    version = parse_pi_version(f"{version_result.stdout}\n{version_result.stderr}")
     if version is None:
         return _unsupported_probe("Pi --version did not report a stable release")
-    if not _version_in_supported_range(version):
+    try:
+        version_key(version)
+    except ValueError:
+        return _unsupported_probe("Pi --version did not report a stable release")
+    if not VERSION_POLICY.admits(version):
         return _unsupported_probe(
             f"Pi {version} is outside the qualified range {PI_FRONTEND_QUALIFIED_RANGE} "
             "(excluded releases did not pass qualification)",

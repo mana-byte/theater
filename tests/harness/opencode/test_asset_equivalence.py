@@ -13,8 +13,8 @@ import pytest
 
 from tests.support.paths import REPO_ROOT
 from theater.harness.builtin.plugins.opencode import (
-    native_plugin_v2,
-    tui_recovery_v2,
+    native_plugin,
+    tui_recovery,
 )
 
 # Rendered by the pre-extraction code at 1ad730d6 with the fixed inputs below.
@@ -28,10 +28,10 @@ _DIGESTS = {
 def test_rendered_assets_match_pre_extraction_bytes_and_parse(monkeypatch, tmp_path: Path) -> None:
     special = 'p " ' + chr(92) + " ☃" + chr(10)
     token = Path('/x/tok " ' + chr(92) + " ☃" + chr(10))
-    monkeypatch.setattr(native_plugin_v2, "theater_binary", lambda: "/x/theater")
-    monkeypatch.setattr(native_plugin_v2, "catalog_path", lambda _id: Path("/x/catalog"))
+    monkeypatch.setattr(native_plugin, "theater_binary", lambda: "/x/theater")
+    monkeypatch.setattr(native_plugin, "catalog_path", lambda _id: Path("/x/catalog"))
 
-    v2 = native_plugin_v2.render_native_plugin_v2(special, Path("/x/config"), token, "manual")
+    v2 = native_plugin.render_native_plugin(special, Path("/x/config"), token, "manual")
     rendered = {
         "server.js": next(text for path, text in v2.items() if path.name == "server.js"),
         "tui.js": next(text for path, text in v2.items() if path.name == "tui.js"),
@@ -70,7 +70,7 @@ def test_fixed_renderings_in_an_ascii_locale() -> None:
 
 
 def test_native_settings_are_not_reexpanded() -> None:
-    rendered = native_plugin_v2.render_native_plugin_v2(
+    rendered = native_plugin.render_native_plugin(
         "__THEATER_SETTINGS__", Path("/x/config"), Path("/x/token"), "yolo"
     )
     source = next(text for path, text in rendered.items() if path.name == "server.js")
@@ -78,6 +78,6 @@ def test_native_settings_are_not_reexpanded() -> None:
 
 
 def test_recovery_keeps_ordered_replacement() -> None:
-    recovery = tui_recovery_v2.render_tui_recovery_v2("__QUALIFIED_VERSIONS__")
-    qualified = json.dumps(list(tui_recovery_v2._QUALIFIED_VERSIONS))
+    recovery = tui_recovery.render_tui_recovery("__QUALIFIED_VERSIONS__")
+    qualified = json.dumps(list(tui_recovery._QUALIFIED_VERSIONS))
     assert f'  id: "{qualified}",' in recovery

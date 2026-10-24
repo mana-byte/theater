@@ -19,24 +19,24 @@ from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.harness.normalization import literal_prompt_argument
 from theater.models import BadRequest
 
-from . import ids_v2
-from .approval_v2 import approval_ruleset
+from . import ids
+from .approval import approval_ruleset
 from .constants import (
     BOOTSTRAP_CREDENTIAL_NAME,
     MODELS_TIMEOUT,
-    TUI_CONFIG_ENV_V2,
-    TUI_PROMPTED_PERMISSIONS_V2,
+    TUI_CONFIG_ENV,
+    TUI_PROMPTED_PERMISSIONS,
 )
 from .dialect import (
+    database_for_domain,
     domain_for,
+    lineage_marker,
+    participant_database_path,
     require_supported_version,
     resolve_binary,
-    v2_database_for_domain,
-    v2_database_path,
-    v2_lineage_marker,
 )
-from .legacy_bootstrap_v2 import bootstrap_path, render_legacy_bootstrap
-from .native_plugin_v2 import plugin_dir, render_native_plugin_v2
+from .legacy_bootstrap import bootstrap_path, render_legacy_bootstrap
+from .native_plugin import plugin_dir, render_native_plugin
 
 #: `$0` is the resolved binary, `$1` the create payload, the rest — after one
 #: `shift` — the full TUI argv, binary included. A failed create aborts pre-TUI.
@@ -50,10 +50,10 @@ def plan_launch(
 ) -> LaunchPlan:
     binary = resolve_binary(context.binary or "opencode")
     require_supported_version(binary)
-    return _plan_launch_v2(context, binary=binary)
+    return _plan_launch(context, binary=binary)
 
 
-def _plan_launch_v2(context: LaunchContext, *, binary: str) -> LaunchPlan:
+def _plan_launch(context: LaunchContext, *, binary: str) -> LaunchPlan:
     """A private `--standalone` server: the shared service would ignore this launch's env.
 
     2.x has no root `--model` or `--fork`: the model rides the config, and resume continues the
@@ -68,7 +68,7 @@ def _plan_launch_v2(context: LaunchContext, *, binary: str) -> LaunchPlan:
         )
     participant_id = context.participant_id
     config_path = context.config_path
-    database = v2_database_path(participant_id)
+    database = participant_database_path(participant_id)
     token_path = paths.participant_observation_dir(participant_id, "opencode") / "receipt-token"
     config: dict[str, object] = {
         "$schema": "https://opencode.ai/config.json",
@@ -76,25 +76,25 @@ def _plan_launch_v2(context: LaunchContext, *, binary: str) -> LaunchPlan:
     }
     if context.model:
         config["model"] = context.model
-    marker, marker_text = v2_lineage_marker(participant_id)
+    marker, marker_text = lineage_marker(participant_id)
     files = {
         config_path: json.dumps(config, indent=2),
         marker: marker_text,
-        **render_native_plugin_v2(participant_id, config_path, token_path, context.approval),
+        **render_native_plugin(participant_id, config_path, token_path, context.approval),
     }
     env = {"OPENCODE_CONFIG": str(config_path), "OPENCODE_DB": str(database)}
     if approval_ruleset(context.approval):
-        return _plan_enforced_launch_v2(context, binary=binary, files=files, env=env)
+        return _plan_enforced_launch(context, binary=binary, files=files, env=env)
     argv = [binary, "--standalone"]
     if context.approval == "yolo":
         argv.append("--auto")
     if context.resume is not None:
         argv += ["-s", context.resume]
     elif context.prompt:
-        argv = _open_new_session_v2(
+        argv = _open_new_session(
             binary, [*argv, "--prompt", literal_prompt_argument(context.prompt)]
         )
-    env.update(tui_env_v2(context.approval))
+    env.update(tui_env(context.approval))
     return LaunchPlan(
         argv=argv,
         env=env,
@@ -105,16 +105,16 @@ def _plan_launch_v2(context: LaunchContext, *, binary: str) -> LaunchPlan:
     )
 
 
-def _plan_enforced_launch_v2(
+def _plan_enforced_launch(
     context: LaunchContext, *, binary: str, files: dict[Path, str], env: dict[str, str]
 ) -> LaunchPlan:
     """Verify the approval plugin on a private server before opening its TUI."""
     participant_id = context.participant_id
     config_path = context.config_path
-    database = v2_database_path(participant_id)
+    database = participant_database_path(participant_id)
     observation = paths.participant_observation_dir(participant_id, "opencode")
     token_path = observation / "receipt-token"
-    session_id = context.resume or ids_v2.session_id()
+    session_id = context.resume or ids.session_id()
     # The bootstrap appends ["--prompt", settings["prompt"]] to the TUI argv,
     # so the stored prompt must already be the literal-safe form.
     prompt = (
@@ -131,7 +131,7 @@ def _plan_enforced_launch_v2(
         "resume": context.resume,
         "prompt": prompt,
         "model": context.model,
-        "tui_env": tui_env_v2(context.approval),
+        "tui_env": tui_env(context.approval),
     }
     files[bootstrap_path(config_path)] = render_legacy_bootstrap(settings)
     return LaunchPlan(
@@ -144,29 +144,29 @@ def _plan_enforced_launch_v2(
     )
 
 
-def _open_new_session_v2(binary: str, tui: list[str]) -> list[str]:
+def _open_new_session(binary: str, tui: list[str]) -> list[str]:
     """Create the session, then open the TUI on it: 2.0.18's home screen submits `--prompt`
     before a cold server lists models and never retries, while a session's screen waits.
     A failed create aborts before the TUI opens, so no prompt is lost.
     """
-    session = ids_v2.session_id()
+    session = ids.session_id()
     payload = json.dumps({"id": session})
     return ["/bin/sh", "-c", _CREATE_THEN_EXEC, binary, payload, *tui, "-s", session]
 
 
-def tui_env_v2(approval: str | None) -> dict[str, str]:
+def tui_env(approval: str | None) -> dict[str, str]:
     """Yolo keeps `--auto`; any other approval must not inherit a client-side autoaccept."""
-    return {} if approval == "yolo" else {TUI_CONFIG_ENV_V2: TUI_PROMPTED_PERMISSIONS_V2}
+    return {} if approval == "yolo" else {TUI_CONFIG_ENV: TUI_PROMPTED_PERMISSIONS}
 
 
 def resume_launch_overlay(
     context: ResumeContext,
 ) -> ResumeLaunchOverlay:
-    lineage = v2_database_for_domain(context.predecessor.transcript_domain)
-    return _resume_overlay_v2(context, lineage)
+    lineage = database_for_domain(context.predecessor.transcript_domain)
+    return _resume_overlay(context, lineage)
 
 
-def _resume_overlay_v2(context: ResumeContext, lineage: Path | None) -> ResumeLaunchOverlay:
+def _resume_overlay(context: ResumeContext, lineage: Path | None) -> ResumeLaunchOverlay:
     """Continue only an authenticated, isolated database lineage."""
     if lineage is None:
         raise BadRequest(

@@ -11,11 +11,12 @@ import pytest
 from theater import paths
 from theater.harness.builtin.plugins.opencode.dialect import (
     domain_for,
-    v2_database_path,
-    v2_lineage_marker,
+    lineage_marker,
+    participant_database_path,
 )
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
-from theater.harness.builtin.plugins.opencode.native_plugin_v2 import plugin_dir
+from theater.harness.builtin.plugins.opencode.native_plugin import plugin_dir
+from theater.harness.builtin.plugins.opencode.observer import database_path
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
     VERSION_POLICY,
 )
@@ -33,6 +34,14 @@ from theater.harness.contracts.runtime import (
     RuntimePlanningContext,
     RuntimeSessionOrder,
 )
+
+
+def test_observed_default_database_is_distinct_from_participant_lineages(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    assert database_path() == tmp_path / "opencode" / "opencode.db"
+    assert participant_database_path("test").name == "opencode-v2.db"
+    assert database_path() != participant_database_path("test")
 
 
 def _context(tmp_path: Path, **overrides: object) -> RuntimePlanningContext:
@@ -81,7 +90,7 @@ def test_plan_builds_the_stock_serve_backend(tmp_path: Path, fake_opencode) -> N
     ]
     assert plan.backend.env == {
         "OPENCODE_CONFIG": str(config_path),
-        "OPENCODE_DB": str(v2_database_path("h00000000001")),
+        "OPENCODE_DB": str(participant_database_path("h00000000001")),
     }
     assert plan.backend.secret_env == {SERVER_SECRET_ENV: context.token_file}
     assert plan.backend.receipt_token_path == (
@@ -91,8 +100,8 @@ def test_plan_builds_the_stock_serve_backend(tmp_path: Path, fake_opencode) -> N
     assert config["model"] == "mistral/mistral-large-latest"
     assert config["plugin"] == [plugin_dir(config_path).resolve().as_uri()]
     assert plugin_dir(config_path) / "server.js" in plan.backend.files
-    assert v2_lineage_marker("h00000000001")[0] in plan.backend.files
-    assert plan.backend.transcript_domain == domain_for(v2_database_path("h00000000001"))
+    assert lineage_marker("h00000000001")[0] in plan.backend.files
+    assert plan.backend.transcript_domain == domain_for(participant_database_path("h00000000001"))
     rendered = json.dumps({str(key): value for key, value in plan.backend.files.items()})
     assert "password" not in rendered.lower()
     assert plan.endpoint is None

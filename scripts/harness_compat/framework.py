@@ -1,4 +1,4 @@
-"""Run pytest in a subprocess and aggregate its JUnit report per selector."""
+"""Run the live suite in a subprocess and summarize its JUnit report."""
 
 from __future__ import annotations
 
@@ -27,12 +27,6 @@ def _nodeid(case: ET.Element) -> str:
     return "::".join([path, *parts[index + 1 :], case.get("name", "")])
 
 
-def _selects(selector: str, nodeid: str) -> bool:
-    return nodeid == selector or any(
-        nodeid.startswith(selector + boundary) for boundary in ("/", "::", "[")
-    )
-
-
 def _case_status(case: ET.Element) -> str:
     if case.find("failure") is not None:
         return "failed"
@@ -47,6 +41,8 @@ def _failure_reason(case: ET.Element) -> str:
     event = case.find("failure")
     if event is None:
         event = case.find("error")
+    if event is None:
+        event = case.find("skipped")
     if event is None:
         return "no failure element"
     if message := clean_diagnostic(event.get("message", "")):
@@ -64,19 +60,10 @@ def _failure_detail(counts: str, nodeid: str, case: ET.Element) -> str:
     return prefix + clip_diagnostic(_failure_reason(case), _DETAIL_LIMIT - len(prefix), tail=True)
 
 
-def _check_selector(
-    selector: str, cases: Mapping[str, ET.Element], expected_skips: Mapping[str, str]
-) -> Check:
-    selected = [(nodeid, case) for nodeid, case in cases.items() if _selects(selector, nodeid)]
-    if not selected:
-        return Check(selector, "error", "0 matched; pytest did not report this selector")
-    counts: Counter[str] = Counter()
-    unexpected_skips: list[str] = []
-    for nodeid, case in selected:
-        kind = _case_status(case)
-        counts[kind] += 1
-        if kind == "skipped" and not any(_selects(key, nodeid) for key in expected_skips):
-            unexpected_skips.append(nodeid)
+def _suite_check(target: str, cases: Sequence[ET.Element]) -> Check:
+    if not cases:
+        return Check(target, "error", "0 tests reported")
+    counts = Counter(_case_status(case) for case in cases)
     detail = ", ".join(
         f"{counts[label]} {label}"
         for label in ("passed", "failed", "errored", "skipped")
@@ -84,30 +71,23 @@ def _check_selector(
     )
     if counts["failed"]:
         status: CheckStatus = "fail"
-    elif counts["errored"] or unexpected_skips:
+    elif counts["errored"] or counts["skipped"]:
         status = "error"
-    elif counts["passed"] == len(selected):
-        status = "pass"
-    elif counts["skipped"] == len(selected) and selector in expected_skips:
-        status = "skip"
     else:
-        status = "error"
-        detail += "; selector did not fully pass or skip"
+        status = "pass"
     if status in ("fail", "error"):
         first = next(
-            ((nodeid, case) for nodeid, case in selected if _case_status(case) == "failed"),
+            (case for case in cases if _case_status(case) == "failed"),
             None,
         )
         if first is None:
             first = next(
-                ((nodeid, case) for nodeid, case in selected if _case_status(case) == "errored"),
+                (case for case in cases if _case_status(case) != "passed"),
                 None,
             )
         if first is not None:
-            detail = _failure_detail(detail, *first)
-        elif unexpected_skips:
-            detail += f"; unexpected skip: {unexpected_skips[0]}"
-    return Check(selector, status, clip_diagnostic(detail, _DETAIL_LIMIT))
+            detail = _failure_detail(detail, _nodeid(first), first)
+    return Check(target, status, clip_diagnostic(detail, _DETAIL_LIMIT))
 
 
 def python_path(root: Path) -> str:
@@ -128,20 +108,16 @@ def _refuse_checkout(root: Path) -> None:
 
 def run_pytest(
     root: Path,
-    nodeids: Sequence[str],
+    target: str,
     *,
     env: Mapping[str, str],
-    expected_skips: Mapping[str, str],
     timeout: float = 900.0,
     pytest_args: Sequence[str] = (),
-) -> tuple[Check, ...]:
-    """Aggregate pytest cases under each file, directory, class, or test selector.
-    Failures win; missing cases, errors, and unexpected skips are errors; all pass is pass.
-    All skip is skip only when the selector is expected; exit 77 is never green.
-    ``root`` is a disposable directory (a code copy), and pytest leaves no bytecode or cache in it.
+) -> Check:
+    """Failures win; missing cases, errors and any skip authorize nothing.
+
+    ``root`` is disposable; pytest leaves no bytecode or cache beside the code it runs.
     """
-    if not nodeids:
-        return ()
     _refuse_checkout(root)
     with tempfile.TemporaryDirectory(prefix="compat-pytest-") as temporary:
         xml = Path(temporary) / "junit.xml"
@@ -156,21 +132,18 @@ def run_pytest(
             "junit_logging=out-err",
             f"--junitxml={xml}",
             *pytest_args,
-            *nodeids,
+            target,
         ]
         try:
             run = run_group(argv, cwd=root, env=_environment(root, env), timeout=timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             detail = clip_diagnostic(str(exc), _DETAIL_LIMIT, tail=True)
-            return tuple(Check(nodeid, "error", detail) for nodeid in nodeids)
+            return Check(target, "error", detail)
         if run.returncode not in (0, 1) or not xml.exists():
             detail = clip_diagnostic(run.stdout + "\n" + run.stderr, _DETAIL_LIMIT - 20, tail=True)
-            return tuple(
-                Check(nodeid, "error", f"pytest exit {run.returncode}: {detail}")
-                for nodeid in nodeids
-            )
+            return Check(target, "error", f"pytest exit {run.returncode}: {detail}")
         try:
-            cases = {_nodeid(case): case for case in ET.parse(xml).iter("testcase")}
+            cases = list(ET.parse(xml).iter("testcase"))
         except ET.ParseError as exc:
-            return tuple(Check(nodeid, "error", f"invalid junit XML: {exc}") for nodeid in nodeids)
-        return tuple(_check_selector(selector, cases, expected_skips) for selector in nodeids)
+            return Check(target, "error", f"invalid junit XML: {exc}")
+        return _suite_check(target, cases)

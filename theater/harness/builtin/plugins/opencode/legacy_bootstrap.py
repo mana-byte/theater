@@ -18,11 +18,11 @@ from pathlib import Path
 
 import theater
 
-from .approval_v2 import require_plugin_active
+from .approval import require_plugin_active
 from .constants import BOOTSTRAP_READY_TIMEOUT_SECONDS, PLUGIN_ACTIVE_TIMEOUT_SECONDS
-from .http_v2 import OpenCodeV2Client, model_ref, session_directory
-from .native_plugin_v2 import PLUGIN_ID
+from .native_plugin import PLUGIN_ID
 from .server_discovery import parse_server_stdout_endpoint
+from .session_http import OpenCodeSessionClient, model_ref, session_directory
 
 _SETTINGS_SENTINEL = "__THEATER_BOOTSTRAP_SETTINGS__"
 _PARENT_SENTINEL = "__THEATER_PACKAGE_PARENT__"
@@ -32,7 +32,7 @@ import json
 import sys
 
 sys.path.insert(0, {_PARENT_SENTINEL!r})
-from theater.harness.builtin.plugins.opencode.legacy_bootstrap_v2 import main
+from theater.harness.builtin.plugins.opencode.legacy_bootstrap import main
 
 raise SystemExit(main(json.loads({_SETTINGS_SENTINEL})))
 """
@@ -93,7 +93,7 @@ async def run(settings: Mapping[str, object], *, directory: str) -> int:
         )
         endpoint = await _read_endpoint(serve, timeout)
         drain = loop.create_task(_drain(serve.stdout))
-        client = OpenCodeV2Client(endpoint=endpoint, token_file=credential)
+        client = OpenCodeSessionClient(endpoint=endpoint, token_file=credential)
         # Fail closed: prove the plugin on this very server before admitting anything.
         plugin_timeout = settings.get("plugin_timeout")
         await require_plugin_active(
@@ -216,7 +216,7 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
             await process.wait()
 
 
-async def _admit_session(client: OpenCodeV2Client, settings: Mapping[str, object]) -> str:
+async def _admit_session(client: OpenCodeSessionClient, settings: Mapping[str, object]) -> str:
     """Resume the exact session, or create the pre-minted one; no prompt is sent here."""
     resume = settings.get("resume")
     if isinstance(resume, str) and resume:

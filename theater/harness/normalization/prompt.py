@@ -1,7 +1,7 @@
 """Launch-argument safety for prompt text.
 
-Commander (Claude), clap (Codex), yargs (OpenCode 1.x), and effect's CLI
-(OpenCode 2.x) all route by the first character of an argv element, so a prompt
+Commander (Claude), clap (Codex), and effect's CLI (OpenCode) all route by
+the first character of an argv element, so a prompt
 starting with "-" would be parsed as an option instead of the prompt.
 """
 

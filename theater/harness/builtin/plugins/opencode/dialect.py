@@ -7,30 +7,21 @@ import logging
 import os
 import shutil
 import subprocess
-import threading
-import time
 from pathlib import Path
 
 from theater import paths
+from theater.harness.contracts import version_probe
+from theater.harness.contracts.version_policy import version_key
 from theater.models import BadRequest
 
-from .constants import MODELS_TIMEOUT, V2_DB_NAME, V2_MARKER_NAME
-from .runtime_plan import VERSION_POLICY, parse_opencode_version, release_text
+from .constants import LINEAGE_DB_NAME, LINEAGE_MARKER_NAME, MODELS_TIMEOUT
+from .runtime_plan import _VERSION, VERSION_POLICY, parse_opencode_version, release_text
 
 logger = logging.getLogger("theater.harness.opencode")
 
 
 #: Pins the release Theater plans for, when a wrapper hides `opencode --version` (and in tests).
 VERSION_ENV = "THEATER_OPENCODE_VERSION"
-
-#: Successful and failed probes, keyed by resolved file identity (path, mtime, size):
-#: a repaired or replaced CLI re-probes, so a failure never permanently poisons it.
-_versions: dict[tuple[str, int, int], tuple[tuple[int, int, int] | None, float]] = {}
-_VERSION_CACHE_MAX = 128
-#: A failed probe retries after this long even when the file is unchanged: a
-#: transient timeout must not poison every spawn until the daemon restarts.
-_FAILURE_CACHE_SECONDS = 2.0
-_lock = threading.Lock()
 
 
 def resolve_binary(binary: str = "opencode") -> str:
@@ -49,49 +40,15 @@ def resolve_binary(binary: str = "opencode") -> str:
 
 
 def installed_version(binary: str = "opencode") -> tuple[int, int, int] | None:
-    """The release on PATH, cached per binary file so launch planning probes it once.
-
-    Failures cache too, but expire: the key carries mtime and size, so a
-    repaired CLI re-probes immediately."""
+    """The verified release on PATH, or the explicit wrapper pin."""
     pinned = os.environ.get(VERSION_ENV)
     if pinned:
         return parse_opencode_version(pinned)
-    resolved = shutil.which(binary)
-    if resolved is None:
-        return None
-    real = Path(resolved).resolve()
     try:
-        info = real.stat()
-    except OSError:
+        version = version_probe.probe_release(binary, _VERSION, timeout=MODELS_TIMEOUT)
+        return version_key(version) if version is not None else None
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
-    key = (str(real), info.st_mtime_ns, info.st_size)
-    with _lock:
-        cached = _versions.get(key)
-        if cached is not None:
-            version, probed_at = cached
-            fresh_failure = version is None and (
-                time.monotonic() - probed_at < _FAILURE_CACHE_SECONDS
-            )
-            if version is not None or fresh_failure:
-                return version
-    try:
-        run = subprocess.run(
-            [resolved, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=MODELS_TIMEOUT,
-            check=False,
-        )
-        version = (
-            parse_opencode_version(f"{run.stdout}\n{run.stderr}") if run.returncode == 0 else None
-        )
-    except (OSError, subprocess.SubprocessError):
-        version = None
-    with _lock:
-        if len(_versions) >= _VERSION_CACHE_MAX:
-            _versions.pop(next(iter(_versions)))
-        _versions[key] = (version, time.monotonic())
-    return version
 
 
 def require_supported_version(binary: str = "opencode") -> tuple[int, int, int]:
@@ -115,34 +72,34 @@ def require_supported_version(binary: str = "opencode") -> tuple[int, int, int]:
     return version
 
 
-def v2_database_path(participant_id: str) -> Path:
+def participant_database_path(participant_id: str) -> Path:
     """A 2.x participant's own database, the root of its resume lineage."""
-    return paths.participant_observation_dir(participant_id, "opencode") / V2_DB_NAME
+    return paths.participant_observation_dir(participant_id, "opencode") / LINEAGE_DB_NAME
 
 
-def v2_lineage_marker(participant_id: str) -> tuple[Path, str]:
+def lineage_marker(participant_id: str) -> tuple[Path, str]:
     """A marker beside the 2.x database: names a native spawn, whose domain no plan records.
 
     Written with the launch files, it also creates the directory SQLite will not create.
     """
-    marker = v2_database_path(participant_id).parent / V2_MARKER_NAME
-    return marker, json.dumps({"participant_id": participant_id, "database": V2_DB_NAME})
+    marker = participant_database_path(participant_id).parent / LINEAGE_MARKER_NAME
+    return marker, json.dumps({"participant_id": participant_id, "database": LINEAGE_DB_NAME})
 
 
-def is_v2_participant(participant_id: str) -> bool:
-    return v2_lineage_marker(participant_id)[0].exists()
+def has_isolated_database(participant_id: str) -> bool:
+    return lineage_marker(participant_id)[0].exists()
 
 
-def is_v2_database(db: Path) -> bool:
-    return db.name == V2_DB_NAME
+def is_lineage_database(db: Path) -> bool:
+    return db.name == LINEAGE_DB_NAME
 
 
-def v2_database_for_domain(domain: str | None) -> Path | None:
+def database_for_domain(domain: str | None) -> Path | None:
     """The isolated database a transcript domain names, or None for a foreign domain."""
     if not domain or not domain.startswith("opencode://"):
         return None
     db = Path(domain.removeprefix("opencode://"))
-    return db if db.is_absolute() and is_v2_database(db) else None
+    return db if db.is_absolute() and is_lineage_database(db) else None
 
 
 def domain_for(db: Path) -> str:
@@ -150,13 +107,13 @@ def domain_for(db: Path) -> str:
 
 
 __all__ = [
+    "database_for_domain",
     "domain_for",
+    "has_isolated_database",
     "installed_version",
-    "is_v2_database",
-    "is_v2_participant",
+    "is_lineage_database",
+    "lineage_marker",
+    "participant_database_path",
     "require_supported_version",
     "resolve_binary",
-    "v2_database_for_domain",
-    "v2_database_path",
-    "v2_lineage_marker",
 ]

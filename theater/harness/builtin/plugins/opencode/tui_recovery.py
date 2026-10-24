@@ -14,9 +14,9 @@ from ._assets import read_asset
 _QUALIFIED_VERSIONS = ("2.0.17", "2.0.18", "2.0.19", "2.0.20")
 
 
-def render_tui_recovery_v2(plugin_id: str) -> str:
+def render_tui_recovery(plugin_id: str) -> str:
     return (
-        read_asset("tui_recovery_v2.js")
+        read_asset("tui_recovery.js")
         .replace("__PLUGIN_ID__", json.dumps(plugin_id))
         .replace("__QUALIFIED_VERSIONS__", json.dumps(list(_QUALIFIED_VERSIONS)))
     )

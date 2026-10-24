@@ -91,7 +91,7 @@ def _fake_npm(
         files(command)
         return _done(returncode, stderr="E404 not found" if returncode else "")
 
-    monkeypatch.setattr(npm, "run_pipe_group", run)
+    monkeypatch.setattr(npm, "run_group", run)
     return calls
 
 
@@ -191,7 +191,7 @@ def test_vibe_pins_python_314_for_every_supported_release(
         (Path(kwargs["env"]["UV_TOOL_BIN_DIR"]) / "vibe").write_text("#!/bin/sh\n")  # type: ignore[index]
         return _done()
 
-    monkeypatch.setattr(vibe_adapter.subprocess, "run", run)
+    monkeypatch.setattr(vibe_adapter, "run_group", run)
     monkeypatch.setattr(vibe_adapter.shutil, "which", lambda *a, **k: "/usr/bin/uv")
 
     with make_sandbox("vibe") as sb:
@@ -210,7 +210,7 @@ def test_vibe_without_uv_or_with_a_failed_install_is_an_install_failure(
 
     monkeypatch.setattr(vibe_adapter.shutil, "which", lambda *a, **k: "/usr/bin/uv")
     monkeypatch.setattr(
-        vibe_adapter.subprocess, "run", lambda *a, **k: _done(1, stderr="no matching distribution")
+        vibe_adapter, "run_group", lambda *a, **k: _done(1, stderr="no matching distribution")
     )
     with make_sandbox("vibe") as sb, pytest.raises(InstallFailed, match="no matching distribution"):
         load_adapter("vibe").install(sb, "3.0.2")
@@ -227,14 +227,14 @@ def test_codex_discovery_falls_back_to_public_tags_when_the_api_is_limited(
         for tag in ("rust-v0.164.0", "rust-v0.163.0", "rust-v0.165.0-alpha.1", "v1.0.0", "other")
     )
     monkeypatch.setattr(github, "github_release_versions", limited)
-    monkeypatch.setattr(codex_adapter.subprocess, "run", lambda *a, **k: _done(0, stdout=listing))
+    monkeypatch.setattr(codex_adapter, "run_group", lambda *a, **k: _done(0, stdout=listing))
 
     assert load_adapter("codex").discover() == ["0.163.0", "0.164.0"]
 
 
 def test_codex_tags_without_a_stable_release_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        codex_adapter.subprocess, "run", lambda *a, **k: _done(0, stdout="abc\trefs/tags/v1\n")
+        codex_adapter, "run_group", lambda *a, **k: _done(0, stdout="abc\trefs/tags/v1\n")
     )
 
     with pytest.raises(RuntimeError, match="no stable rust-v releases"):

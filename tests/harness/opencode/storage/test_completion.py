@@ -6,10 +6,10 @@ import asyncio
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import attached, drain, text, tool
-from tests.support.opencode_recorder_v2 import rec as shared_rec
+from tests.support.opencode_recorder import attached, drain, text, tool
+from tests.support.opencode_recorder import rec as shared_rec
 from theater.harness import EventKind
-from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
+from theater.harness.builtin.plugins.opencode.source import OpenCodeSource
 from theater.models import Status
 
 rec = shared_rec
@@ -40,7 +40,7 @@ def test_stop_with_tools_uses_native_continuation_rules(rec, workdir, state, exe
         EventKind.ASSISTANT,
     ]
     assert events[-1].turn_end is not continues
-    cold = OpenCodeV2Source(rec.path, cwd=str(workdir))
+    cold = OpenCodeSource(rec.path, cwd=str(workdir))
     assert asyncio.run(cold.read()).status is (Status.WORKING if continues else Status.IDLE)
     stored = asyncio.run(src.history(last_n=0)).events
     assert [(e.kind, e.text, e.turn_end) for e in stored] == [

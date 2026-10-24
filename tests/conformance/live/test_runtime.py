@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Mapping
 
 import pytest
 
@@ -22,12 +23,10 @@ _RECONNECT_SECONDS = 30.0
 async def test_a_native_runtime_is_proven_by_its_physical_route(live, obligation):
     initial = {}
     if obligation.detail == "settings":
-        if len(live.provisioned.models) < 2:
-            inconclusive("settings updates need two provisioned models")
-        initial["model"] = live.provisioned.models[0]
-        if live.harness.launch_parameter_support.reasoning_effort:
-            if len(live.provisioned.efforts) < 2:
-                inconclusive("settings updates need two provisioned efforts")
+        support = live.harness.launch_parameter_support
+        if support.model and live.provisioned.models:
+            initial["model"] = live.provisioned.models[0]
+        if support.reasoning_effort and live.provisioned.efforts:
             initial["reasoning_effort"] = live.provisioned.efforts[0]
     participant = await live.spawn(live.approval, **initial)
     await live.ready(participant)
@@ -173,10 +172,19 @@ async def _queue(live, participant: str) -> None:
 
 async def _settings(live, participant: str) -> None:
     _native_route(await live.participant(participant))
-    changed = {"model": live.provisioned.models[1]}
-    effort = live.harness.launch_parameter_support.reasoning_effort
-    if effort:
-        changed["reasoning_effort"] = live.provisioned.efforts[1]
+    settings = (await live.controls(participant)).extra.get("settings")
+    assert isinstance(settings, Mapping), "the native runtime reports no settings"
+    fields = settings.get("supported_fields")
+    assert isinstance(fields, tuple) and fields, "the runtime reports no mutable settings fields"
+    choices = {"model": live.provisioned.models, "reasoning_effort": live.provisioned.efforts}
+    changed = {}
+    for field in fields:
+        if field not in choices:
+            inconclusive(f"no wire oracle exercises the mutable settings field {field!r} yet")
+        alternate = next((value for value in choices[field] if value != settings.get(field)), None)
+        if alternate is None:
+            inconclusive(f"settings updates need an alternate provisioned value for {field!r}")
+        changed[field] = alternate
     before, after = _nonce(), _nonce()
     await _turn(live, participant, before)
     await live.ready(participant)
@@ -208,11 +216,11 @@ async def _settings(live, participant: str) -> None:
     await _turn(live, participant, after)
     (first,) = live.turns(f"Reply with {before}")
     (second,) = live.turns(f"Reply with {after}")
-    assert first.model is not None and second.model is not None
-    assert first.model != second.model, "the settings update did not change the wire model"
-    if effort:
-        assert first.effort is not None and second.effort is not None
-        assert first.effort != second.effort, "the settings update did not change the wire effort"
+    for field, wire_field in (("model", "model"), ("reasoning_effort", "effort")):
+        if field in changed:
+            original, updated = getattr(first, wire_field), getattr(second, wire_field)
+            assert original is not None and updated is not None
+            assert original != updated, f"the settings update did not change the wire {wire_field}"
 
 
 async def _refused(live, participant: str, capability: str) -> None:

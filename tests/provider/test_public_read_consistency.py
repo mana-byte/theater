@@ -364,7 +364,11 @@ async def test_native_capability_projection_is_consistent_across_public_reads(da
     assert controls_value["actions"]["settings_update"] == expected
     assert snapshot_value["actions"]["settings_update"] == expected
     assert controls_value["health"] == {"connection": "connected", "diagnostics": []}
-    assert controls_value["settings"] == {"model": None, "reasoning_effort": None}
+    assert controls_value["settings"] == {
+        "model": None,
+        "reasoning_effort": None,
+        "supported_fields": ["model", "reasoning_effort"],
+    }
     assert set(participant_value["native_route"]) == {
         "backend_generation",
         "native_session_id",

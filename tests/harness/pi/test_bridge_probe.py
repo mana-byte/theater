@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass
 
@@ -100,7 +101,7 @@ def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> N
     assert compatibility.supported is True
     assert compatibility.policy == PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY
     assert compatibility.native_version == version
-    assert calls == [("pi", "--version")]
+    assert calls == [(shutil.which("pi") or "pi", "--version")]
 
 
 @pytest.mark.parametrize(

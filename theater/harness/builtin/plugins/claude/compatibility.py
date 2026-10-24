@@ -6,11 +6,12 @@ import re
 import subprocess
 from pathlib import Path
 
+from theater.harness.contracts import version_probe
 from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
 from theater.harness.contracts.version_policy import VersionPolicy, version_key
 
 VERSION_POLICY = VersionPolicy.load(Path(__file__).with_name("compatibility.json"))
-_VERSION = re.compile(r"(\S+)(?: \(Claude Code\))?")
+_VERSION = re.compile(r"\A(\S+)(?: \(Claude Code\))?\Z")
 _POLICY = f"claude-hooks-{VERSION_POLICY.minimum}-compatible"
 _MESSAGING_POLICY = f"claude-messaging-native-controls-{VERSION_POLICY.minimum}"
 
@@ -35,23 +36,17 @@ def _probe_claude(
     policy: str,
 ) -> RuntimeCompatibility:
     try:
-        result = subprocess.run(
-            [context.binary or "claude", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
+        version = version_probe.probe_release(context.binary or "claude", _VERSION, timeout=5)
+    except subprocess.CalledProcessError:
+        version = None
     except (OSError, subprocess.SubprocessError):
         return RuntimeCompatibility(
             supported=False, policy=policy, reason="Claude version probe could not complete"
         )
-    match = _VERSION.fullmatch(result.stdout.strip())
-    if result.returncode != 0 or match is None:
+    if version is None:
         return RuntimeCompatibility(
             supported=False, policy=policy, reason="Claude did not report a stable CLI version"
         )
-    version = match[1]
     try:
         version_key(version)
     except ValueError:

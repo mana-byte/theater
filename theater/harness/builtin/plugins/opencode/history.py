@@ -29,7 +29,7 @@ from theater.transcript_identity import (
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
-from . import store_v2 as queries
+from . import queries
 from .constants import HISTORY_MESSAGE_BATCH
 from .store import connect, session_for_history
 from .values import _opencode_source_key, load_json_object

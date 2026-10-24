@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Literal, cast, overload
 
-from .store_v2 import SESSION_TABLE
+from .queries import SESSION_TABLE
 
 logger = logging.getLogger("theater.harness.opencode")
 

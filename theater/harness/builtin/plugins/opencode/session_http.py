@@ -13,7 +13,7 @@ from urllib.parse import quote
 from .http import OpenCodeClient, OpenCodeHttpError, _safe_session_id
 
 
-class OpenCodeV2Client:
+class OpenCodeSessionClient:
     """Supported routes on the bounded, credentialed loopback transport."""
 
     def __init__(self, *, endpoint: str, token_file: Path) -> None:
@@ -128,4 +128,4 @@ def model_ref(model: str) -> dict[str, str] | None:
     return ref
 
 
-__all__ = ["OpenCodeV2Client", "model_ref", "session_directory"]
+__all__ = ["OpenCodeSessionClient", "model_ref", "session_directory"]

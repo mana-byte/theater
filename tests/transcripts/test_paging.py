@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support.opencode_recorder_v2 import RecorderV2
-from tests.support.opencode_recorder_v2 import text as opencode_text
+from tests.support.opencode_recorder import Recorder
+from tests.support.opencode_recorder import text as opencode_text
 from tests.support.shipped import OpenCodeObserver
 from tests.support.transcript_pages import StaticSource, page, pager
 from theater.constants.daemon import TRANSCRIPT_READ_RESPONSE_MAX_BYTES
@@ -353,7 +353,7 @@ async def test_file_snapshot_replays_split_event_after_append(tmp_path: Path) ->
 async def test_opencode_source_uses_the_same_pager(tmp_path: Path) -> None:
     workdir = tmp_path / "work"
     workdir.mkdir()
-    recorder = RecorderV2(tmp_path / "opencode.db", "session", str(workdir))
+    recorder = Recorder(tmp_path / "opencode.db", "session", str(workdir))
     try:
         recorder.step(
             "message-1",
@@ -380,7 +380,7 @@ async def test_opencode_snapshot_excludes_a_newer_message_between_chunks(tmp_pat
     workdir = tmp_path / "work"
     workdir.mkdir()
     text = "é" * (TRANSCRIPT_READ_RESPONSE_MAX_BYTES * 2)
-    recorder = RecorderV2(tmp_path / "opencode.db", "session", str(workdir))
+    recorder = Recorder(tmp_path / "opencode.db", "session", str(workdir))
     try:
         recorder.step(
             "message-1",
