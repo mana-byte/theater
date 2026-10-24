@@ -13,10 +13,10 @@ from typing import ClassVar, Literal, Protocol
 
 from theater.harness.contracts.values import freeze_json_mapping
 
-#: Wire protocols the qualification mock speaks; ``openai`` is Chat Completions.
-COMPAT_PROTOCOLS = ("anthropic", "openai", "openai-responses")
+#: Wire protocols the qualification mock speaks; ``openai-chat`` is Chat Completions.
+COMPAT_PROTOCOLS = ("anthropic", "openai-chat", "openai-responses")
 
-type CompatProtocol = Literal["anthropic", "openai", "openai-responses"]
+type CompatProtocol = Literal["anthropic", "openai-chat", "openai-responses"]
 
 
 @dataclass(frozen=True, slots=True)

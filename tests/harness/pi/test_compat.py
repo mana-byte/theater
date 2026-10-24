@@ -17,7 +17,7 @@ def _context(tmp_path: Path, models: tuple[str, ...] = ("mock-a", "mock-b")) -> 
         home=tmp_path / "home",
         config_dir=tmp_path / "home" / ".config",
         workdir=tmp_path / "work",
-        mock_urls={"openai": "http://127.0.0.1:9/v1"},
+        mock_urls={"openai-chat": "http://127.0.0.1:9/v1"},
         binary=tmp_path / "pi",
         version="0.84.4",
         models=models,
@@ -38,7 +38,7 @@ def test_provision_serves_every_logical_model_from_the_mock_over_openai(tmp_path
     provisioned = COMPAT.provision(_context(tmp_path))
     agent_dir = _agent_dir(tmp_path)
 
-    assert provisioned.protocol == "openai"
+    assert provisioned.protocol == "openai-chat"
     assert provisioned.models == ("mock-a", "mock-b")
     assert provisioned.env == {"PI_CODING_AGENT_DIR": str(agent_dir)}
 

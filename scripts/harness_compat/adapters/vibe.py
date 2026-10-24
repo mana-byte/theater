@@ -142,7 +142,7 @@ class VibeAdapter:
         config = (
             'active_model = "mock"\n'
             '[[providers]]\nname = "mockprov"\n'
-            f'api_base = "{sb.mock_base_urls["openai"]}"\n'
+            f'api_base = "{sb.mock_base_urls["openai-chat"]}"\n'
             'api_key_env_var = ""\napi_style = "openai"\nbackend = "generic"\n'
             '[[models]]\nname = "mock-model"\nprovider = "mockprov"\nalias = "mock"\n'
         )

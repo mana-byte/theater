@@ -21,7 +21,7 @@ def _context(
         home=tmp_path / "home",
         config_dir=tmp_path / "home" / ".config",
         workdir=tmp_path / "work",
-        mock_urls={"openai": "http://127.0.0.1:9/v1"},
+        mock_urls={"openai-chat": "http://127.0.0.1:9/v1"},
         binary=tmp_path / "opencode",
         version=version,
         models=models,
@@ -38,7 +38,7 @@ def test_provision_serves_every_logical_model_from_the_mock_over_openai(
         provisioned.files[tmp_path / "home" / ".config" / "opencode" / "opencode.json"]
     )
     (provider,) = config["provider"].values()
-    assert provisioned.protocol == "openai"
+    assert provisioned.protocol == "openai-chat"
     assert provisioned.models == ("mockprov/mock-a", "mockprov/mock-b")
     assert provider["options"]["baseURL"] == "http://127.0.0.1:9/v1"
     assert set(provider["models"]) == {"mock-a", "mock-b"}

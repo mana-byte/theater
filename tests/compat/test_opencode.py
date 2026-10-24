@@ -202,7 +202,7 @@ def _sandbox(
         evidence_dir=tmp_path / "evidence",
         tmux_socket=tmp_path / "tmux.sock",
         mock=_FakeMock(requests),
-        mock_base_urls={"anthropic": "http://127.0.0.1:1", "openai": "http://127.0.0.1:1/v1"},
+        mock_base_urls={"anthropic": "http://127.0.0.1:1", "openai-chat": "http://127.0.0.1:1/v1"},
         mock_requests=tmp_path / "mock_requests.jsonl",
         env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin"},
         offline_env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin"},
@@ -248,7 +248,7 @@ def test_qualify_is_green_when_the_server_proofs_pass(
     assert seen_env["THEATER_OPENCODE_SERVER_CONFORMANCE"] == "1"
     assert seen_env["THEATER_OPENCODE_STOCK_CONFORMANCE"] == ""
     override = (sb.config_dir / "opencode" / "opencode.json").read_text(encoding="utf-8")
-    assert sb.mock_base_urls["openai"] in override
+    assert sb.mock_base_urls["openai-chat"] in override
     skips = [check for check in result.checks if check.name in opencode.ADAPTER.expected_skips]
     assert len(skips) == 2
     assert all("stock-TUI proof NOT run" in check.detail for check in skips)

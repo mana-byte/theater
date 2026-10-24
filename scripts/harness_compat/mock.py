@@ -48,7 +48,7 @@ _MAX_HOLD_SECONDS = 120.0
 _PROTOCOLS: dict[str, MockProtocol] = {
     "/v1/messages": "anthropic",
     "/v1/messages/count_tokens": "anthropic",
-    "/v1/chat/completions": "openai",
+    "/v1/chat/completions": "openai-chat",
     "/v1/responses": "openai-responses",
 }
 _USER_TEXT_CHARS = 300
@@ -478,7 +478,7 @@ class MockServer:
         self._models = tuple(models)
         self._replies: dict[MockProtocol, deque[MockReply]] = {
             "anthropic": deque(),
-            "openai": deque(),
+            "openai-chat": deque(),
             "openai-responses": deque(),
         }
         self._recorded: list[RecordedRequest] = []
@@ -521,7 +521,7 @@ class MockServer:
     def base_urls(self) -> dict[str, str]:
         assert self._httpd is not None, "start() the mock before asking for its URLs"
         root = f"http://127.0.0.1:{self._httpd.server_address[1]}"
-        return {"anthropic": root, "openai": f"{root}/v1", "openai-responses": f"{root}/v1"}
+        return {"anthropic": root, "openai-chat": f"{root}/v1", "openai-responses": f"{root}/v1"}
 
     def queue(self, protocol: MockProtocol, reply: MockReply) -> None:
         with self._lock:
@@ -581,7 +581,7 @@ class MockServer:
         if path == "/v1/responses":
             reply = self._next_reply("openai-responses", body)
             return _streamed(reply, _responses_stream(reply))
-        reply = self._next_reply("openai", body)
+        reply = self._next_reply("openai-chat", body)
         if stream:
             return _streamed(reply, _openai_stream(reply, model))
         return _complete(reply, json.dumps(_openai_completion(reply, model)))

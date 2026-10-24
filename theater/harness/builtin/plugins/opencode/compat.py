@@ -35,13 +35,13 @@ def provision(context: ProvisionContext) -> Provisioned:
             _PROVIDER: {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Mock",
-                "options": {"baseURL": context.mock_urls["openai"], "apiKey": "mock-key"},
+                "options": {"baseURL": context.mock_urls["openai-chat"], "apiKey": "mock-key"},
                 "models": {name: {"name": name} for name in models},
             }
         },
     }
     return Provisioned(
-        protocol="openai",
+        protocol="openai-chat",
         env={
             # No update check or catalog refresh may reach for the dead proxy during startup.
             "OPENCODE_DISABLE_AUTOUPDATE": "1",

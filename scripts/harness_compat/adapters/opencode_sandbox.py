@@ -66,7 +66,7 @@ def write_provider_override(sb: Sandbox) -> None:
                 "provider": {
                     "mistral": {
                         "options": {
-                            "baseURL": sb.mock_base_urls["openai"],
+                            "baseURL": sb.mock_base_urls["openai-chat"],
                             "apiKey": "mock-key",
                         }
                     }

@@ -14,8 +14,8 @@ from typing import Any, Literal, Protocol
 #: ``tooling`` means our own machinery failed (mock gap, inconsistent bump), never upstream.
 Verdict = Literal["green", "red", "inconclusive", "tooling"]
 CheckStatus = Literal["pass", "fail", "skip", "error"]
-#: Wire protocols the mock speaks; "openai" is Chat Completions.
-MockProtocol = Literal["anthropic", "openai", "openai-responses"]
+#: Wire protocols the mock speaks; "openai-chat" is Chat Completions.
+MockProtocol = Literal["anthropic", "openai-chat", "openai-responses"]
 Route = tuple[str, str]  # (HTTP method, path without query string)
 
 #: Legacy evidence paths remain excluded from artifacts and stale-limit scans.
@@ -233,7 +233,7 @@ class Sandbox:
     evidence_dir: Path
     tmux_socket: Path
     mock: MockControl
-    #: "anthropic" is the origin http://127.0.0.1:P; "openai" and "openai-responses" end in /v1.
+    #: "anthropic" is the origin http://127.0.0.1:P; the OpenAI protocols end in /v1.
     mock_base_urls: Mapping[str, str]
     mock_requests: Path  # JSONL the mock appends every request to
     env: Mapping[str, str]

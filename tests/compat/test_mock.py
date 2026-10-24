@@ -49,7 +49,7 @@ def test_queued_tool_calls_cover_protocol_shapes_and_unknown_accounting(tmp_path
     )
 
     with MockServer(requests_path) as server:
-        for protocol in ("anthropic", "openai"):
+        for protocol in ("anthropic", "openai-chat"):
             server.queue(protocol, reply)
             server.queue(protocol, reply)
 
@@ -73,7 +73,7 @@ def test_queued_tool_calls_cover_protocol_shapes_and_unknown_accounting(tmp_path
         assert anthropic_events[7]["content_block"]["id"] == "toolu_mock_1"  # type: ignore[index]
         assert anthropic_events[-2]["delta"]["stop_reason"] == "tool_use"  # type: ignore[index]
 
-        chat_url = f"{server.base_urls['openai']}/chat/completions"
+        chat_url = f"{server.base_urls['openai-chat']}/chat/completions"
         status, payload = _request(chat_url, {"stream": False})
         openai = json.loads(payload)
         assert status == 200
@@ -190,7 +190,7 @@ def test_responses_codec_streams_text_tool_calls_and_the_codex_side_channel(
         ]
 
         status, payload = _request(
-            f"{server.base_urls['openai']}/analytics/codex/turn-costs", {"cost": 1}
+            f"{server.base_urls['openai-chat']}/analytics/codex/turn-costs", {"cost": 1}
         )
         assert (status, payload) == (204, "")
         assert not server.unhandled
@@ -289,7 +289,7 @@ def test_requests_are_described_by_protocol_model_effort_tools_and_last_user_tex
             },
         )
         _request(
-            f"{server.base_urls['openai']}/chat/completions",
+            f"{server.base_urls['openai-chat']}/chat/completions",
             {
                 "model": "gpt",
                 "reasoning_effort": "low",
@@ -319,7 +319,7 @@ def test_requests_are_described_by_protocol_model_effort_tools_and_last_user_tex
     )
     assert anthropic.tools == ("Bash", "write_file")
     assert (anthropic.messages, anthropic.last_user, anthropic.stream) == (2, "first", False)
-    assert (chat.protocol, chat.model, chat.effort) == ("openai", "gpt", "low")
+    assert (chat.protocol, chat.model, chat.effort) == ("openai-chat", "gpt", "low")
     assert (chat.messages, chat.last_user, chat.stream) == (2, "hi ", True)
     assert (responses.protocol, responses.model, responses.effort) == (
         "openai-responses",
@@ -350,13 +350,13 @@ def test_requests_carry_the_conversation_humans_and_the_last_tool_result(tmp_pat
         {"type": "function_call_output", "call_id": "c", "output": "responses result"},
     ]
     with MockServer(tmp_path / "requests.jsonl") as server:
-        _request(f"{server.base_urls['openai']}/chat/completions", {"messages": chat_history})
+        _request(f"{server.base_urls['openai-chat']}/chat/completions", {"messages": chat_history})
         _request(f"{server.base_urls['anthropic']}/v1/messages", {"messages": anthropic_history})
         _request(
             f"{server.base_urls['openai-responses']}/responses",
             {"stream": True, "input": responses_history},
         )
-        _request(f"{server.base_urls['openai']}/chat/completions", {"messages": []})
+        _request(f"{server.base_urls['openai-chat']}/chat/completions", {"messages": []})
         chat, anthropic, responses, empty = server.requests
 
     assert (chat.user_texts, chat.last_user) == (("one", "two"), "two")
@@ -449,9 +449,9 @@ def test_a_held_stream_withholds_its_tail_until_released(tmp_path: Path) -> None
 def test_a_held_stream_reports_a_client_that_drops_the_connection(tmp_path: Path) -> None:
     with MockServer(tmp_path / "requests.jsonl") as server:
         hold = server.hold()
-        server.queue("openai", MockReply("partial", hold=hold))
+        server.queue("openai-chat", MockReply("partial", hold=hold))
         connection, response = _open(
-            f"{server.base_urls['openai']}/chat/completions", {"stream": True}
+            f"{server.base_urls['openai-chat']}/chat/completions", {"stream": True}
         )
         assert len(_read_events(response, count=1)) == 1
         assert hold.wait_reached(2.0)

@@ -19,7 +19,7 @@ def provision(context: ProvisionContext) -> Provisioned:
     catalog = {
         "providers": {
             _PROVIDER: {
-                "baseUrl": context.mock_urls["openai"],
+                "baseUrl": context.mock_urls["openai-chat"],
                 "api": "openai-completions",
                 "apiKey": "mock-key",
                 "models": [{"id": name} for name in models],
@@ -38,7 +38,7 @@ def provision(context: ProvisionContext) -> Provisioned:
     # Pi canonicalises cwd with realpath before the trust lookup.
     trust = {str(context.workdir.resolve()): True}
     return Provisioned(
-        protocol="openai",
+        protocol="openai-chat",
         env={"PI_CODING_AGENT_DIR": str(agent_dir)},
         files={
             agent_dir / "models.json": json.dumps(catalog, indent=2) + "\n",

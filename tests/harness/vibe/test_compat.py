@@ -16,7 +16,7 @@ def _context(tmp_path: Path, models: tuple[str, ...] = ("mock-a", "mock-b")) -> 
         home=tmp_path / "home",
         config_dir=tmp_path / "home" / ".config",
         workdir=tmp_path / "work",
-        mock_urls={"openai": "http://127.0.0.1:9/v1"},
+        mock_urls={"openai-chat": "http://127.0.0.1:9/v1"},
         binary=tmp_path / "vibe",
         version="3.0.2",
         models=models,
@@ -27,7 +27,7 @@ def test_provision_serves_every_logical_model_from_the_mock_over_openai(tmp_path
     provisioned = VibeHarness().compat.provision(_context(tmp_path))
 
     config = tomllib.loads(provisioned.files[tmp_path / "home" / ".vibe" / "config.toml"])
-    assert provisioned.protocol == "openai"
+    assert provisioned.protocol == "openai-chat"
     assert provisioned.models == ("mock-a", "mock-b")
     assert provisioned.env == {"VIBE_HOME": str(tmp_path / "home" / ".vibe")}
     assert config["active_model"] == "mock-a"

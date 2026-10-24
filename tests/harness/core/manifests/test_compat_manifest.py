@@ -27,8 +27,8 @@ from theater.harness.manifests.validation import ManifestValidationError
 
 def provision(context: ProvisionContext) -> Provisioned:
     return Provisioned(
-        protocol="openai",
-        env={"ACME_BASE_URL": context.mock_urls["openai"]},
+        protocol="openai-chat",
+        env={"ACME_BASE_URL": context.mock_urls["openai-chat"]},
         files={context.config_dir / "acme.toml": "x = 1\n"},
         models=context.models,
         efforts=("low", "high"),
@@ -41,7 +41,7 @@ def context(tmp_path: Path) -> ProvisionContext:
         home=tmp_path / "home",
         config_dir=tmp_path / "config",
         workdir=tmp_path / "work",
-        mock_urls={"openai": "http://127.0.0.1:1/v1"},
+        mock_urls={"openai-chat": "http://127.0.0.1:1/v1"},
         binary=tmp_path / "acme",
         version="1.2.3",
         models=["mock-a", "mock-b"],
@@ -59,7 +59,7 @@ def test_compilation_forwards_the_declared_compat_manifest(tmp_path: Path) -> No
 
     assert harness.compat is declared
     provisioned = harness.compat.provision(context(tmp_path))
-    assert provisioned.protocol == "openai"
+    assert provisioned.protocol == "openai-chat"
     assert provisioned.models == ("mock-a", "mock-b")
     assert provisioned.env == {"ACME_BASE_URL": "http://127.0.0.1:1/v1"}
 
@@ -77,7 +77,7 @@ def test_context_and_provisioned_values_are_frozen(tmp_path: Path) -> None:
 def test_provisioned_rejects_an_unknown_protocol() -> None:
     with pytest.raises(ValueError, match="protocol must be one of"):
         Provisioned(protocol="gemini")
-    assert COMPAT_PROTOCOLS == ("anthropic", "openai", "openai-responses")
+    assert COMPAT_PROTOCOLS == ("anthropic", "openai-chat", "openai-responses")
 
 
 _APPROVALS = ("manual", "edits", "yolo")

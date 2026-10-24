@@ -539,7 +539,7 @@ no scenarios, assertions, skips or proof callbacks.
 the binary and its version, and the logical model names the run will request)
 and returns the `Provisioned` values that make the stock CLI use the mock:
 
-- `protocol`: `"anthropic"`, `"openai"` (Chat Completions) or
+- `protocol`: `"anthropic"`, `"openai-chat"` (Chat Completions) or
   `"openai-responses"`;
 - `env`: endpoint, dummy credential, update and telemetry opt-outs;
 - `files`: absolute config, model-catalog and onboarding or trust pre-seeding;

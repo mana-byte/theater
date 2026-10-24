@@ -22,7 +22,7 @@ def provision(context: ProvisionContext) -> Provisioned:
     config = (
         f'active_model = "{models[0]}"\n'
         f'[[providers]]\nname = "{_PROVIDER}"\n'
-        f'api_base = "{context.mock_urls["openai"]}"\n'
+        f'api_base = "{context.mock_urls["openai-chat"]}"\n'
         'api_key_env_var = ""\napi_style = "openai"\nbackend = "generic"\n'
     ) + "".join(
         f'[[models]]\nname = "{name}"\nprovider = "{_PROVIDER}"\nalias = "{name}"\n'
@@ -31,7 +31,7 @@ def provision(context: ProvisionContext) -> Provisioned:
     # Vibe resolves the workdir before comparing, so trust the resolved path.
     trusted = f'trusted = ["{context.workdir.resolve()}"]\nuntrusted = []\n'
     return Provisioned(
-        protocol="openai",
+        protocol="openai-chat",
         env={"VIBE_HOME": str(vibe_home)},
         files={
             vibe_home / "config.toml": config,
