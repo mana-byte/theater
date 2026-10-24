@@ -21,6 +21,9 @@ Expectation = Literal["fail", "not-pass"]
 ANY = "*"
 #: Logged by the mutated package when the daemon imports it: proof the mutation was in force.
 LOADED_BANNER = "canary %s active"
+#: Logged by a mutation that removed something, with the count; zero counts do not match.
+DROPPED_BANNER = "canary dropped %d %s"
+DROPPED_EFFECT = r"canary dropped [1-9]\d* "
 
 _WRAP_PLANNER = """
 def mutate(manifest):
@@ -42,10 +45,26 @@ class Mutation:
     breaks: Mapping[str, Expectation]
     #: Selects only the scenarios that can notice it: a pytest ``-k`` expression.
     select: str
+    #: Logged by the mutation when it changed something; absent from every daemon log means the
+    #: plugin had nothing for it to break (a planner that writes no files), so nothing is proven.
+    effect: str = ""
 
 
 def _planner(body: str) -> str:
     return _WRAP_PLANNER.format(body=body)
+
+
+def _drop(label: str, *attributes: str) -> str:
+    """Empty launch-plan ``attributes`` and log how much there was to lose."""
+    count = " + ".join(f"len(plan.{name})" for name in attributes)
+    empty = ", ".join(f"{name}={{}}" for name in attributes)
+    return (
+        "plan = inner(context)\n"
+        "        logging.getLogger('theater.canary').warning(\n"
+        f"            {DROPPED_BANNER!r}, {count}, {label!r}\n"
+        "        )\n"
+        f"        return replace(plan, {empty})"
+    )
 
 
 def _remap_approval(requested: str, launched: str) -> str:
@@ -97,9 +116,17 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "launch-env-dropped",
-        _planner("return replace(inner(context), env={})"),
+        _planner(_drop("env", "env")),
         {ANY: "not-pass"},
         "turn",
+        DROPPED_EFFECT,
+    ),
+    Mutation(
+        "launch-files-dropped",
+        _planner(_drop("files", "files", "private_files")),
+        {ANY: "not-pass"},
+        "turn",
+        DROPPED_EFFECT,
     ),
 )
 

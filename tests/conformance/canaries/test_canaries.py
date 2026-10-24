@@ -7,6 +7,7 @@ the suite or a plugin changes and weekly, never per release.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -60,14 +61,17 @@ def test_the_suite_notices_a_deliberately_broken_plugin(name: str, mutation: Mut
             pytest_args=["-k", mutation.select],
             extra_env={SUITE_ENV_MUTATION: mutation.name},
         )
-        banner = LOADED_BANNER % mutation.name
-        loaded = [
-            log
+        logs = [
+            log.read_text(encoding="utf-8", errors="replace")
             for log in sb.evidence_dir.glob("*/daemon.log")
-            if banner in log.read_text(encoding="utf-8", errors="replace")
         ]
 
-    assert loaded, "the mutated plugin was never loaded by the daemon, so nothing was proven"
+    banner = LOADED_BANNER % mutation.name
+    assert any(banner in log for log in logs), (
+        "the mutated plugin was never loaded by the daemon, so nothing was proven"
+    )
+    if mutation.effect and not any(re.search(mutation.effect, log) for log in logs):
+        pytest.skip(f"{mutation.name} found nothing to break in the {name} launch plan")
     assert not report.problems
     ran = {
         check.name.removeprefix("conformance:"): check.status
