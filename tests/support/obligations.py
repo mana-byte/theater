@@ -93,6 +93,18 @@ def _edit(harness: Harness) -> tuple[str, ...]:
     return _gating(harness, {"gated": "manual", "runs": "edits"})
 
 
+def _runtime(harness: Harness) -> tuple[str, ...]:
+    """A native route that is physical, and every non-steer capability declared unavailable."""
+    if harness.runtime is None:
+        return ()
+    refused = sorted(
+        capability.value
+        for capability in harness.runtime.unavailable_capabilities
+        if capability is not RuntimeCapability.STEER  # the steer family proves its own refusal
+    )
+    return ("native", *(f"unavailable-{name}" for name in refused))
+
+
 FAMILIES: tuple[Family, ...] = (
     Family("launch", _approvals, "test_launch.py"),
     Family("turn", _always, "test_turn.py"),
@@ -110,7 +122,7 @@ FAMILIES: tuple[Family, ...] = (
     Family("mcp", _mcp, "test_mcp.py"),
     Family("edit", _edit, "test_edit.py"),
     Family("channels", _channels, None, "scenario pending"),
-    Family("runtime", _flag("native", lambda h: h.runtime is not None), None, "scenario pending"),
+    Family("runtime", _runtime, "test_runtime.py"),
 )
 
 

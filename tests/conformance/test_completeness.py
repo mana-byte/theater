@@ -191,3 +191,15 @@ def test_a_provisioning_plugin_offers_what_its_declared_capabilities_need(
     assert all(path.is_relative_to(tmp_path) for path in provisioned.files), (
         "provisioning writes only inside the sandbox"
     )
+
+
+def test_a_declared_unavailable_capability_becomes_one_refusal_obligation() -> None:
+    opencode = {item.id for item in required(HARNESSES["opencode"])}
+    pi = {item.id for item in required(HARNESSES["pi"])}
+
+    assert {"runtime:native", "runtime:unavailable-settings_update", "steer:refused"} <= opencode
+    assert "runtime:unavailable-steer" not in opencode | pi, "steer is proven by its own family"
+    assert {"runtime:native", "steer:refused"} <= pi
+    assert not any(
+        item.startswith("runtime:") for item in {i.id for i in required(HARNESSES["vibe"])}
+    )
