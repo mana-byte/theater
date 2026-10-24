@@ -101,7 +101,8 @@ def _attachment_context(path: Path, point: StreamPoint, mtime: int) -> list[tupl
 def _live_turn_start(
     records: list[tuple[int, int, str]], after: float | None, session_id: str | None
 ) -> tuple[int, int] | None:
-    """Locate a main-thread user turn proven to belong to this fresh launch."""
+    """Locate a launch-local user turn assuming nondecreasing same-machine wall time."""
+    # No predecessor floor is supplied; copied history cannot be fenced by record index.
     if after is None or session_id is None:
         return None
     previous = 0 if records and records[0][0] == 0 else None

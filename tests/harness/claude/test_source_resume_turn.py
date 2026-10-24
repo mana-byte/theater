@@ -115,3 +115,15 @@ def test_live_turn_requires_launch_local_main_thread_evidence(extra):
     record = {"type": "user", "timestamp": AFTER, "sessionId": SESSION, **extra}
     records = [(0, 10, "{}"), (1, 20, json.dumps(record))]
     assert claude_source._live_turn_start(records, iso_epoch(LAUNCH), SESSION) is None
+
+
+def test_copied_future_timestamp_exposes_wall_clock_assumption():
+    predecessor = {
+        "type": "user",
+        "uuid": "old_user",
+        "timestamp": AFTER,
+        "sessionId": SESSION,
+    }
+    records = [(0, 10, "{}"), (1, 20, json.dumps(predecessor))]
+    # Without a predecessor floor, a clock step makes copied history look launch-local.
+    assert claude_source._live_turn_start(records, iso_epoch(LAUNCH), SESSION) == (1, 10)
