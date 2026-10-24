@@ -45,10 +45,8 @@ def edit_effect(live: LiveRig) -> Effect:
     assert edit is not None
     nonce = f"EDIT-{uuid.uuid4().hex[:8]}"
     target = live.workdir.resolve() / f"{nonce}.txt"
-    arguments = edit.render(path=str(target), nonce=nonce)
-    if isinstance(arguments, str):
-        raise NotImplementedError("freeform native_edit payloads need mock support first")
-    return Effect(MockToolCall(edit.name, arguments), lambda: _contains(target, nonce))
+    call = MockToolCall(edit.name, edit.render(path=str(target), nonce=nonce))
+    return Effect(call, lambda: _contains(target, nonce))
 
 
 async def mcp_effect(live: LiveRig, participant: str) -> Effect:
@@ -117,9 +115,11 @@ def _check_fit(live: LiveRig, prompt: str, effect: Effect) -> None:
 
 
 def _misfit(request: RecordedRequest, call: MockToolCall) -> str | None:
-    shape = request.tool_shapes.get(call.name)
-    if shape is None:
+    if call.name not in request.tools:
         return "the model was not offered it"
+    shape = request.tool_shapes.get(call.name)
+    if shape is None or isinstance(call.arguments, str):
+        return None  # a freeform (grammar) tool declares no arguments to compare against
     given = set(call.arguments)
     unknown = sorted(given - set(shape.properties)) if shape.properties else []
     missing = sorted(set(shape.required) - given)
@@ -140,10 +140,7 @@ async def _mcp_call(
     declared = live.harness.compat.mcp_call
     if declared is None:
         return MockToolCall(name, arguments)
-    rendered = declared.render(server=server, tool=tool, arguments=arguments)
-    if isinstance(rendered, str):
-        raise NotImplementedError("freeform mcp_call payloads need mock support first")
-    return MockToolCall(name, rendered)
+    return MockToolCall(name, declared.render(server=server, tool=tool, arguments=arguments))
 
 
 async def _offered(
