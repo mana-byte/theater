@@ -215,9 +215,13 @@ Every path it touches lives under the sandbox root, the environment of the daemo
 scratch (dead proxy, private tmux, throwaway home), the version probe runs from a throwaway home, and the
 guards are unit-tested (`tests/conformance/test_guards.py`). The weekly `Harness compatibility canaries`
 workflow installs each harness's newest admitted release and requires the suite to fail the obligations that
-a manifest-level mutation breaks (manual mapped to yolo, edits to manual, model or resume dropped, inert
-interrupt keys, launch env or files dropped, a native runtime the probe refuses); it also runs when the
-suite changes.
+a manifest-level mutation breaks (manual mapped to yolo, edits to manual, model or resume dropped, interrupt
+suppressed, a native runtime the probe refuses, and per plan the launch env dropped for Vibe and the launch
+files, which carry Claude's receipt hooks, dropped for Claude); approval and model mutations wrap the legacy
+launch planner and, for a harness with a native runtime, its backend planner and runtime factory, and the
+interrupt mutation also suppresses the native interrupt, because a canary that broke only the legacy path
+would pass silently on the harnesses whose production path is the native one. It also runs when the suite
+changes.
 
 ## Requirements and limits
 

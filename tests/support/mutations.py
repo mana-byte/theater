@@ -35,6 +35,33 @@ def mutate(manifest):
     return replace(manifest, launch=replace(manifest.launch, planner=planner))
 """
 
+#: ``alter(context)`` applied wherever the manifest receives the launch facts. A harness with a
+#: native runtime is launched by its backend planner and driven by its runtime factory, each with
+#: the same approval and model, so a canary that only broke the legacy launch planner would pass
+#: silently on exactly the harnesses whose production path is the native one.
+_ALTER_CONTEXTS = """
+def alter(context):
+    {body}
+
+
+def mutate(manifest):
+    inner_planner = manifest.launch.planner
+    changes = {
+        "launch": replace(
+            manifest.launch, planner=lambda context: inner_planner(alter(context))
+        )
+    }
+    runtime = manifest.runtime
+    if runtime is not None:
+        inner_factory = runtime.factory
+        wrapped = {"factory": lambda context: inner_factory(alter(context))}
+        if runtime.plan is not None:
+            inner_plan = runtime.plan
+            wrapped["plan"] = lambda context: inner_plan(alter(context))
+        changes["runtime"] = replace(runtime, **wrapped)
+    return replace(manifest, **changes)
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class Mutation:
@@ -48,10 +75,18 @@ class Mutation:
     #: Logged by the mutation when it changed something; absent from every daemon log means the
     #: plugin had nothing for it to break (a planner that writes no files), so nothing is proven.
     effect: str = ""
+    #: The harnesses it is a canary for; empty means every harness that declares what it breaks.
+    #: Plan 5.9 names two canaries for one harness each: whether losing a planned value is visible
+    #: depends on whether the sandbox's own provisioning supplies it anyway.
+    only: tuple[str, ...] = ()
 
 
 def _planner(body: str) -> str:
     return _WRAP_PLANNER.format(body=body)
+
+
+def _contexts(body: str) -> str:
+    return _ALTER_CONTEXTS.replace("{body}", body)
 
 
 def _drop(label: str, *attributes: str) -> str:
@@ -71,26 +106,26 @@ def _remap_approval(requested: str, launched: str) -> str:
     """Launch with ``launched`` whenever ``requested`` was asked for."""
     return (
         f"approval = {launched!r} if context.approval == {requested!r} else context.approval\n"
-        "        return inner(replace(context, approval=approval))"
+        "    return replace(context, approval=approval)"
     )
 
 
 MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "manual-as-yolo",
-        _planner(_remap_approval("manual", "yolo")),
+        _contexts(_remap_approval("manual", "yolo")),
         {"mcp:gated": "fail", "edit:gated": "fail"},
         "mcp or edit",
     ),
     Mutation(
         "edits-as-manual",
-        _planner(_remap_approval("edits", "manual")),
+        _contexts(_remap_approval("edits", "manual")),
         {"edit:runs": "fail"},
         "edit",
     ),
     Mutation(
         "model-dropped",
-        _planner("return inner(replace(context, model=None))"),
+        _contexts("return replace(context, model=None)"),
         {"model:model": "fail"},
         "model",
     ),
@@ -101,14 +136,38 @@ MUTATIONS: tuple[Mutation, ...] = (
         "resume",
     ),
     Mutation(
-        "interrupt-keys-inert",
+        "interrupt-inert",
         dedent(
             """
             def mutate(manifest):
                 from theater.harness.contracts import InterruptPlan
+                from theater.harness.contracts.runtime import ControlReceipt, DeliveryResult
 
-                controls = replace(manifest.controls, interrupt=InterruptPlan(keys=("F20",)))
-                return replace(manifest, controls=controls)
+                changes = {}
+                if manifest.controls.interrupt is not None:
+                    changes["controls"] = replace(
+                        manifest.controls, interrupt=InterruptPlan(keys=("F20",))
+                    )
+                runtime = manifest.runtime
+                if runtime is not None:
+                    inner = runtime.factory
+
+                    def factory(context):
+                        native = inner(context)
+
+                        async def interrupt(*, operation_id, native_turn_id=None):
+                            return ControlReceipt(
+                                operation_id=operation_id,
+                                result=DeliveryResult.REJECTED,
+                                error_code="canary",
+                                error="the canary suppressed the native interrupt",
+                            )
+
+                        native.interrupt = interrupt
+                        return native
+
+                    changes["runtime"] = replace(runtime, factory=factory)
+                return replace(manifest, **changes)
             """
         ),
         {"interrupt:interrupt": "fail"},
@@ -139,6 +198,7 @@ MUTATIONS: tuple[Mutation, ...] = (
         {ANY: "not-pass"},
         "turn",
         DROPPED_EFFECT,
+        only=("vibe",),  # plan 5.9: the isolated session-log env; elsewhere provision supplies it
     ),
     Mutation(
         "launch-files-dropped",
@@ -146,12 +206,17 @@ MUTATIONS: tuple[Mutation, ...] = (
         {ANY: "not-pass"},
         "turn",
         DROPPED_EFFECT,
+        only=("claude",),  # plan 5.9: the receipt hooks, which only the launch plan writes
     ),
 )
 
 
-def applicable(mutation: Mutation, required: tuple[Obligation, ...]) -> Mapping[str, Expectation]:
+def applicable(
+    mutation: Mutation, required: tuple[Obligation, ...], harness: str | None = None
+) -> Mapping[str, Expectation]:
     """The breakage this harness is expected to show: what the mutation breaks and it declares."""
+    if mutation.only and harness not in mutation.only:
+        return {}
     ids = {item.id for item in required}
     if ANY in mutation.breaks:
         return mutation.breaks
