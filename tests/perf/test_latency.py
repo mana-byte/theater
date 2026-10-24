@@ -21,7 +21,7 @@ from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.loading.discovery import discover
 from theater.harness.loading.importer import load_plugin
 
-SCRIPTS = REPO_ROOT / "scripts"
+SCRIPTS = REPO_ROOT / "scripts" / "bench"
 
 
 def test_observe_to_bus_is_bus_ts_minus_read_at_and_nan_without_samples(perf):
@@ -139,6 +139,7 @@ def test_synthetic_option_selects_plugin_and_validates(perf) -> None:
 
 
 def test_install_pins_writer_and_plugin_compiles_and_plans(perf, tmp_path: Path) -> None:
+    assert perf.REPO == REPO_ROOT
     home, bin_dir = tmp_path / "home", tmp_path / "bin"
     bin_dir.mkdir()
     perf.install_synthetic_plugin(home, bin_dir)

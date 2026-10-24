@@ -445,7 +445,7 @@ async def test_harness_rejection_of_sidecars_omits_them_without_failing_the_spaw
 
 
 async def test_build_plan_renders_core_servers_with_empty_and_configured_plugin_sets(
-    registry, isolated_mcp_registry
+    registry, isolated_mcp_registry, available_harness_binaries
 ):
     request = SpawnRequest(harness="codex", prompt="", cwd="/tmp", approval="manual")
     empty = registry.create_spawned(harness="codex", cwd="/tmp")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measurement-only transcript writer: appends JSONL records stamped at write time.
 
-Stands in for an agent CLI under the `synth` plugin (scripts/perf_synth_plugin) so
+Stands in for an agent CLI under the `synth` plugin (scripts/bench/perf_synth_plugin) so
 `transcript_to_bus` becomes write-to-bus: theater-side latency at a deterministic event rate.
 Stdlib only; runs unchanged against any commit. Rate 0 creates the file and idles.
 """

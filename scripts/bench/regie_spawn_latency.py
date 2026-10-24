@@ -128,10 +128,12 @@ class Stack:
         return {str(row["id"]): row for row in rows}
 
     def install_synth(self) -> None:
-        source = self.tree / "scripts" / "perf_synth_plugin"
-        writer = self.tree / "scripts" / "perf_synthetic_writer.py"
+        # Keep the workload fixed when --tree selects an older checkout.
+        bench = Path(__file__).resolve().parent
+        source = bench / "perf_synth_plugin"
+        writer = bench / "perf_synthetic_writer.py"
         if not source.is_dir() or not writer.is_file():
-            raise RuntimeError(f"synthetic harness assets missing under {self.tree / 'scripts'}")
+            raise RuntimeError(f"synthetic harness assets missing under {bench}")
         stub = self.bin_dir / "synth"
         stub.write_text("#!/bin/sh\nexit 0\n")
         stub.chmod(0o755)
