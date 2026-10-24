@@ -135,12 +135,12 @@ def test_main_publishes_completed_prefixes_and_reuses_the_same_run_url(
 
 @pytest.mark.parametrize("first", ["red", "green"])
 def test_a_failed_publication_is_retried_with_all_known_results_before_later_admission(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, first: str
+    repo: Path, monkeypatch: pytest.MonkeyPatch, first: str, capsys
 ) -> None:
     _publishing(monkeypatch, repo)
     _scripted(monkeypatch, ["1.0.0", "1.2.0", "1.3.0", "1.4.0"], {"1.3.0": first})
     proposals = []
-    attention: list[str] = []
+    issues = []
 
     def publish(root, run, *, run_url):
         proposal = derive(run.policy, run.results)
@@ -150,25 +150,27 @@ def test_a_failed_publication_is_retried_with_all_known_results_before_later_adm
         return Published(proposal, 17)
 
     monkeypatch.setattr(cli, "publish", publish)
-    monkeypatch.setattr(cli, "_attention", attention.append)
+    monkeypatch.setattr(cli, "file_attention_issue", lambda *args: issues.append(args))
     assert _main(monkeypatch, repo, "run", "claude") == 2
     assert proposals[-1] == VersionPolicy("1.0.0", "1.4.0", ("1.3.0",))
-    assert attention and "temporary publication failure" in attention[0]
+    assert not issues and "temporary publication failure" in capsys.readouterr().out
 
 
-def test_discovery_failure_reports_an_issue_without_inventing_a_version(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
+def test_discovery_failure_exits_with_context_for_the_independent_reporter(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     _publishing(monkeypatch, repo)
-    messages: list[str] = []
+    issues = []
 
     def broken(*args, **kwargs):
         raise OSError("registry unreachable")
 
     monkeypatch.setattr(cli, "run_harness", broken)
-    monkeypatch.setattr(cli, "_attention", messages.append)
+    monkeypatch.setattr(cli, "file_attention_issue", lambda *args: issues.append(args))
     assert _main(monkeypatch, repo, "run", "claude") == 2
-    assert messages == ["OSError: registry unreachable"]
+    output = capsys.readouterr()
+    assert not issues and "OSError: registry unreachable" in output.err
+    assert "compat:start" not in output.out
 
 
 def test_issue_publication_failure_is_explicitly_visible(
@@ -176,14 +178,14 @@ def test_issue_publication_failure_is_explicitly_visible(
 ) -> None:
     _publishing(monkeypatch, repo)
     monkeypatch.setattr(
-        cli, "run_harness", lambda *a, **k: (_ for _ in ()).throw(OSError("discovery"))
+        cli, "report_workflow_failure", lambda *a, **k: (_ for _ in ()).throw(OSError("logs"))
     )
 
-    def unavailable(message):
+    def unavailable(*args):
         raise RuntimeError("GitHub issues unavailable")
 
-    monkeypatch.setattr(cli, "_attention", unavailable)
-    assert _main(monkeypatch, repo, "run", "claude") == 2
+    monkeypatch.setattr(cli, "file_attention_issue", unavailable)
+    assert _main(monkeypatch, repo, "report", "42") == 2
     assert "Failure issue publication" in capsys.readouterr().err
 
 

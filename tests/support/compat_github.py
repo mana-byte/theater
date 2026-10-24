@@ -12,6 +12,12 @@ from theater.harness.contracts.version_policy import VersionPolicy
 POLICY_PATH = policy_relative("claude").as_posix()
 
 
+def assert_gh_flags(args: tuple[str, ...]) -> None:
+    assert not ("--slurp" in args and {"--jq", "--template"}.intersection(args)), (
+        "gh does not support --slurp with --jq or --template"
+    )
+
+
 class CompatGithub:
     def __init__(self, sha: str, policy: VersionPolicy) -> None:
         self.refs = {"main": sha}
@@ -52,6 +58,7 @@ class CompatGithub:
         ]
 
     def __call__(self, *args: str) -> str:
+        assert_gh_flags(args)
         self.calls.append(args)
         if "--body-file" in args:
             path = Path(args[args.index("--body-file") + 1])
@@ -72,7 +79,7 @@ class CompatGithub:
         if args[0] != "api":
             return ""
         if "--paginate" in args:
-            return json.dumps([{"title": title, "number": n} for title, n in self.issues.items()])
+            return json.dumps([[{"title": title, "number": n} for title, n in self.issues.items()]])
         path = args[1].removeprefix("repos/{owner}/{repo}/")
         return json.dumps(self._api(path, body))
 

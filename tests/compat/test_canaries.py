@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,12 @@ import pytest
 from scripts.harness_compat import canaries
 from scripts.harness_compat.codecopy import code_copy
 from scripts.harness_compat.contract import InstallFailed, Sandbox
+from scripts.harness_compat.framework import python_path
 from scripts.harness_compat.policy import load_policy, write_policy
+from scripts.harness_compat.process import run_group
+from scripts.harness_compat.sandbox import make_sandbox
+from tests.support.mutations import MUTATIONS
+from tests.support.paths import REPO_ROOT
 from theater.harness.contracts.version_policy import VersionPolicy
 
 
@@ -65,7 +71,33 @@ def test_the_policys_maximum_is_installed_and_every_caught_canary_passes(
     env = seen[0]["env"]
     assert env[canaries.ENV_ENABLE] == "1" and env[canaries.ENV_HARNESS] == "claude"
     assert env[canaries.ENV_BINARY].endswith("claude")
-    assert seen[0]["argv"][-3:] == ["-k", "claude", canaries.CANARIES_TARGET]
+    assert "-k" not in seen[0]["argv"] and seen[0]["argv"][-1] == canaries.CANARIES_TARGET
+
+
+def test_canary_collection_selects_exactly_pi_without_matching_the_skipif_marker() -> None:
+    with make_sandbox("canary-collection") as sb, code_copy(REPO_ROOT) as tree:
+        result = run_group(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "--collect-only",
+                canaries.CANARIES_TARGET,
+            ],
+            cwd=tree,
+            env={
+                **sb.offline_env,
+                canaries.ENV_HARNESS: "pi",
+                "PYTHONPATH": python_path(tree),
+            },
+            timeout=30,
+        )
+    collected = [line for line in result.stdout.splitlines() if "::test_" in line]
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(collected) == len(MUTATIONS) and all("[pi-" in line for line in collected)
 
 
 def test_an_excluded_max_uses_the_newest_admitted_release(repo: Path, monkeypatch) -> None:

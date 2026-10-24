@@ -14,6 +14,7 @@ from scripts.harness_compat import attention
 from scripts.harness_compat.codecopy import code_copy
 from scripts.harness_compat.git import git
 from scripts.harness_compat.run import Run
+from tests.support.compat_github import assert_gh_flags
 from tests.support.paths import REPO_ROOT
 
 URL = "https://github.com/o/r/actions/runs/42"
@@ -57,38 +58,64 @@ def _report(
     stage: str = "failure",
     job: str | None = None,
     head_branch: str = "main",
+    head_repository: str | None = "o/r",
+    path: str | None = None,
+    superseded: bool = False,
 ):
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_run")
     monkeypatch.setenv("GITHUB_SHA", git(repo, "rev-parse", "HEAD").strip())
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
     issues: list[tuple[str, str]] = []
     proposals: list[Run] = []
     log_reads: list[str] = []
 
-    def api(gh, path):
-        return {
-            "name": "Harness compatibility",
-            "conclusion": stage,
-            "event": event,
-            "html_url": URL,
-            "head_branch": head_branch,
-        }
+    canaries = bool(job and job.startswith("Canaries "))
+    workflow = {
+        "id": 42,
+        "workflow_id": 9,
+        "name": "Harness compatibility canaries" if canaries else "Harness compatibility",
+        "path": path or f".github/workflows/harness-compat{'-canaries' if canaries else ''}.yml",
+        "conclusion": stage,
+        "event": event,
+        "html_url": URL,
+        "head_branch": head_branch,
+        "head_sha": "tested-head",
+        "head_repository": {"full_name": head_repository} if head_repository else None,
+        "pull_requests": [{"number": 7}] if event == "pull_request" else [],
+    }
+
+    def api(gh, endpoint):
+        if endpoint.startswith("pulls/"):
+            return {
+                "state": "open",
+                "head": {"sha": "new-head" if superseded else "tested-head"},
+            }
+        if endpoint.startswith("actions/workflows/"):
+            return {"workflow_runs": [{**workflow, "id": 43 if superseded else 42}]}
+        return workflow
 
     def gh(*args):
+        assert_gh_flags(args)
         if "--paginate" in args:
             return json.dumps(
                 [
+                    {"jobs": []},
                     {
-                        "name": job
-                        or (
-                            "Verify claude plugin and policy"
-                            if event == "pull_request"
-                            else "Qualify claude"
-                        ),
-                        "conclusion": stage,
-                        "id": 3,
-                    }
+                        "jobs": [
+                            {
+                                "name": job
+                                or (
+                                    "Verify claude plugin and policy"
+                                    if event == "pull_request"
+                                    else "Qualify claude"
+                                ),
+                                "conclusion": stage,
+                                "id": 3,
+                            }
+                        ]
+                    },
                 ]
             )
         log_reads.append(args[1])
@@ -174,6 +201,99 @@ def test_canary_failures_report_the_known_version_as_suite_tooling(repo: Path, m
         log="compat:start claude 1.2.0\ncompat:result claude 1.2.0 tooling",
     )
     assert issues and proposals[0].results[0].verdict == "tooling"
+
+
+@pytest.mark.parametrize(
+    "event,job",
+    [
+        ("pull_request", None),
+        ("schedule", "Canaries claude"),
+        ("workflow_dispatch", "Canaries claude"),
+    ],
+)
+def test_supersession_never_manufactures_an_unfinished_version_failure(
+    repo: Path, monkeypatch, event: str, job: str | None
+) -> None:
+    log = "compat:start claude 1.3.0"
+    if job is None:
+        log += "\ncompat:result claude 1.3.0 green\ncompat:start claude 1.4.0"
+    issues, proposals, _ = _report(
+        monkeypatch,
+        repo,
+        event=event,
+        job=job,
+        stage="cancelled",
+        superseded=True,
+        log=log,
+    )
+    assert not issues and not proposals
+
+
+def test_a_completed_failure_survives_supersession_without_excluding_unfinished_versions(
+    repo: Path, monkeypatch
+) -> None:
+    issues, proposals, _ = _report(
+        monkeypatch,
+        repo,
+        event="pull_request",
+        stage="cancelled",
+        superseded=True,
+        log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 red\ncompat:start claude 1.4.0",
+    )
+    assert not issues and [(r.version, r.verdict) for r in proposals[0].results] == [
+        ("1.3.0", "red")
+    ]
+
+
+@pytest.mark.parametrize("job", [None, "Canaries claude"])
+def test_an_ordinary_cancellation_still_needs_attention_and_a_known_version_exclusion(
+    repo: Path, monkeypatch, job: str | None
+) -> None:
+    issues, proposals, _ = _report(
+        monkeypatch,
+        repo,
+        event="pull_request",
+        job=job,
+        stage="cancelled",
+        log="compat:start claude 1.3.0",
+    )
+    assert issues and proposals[0].results[0].verdict == "inconclusive"
+
+
+def test_main_sweep_cancellation_is_a_failure_even_when_a_newer_run_exists(
+    repo: Path, monkeypatch
+) -> None:
+    issues, proposals, _ = _report(
+        monkeypatch,
+        repo,
+        stage="cancelled",
+        superseded=True,
+        log="compat:start claude 1.3.0",
+    )
+    assert issues and proposals[0].results[0].verdict == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    "head_repository,path",
+    [
+        ("fork/r", ".github/workflows/harness-compat.yml"),
+        (None, ".github/workflows/harness-compat.yml"),
+        ("o/r", ".github/workflows/foreign.yml"),
+    ],
+)
+def test_foreign_or_unidentified_source_logs_cannot_propose_version_exclusions(
+    repo: Path, monkeypatch, head_repository: str | None, path: str
+) -> None:
+    issues, proposals, log_reads = _report(
+        monkeypatch,
+        repo,
+        event="pull_request",
+        head_repository=head_repository,
+        path=path,
+        log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 red",
+    )
+    assert issues and not proposals and not log_reads
+    assert "1.3.0" not in issues[0][1]
 
 
 def test_reporting_imports_without_project_dependencies_or_site_packages() -> None:

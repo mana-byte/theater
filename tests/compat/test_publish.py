@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -11,9 +12,15 @@ from scripts.harness_compat.contract import Check, Result
 from scripts.harness_compat.diagnostics import exception_detail
 from scripts.harness_compat.git import git
 from scripts.harness_compat.policy import PolicyChangeError, load_policy
-from scripts.harness_compat.publish import file_issues, issue_body, issue_title, publish
+from scripts.harness_compat.publish import (
+    file_attention_issue,
+    file_issues,
+    issue_body,
+    issue_title,
+    publish,
+)
 from scripts.harness_compat.run import Run
-from tests.support.compat_github import POLICY_PATH, CompatGithub
+from tests.support.compat_github import POLICY_PATH, CompatGithub, assert_gh_flags
 from theater.harness.contracts.version_policy import VersionPolicy
 
 Make = Callable[..., Result]
@@ -210,16 +217,22 @@ def test_pending_code_changes_are_never_overwritten(repo: Path, result: Make) ->
     assert gh.refs["chore/compat-claude"] == "pending"
 
 
-def test_main_advance_prevents_a_pass_authorizing_untested_code(repo: Path, result: Make) -> None:
+def test_main_advance_rebases_a_green_proposal_and_preserves_the_pending_policy(
+    repo: Path, result: Make
+) -> None:
     gh = _github(repo)
+    gh.seed_pending(VersionPolicy("1.0.0", "1.4.0", ("1.3.0",)))
+    previous = gh.refs["main"]
+    gh.trees["tree-new-main"] = {**gh.trees["tree-main"], "tracked.txt": "new code\n"}
+    gh.commits["new-main"] = {
+        "tree": {"sha": "tree-new-main"},
+        "parents": [previous],
+    }
     gh.refs["main"] = "new-main"
-    gh.commits["new-main"] = gh.commits[_context(repo)["GITHUB_SHA"]]
-    with pytest.raises(ExceptionGroup) as caught:
-        _publish(repo, gh, result("1.3.0"))
-    assert "main advanced" in exception_detail(caught.value)
-    assert "chore/compat-claude" not in gh.refs
-    _publish(repo, gh, result("1.3.0", "inconclusive"))
-    assert gh.policy() == VersionPolicy("1.0.0", "1.2.0", ("1.3.0",))
+    published = _publish(repo, gh, result("1.5.0"))
+    assert published.proposal == VersionPolicy("1.0.0", "1.5.0", ("1.3.0",))
+    assert published.pr == 17 and not gh.issues
+    _one_line(gh)
 
 
 def test_clean_run_needs_no_failure_issue_calls(repo: Path, result: Make) -> None:
@@ -234,11 +247,32 @@ def test_main_advance_never_drops_failures_beside_a_previously_completed_pass(
     gh = _github(repo)
     gh.refs["main"] = "new-main"
     gh.commits["new-main"] = gh.commits[_context(repo)["GITHUB_SHA"]]
-    with pytest.raises(ExceptionGroup):
-        _publish(repo, gh, result("1.3.0"), result("1.4.0", "tooling"))
-    assert gh.policy() == VersionPolicy("1.0.0", "1.2.0", ("1.4.0",))
+    _publish(repo, gh, result("1.3.0"), result("1.4.0", "tooling"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.3.0", ("1.4.0",))
     assert issue_title("claude", "1.4.0") in gh.issues and gh.pr == 17
     _one_line(gh)
+
+
+def test_paginated_issue_lookup_flattens_pages_and_does_not_treat_prs_as_issues() -> None:
+    calls = []
+
+    def gh(*args):
+        assert_gh_flags(args)
+        calls.append(args)
+        if "--paginate" in args:
+            return json.dumps(
+                [
+                    [],
+                    [
+                        {"title": "attention", "number": 42},
+                        {"title": "attention", "number": 17, "pull_request": {"url": "PR"}},
+                    ],
+                ]
+            )
+        return ""
+
+    file_attention_issue("attention", "observed failure", gh=gh)
+    assert calls[-1][:3] == ("issue", "edit", "42")
 
 
 def test_issue_explanation_has_the_exact_check_and_run(result: Make) -> None:

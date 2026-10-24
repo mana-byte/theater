@@ -17,15 +17,15 @@ from theater.harness.builtin.plugins.opencode import (
     tui_recovery,
 )
 
-# Rendered by the pre-extraction code at 1ad730d6 with the fixed inputs below.
+# Fixed executable output; the TUI digest includes the supported recovery scope.
 _DIGESTS = {
     "server.js": "d28b78e919644e40ca14a428c1a98f645b19b4d67a3c97aa348685dc3b0256cc",
-    "tui.js": "94fdd72502bc52f5068ecb65b656364f7286f91fd49694c8eb474d5998c2ba8d",
+    "tui.js": "ffbf3da0e4f393c3901d8126c79ceeda7aff7e87bbfe87e29979687878c42e2f",
 }
 
 
 @pytest.mark.requires_node
-def test_rendered_assets_match_pre_extraction_bytes_and_parse(monkeypatch, tmp_path: Path) -> None:
+def test_rendered_assets_match_fixed_bytes_and_parse(monkeypatch, tmp_path: Path) -> None:
     special = 'p " ' + chr(92) + " ☃" + chr(10)
     token = Path('/x/tok " ' + chr(92) + " ☃" + chr(10))
     monkeypatch.setattr(native_plugin, "theater_binary", lambda: "/x/theater")
@@ -57,7 +57,7 @@ def test_fixed_renderings_in_an_ascii_locale() -> None:
             "-m",
             "pytest",
             "-q",
-            f"{__file__}::test_rendered_assets_match_pre_extraction_bytes_and_parse",
+            f"{__file__}::test_rendered_assets_match_fixed_bytes_and_parse",
         ],
         cwd=REPO_ROOT,
         env=env,

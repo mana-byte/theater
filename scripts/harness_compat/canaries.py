@@ -79,8 +79,6 @@ def run_canaries(
                 "no:cacheprovider",
                 "-n",
                 _PARALLEL_WORKERS,
-                "-k",
-                adapter.name,
                 CANARIES_TARGET,
             ]
             run = run_group(argv, cwd=tree, env=env, timeout=timeout)

@@ -40,6 +40,7 @@ Scripts create or update `chore/compat-<harness>`, preserving pending range/excl
 A routine PR changes **exactly one file, +1/−1**: the plugin's JSON line. It contains no fixture,
 history, evidence, Python or documentation edits. Publication uses GitHub APIs without editing the
 qualification checkout. Concurrent branch updates are refused rather than overwritten.
+A moving main rebases the proposed JSON; fresh PR checks prove admissions on the proposed code.
 
 Routine PR checks cover the proposed extension and every changed exclusion, including removals;
 unrelated newer upstream releases cannot make them fail. Wiring/code PRs recheck the current policy
@@ -48,8 +49,11 @@ window. Excluded contract failures do not admit that release; inconclusive check
 A separate `workflow_run` reporter uses trusted main code and system Python, independent of uv
 setup. It files issues for discovery, setup/static-check, timeout, cleanup and publication failures.
 It recovers unfinished or failed known versions from qualification, PR verification and canary
-logs, then proposes exclusions through the same shared PR. Only logged version identities are
-used; reporting never invents a version, executes PR code or authorizes a pass from logs.
+logs, then proposes exclusions through the same shared PR. Only identities from this repository's
+two expected workflow files can propose exclusions; foreign/fork source failures get a workflow
+issue without trusting their claimed versions. Reporting never executes PR code or authorizes
+a pass from logs. Concurrency supersession does not fail an unfinished version; completed failures
+are still reported, and ordinary cancellations require attention.
 
 ## Suite and temporary data
 
@@ -78,5 +82,5 @@ exemptions in `tests/support/coverage.py`; ordinary regressions cover their curr
 
 Hosted sweeps interrupt after 320 minutes, leaving five minutes for cleanup and publication.
 Finished outcomes are retained in the shared PR/issues; an unfinished known version is excluded.
-OpenCode's 2.0.17–2.0.20 renderer recovery remains independent of policy because baseline 2.0.18
+OpenCode's 2.0.18–2.0.20 renderer recovery remains independent of policy because baseline 2.0.18
 needs it.

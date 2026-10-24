@@ -30,6 +30,10 @@ pytestmark = [
 ]
 #: Read from disk: the registry is only populated after collection.
 SHIPPED = sorted(path.parent.name for path in plugin_dir().glob("*/manifest.py"))
+if selected := os.environ.get(ENV_HARNESS):
+    if selected not in SHIPPED:
+        raise pytest.UsageError(f"unknown canary harness: {selected}")
+    SHIPPED = [selected]
 
 
 def _binary(name: str, command: str) -> str | None:

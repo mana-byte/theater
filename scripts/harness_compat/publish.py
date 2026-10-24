@@ -93,10 +93,13 @@ def _open_issues(gh: Gh) -> dict[str, int]:
         "state=open",
         "-f",
         "per_page=100",
-        "--jq",
-        "[.[][] | select(.pull_request == null) | {number,title}]",
     )
-    return {item["title"]: item["number"] for item in json.loads(listing)}
+    return {
+        item["title"]: item["number"]
+        for page in json.loads(listing)
+        for item in page
+        if not item.get("pull_request")
+    }
 
 
 def _write_issue(gh: Gh, title: str, text: str, number: int | None) -> None:
@@ -225,25 +228,11 @@ def _commit_policy(
         )
 
 
-def propose_policy(
-    root: Path, run: Run, *, run_url: str, gh: Gh, environ: Mapping[str, str]
-) -> Published:
+def propose_policy(run: Run, *, run_url: str, gh: Gh) -> Published:
     """Preserve the pending PR's delta and propose one remote JSON line."""
     branch = f"chore/compat-{run.harness}"
     main = api(gh, "git/ref/heads/main")["object"]["sha"]
-    current = (
-        load_policy(root, run.harness)
-        if main == environ["GITHUB_SHA"]
-        else _policy_at(gh, run.harness, main)
-    )
-    if main == environ["GITHUB_SHA"]:
-        check_change((root / policy_relative(run.harness)).read_text(), format_policy(current))
-    blocked_passes = main != environ["GITHUB_SHA"] and any(
-        r.verdict == "green" for r in run.results
-    )
-    results = (
-        tuple(r for r in run.results if r.verdict != "green") if blocked_passes else run.results
-    )
+    current = _policy_at(gh, run.harness, main)
     refs = api(gh, f"git/matching-refs/heads/{branch}")
     head = next(
         (ref["object"]["sha"] for ref in refs if ref["ref"] == f"refs/heads/{branch}"), None
@@ -281,7 +270,7 @@ def propose_policy(
             candidate = _policy_at(gh, run.harness, head)
             check_change(format_policy(original), format_policy(candidate))
             pending = merge_pending(current, original, candidate)
-    proposal = derive(pending, results)
+    proposal = derive(pending, run.results)
     check_change(format_policy(current), format_policy(proposal))
     number = prs[0]["number"] if prs else None
     if proposal != current or pending != current:
@@ -304,10 +293,6 @@ def propose_policy(
             )["number"]
         else:
             api(gh, f"pulls/{number}", method="PATCH", body=body)
-    if blocked_passes:
-        raise PolicyChangeError(
-            "main advanced; exclusions were preserved, passes need current qualification"
-        )
     return Published(proposal, number)
 
 
@@ -332,7 +317,7 @@ def publish(
     except Exception as exc:
         failures.append(exc)
     try:
-        outcome = propose_policy(root, run, run_url=run_url, gh=gh, environ=environ)
+        outcome = propose_policy(run, run_url=run_url, gh=gh)
     except Exception as exc:
         failures.append(exc)
     if failures:

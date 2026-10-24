@@ -59,14 +59,6 @@ def _publishes() -> bool:
     ) in {"schedule", "workflow_dispatch"}
 
 
-def _attention(message: str) -> None:
-    file_attention_issue(
-        f"Harness compatibility automation: {os.environ['GITHUB_RUN_ID']}",
-        f"The workflow could not finish reliably. Human attention is required.\n\n"
-        f"Run: {_run_url()}\n\n{message}\n",
-    )
-
-
 def _run(args: argparse.Namespace, root: Path) -> int:
     publishing = _publishes()
     if publishing:
@@ -80,8 +72,6 @@ def _run(args: argparse.Namespace, root: Path) -> int:
     print(render_run(run))
     if run.errors:
         print(error_annotation("Harness compatibility", "; ".join(run.errors)))
-        if publishing:
-            _attention("; ".join(run.errors))
         return 2
     if len(run.results) != len(run.releases):
         raise RuntimeError("qualification stopped before every newer release had an outcome")
@@ -163,9 +153,13 @@ def main(argv: list[str] | None = None) -> int:
         message = exception_detail(exc)
         print(f"harness-compat: {message}", file=sys.stderr)
         print(error_annotation("Harness compatibility", message))
-        if _publishes() or args.command == "report":
+        if args.command == "report":
             try:
-                _attention(message)
+                file_attention_issue(
+                    f"Harness compatibility workflow: {args.run_id}",
+                    f"Failure reporting needs human attention for run {args.run_id}.\n\n"
+                    f"Reporter: {_run_url()}\n\n{message}\n",
+                )
             except Exception as reporting:
                 print(
                     error_annotation("Failure issue publication", str(reporting)), file=sys.stderr
