@@ -20,7 +20,7 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 
 | Directory | Purpose |
 |---|---|
-| `support/` | Shared helpers (and `test_tmux_guard.py`); import as `from tests.support.x import ...` |
+| `support/` | Shared helpers (and `test_tmux_guard.py`); import as `from tests.support.x import ...`. The live suite's rig, obligations, coverage registry, declaration walker, tool effects, mutations and probe sidecar (`compat_probe/`) live here |
 | `fixtures/` | Data only: recorded transcripts, schemas, compat evidence |
 | `native/` | Qualification helpers imported by `scripts/harness_compat` |
 | `daemon/controls/` | Send, steer, follow-up and dispatch control state machine |
@@ -56,6 +56,7 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 | `perf/` | Latency baselines and synthetic loads |
 | `integration/<vendor>/` | Real-binary, opt-in proofs (claude, codex, opencode, pi); skip unless their env vars are set |
 | `compat/` | Harness-compat pipeline tests |
+| `conformance/` | The live compatibility suite: binary-free completeness and guard tests here; `live/` (a real daemon, Régie bridge and stock CLI against a mock model; collected only under the pipeline sandbox token, run with `make suite HARNESS=<h>`) and `canaries/` (mutation canaries, opt-in with `make canaries`) |
 
 Régie tests live in `packages/regie/tests`, grouped like `packages/regie/src/regie`
 (`ambience/`, `app/`, `bridge/`, `controllers/`, `dashboard/`, `motions/`, `render/`, `tmux/`,
@@ -70,3 +71,12 @@ Régie tests live in `packages/regie/tests`, grouped like `packages/regie/src/re
 - `tests/native` and `tests/fixtures` stay where they are because `scripts/harness_compat`
   imports and digests them.
 - Every module opens with a one-line docstring stating its subject.
+
+## The live conformance suite
+
+`tests/conformance/live` never runs under `make test`: it is collected only inside the harness-compat
+sandbox (`HARNESS_COMPAT_SANDBOX`), so it can never touch a developer's `~/.theater`, CLI homes or
+tmux server. Its scenarios are derived from each plugin's manifest (`tests/support/obligations.py`);
+`tests/support/coverage.py` must map every manifest declaration to a scenario family or a reasoned
+exemption, and `tests/conformance/test_completeness.py` fails when it does not. Run it with
+`make suite HARNESS=vibe ARGS="-- -k mcp"`; see `docs/harness-compat.md`.

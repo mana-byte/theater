@@ -1341,7 +1341,8 @@ theater/
 │   ├── schema.py       table metadata, the one place columns are declared
 │   └── migrations/     alembic env + versions/
 ├── harness/
-│   ├── contracts/      immutable manifests, typed callbacks, harness/source/observation facts
+│   ├── contracts/      immutable manifests, typed callbacks, harness/source/observation facts;
+│   │                   compat.py is the optional qualification manifest (read only by the live suite)
 │   ├── manifests/      manifest compiler, validation, and reusable strategies
 │   ├── loading/        named-directory discovery and isolated package imports
 │   ├── channels/       CompositeSource, HybridSource, bounded hooks, and inbound native OTel
@@ -1357,6 +1358,14 @@ theater/
 ├── frontend/           public SDK, schemas, DTOs, state synchronizer and provider client
 └── tmux/               legacy compatibility/client facts; terminal execution belongs to a provider
 ```
+
+Qualification sits outside this tree on purpose. `tests/conformance/live` runs a real daemon, the real
+Régie bridge and a stock CLI against a mock model server, driven only through `theater.frontend`;
+`scripts/harness_compat` (which never imports `theater`) installs releases, runs the suite in a pytest
+subprocess and reconciles what it promised against what it proved. A plugin contributes only the
+optional `HarnessManifest.compat` (`provision`, `native_edit`, `mcp_call`): it is read by the suite and
+never at runtime, and every scenario is derived from the rest of the manifest. See
+[`harness-compat.md`](harness-compat.md).
 
 The modular refactor decomposed the daemon's monolithic observer, methods,
 store, and server into packages (`observation/`, `rpc/`, `persistence/`,

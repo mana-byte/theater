@@ -154,6 +154,58 @@ multi-tool reasoning, or realistic latency. Use `make compat HARNESS=codex VERSI
 to qualify a candidate before changing its gate; refresh the retained fixture only when
 the evidence changes.
 
+## Live conformance suite (shadow period)
+
+One harness-agnostic suite, `tests/conformance/live`, exercises every Theater capability a plugin
+declares against a candidate release: a real `theater daemon`, the real Régie bridge and the stock CLI
+run in a throwaway sandbox against a mock model (Anthropic Messages, OpenAI Chat Completions,
+OpenAI Responses) and are driven only through `theater.frontend`. A plugin declares almost nothing: the
+optional `compat` manifest (`provision`, `native_edit`, `mcp_call`, see `harness-plugins.md`) points the CLI
+at the mock; every scenario is derived from the rest of the manifest (`tests/support/obligations.py`).
+
+```sh
+make suite HARNESS=vibe                    # the installed CLI, every derived scenario
+make suite HARNESS=vibe ARGS="-- -k mcp"   # pytest arguments go after a lone --
+make canaries HARNESS=vibe                 # the suite must notice deliberately broken plugins
+```
+
+Each obligation is `family:detail`: `launch:<approval>`, `turn:prompt`, `interrupt`, `steer` (or
+`steer:refused` where the runtime declares steering unavailable), `resume` (history reaches the model
+once and the daemon records the lineage), `model` and `effort` (two selections reach the wire as two
+values, a repeat is stable), `mcp:gated|call|refusal` (the approval policy gates or runs the probe
+sidecar's tool; a refusal from Theater's own MCP server reaches the model) and `edit:gated|runs` (the
+CLI's own file-write tool is gated under `manual` and runs under `edits`). The `channels` and `runtime`
+families derive obligations but have no scenario yet; they are reported as declared gaps. Every
+manifest declaration is mapped to a family or a reasoned exemption in `tests/support/coverage.py`, and
+`tests/conformance/test_completeness.py` fails when one is not.
+
+Oracles do not rely on the plugin's own parsers except where the plugin's screen classifier is itself the
+subject: filesystem effects, the mock's request records (model, effort, offered tools and their declared
+arguments, human messages, tool results), job results and the daemon's route and identity facts. An oracle
+violation, or a proven contract violation by the CLI, fails (red, never cancelled by a later pass); an
+environmental or unattributed failure skips as `inconclusive` and the runner retries it. The suite writes
+`required.json` before it runs and `inventory.json` after; `scripts/harness_compat/suite_runner.py`
+reconciles them, and an obligation whose scenario never ran is a `tooling` failure rather than a green.
+
+Shadow mode: an adapter with `shadow_suite = True` runs the suite after a conclusive verdict. The
+per-obligation checks ride on `Result.shadow_checks`, appear as `shadow` in the evidence document and as a
+table in the job summary, and never change the verdict; a failing run's logs, pane captures and request
+records go to the diagnostics artifact. A harness switches authority only after at least 14 days and 30
+paired old/new runs over three consecutive releases with no unexplained disagreement, every applicable canary
+detected, a median attempt of at most 6 minutes (p95 8, hard cap 20) and at most 5% first-attempt
+infrastructure noise. After the switch the adapter's `green_tests` is `tests/conformance/live`, the
+evidence digest covers the daemon and bridge closures the suite starts (Régie's UI excluded), and obligations
+that vanish at an unchanged plugin turn a green red (`inventory`, keyed by a plugin digest with the verified
+gate literals normalised so an ordinary bump keeps the baseline).
+
+Isolation: the suite is collected only under the pipeline sandbox token, so `make test` never starts it.
+Every path it touches lives under the sandbox root, the environment of the daemon, bridge and CLI is built from
+scratch (dead proxy, private tmux, throwaway home), the version probe runs from a throwaway home, and the
+guards are unit-tested (`tests/conformance/test_guards.py`). The weekly `Harness compatibility canaries`
+workflow installs each harness's newest admitted release and requires the suite to fail the obligations that
+a manifest-level mutation breaks (manual mapped to yolo, edits to manual, model or resume dropped, inert
+interrupt keys, launch env dropped); it also runs when the suite changes.
+
 ## Requirements and limits
 
 - A run needs network (npm, PyPI, GitHub release downloads), `tmux`, Node.js 22 with npm, and `uv`.
@@ -165,7 +217,8 @@ the evidence changes.
   that clears its environment escapes the sweep (tmux servers are stopped by socket instead).
 - `uv run python -m scripts.harness_compat check` only confirms that every adapter reads its gate.
 
-To add a harness, implement the frozen `Adapter` in
+To add a harness, first give its plugin a `compat.py` (see `harness-plugins.md`, "Qualification") so the live
+suite can run it, then implement the frozen `Adapter` in
 `scripts/harness_compat/adapters/<name>.py`, export `ADAPTER`, and register its name in
 `adapters/__init__.py`. Add its real-binary tests, expected model routes, and gate files,
-then add it to the `plan` job's list and the dispatch options. Keep installs and CLI invocations inside `make_sandbox`. Pi's install pins its `@earendil-works/*` dependencies to the range floor upstream shipped, since npm would otherwise resolve carets to a newer, incompatible sibling.
+then add it to the `plan` job's list and the dispatch options, and to the canaries workflow's matrix. An adapter may set `shadow_suite = True` and list the literals its bump rewrites in `gate_literals`. Keep installs and CLI invocations inside `make_sandbox`. Pi's install pins its `@earendil-works/*` dependencies to the range floor upstream shipped, since npm would otherwise resolve carets to a newer, incompatible sibling.

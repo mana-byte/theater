@@ -52,6 +52,8 @@ uv run ruff check             # lint
 uv run ruff format --check    # verify formatting; omit --check to format
 uv run mypy                   # Theater, Régie, compat scripts; no --strict
 make compat HARNESS=vibe       # dry-run: qualify new upstream CLI releases (docs/harness-compat.md)
+make suite HARNESS=vibe        # live conformance suite on the installed CLI: ARGS="-- -k mcp -x"
+make canaries HARNESS=vibe     # the suite must notice deliberately broken plugins (slow, opt-in)
 ```
 
 Schema changes (see architecture §5):
@@ -256,10 +258,22 @@ ceiling, qualified as `opencode` and `opencode2`), Pi `runtime_constants.py`, Vi
   `consistency_tests` and expected routes so the pipeline proves the behaviour Theater really
   runs, and keep every declared gap in `docs/harness-compat.md`. Moving a proof test breaks its
   selector.
+- The live conformance suite derives its obligations from the manifest and runs beside the old proofs
+  in shadow mode (`Result.shadow_checks`, never part of a verdict) until a harness's authority
+  switch; changing what a harness does inside Theater can add or remove obligations, and obligations
+  that vanish at an unchanged plugin turn a suite-driven green red.
 - Prove a candidate with `make compat HARNESS=<h> VERSION=<newest>` before moving a gate by hand.
   Gate PRs change one literal; never hand-edit cached evidence, `.md` files or tests in them.
 - Check with `uv run python -m scripts.harness_compat check` and
   `uv run pytest tests/compat tests/harness/<h>`.
+
+A plugin may also export an optional `compat=CompatManifest(provision, native_edit, mcp_call)` (see
+`docs/harness-plugins.md`, "Qualification"). It is read only by the live conformance suite, never at
+runtime; `provision` must stay endpoint, credential, catalog and onboarding setup. Scenarios are derived
+from the rest of the manifest, so a new manifest capability needs a mapping in
+`tests/support/coverage.py` (the completeness test fails until it has one) and, if it is provable,
+a scenario family. Adapters opt into the shadow run with `shadow_suite = True` and name the gate
+literals their bump rewrites in `gate_literals`.
 
 ## When adding a skill
 
