@@ -18,7 +18,6 @@ from theater.frontend.trajectory import (
     TrajectoryRecord,
 )
 from theater.harness.contracts.manifest import HookChannelManifest
-from theater.trajectory.identity import namespaced_native_id
 
 _OBSERVATION_SECONDS = 20.0
 _POLL_SECONDS = 0.5
@@ -45,13 +44,16 @@ async def expect_channel_tool_facts(
     page: TrajectoryPage,
     call_id: str,
     *,
+    turn_started_at: float,
     evidence: Path,
     seconds: float = _OBSERVATION_SECONDS,
 ) -> None:
     """Require accepted hook delivery and a second source carrying the scripted call id."""
     assert page.stream_id is not None and page.cursor is not None
     declared = {binding.event for binding in channel.bindings}
-    records = {record.record_id: record for record in page.records}
+    # Only new records after the pre-turn cursor can prove this tool turn.
+    previous_ids = {record.record_id for record in page.records}
+    records: dict[str, TrajectoryRecord] = {}
     deliveries: list[dict[str, object]] = []
     after_id = 0
     cursor = page.cursor
@@ -82,13 +84,8 @@ async def expect_channel_tool_facts(
                 )
 
             accepted = [row for row in deliveries if row.get("dropped") is False]
-            if accepted:
-                identities = [row.get("native_id") for row in accepted]
-                if not all(isinstance(value, str) and value for value in identities):
-                    inconclusive("hook bus rows expose no native_id to attribute trajectory facts")
-                native_ids = {value for value in identities if isinstance(value, str)}
-                if _correlated(records.values(), participant, native_ids, call_id):
-                    return
+            if accepted and _correlated(records.values(), participant, call_id):
+                return
 
             remaining = seconds - (time.monotonic() - started)
             if remaining <= 0:
@@ -108,7 +105,11 @@ async def expect_channel_tool_facts(
                 inconclusive(f"the trajectory stream needs resync: {delta.reason}")
             assert delta.cursor is not None
             cursor = delta.cursor
-            records.update((item.record.record_id, item.record) for item in delta.upserts)
+            records.update(
+                (item.record.record_id, item.record)
+                for item in delta.upserts
+                if item.record.record_id not in previous_ids
+            )
     finally:
         evidence.write_text(
             json.dumps(
@@ -116,9 +117,11 @@ async def expect_channel_tool_facts(
                     "participant": participant,
                     "channel": channel.declaration.id,
                     "call_id": call_id,
+                    "turn_started_at": turn_started_at,
                     "poll_started_at": started_at,
                     "observation_seconds": time.monotonic() - started,
                     "deliveries": deliveries,
+                    "previous_record_ids": sorted(previous_ids),
                     "records": [record.to_wire() for record in records.values()],
                 },
                 indent=2,
@@ -131,7 +134,6 @@ async def expect_channel_tool_facts(
 def _correlated(
     records: Collection[TrajectoryRecord],
     participant: str,
-    native_ids: set[str],
     call_id: str,
 ) -> bool:
     primary_sources = {
@@ -141,25 +143,17 @@ def _correlated(
         and record.kind is TrajectoryKind.TOOL_CALL
         and record.call_id == call_id
     }
-    return any(
+    return bool(primary_sources) and any(
         record.participant_id == participant
-        and any(
-            record.native_id == namespaced_native_id(native_id, record.source_epoch)
-            for native_id in native_ids
-        )
+        and record.source not in primary_sources
         and _carries_call_id(record, call_id)
-        and any(source != record.source for source in primary_sources)
         for record in records
     )
 
 
 def _carries_call_id(record: TrajectoryRecord, call_id: str) -> bool:
     """Match complete values, never a plugin-specific detail name or an id substring."""
-    return (
-        record.call_id == call_id
-        or record.native_id == namespaced_native_id(call_id, record.source_epoch)
-        or any(
-            detail.preview.text == call_id and not detail.preview.omitted_bytes
-            for detail in record.details
-        )
+    return call_id in (record.call_id, record.native_id) or any(
+        detail.preview.text == call_id and not detail.preview.omitted_bytes
+        for detail in record.details
     )

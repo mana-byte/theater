@@ -1,9 +1,14 @@
 """Available hooks deliver correlated tool facts through the stock CLI.
 
 No scenario exists for an available OTel channel; it is explicitly inconclusive.
+
+With two enrichment channels on one harness, a distinct source cannot attribute a fact to
+one channel. An exact join would require the hook bus row to carry its admitted native id.
 """
 
 from __future__ import annotations
+
+import time
 
 import pytest
 
@@ -37,6 +42,7 @@ async def test_a_channel_delivers_correlated_tool_facts(live, obligation):
     call_id = "toolu_mock_0" if live.protocol == "anthropic" else "call_mock_0"
 
     async with capture_channel_facts(live.client, participant) as page:
+        turn_started_at = time.time()
         await expect_runs(live, participant, effect)
         await expect_channel_tool_facts(
             live.client,
@@ -44,5 +50,6 @@ async def test_a_channel_delivers_correlated_tool_facts(live, obligation):
             channel,
             page,
             call_id,
+            turn_started_at=turn_started_at,
             evidence=live.session.evidence_dir / f"{live.label}.channels.json",
         )
