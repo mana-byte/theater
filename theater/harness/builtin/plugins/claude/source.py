@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 from theater.constants.harness import HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES
 from theater.harness.channels.filesystem import WatchGate
 from theater.harness.contracts.events import clip
+from theater.harness.normalization.timing import iso_epoch
+from theater.harness.normalization.values import decode_json_record
 from theater.harness.source import (
     Attachment,
     Batch,
@@ -96,6 +98,29 @@ def _attachment_context(path: Path, point: StreamPoint, mtime: int) -> list[tupl
     return records
 
 
+def _live_turn_start(
+    records: list[tuple[int, int, str]], after: float | None, session_id: str | None
+) -> tuple[int, int] | None:
+    """Locate a main-thread user turn proven to belong to this fresh launch."""
+    if after is None or session_id is None:
+        return None
+    previous = 0 if records and records[0][0] == 0 else None
+    for index, offset, line in records:
+        record = decode_json_record(line)
+        if (
+            previous is not None
+            and record is not None
+            and record.get("type") == "user"
+            and record.get("isSidechain") is not True
+            and record.get("sessionId") == session_id
+            and (timestamp := iso_epoch(record.get("timestamp"))) is not None
+            and timestamp > after
+        ):
+            return index, previous
+        previous = offset
+    return None
+
+
 class _ClaudeSource(TranscriptSource):
     """Keep a receipt pending until its JSONL materializes.
 
@@ -107,6 +132,8 @@ class _ClaudeSource(TranscriptSource):
 
     def __init__(self, observer: ClaudeCodeObserver, **kwargs) -> None:
         super().__init__(observer, **kwargs)
+        # A restored pin is history; only an unbound launch may have an unread current turn.
+        self._live_after = self._after if self._known_location is None else None
         self._expected_location: Path | None = None
         #: A receipt path is stat-polled only when its directory changed or the safety net is due.
         self._receipt_gate = WatchGate(fallback_seconds=_RECEIPT_FALLBACK_SECONDS)
@@ -123,10 +150,13 @@ class _ClaudeSource(TranscriptSource):
                 _attachment_context, Path(attached.location), point, mtime
             )
             self._observer.reset_stream()
+            live_start = _live_turn_start(records, self._live_after, attached.session_id)
             offsets = {index: offset for index, offset, _ in records}
             last_event = None
             evidence_point = point
             for index, _, line in records:
+                if live_start is not None and index == live_start[0]:
+                    break
                 for event in self._observer.parse(line, index, clip_text=False):
                     if not event.usage_only:
                         last_event = replace(event, text=clip(event.text))
@@ -137,12 +167,22 @@ class _ClaudeSource(TranscriptSource):
                     await asyncio.sleep(0)
             stat = await asyncio.to_thread(Path(attached.location).stat)
             _check_attachment_snapshot(stat, point, mtime)
+            if live_start is not None:
+                pending_path, _, _, mtime, session_id = self._pending
+                self._pending = (pending_path, live_start[1], live_start[0], mtime, session_id)
+                # Copied history primes the seal; the current turn settles only through live reads.
+                attached = replace(attached, status=None)
+                last_event = None
         except (OSError, asyncio.CancelledError):
             self._pending = None
             self._observer.reset_stream()
             raise
         # Metadata after a boundary must not advance that boundary past a resume floor.
         return replace(attached, last_event=last_event, point=evidence_point)
+
+    def commit_attachment(self) -> None:
+        super().commit_attachment()
+        self._live_after = None
 
     def bind_wakeup(self, wakeup) -> None:
         super().bind_wakeup(wakeup)
