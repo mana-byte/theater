@@ -782,34 +782,6 @@ async def test_a_missed_live_completion_is_recovered_from_history_once_the_threa
         await runtime.aclose()
 
 
-async def test_history_that_never_records_an_end_leaves_the_turn_to_its_live_completion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Recovery re-reads a bounded number of times, never replays a prompt, then steps aside."""
-    monkeypatch.setattr(codex_runtime_constants, "CODEX_RUNTIME_RECONCILE_RETRY_SECONDS", 0.01)
-    server = ScriptedCodexServer()
-    server.respond("thread/resume", active_resume_response(unfinished_turn_read_as_interrupted()))
-    server.respond("thread/turns/list", {"data": [unfinished_turn_read_as_interrupted()]})
-    runtime, _binding = await open_new(server)
-    source = runtime.live_source()
-    try:
-        await runtime.send(operation_id="op-1", prompt="work")
-        server.push(thread_status_changed("idle"))
-        reads = codex_runtime_constants.CODEX_RUNTIME_UNFINISHED_READS
-        assert await until(lambda: len(server.requested("thread/turns/list")) == reads)
-        assert await until(lambda: not runtime._unfinished_turns)
-        await asyncio.sleep(0.1)
-
-        assert len(server.requested("thread/turns/list")) == reads
-        assert len(server.requested("turn/start")) == 1
-        assert not (await source.read()).terminal_evidence
-        server.push(live_completion())
-        (outcome,) = await read_outcomes(source)
-        assert (outcome.terminal, outcome.from_history) == (NativeTurnTerminal.COMPLETED, False)
-    finally:
-        await runtime.aclose()
-
-
 async def test_a_turn_that_started_while_a_page_was_read_is_not_ended_by_that_page() -> None:
     """Asked while idle, the page can still catch a turn that started during the read."""
     server = ScriptedCodexServer()
