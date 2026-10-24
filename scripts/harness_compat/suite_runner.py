@@ -1,22 +1,21 @@
 """Run the live conformance suite for one harness release and reconcile what it proved.
 
-The suite runs in a pytest subprocess inside the pipeline sandbox; this module never imports
-``theater``. It reads the two documents the suite writes to the evidence directory:
-``required.json`` (everything the manifest promises, written before any test runs) and
-``inventory.json`` (what each obligation did), and turns them into one check per obligation.
+The suite runs in a pytest subprocess inside the pipeline sandbox. This module reads the two
+documents the suite writes into the sandbox's transient evidence directory: ``required.json``
+(everything the manifest promises, written before any test runs) and ``inventory.json`` (what
+each obligation did), and turns them into one check per obligation. Nothing here outlives the
+sandbox.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
-import subprocess
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from theater.harness.contracts.version_policy import version_key
 
 from .contract import (
     SUITE_ENV_BINARY,
@@ -30,21 +29,22 @@ from .contract import (
     SuiteDocument,
     SuiteDocumentError,
     SuiteRow,
+    Verdict,
 )
 from .diagnostics import clip_diagnostic
 from .framework import run_pytest
+from .process import run_group
+from .sandbox import make_sandbox
 
 #: The pytest target of the live suite; it is collected only under the pipeline sandbox token.
 SUITE_TARGET = "tests/conformance/live"
-#: One attempt may not exceed the runner's attempt cap.
+#: The live scenarios of one release may not run longer than this.
 SUITE_TIMEOUT_SECONDS = 20 * 60.0
 _DETAIL_LIMIT = 300
 _OUTCOMES: Mapping[str, CheckStatus] = {"passed": "pass", "failed": "fail"}
-#: Where the workflow collects diagnostics to upload as an artifact (Codex's collector uses it too).
-DIAGNOSTICS_ENV = "THEATER_COMPAT_DIAGNOSTICS"
-_KEPT_FILE_BYTES = 1_000_000
-_KEPT_TOTAL_BYTES = 20_000_000
-_VERSION = re.compile(r"\d+\.\d+\.\d+")
+#: A word that opens like a release (MAJOR.MINOR.PATCH...): it must then be exactly one.
+_VERSION_WORD = re.compile(r"v?(\d+\.\d+\.\d+\S*)")
+_WORD_BREAKS = re.compile(r"[\s()\[\],;:\"']+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,31 +54,51 @@ class SuiteReport:
     checks: tuple[Check, ...]
     #: Reconciliation failures: our machinery lost an obligation, not the CLI misbehaving.
     problems: tuple[str, ...] = ()
-    #: Every obligation id the manifest promised, for the cross-run baseline.
-    inventory: tuple[str, ...] = ()
+    #: Pytest arguments selected part of the suite: nothing proven here can authorize a release.
+    partial: bool = False
+
+
+def _reported_versions(text: str) -> set[str]:
+    """The releases ``text`` names; a word shaped like one but not canonical stable raises."""
+    found: set[str] = set()
+    for word in _WORD_BREAKS.split(text):
+        if (match := _VERSION_WORD.fullmatch(word)) is None:
+            continue
+        try:
+            version_key(candidate := match.group(1))
+        except ValueError as exc:
+            raise ValueError(f"{word!r} is not a canonical stable release") from exc
+        found.add(candidate)
+    return found
 
 
 def installed_version(binary: Path) -> str:
-    """The MAJOR.MINOR.PATCH an installed CLI reports for ``--version``, from a throwaway home.
+    """The one MAJOR.MINOR.PATCH an installed CLI reports for ``--version``.
 
-    A CLI may log or write config on any start, so it never sees the real home.
+    The CLI starts offline in a throwaway home that is also its working directory, so it never
+    sees the real home or the checkout. A failed exit, no release, a pre-release or build suffix,
+    or two different releases are all refused. Stdout wins; stderr is read only when stdout names
+    no release (some CLIs print it there).
     """
-    with tempfile.TemporaryDirectory(prefix="v") as home:
-        env = {
-            "HOME": home,
-            "PATH": os.environ.get("PATH", ""),
-            "XDG_CONFIG_HOME": f"{home}/.config",
-            "XDG_CACHE_HOME": f"{home}/.cache",
-            "XDG_DATA_HOME": f"{home}/.local/share",
-            "XDG_STATE_HOME": f"{home}/.local/state",
-        }
-        shown = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=30, check=False, env=env
-        ).stdout
-    found = _VERSION.search(shown)
-    if found is None:
-        raise ValueError(f"cannot read a version from {binary} --version: {shown.strip()!r}")
-    return found.group(0)
+    binary = binary.resolve()
+    with make_sandbox("version-probe") as sb:
+        shown = run_group(
+            [str(binary), "--version"],
+            cwd=sb.home,
+            env=sb.offline_env,
+            timeout=30,
+        )
+    if shown.returncode != 0:
+        detail = clip_diagnostic(shown.stdout + shown.stderr, 200, tail=True)
+        raise ValueError(f"{binary} --version exited {shown.returncode}: {detail}")
+    for text in (shown.stdout, shown.stderr):
+        if versions := _reported_versions(text):
+            if len(versions) > 1:
+                raise ValueError(f"{binary} --version names {sorted(versions)}: ambiguous")
+            return versions.pop()
+    raise ValueError(
+        f"cannot read a version from {binary} --version: {(shown.stdout + shown.stderr).strip()!r}"
+    )
 
 
 def suite_environment(sb: Sandbox, *, harness: str, binary: Path, version: str) -> dict[str, str]:
@@ -161,7 +181,7 @@ def reconcile(
         ):
             problems.append(f"{label} describes {document.harness} {document.version}")
     if problems:
-        return SuiteReport((suite, *_fault(problems)), tuple(problems))
+        return SuiteReport((suite, *_fault(problems)), tuple(problems), partial)
     assert isinstance(required, SuiteDocument) and isinstance(inventory, SuiteDocument)
     results = {row.id: row for row in inventory.rows}
     checks: list[Check] = [suite]
@@ -179,7 +199,7 @@ def reconcile(
         for extra in sorted(set(results) - promised_ids):
             problems.append(f"inventory.json holds {extra}, which required.json never promised")
     checks.extend(_fault(problems))
-    return SuiteReport(tuple(checks), tuple(problems), tuple(row.id for row in required.rows))
+    return SuiteReport(tuple(checks), tuple(problems), partial)
 
 
 def _obligation_check(promised: SuiteRow, found: SuiteRow, *, partial: bool) -> tuple[Check, bool]:
@@ -200,31 +220,19 @@ def _fault(problems: Sequence[str]) -> tuple[Check, ...]:
     return tuple(Check("conformance:reconcile", "error", problem) for problem in problems)
 
 
-def shadow_checks(
-    root: Path, sb: Sandbox, *, harness: str, binary: Path, version: str
-) -> tuple[Check, ...]:
-    """The suite's result as a second opinion: whatever goes wrong here never touches a verdict."""
-    try:
-        report = run_suite(root, sb, harness=harness, binary=binary, version=version)
-        if any(check.status in ("fail", "error") for check in report.checks):
-            _keep_diagnostics(sb.evidence_dir, f"{harness}-{version}-suite")
-    except Exception as exc:
-        return (Check("shadow", "error", clip_diagnostic(f"{type(exc).__name__}: {exc}", 300)),)
-    return report.checks
+def verdict(report: SuiteReport) -> Verdict:
+    """The suite is the sole authority, and only a whole, clean pass is green.
 
-
-def _keep_diagnostics(evidence: Path, name: str) -> None:
-    """Copy a failing run's logs, pane captures and request records where the workflow uploads."""
-    target = os.environ.get(DIAGNOSTICS_ENV)
-    if not target:
-        return
-    kept = 0
-    for source in sorted(evidence.rglob("*")):
-        if not source.is_file() or source.stat().st_size > _KEPT_FILE_BYTES:
-            continue
-        kept += source.stat().st_size
-        if kept > _KEPT_TOTAL_BYTES:
-            break
-        destination = Path(target) / name / source.relative_to(evidence)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+    A failed obligation is red. Reconciliation problems beside a clean pytest run are our own
+    accounting (tooling). Anything unproven (an error, a skipped or unrun obligation, a filtered
+    run, or no passing obligation at all) says nothing about the release, so it is inconclusive.
+    """
+    checks = report.checks
+    if any(check.status == "fail" for check in checks):
+        return "red"
+    if report.problems and checks[0].status == "pass":
+        return "tooling"
+    if report.partial or any(check.status in ("error", "skip") for check in checks):
+        return "inconclusive"
+    proven = any(check.name.startswith("conformance:") for check in checks)
+    return "green" if proven and checks[0].status == "pass" else "inconclusive"

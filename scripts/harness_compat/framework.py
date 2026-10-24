@@ -1,7 +1,8 @@
-"""Subprocess pytest and bump proofs."""
+"""Run pytest in a subprocess and aggregate its JUnit report per selector."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -10,9 +11,8 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .contract import Adapter, Check, CheckStatus
+from .contract import Check, CheckStatus
 from .diagnostics import clean_diagnostic, clip_diagnostic
-from .probe import check_bump_problems
 from .process import run_group
 
 _DETAIL_LIMIT = 600
@@ -110,6 +110,22 @@ def _check_selector(
     return Check(selector, status, clip_diagnostic(detail, _DETAIL_LIMIT))
 
 
+def python_path(root: Path) -> str:
+    """The code copy itself plus its workspace packages, so nothing resolves to another checkout."""
+    sources = sorted((root / "packages").glob("*/src"))
+    return os.pathsep.join(str(path) for path in (root, *sources))
+
+
+def _environment(root: Path, env: Mapping[str, str]) -> dict[str, str]:
+    return {**env, "PYTHONPATH": python_path(root), "PYTHONDONTWRITEBYTECODE": "1"}
+
+
+def _refuse_checkout(root: Path) -> None:
+    """Pytest writes bytecode and caches beside what it runs: never in a git checkout."""
+    if (root / ".git").exists():
+        raise ValueError(f"refusing to run pytest in the git checkout {root}; use a code copy")
+
+
 def run_pytest(
     root: Path,
     nodeids: Sequence[str],
@@ -122,9 +138,11 @@ def run_pytest(
     """Aggregate pytest cases under each file, directory, class, or test selector.
     Failures win; missing cases, errors, and unexpected skips are errors; all pass is pass.
     All skip is skip only when the selector is expected; exit 77 is never green.
+    ``root`` is a disposable directory (a code copy), and pytest leaves no bytecode or cache in it.
     """
     if not nodeids:
         return ()
+    _refuse_checkout(root)
     with tempfile.TemporaryDirectory(prefix="compat-pytest-") as temporary:
         xml = Path(temporary) / "junit.xml"
         argv = [
@@ -132,6 +150,8 @@ def run_pytest(
             "-m",
             "pytest",
             "-q",
+            "-p",
+            "no:cacheprovider",
             "-o",
             "junit_logging=out-err",
             f"--junitxml={xml}",
@@ -139,7 +159,7 @@ def run_pytest(
             *nodeids,
         ]
         try:
-            run = run_group(argv, cwd=root, env={**env, "PYTHONPATH": str(root)}, timeout=timeout)
+            run = run_group(argv, cwd=root, env=_environment(root, env), timeout=timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             detail = clip_diagnostic(str(exc), _DETAIL_LIMIT, tail=True)
             return tuple(Check(nodeid, "error", detail) for nodeid in nodeids)
@@ -154,11 +174,3 @@ def run_pytest(
         except ET.ParseError as exc:
             return tuple(Check(nodeid, "error", f"invalid junit XML: {exc}") for nodeid in nodeids)
         return tuple(_check_selector(selector, cases, expected_skips) for selector in nodeids)
-
-
-def check_bump(adapter: Adapter, root: Path, bumped: Sequence[str]) -> list[str]:
-    """Probe edited tree in a subprocess with version_line and stub_help.
-    Bumped versions must be supported; the next release must be refused.
-    Active old bounds fail; historical references become review warnings.
-    """
-    return check_bump_problems(adapter, root, bumped)

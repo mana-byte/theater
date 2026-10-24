@@ -1342,7 +1342,7 @@ theater/
 │   └── migrations/     alembic env + versions/
 ├── harness/
 │   ├── contracts/      immutable manifests, typed callbacks, harness/source/observation facts;
-│   │                   compat.py is the optional qualification manifest (read only by the live suite)
+│   │                   compat.py is the optional qualification manifest; version_policy.py reads JSON gates
 │   ├── manifests/      manifest compiler, validation, and reusable strategies
 │   ├── loading/        named-directory discovery and isolated package imports
 │   ├── channels/       CompositeSource, HybridSource, bounded hooks, and inbound native OTel
@@ -1361,9 +1361,11 @@ theater/
 
 Qualification sits outside this tree on purpose. `tests/conformance/live` runs a real daemon, the real
 Régie bridge and a stock CLI against a mock model server, driven only through `theater.frontend`;
-`scripts/harness_compat` (which never imports `theater`) installs releases, runs the suite in a pytest
-subprocess and reconciles what it promised against what it proved. A plugin contributes only the
-optional `HarnessManifest.compat` (`provision`, `native_edit`, `mcp_call`): it is read by the suite and
+`scripts/harness_compat` uses only the public version-policy contract to read each plugin's
+`compatibility.json`, installs one supplied release and runs the suite in a disposable code copy,
+home and pytest subprocess. Results stay in memory; required/inventory documents and CLI state
+are deleted with the sandbox. A plugin contributes the
+optional `HarnessManifest.compat` (`provision`, `native_edit`, `mcp_call`, `canaries`): it is read by the suite and
 never at runtime, and every scenario is derived from the rest of the manifest. See
 [`harness-compat.md`](harness-compat.md).
 
@@ -1868,8 +1870,8 @@ the verified integrated base. `NATIVE_AUTO_SELECTION_ENABLED = True` in
 selects native only for new sessions whose harness runtime probe accepts the
 installed release. Automatic selection means *Theater-verified* compatibility,
 never presumed vendor stability: Codex, OpenCode, and Pi each publish a tested
-range and re-check their native handshake. Unknown or unsupported versions retain
-legacy under `auto` and `native`. Explicit
+range with explicit exclusions in plugin-local `compatibility.json` and re-check their native
+handshake. Unsupported versions are refused at launch. Explicit
 `wiring="legacy"` remains the
 per-spawn opt-out, and harnesses — including local overrides — without a
 runtime manifest are legacy by construction. Existing participants stay

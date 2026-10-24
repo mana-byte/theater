@@ -3,32 +3,30 @@
 from __future__ import annotations
 
 import argparse
-import json
 from types import SimpleNamespace
 
 import pytest
 
-from tests.support.paths import fixture
 from tests.support.shipped import VibeHarness, pin_installed_vibe_version
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.vibe import version as version_module
 from theater.harness.builtin.plugins.vibe.approval_guard import shadowed_approval_profile
-from theater.harness.builtin.plugins.vibe.compatibility import (
-    vibe_isolation_floor,
-    vibe_store_format_ceiling,
-)
+from theater.harness.builtin.plugins.vibe.compatibility import VERSION_POLICY
 from theater.harness.builtin.plugins.vibe.constants import VIBE_BYPASS_TOOL_PERMISSIONS_ENV
-from theater.harness.builtin.plugins.vibe.launch import _ASK_FLOOR
 from theater.harness.builtin.plugins.vibe.manifest import MANIFEST
 from theater.harness.builtin.plugins.vibe.version import installed_vibe_version
 from theater.harness.contracts.manifest import InterruptPlan
+from theater.harness.contracts.version_policy import version_key
 from theater.models import BadRequest
+
+_MINIMUM = version_key(VERSION_POLICY.minimum)
+_MAXIMUM = version_key(VERSION_POLICY.maximum)
 
 
 @pytest.fixture(autouse=True)
 def isolated_vibe_launch(monkeypatch, shipped_harnesses) -> None:
     """Unit plans must not probe the host CLI or personal profiles."""
-    pin_installed_vibe_version(monkeypatch, None)
+    pin_installed_vibe_version(monkeypatch, _MINIMUM)
 
 
 def test_vibe_resume_uses_resume_flag(tmp_path):
@@ -85,12 +83,11 @@ def test_vibe_without_resume_has_no_resume_flag(tmp_path):
 
 
 def _last_admitted_version() -> tuple[int, int, int]:
-    major, minor, patch = vibe_store_format_ceiling()
-    return (major, minor, patch - 1) if patch else (major, minor - 1, 99)
+    return _MAXIMUM
 
 
 def _next_minor_version() -> tuple[int, int, int]:
-    major, minor, _ = vibe_store_format_ceiling()
+    major, minor, _ = _MAXIMUM
     return major, minor + 1, 0
 
 
@@ -129,7 +126,7 @@ def test_launch_admits_the_newest_qualified_writer(tmp_path, monkeypatch):
     assert plan.argv[0] == "vibe"
 
 
-@pytest.mark.parametrize("version", [vibe_store_format_ceiling(), _next_minor_version()])
+@pytest.mark.parametrize("version", [(*_MAXIMUM[:2], _MAXIMUM[2] + 1), _next_minor_version()])
 def test_launch_refuses_a_writer_newer_than_the_store_reader(tmp_path, monkeypatch, version):
     """A writer whose unified store no reader understands must fail at spawn."""
     pin_installed_vibe_version(monkeypatch, version)
@@ -214,58 +211,18 @@ def test_a_flag_shaped_prompt_stays_a_literal_prompt(tmp_path, resume):
     assert parsed.resume == resume
 
 
-RECORD = fixture("vibe_app_server", "topology.json")
-PINNED_VERSION = "2.25.4"
-PINNED_COMMIT = "19b5b74faa78d0816b8d4d4c7d7543fc3520678c"
-PINNED_ARCHIVE_DIGEST = "sha256:9af6a094e2294f11651927759020e8ee3ff88376baba21e67b8d3796acd77702"
-PINNED_RESULT = "failed: no supported stock-TUI attachment"
-
-
-PINNED_GO_CRITERIA = {
-    "observerControlRole": False,
-    "stockTuiExtension": False,
-    "sharedBroker": False,
-}
-
-
-def test_pinned_evidence_names_the_current_inspected_release() -> None:
-    record = json.loads(RECORD.read_text())
-    drift = "evidence drift: inspect the latest official Vibe release"
-    assert record["version"] == PINNED_VERSION, drift
-    assert record["commit"] == PINNED_COMMIT, drift
-    assert record["archiveDigest"] == PINNED_ARCHIVE_DIGEST
-    assert record["inspectedAt"], "evidence drift: inspection date missing"
-    assert record["adr"] == "docs/adr/0009-app-server-boundary.md"
-    assert record["callbackOwner"] == "stock client connection"
-    assert record["result"] == PINNED_RESULT
-    assert record["goCriteria"] == PINNED_GO_CRITERIA
-    observed = record["observed"]
-    assert observed["secondSessionStartSameConnection"].startswith("conflict")
-    assert observed["crossProcessResumeOfLiveSession"] == "conflict: session_busy"
-
-
 def test_shipped_vibe_manifest_stays_legacy_while_topology_fails() -> None:
-    record = json.loads(RECORD.read_text())
-    if any(record["goCriteria"].values()):
-        raise AssertionError(
-            "a Vibe go criterion is true: review upstream and write a new "
-            "implementation plan before wiring any runtime"
-        )
     assert MANIFEST.runtime is None
     assert MANIFEST.controls is not None
     assert MANIFEST.controls.interrupt == InterruptPlan(keys=("Escape",))
 
 
-_ASK_TEXT = ".".join(map(str, _ASK_FLOOR))
+_VERSION_TEXT = VERSION_POLICY.minimum
 
 
 def _before(release):
     major, minor, patch = release
     return (major, minor, patch - 1) if patch else (major, minor - 1, 99)
-
-
-def _after(release):
-    return (release[0], release[1] + 1, 0)
 
 
 def _plan(tmp_path, approval):
@@ -279,7 +236,7 @@ def _plan(tmp_path, approval):
 
 
 def test_launch_admits_the_oldest_qualified_writer(tmp_path, monkeypatch):
-    pin_installed_vibe_version(monkeypatch, vibe_isolation_floor())
+    pin_installed_vibe_version(monkeypatch, _MINIMUM)
     plan = plan_launch(
         "vibe",
         participant_id="a",
@@ -291,13 +248,10 @@ def test_launch_admits_the_oldest_qualified_writer(tmp_path, monkeypatch):
     assert plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"]
 
 
-@pytest.mark.parametrize("version", [_before(vibe_isolation_floor()), (2, 0, 0)])
-def test_launch_refuses_a_writer_that_ignores_the_isolated_log_directory(
-    tmp_path, monkeypatch, version
-):
-    """Such a release writes its transcript where the observer never looks."""
+@pytest.mark.parametrize("version", [_before(_MINIMUM)])
+def test_launch_refuses_a_writer_below_the_installed_floor(tmp_path, monkeypatch, version):
     pin_installed_vibe_version(monkeypatch, version)
-    with pytest.raises(BadRequest, match="upgrade Vibe"):
+    with pytest.raises(BadRequest, match="qualified releases"):
         plan_launch(
             "vibe",
             participant_id="a",
@@ -307,40 +261,32 @@ def test_launch_refuses_a_writer_that_ignores_the_isolated_log_directory(
         )
 
 
-@pytest.mark.parametrize(
-    ("version", "agent"),
-    [
-        pytest.param(None, "ask", id="probe-failed"),
-        pytest.param(_before(_ASK_FLOOR), "default", id="before-ask-floor"),
-        pytest.param(_ASK_FLOOR, "ask", id="ask-floor"),
-        pytest.param(_after(_ASK_FLOOR), "ask", id="after-ask-floor"),
-    ],
-)
-def test_manual_maps_the_approval_per_tool_profile(tmp_path, monkeypatch, version, agent):
+@pytest.mark.parametrize("version", tuple(dict.fromkeys((_MINIMUM, _MAXIMUM))))
+def test_manual_pins_the_supported_approval_profile(tmp_path, monkeypatch, version):
     pin_installed_vibe_version(monkeypatch, version)
     argv = _plan(tmp_path, "manual").argv
-    assert f"--agent={agent}" in argv
+    assert "--agent=ask" in argv
     assert "--yolo" not in argv
 
 
-@pytest.mark.parametrize("version", [None, vibe_isolation_floor(), _after(vibe_isolation_floor())])
-def test_yolo_takes_the_flag(tmp_path, monkeypatch, version):
-    pin_installed_vibe_version(monkeypatch, version)
+def test_yolo_takes_the_flag(tmp_path, monkeypatch):
+    pin_installed_vibe_version(monkeypatch, _MINIMUM)
     argv = _plan(tmp_path, "yolo").argv
     assert "--yolo" in argv
     assert "--agent" not in argv
 
 
 def test_edits_pins_accept_edits_on_every_version(tmp_path, monkeypatch):
-    pin_installed_vibe_version(monkeypatch, vibe_isolation_floor())
+    pin_installed_vibe_version(monkeypatch, _MINIMUM)
     argv = _plan(tmp_path, "edits").argv
     assert argv[argv.index("--agent") + 1] == "accept-edits"
 
 
-def test_probe_failure_keeps_todays_argv(tmp_path, monkeypatch):
+@pytest.mark.parametrize("approval", ["manual", "yolo"])
+def test_probe_failure_refuses_an_unverified_launch(tmp_path, monkeypatch, approval):
     pin_installed_vibe_version(monkeypatch, None)
-    assert "--agent=ask" in _plan(tmp_path, "manual").argv
-    assert "--yolo" in _plan(tmp_path, "yolo").argv
+    with pytest.raises(BadRequest, match="could not verify a stable CLI version"):
+        _plan(tmp_path, approval)
 
 
 @pytest.mark.parametrize(
@@ -349,7 +295,7 @@ def test_probe_failure_keeps_todays_argv(tmp_path, monkeypatch):
 )
 def test_launch_runs_the_binary_the_probe_resolved(tmp_path, monkeypatch, resolved, argv0):
     """The pane's PATH may differ from the daemon's, so argv[0] must be the probed path."""
-    pin_installed_vibe_version(monkeypatch, _ASK_FLOOR, binary=resolved)
+    pin_installed_vibe_version(monkeypatch, _MINIMUM, binary=resolved)
     assert _plan(tmp_path, "manual").argv[0] == argv0
 
 
@@ -359,16 +305,16 @@ def test_installed_version_parses_and_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(version_module.shutil, "which", lambda name: str(binary))
 
     def run(argv, **kwargs):
-        return SimpleNamespace(returncode=0, stdout=f"vibe {_ASK_TEXT}\n")
+        return SimpleNamespace(returncode=0, stdout=f"vibe {_VERSION_TEXT}\n")
 
     monkeypatch.setattr(version_module.subprocess, "run", run)
     version_module._CACHE.clear()
-    assert installed_vibe_version() == _ASK_FLOOR
+    assert installed_vibe_version() == _MINIMUM
 
     monkeypatch.setattr(
         version_module.subprocess,
         "run",
-        lambda argv, **kwargs: SimpleNamespace(returncode=1, stdout=f"vibe {_ASK_TEXT}"),
+        lambda argv, **kwargs: SimpleNamespace(returncode=1, stdout=f"vibe {_VERSION_TEXT}"),
     )
     version_module._CACHE.clear()
     assert installed_vibe_version() is None
@@ -382,4 +328,4 @@ def test_installed_version_parses_and_fails_closed(monkeypatch, tmp_path):
 
     # A failure is never cached: the next spawn re-probes and recovers.
     monkeypatch.setattr(version_module.subprocess, "run", run)
-    assert installed_vibe_version() == _ASK_FLOOR
+    assert installed_vibe_version() == _MINIMUM

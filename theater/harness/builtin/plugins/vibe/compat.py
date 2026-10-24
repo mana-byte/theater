@@ -48,4 +48,5 @@ COMPAT = CompatManifest(
     mcp_call=McpCall(
         "run_typescript", {"code": "return await tools.mcp_{server}.{tool}({arguments});"}
     ),
+    canaries=("launch-env-dropped",),
 )

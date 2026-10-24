@@ -1,9 +1,13 @@
 name: Harness compatibility
 run-name: >-
   Harness compatibility · ${{ github.event_name == 'pull_request'
-  && format('static checks (PR #{0})', github.event.pull_request.number)
-  || format('{0}{1} ({2})', inputs.harness || 'all', inputs.version && format(' @ {0}', inputs.version) || '', github.event_name) }}
+  && format('PR #{0}', github.event.pull_request.number)
+  || format('{0} ({1})', inputs.harness || 'all', github.event_name) }}
 
+# Every run qualifies every published stable release of a harness, from its pinned minimum to the
+# latest, with the live conformance suite as the only authority. Nothing is cached, stored or
+# uploaded, and no summary file is written: results live in the run's memory and the log, and
+# end up as issues and one reviewed policy PR.
 on:
   schedule:
     - cron: "43 5 * * *"
@@ -14,11 +18,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, claude, codex, opencode, opencode2, pi, vibe]
-      version:
-        description: Exact stable version of one harness; empty discovers new releases
-        required: false
-        type: string
+        options: [all, claude, codex, opencode, pi, vibe]
   pull_request:
     paths:
       - ".github/workflows/harness-compat.yml"
@@ -33,17 +33,18 @@ on:
       - "tests/support/mutations.py"
       - "tests/support/tool_effects.py"
       - "tests/support/compat_probe/**"
-      - "theater/harness/contracts/compat.py"
-      - "theater/harness/builtin/plugins/**/compat*.py"
-      - "theater/harness/builtin/plugins/**/runtime_constants.py"
-      - "theater/harness/builtin/plugins/**/runtime_plan.py"
-      - "theater/harness/builtin/plugins/**/runtime_probe.py"
-      - "theater/harness/builtin/plugins/**/server_plan.py"
-      - "theater/harness/builtin/plugins/**/version.py"
-      - "theater/harness/builtin/plugins/**/unified_store_types.py"
+      - "tests/conftest.py"
+      - "theater/**"
+      - "packages/regie/src/**"
+      - "Makefile"
+      - "pyproject.toml"
+      - "uv.lock"
 
 permissions:
   contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
 
 concurrency:
   # PR checks supersede each other; qualification runs queue per harness (see the qualify job).
@@ -61,15 +62,14 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          enable-cache: true
+          enable-cache: false
       - run: uv sync --locked --all-packages --group dev
       - run: uv run ruff check scripts/harness_compat
       - run: uv run ruff format --check scripts/harness_compat
       - run: uv run mypy
-      - run: uv run pytest tests/compat --ignore=tests/compat/test_codex_collector.py -q
+      - run: uv run --no-sync --no-cache pytest -p no:cacheprovider tests/compat -q
       # No binaries: the completeness, guard and derivation tests; the live and canary scenarios skip.
-      - run: uv run pytest tests/conformance -q
-      - run: uv run python -m scripts.harness_compat check
+      - run: uv run --no-sync --no-cache pytest -p no:cacheprovider tests/conformance -q
 
   plan:
     name: Select harnesses
@@ -83,35 +83,27 @@ jobs:
       - id: plan
         env:
           REQUESTED_HARNESS: ${{ inputs.harness || 'all' }}
-          REQUESTED_VERSION: ${{ inputs.version || '' }}
           REF: ${{ github.ref }}
         run: |
-          if [[ "$REQUESTED_HARNESS" == "all" && -n "$REQUESTED_VERSION" ]]; then
-            echo "::error title=Harness compatibility::A version belongs to one harness: choose a harness or clear the version."
-            exit 1
-          fi
           if [[ "$REQUESTED_HARNESS" == "all" ]]; then
-            harnesses='["claude","codex","opencode","opencode2","pi","vibe"]'
+            harnesses='["claude","codex","opencode","pi","vibe"]'
           else
             harnesses="[\"$REQUESTED_HARNESS\"]"
           fi
-          # Gate PRs and issues come from main only; any other ref is a dry run of its own code.
+          # Policy PRs and issues come from main only; any other ref is a dry run of its own code.
           publish=false
           if [[ "$REF" == "refs/heads/main" ]]; then publish=true; fi
           echo "harnesses=$harnesses" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
-          {
-            echo "### Plan"
-            echo "- Harnesses: \`$harnesses\`"
-            echo "- Publishing PRs and issues: \`$publish\` (ref \`$REF\`)"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "harnesses=$harnesses publish=$publish ref=$REF"
 
   qualify:
     name: Qualify ${{ matrix.harness }}
     needs: [static-checks, plan]
     runs-on: ubuntu-24.04
-    # RUN_BUDGET_SECONDS + ATTEMPT_RESERVE_SECONDS (70 + 20 min) in scripts/harness_compat/runner.py.
-    timeout-minutes: 90
+    # One sequential process per harness: every release since the pinned minimum, each install and
+    # live run taking minutes. The hosted-runner ceiling is 360 minutes.
+    timeout-minutes: 350
     permissions:
       contents: read
       issues: write
@@ -125,23 +117,15 @@ jobs:
     env:
       HARNESS: ${{ matrix.harness }}
       PUBLISH: ${{ needs.plan.outputs.publish }}
-      REQUESTED_VERSION: ${{ inputs.version || '' }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
           persist-credentials: false
-      - name: Restore qualification evidence
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/harness-compat-cache
-          key: compat-evidence-${{ matrix.harness }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: compat-evidence-${{ matrix.harness }}-
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          enable-cache: true
+          enable-cache: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
@@ -149,172 +133,112 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Sync project
         run: uv sync --locked --all-packages --group dev
-      - name: Read the open issue's unresolved releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # Must equal issue_title in scripts/harness_compat/report.py (the publish steps use it).
-          ISSUE_TITLE: "Harness compatibility failures: ${{ matrix.harness }}"
-        run: |
-          set -euo pipefail
-          # The issue closes only once every release it lists was proved again (or retired).
-          body="$(gh issue list --state open --label "compat:$HARNESS" --limit 1000 \
-            --json title,body |
-            jq -r --arg title "$ISSUE_TITLE" 'map(select(.title == $title))[0].body // empty')"
-          marker="$(grep -o '<!-- compat-failing:[^>]*-->' <<< "$body" | head -1 || true)"
-          failing="$(sed -E 's/<!-- compat-failing:([^>]*)-->/\1/' <<< "$marker" | tr -d ' ')"
-          echo "HARNESS_COMPAT_OPEN_FAILURES=$failing" >> "$GITHUB_ENV"
-      - name: Qualify and prepare publication
+      - name: Qualify every release and prepare publication
         id: compat
         continue-on-error: true
         env:
-          THEATER_COMPAT_DIAGNOSTICS: ${{ runner.temp }}/compat-diagnostics
-          HARNESS_COMPAT_CACHE: ${{ runner.temp }}/harness-compat-cache
+          # Read-only discovery rate limit, and `gh issue` when publishing.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          mkdir -p "$HARNESS_COMPAT_CACHE"
-          args=(run --harness "$HARNESS" --run-url "$RUN_URL" \
-            --summary-json "$RUNNER_TEMP/compat-summary.json")
+          args=(run "$HARNESS" --run-url "$RUN_URL")
           if [[ "$PUBLISH" == "true" ]]; then
             args+=(--publish)
           fi
-          if [[ -n "$REQUESTED_VERSION" ]]; then
-            args+=(--version "$REQUESTED_VERSION")
-          fi
-          uv run python -m scripts.harness_compat "${args[@]}"
-      - name: Save qualification evidence
-        if: always()
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/harness-compat-cache
-          key: compat-evidence-${{ matrix.harness }}-${{ github.run_id }}-${{ github.run_attempt }}
+          uv run --no-sync --no-cache python -m scripts.harness_compat "${args[@]}"
       - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         id: pr
-        if: steps.compat.outputs.pr_needed == 'true'
+        if: steps.compat.outputs.pr_action == 'propose'
         continue-on-error: true
         with:
           token: ${{ secrets.PR_AUTOMATION_TOKEN }}
           base: main
           branch: chore/compat-${{ matrix.harness }}
-          commit-message: "chore(compat): advance ${{ matrix.harness }} version gate"
+          add-paths: theater/harness/builtin/plugins/${{ matrix.harness }}/compatibility.json
+          commit-message: "chore(compat): update ${{ matrix.harness }} version policy"
           title: ${{ steps.compat.outputs.pr_title }}
-          body: ${{ steps.compat.outputs.pr_body }}
+          body-path: ${{ steps.compat.outputs.pr_body_path }}
           delete-branch: true
-      - name: Withdraw the gate PR whose evidence was revoked
-        if: steps.compat.outputs.pr_withdraw != ''
+      - name: Close the policy PR the evidence no longer asks for
+        if: steps.compat.outputs.pr_action == 'retire'
         env:
           GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN }}
-          REVOKED: ${{ steps.compat.outputs.pr_withdraw }}
         run: |
           set -euo pipefail
-          # Only a PR that actually lists a revoked release is withdrawn.
-          body="$(gh pr list --head "chore/compat-$HARNESS" --state open --json body --jq '.[0].body // empty')"
-          IFS=',' read -ra revoked <<< "$REVOKED"
-          for version in "${revoked[@]}"; do
-            if [[ "$body" == *"\`$version\`"* ]]; then
-              gh pr close "chore/compat-$HARNESS" --delete-branch \
-                --comment "The evidence for $version was revoked by $RUN_URL"
-              break
-            fi
-          done
-      - name: Upsert failure issue
-        if: steps.compat.outputs.issue_action == 'upsert' || steps.compat.outputs.issue_action == 'ledger'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_ACTION: ${{ steps.compat.outputs.issue_action }}
-          ISSUE_BODY: ${{ steps.compat.outputs.issue_body }}
-          ISSUE_LABELS: ${{ steps.compat.outputs.issue_labels }}
-          ISSUE_TITLE: ${{ steps.compat.outputs.issue_title }}
-        run: |
-          set -euo pipefail
-          gh label create "compat:$HARNESS" --color 5319e7 --force
-          gh label create tooling --color d93f0b --force
-          gh label create admitted-regression --color b60205 --force
-          gh label create inconclusive --color fbca04 --force
-          number="$(gh issue list --state open --label "compat:$HARNESS" --limit 1000 \
-            --json number,title |
-            jq -r --arg title "$ISSUE_TITLE" 'map(select(.title == $title))[0].number // empty')"
+          number="$(gh pr list --head "chore/compat-$HARNESS" --state open --json number --jq '.[0].number // empty')"
           if [[ -n "$number" ]]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$number" -f body="$ISSUE_BODY" --silent
-          elif [[ "$ISSUE_ACTION" == "ledger" ]]; then
-            exit 0  # nothing to shrink
-          else
-            # Labelled at creation: the label is how the next run finds this issue.
-            IFS=',' read -ra initial <<< "$ISSUE_LABELS"
-            create=()
-            for label in "${initial[@]}"; do create+=(-f "labels[]=$label"); done
-            number="$(gh api -X POST "repos/$GITHUB_REPOSITORY/issues" \
-              -f title="$ISSUE_TITLE" -f body="$ISSUE_BODY" "${create[@]}" --jq '.number')"
+            gh pr close "$number" --delete-branch \
+              --comment "A fresh run of every release agrees with the policy on main: $RUN_URL"
           fi
-          # A ledger update only shrinks the unresolved list: the labels keep describing the failure.
-          if [[ "$ISSUE_ACTION" == "ledger" ]]; then
-            exit 0
-          fi
-          # Assign labels explicitly so permission failures surface.
-          IFS=',' read -ra labels <<< "$ISSUE_LABELS"
-          for stale in tooling admitted-regression inconclusive; do
-            if [[ ! ",$ISSUE_LABELS," == *",$stale,"* ]]; then
-              gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$number/labels/$stale" --silent 2>/dev/null || true
-            fi
-          done
-          add=()
-          for label in "${labels[@]}"; do add+=(-f "labels[]=$label"); done
-          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$number/labels" "${add[@]}" --silent
-          echo "Issue #$number: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/issues/$number" >> "$GITHUB_STEP_SUMMARY"
-      - name: Close recovered issue
-        if: steps.compat.outputs.issue_action == 'close'
+      - name: Remove the temporary PR body
+        if: always() && steps.compat.outputs.pr_body_path != ''
         env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_TITLE: ${{ steps.compat.outputs.issue_title }}
-        run: |
-          set -euo pipefail
-          number="$(gh issue list --state open --label "compat:$HARNESS" --limit 1000 \
-            --json number,title |
-            jq -r --arg title "$ISSUE_TITLE" 'map(select(.title == $title))[0].number // empty')"
-          if [[ -n "$number" ]]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$number" \
-              -f state=closed -f state_reason=completed --silent
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$number/comments" \
-              -f body="The latest conclusive qualification is green." --silent
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: compat-result-${{ matrix.harness }}
-          path: |
-            ${{ runner.temp }}/compat-summary*
-            ${{ runner.temp }}/compat-diagnostics
-          if-no-files-found: warn
-          retention-days: 14
-      - name: Preserve qualification result
+          PR_BODY_PATH: ${{ steps.compat.outputs.pr_body_path }}
+        run: rm -f -- "$PR_BODY_PATH"
+      - name: Preserve the qualification result
         if: steps.compat.outcome == 'failure' || steps.pr.outcome == 'failure'
         run: exit 1
 
-  overview:
-    name: Result overview
-    if: always() && needs.plan.result == 'success'
-    needs: [plan, qualify]
+  gate-plan:
+    name: Select changed plugins
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      harnesses: ${{ steps.gates.outputs.harnesses }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          enable-cache: true
+          enable-cache: false
       - run: uv sync --locked --all-packages --group dev
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: compat-result-*
-          path: ${{ runner.temp }}/results
-      - name: Summarize every selected harness
+      - id: gates
         env:
-          EXPECTED: ${{ join(fromJSON(needs.plan.outputs.harnesses), ',') }}
-          QUALIFY_RESULT: ${{ needs.qualify.result }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          # Fails for a missing result, a red/tooling/inconclusive row, or a failed publishing step.
-          uv run python -m scripts.harness_compat summarize "$RUNNER_TEMP/results" --expect "$EXPECTED"
-          if [[ "$QUALIFY_RESULT" != "success" ]]; then
-            echo "::error title=Harness compatibility::A qualification job ended as $QUALIFY_RESULT; see its summary."
-            exit 1
+          set -euo pipefail
+          args=(gates --base "$BASE_SHA")
+          # The pipeline's own branches may change one policy line and nothing else; any other
+          # edit to a plugin selects that harness for a full re-test of the proposed code.
+          if [[ "$HEAD_REF" == chore/compat-* ]]; then
+            args+=(--routine)
           fi
+          harnesses="$(uv run --no-sync --no-cache python -m scripts.harness_compat "${args[@]}")"
+          echo "harnesses=$harnesses" >> "$GITHUB_OUTPUT"
+
+  verify-gate:
+    name: Verify ${{ matrix.harness }} plugin and policy
+    needs: [static-checks, gate-plan]
+    if: needs.gate-plan.outputs.harnesses != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    # Read-only: the proposed code is re-tested against every release, and nothing is published.
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: ${{ fromJSON(needs.gate-plan.outputs.harnesses) }}
+    env:
+      HARNESS: ${{ matrix.harness }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: uv sync --locked --all-packages --group dev
+      - name: Re-test the proposed plugin and policy against every release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --no-sync --no-cache python -m scripts.harness_compat run "$HARNESS" --check

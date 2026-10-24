@@ -35,11 +35,13 @@ from scripts.harness_compat.contract import (
     MockReply,
     RecordedRequest,
 )
+from scripts.harness_compat.framework import python_path
 from scripts.harness_compat.mock import MockServer
 from scripts.harness_compat.process import SANDBOX_ENV
 from scripts.harness_compat.sandbox import sandbox_environment
 from tests.support import mutations
 from tests.support.live_stack import BOOT_SECONDS, Stack
+from tests.support.paths import REPO_ROOT
 from theater.frontend import FrontendClient
 from theater.frontend.dto import Controls, Job, Participant
 from theater.harness.contracts.compat import ProvisionContext, Provisioned
@@ -152,7 +154,14 @@ def hermetic_environment(
         path=path,
         offline=True,
     )
-    return {**env, "LANG": "en_US.UTF-8", "THEATER_HOME": str(root / "th"), **extra}
+    return {
+        **env,
+        "LANG": "en_US.UTF-8",
+        "THEATER_HOME": str(root / "th"),
+        **extra,
+        "PYTHONPATH": python_path(REPO_ROOT),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
 
 
 def _config_toml(harness: str, provisioned: Provisioned, marker_dir: Path) -> str:

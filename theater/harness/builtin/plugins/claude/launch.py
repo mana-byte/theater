@@ -22,9 +22,12 @@ from theater.harness.base import (
 )
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, ResumePreflightContext
 from theater.harness.contracts.manifest import LaunchManifest
+from theater.harness.contracts.runtime import RuntimeProbeContext
 from theater.harness.normalization import literal_prompt_argument
 from theater.harness.transcript.discovery import root_domain_overlay
+from theater.models import BadRequest
 
+from .compatibility import probe_claude_native_compatibility
 from .config_root import claude_config_env, claude_config_root, claude_projects_root
 from .constants import (
     CLAUDE_MCP_AUTO_BACKGROUND_ENV,
@@ -89,12 +92,19 @@ def _user_configures_thinking_summaries() -> bool:
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
     """Build Claude's launch plan and isolated receipt-hook settings."""
+    compatibility = probe_claude_native_compatibility(RuntimeProbeContext(binary=context.binary))
+    if not compatibility.supported:
+        raise BadRequest(f"refusing to launch Claude: {compatibility.reason}")
     # Project .claude/settings*.json is not consulted: no planner cwd, and --settings outranks it.
     settings_path = _claude_settings_path(context.participant_id)
     token_path = (
         paths.participant_observation_dir(context.participant_id, "claude") / "receipt-token"
     )
-    argv = ["claude", f"--mcp-config={context.config_path}", f"--settings={settings_path}"]
+    argv = [
+        context.binary or "claude",
+        f"--mcp-config={context.config_path}",
+        f"--settings={settings_path}",
+    ]
     native_session_id = str(uuid.uuid4())
     argv.append(f"--session-id={native_session_id}")
     if context.model:
@@ -109,8 +119,6 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         argv += ["--permission-mode", "acceptEdits"]
     elif context.approval == "manual":
         # Explicit, so the launch cannot inherit a permissive `permissions.defaultMode`.
-        # `default` parses on every release in the hooks range (still on 2.1.284, though
-        # --help no longer lists it); `manual` is the documented name since Claude 2.1.200.
         argv += ["--permission-mode", "default"]
     if context.prompt:
         # Commander treats any element starting with "-" as an option, so a

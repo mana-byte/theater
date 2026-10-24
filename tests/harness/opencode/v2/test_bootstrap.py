@@ -12,16 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.opencode_releases import V2_RELEASE
 from tests.support.shipped import OpenCodeHarness
-from theater.harness.builtin.plugins.opencode.dialect import OpenCodeDialect
 from theater.harness.builtin.plugins.opencode.legacy_bootstrap_v2 import render_legacy_bootstrap
 from theater.harness.builtin.plugins.opencode.native_plugin_v2 import plugin_dir
+from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
 
 # The fake `opencode` is a Python script on PATH: `serve` announces a banner and answers /api,
 # anything else is the TUI. Every invocation and request is logged for the assertions.
-
-V2 = OpenCodeDialect.V2
 
 
 _FAKE = """#!{executable}
@@ -139,7 +136,7 @@ def fake_opencode(tmp_path, monkeypatch):
 
 def _plan(tmp_path, *, approval="manual", prompt="say hello", resume=None):
     config = tmp_path / "abc.json"
-    plan = OpenCodeHarness(dialect=V2).plan_launch(
+    plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt=prompt,
         config_path=config,
@@ -198,7 +195,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def test_one_verified_server_then_one_tui_with_the_prompt(tmp_path, fake_opencode, monkeypatch):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     workdir = tmp_path / "work"
     workdir.mkdir()
     plan = _plan(tmp_path)
@@ -236,7 +233,7 @@ def test_one_verified_server_then_one_tui_with_the_prompt(tmp_path, fake_opencod
 
 
 def test_a_promptless_launch_precreates_its_session(tmp_path, fake_opencode, monkeypatch):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     workdir = tmp_path / "work"
     workdir.mkdir()
     plan = _plan(tmp_path, prompt="")
@@ -251,7 +248,7 @@ def test_a_promptless_launch_precreates_its_session(tmp_path, fake_opencode, mon
 def test_a_resume_continues_the_exact_session_on_the_overlay_database(
     tmp_path, fake_opencode, monkeypatch
 ):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     workdir = tmp_path / "work"
     workdir.mkdir()
     plan = _plan(tmp_path, prompt="", resume="ses_resume")
@@ -275,7 +272,7 @@ def test_a_resume_continues_the_exact_session_on_the_overlay_database(
 
 
 def test_a_failed_plugin_refuses_before_any_tui(tmp_path, fake_opencode, monkeypatch):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     workdir = tmp_path / "work"
     workdir.mkdir()
     plan = _plan(tmp_path)
@@ -303,7 +300,7 @@ def _credential_of(plan) -> str:
 def test_an_unverified_session_refuses_before_any_tui(
     tmp_path, fake_opencode, monkeypatch, failure
 ):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     workdir = tmp_path / "work"
     workdir.mkdir()
     plan = _plan(tmp_path)
@@ -323,7 +320,7 @@ def test_an_unverified_session_refuses_before_any_tui(
 def test_a_sigterm_during_startup_reaps_the_backend_and_the_credential(
     tmp_path, fake_opencode, monkeypatch
 ):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     workdir = tmp_path / "work"
     workdir.mkdir()
     plan = _plan(tmp_path)

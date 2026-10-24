@@ -75,10 +75,6 @@ class Mutation:
     #: Logged by the mutation when it changed something; absent from every daemon log means the
     #: plugin had nothing for it to break (a planner that writes no files), so nothing is proven.
     effect: str = ""
-    #: The harnesses it is a canary for; empty means every harness that declares what it breaks.
-    #: Plan 5.9 names two canaries for one harness each: whether losing a planned value is visible
-    #: depends on whether the sandbox's own provisioning supplies it anyway.
-    only: tuple[str, ...] = ()
 
 
 def _planner(body: str) -> str:
@@ -189,7 +185,12 @@ MUTATIONS: tuple[Mutation, ...] = (
                 return replace(manifest, runtime=replace(manifest.runtime, probe=probe))
             """
         ),
-        {"runtime:native": "fail", "runtime:survival": "fail"},
+        {
+            "runtime:native": "fail",
+            "runtime:survival": "fail",
+            "runtime:queue": "fail",
+            "runtime:settings": "fail",
+        },
         "runtime",
     ),
     Mutation(
@@ -198,7 +199,6 @@ MUTATIONS: tuple[Mutation, ...] = (
         {ANY: "not-pass"},
         "turn",
         DROPPED_EFFECT,
-        only=("vibe",),  # plan 5.9: the isolated session-log env; elsewhere provision supplies it
     ),
     Mutation(
         "launch-files-dropped",
@@ -206,20 +206,17 @@ MUTATIONS: tuple[Mutation, ...] = (
         {ANY: "not-pass"},
         "turn",
         DROPPED_EFFECT,
-        only=("claude",),  # plan 5.9: the receipt hooks, which only the launch plan writes
     ),
 )
 
 
 def applicable(
-    mutation: Mutation, required: tuple[Obligation, ...], harness: str | None = None
+    mutation: Mutation, required: tuple[Obligation, ...], canaries: tuple[str, ...] = ()
 ) -> Mapping[str, Expectation]:
     """The breakage this harness is expected to show: what the mutation breaks and it declares."""
-    if mutation.only and harness not in mutation.only:
-        return {}
-    ids = {item.id for item in required}
     if ANY in mutation.breaks:
-        return mutation.breaks
+        return mutation.breaks if mutation.name in canaries else {}
+    ids = {item.id for item in required}
     return {name: how for name, how in mutation.breaks.items() if name in ids}
 
 

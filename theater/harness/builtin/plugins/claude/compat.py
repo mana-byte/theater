@@ -62,4 +62,5 @@ def provision(context: ProvisionContext) -> Provisioned:
 COMPAT = CompatManifest(
     provision=provision,
     native_edit=NativeEdit("Write", {"file_path": "{path}", "content": "{nonce}\n"}),
+    canaries=("launch-files-dropped",),
 )

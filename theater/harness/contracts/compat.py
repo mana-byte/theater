@@ -169,6 +169,8 @@ class CompatManifest:
     native_edit: NativeEdit | None = None
     #: Only when the model cannot call an MCP tool under its own name.
     mcp_call: McpCall | None = None
+    #: Extra generic mutations whose effects this plugin's provisioning cannot mask.
+    canaries: tuple[str, ...] = ()
 
 
 __all__ = [

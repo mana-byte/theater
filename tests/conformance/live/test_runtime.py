@@ -20,7 +20,16 @@ _RECONNECT_SECONDS = 30.0
 
 
 async def test_a_native_runtime_is_proven_by_its_physical_route(live, obligation):
-    participant = await live.spawn(live.approval)
+    initial = {}
+    if obligation.detail == "settings":
+        if len(live.provisioned.models) < 2:
+            inconclusive("settings updates need two provisioned models")
+        initial["model"] = live.provisioned.models[0]
+        if live.harness.launch_parameter_support.reasoning_effort:
+            if len(live.provisioned.efforts) < 2:
+                inconclusive("settings updates need two provisioned efforts")
+            initial["reasoning_effort"] = live.provisioned.efforts[0]
+    participant = await live.spawn(live.approval, **initial)
     await live.ready(participant)
 
     if obligation.detail == "native":
@@ -29,6 +38,10 @@ async def test_a_native_runtime_is_proven_by_its_physical_route(live, obligation
         await _survival(live, participant)
     elif obligation.detail == "legacy":
         await _legacy_turn(live, participant)
+    elif obligation.detail == "queue":
+        await _queue(live, participant)
+    elif obligation.detail == "settings":
+        await _settings(live, participant)
     else:
         await _refused(live, participant, obligation.detail.removeprefix("unavailable-"))
 
@@ -129,23 +142,105 @@ async def _legacy_turn(live, participant: str) -> None:
     assert seen.terminal_route is not None and seen.terminal_route.health == "healthy"
 
 
-async def _refused(live, participant: str, capability: str) -> None:
-    offered = (await live.controls(participant)).actions.get(capability)
-    assert offered is None or not offered.admissible, f"{capability} is declared unavailable"
-    if capability != "settings_update":
-        inconclusive(f"no public call exercises the {capability!r} capability yet")
-    models = live.provisioned.models
+async def _queue(live, participant: str) -> None:
+    _native_route(await live.participant(participant))
+    prompt, followup, answer = _nonce(), _nonce(), _nonce()
+    held = await live.hold_turn(participant, prompt)
     key = uuid.uuid4().hex
+    accepted = (
+        await live.client.controls.queue_followup(participant, followup, idempotency_key=key)
+    ).value
+    repeated = (
+        await live.client.controls.queue_followup(participant, followup, idempotency_key=key)
+    ).value
+    assert accepted.job_handle is not None
+    assert repeated.job_handle == accepted.job_handle, "a retry minted another queued job"
+    assert not live.turns(followup), "the follow-up reached the model before the held turn ended"
+
+    live.queue(MockReply(answer))
+    held.hold.release()
+    original = await live.job(held.handle)
+    queued = await live.job(accepted.job_handle)
+
+    assert original.state == "done", original.error
+    assert queued.state == "done", queued.error
+    assert answer in str(queued.result)
+    (first,) = live.turns(prompt)
+    (second,) = live.turns(followup)
+    assert prompt in second.user_texts, "the follow-up lost the original turn's history"
+    assert second.messages > first.messages
+
+
+async def _settings(live, participant: str) -> None:
+    _native_route(await live.participant(participant))
+    changed = {"model": live.provisioned.models[1]}
+    effort = live.harness.launch_parameter_support.reasoning_effort
+    if effort:
+        changed["reasoning_effort"] = live.provisioned.efforts[1]
+    before, after = _nonce(), _nonce()
+    await _turn(live, participant, before)
+    await live.ready(participant)
+
+    held = await live.hold_turn(participant, _nonce())
     try:
         accepted = (
             await live.client.controls.update_settings(
-                participant, idempotency_key=key, model=models[-1]
+                participant, idempotency_key=uuid.uuid4().hex, **changed
             )
         ).value
     except FrontendResponseError as refusal:
-        assert "setting" in str(refusal).lower(), refusal
+        assert refusal.value.code == "busy", refusal
+    else:
+        operation = await live._settled(accepted.operation_id)
+        assert operation.state == "failed", "settings changed during an active turn"
+        assert operation.error is not None and operation.error.code == "busy", operation.error
+    held.hold.release()
+    assert (await live.job(held.handle)).state == "done"
+    await live.ready(participant)
+
+    accepted = (
+        await live.client.controls.update_settings(
+            participant, idempotency_key=uuid.uuid4().hex, **changed
+        )
+    ).value
+    operation = await live._settled(accepted.operation_id)
+    assert operation.state == "succeeded", operation.error
+    await _turn(live, participant, after)
+    (first,) = live.turns(f"Reply with {before}")
+    (second,) = live.turns(f"Reply with {after}")
+    assert first.model is not None and second.model is not None
+    assert first.model != second.model, "the settings update did not change the wire model"
+    if effort:
+        assert first.effort is not None and second.effort is not None
+        assert first.effort != second.effort, "the settings update did not change the wire effort"
+
+
+async def _refused(live, participant: str, capability: str) -> None:
+    offered = (await live.controls(participant)).actions.get(capability)
+    assert offered is None or not offered.admissible, f"{capability} is declared unavailable"
+    key = uuid.uuid4().hex
+    try:
+        if capability == "settings_update":
+            result = await live.client.controls.update_settings(
+                participant, idempotency_key=key, model=live.provisioned.models[-1]
+            )
+        elif capability == "queue_followup":
+            result = await live.client.controls.queue_followup(
+                participant, _nonce(), idempotency_key=key
+            )
+        elif capability == "interrupt":
+            result = await live.client.controls.interrupt(participant, idempotency_key=key)
+        elif capability == "send":
+            result = await live.client.controls.send(participant, _nonce(), idempotency_key=key)
+        else:
+            inconclusive(f"no public call exercises the {capability!r} capability yet")
+    except FrontendResponseError as refusal:
+        assert refusal.value.code == "bad_request", refusal
+        assert capability.split("_", maxsplit=1)[0] in refusal.value.message.lower(), refusal
         return
+    accepted = result.value
     operation = await live._settled(accepted.operation_id)
     assert operation.state != "succeeded", (
         f"{capability} was accepted although declared unavailable"
     )
+    assert operation.error is not None and operation.error.code == "bad_request", operation.error

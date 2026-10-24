@@ -94,6 +94,13 @@ def test_the_shipped_plugins_are_all_discovered() -> None:
     assert set(SHIPPED) == set(HARNESSES)
 
 
+@pytest.mark.parametrize("name", SHIPPED)
+def test_plugin_canaries_exist_in_the_generic_catalogue(name: str) -> None:
+    compat = HARNESSES[name].compat
+    assert compat is not None
+    assert set(compat.canaries) <= {mutation.name for mutation in MUTATIONS}
+
+
 def test_every_declaration_a_manifest_can_make_is_mapped_or_exempted() -> None:
     found = declarations()
 

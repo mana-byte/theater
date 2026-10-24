@@ -16,7 +16,6 @@ from theater.transcript_identity import (
 
 from .constants import RECEIPT_SESSION_ID_MAX_BYTES
 from .store import (
-    QueryConnection,
     candidate_session,
     candidate_sessions,
     located_sessions,
@@ -149,7 +148,7 @@ class OpenCodeIdentity:
     _session_exact: bool
     _session_id: str | None
 
-    def _locate(self, conn: QueryConnection, *, pinned: bool) -> str | None:
+    def _locate(self, conn: sqlite3.Connection, *, pinned: bool) -> str | None:
         if self._receipt_target is not None:
             row = root_session(conn, self._receipt_target)
             return row[0] if row is not None else None
@@ -177,7 +176,7 @@ class OpenCodeIdentity:
         row = located_sessions(conn, want, self._after)
         return row[0] if row is not None else None
 
-    def _correlation_problem(self, conn: QueryConnection) -> Batch | None:
+    def _correlation_problem(self, conn: sqlite3.Connection) -> Batch | None:
         """Surface a missing exact channel after bounded startup."""
         if self._receipt_deadline is None or time.monotonic() < self._receipt_deadline:
             return None
@@ -222,7 +221,7 @@ class OpenCodeIdentity:
         return Batch(waiting=True, error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE, error=reason)
 
     @staticmethod
-    def _session_exists(conn: QueryConnection, sid: str) -> bool:
+    def _session_exists(conn: sqlite3.Connection, sid: str) -> bool:
         return root_session(conn, sid) is not None
 
     def _attachment_provenance(self, sid: str) -> str:

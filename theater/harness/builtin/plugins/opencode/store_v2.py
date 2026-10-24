@@ -1,7 +1,7 @@
-"""Read-only OpenCode 2.x queries answered in the 1.x row shapes `store` callers expect.
+"""Read-only OpenCode queries answered in the normalized row shapes `store` callers expect.
 
-Rows carry `seq` where 1.x carried `time_created`: it is the transcript order, and callers use
-that column only as an ordering coordinate. 2.x keeps no event log, so live reads advance a
+Rows carry `seq` as the transcript order, and callers use that column only as an ordering
+coordinate. OpenCode keeps no event log, so live reads advance a
 `(time_updated, seq)` cursor and re-read a short window for same-ms rewrites.
 """
 
@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from . import compaction_v2, translate_v2
 from .values import load_json_object
 
-#: The message types with a 1.x counterpart; the rest (instructions, switches, shell) are not
+#: The message types observed as conversation; the rest (instructions, switches, shell) are not
 #: conversation, and an `idle` marker is kept so it can close its turn. A `compaction` row is
 #: paid usage, not talk, so it rides the same cursor the observer drains.
 _VIEW = "type IN ('user', 'assistant', 'idle', 'compaction')"

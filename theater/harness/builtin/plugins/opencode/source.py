@@ -8,13 +8,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 import time
+from abc import abstractmethod
 from collections import OrderedDict
 from pathlib import Path
 
 from theater.harness.contracts.trajectory import TrajectoryFact
-from theater.harness.source import Attachment, Batch, ReceiptAdmission, Source, SourceContractError
-from theater.models import Status
+from theater.harness.source import Batch, ReceiptAdmission, Source, SourceContractError
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
 from .constants import CORRELATION_READY_TIMEOUT
@@ -22,9 +23,8 @@ from .history import OpenCodeHistory
 from .identity import OpenCodeIdentity, validate_receipt_session_id
 from .mcp import OpenCodeMcpCatalog
 from .parser import OpenCodeParser
-from .store import QueryConnection, event_head, open_readonly
+from .store import open_readonly
 from .trajectory import OpenCodeTrajectory
-from .values import _has_tool_calls, _table, _terminal_finish, load_json_object
 
 logger = logging.getLogger("theater.harness.opencode")
 
@@ -59,7 +59,9 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
             time.monotonic() + CORRELATION_READY_TIMEOUT if receipt_expected else None
         )
         self._receipt_target: str | None = None
-        self._conn: QueryConnection | None = None
+        self._conn: sqlite3.Connection | None = None
+        self._connection_lock = threading.Lock()
+        self._closed = False
         self._session: str | None = None
         self._cursor = -1
         self._pending: tuple[str, int] | None = None
@@ -151,14 +153,26 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._trajectory_state.clear()
 
     async def aclose(self) -> None:
-        conn, self._conn = self._conn, None
-        if conn is not None:
-            try:
-                conn.close()
-            except sqlite3.Error:
-                logger.debug("closing the opencode database failed", exc_info=True)
+        # Cancelling to_thread does not stop SQLite; close only after its worker releases the lock.
+        self._closed = True
+        await asyncio.to_thread(self._close_connection)
+
+    def _close_connection(self) -> None:
+        with self._connection_lock:
+            conn, self._conn = self._conn, None
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    logger.debug("closing the opencode database failed", exc_info=True)
 
     def _read(self) -> Batch:
+        with self._connection_lock:
+            if self._closed:
+                return self._source_unavailable_batch("OpenCode source is closed")
+            return self._read_connection()
+
+    def _read_connection(self) -> Batch:
         self._require_decision()
         conn = self._open()
         if conn is None:
@@ -180,47 +194,13 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
             logger.debug("reading the opencode database failed", exc_info=True)
             return self._source_unavailable_batch(f"reading OpenCode database failed: {exc}")
 
-    def _open(self) -> QueryConnection | None:
+    def _open(self) -> sqlite3.Connection | None:
         if self._conn is None:
             self._conn = open_readonly(self._db, persistent=True)
         return self._conn
 
-    def _attach(self, conn: QueryConnection, sid: str) -> Batch:
-        row = event_head(conn, sid)
-        status = self._status(conn, sid)
-        self._pending = (sid, row[0])
-        return Batch(
-            attached=Attachment(
-                location=f"opencode://{sid}",
-                session_id=sid,
-                skipped=row[1],
-                correlation=self._attachment_provenance(sid),
-            ),
-            status=status,
-        )
+    @abstractmethod
+    def _attach(self, conn: sqlite3.Connection, sid: str) -> Batch: ...
 
-    def _status(self, conn: QueryConnection, sid: str) -> Status:
-        row = conn.queries.latest_message(conn, sid)
-        if row is None:
-            return Status.IDLE
-        info = load_json_object(row[0])
-        if info.get("role") != "assistant":
-            return Status.WORKING
-        time_data = _table(info.get("time"))
-        mid = info.get("id")
-        # A stored error ends the turn (native idles on it); a finish waits for `time.completed`,
-        # and `stop` with a live tool call keeps looping (session/prompt.ts:1097-1115).
-        has_tool_calls = (
-            isinstance(mid, str)
-            and bool(mid)
-            and _has_tool_calls(
-                load_json_object(part_row[0]) for part_row in conn.queries.message_parts(conn, mid)
-            )
-        )
-        if bool(info.get("error")) or (
-            _terminal_finish(info.get("finish"))
-            and time_data.get("completed")
-            and not has_tool_calls
-        ):
-            return Status.IDLE
-        return Status.WORKING
+    @abstractmethod
+    def _drain(self, conn: sqlite3.Connection) -> Batch: ...

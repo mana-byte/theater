@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ pytest_plugins = ["tests.support.fixtures"]
 @pytest.fixture
 def available_harness_binaries(monkeypatch, shipped_harnesses) -> None:
     """Simulated launches need executable discovery, not installed agent CLIs."""
+    from theater import harness
     from theater.harness import HARNESSES
 
     binaries = {harness.binary for harness in HARNESSES.values()}
@@ -36,7 +38,46 @@ def available_harness_binaries(monkeypatch, shipped_harnesses) -> None:
     monkeypatch.setattr(shutil, "which", which)
     # Hermetic vibe plans: no probe of the host CLI, and no shadow-profile scan
     # of the host filesystem; argv[0] stays the interpreter the which stub returns.
-    pin_installed_vibe_version(monkeypatch, None, binary=sys.executable)
+    from theater.harness.builtin.plugins.vibe.compatibility import VERSION_POLICY
+    from theater.harness.contracts.runtime import RuntimeCompatibility
+    from theater.harness.contracts.version_policy import version_key
+
+    def pin_launches():
+        pin_installed_vibe_version(
+            monkeypatch, version_key(VERSION_POLICY.minimum), binary=sys.executable
+        )
+        for name, probe in (
+            ("claude", "probe_claude_native_compatibility"),
+            ("codex", "probe_codex_compatibility"),
+            ("pi", "probe_pi_frontend_compatibility"),
+        ):
+            module = importlib.import_module(f"theater.harness.builtin.plugins.{name}.launch")
+            scopes = [vars(module)]
+            if name in HARNESSES:
+                planner = HARNESSES[name]._launch.planner
+                while hasattr(planner, "func"):
+                    planner = planner.func
+                scopes.append(planner.__globals__)
+            for scope in scopes:
+                if probe in scope:
+                    monkeypatch.setitem(
+                        scope,
+                        probe,
+                        lambda context: RuntimeCompatibility(
+                            supported=True, policy="simulated-launch"
+                        ),
+                    )
+
+    original_install = harness.install
+
+    def install(*args, **kwargs):
+        installed = original_install(*args, **kwargs)
+        # Daemon startup reloads isolated plugin modules; re-pin their newly imported planners.
+        pin_launches()
+        return installed
+
+    monkeypatch.setattr(harness, "install", install)
+    pin_launches()
 
 
 @pytest.fixture
@@ -85,12 +126,14 @@ def theater_home(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def opencode_release(monkeypatch, theater_home):
-    """Plan OpenCode 1.x unless a test asks for 2.x, on a data folder of the test's own.
+    """Plan the current OpenCode baseline on a data folder of the test's own.
 
     Environment, since the registry imports its own copy of every plugin package; a real
     opencode a test reaches must never write the host's `~/.local/share/opencode`.
     """
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "1.18.29")
+    from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
+
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     monkeypatch.setenv("XDG_DATA_HOME", str(theater_home / "xdg-data"))
 
 

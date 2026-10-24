@@ -1,14 +1,13 @@
 """Codex native runtime planning: compatibility probe and pure plans.
 
-Auto selects native only inside the qualified release range (floor, ceiling, excluded);
-everything else selects legacy, with the reason recorded for both auto and explicit native
-preference (the daemon treats native as a preference, never a hard requirement).
+Native and provider launches share the plugin's qualified stable release policy.
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
+from pathlib import Path
 
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
@@ -17,25 +16,12 @@ from theater.harness.contracts.runtime import (
     RuntimePlanningContext,
     RuntimeProbeContext,
 )
+from theater.harness.contracts.version_policy import VersionPolicy, version_key
 
 from .constants import CODEX_BINARY
 
-#: First codex-cli release proved compatible; the native runtime is untested below it.
-CODEX_RUNTIME_QUALIFIED_FLOOR = (0, 148, 0)
-#: First release not yet proved; the daily compat pipeline moves it over an unbroken run of greens.
-CODEX_RUNTIME_QUALIFIED_CEILING = (0, 164, 1)
-#: Releases inside the range measured incompatible; each entry needs a comment naming the cause.
-CODEX_RUNTIME_QUALIFIED_EXCLUDED: tuple[tuple[int, int, int], ...] = ()
-
-
-def _release_text(release: tuple[int, int, int]) -> str:
-    return ".".join(str(part) for part in release)
-
-
-#: Tested compatibility policy; derived from the floor so a ceiling bump never renames it.
-CODEX_RUNTIME_COMPATIBILITY_POLICY = (
-    f"codex-appserver-{_release_text(CODEX_RUNTIME_QUALIFIED_FLOOR)}-compatible"
-)
+VERSION_POLICY = VersionPolicy.load(Path(__file__).with_name("compatibility.json"))
+CODEX_RUNTIME_COMPATIBILITY_POLICY = f"codex-appserver-{VERSION_POLICY.minimum}-compatible"
 
 #: ``codex --version`` prints ``codex-cli <version>`` on the verified release.
 CODEX_RUNTIME_VERSION_PREFIX = "codex-cli"
@@ -44,7 +30,6 @@ CODEX_RUNTIME_VERSION_PREFIX = "codex-cli"
 CODEX_RUNTIME_PROBE_TIMEOUT_SECONDS = 10.0
 
 _VERSION_TOKEN = re.compile(r"codex-cli[ \t]+(\S+)")
-_STABLE_RELEASE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)")
 
 #: Backend config overrides per approval mode. Approval is explicit per
 #: spawn — it has no default anywhere: a missing or unknown approval mode is
@@ -68,40 +53,33 @@ _CODEX_APPROVAL_OVERRIDES: dict[str, tuple[tuple[str, str], ...]] = {
 
 
 def qualified_versions_range_text() -> str:
-    """Display text of the qualified range, derived from the gate constants."""
-    text = (
-        f">={_release_text(CODEX_RUNTIME_QUALIFIED_FLOOR)},"
-        f"<{_release_text(CODEX_RUNTIME_QUALIFIED_CEILING)}"
-    )
-    if CODEX_RUNTIME_QUALIFIED_EXCLUDED:
-        text += " excluding " + ", ".join(map(_release_text, CODEX_RUNTIME_QUALIFIED_EXCLUDED))
-    return text
+    """Display the same inclusive policy used for admission."""
+    return VERSION_POLICY.range_text
 
 
 def codex_version_refusal(version: str) -> str | None:
     """Why this release is outside the qualified range, or None when it is admitted."""
-    match = _STABLE_RELEASE.fullmatch(version)
-    if match is None:
+    try:
+        release = version_key(version)
+    except ValueError:
         return f"codex-cli {version!r} is not a stable MAJOR.MINOR.PATCH release"
-    release = (int(match[1]), int(match[2]), int(match[3]))
-    if release in CODEX_RUNTIME_QUALIFIED_EXCLUDED:
-        return f"codex-cli {version} was measured incompatible and is excluded"
-    if release < CODEX_RUNTIME_QUALIFIED_FLOOR:
+    if VERSION_POLICY.admits(version):
+        return None
+    if version in VERSION_POLICY.excluded:
+        return f"codex-cli {version} is excluded by the compatibility policy"
+    if release < version_key(VERSION_POLICY.minimum):
         return f"codex-cli {version} is older than the qualified floor"
-    if release >= CODEX_RUNTIME_QUALIFIED_CEILING:
-        return f"codex-cli {version} is newer than the newest proved release"
-    return None
+    return f"codex-cli {version} is newer than the newest proved release"
 
 
 def codex_refusal_message(version: str) -> str | None:
-    """The actionable refusal for an unqualified release; wiring=auto falls back to legacy."""
+    """The actionable refusal for an unqualified release."""
     refusal = codex_version_refusal(version)
     if refusal is None:
         return None
     return (
         f"{refusal} (compatibility policy {CODEX_RUNTIME_COMPATIBILITY_POLICY}, qualified range "
-        f"{qualified_versions_range_text()}); wiring=auto selects legacy, and explicit native "
-        "preference selects legacy with this reason"
+        f"{qualified_versions_range_text()}); install a qualified release or upgrade Theater"
     )
 
 
@@ -140,7 +118,7 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
             native_version=None,
             reason=(
                 f"codex compatibility probe could not run {binary!r} --version: {error}; "
-                "wiring=auto and explicit native preference both select legacy with this reason"
+                "refusing an unverified CLI release"
             ),
         )
     if completed.returncode != 0:
@@ -149,8 +127,8 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
             policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
             native_version=None,
             reason=(
-                f"codex --version exited with {completed.returncode}; wiring=auto selects "
-                "legacy, and explicit native preference selects legacy with this reason"
+                f"codex --version exited with {completed.returncode}; "
+                "refusing an unverified CLI release"
             ),
         )
     version = parse_codex_version(output)
@@ -161,7 +139,7 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
             native_version=None,
             reason=(
                 f"codex --version output did not name a codex-cli version: {output.strip()!r}; "
-                "wiring=auto and explicit native preference both select legacy with this reason"
+                "refusing an unverified CLI release"
             ),
         )
     refusal = codex_refusal_message(version)
@@ -244,7 +222,7 @@ def plan_codex_runtime_backend(context: RuntimePlanningContext) -> RuntimePlan:
     ``--listen unix://`` speaks WebSocket, not Theater NDJSON; the daemon adds MCP overrides
     and launches it in the worktree, so every thread captures that cwd.
     """
-    argv: list[str] = [CODEX_BINARY]
+    argv: list[str] = [context.binary or CODEX_BINARY]
     for key, value in codex_backend_config_overrides(context):
         argv += ["-c", f"{key}={value}"]
     if context.endpoint is None:
@@ -263,11 +241,12 @@ def plan_codex_frontend(
     approval: str | None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    binary: str | None = None,
 ) -> LaunchPlan:
     """Plan a promptless native CLI UI attachment."""
     # A promptless TUI shows a blocking update dialog before it creates its thread, and
     # nobody is there to answer it; only a CLI prompt skips it.
-    argv = [CODEX_BINARY, "-c", "check_for_update_on_startup=false"]
+    argv = [binary or CODEX_BINARY, "-c", "check_for_update_on_startup=false"]
     for key, value in codex_launch_config_overrides(
         approval=approval,
         model=model,

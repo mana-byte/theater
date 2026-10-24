@@ -16,11 +16,7 @@ from theater.harness.contracts.callbacks import (
 from theater.models import BadRequest
 
 from .approval_guard import shadowed_approval_profile, vibe_home
-from .compatibility import (
-    vibe_isolation_floor,
-    vibe_qualified_range_text,
-    vibe_store_format_ceiling,
-)
+from .compatibility import VERSION_POLICY
 from .constants import (
     ISOLATION_MARKER,
     VIBE_ACTIVE_MODEL_ENV,
@@ -33,10 +29,6 @@ from .identity import participant_root
 from .isolation import _canonical, isolation_marker_text, validate_isolated_domain
 from .version import installed_vibe_version, resolve_vibe_binary
 
-# Verified against real wheels: `ask` replaces `default` as the builtin
-# approval-per-tool profile in 2.24.1.
-_ASK_FLOOR = (2, 24, 1)
-
 
 def plan_launch(
     context: LaunchContext,
@@ -48,23 +40,17 @@ def plan_launch(
     approval = context.approval
     model = context.model
     resume = context.resume
-    # Undeterminable version keeps today's argv; never guess from a probe failure.
     version = installed_vibe_version(context.binary)
-    if version is not None and version < vibe_isolation_floor():
-        # Such a release ignores the isolated session-log directory below, so its transcript
-        # never appears where the observer looks and the job would wait forever.
+    if version is None:
         raise BadRequest(
-            f"refusing to launch Vibe {'.'.join(str(part) for part in version)}: it predates "
-            "the isolated session-log directory Theater relies on (qualified Vibe "
-            f"releases are {vibe_qualified_range_text()}); upgrade Vibe"
+            "refusing to launch Vibe: could not verify a stable CLI version; "
+            f"install a qualified release ({VERSION_POLICY.range_text})"
         )
-    if version is not None and version >= vibe_store_format_ceiling():
-        # Refuse a writer whose unified store this reader cannot open: the job
-        # would wait forever on a transcript that never becomes readable.
+    rendered = ".".join(str(part) for part in version)
+    if not VERSION_POLICY.admits(rendered):
         raise BadRequest(
-            f"refusing to launch Vibe {'.'.join(str(part) for part in version)}: it writes "
-            "a unified session store newer than this Theater can read (qualified Vibe "
-            f"releases are {vibe_qualified_range_text()}); upgrade Theater"
+            f"refusing to launch Vibe {rendered}: qualified releases are "
+            f"{VERSION_POLICY.range_text}; install a qualified release or upgrade Theater"
         )
     # No --experimental-harness: the observer reads both the classic session log
     # and the Unified Session Store that flag opts into, so neither is required.
@@ -79,8 +65,8 @@ def plan_launch(
         argv += ["--agent", profile]
     elif approval == "manual":
         # Explicit, since without --agent vibe falls back to `default_agent` (may
-        # auto-approve). `ask`/`default` are the same approval-per-tool profile.
-        profile = "ask" if version is None or version >= _ASK_FLOOR else "default"
+        # auto-approve).
+        profile = "ask"
         argv.append(f"--agent={profile}")
     # --resume appends to the same messages.jsonl, keeps the session id; prompt still honoured.
     if resume is not None:

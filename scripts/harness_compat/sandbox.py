@@ -1,19 +1,15 @@
-"""Per-run sandbox: fresh dirs, private tmux socket, local mock, offline environment."""
+"""Per-run sandbox: fresh dirs, a private tmux socket and an offline environment."""
 
 from __future__ import annotations
 
-import contextlib
 import os
-import shutil
-import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from .cleanup import stop_sandbox_processes
+from .cleanup import remove_tree, stop_sandbox_processes
 from .contract import Sandbox
-from .mock import MockServer
 from .process import SANDBOX_ENV, new_token
 
 #: Nothing listens here, so a CLI that honours the proxy variables cannot leave the machine.
@@ -37,7 +33,7 @@ def sandbox_environment(
 
     Private homes and caches, the sandbox token, user git, pip and npm configuration discarded and,
     when ``offline``, every proxy variable (either case) aimed at a dead port: a CLI that honours
-    one cannot leave the machine, and loopback stays reachable for the mock.
+    one cannot leave the machine, and loopback stays reachable for the suite's own mock model.
     """
     env = {
         SANDBOX_ENV: token,
@@ -51,8 +47,11 @@ def sandbox_environment(
         "TMPDIR": str(temp),
         "TMUX_TMPDIR": str(temp),
         "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_OPTIONAL_LOCKS": "0",
         "PIP_CONFIG_FILE": os.devnull,
         "NPM_CONFIG_CACHE": str(cache / "npm"),
+        "PYTHONDONTWRITEBYTECODE": "1",
         "NO_PROXY": _LOOPBACK,
         "no_proxy": _LOOPBACK,
     }
@@ -76,26 +75,6 @@ def _new_temp_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="")).resolve()
 
 
-def _unlock(directory: Path) -> None:
-    """Make every directory below ``directory`` listable and writable so it can be deleted."""
-    with contextlib.suppress(OSError):
-        directory.chmod(0o700)
-        for child in directory.iterdir():
-            if child.is_dir() and not child.is_symlink():
-                _unlock(child)
-
-
-def _remove_tree(path: Path) -> None:
-    """Delete ``path`` despite read-only or unreadable directories; report what stays behind."""
-    if not path.exists():
-        return
-    _unlock(path)
-    stuck: list[str] = []
-    shutil.rmtree(path, onexc=lambda _function, target, _error: stuck.append(str(target)))
-    if stuck or path.exists():
-        sys.stderr.write(f"harness-compat: sandbox cleanup left {path} ({len(stuck)} paths)\n")
-
-
 @contextmanager
 def make_sandbox(harness: str, *, root: Path | None = None) -> Iterator[Sandbox]:
     """Create a sandbox under ``root`` (a fresh temp dir by default) and remove it on exit."""
@@ -111,10 +90,12 @@ def make_sandbox(harness: str, *, root: Path | None = None) -> Iterator[Sandbox]
             raise RuntimeError(f"{harness} tmux AF_UNIX socket path is too long: {tmux_socket}")
         yield from _sandbox(base, tmux_socket)
     finally:
-        if socket_root is not None:
-            _remove_tree(socket_root)
-        if owned:
-            _remove_tree(base)
+        try:
+            if socket_root is not None:
+                remove_tree(socket_root)
+        finally:
+            if owned:
+                remove_tree(base)
 
 
 def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
@@ -137,9 +118,6 @@ def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
         temp_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    mock_requests = evidence_dir / "mock_requests.jsonl"
-    mock = MockServer(mock_requests)
-    mock.start()
     token = new_token()
 
     def environment(*, offline: bool) -> dict[str, str]:
@@ -164,12 +142,8 @@ def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
             bin_dir=bin_dir,
             evidence_dir=evidence_dir,
             tmux_socket=tmux_socket,
-            mock=mock,
-            mock_base_urls=mock.base_urls,
-            mock_requests=mock_requests,
             env=env,
             offline_env=offline_env,
         )
     finally:
         stop_sandbox_processes(base, token, tmux_socket)
-        mock.stop()

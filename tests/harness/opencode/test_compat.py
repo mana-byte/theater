@@ -1,14 +1,11 @@
-"""OpenCode's qualification provisioning points the stock CLI at the mock for both release lines."""
+"""OpenCode's qualification provisioning points the supported CLI at the mock."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
-
 from tests.support.shipped import OpenCodeHarness
-from theater.harness.builtin.plugins.opencode.dialect import OpenCodeDialect
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST, manifest_for_paths
 from theater.harness.contracts.compat import ProvisionContext
 
@@ -28,11 +25,10 @@ def _context(
     )
 
 
-@pytest.mark.parametrize("version", ["1.18.0", "2.0.18"])
 def test_provision_serves_every_logical_model_from_the_mock_over_openai(
-    tmp_path: Path, version: str
+    tmp_path: Path,
 ) -> None:
-    provisioned = OpenCodeHarness().compat.provision(_context(tmp_path, version=version))
+    provisioned = OpenCodeHarness().compat.provision(_context(tmp_path))
 
     config = json.loads(
         provisioned.files[tmp_path / "home" / ".config" / "opencode" / "opencode.json"]
@@ -45,9 +41,8 @@ def test_provision_serves_every_logical_model_from_the_mock_over_openai(
     assert config["model"] == "mockprov/mock-a"
 
 
-@pytest.mark.parametrize("version", ["1.18.0", "2.0.18"])
-def test_provision_keeps_the_cli_off_the_network(tmp_path: Path, version: str) -> None:
-    provisioned = OpenCodeHarness().compat.provision(_context(tmp_path, version=version))
+def test_provision_keeps_the_cli_off_the_network(tmp_path: Path) -> None:
+    provisioned = OpenCodeHarness().compat.provision(_context(tmp_path))
 
     config = json.loads(next(iter(provisioned.files.values())))
     assert provisioned.env == {
@@ -83,11 +78,10 @@ def test_native_edit_names_the_target_as_the_2x_write_tool_declares_it() -> None
     }
 
 
-@pytest.mark.parametrize("dialect", [None, OpenCodeDialect.V1, OpenCodeDialect.V2])
 def test_every_manifest_the_plugin_builds_carries_the_compat_declaration(
-    tmp_path: Path, dialect: OpenCodeDialect | None
+    tmp_path: Path,
 ) -> None:
-    built = manifest_for_paths(db=tmp_path / "db", dialect=dialect)
+    built = manifest_for_paths(db=tmp_path / "db")
 
     assert MANIFEST.compat is not None
     assert built.compat is MANIFEST.compat

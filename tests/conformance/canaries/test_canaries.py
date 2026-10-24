@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from scripts.harness_compat.canaries import ENV_BINARY, ENV_ENABLE, ENV_HARNESS
+from scripts.harness_compat.codecopy import code_copy
 from scripts.harness_compat.contract import SUITE_ENV_MUTATION
 from scripts.harness_compat.sandbox import make_sandbox
 from scripts.harness_compat.suite_runner import installed_version, run_suite
@@ -44,16 +45,16 @@ def test_the_suite_notices_a_deliberately_broken_plugin(name: str, mutation: Mut
     harness = HARNESSES[name]
     if harness.compat is None:
         pytest.skip(f"{name} declares no compat manifest yet")
-    expected = applicable(mutation, required(harness), name)
+    expected = applicable(mutation, required(harness), harness.compat.canaries)
     if not expected:
         pytest.skip(f"{mutation.name} breaks nothing this harness declares")
     binary = _binary(name, harness.binary)
     if binary is None:
         pytest.skip(f"no {harness.binary!r} binary on PATH")
 
-    with make_sandbox(name) as sb:
+    with make_sandbox(name) as sb, code_copy(REPO_ROOT) as tree:
         report = run_suite(
-            REPO_ROOT,
+            tree,
             sb,
             harness=name,
             binary=Path(binary),

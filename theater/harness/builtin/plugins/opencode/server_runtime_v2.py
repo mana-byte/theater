@@ -37,10 +37,8 @@ from .http_v2 import OpenCodeV2Client, model_ref, server_time, session_directory
 from .launch import tui_env_v2
 from .native_plugin_v2 import PLUGIN_ID, plugin_dir
 from .runtime_plan import (
-    OPENCODE_SERVER_V2_COMPATIBILITY_POLICY,
-    OPENCODE_SERVER_V2_MAX_VERSION,
-    OPENCODE_SERVER_V2_MIN_VERSION,
-    parse_opencode_version,
+    OPENCODE_SERVER_COMPATIBILITY_POLICY,
+    VERSION_POLICY,
 )
 from .runtime_policy import send_capabilities, server_http_refusal, valid_prompt
 from .server_live_v2 import OpenCodeV2LiveSource
@@ -127,7 +125,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
             native_session_id=session_id,
             protocol=_PROTOCOL,
             native_version=version,
-            compatibility_policy=OPENCODE_SERVER_V2_COMPATIBILITY_POLICY,
+            compatibility_policy=OPENCODE_SERVER_COMPATIBILITY_POLICY,
         )
 
     async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
@@ -278,12 +276,10 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
 
     async def _verified_version(self) -> str:
         version = await self._client.version()
-        parsed = parse_opencode_version(version)
-        if parsed is None or not (
-            OPENCODE_SERVER_V2_MIN_VERSION <= parsed < OPENCODE_SERVER_V2_MAX_VERSION
-        ):
+        if not VERSION_POLICY.admits(version):
             raise RuntimeError(
-                f"OpenCode server {version!r} is outside the qualified 2.x server range"
+                f"OpenCode server {version!r} is outside the qualified range "
+                f"{VERSION_POLICY.range_text}"
             )
         return version
 
@@ -384,4 +380,8 @@ def _gated(operation_id: str, detail: str) -> ControlReceipt:
     )
 
 
-__all__ = ["OpenCodeServerV2Runtime"]
+def opencode_server_runtime_factory(context: RuntimeContext) -> HarnessRuntime:
+    return OpenCodeServerV2Runtime(context)
+
+
+__all__ = ["OpenCodeServerV2Runtime", "opencode_server_runtime_factory"]

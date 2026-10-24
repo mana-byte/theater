@@ -845,6 +845,12 @@ def _validate_compat(name: str, manifest: HarnessManifest) -> None:
         _fail(name, "compat", f"expected CompatManifest or null, got {type(compat).__name__}")
     if not callable(compat.provision):
         _fail(name, "compat.provision", "must be callable")
+    if not isinstance(compat.canaries, tuple):
+        _fail(name, "compat.canaries", "must be a tuple of mutation names")
+    for canary in compat.canaries:
+        _validate_text(name, "compat.canaries", canary)
+    if len(set(compat.canaries)) != len(compat.canaries):
+        _fail(name, "compat.canaries", "mutation names must be unique")
     if compat.native_edit is not None:
         if "edits" not in manifest.launch.approvals:
             _fail(name, "compat.native_edit", "requires launch.approvals to include 'edits'")

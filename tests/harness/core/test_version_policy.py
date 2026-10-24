@@ -1,0 +1,111 @@
+"""Support policies reject ambiguous JSON and noncanonical stable releases."""
+
+from dataclasses import FrozenInstanceError
+
+import pytest
+
+from theater.harness.contracts.version_policy import VersionPolicy, version_key
+
+
+def test_inclusive_bounds_exclusions_and_numeric_ordering():
+    policy = VersionPolicy("0.84.4", "1.4.0", ("0.85.0",))
+    assert all(policy.admits(version) for version in ("0.84.4", "0.84.10", "0.85.1", "1.4.0"))
+    assert not any(policy.admits(version) for version in ("0.84.3", "0.85.0", "1.4.1"))
+    assert version_key("12.0.103") == (12, 0, 103)
+    assert policy.to_json() == {"min": "0.84.4", "max": "1.4.0", "excluded": ["0.85.0"]}
+    assert VersionPolicy.from_json(policy.to_json()) == policy
+    with pytest.raises(FrozenInstanceError):
+        policy.minimum = "0.0.0"
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        None,
+        True,
+        1,
+        "",
+        "1",
+        "1.2",
+        "1.2.3.4",
+        "01.2.3",
+        "1.02.3",
+        "1.2.03",
+        "1.2.3-beta",
+        "1.2.3+build",
+        "v1.2.3",
+        " 1.2.3",
+        "1.2.3\n",
+        "١.2.3",
+        "-1.2.3",
+    ],
+)
+def test_only_canonical_stable_versions_have_keys_or_admission(version):
+    with pytest.raises(ValueError, match="canonical stable"):
+        version_key(version)
+    assert not VersionPolicy("0.0.0", "9.9.9").admits(version)
+
+
+@pytest.mark.parametrize(
+    ("minimum", "maximum", "excluded"),
+    [
+        ("1.2.4", "1.2.3", ()),
+        ("1.2", "1.2.3", ()),
+        ("1.2.3", None, ()),
+        ("1.2.3", "1.2.4", []),
+        ("1.2.3", "1.2.4", ("1.2.3", "1.2.3")),
+        ("1.2.3", "1.2.4", ("1.2.2",)),
+        ("1.2.3", "1.2.4", ("1.2.5",)),
+        ("1.2.3", "1.2.4", ("1.2.3-beta",)),
+        ("1.2.3", "1.2.4", (None,)),
+        ("1.2.3", "1.2.4", ({},)),
+    ],
+)
+def test_invalid_direct_policies_fail_closed(minimum, maximum, excluded):
+    with pytest.raises(ValueError):
+        VersionPolicy(minimum, maximum, excluded)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        [],
+        {},
+        {"min": "1.2.3", "max": "1.2.4"},
+        {"min": "1.2.3", "max": "1.2.4", "excluded": [], "extra": 1},
+        {"min": None, "max": "1.2.4", "excluded": []},
+        {"min": "1.2.3", "max": False, "excluded": []},
+        {"min": "1.2.3", "max": "1.2.4", "excluded": ()},
+        {"min": "1.2.3", "max": "1.2.4", "excluded": [3]},
+        {"min": "1.2.3", "max": "1.2.4", "excluded": ["1.2.5"]},
+    ],
+)
+def test_json_requires_exact_keys_and_typed_values(value):
+    with pytest.raises(ValueError):
+        VersionPolicy.from_json(value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"min":"1.2.3","min":"1.2.4","max":"1.2.4","excluded":[]}',
+        '{"min":"1.2.3","max":"1.2.4","excluded":[],"excluded":[]}',
+        '{"min":"1.2.3","max":"1.2.4","excluded":["1.2.3","1.2.3"]}',
+        '{"min":"1.2.3","max":"1.2.4","excluded":NaN}',
+        '{"min":"1.2.3","max":"1.2.4","excluded":[]',
+    ],
+)
+def test_load_rejects_ambiguous_or_invalid_json(tmp_path, text):
+    path = tmp_path / "compatibility.json"
+    path.write_text(text)
+    with pytest.raises(ValueError):
+        VersionPolicy.load(path)
+
+
+def test_load_reads_a_single_release_policy(tmp_path):
+    path = tmp_path / "compatibility.json"
+    path.write_text('{"min":"3.0.2","max":"3.0.2","excluded":[]}\n')
+    policy = VersionPolicy.load(path)
+    assert policy.admits("3.0.2") and not policy.admits("3.0.3")
+    assert list(policy.to_json()) == ["min", "max", "excluded"]

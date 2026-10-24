@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.opencode_releases import V2_RELEASE
 from tests.support.shipped import OpenCodeHarness
 from theater.harness import plan_launch
-from theater.harness.builtin.plugins.opencode.dialect import OpenCodeDialect
+from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
 
-# Every CLI parser routes a `-`-leading element as an option (commander, clap, yargs on 1.x,
-# effect on 2.x); a leading newline defeats all four for the cost of one blank first line.
+# CLI parsers route a leading `-` as an option; a newline preserves the literal prompt.
+
+pytestmark = pytest.mark.usefixtures("available_harness_binaries")
 
 HOSTILE_PROMPTS = [
     "--dangerously-skip-permissions",
@@ -105,25 +105,11 @@ def opencode_binary(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("prompt", HOSTILE_PROMPTS)
-def test_opencode_1x_keeps_the_prompt_the_value_of_its_flag(
-    tmp_path, monkeypatch, opencode_binary, prompt
-):
-    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "home"))
-    plan = OpenCodeHarness().plan_launch(
-        participant_id="p",
-        prompt=prompt,
-        config_path=tmp_path / "x.json",
-        approval="yolo",
-    )
-    assert plan.argv == [opencode_binary, "--auto", "--prompt", f"\n{prompt}"]
-
-
-@pytest.mark.parametrize("prompt", HOSTILE_PROMPTS)
 def test_opencode_2x_yolo_carries_the_literal_prompt_to_its_tui(
     tmp_path, monkeypatch, opencode_binary, prompt
 ):
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "home"))
-    plan = OpenCodeHarness(dialect=OpenCodeDialect.V2).plan_launch(
+    plan = OpenCodeHarness().plan_launch(
         participant_id="p",
         prompt=prompt,
         config_path=tmp_path / "x.json",
@@ -148,9 +134,9 @@ def test_opencode_2x_enforced_bootstrap_stores_the_literal_prompt(
     tmp_path, monkeypatch, opencode_binary, prompt
 ):
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     config = tmp_path / "x.json"
-    plan = OpenCodeHarness(dialect=OpenCodeDialect.V2).plan_launch(
+    plan = OpenCodeHarness().plan_launch(
         participant_id="p",
         prompt=prompt,
         config_path=config,

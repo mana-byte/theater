@@ -179,6 +179,7 @@ class CodexRuntimeConnection(CodexRuntimeHost):
             approval=self.context.approval,
             model=self.context.model,
             reasoning_effort=self.context.reasoning_effort,
+            binary=self.context.binary,
         )
 
     def live_source(self) -> Source:

@@ -8,10 +8,12 @@ from pathlib import Path
 from theater import paths
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
 from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
+from theater.harness.contracts.runtime import RuntimeProbeContext
 from theater.models import BadRequest
 
 from .constants import PI_ISOLATION_MARKER, PI_LAUNCH_ENV, PI_SESSIONS_DIRNAME
 from .isolation import canonical, marker_text, validate_domain
+from .runtime_probe import probe_pi_frontend_compatibility
 
 _THEATER_MCP_BRIDGE = Path(__file__).with_name("theater_mcp_bridge.ts")
 
@@ -23,6 +25,9 @@ def participant_root(participant_id: str) -> Path:
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
     """Give Pi an isolated session id and its MCP bridge launch arguments."""
+    compatibility = probe_pi_frontend_compatibility(RuntimeProbeContext(binary=context.binary))
+    if not compatibility.supported:
+        raise BadRequest(f"refusing to launch Pi: {compatibility.reason}")
     session_id = context.participant_id
     session_dir = participant_root(context.participant_id)
     argv = [
@@ -30,6 +35,8 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         "-m",
         "theater.harness.builtin.plugins.pi.bootstrap",
     ]
+    if context.binary:
+        argv += ["--theater-binary", context.binary]
     if context.resume is None:
         argv += ["--theater-cold-session-id", session_id]
     argv += [

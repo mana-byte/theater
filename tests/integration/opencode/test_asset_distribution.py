@@ -15,10 +15,7 @@ import pytest
 from tests.support.paths import REPO_ROOT
 
 _ASSETS = {
-    "native_plugin.js",
     "native_plugin_v2.js",
-    "frontend.js",
-    "frontend_inputs.js",
     "tui_recovery_v2.js",
 }
 _PREFIX = "theater/harness/builtin/plugins/opencode/assets/"
@@ -66,20 +63,14 @@ import sys
 from importlib.resources import files
 from pathlib import Path
 from theater.harness.builtin.plugins import opencode
-from theater.harness.builtin.plugins.opencode.frontend import render_opencode_tui_plugin
-from theater.harness.builtin.plugins.opencode.frontend_inputs import TUI_INPUTS
-from theater.harness.builtin.plugins.opencode.native_plugin import render_native_plugin
 from theater.harness.builtin.plugins.opencode.native_plugin_v2 import render_native_plugin_v2
 
 root = files(opencode).joinpath('assets')
 assets = json.loads(sys.argv[1])
 assert all(root.joinpath(name).is_file() for name in assets)
-assert 'const loadProof = "' in render_native_plugin('p', Path('/x/token'))
 files = render_native_plugin_v2('p', Path('/x/config'), Path('/x/token'), 'manual')
 assert any(path.name == 'server.js' and 'export default' in text for path, text in files.items())
 assert any(path.name == 'tui.js' and 'root.render = render' in text for path, text in files.items())
-assert 'function observeInputs' in TUI_INPUTS
-assert 'export default' in render_opencode_tui_plugin('/x/socket', Path('/x/token'))
 print(json.dumps({'package': str(Path(opencode.__file__).resolve()), 'assets': sorted(assets)}))
 """
     output = _run(

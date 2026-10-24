@@ -529,6 +529,11 @@ a sensitive modal.
 
 ## Qualification (`compat`)
 
+Shipped plugins keep their inclusive `min`, `max` and `excluded` in a compact, one-line
+`compatibility.json`. Runtime gates use the public `VersionPolicy` reader/predicate; the daily
+pipeline proposes only a +1/−1 edit to that file after testing every stable release from the
+pinned minimum through latest. See [`harness-compat.md`](harness-compat.md).
+
 `HarnessManifest.compat` is optional and read only by the compatibility suite,
 never at runtime. The suite derives every scenario from the rest of the
 manifest; `compat` supplies only what cannot be derived, so a plugin declares
@@ -570,6 +575,10 @@ and a payload that invokes one MCP tool; it must contain `{tool}` and
 `{arguments}` and may contain `{server}`, substituted in one pass (`{arguments}`
 as its JSON text). Without it the suite finds the MCP tool among the tool names
 the model was offered by suffix match.
+
+`CompatManifest.canaries` names extra generic mutations that this plugin's provisioning cannot
+mask. The mutation implementations and assertions stay in the shared suite. These tooling checks
+run separately from release qualification; no shared code branches on a harness name.
 
 ## Optional signal enrichment
 
@@ -1076,14 +1085,14 @@ active and for send/interrupt before the session is bound.
 Compatibility is probed read-only through `RuntimeCompatibility` and must
 mean Theater-verified compatibility, never presumed vendor stability: the
 `policy` string names the tested policy and `native_version` the release it
-was verified against. Unknown or unsupported versions keep the ordinary
-launch under either `auto` or `native`.
+was verified against. Unqualified CLI releases are refused before launch.
+An unavailable native runtime on an admitted release keeps the ordinary launch.
 The Codex runtime re-checks the version at the connection handshake, so a
 binary that changed between probe and connect fails closed.
-A version bound is only as good as its proof: each shipped harness's bound is moved by the
-[compatibility pipeline](harness-compat.md), which edits one constant in the plugin, so a new
-or changed probe, bound or runtime needs a matching adapter under
-`scripts/harness_compat/adapters/`.
+Each shipped plugin reads its inclusive bounds and excluded releases from `compatibility.json`.
+The [compatibility pipeline](harness-compat.md) rechecks every stable release from the pinned
+minimum and proposes one JSON line. Probe or runtime changes need matching manifest-derived
+live scenarios; adapters under `scripts/harness_compat/adapters/` only discover and install CLIs.
 
 Settings are separately gated: a runtime must not emulate `update_settings`
 by storing values that might apply to an unrelated future turn. Report
@@ -1101,7 +1110,7 @@ default anywhere.
   compatible runtime when available and otherwise retain the ordinary launch.
   A failed probe is diagnostic only; it does not disable a working legacy
   capability.
-- `legacy` is the explicit opt-out and is honoured regardless of the gate.
+- `legacy` opts out of native wiring; version admission still applies.
 
 Existing participants stay pinned to the wiring persisted in their binding; a
 rollback to legacy affects future spawns only.
@@ -1184,9 +1193,8 @@ documented, not solved.
 ### Tested Codex compatibility boundaries
 
 The shipped Codex runtime uses compatibility policy `codex-appserver-<floor>-compatible`
-for releases the [compatibility pipeline](harness-compat.md) proved without a gap
-(`CODEX_RUNTIME_QUALIFIED_FLOOR` up to the
-exclusive `CODEX_RUNTIME_QUALIFIED_CEILING`, minus the excluded tuple). The probe runs
+for releases admitted by its plugin-local `compatibility.json`
+(inclusive `min` and `max`, minus `excluded`). The probe runs
 `codex --version` and refuses any release outside the range. Within that boundary, the tested facts are: one detached
 `codex app-server --listen unix://<private-socket>` backend per participant
 (the endpoint carries WebSocket frames with an HTTP Upgrade handshake, not
@@ -1199,8 +1207,8 @@ after abrupt daemon death.
 Vendor documentation labels the WebSocket transport experimental. Theater's
 verification covers the qualified releases above under the tested policy — it is
 not a claim of universal transport stability across Codex versions. On a new Codex
-spawn, `auto` selects native only inside the qualified range. Outside it, `auto` and
-`native` retain the ordinary launch with the recorded compatibility reason.
+spawn, `auto` selects native inside the qualified range. Releases outside that policy
+are refused before launch, including with `native` or `legacy` wiring.
 
 ### Legacy opt-out and recovery
 
@@ -1366,7 +1374,7 @@ teardown if the test suite continues in the same process.
   daemon-owned teardown after process-identity verification.
 - Do not alter global/project hooks or steal an OTel exporter.
 - Preserve daemon-only ownership of SQLite, pane lifecycle, and tmux input.
-- Keep the version gate a single constant the compatibility pipeline can read and bump
+- Keep inclusive version bounds and exclusions in the plugin's one-line `compatibility.json`
   (see `AGENTS.md`, "Changing a version gate or native wiring").
 
 ## Trust

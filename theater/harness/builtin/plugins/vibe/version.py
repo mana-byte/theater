@@ -7,7 +7,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-_VERSION = re.compile(r"vibe (\d+)\.(\d+)\.(\d+)")
+from theater.harness.contracts.version_policy import version_key
+
+_VERSION = re.compile(r"vibe (\S+)")
 _CACHE_LIMIT = 8
 
 
@@ -16,7 +18,10 @@ def parse_vibe_version(text: str) -> tuple[int, int, int] | None:
     match = _VERSION.fullmatch(text.strip())
     if match is None:
         return None
-    return (int(match[1]), int(match[2]), int(match[3]))
+    try:
+        return version_key(match[1])
+    except ValueError:
+        return None
 
 
 # Keyed on the resolved path and its mtime, so a CLI upgrade re-probes once.
@@ -52,7 +57,7 @@ def resolve_vibe_binary(binary: str | None = None) -> str | None:
 def installed_vibe_version(binary: str | None = None) -> tuple[int, int, int] | None:
     """The installed CLI's version, or ``None`` when it cannot be determined.
 
-    Callers treat ``None`` as "stay on today's argv"; never guess from a failure.
+    Launch admission refuses ``None``; a transient probe failure is never cached.
     """
     name = binary or "vibe"
     path = shutil.which(name)

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.opencode_recorder_v2 import SCHEMA as OPENCODE_SCHEMA
 from tests.support.presence import PRESENT, UNKNOWN, FakePresence
 from tests.support.shipped import (
     ClaudeCodeObserver,
@@ -27,13 +28,6 @@ from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
 from theater.harness.builtin.plugins.vibe.isolation import isolation_marker_text
 from theater.models import BadRequest, HumanPresent
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
-
-OPENCODE_SCHEMA = """
-CREATE TABLE session (
-    id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT,
-    time_created INTEGER, time_updated INTEGER
-);
-"""
 
 
 def _vibe_session(root: Path, short: str, cwd: Path, *, text: str = "hello") -> Path:
@@ -108,7 +102,8 @@ def _opencode_db(path: Path, sid: str, cwd: Path, *, created: int = 1000) -> Non
     try:
         conn.executescript(OPENCODE_SCHEMA)
         conn.execute(
-            "INSERT INTO session (id, parent_id, directory, time_created) VALUES (?, NULL, ?, ?)",
+            "INSERT INTO session_v2 (id, parent_id, directory, time_created) "
+            "VALUES (?, NULL, ?, ?)",
             (sid, str(cwd.resolve()), created),
         )
         conn.commit()

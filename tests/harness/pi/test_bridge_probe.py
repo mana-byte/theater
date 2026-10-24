@@ -20,19 +20,18 @@ from theater.harness.builtin.plugins.pi.frontend import (
 )
 from theater.harness.builtin.plugins.pi.launch import plan_launch
 from theater.harness.builtin.plugins.pi.runtime_constants import (
-    PI_FRONTEND_QUALIFIED_EXCLUDED,
-    PI_FRONTEND_QUALIFIED_FLOOR,
-    PI_FRONTEND_QUALIFIED_MAX,
     PI_FRONTEND_QUALIFIED_RANGE,
     PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY,
-    pi_version_text,
+    VERSION_POLICY,
 )
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.runtime import (
     RuntimeProbeContext,
 )
+from theater.harness.contracts.version_policy import version_key
 
 
+@pytest.mark.usefixtures("available_harness_binaries")
 def test_pi_frontend_bridge_overlay_keeps_token_out_of_argv_and_public_files(
     tmp_path, monkeypatch
 ) -> None:
@@ -70,37 +69,15 @@ class _Completed:
     returncode: int = 0
 
 
-def _admitted(*releases: tuple[int, int, int]) -> list[str]:
-    """The releases the qualified range admits, as version texts, without repeats."""
-    kept: list[tuple[int, int, int]] = []
-    for release in releases:
-        inside = PI_FRONTEND_QUALIFIED_FLOOR <= release <= PI_FRONTEND_QUALIFIED_MAX
-        if inside and release not in PI_FRONTEND_QUALIFIED_EXCLUDED and release not in kept:
-            kept.append(release)
-    return [pi_version_text(release) for release in kept]
+def _version_text(version: tuple[int, int, int]) -> str:
+    return ".".join(map(str, version))
 
 
-_FLOOR_MAJOR, _FLOOR_MINOR, _FLOOR_PATCH = PI_FRONTEND_QUALIFIED_FLOOR
 _QUALIFIED_PI_VERSIONS = (
-    *_admitted(
-        PI_FRONTEND_QUALIFIED_FLOOR,
-        (_FLOOR_MAJOR, _FLOOR_MINOR, _FLOOR_PATCH + 1),
-        # A two-digit patch still orders numerically, not as text.
-        (_FLOOR_MAJOR, _FLOOR_MINOR, 10),
-        (_FLOOR_MAJOR, _FLOOR_MINOR + 1, 0),
-        PI_FRONTEND_QUALIFIED_MAX,
-    ),
-    # Immediate neighbours of every excluded release stay accepted.
-    *(
-        pi_version_text((major, minor, patch + offset))
-        for major, minor, patch in PI_FRONTEND_QUALIFIED_EXCLUDED
-        for offset in (-1, 1)
-        if patch + offset >= 0
-        and (major, minor, patch + offset) not in PI_FRONTEND_QUALIFIED_EXCLUDED
-        and PI_FRONTEND_QUALIFIED_FLOOR
-        <= (major, minor, patch + offset)
-        <= PI_FRONTEND_QUALIFIED_MAX
-    ),
+    VERSION_POLICY.minimum,
+    "0.84.10",
+    "0.85.1",
+    VERSION_POLICY.maximum,
 )
 
 
@@ -129,24 +106,18 @@ def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> N
 @pytest.mark.parametrize(
     "version",
     [
-        pi_version_text(
-            (
-                PI_FRONTEND_QUALIFIED_FLOOR[0],
-                PI_FRONTEND_QUALIFIED_FLOOR[1],
-                PI_FRONTEND_QUALIFIED_FLOOR[2] - 1,
-            )
+        _version_text(
+            (*version_key(VERSION_POLICY.minimum)[:2], version_key(VERSION_POLICY.minimum)[2] - 1)
         ),
         # Every excluded broken release.
-        *(pi_version_text(entry) for entry in PI_FRONTEND_QUALIFIED_EXCLUDED),
-        pi_version_text(
+        *VERSION_POLICY.excluded,
+        _version_text(
             (
-                PI_FRONTEND_QUALIFIED_MAX[0],
-                PI_FRONTEND_QUALIFIED_MAX[1],
-                PI_FRONTEND_QUALIFIED_MAX[2] + 1,
+                *version_key(VERSION_POLICY.maximum)[:2],
+                version_key(VERSION_POLICY.maximum)[2] + 1,
             )
         ),
-        pi_version_text((PI_FRONTEND_QUALIFIED_MAX[0], PI_FRONTEND_QUALIFIED_MAX[1] + 1, 0)),
-        pi_version_text((PI_FRONTEND_QUALIFIED_MAX[0] + 1, 0, 0)),
+        _version_text((version_key(VERSION_POLICY.maximum)[0] + 1, 0, 0)),
     ],
 )
 def test_pi_frontend_probe_refuses_unqualified_versions(version, monkeypatch) -> None:
@@ -155,11 +126,17 @@ def test_pi_frontend_probe_refuses_unqualified_versions(version, monkeypatch) ->
     assert refused.supported is False
     assert refused.policy == PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY
     assert refused.reason is not None
-    if int(version.split(".", 1)[0]) <= PI_FRONTEND_QUALIFIED_MAX[0]:
-        assert refused.native_version == version
-        assert PI_FRONTEND_QUALIFIED_RANGE in refused.reason
-    else:
-        assert refused.native_version is None
+    assert refused.native_version == version
+    assert PI_FRONTEND_QUALIFIED_RANGE in refused.reason
+
+
+@pytest.mark.parametrize("suffix", ["+build", "-beta", ".1"])
+def test_pi_probe_never_admits_a_stable_prefix_of_an_unstable_release(monkeypatch, suffix):
+    monkeypatch.setattr(
+        subprocess, "run", lambda *args, **kwargs: _Completed(f"{VERSION_POLICY.minimum}{suffix}\n")
+    )
+    refused = pi_runtime_module.probe_pi_frontend_compatibility(RuntimeProbeContext(binary="pi"))
+    assert not refused.supported and refused.native_version is None
 
 
 def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None:

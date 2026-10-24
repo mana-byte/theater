@@ -14,7 +14,7 @@ from .http import OpenCodeClient, OpenCodeHttpError, _safe_session_id
 
 
 class OpenCodeV2Client:
-    """2.x routes only; the 1.x client is the bounded, credentialed transport underneath."""
+    """Supported routes on the bounded, credentialed loopback transport."""
 
     def __init__(self, *, endpoint: str, token_file: Path) -> None:
         self._transport = OpenCodeClient(endpoint=endpoint, token_file=token_file)

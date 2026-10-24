@@ -1,42 +1,38 @@
-"""Bounded read-only admission for Claude's optional asynchronous hooks."""
+"""Read-only admission shared by Claude launches, hooks and native display."""
 
 from __future__ import annotations
 
 import re
 import subprocess
+from pathlib import Path
 
 from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
+from theater.harness.contracts.version_policy import VersionPolicy, version_key
 
-_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?: \(Claude Code\))?")
-_HOOK_FLOOR = (2, 1, 119)
-#: Newest release the daily compat pipeline proved (inclusive); it is the only value it moves.
-_QUALIFIED_MAX = (2, 1, 309)
-_MESSAGING_FLOOR = (2, 1, 248)
-_POLICY = f"claude-hooks-{'.'.join(map(str, _HOOK_FLOOR))}-compatible"
-_MESSAGING_POLICY = f"claude-messaging-native-controls-{'.'.join(map(str, _MESSAGING_FLOOR))}"
+VERSION_POLICY = VersionPolicy.load(Path(__file__).with_name("compatibility.json"))
+_VERSION = re.compile(r"(\S+)(?: \(Claude Code\))?")
+_POLICY = f"claude-hooks-{VERSION_POLICY.minimum}-compatible"
+_MESSAGING_POLICY = f"claude-messaging-native-controls-{VERSION_POLICY.minimum}"
 
 
 def claude_messaging_range_text() -> str:
-    return f">={'.'.join(map(str, _MESSAGING_FLOOR))}"
+    return VERSION_POLICY.range_text
 
 
 def probe_claude_hooks(context: RuntimeProbeContext) -> RuntimeCompatibility:
     """Check the qualified CLI range; hook payload decoding is the schema gate."""
-    # The hook floor is where PostToolUse/PostToolUseFailure gained duration_ms.
-    return _probe_claude(context, floor=_HOOK_FLOOR, policy=_POLICY, maximum=_QUALIFIED_MAX)
+    return _probe_claude(context, policy=_POLICY)
 
 
 def probe_claude_native_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
-    """Check the documented same-machine messaging floor."""
-    return _probe_claude(context, floor=_MESSAGING_FLOOR, policy=_MESSAGING_POLICY)
+    """Check the plugin's qualified CLI range."""
+    return _probe_claude(context, policy=_MESSAGING_POLICY)
 
 
 def _probe_claude(
     context: RuntimeProbeContext,
     *,
-    floor: tuple[int, int, int],
     policy: str,
-    maximum: tuple[int, int, int] | None = None,
 ) -> RuntimeCompatibility:
     try:
         result = subprocess.run(
@@ -55,19 +51,19 @@ def _probe_claude(
         return RuntimeCompatibility(
             supported=False, policy=policy, reason="Claude did not report a stable CLI version"
         )
-    version = tuple(int(part) for part in match.groups())
-    supported = version >= floor and (maximum is None or version <= maximum)
-    lower_text = ".".join(str(part) for part in floor)
-    range_text = (
-        f">={lower_text}"
-        if maximum is None
-        else f">={lower_text},<={'.'.join(str(part) for part in maximum)}"
-    )
+    version = match[1]
+    try:
+        version_key(version)
+    except ValueError:
+        return RuntimeCompatibility(
+            supported=False, policy=policy, reason="Claude did not report a stable CLI version"
+        )
+    supported = VERSION_POLICY.admits(version)
     return RuntimeCompatibility(
         supported=supported,
         policy=policy,
-        native_version=".".join(match.groups()),
-        reason=None if supported else f"Claude native support requires {range_text}",
+        native_version=version,
+        reason=None if supported else f"Claude support requires {VERSION_POLICY.range_text}",
     )
 
 

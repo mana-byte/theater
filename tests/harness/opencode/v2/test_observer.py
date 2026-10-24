@@ -16,7 +16,7 @@ from tests.support.opencode_recorder_v2 import (
 from tests.support.opencode_recorder_v2 import rec as shared_rec
 from theater.harness import EventKind, TurnTerminal
 from theater.harness.base import EventPath
-from theater.harness.builtin.plugins.opencode import source_v2, store
+from theater.harness.builtin.plugins.opencode import source_v2, store, store_v2
 from theater.harness.builtin.plugins.opencode.observer import OpenCodeObserver
 from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
 from theater.models import Status
@@ -67,7 +67,7 @@ def test_v2_discovery_admission_and_history_cursor_use_selected_queries(rec, wor
     conn = store.open_readonly(rec.path)
     assert conn is not None
     try:
-        assert [row[0] for row in conn.queries.history_messages(conn, rec.sid)] == [
+        assert [row[0] for row in store_v2.history_messages(conn, rec.sid)] == [
             f"msg_u{index}" for index in range(3)
         ]
     finally:

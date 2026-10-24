@@ -66,6 +66,10 @@ def _assert_theater_contents(artifacts: Iterable[Path]) -> None:
         assert "Requires-Dist: regie" not in metadata
         assert not any("packages/regie/" in name or "/regie/" in name for name in names)
         for required in (
+            *(
+                path.relative_to(ROOT).as_posix()
+                for path in (ROOT / "theater/harness/builtin/plugins").glob("*/compatibility.json")
+            ),
             "theater/frontend/schemas/methods.json",
             "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts",
             "theater/harness/builtin/plugins/pi/pi_startup_filter.cjs",

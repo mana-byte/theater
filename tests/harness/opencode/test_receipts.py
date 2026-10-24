@@ -10,37 +10,20 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.opencode_recorder import rec as shared_rec
+from tests.support.opencode_recorder_v2 import SCHEMA
+from tests.support.opencode_recorder_v2 import rec as shared_rec
 from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
 from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.harness.builtin.plugins.opencode.mcp import catalog_path
+from theater.harness.builtin.plugins.opencode.native_plugin_v2 import plugin_dir
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import SourceContractError
 from theater.protocol import RemoteError
 from theater.provenance import TranscriptProvenance
 from theater.trajectory import TrajectoryKind
-
-SCHEMA = """
-CREATE TABLE session (
-    id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT,
-    time_created INTEGER, time_updated INTEGER
-);
-CREATE TABLE event (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, aggregate_id TEXT, seq INTEGER,
-    type TEXT, data TEXT
-);
-CREATE TABLE message (
-    id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
-    time_updated INTEGER, data TEXT
-);
-CREATE TABLE part (
-    id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
-    time_created INTEGER, time_updated INTEGER, data TEXT
-);
-"""
 
 
 def _database(path: Path) -> sqlite3.Connection:
@@ -52,7 +35,7 @@ def _database(path: Path) -> sqlite3.Connection:
 
 def _root_session(conn: sqlite3.Connection, session_id: str, cwd: Path, created: int) -> None:
     conn.execute(
-        "INSERT INTO session (id, parent_id, directory, time_created) VALUES (?, NULL, ?, ?)",
+        "INSERT INTO session_v2 (id, parent_id, directory, time_created) VALUES (?, NULL, ?, ?)",
         (session_id, str(cwd.resolve()), created),
     )
     conn.commit()
@@ -92,27 +75,22 @@ def test_launch_uses_a_core_owned_generic_receipt_token(
     )
 
     token_path = paths.participant_observation_dir("participant", "opencode") / "receipt-token"
-    plugin = config.with_suffix(".opencode.mjs")
+    plugin = plugin_dir(config) / "server.js"
     source = plan.files[plugin]
     assert plan.receipt_token_path == token_path
     assert plan.receipt_token is None
     assert "transcript-receipt" in source
-    assert '"--strict-exit", "--id", participantID' in source
+    assert '"--strict-exit"' in source
+    assert '"--id"' in source
+    assert "settings.participantID" in source
     assert "spawn(" in source
     assert 'stdio: ["pipe", "ignore", "ignore"]' in source
-    assert "const retryDelays = [0, 100, 500, 2000]" in source
-    assert 'child.once("close", (code) => finish(code === 0))' in source
-    assert 'event.type === "session.created" && info && !info.parentID' in source
-    assert source.count("schedule()") >= 3
-    assert "config: async (config)" in source
-    assert '"tool.definition": async' in source
-    assert '"tool.execute.before": async' in source
-    assert "mcp.tools.changed" in source
+    assert '"retryDelays": [0, 100, 500, 2000]' in source
+    assert "code === 0" in source
+    assert 'event.type === "session.created" && !data.parentID' in source
     assert str(catalog_path("participant")) in source
-    event_body = source.split("event: async", 1)[1].split("} catch", 1)[0]
-    assert "await " not in event_body
     assert str(token_path) in source
-    assert ".opencode-session" not in source
+    assert '"pluginID": "theater.opencode-session"' in source
 
 
 @pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])
@@ -313,7 +291,7 @@ def test_staged_receipt_times_out_when_database_row_is_not_a_root(tmp_path):
     db = tmp_path / "opencode.db"
     conn = _database(db)
     conn.execute(
-        "INSERT INTO session (id, parent_id, directory, time_created) VALUES (?, ?, ?, ?)",
+        "INSERT INTO session_v2 (id, parent_id, directory, time_created) VALUES (?, ?, ?, ?)",
         ("ses-child", "ses-parent", str(tmp_path.resolve()), 1000),
     )
     conn.commit()
@@ -336,7 +314,7 @@ def test_receipt_marker_requires_a_generic_admission(tmp_path):
     _root_session(conn, "ses-one", cwd, 1000)
     correlation = tmp_path / "correlation"
     correlation.mkdir()
-    (correlation / "participant.opencode.mjs").write_text("// marker\n")
+    plugin_dir(correlation / "participant.json").mkdir()
     source = OpenCodeObserver(db=db, correlation_dir=correlation).open_source_for(
         participant_id="participant",
         cwd=str(cwd),
@@ -357,7 +335,7 @@ def test_receipt_marker_waits_without_error_until_an_eligible_root_exists(tmp_pa
     _root_session(conn, "ses-too-old", cwd, 1000)
     correlation = tmp_path / "correlation"
     correlation.mkdir()
-    (correlation / "participant.opencode.mjs").write_text("// marker\n")
+    plugin_dir(correlation / "participant.json").mkdir()
     source = OpenCodeObserver(db=db, correlation_dir=correlation).open_source_for(
         participant_id="participant",
         cwd=str(cwd),
@@ -485,7 +463,7 @@ rec = shared_rec  # the shared fixture
 def test_generic_receipts_disambiguate_concurrent_sessions_in_the_same_cwd(rec, workdir):
     """Exact receipts disambiguate concurrent sessions sharing a cwd."""
     rec.conn.execute(
-        "INSERT INTO session (id, parent_id, directory, time_created) "
+        "INSERT INTO session_v2 (id, parent_id, directory, time_created) "
         "VALUES ('ses_two', NULL, ?, 2000)",
         (str(workdir.resolve()),),
     )
@@ -521,7 +499,7 @@ def test_a_receipt_capable_process_waits_for_its_receipt(rec, workdir, tmp_path)
     """Never fall back during the creation-event/receipt race window."""
     correlation = tmp_path / "mcp"
     correlation.mkdir()
-    (correlation / "participant.opencode.mjs").write_text("// capability marker\n")
+    plugin_dir(correlation / "participant.json").mkdir()
     observer = OpenCodeObserver(db=rec.path, correlation_dir=correlation)
 
     source = observer.open_source_for(

@@ -21,9 +21,7 @@ from theater.harness.builtin.plugins.codex.manifest import MANIFEST, manifest_fo
 from theater.harness.builtin.plugins.codex.runtime import CodexRuntime, codex_runtime_factory
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
-    CODEX_RUNTIME_QUALIFIED_CEILING,
-    CODEX_RUNTIME_QUALIFIED_EXCLUDED,
-    CODEX_RUNTIME_QUALIFIED_FLOOR,
+    VERSION_POLICY,
     codex_backend_config_overrides,
     codex_endpoint_url,
     plan_codex_frontend,
@@ -45,6 +43,7 @@ from theater.harness.contracts.runtime import (
     RuntimeProbeContext,
     SessionOpenMode,
 )
+from theater.harness.contracts.version_policy import version_key
 from theater.harness.manifests.validation import validate_manifest
 
 
@@ -79,22 +78,15 @@ def _before(release: tuple[int, int, int]) -> tuple[int, int, int]:
 
 
 def _gate_cases() -> list[tuple[str, bool]]:
-    floor, ceiling = CODEX_RUNTIME_QUALIFIED_FLOOR, CODEX_RUNTIME_QUALIFIED_CEILING
-    inside = [floor, _before(ceiling), (floor[0], floor[1] + 1, 0)]
-    admitted = [
-        release
-        for release in inside
-        if floor <= release < ceiling and release not in CODEX_RUNTIME_QUALIFIED_EXCLUDED
-    ]
-    refused = [
-        _before(floor),
-        ceiling,
-        (ceiling[0], ceiling[1], ceiling[2] + 1),
-        *CODEX_RUNTIME_QUALIFIED_EXCLUDED,
-    ]
-    return [(_text(release), True) for release in admitted] + [
-        *((_text(release), False) for release in refused),
-        (f"{_text(floor)}-alpha.1", False),
+    minimum, maximum = version_key(VERSION_POLICY.minimum), version_key(VERSION_POLICY.maximum)
+    return [
+        (VERSION_POLICY.minimum, True),
+        (VERSION_POLICY.maximum, True),
+        (_text(_before(minimum)), False),
+        (_text((*maximum[:2], maximum[2] + 1)), False),
+        *((version, False) for version in VERSION_POLICY.excluded),
+        (f"{VERSION_POLICY.minimum}-alpha.1", False),
+        (f"0{VERSION_POLICY.minimum}", False),
     ]
 
 
@@ -108,16 +100,14 @@ def test_probe_range_gate_and_manifest_range(monkeypatch, version: str, supporte
     if supported:
         assert compatibility.reason is None
     else:
-        # The reason names the refusal, the range and what wiring does about it.
+        # The same refusal prevents a provider launch from bypassing admission.
         assert compatibility.reason is not None
         assert version in compatibility.reason
         assert f"qualified range {qualified_versions_range_text()}" in compatibility.reason
-        assert "wiring=auto selects legacy" in compatibility.reason
+        assert "install a qualified release" in compatibility.reason
     qualified_range = MANIFEST.native_compatibility.qualified_range
     assert qualified_range == qualified_versions_range_text()
-    assert qualified_range.startswith(
-        f">={_text(CODEX_RUNTIME_QUALIFIED_FLOOR)},<{_text(CODEX_RUNTIME_QUALIFIED_CEILING)}"
-    )
+    assert qualified_range == VERSION_POLICY.range_text
 
 
 @pytest.mark.parametrize(
@@ -271,6 +261,28 @@ async def test_runtime_frontend_plan_matches_pure_planner() -> None:
         assert not any("prompt" in arg for arg in plan.argv)
 
 
+async def test_backend_and_frontend_use_the_same_selected_binary(tmp_path):
+    binary = str(tmp_path / "codex-qualified")
+    backend = plan_codex_runtime_backend(planning_context(binary=binary))
+    assert backend.backend.argv[0] == binary
+    runtime = CodexRuntime(
+        RuntimeContext(
+            participant_id=PARTICIPANT,
+            cwd=CWD,
+            io=ScriptedCodexIO(ScriptedCodexServer()),
+            backend_generation=GENERATION,
+            endpoint=ENDPOINT,
+            approval="manual",
+            binary=binary,
+        )
+    )
+    try:
+        frontend = await runtime.frontend_plan(native_session_id=None)
+        assert frontend.argv[0] == binary
+    finally:
+        await runtime.aclose()
+
+
 def test_manifest_declares_valid_runtime_manifest() -> None:
     runtime = MANIFEST.runtime
     assert isinstance(runtime, RuntimeManifest)
@@ -292,6 +304,7 @@ def test_manifest_for_root_preserves_runtime() -> None:
     assert manifest.runtime is MANIFEST.runtime
 
 
+@pytest.mark.usefixtures("available_harness_binaries")
 def test_legacy_launch_behavior_unchanged() -> None:
     context = LaunchContext(
         participant_id=PARTICIPANT,

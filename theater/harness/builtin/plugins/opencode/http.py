@@ -1,4 +1,4 @@
-"""Bounded loopback HTTP/1.1 and SSE client for the detached OpenCode server.
+"""Bounded loopback HTTP/1.1 transport for the detached OpenCode server.
 
 Errors carry method/path/status only — never credentials, request bodies, or payloads.
 """
@@ -12,7 +12,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -21,16 +21,11 @@ from theater.harness.contracts.runtime import RuntimeConnectionError
 
 #: One control-plane request: connect, headers, and a bounded body, end to end.
 REQUEST_DEADLINE_SECONDS = 15.0
-#: Longest gap between SSE bytes before the subscription is considered lost.
-SSE_IDLE_DEADLINE_SECONDS = 120.0
-#: Hard bound for one response body and one assembled SSE event.
+#: Hard bound for one response body.
 MAX_RESPONSE_BYTES = 1_048_576
-MAX_SSE_EVENT_BYTES = 1_048_576
-#: One HTTP header line and one SSE line.
+#: One HTTP header line.
 MAX_LINE_BYTES = 65_536
 MAX_HEADER_LINES = 128
-#: Bounded client-side event buffer before the reader applies backpressure.
-MAX_SSE_QUEUE = 256
 #: The Basic username the stock server authenticates (upstream serve.ts).
 BASIC_USERNAME = "opencode"
 #: The longest client-supplied session id used in a path segment.
@@ -66,10 +61,6 @@ class OpenCodeHttpError(RuntimeConnectionError):
         where = f" for session {session_id}" if session_id else ""
         code = f"HTTP {status} " if status is not None else ""
         super().__init__(f"{method} {path}{where} failed: {code}{reason} ({delivery})")
-
-
-class OpenCodeStreamError(RuntimeConnectionError):
-    """The SSE subscription ended; reconnect must reconcile, never replay."""
 
 
 class _ClientSecret:
@@ -233,16 +224,8 @@ async def _read_body(reader: asyncio.StreamReader, headers: Mapping[str, str]) -
     return body
 
 
-async def _close_writer(writer: asyncio.StreamWriter | None) -> None:
-    if writer is None:
-        return
-    writer.close()
-    with contextlib.suppress(ConnectionError, OSError):
-        await writer.wait_closed()
-
-
 class OpenCodeClient:
-    """The daemon's authenticated client for one participant's server."""
+    """Authenticated transport for one participant's server."""
 
     def __init__(
         self,
@@ -384,247 +367,3 @@ class OpenCodeClient:
                 written=True,
                 session_id=session_id,
             ) from exc
-
-    # ---- named server surfaces -------------------------------------
-
-    async def health(self) -> str:
-        """Return the server's version; any other answer raises."""
-        result = await self._json_request("GET", "/global/health")
-        if not isinstance(result, Mapping) or "version" not in result:
-            raise OpenCodeHttpError(
-                "GET", "/global/health", "health response carries no version", written=True
-            )
-        return str(result["version"])
-
-    async def create_session(self, *, title: str | None = None) -> str:
-        body: dict[str, object] = {}
-        if title is not None:
-            body["title"] = title
-        result = await self._json_request("POST", "/session", body=body)
-        if not isinstance(result, Mapping) or not isinstance(result.get("id"), str):
-            raise OpenCodeHttpError(
-                "POST", "/session", "session response carries no string id", written=True
-            )
-        return _safe_session_id(result["id"])
-
-    async def read_session(self, session_id: str) -> Mapping[str, object]:
-        session_id = _safe_session_id(session_id)
-        result = await self._json_request("GET", f"/session/{session_id}", session_id=session_id)
-        if not isinstance(result, Mapping):
-            raise OpenCodeHttpError(
-                "GET",
-                f"/session/{session_id}",
-                "session readback is not an object",
-                written=True,
-                session_id=session_id,
-            )
-        return result
-
-    async def fork_session(self, session_id: str) -> str:
-        """Fork one session; return the new session's exact id."""
-        session_id = _safe_session_id(session_id)
-        result = await self._json_request(
-            "POST", f"/session/{session_id}/fork", body={}, session_id=session_id
-        )
-        if not isinstance(result, Mapping) or not isinstance(result.get("id"), str):
-            raise OpenCodeHttpError(
-                "POST",
-                f"/session/{session_id}/fork",
-                "fork response carries no string id",
-                written=True,
-                session_id=session_id,
-            )
-        return _safe_session_id(result["id"])
-
-    async def list_messages(self, session_id: str) -> tuple[Mapping[str, object], ...]:
-        """Read back the session's durable message list, oldest first."""
-        session_id = _safe_session_id(session_id)
-        result = await self._json_request(
-            "GET", f"/session/{session_id}/message", session_id=session_id
-        )
-        if not isinstance(result, list):
-            raise OpenCodeHttpError(
-                "GET",
-                f"/session/{session_id}/message",
-                "message readback is not a list",
-                written=True,
-                session_id=session_id,
-            )
-        return tuple(item for item in result if isinstance(item, Mapping))
-
-    async def session_status(self) -> Mapping[str, object]:
-        result = await self._json_request("GET", "/session/status")
-        if not isinstance(result, Mapping):
-            raise OpenCodeHttpError(
-                "GET", "/session/status", "status response is not an object", written=True
-            )
-        return result
-
-    async def pending_inputs(self, session_id: str) -> dict[str, object]:
-        """Read pending UI requests and exact child lineage without answering them."""
-        session_id = _safe_session_id(session_id)
-        async with asyncio.TaskGroup() as group:
-            permissions = group.create_task(self._json_request("GET", "/permission"))
-            questions = group.create_task(self._json_request("GET", "/question"))
-            children = group.create_task(
-                self._json_request("GET", f"/session/{session_id}/children")
-            )
-        return {
-            "permission": permissions.result(),
-            "question": questions.result(),
-            "children": children.result(),
-        }
-
-    async def prompt_async(self, session_id: str, body: Mapping[str, object]) -> object | None:
-        session_id = _safe_session_id(session_id)
-        return await self._json_request(
-            "POST", f"/session/{session_id}/prompt_async", body=body, session_id=session_id
-        )
-
-    async def abort(self, session_id: str) -> object | None:
-        session_id = _safe_session_id(session_id)
-        return await self._json_request(
-            "POST", f"/session/{session_id}/abort", body={}, session_id=session_id
-        )
-
-    # ---- SSE ---------------------------------------------------------
-
-    async def _open_event_stream(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        request = (
-            "\r\n".join(self._request_lines("GET", "/event", accept="text/event-stream"))
-            + "\r\n\r\n"
-        ).encode("ascii")
-        writer: asyncio.StreamWriter | None = None
-        try:
-            async with asyncio.timeout(REQUEST_DEADLINE_SECONDS):
-                reader, writer = await self._connect()
-                writer.write(request)
-                await writer.drain()
-                status, _ = _read_status_line(await reader.readline())
-                headers = await _read_header_block(reader)
-        except asyncio.CancelledError:
-            await _close_writer(writer)
-            raise
-        except (
-            TimeoutError,
-            ConnectionError,
-            OSError,
-            asyncio.IncompleteReadError,
-            OpenCodeHttpError,
-        ) as exc:
-            await _close_writer(writer)
-            raise OpenCodeStreamError(f"subscription failed: {exc!r}") from exc
-        except ValueError as exc:
-            await _close_writer(writer)
-            raise OpenCodeStreamError(f"malformed subscription response: {exc}") from exc
-        if status != 200:
-            await _close_writer(writer)
-            raise OpenCodeStreamError(f"subscription failed: HTTP {status}")
-        if headers.get("content-type", "").split(";")[0].strip() != "text/event-stream":
-            await _close_writer(writer)
-            raise OpenCodeStreamError("subscription is not text/event-stream")
-        assert writer is not None
-        return reader, writer
-
-    async def _consume_events(
-        self, reader: asyncio.StreamReader, queue: asyncio.Queue[object]
-    ) -> None:
-        """Parse the stream into the queue with backpressure, never dropping identity or terminal
-        events.
-        """
-        data_lines: list[bytes] = []
-        try:
-            while True:
-                async with asyncio.timeout(SSE_IDLE_DEADLINE_SECONDS):
-                    line = await reader.readline()
-                _check_sse_line(line)
-                stripped = line.rstrip(b"\r\n")
-                if stripped == b"":
-                    if data_lines:
-                        await queue.put(_decode_event(b"\n".join(data_lines)))
-                        data_lines = []
-                    continue
-                if stripped.startswith(b":"):
-                    continue
-                name, _, value = stripped.partition(b":")
-                value = value[1:] if value.startswith(b" ") else value
-                if name == b"data":
-                    _check_sse_event_size(data_lines, value)
-                    data_lines.append(value)
-                # `event:` and `id:` fields are accepted but carry no
-                # replayable identity in the qualified release.
-        except OpenCodeStreamError:
-            raise
-        except ValueError as exc:
-            raise OpenCodeStreamError("oversized SSE line") from exc
-        except (TimeoutError, ConnectionError, OSError) as exc:
-            raise OpenCodeStreamError(f"event stream lost: {exc!r}") from exc
-
-    async def events(
-        self, *, on_open: Callable[[], None] | None = None
-    ) -> AsyncGenerator[Mapping[str, object], None]:
-        """Yield parsed server events; raise ``OpenCodeStreamError`` so the caller reconnects and
-        reconciles.
-        """
-        reader, writer = await self._open_event_stream()
-        if on_open is not None:
-            on_open()
-        queue: asyncio.Queue[object] = asyncio.Queue(MAX_SSE_QUEUE)
-        consumer = asyncio.create_task(self._consume_events(reader, queue))
-        pending_get: asyncio.Task[object] | None = None
-        try:
-            while True:
-                if consumer.done() and queue.empty():
-                    await consumer
-                    raise OpenCodeStreamError("event stream ended")
-                pending_get = asyncio.create_task(queue.get())
-                done, _ = await asyncio.wait(
-                    (pending_get, consumer), return_when=asyncio.FIRST_COMPLETED
-                )
-                if pending_get not in done:
-                    if queue.empty():
-                        pending_get.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await pending_get
-                        pending_get = None
-                        await consumer
-                        raise OpenCodeStreamError("event stream ended")
-                    await pending_get
-                item = pending_get.result()
-                pending_get = None
-                yield item  # type: ignore[misc]
-        finally:
-            if pending_get is not None:
-                pending_get.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pending_get
-            consumer.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await consumer
-            writer.close()
-            with contextlib.suppress(ConnectionError, OSError):
-                await writer.wait_closed()
-
-
-def _check_sse_line(line: bytes) -> None:
-    if not line:
-        raise OpenCodeStreamError("server closed the event stream")
-    if len(line) > MAX_LINE_BYTES:
-        raise OpenCodeStreamError("oversized SSE line")
-
-
-def _check_sse_event_size(data_lines: list[bytes], value: bytes) -> None:
-    if sum(len(part) for part in data_lines) + len(value) > MAX_SSE_EVENT_BYTES:
-        raise OpenCodeStreamError("oversized SSE event")
-
-
-def _decode_event(payload: bytes) -> Mapping[str, object]:
-    if len(payload) > MAX_SSE_EVENT_BYTES:
-        raise OpenCodeStreamError("oversized SSE event")
-    try:
-        decoded = json.loads(payload.decode("utf-8", errors="strict"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise OpenCodeStreamError(f"malformed SSE event: {exc}") from exc
-    if not isinstance(decoded, Mapping):
-        raise OpenCodeStreamError("SSE event is not a JSON object")
-    return decoded

@@ -11,12 +11,16 @@ import pytest
 
 from tests.support.shipped import VibeHarness
 from tests.support.tables import run_rows
+from theater import paths
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.claude.source import _ClaudeSource
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.codex.source import _CodexSource
+from theater.harness.builtin.plugins.opencode import observer as opencode_observer
+from theater.harness.builtin.plugins.opencode.dialect import domain_for
+from theater.harness.builtin.plugins.opencode.mcp import catalog_path
 from theater.harness.builtin.plugins.opencode.observer import OpenCodeObserver
-from theater.harness.builtin.plugins.opencode.source import OpenCodeSource
+from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
 from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
 from theater.harness.builtin.plugins.vibe.isolation import isolation_marker_text
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
@@ -285,7 +289,6 @@ def _shipped_observer(name: str, tmp_path):
             {"pane_pid": 42, "participant_scoped": True, "adopted": False},
             id="codex",
         ),
-        pytest.param("opencode", OpenCodeSource, {}, id="opencode"),
         pytest.param(
             "vibe",
             _VibeSource,
@@ -349,6 +352,51 @@ def test_shipped_observers_use_context_factories_and_keep_legacy_sources(
             participant_id="participant", cwd="/work", session_id="session", after=4
         ),
         source_type,
+    )
+
+
+def test_opencode_context_preserves_lineage_and_public_source_shape(monkeypatch, tmp_path):
+    instance = _shipped_observer("opencode", tmp_path)
+    lineage = (
+        paths.participant_observation_dir("participant", "opencode") / "opencode-v2.db"
+    ).resolve()
+    context = ParticipantObservationContext(
+        participant_id="participant",
+        cwd="/work",
+        session_id="session",
+        after=4,
+        session_provenance="operator",
+        known_location="opencode://session",
+        transcript_domain=domain_for(lineage),
+    )
+    source, received = _Source(), {}
+
+    def factory(database, **kwargs):
+        received.update(database=database, **kwargs)
+        return source
+
+    with monkeypatch.context() as patch:
+        patch.setattr(opencode_observer, "OpenCodeV2Source", factory)
+        assert instance.open_source_context(context) is source
+    assert received == {
+        "database": lineage,
+        "cwd": "/work",
+        "session_id": "session",
+        "after": 4,
+        "receipt_expected": False,
+        "session_provenance": TranscriptProvenance.OPERATOR,
+        "known_location": "opencode://session",
+        "mcp_catalog_path": catalog_path("participant"),
+    }
+    assert source.collision_domain == domain_for(lineage)
+    assert isinstance(
+        instance.open_source(cwd="/work", session_id="session", after=4), OpenCodeV2Source
+    )
+    assert isinstance(
+        instance.open_source_for(
+            participant_id="participant", cwd="/work", session_id="session", after=4
+        ),
+        OpenCodeV2Source,
     )
 
 

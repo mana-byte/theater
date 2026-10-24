@@ -284,11 +284,15 @@ async def test_codex_refuses_mismatched_domain(registry, monkeypatch):
         await prepare_provider_reservation(spawner, req)
 
 
-async def test_opencode_refuses_mismatched_domain(registry, monkeypatch):
-    """OpenCode refuses a predecessor whose domain does not match its
-    native observation namespace."""
+async def test_opencode_refuses_a_foreign_database_lineage(registry, monkeypatch, tmp_path):
+    """A trusted participant cannot make a database outside Theater resumable."""
+    from theater.harness.builtin.plugins.opencode.constants import V2_DB_NAME
+    from theater.harness.builtin.plugins.opencode.dialect import domain_for
+
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
-    trusted_predecessor(registry, harness="opencode", transcript_domain="/tmp/wrong-opencode-root")
+    trusted_predecessor(
+        registry, harness="opencode", transcript_domain=domain_for(tmp_path / V2_DB_NAME)
+    )
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="opencode",
@@ -297,5 +301,5 @@ async def test_opencode_refuses_mismatched_domain(registry, monkeypatch):
         approval="edits",
         resume="sess-abc",
     )
-    with pytest.raises(BadRequest, match="does not match the OpenCode"):
+    with pytest.raises(BadRequest, match=r"not a Theater-isolated 2\.x lineage"):
         await prepare_provider_reservation(spawner, req)

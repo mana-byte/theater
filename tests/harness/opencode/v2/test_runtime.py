@@ -10,7 +10,6 @@ from typing import Any
 
 import pytest
 
-from tests.support.opencode_releases import V2_RELEASE
 from tests.support.opencode_server import PASSWORD, ServerFake
 from theater import paths
 from theater.harness.builtin.plugins.opencode import server_live_v2, server_runtime_v2
@@ -18,11 +17,12 @@ from theater.harness.builtin.plugins.opencode.approval_v2 import PluginNotActive
 from theater.harness.builtin.plugins.opencode.dialect import v2_lineage_marker
 from theater.harness.builtin.plugins.opencode.http import OpenCodeHttpError
 from theater.harness.builtin.plugins.opencode.native_plugin_v2 import PLUGIN_ID, plugin_dir
+from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
 from theater.harness.builtin.plugins.opencode.server_plan import SERVER_SECRET_ENV
-from theater.harness.builtin.plugins.opencode.server_runtime import (
+from theater.harness.builtin.plugins.opencode.server_runtime_v2 import (
+    OpenCodeServerV2Runtime,
     opencode_server_runtime_factory,
 )
-from theater.harness.builtin.plugins.opencode.server_runtime_v2 import OpenCodeServerV2Runtime
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     ConnectionHealth,
@@ -94,7 +94,12 @@ class V2Fake(ServerFake):
         )
         answer: object = None
         if segments == ["api", "info"]:
-            answer = {"version": V2_RELEASE, "pid": 1, "urls": [], "paths": {"tmp": "/tmp"}}
+            answer = {
+                "version": VERSION_POLICY.minimum,
+                "pid": 1,
+                "urls": [],
+                "paths": {"tmp": "/tmp"},
+            }
         elif segments == ["api", "plugin"]:
             from urllib.parse import parse_qs, urlsplit
 
@@ -142,7 +147,7 @@ def fake_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def runtime(server: V2Fake, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_opencode):
     monkeypatch.setattr(server_runtime_v2, "_POLL_SECONDS", 0.01)
     monkeypatch.setattr(server_live_v2, "_ADMISSION_GRACE_SECONDS", 0.2)
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     token = tmp_path / "runtime.token"
     token.write_text(PASSWORD)
     token.chmod(0o600)
@@ -177,7 +182,7 @@ async def _settles(runtime: OpenCodeServerV2Runtime, state: RuntimeExecutionStat
 async def test_a_2x_session_takes_prompts_over_http(server: V2Fake, runtime, fake_opencode) -> None:
     binding = await runtime.open_session(mode=SessionOpenMode.NEW)
     assert binding.native_session_id == "ses_fake_1"
-    assert binding.native_version == V2_RELEASE
+    assert binding.native_version == VERSION_POLICY.minimum
     assert server.bodies("/api/session") == [
         {
             "location": {"directory": "/work"},

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from pathlib import Path
 
 from tests.support.observation import apply_batch
+from tests.support.opencode_recorder_v2 import RecorderV2, text
 from tests.support.paths import FIXTURES
 from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from theater.daemon.jobs import JobManager
@@ -90,88 +90,27 @@ def test_vibe_uses_the_user_message_id_as_its_turn_identity():
 
 # ---- opencode, whose transcript is a database --------------------------
 
-OPENCODE_SCHEMA = """
-CREATE TABLE session (
-    id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT,
-    time_created INTEGER, time_updated INTEGER
-);
-CREATE TABLE event (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, aggregate_id TEXT, seq INTEGER,
-    type TEXT, data TEXT
-);
-CREATE TABLE message (
-    id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
-    time_updated INTEGER, data TEXT
-);
-CREATE TABLE part (
-    id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
-    time_created INTEGER, time_updated INTEGER, data TEXT
-);
-"""
-
-
-def replay_opencode_capture(db: Path, directory: str) -> list[Event]:
-    """Put the captured rows back in a database and read them as they arrive.
-
-    The capture is the three tables opencode actually wrote for one turn. They
-    are inserted *after* the source attaches, because attaching skips whatever
-    is already there — replaying them as history would exercise a different
-    code path than the live one this is about.
-    """
-    rows = json.loads((FIXTURES / "turn_opencode.json").read_text())
-    sid = rows["event"][0]["aggregate_id"]
-
-    conn = sqlite3.connect(db)
-    try:
-        conn.executescript(OPENCODE_SCHEMA)
-        conn.execute(
-            "INSERT INTO session (id, parent_id, directory, time_created) "
-            "VALUES (?, NULL, ?, 1000)",
-            (sid, directory),
-        )
-        conn.commit()
-
-        source = OpenCodeObserver(db=db).open_source(cwd=directory)
-        asyncio.run(source.read())  # attach at the end of an empty log
-        source.commit_attachment()
-
-        for table in ("message", "part", "event"):
-            # The captured `event.id` is opencode's own `evt_…` string and the
-            # local column is the autoincrementing integer the rest of the
-            # suite uses. Dropped rather than reconciled: the adapter orders
-            # the log by `seq` and never looks at the row id.
-            drop = {"id"} if table == "event" else set()
-            for raw in rows[table]:
-                row = {k: v for k, v in raw.items() if k not in drop}
-                columns = ", ".join(row)
-                marks = ", ".join("?" * len(row))
-                conn.execute(
-                    f"INSERT INTO {table} ({columns}) VALUES ({marks})",
-                    tuple(row.values()),
-                )
-        conn.commit()
-
-        batch = asyncio.run(source.read())
-        asyncio.run(source.aclose())
-        return list(batch.events)
-    finally:
-        conn.close()
-
 
 def test_opencode_names_the_turn_after_the_finished_message(tmp_path, workdir):
-    """A turn ends when a message finishes, so the message id names the turn.
-
-    Every part of the reply already references it as `messageID`; nothing else
-    on the row is a candidate.
-    """
-    events = replay_opencode_capture(tmp_path / "opencode-stable.db", str(workdir))
-    ends = boundaries(events)
-
-    rows = json.loads((FIXTURES / "turn_opencode.json").read_text())
-    assistant = next(r for r in rows["message"] if json.loads(r["data"]).get("role") == "assistant")
-
-    assert len(ends) == 1
-    assert ends[0].turn_id == assistant["id"]
+    recorder = RecorderV2(tmp_path / "opencode.db", "ses_one", str(workdir))
+    source = OpenCodeObserver(db=recorder.path).open_source(cwd=str(workdir))
+    try:
+        assert asyncio.run(source.read()).attached is not None
+        source.commit_attachment()
+        recorder.step(
+            "message-1",
+            recorder.tick(),
+            [text("answer")],
+            finish="stop",
+            times={"completed": recorder.tick()},
+        )
+        recorder.idle("idle-1", "succeeded")
+        ends = boundaries(list(asyncio.run(source.read()).events))
+        assert len(ends) == 1
+        assert ends[0].turn_id == "message-1"
+    finally:
+        asyncio.run(source.aclose())
+        recorder.conn.close()
 
 
 # ---- the observer answers a named turn once ----------------------------

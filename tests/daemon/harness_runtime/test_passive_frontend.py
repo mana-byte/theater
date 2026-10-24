@@ -1,4 +1,4 @@
-"""Passive Pi/OpenCode frontends: duplex requests, authenticated listener and spawn fallback."""
+"""Passive frontends: duplex requests, authenticated listener and spawn fallback."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.fake_runtime import FakeRuntime
 from theater import paths
 from theater.daemon.harness_runtime.constants import FRONTEND_QUEUE_MAX
 from theater.daemon.harness_runtime.errors import RuntimePayloadTooLarge
@@ -24,10 +25,6 @@ from theater.daemon.server import Daemon
 from theater.daemon.spawning.models import SpawnRequest
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import HARNESSES, Harness
-from theater.harness.builtin.plugins.opencode.runtime import (
-    OpenCodeFrontendRuntime,
-    opencode_frontend_runtime_factory,
-)
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind
 from theater.harness.contracts.harness import LaunchParameterSupport
 from theater.harness.contracts.launch import LaunchPlan
@@ -454,8 +451,8 @@ class _Observer(TranscriptObserver):
         del payload, cwd, expected_session_id
 
 
-class _BoundFrontendRuntime(OpenCodeFrontendRuntime):
-    def __init__(self, context, native_session_id: str) -> None:
+class _FrontendRuntime(FakeRuntime):
+    def __init__(self, context, native_session_id: str | None = None) -> None:
         super().__init__(context)
         self._native_session_id = native_session_id
 
@@ -480,10 +477,17 @@ class _BoundFrontendRuntime(OpenCodeFrontendRuntime):
             participant_id=self.context.participant_id,
             backend_generation=self.context.backend_generation,
             native_session_id=self._native_session_id,
-            capabilities=RuntimeCapabilities(available={RuntimeCapability.SEND}),
+            capabilities=RuntimeCapabilities(
+                available={RuntimeCapability.SEND} if self._native_session_id else set()
+            ),
             health=ConnectionHealth.CONNECTED,
             execution_state=RuntimeExecutionState.IDLE,
         )
+
+    async def aclose(self) -> None:
+        await super().aclose()
+        if self.context.frontend is not None:
+            await self.context.frontend.aclose()
 
 
 class _FrontendHarness(Harness):
@@ -495,13 +499,6 @@ class _FrontendHarness(Harness):
     def __init__(self, *, fail_install: bool = False, native_session_id: str | None = None) -> None:
         self.observer = _Observer()
         self.fail_install = fail_install
-        factory = opencode_frontend_runtime_factory
-        if native_session_id is not None:
-
-            def bound_factory(context):
-                return _BoundFrontendRuntime(context, native_session_id)
-
-            factory = bound_factory
         self.runtime = RuntimeManifest(
             probe=lambda context: RuntimeCompatibility(
                 supported=True,
@@ -509,7 +506,7 @@ class _FrontendHarness(Harness):
                 native_version="1.2.3",
             ),
             plan=None,
-            factory=factory,
+            factory=lambda context: _FrontendRuntime(context, native_session_id),
             channel=LiveChannelDeclaration(
                 channel=ChannelDeclaration(id="frontend-live", kind=ChannelKind.LIVE),
                 drives_job_completion=False,

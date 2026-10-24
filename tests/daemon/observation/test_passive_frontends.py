@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from tests.support.hybrid_source import ScriptedSource, outcome
 from tests.support.pi_bridge import (
     GENERATION,
@@ -18,13 +16,12 @@ from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.observation.service import Observer
 from theater.daemon.observation.turns import TurnAccumulator
-from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
 from theater.harness.builtin.plugins.pi.runtime import PiFrontendRuntime
 from theater.harness.channels.composite import CompositeSource, EnrichmentBinding
 from theater.harness.channels.hybrid import HybridSource
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind
 from theater.harness.contracts.events import Event, EventKind, EventPath
-from theater.harness.contracts.runtime import LiveChannelDeclaration, RuntimeNotification
+from theater.harness.contracts.runtime import LiveChannelDeclaration
 from theater.harness.contracts.source import Batch, Source
 from theater.models import Status
 
@@ -80,64 +77,6 @@ async def test_passive_pi_identity_is_rechecked_after_sibling_enrichment_awaits(
         assert (await runtime.live_source().read()).status is None
     finally:
         await runtime.aclose()
-
-
-@pytest.mark.parametrize("change", ["trusted", "visible", "home", "disconnect", "expire", "busy"])
-async def test_opencode_status_is_revalidated_after_sibling_await(change, monkeypatch):
-    trusted = ["ses-a"]
-    clock = [100.0]
-    monkeypatch.setattr("theater.harness.builtin.plugins.opencode.live.monotonic", lambda: clock[0])
-    live = OpenCodeTuiLiveSource(lambda: trusted[0])
-
-    def publish(session, epoch, status):
-        live.feed(
-            RuntimeNotification(
-                method="snapshot",
-                params={
-                    "session_id": session,
-                    "route_session_id": session,
-                    "session_epoch": epoch,
-                    "status": {"type": status},
-                },
-            )
-        )
-
-    publish("ses-a", 1, "idle")
-
-    class LaterSource(Source):
-        async def read(self):
-            if change == "trusted":
-                trusted[0] = "ses-b"
-            elif change == "visible":
-                publish("ses-b", 2, "idle")
-            elif change == "home":
-                publish(None, 2, "idle")
-            elif change == "disconnect":
-                live.disconnected()
-            elif change == "expire":
-                clock[0] += 4
-            else:
-                publish("ses-a", 1, "busy")
-            return Batch()
-
-    source = CompositeSource(
-        primary=HybridSource(
-            durable=ScriptedSource(
-                Batch(status=Status.IDLE if change == "busy" else Status.WORKING)
-            ),
-            live=live,
-            live_channel=LiveChannelDeclaration(
-                channel=ChannelDeclaration(id="opencode-tui-live", kind=ChannelKind.LIVE),
-                drives_job_completion=False,
-            ),
-        ),
-        enrichments=(
-            EnrichmentBinding(LaterSource(), ChannelDeclaration(id="late", kind=ChannelKind.HOOK)),
-        ),
-    )
-    batch = await source.read()
-    assert batch.status is Status.WORKING
-    assert batch.terminal_evidence == ()
 
 
 class EmptySource(Source):

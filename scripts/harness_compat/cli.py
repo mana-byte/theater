@@ -1,4 +1,4 @@
-"""Command line entry point for scheduled and local compatibility runs."""
+"""Command line entry points: local qualification, the full run, and the PR gate checks."""
 
 from __future__ import annotations
 
@@ -7,69 +7,46 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any
 
 from .adapters import ADAPTER_NAMES, load_adapter
 from .canaries import run_canaries
-from .inputs import adapter_metadata
-from .publication import prepare_publication
-from .runner import run_harness_state
+from .contract import Result
+from .policy import affected_harnesses, check_routine_change, mismatches
+from .publish import check_publication_context, publish
+from .qualify import qualify_binary, qualify_release
+from .run import run_harness
 from .sandbox import make_sandbox
-from .suite_runner import installed_version, run_suite
-from .summary import error_annotation, render_harness, render_overview, workflow_annotations
+from .suite_runner import installed_version
+from .summary import error_annotation, render_run
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m scripts.harness_compat")
     commands = parser.add_subparsers(dest="command", required=True)
-    summarize = commands.add_parser("summarize")
-    summarize.add_argument("directory", type=Path)
-    summarize.add_argument(
-        "--expect", default="", help="comma-separated harnesses that must report"
+    qualify = commands.add_parser(
+        "qualify", help="install one exact release and run the live suite"
     )
-    suite = commands.add_parser("suite", help="run the live conformance suite on an installed CLI")
+    qualify.add_argument("harness", choices=ADAPTER_NAMES)
+    qualify.add_argument("version")
+    qualify.epilog = "arguments after a lone -- go to pytest, e.g. qualify vibe 3.0.2 -- -k mcp"
+    suite = commands.add_parser("suite", help="run the live suite on an installed CLI")
     suite.add_argument("harness", choices=ADAPTER_NAMES)
-    suite.add_argument("--binary", type=Path, help="default: the harness plugin's binary on PATH")
-    suite.add_argument("--keep", type=Path, help="copy the evidence directory here afterwards")
+    suite.add_argument("--binary", type=Path, help="default: the harness binary on PATH")
     suite.epilog = "arguments after a lone -- go to pytest, e.g. suite vibe -- -k mcp -x"
+    run = commands.add_parser("run", help="qualify every stable release from the pinned minimum")
+    run.add_argument("harness", choices=ADAPTER_NAMES)
+    mode = run.add_mutually_exclusive_group()
+    mode.add_argument("--publish", action="store_true", help="file issues, prepare the policy PR")
+    mode.add_argument("--check", action="store_true", help="fail when the policy disagrees")
+    run.add_argument("--run-url")
+    gates = commands.add_parser("gates", help="list the harnesses whose plugin a change edits")
+    gates.add_argument("--base", required=True, help="the revision the change is based on")
+    gates.add_argument("--routine", action="store_true", help="enforce the routine gate-PR shape")
     canaries = commands.add_parser("canaries", help="prove the live suite notices broken plugins")
     canaries.add_argument("harness", choices=ADAPTER_NAMES)
-    canaries.add_argument("--version", help="default: the newest admitted release")
-    for command in ("discover", "run", "check"):
-        action = commands.add_parser(command)
-        action.add_argument("--harness", choices=ADAPTER_NAMES)
-        if command == "run":
-            action.add_argument("--version")
-            action.add_argument("--max-candidates", type=int, default=5)
-            action.add_argument("--publish", action="store_true")
-            action.add_argument("--summary-json", type=Path)
-            action.add_argument("--run-url")
+    canaries.add_argument("--version", help="default: the policy's maximum")
     return parser
-
-
-def _adapters(name: str | None) -> list[Any]:
-    if name:
-        return [load_adapter(name)]
-    loaded = []
-    for candidate in ADAPTER_NAMES:
-        try:
-            loaded.append(load_adapter(candidate))
-        except ImportError:
-            continue
-    return loaded
-
-
-def _validate_run(args: argparse.Namespace) -> None:
-    if args.version and not args.harness:
-        raise ValueError("--version requires --harness")
-    if args.max_candidates < 1:
-        raise ValueError("--max-candidates must be positive")
-    if args.publish and os.environ.get("GITHUB_ACTIONS") != "true":
-        raise ValueError("--publish is reserved for GitHub Actions")
-    if args.publish and not args.harness:
-        raise ValueError("--publish requires --harness")
 
 
 def _run_url() -> str:
@@ -81,102 +58,66 @@ def _run_url() -> str:
     return "local"
 
 
-def _open_failures() -> list[str]:
-    """The releases the open issue lists, tolerant of the spaces a human may add."""
-    ledger = os.environ.get("HARNESS_COMPAT_OPEN_FAILURES", "")
-    return [item.strip() for item in ledger.split(",") if item.strip()]
+def _print_result(result: Result) -> int:
+    """Checks to stdout; 0 green, 1 red, 2 for anything that is no verdict on the release."""
+    for check in result.checks:
+        print(f"{check.status:5} {check.name}: {check.detail}")
+    print(f"{result.harness} {result.version}: {result.verdict}")
+    return {"green": 0, "red": 1}.get(result.verdict, 2)
 
 
-def exit_code(summaries: list[dict[str, Any]]) -> int:
-    """1: a red or tooling row; 2: only exhausted inconclusive rows; 0: nothing to act on."""
-    rows = [row for summary in summaries for row in summary["issues"]]
-    if any(row["verdict"] in ("red", "tooling") for row in rows):
-        return 1
-    return 2 if any(summary["inconclusive"] for summary in summaries) else 0
-
-
-def _append_step_summary(text: str) -> None:
-    if target := os.environ.get("GITHUB_STEP_SUMMARY"):
-        with Path(target).open("a", encoding="utf-8") as stream:
-            stream.write(text + "\n")
-    else:
-        print(text, file=sys.stderr)
-
-
-def _summarize(args: argparse.Namespace) -> int:
-    summaries = [
-        summary
-        for path in sorted(args.directory.rglob("compat-summary.json"))
-        for summary in json.loads(path.read_text(encoding="utf-8"))["harnesses"]
-    ]
-    table, missing = render_overview(summaries, [n for n in args.expect.split(",") if n])
-    _append_step_summary(table)
-    return 1 if missing else exit_code(summaries)
-
-
-def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
-    _validate_run(args)
-    states = [
-        run_harness_state(
-            adapter,
-            root,
-            version=args.version,
-            max_candidates=args.max_candidates,
-            publish=args.publish,
-            run_url=args.run_url or _run_url(),
+def _qualify(args: argparse.Namespace, root: Path) -> int:
+    return _print_result(
+        qualify_release(
+            root, load_adapter(args.harness), args.version, pytest_args=args.pytest_args
         )
-        for adapter in adapters
-    ]
-    summaries = [state.to_summary() for state in states]
-    document = {"harnesses": summaries}
-    summary_path = args.summary_json
-    if args.publish and summary_path is None:
-        summary_path = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / (
-            f"harness-compat-{adapters[0].name}.json"
-        )
-    if args.publish and summary_path:
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        report = prepare_publication(states[0], summary_path, _open_failures())
-        summaries[0]["publication"] = {"pr": report.pr_needed, "issue": report.issue_action}
-    if summary_path:
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(
-            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-    print(json.dumps(document, sort_keys=True))
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        for summary in summaries:
-            _append_step_summary(render_harness(summary))
-            for command in workflow_annotations(summary):
-                print(command)
-    return exit_code(summaries)
+    )
 
 
 def _suite(args: argparse.Namespace, root: Path) -> int:
     """Dev entry point: the suite against an installed binary, in a throwaway sandbox."""
-    plugin = adapter_metadata(load_adapter(args.harness), args.harness).plugin
-    binary = args.binary or shutil.which(plugin)
+    binary = args.binary or shutil.which(args.harness)
     if binary is None:
-        raise ValueError(f"no {plugin!r} binary on PATH; pass --binary")
+        raise ValueError(f"no {args.harness!r} binary on PATH; pass --binary")
+    binary = Path(binary).resolve()
+    version = installed_version(binary)
     with make_sandbox(args.harness) as sb:
-        report = run_suite(
-            root,
-            sb,
-            harness=plugin,
-            binary=Path(binary),
-            version=installed_version(Path(binary)),
-            pytest_args=args.pytest_args,
+        result = qualify_binary(
+            root, sb, args.harness, binary, version, pytest_args=args.pytest_args
         )
-        if args.keep:
-            shutil.copytree(sb.evidence_dir, args.keep, dirs_exist_ok=True)
-    for check in report.checks:
-        print(f"{check.status:5} {check.name}: {check.detail}")
-    for problem in report.problems:
-        print(f"tooling: {problem}")
-    statuses = {check.status for check in report.checks}
-    if report.problems or "error" in statuses:
-        return 2
-    return 1 if "fail" in statuses else 0
+    return _print_result(result)
+
+
+def _run(args: argparse.Namespace, root: Path) -> int:
+    if args.publish:
+        check_publication_context(root, os.environ)
+    run = run_harness(root, load_adapter(args.harness))
+    found = mismatches(run.policy, run.results)
+    summary = render_run(run, found)
+    print(summary)
+    regressions = [item for item in found if item.kind == "regression"]
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        for item in regressions:
+            print(
+                error_annotation(
+                    "Harness compatibility",
+                    f"{run.harness} {item.version} is admitted but ended {item.verdict}",
+                )
+            )
+    if args.publish:
+        published = publish(root, run, run_url=args.run_url or _run_url())
+        print(
+            f"{run.harness}: pr {published.pr_action}; issues created "
+            f"{len(published.created)}, already filed {len(published.existing)}"
+        )
+    return 1 if (found if args.check else regressions) else 0
+
+
+def _gates(args: argparse.Namespace, root: Path) -> int:
+    if args.routine:
+        check_routine_change(root, args.base)
+    print(json.dumps(affected_harnesses(root, args.base)))
+    return 0
 
 
 def _canaries(args: argparse.Namespace, root: Path) -> int:
@@ -186,7 +127,7 @@ def _canaries(args: argparse.Namespace, root: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """0: all clear; 1: red/tooling or a missing result; 2: inconclusive or a usage error."""
+    """0: all clear; 1: red or a policy disagreement; 2: no verdict or an error."""
     argv = list(sys.argv[1:] if argv is None else argv)
     pytest_args: list[str] = []
     if "--" in argv:
@@ -195,25 +136,15 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     args.pytest_args = pytest_args
     root = Path.cwd()
+    handlers = {
+        "qualify": _qualify,
+        "suite": _suite,
+        "run": _run,
+        "gates": _gates,
+        "canaries": _canaries,
+    }
     try:
-        if args.command == "summarize":
-            return _summarize(args)
-        if args.command == "suite":
-            return _suite(args, root)
-        if args.command == "canaries":
-            return _canaries(args, root)
-        adapters = _adapters(args.harness)
-        if args.command == "discover":
-            versions = {adapter.name: adapter.discover() for adapter in adapters}
-            print(json.dumps(versions, sort_keys=True))
-            return 0
-        if args.command == "check":
-            print(json.dumps({adapter.name: adapter.verified(root).kind for adapter in adapters}))
-            return 0
-        if not adapters:
-            print("harness-compat: no harness adapters import successfully", file=sys.stderr)
-            return 2
-        return _run(args, root, adapters)
+        return handlers[args.command](args, root)
     except Exception as exc:
         print(f"harness-compat: {exc}", file=sys.stderr)
         if os.environ.get("GITHUB_ACTIONS") == "true":

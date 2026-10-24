@@ -11,25 +11,25 @@ import sys
 import pytest
 
 from tests.support.opencode_recorder_v2 import rec as shared_rec
-from tests.support.opencode_releases import V2_RELEASE, V2_UNQUALIFIED
 from tests.support.shipped import OpenCodeHarness
 from theater.harness import theater_mcp_servers
 from theater.harness.builtin.plugins.opencode.dialect import (
-    OpenCodeDialect,
     domain_for,
     v2_database_path,
 )
 from theater.harness.builtin.plugins.opencode.native_plugin_v2 import (
     plugin_dir,
 )
-from theater.harness.builtin.plugins.opencode.runtime_plan import parse_opencode_version
+from theater.harness.builtin.plugins.opencode.runtime_plan import (
+    VERSION_POLICY,
+    parse_opencode_version,
+    release_text,
+)
 from theater.harness.contracts.context import ParticipantObservationContext
+from theater.harness.contracts.version_policy import version_key
 from theater.models import BadRequest, Participant
 
 rec = shared_rec  # the shared fixture
-
-
-V2 = OpenCodeDialect.V2
 
 
 @pytest.fixture
@@ -52,15 +52,15 @@ def _bootstrap_settings(plan, config) -> dict:
 
 def test_the_2x_version_banner_names_its_release():
     assert parse_opencode_version("opencode v2.3.4\n") == (2, 3, 4)
-    assert parse_opencode_version("1.5.6") == (1, 5, 6)
+    assert parse_opencode_version("2.3.5") == (2, 3, 5)
 
 
 def test_a_2x_launch_runs_a_private_server_on_its_own_database(
     tmp_path, monkeypatch, fake_opencode
 ):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     config = tmp_path / "abc.json"
-    plan = OpenCodeHarness(dialect=V2).plan_launch(
+    plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="say hello",
         config_path=config,
@@ -101,9 +101,9 @@ def test_a_2x_launch_runs_a_private_server_on_its_own_database(
 def test_a_promptless_enforced_launch_still_precreates_its_protected_session(
     tmp_path, monkeypatch, fake_opencode
 ):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     config = tmp_path / "abc.json"
-    plan = OpenCodeHarness(dialect=V2).plan_launch(
+    plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="",
         config_path=config,
@@ -116,9 +116,9 @@ def test_a_promptless_enforced_launch_still_precreates_its_protected_session(
 
 
 def test_an_enforced_resume_verifies_its_plugin_before_any_ui(tmp_path, monkeypatch, fake_opencode):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_RELEASE)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
     config = tmp_path / "abc.json"
-    plan = OpenCodeHarness(dialect=V2).plan_launch(
+    plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="say hello",
         config_path=config,
@@ -131,28 +131,24 @@ def test_an_enforced_resume_verifies_its_plugin_before_any_ui(tmp_path, monkeypa
     assert settings["prompt"] is None and settings["session_id"] is None
 
 
-def test_an_unqualified_2x_release_refuses_enforced_approval(tmp_path, monkeypatch, fake_opencode):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", V2_UNQUALIFIED)
-    with pytest.raises(BadRequest, match=r"qualified 2\.x range"):
-        OpenCodeHarness(dialect=V2).plan_launch(
+@pytest.mark.parametrize("approval", ["manual", "edits", "yolo"])
+def test_an_unqualified_release_refuses_every_launch(
+    tmp_path, monkeypatch, fake_opencode, approval
+):
+    major, minor, patch = version_key(VERSION_POLICY.maximum)
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", release_text((major, minor, patch + 1)))
+    with pytest.raises(BadRequest, match="qualified releases"):
+        OpenCodeHarness().plan_launch(
             participant_id="abc123",
             prompt="say hello",
             config_path=tmp_path / "abc.json",
-            approval="manual",
+            approval=approval,
         )
-    # Yolo enforces nothing, so it keeps its ordinary launch on any 2.x release.
-    plan = OpenCodeHarness(dialect=V2).plan_launch(
-        participant_id="abc123",
-        prompt="say hello",
-        config_path=tmp_path / "abc.json",
-        approval="yolo",
-    )
-    assert "--auto" in plan.argv
 
 
 def test_a_new_session_exists_before_its_tui_opens_on_it(tmp_path, fake_opencode):
     """A 2.x TUI drops a cold home screen's `--prompt`; a session's screen submits it once ready."""
-    plan = OpenCodeHarness(dialect=V2).plan_launch(
+    plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="say hello",
         config_path=tmp_path / "abc.json",
@@ -171,7 +167,7 @@ def test_a_failed_session_create_never_opens_the_tui(tmp_path, fake_opencode):
     fake_opencode.write_text(
         f'#!/bin/sh\nprintf "%s\\n" "$*" >> {tmp_path / "calls"}\ncase "$1" in api) exit 1;; esac\n'
     )
-    plan = OpenCodeHarness(dialect=V2).plan_launch(
+    plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="say hello",
         config_path=tmp_path / "abc.json",
@@ -185,7 +181,7 @@ def test_a_failed_session_create_never_opens_the_tui(tmp_path, fake_opencode):
 
 def test_yolo_auto_accepts_and_a_resume_continues_its_known_session(tmp_path, fake_opencode):
     config = tmp_path / "abc.json"
-    plan = OpenCodeHarness(dialect=V2).plan_launch(
+    plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="",
         config_path=config,
@@ -204,25 +200,19 @@ def test_a_resume_stays_in_its_lineage_and_never_crosses_releases(tmp_path):
     lineage.touch()
     predecessor = Participant(id="second", transcript_domain=domain_for(lineage))
 
-    overlay = OpenCodeHarness(dialect=V2).resume_launch_overlay(
+    overlay = OpenCodeHarness().resume_launch_overlay(
         predecessor=predecessor, trusted_session_owners=(predecessor,)
     )
     assert overlay.env == {"OPENCODE_DB": str(lineage.resolve())}
     assert overlay.transcript_domain == domain_for(lineage)
 
     with pytest.raises(BadRequest, match="not a Theater-isolated"):
-        OpenCodeHarness(dialect=V2).resume_launch_overlay(
-            predecessor=predecessor, trusted_session_owners=()
-        )
+        OpenCodeHarness().resume_launch_overlay(predecessor=predecessor, trusted_session_owners=())
     v1_domain = f"opencode://{(tmp_path / 'opencode.db').resolve()}"
-    with pytest.raises(BadRequest, match=r"recorded by OpenCode 1\.x"):
-        OpenCodeHarness(dialect=V2).resume_launch_overlay(
+    with pytest.raises(BadRequest, match="no supported isolated database lineage"):
+        OpenCodeHarness().resume_launch_overlay(
             predecessor=Participant(id="old", transcript_domain=v1_domain),
             trusted_session_owners=(),
-        )
-    with pytest.raises(BadRequest, match=r"recorded by OpenCode 2\.x"):
-        OpenCodeHarness(db=tmp_path / "opencode.db").resume_launch_overlay(
-            predecessor=predecessor, trusted_session_owners=(predecessor,)
         )
 
 

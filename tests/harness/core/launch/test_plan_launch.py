@@ -19,8 +19,10 @@ from theater.harness import (
 )
 from theater.harness.base import theater_binary
 from theater.harness.builtin.plugins.claude.constants import CLAUDE_RECEIPT_EVENTS
+from theater.harness.builtin.plugins.vibe.compatibility import VERSION_POLICY
 from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
 from theater.harness.builtin.plugins.vibe.isolation import validate_isolated_domain
+from theater.harness.contracts.version_policy import version_key
 from theater.mcp_plugins import McpServerSpec
 from theater.models import BadRequest
 
@@ -29,9 +31,9 @@ from theater.models import BadRequest
 
 
 @pytest.fixture(autouse=True)
-def _modern_vibe(monkeypatch):
+def _modern_vibe(monkeypatch, available_harness_binaries):
     """Pin a modern Vibe: these plans must not depend on the installed CLI."""
-    pin_installed_vibe_version(monkeypatch, (2, 25, 8))
+    pin_installed_vibe_version(monkeypatch, version_key(VERSION_POLICY.minimum))
 
 
 def test_vibe_carries_the_id_in_an_env_override(tmp_path):
@@ -246,11 +248,11 @@ def test_shipped_renderers_receive_core_and_extra_stdio_servers(
         assert not any(value.startswith("mcp_servers.metrics.env={") for value in plan.argv)
         servers = {"theater", "theater_wait", "metrics"}
     elif harness == "opencode":
-        servers = json.loads(plan.files[tmp_path / "opencode.json"])["mcp"]
+        servers = json.loads(plan.files[tmp_path / "opencode.json"])["mcp"]["servers"]
         assert servers["metrics"] == {
             "type": "local",
-            "enabled": True,
             "command": ["metrics-mcp", "--scope", "participant"],
+            "codemode": False,
             "environment": {"METRICS_TOKEN": "launch-local", "METRICS_LABEL": "needs quotes"},
         }
     else:
@@ -379,10 +381,7 @@ def test_model_reaches_every_harness_by_its_own_lever(tmp_path, available_harnes
         approval="yolo",
         model="anthropic/claude-sonnet-4",
     )
-    assert plan.argv[plan.argv.index("--model") :][:2] == [
-        "--model",
-        "anthropic/claude-sonnet-4",
-    ]
+    assert json.loads(plan.files[tmp_path / "x.json"])["model"] == "anthropic/claude-sonnet-4"
 
     plan = plan_launch(
         "vibe",

@@ -25,7 +25,6 @@ DRAIN_LIMIT = 500
 HISTORY_MESSAGE_BATCH = 200
 LIVE_TRAJECTORY_STATE_LIMIT = 2_000
 
-CORRELATION_PLUGIN_SUFFIX = ".opencode.mjs"
 CORRELATION_READY_TIMEOUT = 30.0
 RECEIPT_RETRY_DELAYS_MS = (0, 100, 500, 2_000)
 RECEIPT_SESSION_ID_MAX_BYTES = 256
@@ -40,31 +39,9 @@ MCP_CATALOG_NAME_MAX_BYTES = 512
 
 _WRITE_TOOLS = frozenset({"write", "edit"})
 
-#: Session permission rulesets enforcing each approval choice at the last native layer.
-#: Native uses the LAST matching rule and session permission merges after config and agent
-#: rules, so the plugin appends these plus existing denies (OPENCODE_PERMISSION cannot).
-#: `manual` asks for all but native's read allowlist; `edits` adds a trailing `edit: allow`.
-_APPROVAL_SESSION_RULES: dict[str, tuple[dict[str, str], ...]] = {
-    "manual": (
-        {"permission": "*", "pattern": "*", "action": "ask"},
-        {"permission": "read", "pattern": "*", "action": "allow"},
-        {"permission": "read", "pattern": "*.env", "action": "ask"},
-        {"permission": "read", "pattern": "*.env.*", "action": "ask"},
-        {"permission": "read", "pattern": "*.env.example", "action": "allow"},
-    ),
-    "edits": (
-        {"permission": "*", "pattern": "*", "action": "ask"},
-        {"permission": "read", "pattern": "*", "action": "allow"},
-        {"permission": "read", "pattern": "*.env", "action": "ask"},
-        {"permission": "read", "pattern": "*.env.*", "action": "ask"},
-        {"permission": "read", "pattern": "*.env.example", "action": "allow"},
-        {"permission": "edit", "pattern": "*", "action": "allow"},
-    ),
-}
-
-#: The same policies in 2.x rule shape, applied by the plugin's `permission.evaluate` hook: 2.x
+#: Rules applied by the plugin's `permission.evaluate` hook: OpenCode
 #: returns configured denies before hooks run and appends saved allows after session rules, so
-#: only the hook decides last. `grep`/`glob` are 2.x actions of their own, reads in 1.x.
+#: only the hook decides last.
 _READ_RULES_V2: tuple[dict[str, str], ...] = (
     {"action": "*", "resource": "*", "effect": "ask"},
     {"action": "read", "resource": "*", "effect": "allow"},
@@ -93,15 +70,3 @@ PLUGIN_ACTIVE_TIMEOUT_SECONDS = 15.0
 PLUGIN_ACTIVE_POLL_SECONDS = 0.1
 #: The legacy bootstrap's own serve credential file, minted 0600 and never in argv.
 BOOTSTRAP_CREDENTIAL_NAME = "server-credential"
-
-#: Approval choices whose 1.x enforcement rides on the generated plugin; yolo
-#: enforces nothing and never needs the plugin proven loaded.
-ENFORCED_APPROVALS = frozenset(("manual", "edits"))
-#: The 1.x plugin writes this receipt from its `config` hook, naming the exact
-#: build that rendered it; the server runtime refuses a manual/edits session
-#: until it appears — OpenCode 1.x keeps serving with a broken plugin.
-PLUGIN_LOAD_RECEIPT_FILENAME = "plugin-load-receipt.json"
-#: The backend loads its config (and the plugin) lazily on first session work,
-#: so the gate polls within this bound before refusing.
-PLUGIN_RECEIPT_TIMEOUT_SECONDS = 15.0
-PLUGIN_RECEIPT_POLL_SECONDS = 0.1

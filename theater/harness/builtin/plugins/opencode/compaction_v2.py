@@ -10,7 +10,7 @@ from .values import _table
 
 
 def message_info(message_id: str, session_id: str, data: dict) -> dict:
-    """A compaction row as 1.x-shaped info; only a billed call carries usage."""
+    """A compaction row as normalized message info; only a billed call carries usage."""
     time_data = _table(data.get("time"))
     info: dict = {
         "id": message_id,

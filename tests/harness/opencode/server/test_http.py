@@ -1,4 +1,4 @@
-"""The OpenCode HTTP client and event stream against a fake server."""
+"""Supported OpenCode routes over a bounded, credentialed loopback transport."""
 
 from __future__ import annotations
 
@@ -6,23 +6,21 @@ import asyncio
 import base64
 import json
 import socket
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tests.support.opencode_releases import V1_RELEASE
 from theater import paths
 from theater.harness.builtin.plugins.opencode import http as opencode_http
 from theater.harness.builtin.plugins.opencode.http import (
     BASIC_USERNAME,
-    OpenCodeClient,
     OpenCodeHttpError,
-    OpenCodeStreamError,
     read_client_secret,
     validate_loopback_endpoint,
 )
+from theater.harness.builtin.plugins.opencode.http_v2 import OpenCodeV2Client
+from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
 
 # A real loopback server, no transport mocking: write ambiguity and redaction only mean
 # something over a socket.
@@ -31,7 +29,7 @@ PASSWORD = "test-password-1234"
 
 
 class FakeServer:
-    """A minimal HTTP/1.1 + SSE server that records every request verbatim."""
+    """A minimal 2.x HTTP server that records requests and injected transport failures."""
 
     def __init__(self, *, password: str = PASSWORD) -> None:
         self._password = password
@@ -39,7 +37,6 @@ class FakeServer:
         self.port = 0
         self.requests: list[dict[str, Any]] = []
         self._behaviors: dict[str, Any] = {}
-        self._handler: Any = None
         self._connections: set[asyncio.Task[Any]] = set()
 
     @property
@@ -63,39 +60,6 @@ class FakeServer:
 
     def set_behavior(self, name: str, value: Any) -> None:
         self._behaviors[name] = value
-
-    async def _route_event(self, writer: asyncio.StreamWriter) -> None:
-        behavior = self._behaviors.get("event")
-        if behavior == "stall-handshake":
-            await asyncio.sleep(30)
-            return
-        if behavior == "wrong-type":
-            await self._send(writer, 200, "OK", b"", content_type="application/json")
-            return
-        writer.write(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
-        )
-        if behavior == "malformed":
-            writer.write(b"data: {not json}\n\n")
-        elif behavior == "oversized":
-            writer.write(b"data: " + b"x" * 70_000 + b"\n\n")
-        elif behavior == "events-then-close":
-            for event in ({"type": "server.connected"}, {"type": "session.idle"}):
-                writer.write(b"data: " + json.dumps(event).encode() + b"\n\n")
-            writer.write(b": keepalive\n")
-            await writer.drain()
-            writer.close()
-            return
-        else:
-            for event in (
-                {"type": "server.connected"},
-                {"type": "session.updated"},
-                {"type": "session.idle"},
-            ):
-                writer.write(b"data: " + json.dumps(event).encode() + b"\n\n")
-            await writer.drain()
-            await asyncio.sleep(30)
-        await writer.drain()
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
@@ -164,21 +128,23 @@ class FakeServer:
         if not self._authorized(record):
             await self._send(writer, 401, "Unauthorized", b"{}")
             return
-        if record["path"] == "/event":
-            await self._route_event(writer)
-            return
-        if record["path"] == "/global/health":
-            await self._route_health(writer)
+        if record["path"] == "/api/info":
+            await self._route_info(writer)
             return
         await self._route_control(record, writer)
 
-    async def _route_health(self, writer: asyncio.StreamWriter) -> None:
-        behavior = self._behaviors.get("health")
+    async def _route_info(self, writer: asyncio.StreamWriter) -> None:
+        behavior = self._behaviors.get("info")
+        if behavior == "stall":
+            await asyncio.Event().wait()
+        if behavior == "oversized":
+            await self._send(writer, 200, "OK", b"x" * (opencode_http.MAX_RESPONSE_BYTES + 1))
+            return
         if behavior == "plain-text":
             await self._send(writer, 200, "OK", b"healthy", content_type="text/plain")
             return
         if behavior == "chunked":
-            payload = json.dumps({"healthy": True, "version": V1_RELEASE}).encode()
+            payload = json.dumps({"version": VERSION_POLICY.minimum}).encode()
             await self._send(writer, 200, "OK", payload, chunked=True)
             return
         if behavior == "redirect":
@@ -188,33 +154,27 @@ class FakeServer:
             )
             await writer.drain()
             return
-        payload = json.dumps({"healthy": True, "version": V1_RELEASE}).encode()
+        payload = json.dumps({"version": VERSION_POLICY.minimum}).encode()
         await self._send(writer, 200, "OK", payload)
 
     async def _route_control(self, record: dict[str, Any], writer: asyncio.StreamWriter) -> None:
         path = record["path"]
-        if path == "/session" and record["method"] == "POST":
-            payload = json.dumps({"id": "ses_proof_1"}).encode()
-            await self._send(writer, 200, "OK", payload)
-            return
-        if path == "/session/status":
-            payload = json.dumps({"ses_proof_1": {"status": "idle"}}).encode()
-            await self._send(writer, 200, "OK", payload)
-            return
-        if path == "/session/ses_proof_1":
-            payload = json.dumps({"id": "ses_proof_1", "title": "t"}).encode()
-            await self._send(writer, 200, "OK", payload)
-            return
-        if path == "/session/ses_proof_1/prompt_async":
+        result: dict[str, object]
+        if path == "/api/session" and record["method"] == "POST":
+            result = {"data": {"id": "ses_one"}}
+        elif path == "/api/session/active":
+            result = {"data": {}}
+        elif path == "/api/session/ses_one":
+            result = {"data": {"id": "ses_one", "location": {"directory": "/work"}}}
+        elif path == "/api/session/ses_one/prompt":
             if self._behaviors.get("prompt") == "write-then-drop":
                 writer.close()
                 return
-            await self._send(writer, 204, "No Content", b"")
+            result = {"data": {"id": json.loads(record["body"])["id"], "time": {"created": 1000}}}
+        else:
+            await self._send(writer, 404, "Not Found", b"{}")
             return
-        if path == "/session/ses_proof_1/abort":
-            await self._send(writer, 200, "OK", b"true")
-            return
-        await self._send(writer, 404, "Not Found", b"{}")
+        await self._send(writer, 200, "OK", json.dumps(result).encode())
 
 
 @pytest.fixture
@@ -234,8 +194,8 @@ async def server():
     await fake.stop()
 
 
-def _client(server: FakeServer, token_file: Path) -> OpenCodeClient:
-    return OpenCodeClient(endpoint=server.endpoint, token_file=token_file)
+def _client(server: FakeServer, token_file: Path) -> OpenCodeV2Client:
+    return OpenCodeV2Client(endpoint=server.endpoint, token_file=token_file)
 
 
 def test_endpoint_validation_accepts_only_bare_loopback() -> None:
@@ -276,15 +236,12 @@ def test_secret_file_refuses_insecure_representations(token_file: Path) -> None:
         read_client_secret(empty)
 
 
-async def test_health_create_status_and_abort(server: FakeServer, token_file: Path) -> None:
+async def test_version_create_read_and_active(server: FakeServer, token_file: Path) -> None:
     client = _client(server, token_file)
-    assert await client.health() == V1_RELEASE
-    assert await client.create_session(title="t") == "ses_proof_1"
-    assert (await client.read_session("ses_proof_1"))["id"] == "ses_proof_1"
-    session_status = (await client.session_status())["ses_proof_1"]
-    assert isinstance(session_status, Mapping)
-    assert session_status["status"] == "idle"
-    assert await client.abort("ses_proof_1") is True
+    assert await client.version() == VERSION_POLICY.minimum
+    assert await client.create_session(directory="/work") == "ses_one"
+    assert (await client.read_session("ses_one"))["id"] == "ses_one"
+    assert await client.active() == {}
     assert all(request["headers"].get("authorization") for request in server.requests)
 
 
@@ -292,20 +249,24 @@ async def test_wrong_password_is_rejected(server: FakeServer, token_file: Path) 
     wrong = token_file.with_name("wrong.token")
     wrong.write_text("not-the-password")
     wrong.chmod(0o600)
-    client = OpenCodeClient(endpoint=server.endpoint, token_file=wrong)
+    client = OpenCodeV2Client(endpoint=server.endpoint, token_file=wrong)
     with pytest.raises(OpenCodeHttpError) as raised:
-        await client.health()
+        await client.version()
     assert raised.value.status == 401
     assert "not-the-password" not in str(raised.value)
 
 
-async def test_prompt_async_accepts_204_no_body(server: FakeServer, token_file: Path) -> None:
+async def test_prompt_admission_carries_exact_message_and_delivery(
+    server: FakeServer, token_file: Path
+) -> None:
     client = _client(server, token_file)
-    body = {"messageID": "op_1", "parts": [{"type": "text", "text": "hello proof"}]}
-    assert await client.prompt_async("ses_proof_1", body) is None
-    prompt = next(r for r in server.requests if r["path"].endswith("prompt_async"))
-    assert prompt["method"] == "POST"
-    assert json.loads(prompt["body"]) == body
+    admitted = await client.prompt(
+        "ses_one", message_id="msg_one", text="hello", delivery="followUp"
+    )
+    assert admitted == {"id": "msg_one", "time": {"created": 1000}}
+    prompt = server.requests[-1]
+    assert (prompt["method"], prompt["path"]) == ("POST", "/api/session/ses_one/prompt")
+    assert json.loads(prompt["body"]) == {"id": "msg_one", "text": "hello", "delivery": "followUp"}
 
 
 async def test_post_write_ambiguity_is_flagged_and_redacted(
@@ -314,9 +275,12 @@ async def test_post_write_ambiguity_is_flagged_and_redacted(
     server.set_behavior("prompt", "write-then-drop")
     client = _client(server, token_file)
     with pytest.raises(OpenCodeHttpError) as raised:
-        await client.prompt_async("ses_proof_1", {"parts": []})
+        await client.prompt(
+            "ses_one", message_id="msg_one", text="private prompt", delivery="followUp"
+        )
     assert raised.value.written is True, "bytes crossed; the runtime must treat it as UNKNOWN"
-    assert "parts" not in str(raised.value)
+    assert "private prompt" not in str(raised.value)
+    assert PASSWORD not in str(raised.value)
 
 
 async def test_drain_failure_after_write_is_ambiguous(
@@ -340,9 +304,9 @@ async def test_drain_failure_after_write_is_ambiguous(
     async def connect():
         return asyncio.StreamReader(), Writer()
 
-    monkeypatch.setattr(client, "_connect", connect)
+    monkeypatch.setattr(client._transport, "_connect", connect)
     with pytest.raises(OpenCodeHttpError) as raised:
-        await client.health()
+        await client.version()
     assert raised.value.written is True
 
 
@@ -350,9 +314,9 @@ async def test_connect_refusal_is_unwritten_and_redacted(token_file: Path) -> No
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         reserved = probe.getsockname()[1]
-    client = OpenCodeClient(endpoint=f"http://127.0.0.1:{reserved}", token_file=token_file)
+    client = OpenCodeV2Client(endpoint=f"http://127.0.0.1:{reserved}", token_file=token_file)
     with pytest.raises(OpenCodeHttpError) as raised:
-        await client.health()
+        await client.version()
     assert raised.value.written is False
     assert PASSWORD not in str(raised.value)
 
@@ -361,20 +325,20 @@ async def test_redirect_and_wrong_content_type_fail_closed(
     server: FakeServer, token_file: Path
 ) -> None:
     client = _client(server, token_file)
-    server.set_behavior("health", "redirect")
+    server.set_behavior("info", "redirect")
     with pytest.raises(OpenCodeHttpError, match="redirect refused"):
-        await client.health()
-    server.set_behavior("health", "plain-text")
+        await client.version()
+    server.set_behavior("info", "plain-text")
     with pytest.raises(OpenCodeHttpError, match="not application/json"):
-        await client.health()
-    server.set_behavior("health", "chunked")
-    assert await client.health() == V1_RELEASE
+        await client.version()
+    server.set_behavior("info", "chunked")
+    assert await client.version() == VERSION_POLICY.minimum
 
 
 async def test_missing_session_answer_fails_closed(server: FakeServer, token_file: Path) -> None:
     client = _client(server, token_file)
     with pytest.raises(OpenCodeHttpError) as raised:
-        await client.prompt_async("ses_missing", {"parts": []})
+        await client.prompt("ses_missing", message_id="msg_one", text="hello", delivery="followUp")
     assert raised.value.status == 404
     assert raised.value.session_id == "ses_missing"
 
@@ -385,80 +349,29 @@ async def test_session_ids_are_bounded_path_tokens(
 ) -> None:
     client = _client(server, token_file)
     with pytest.raises(ValueError, match="path-safe"):
-        await client.prompt_async(session_id, {"parts": []})
+        await client.prompt(session_id, message_id="msg_one", text="hello", delivery="followUp")
     assert server.requests == []
 
 
 async def test_request_body_is_bounded_before_connect(server: FakeServer, token_file: Path) -> None:
     client = _client(server, token_file)
     with pytest.raises(OpenCodeHttpError) as raised:
-        await client.prompt_async("ses_proof_1", {"text": "x" * 1_048_577})
+        await client.prompt(
+            "ses_one", message_id="msg_one", text="x" * 1_048_577, delivery="followUp"
+        )
     assert raised.value.written is False
     assert server.requests == []
 
 
-async def test_events_stream_until_server_closes(server: FakeServer, token_file: Path) -> None:
-    server.set_behavior("event", "events-then-close")
-    client = _client(server, token_file)
-    seen: list[str] = []
-    with pytest.raises(OpenCodeStreamError):
-        async for event in client.events():
-            seen.append(str(event["type"]))
-    assert seen == ["server.connected", "session.idle"]
+async def test_response_body_is_bounded(server: FakeServer, token_file: Path) -> None:
+    server.set_behavior("info", "oversized")
+    with pytest.raises(OpenCodeHttpError, match="response body exceeds"):
+        await _client(server, token_file).version()
 
 
-async def test_event_subscription_requires_event_stream_content_type(
-    server: FakeServer, token_file: Path
-) -> None:
-    server.set_behavior("event", "wrong-type")
-    client = _client(server, token_file)
-    with pytest.raises(OpenCodeStreamError, match="not text/event-stream"):
-        async for _ in client.events():
-            pass
-
-
-async def test_event_handshake_has_one_total_deadline(
-    server: FakeServer, token_file: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    server.set_behavior("event", "stall-handshake")
+async def test_request_has_one_total_deadline(server, token_file, monkeypatch) -> None:
+    server.set_behavior("info", "stall")
     monkeypatch.setattr(opencode_http, "REQUEST_DEADLINE_SECONDS", 0.05)
-    client = _client(server, token_file)
-    with pytest.raises(OpenCodeStreamError, match="subscription failed"):
-        async for _ in client.events():
-            pass
-
-
-async def test_full_event_queue_drains_before_stream_failure(
-    server: FakeServer, token_file: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(opencode_http, "MAX_SSE_QUEUE", 1)
-    server.set_behavior("event", "events-then-close")
-    client = _client(server, token_file)
-    seen: list[str] = []
-    with pytest.raises(OpenCodeStreamError):
-        async for event in client.events():
-            seen.append(str(event["type"]))
-    assert seen == ["server.connected", "session.idle"]
-
-
-async def test_malformed_and_oversized_events_fail_closed(
-    server: FakeServer, token_file: Path
-) -> None:
-    client = _client(server, token_file)
-    server.set_behavior("event", "malformed")
-    with pytest.raises(OpenCodeStreamError, match="malformed SSE event"):
-        async for _ in client.events():
-            pass
-    server.set_behavior("event", "oversized")
-    with pytest.raises(OpenCodeStreamError, match="oversized"):
-        async for _ in client.events():
-            pass
-
-
-async def test_abandoned_subscription_cleans_up(server: FakeServer, token_file: Path) -> None:
-    client = _client(server, token_file)
-    stream = client.events()
-    first = await stream.__anext__()
-    assert first["type"] == "server.connected"
-    await stream.aclose()
-    await asyncio.sleep(0.1)
+    with pytest.raises(OpenCodeHttpError, match="deadline exceeded") as raised:
+        await _client(server, token_file).version()
+    assert raised.value.written is True

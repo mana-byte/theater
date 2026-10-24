@@ -1,27 +1,14 @@
 """Constants for the Pi frontend runtime."""
 
 import re
+from pathlib import Path
 
-PI_FRONTEND_QUALIFIED_FLOOR = (0, 80, 8)
-PI_FRONTEND_QUALIFIED_MAX = (1, 4, 0)
-# Broken published artifacts inside [FLOOR, MAX]: 0.85.0 crashes at import
-# (no ModelRuntime/agent_settled).
-PI_FRONTEND_QUALIFIED_EXCLUDED = ((0, 85, 0),)
+from theater.harness.contracts.version_policy import VersionPolicy
 
-
-def pi_version_text(version: tuple[int, int, int]) -> str:
-    return ".".join(map(str, version))
-
-
-_EXCLUDED_TEXT = ", ".join(pi_version_text(entry) for entry in PI_FRONTEND_QUALIFIED_EXCLUDED)
-PI_FRONTEND_QUALIFIED_RANGE = (
-    f">={pi_version_text(PI_FRONTEND_QUALIFIED_FLOOR)},"
-    f"<={pi_version_text(PI_FRONTEND_QUALIFIED_MAX)}"
-    f" (excluding {_EXCLUDED_TEXT})"
-)
+VERSION_POLICY = VersionPolicy.load(Path(__file__).with_name("compatibility.json"))
+PI_FRONTEND_QUALIFIED_RANGE = VERSION_POLICY.range_text
 PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY = (
-    f"pi-extension-{pi_version_text(PI_FRONTEND_QUALIFIED_FLOOR)}-"
-    f"{pi_version_text(PI_FRONTEND_QUALIFIED_MAX)}-supported"
+    f"pi-extension-{VERSION_POLICY.minimum}-{VERSION_POLICY.maximum}-supported"
 )
 PI_FRONTEND_RUNTIME_PROBE_TIMEOUT_SECONDS = 5.0
 PI_FRONTEND_CONTROL_TIMEOUT_SECONDS = 10.0
@@ -30,9 +17,7 @@ PI_FRONTEND_HISTORY_MAX = 64
 PI_FRONTEND_CHANNEL_ID = "pi-frontend-live"
 PI_FRONTEND_SEND_PROMPT_MAX_CHARS = 100_000
 
-_VERSION_TOKEN = re.compile(
-    r"(?<![\w.])(?P<version>(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+))(?![\w.-])"
-)
+_VERSION_TOKEN = re.compile(r"(?<![\w.+-])(?P<version>[0-9]+\.[0-9]+\.[0-9]+)(?![\w.+-])")
 _REJECTED_SETTINGS_ERRORS = frozenset(
     {
         "busy",

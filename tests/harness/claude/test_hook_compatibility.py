@@ -12,9 +12,7 @@ from theater import paths
 from theater.daemon.spawning.hook_compatibility import probe_hook_channels
 from theater.daemon.spawning.planning import install_hook_plan
 from theater.harness.builtin.plugins.claude.compatibility import (
-    _HOOK_FLOOR,
-    _MESSAGING_FLOOR,
-    _QUALIFIED_MAX,
+    VERSION_POLICY,
     claude_messaging_range_text,
     probe_claude_hooks,
     probe_claude_native_compatibility,
@@ -24,6 +22,7 @@ from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind, 
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.manifest import HookChannelManifest
 from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
+from theater.harness.contracts.version_policy import version_key
 from theater.models import Participant
 
 
@@ -148,17 +147,19 @@ def _cli_version(parts: tuple[int, int, int]) -> str:
     return f"{'.'.join(map(str, parts))} (Claude Code)"
 
 
+_MINIMUM = version_key(VERSION_POLICY.minimum)
+_MAXIMUM = version_key(VERSION_POLICY.maximum)
+
+
 @pytest.mark.parametrize(
     ("sample", "supported"),
     [
-        pytest.param((_HOOK_FLOOR[0], _HOOK_FLOOR[1], _HOOK_FLOOR[2] - 1), False, id="hook-below"),
-        pytest.param(_HOOK_FLOOR, True, id="hook-floor"),
+        pytest.param((*_MINIMUM[:2], _MINIMUM[2] - 1), False, id="below-minimum"),
+        pytest.param(_MINIMUM, True, id="minimum"),
+        pytest.param((*_MINIMUM[:2], _MINIMUM[2] + 1), True, id="next-patch"),
+        pytest.param(_MAXIMUM, True, id="maximum"),
         pytest.param(
-            (_HOOK_FLOOR[0], _HOOK_FLOOR[1], _HOOK_FLOOR[2] + 1), True, id="hook-next-patch"
-        ),
-        pytest.param(_QUALIFIED_MAX, True, id="hook-max"),
-        pytest.param(
-            (_QUALIFIED_MAX[0], _QUALIFIED_MAX[1], _QUALIFIED_MAX[2] + 1),
+            (*_MAXIMUM[:2], _MAXIMUM[2] + 1),
             False,
             id="hook-above-max",
         ),
@@ -172,12 +173,13 @@ def test_claude_hook_version_range(sample, supported, monkeypatch):
     )
     result = probe_claude_hooks(RuntimeProbeContext())
     assert result.supported is supported
-    assert result.policy == f"claude-hooks-{'.'.join(map(str, _HOOK_FLOOR))}-compatible"
-    hook_range = f">={'.'.join(map(str, _HOOK_FLOOR))},<={'.'.join(map(str, _QUALIFIED_MAX))}"
-    assert result.reason == (None if supported else f"Claude native support requires {hook_range}")
+    assert result.policy == f"claude-hooks-{VERSION_POLICY.minimum}-compatible"
+    assert result.reason == (
+        None if supported else f"Claude support requires {VERSION_POLICY.range_text}"
+    )
 
 
-@pytest.mark.parametrize("version", ["unknown", f"{_cli_version(_HOOK_FLOOR)}-beta"])
+@pytest.mark.parametrize("version", ["unknown", f"{_cli_version(_MINIMUM)}-beta", "02.1.296"])
 def test_claude_hook_rejects_malformed_version(version, monkeypatch):
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
@@ -191,13 +193,14 @@ def test_claude_hook_rejects_malformed_version(version, monkeypatch):
 @pytest.mark.parametrize(
     ("sample", "supported"),
     [
-        ((_MESSAGING_FLOOR[0], _MESSAGING_FLOOR[1], _MESSAGING_FLOOR[2] - 1), False),
-        (_MESSAGING_FLOOR, True),
-        ((_MESSAGING_FLOOR[0], _MESSAGING_FLOOR[1], _MESSAGING_FLOOR[2] + 1), True),
-        ((_QUALIFIED_MAX[0] + 1, 0, 0), True),
+        ((*_MINIMUM[:2], _MINIMUM[2] - 1), False),
+        (_MINIMUM, True),
+        (_MAXIMUM, True),
+        ((*_MAXIMUM[:2], _MAXIMUM[2] + 1), False),
+        ((_MAXIMUM[0] + 1, 0, 0), False),
     ],
 )
-def test_claude_messaging_version_floor(sample, supported, monkeypatch):
+def test_claude_messaging_uses_the_same_bounded_policy(sample, supported, monkeypatch):
     version = _cli_version(sample)
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
@@ -206,9 +209,7 @@ def test_claude_messaging_version_floor(sample, supported, monkeypatch):
     result = probe_claude_native_compatibility(RuntimeProbeContext())
     assert result.supported is supported
     assert result.native_version == ".".join(map(str, sample))
-    assert result.policy == (
-        f"claude-messaging-native-controls-{'.'.join(map(str, _MESSAGING_FLOOR))}"
-    )
+    assert result.policy == (f"claude-messaging-native-controls-{VERSION_POLICY.minimum}")
     assert result.reason == (
-        None if supported else f"Claude native support requires {claude_messaging_range_text()}"
+        None if supported else f"Claude support requires {claude_messaging_range_text()}"
     )

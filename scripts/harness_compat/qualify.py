@@ -1,0 +1,94 @@
+"""Qualify one supplied release: install it, then let the live suite alone decide."""
+
+from __future__ import annotations
+
+import subprocess
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+from theater.harness.contracts.version_policy import version_key
+
+from .cleanup import CleanupFailed
+from .codecopy import code_copy
+from .contract import Adapter, Check, InstallFailed, Result, Sandbox
+from .diagnostics import clip_diagnostic
+from .policy import admit_only, load_policy
+from .sandbox import make_sandbox
+from .suite_runner import SUITE_TIMEOUT_SECONDS, installed_version, run_suite, verdict
+
+
+def qualify_binary(
+    root: Path,
+    sb: Sandbox,
+    name: str,
+    binary: Path,
+    version: str,
+    *,
+    pytest_args: Sequence[str] = (),
+    extra_env: Mapping[str, str] | None = None,
+    timeout: float = SUITE_TIMEOUT_SECONDS,
+) -> Result:
+    """Run the full live suite for ``binary`` in a disposable copy of ``root``.
+
+    A release the policy does not admit would be refused by the plugin's own gate, which says
+    nothing about behaviour: the copy admits just this release, and only the copy. Only a whole,
+    unfiltered run can be green: ``pytest_args`` or ``extra_env`` cap the outcome at inconclusive.
+    """
+    version_key(version)
+    binary = binary.resolve()
+    try:
+        with code_copy(root) as tree:
+            if not load_policy(tree, name).admits(version):
+                admit_only(tree, name, version)
+            report = run_suite(
+                tree,
+                sb,
+                harness=name,
+                binary=binary,
+                version=version,
+                pytest_args=pytest_args,
+                timeout=timeout,
+                extra_env=extra_env,
+            )
+    except CleanupFailed:
+        raise
+    except Exception as exc:
+        detail = clip_diagnostic(f"{type(exc).__name__}: {exc}", 400, tail=True)
+        return Result(name, version, "tooling", (Check("qualification", "error", detail),))
+    outcome, checks = verdict(report), report.checks
+    if pytest_args or extra_env:
+        # A filtered or mutated run proves a part of the suite at most: it can never authorize.
+        checks = (
+            *checks,
+            Check("filtered", "skip", "part of the suite ran; nothing is authorized"),
+        )
+        outcome = "inconclusive" if outcome == "green" else outcome
+    return Result(name, version, outcome, checks)
+
+
+def install_verified(adapter: Adapter, sb: Sandbox, version: str) -> Path:
+    """Install exactly ``version`` and prove the binary reports that very release."""
+    binary = adapter.install(sb, version)
+    try:
+        reported = installed_version(binary)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise InstallFailed(f"{adapter.name} {version} cannot report its version: {exc}") from exc
+    if reported != version:
+        raise InstallFailed(f"{adapter.name} {version} reports {reported} for --version")
+    return binary
+
+
+def qualify_release(
+    root: Path, adapter: Adapter, version: str, *, pytest_args: Sequence[str] = ()
+) -> Result:
+    """Install exactly ``version``, check what the binary reports, and run the live suite on it."""
+    version_key(version)
+    with make_sandbox(adapter.name) as sb:
+        try:
+            binary = install_verified(adapter, sb, version)
+        except (InstallFailed, OSError, subprocess.SubprocessError) as exc:
+            detail = clip_diagnostic(str(exc), 500, tail=True)
+            return Result(
+                adapter.name, version, "inconclusive", (Check("install", "error", detail),)
+            )
+        return qualify_binary(root, sb, adapter.name, binary, version, pytest_args=pytest_args)

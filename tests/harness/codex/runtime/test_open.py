@@ -18,7 +18,7 @@ from tests.support.codex_server import (
 from theater.harness.builtin.plugins.codex import runtime_constants as codex_runtime_constants
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
-    CODEX_RUNTIME_QUALIFIED_CEILING,
+    VERSION_POLICY,
     plan_codex_frontend,
 )
 from theater.harness.contracts.runtime import (
@@ -26,6 +26,7 @@ from theater.harness.contracts.runtime import (
     RuntimeRequestError,
     SessionOpenMode,
 )
+from theater.harness.contracts.version_policy import version_key
 
 
 async def test_open_new_discovers_exact_ui_thread_and_handshake_dialect() -> None:
@@ -149,8 +150,9 @@ async def test_handshake_rejects_unverified_backend_version() -> None:
     server = ScriptedCodexServer()
     # A binary changed between the probe and backend start must not bind an
     # unverified server under the verified policy.
-    ceiling = ".".join(map(str, CODEX_RUNTIME_QUALIFIED_CEILING))
-    server.respond("initialize", {"userAgent": f"codex-cli/{ceiling} (macos; arm64)"})
+    maximum = version_key(VERSION_POLICY.maximum)
+    unsupported = ".".join(map(str, (*maximum[:2], maximum[2] + 1)))
+    server.respond("initialize", {"userAgent": f"codex-cli/{unsupported} (macos; arm64)"})
     runtime = make_runtime(server)
     with pytest.raises(RuntimeConnectionError, match="unverified native version"):
         await runtime.open_session(mode=SessionOpenMode.NEW)

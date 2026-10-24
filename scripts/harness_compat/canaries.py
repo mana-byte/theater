@@ -2,21 +2,25 @@
 
 A canary breaks a plugin's wiring on purpose (``tests/support/mutations.py``); the live suite must
 fail the obligations it breaks. They prove the suite still has teeth, so they run when the suite
-changes and weekly, never per release.
+changes and weekly, never per release. The canary tests run in a disposable code copy that admits
+only the chosen release, and each scenario copies that copy again: nothing runs in the checkout.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
-from .contract import Adapter, Check
+from .codecopy import code_copy
+from .contract import Adapter, Check, InstallFailed
 from .diagnostics import clip_diagnostic
-from .inputs import adapter_metadata
+from .framework import python_path
+from .policy import admit_only, load_policy
 from .process import run_group
+from .qualify import install_verified
 from .sandbox import make_sandbox
-from .select import newest_in_range
 
 CANARIES_TARGET = "tests/conformance/canaries"
 CANARIES_TIMEOUT_SECONDS = 45 * 60.0
@@ -36,35 +40,37 @@ def run_canaries(
     timeout: float = CANARIES_TIMEOUT_SECONDS,
 ) -> Check:
     """pass: every applicable canary was caught; fail: the suite missed one; error: no verdict."""
-    gate = adapter.verified(root)
-    chosen = version or newest_in_range(adapter, gate)
-    if chosen is None:
-        return Check("canaries", "error", f"no stable {adapter.name} release is admitted")
-    # The suite and the canary tests know plugins, not qualification aliases (opencode2).
-    plugin = adapter_metadata(adapter, adapter.name).plugin
+    chosen = version or load_policy(root, adapter.name).maximum
     with make_sandbox(adapter.name) as sb:
-        binary = adapter.install(sb, chosen)
-        env = {
-            **sb.offline_env,
-            ENV_ENABLE: "1",
-            ENV_HARNESS: plugin,
-            ENV_BINARY: str(binary),
-            "PYTHONPATH": str(root),
-        }
-        argv = [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            _PARALLEL_WORKERS,
-            "-k",
-            plugin,
-            CANARIES_TARGET,
-        ]
-        run = run_group(argv, cwd=root, env=env, timeout=timeout)
+        try:
+            binary = install_verified(adapter, sb, chosen)
+        except (InstallFailed, OSError, subprocess.SubprocessError) as exc:
+            return Check("canaries", "error", f"{adapter.name} {chosen}: {_tail(str(exc))}")
+        with code_copy(root) as tree:
+            if not load_policy(tree, adapter.name).admits(chosen):
+                admit_only(tree, adapter.name, chosen)
+            env = {
+                **sb.offline_env,
+                ENV_ENABLE: "1",
+                ENV_HARNESS: adapter.name,
+                ENV_BINARY: str(binary),
+                "PYTHONPATH": python_path(tree),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            argv = [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "-n",
+                _PARALLEL_WORKERS,
+                "-k",
+                adapter.name,
+                CANARIES_TARGET,
+            ]
+            run = run_group(argv, cwd=tree, env=env, timeout=timeout)
     tally = {kind: int(count) for count, kind in _TALLY.findall(run.stdout)}
     shown = f"{adapter.name} {chosen}: " + ", ".join(f"{n} {kind}" for kind, n in tally.items())
     if run.returncode == 0 and tally.get("passed", 0) > 0:

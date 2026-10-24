@@ -1,4 +1,4 @@
-"""Project OpenCode 2.x message rows onto the 1.x message and part shapes the observer reads.
+"""Project OpenCode message rows onto the observer's normalized messages and parts.
 
 2.x embeds parts in one row per message (schema/src/session-message.ts), so each part gets a
 positional id; an `idle` marker that closes a turn no step closed becomes its terminal message.
@@ -46,7 +46,7 @@ def message_info(
     closes_turn: bool = False,
     cause: dict | None = None,
 ) -> dict:
-    """The 1.x `message.data` a 2.x row stands for; non-conversation rows get role `idle`."""
+    """Normalized message info; non-conversation rows get role `idle`."""
     time_data = _table(data.get("time"))
     info: dict = {
         "id": message_id,
@@ -63,7 +63,7 @@ def message_info(
 
 
 def message_parts(message_id: str, kind: str, session_id: str, data: dict) -> list[dict]:
-    """The 1.x `part.data` rows of one 2.x message, in content order."""
+    """Normalized parts of one message, in content order."""
     base = {"messageID": message_id, "sessionID": session_id}
     if kind == "user":
         text = data.get("text")
@@ -133,7 +133,7 @@ def _closing_info(info: dict, data: dict, cause: dict | None = None) -> dict:
 
 
 def _error(value: object) -> dict | None:
-    """2.x `{type, message}` errors as 1.x `{name, message}`; `aborted` is the interrupt."""
+    """Normalize `{type, message}` errors to `{name, message}`; `aborted` is the interrupt."""
     if not isinstance(value, dict):
         return None
     kind = value.get("type")
@@ -164,7 +164,7 @@ def _tool(item: dict) -> dict:
     raw_input = state.get("input")
     tool_input = dict(raw_input) if isinstance(raw_input, dict) else {}
     path = tool_input.get("path")
-    # 1.x path projection reads `filePath`; 2.x file tools name it `path`.
+    # Event path projection reads `filePath`; file tools name it `path`.
     if name in _PATH_TOOLS and isinstance(path, str) and "filePath" not in tool_input:
         tool_input["filePath"] = path
     status = _TOOL_STATUSES.get(_string(state.get("status")), "pending")

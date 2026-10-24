@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from dataclasses import dataclass, field
 
 from theater.harness.contracts.trajectory import TrajectoryFact
@@ -11,7 +12,6 @@ from theater.models import Status
 
 from .constants import DRAIN_LIMIT
 from .source import OpenCodeSource
-from .store import QueryConnection
 from .store_v2 import (
     Row,
     forward_rows,
@@ -80,7 +80,7 @@ class OpenCodeV2Source(OpenCodeSource):
             self._reread = None
             self._staged = None
 
-    def _attach(self, conn: QueryConnection, sid: str) -> Batch:
+    def _attach(self, conn: sqlite3.Connection, sid: str) -> Batch:
         try:
             if self._seeding is None:
                 # Native uses WAL: retain one read snapshot without blocking its writer.
@@ -119,7 +119,7 @@ class OpenCodeV2Source(OpenCodeSource):
             self._conn.rollback()
         self._seeding = None
 
-    def _seed_page(self, conn: QueryConnection, sid: str, seed: _AttachmentSeed) -> None:
+    def _seed_page(self, conn: sqlite3.Connection, sid: str, seed: _AttachmentSeed) -> None:
         """Build baseline maps before attachment, at most two bounded pages per call."""
         if not seed.window_done:
             floor = max(0, seed.point[0] - _REREAD_WINDOW_MS)
@@ -143,7 +143,7 @@ class OpenCodeV2Source(OpenCodeSource):
                 elif row[2] == "user":
                     seed.said.add(part.get("id") or "")
 
-    def _drain(self, conn: QueryConnection) -> Batch:
+    def _drain(self, conn: sqlite3.Connection) -> Batch:
         sid = self._session or ""
         events: list = []
         trajectory: list[TrajectoryFact] = []
@@ -173,7 +173,9 @@ class OpenCodeV2Source(OpenCodeSource):
             trajectory_events=(),
         )
 
-    def _reread_page(self, conn: QueryConnection, sid: str, events: list, trajectory: list) -> int:
+    def _reread_page(
+        self, conn: sqlite3.Connection, sid: str, events: list, trajectory: list
+    ) -> int:
         """Service older rewrites before advancing the forward cursor's retention window."""
         sweep = self._reread
         if sweep is None:
@@ -191,7 +193,9 @@ class OpenCodeV2Source(OpenCodeSource):
         )
         return fresh
 
-    def _emit(self, conn: QueryConnection, rows: list[Row], events: list, trajectory: list) -> int:
+    def _emit(
+        self, conn: sqlite3.Connection, rows: list[Row], events: list, trajectory: list
+    ) -> int:
         """Translate rows whose fingerprint moved since they were last reported."""
         fresh = 0
         for row in rows:
@@ -209,15 +213,15 @@ class OpenCodeV2Source(OpenCodeSource):
             self._emitted[row[0]] = seen
         return fresh
 
-    def _row_events(self, conn: QueryConnection, row: Row) -> list[tuple[str, dict]]:
-        """A row as the 1.x events it replaces: an assistant's parts land before its finish."""
+    def _row_events(self, conn: sqlite3.Connection, row: Row) -> list[tuple[str, dict]]:
+        """Ordered observation events: an assistant's parts land before its finish."""
         message = ("message.updated.1", {"info": row_info(conn, row)})
         parts = [
             ("message.part.updated.1", {"part": part, "time": row[4]}) for part in row_parts(row)
         ]
         return [*parts, message] if row[2] == "assistant" else [message, *parts]
 
-    def _status(self, conn: QueryConnection, sid: str) -> Status:
+    def _status(self, conn: sqlite3.Connection, sid: str) -> Status:
         row = latest_row(conn, sid)
         if row is None or row[2] == "idle":
             return Status.IDLE

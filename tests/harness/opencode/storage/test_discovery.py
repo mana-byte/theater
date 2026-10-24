@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from tests.support.opencode_recorder import rec as shared_rec
-from tests.support.opencode_storage import a_turn_with_a_tool, attach, drain, source_for
+from tests.support.opencode_recorder_v2 import attached, text
+from tests.support.opencode_recorder_v2 import rec as shared_rec
 from tests.support.shipped import OpenCodeObserver
 from theater.models import Status
 from theater.provenance import TranscriptProvenance
@@ -14,7 +14,11 @@ from theater.transcript_identity import (
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
-rec = shared_rec  # the shared fixture
+rec = shared_rec
+
+
+def source_for(rec, workdir, **kwargs):
+    return OpenCodeObserver(db=rec.path).open_source(cwd=str(workdir), **kwargs)
 
 
 def test_a_missing_database_is_ordinary_waiting(tmp_path, workdir):
@@ -63,14 +67,16 @@ def test_a_directory_with_no_session_is_waiting(rec, tmp_path):
 
 
 def test_attaching_skips_history_and_reports_where_it_started(rec, workdir):
-    a_turn_with_a_tool(rec)
+    rec.user("msg_u1", "hello")
+    rec.step("msg_a1", rec.tick(), [text("answer")], finish="stop", times={"completed": rec.tick()})
+    rec.idle("msg_i1", "succeeded")
     src = source_for(rec, workdir)
 
     batch = asyncio.run(src.read())
 
     assert batch.attached.session_id == "ses_one"
     assert batch.attached.location == "opencode://ses_one"
-    assert batch.attached.skipped == rec.seq + 1
+    assert batch.attached.skipped == rec.seq
     assert not batch.events
     src.commit_attachment()
     # Nothing new after an attach that skipped everything.
@@ -79,14 +85,15 @@ def test_attaching_skips_history_and_reports_where_it_started(rec, workdir):
 
 def test_a_session_that_finished_before_we_looked_is_idle(rec, workdir):
     """The reason `Batch.status` exists: no further event will ever arrive."""
-    a_turn_with_a_tool(rec)
+    rec.user("msg_u1", "hello")
+    rec.step("msg_a1", rec.tick(), [text("answer")], finish="stop", times={"completed": rec.tick()})
+    rec.idle("msg_i1", "succeeded")
     assert asyncio.run(source_for(rec, workdir).read()).status is Status.IDLE
 
 
 def test_a_session_still_working_when_we_attach_says_so(rec, workdir):
-    user = rec.message("msg_u1", "user")
-    rec.user_text(user["id"], "prt_u1", "hello")
-    rec.message("msg_a1", "assistant")
+    rec.user("msg_u1", "hello")
+    rec.step("msg_a1", rec.tick(), [])
 
     assert asyncio.run(source_for(rec, workdir).read()).status is Status.WORKING
 
@@ -99,7 +106,7 @@ def test_a_session_with_no_messages_is_idle(rec, workdir):
 def test_a_sub_agent_session_is_not_mistaken_for_the_pane(rec, workdir):
     """Sub-agents share their parent's directory and are always newer."""
     rec.conn.execute(
-        "INSERT INTO session (id, parent_id, directory, time_created) "
+        "INSERT INTO session_v2 (id, parent_id, directory, time_created) "
         "VALUES ('ses_child', 'ses_one', ?, 9999)",
         (str(workdir.resolve()),),
     )
@@ -119,9 +126,11 @@ def test_a_session_older_than_the_participant_is_not_ours(rec, workdir):
 def test_a_new_session_in_the_same_process_is_picked_up(rec, workdir):
     """A generic receipt stages a fresh exact session."""
     src = source_for(rec, workdir)
-    attach(src)
+    batch = asyncio.run(src.read())
+    assert batch.attached is not None
+    src.commit_attachment()
     rec.conn.execute(
-        "INSERT INTO session (id, parent_id, directory, time_created) "
+        "INSERT INTO session_v2 (id, parent_id, directory, time_created) "
         "VALUES ('ses_two', NULL, ?, 9999)",
         (str(workdir.resolve()),),
     )
@@ -144,10 +153,12 @@ def test_exact_session_without_receipt_does_not_bless_a_different_candidate(rec,
         session_id="ses_one",
         session_provenance=TranscriptProvenance.EXACT,
     )
-    initial = attach(src)
+    initial = asyncio.run(src.read())
+    assert initial.attached is not None
+    src.commit_attachment()
     assert initial.attached.correlation == str(TranscriptProvenance.EXACT)
     rec.conn.execute(
-        "INSERT INTO session (id, parent_id, directory, time_created) "
+        "INSERT INTO session_v2 (id, parent_id, directory, time_created) "
         "VALUES ('ses_two', NULL, ?, 9999)",
         (str(workdir.resolve()),),
     )
@@ -163,7 +174,7 @@ def test_exact_session_without_receipt_does_not_bless_a_different_candidate(rec,
 
 def test_refreshing_onto_the_same_session_reports_nothing(rec, workdir):
     """An empty batch, so the observer's quiet timers keep counting."""
-    src = drain(rec, workdir)
+    src = attached(rec, workdir)
     batch = asyncio.run(src.refresh())
     assert batch.attached is None
     assert batch.progressed is False

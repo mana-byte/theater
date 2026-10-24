@@ -3,44 +3,20 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
+from theater.harness.contracts.version_policy import VersionPolicy
 
 from .version import parse_vibe_version
 
-# _FLOOR is the first release whose config honours VIBE_SESSION_LOGGING__SAVE_DIR.
-# Earlier releases write outside the isolated domain, so launch planning refuses them.
-_FLOOR = (2, 24, 0)
-#: The first Vibe release not yet proved compatible with this store reader.
-#: Launch planning enforces the ceiling because the probe is display-only.
-_CEILING = (3, 0, 3)
-_POLICY = f"vibe-harness-{'.'.join(map(str, _FLOOR))}-compatible"
+VERSION_POLICY = VersionPolicy.load(Path(__file__).with_name("compatibility.json"))
+_POLICY = f"vibe-harness-{VERSION_POLICY.minimum}-compatible"
 
 
 def vibe_qualified_range_text() -> str:
     """The human-readable qualified Vibe range, shared by the probe and launch."""
-    floor = ".".join(str(part) for part in _FLOOR)
-    ceiling = ".".join(str(part) for part in _CEILING)
-    return f">={floor},<{ceiling}"
-
-
-def vibe_isolation_floor() -> tuple[int, int, int]:
-    """The oldest Vibe whose config honours the isolated session-log directory.
-
-    Older releases write their transcript outside it, where the observer never looks, so
-    launch planning refuses them instead of letting the job wait forever.
-    """
-    return _FLOOR
-
-
-def vibe_store_format_ceiling() -> tuple[int, int, int]:
-    """The newest Vibe version whose unified session store this reader can read.
-
-    The probe is display-only; launch planning enforces this ceiling so a too-new
-    writer is refused before the child runs instead of writing a store that no
-    reader understands.
-    """
-    return _CEILING
+    return VERSION_POLICY.range_text
 
 
 def probe_vibe_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
@@ -62,11 +38,12 @@ def probe_vibe_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibili
         return RuntimeCompatibility(
             supported=False, policy=_POLICY, reason="Vibe did not report a stable CLI version"
         )
-    supported = _FLOOR <= version < _CEILING
+    rendered = ".".join(str(part) for part in version)
+    supported = VERSION_POLICY.admits(rendered)
     return RuntimeCompatibility(
         supported=supported,
         policy=_POLICY,
-        native_version=".".join(str(part) for part in version),
+        native_version=rendered,
         reason=(
             None if supported else f"Vibe harness support requires {vibe_qualified_range_text()}"
         ),
@@ -75,7 +52,5 @@ def probe_vibe_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibili
 
 __all__ = [
     "probe_vibe_compatibility",
-    "vibe_isolation_floor",
     "vibe_qualified_range_text",
-    "vibe_store_format_ceiling",
 ]

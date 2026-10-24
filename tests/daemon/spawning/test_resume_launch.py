@@ -347,7 +347,9 @@ async def test_spawn_session_schema_includes_resume(daemon):
     assert "resume" not in schema["spawn_session"].get("required", [])
 
 
-async def test_provider_preparation_keeps_participant_unbound(registry, monkeypatch):
+async def test_provider_preparation_keeps_participant_unbound(
+    registry, monkeypatch, available_harness_binaries
+):
     """Provider preparation builds the plan before terminal creation."""
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)

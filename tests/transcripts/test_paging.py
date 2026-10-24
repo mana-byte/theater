@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support.opencode_recorder import Recorder
+from tests.support.opencode_recorder_v2 import RecorderV2
+from tests.support.opencode_recorder_v2 import text as opencode_text
 from tests.support.shipped import OpenCodeObserver
 from tests.support.transcript_pages import StaticSource, page, pager
 from theater.constants.daemon import TRANSCRIPT_READ_RESPONSE_MAX_BYTES
@@ -352,11 +353,15 @@ async def test_file_snapshot_replays_split_event_after_append(tmp_path: Path) ->
 async def test_opencode_source_uses_the_same_pager(tmp_path: Path) -> None:
     workdir = tmp_path / "work"
     workdir.mkdir()
-    recorder = Recorder(tmp_path / "opencode.db", "session", str(workdir))
+    recorder = RecorderV2(tmp_path / "opencode.db", "session", str(workdir))
     try:
-        message = recorder.message("message-1", "assistant")
-        recorder.text("message-1", "part-1", "é" * 20_000)
-        recorder.finish(message, "stop")
+        recorder.step(
+            "message-1",
+            recorder.tick(),
+            [opencode_text("é" * 20_000)],
+            finish="stop",
+            times={"completed": recorder.tick()},
+        )
         source = OpenCodeObserver(db=recorder.path).open_source(
             cwd=str(workdir), session_id="session"
         )
@@ -375,19 +380,27 @@ async def test_opencode_snapshot_excludes_a_newer_message_between_chunks(tmp_pat
     workdir = tmp_path / "work"
     workdir.mkdir()
     text = "é" * (TRANSCRIPT_READ_RESPONSE_MAX_BYTES * 2)
-    recorder = Recorder(tmp_path / "opencode.db", "session", str(workdir))
+    recorder = RecorderV2(tmp_path / "opencode.db", "session", str(workdir))
     try:
-        message = recorder.message("message-1", "assistant")
-        recorder.text("message-1", "part-1", text)
-        recorder.finish(message, "stop")
+        recorder.step(
+            "message-1",
+            recorder.tick(),
+            [opencode_text(text)],
+            finish="stop",
+            times={"completed": recorder.tick()},
+        )
         source = OpenCodeObserver(db=recorder.path).open_source(
             cwd=str(workdir), session_id="session"
         )
         try:
             first = await pager(source).read()
-            newer = recorder.message("message-2", "assistant")
-            recorder.text("message-2", "part-2", "newer")
-            recorder.finish(newer, "stop")
+            recorder.step(
+                "message-2",
+                recorder.tick(),
+                [opencode_text("newer")],
+                finish="stop",
+                times={"completed": recorder.tick()},
+            )
             chunks = list(first.events)
             current = first
             while current.next_cursor is not None:

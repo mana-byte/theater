@@ -17,7 +17,7 @@ from tests.support.pi_transcripts import append, session_record
 from theater import paths
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import theater_mcp_servers
-from theater.harness.builtin.plugins.pi import bootstrap
+from theater.harness.builtin.plugins.pi import bootstrap, launch
 from theater.harness.builtin.plugins.pi.constants import (
     PI_ISOLATION_MARKER,
 )
@@ -27,7 +27,10 @@ from theater.harness.builtin.plugins.pi.launch import (
 )
 from theater.harness.builtin.plugins.pi.manifest import MANIFEST
 from theater.harness.contracts.callbacks import LaunchContext
+from theater.harness.contracts.runtime import RuntimeCompatibility
 from theater.harness.manifests.compiler import compile_manifest
+
+pytestmark = pytest.mark.usefixtures("available_harness_binaries")
 
 
 def test_pi_launch_advertises_only_yolo_and_builds_isolated_argv(tmp_path, monkeypatch) -> None:
@@ -115,6 +118,41 @@ def test_pi_launch_argv_is_independent_of_approval_and_manifest_rejects_other_mo
                 config_path=config_path,
                 approval=rejected,
             )
+
+
+@pytest.mark.parametrize("cold", [True, False])
+def test_bootstrap_executes_the_binary_verified_by_launch_admission(tmp_path, monkeypatch, cold):
+    binary = str(tmp_path / "pi-qualified")
+
+    def probe(context):
+        assert context.binary == binary
+        return RuntimeCompatibility(supported=True, policy="simulated-launch")
+
+    monkeypatch.setattr(launch, "probe_pi_frontend_compatibility", probe)
+    plan = plan_launch(
+        LaunchContext(
+            "pi-child",
+            "hello",
+            tmp_path / "mcp.json",
+            "yolo",
+            binary=binary,
+            resume=None if cold else "old.jsonl",
+        )
+    )
+    captured = {}
+
+    def execvpe(file, args, env):
+        captured.update(file=file, args=args, env=env)
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(sys, "argv", ["bootstrap", *plan.argv[3:]])
+    monkeypatch.setattr(bootstrap.os, "execvpe", execvpe)
+    with pytest.raises(RuntimeError, match="exec intercepted"):
+        bootstrap.main()
+    assert captured["file"] == binary
+    assert captured["args"][0] == binary
+    assert "--theater-binary" not in captured["args"]
+    assert "--theater-cold-session-id" not in captured["args"]
 
 
 @pytest.mark.requires_node

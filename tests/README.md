@@ -21,8 +21,7 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 | Directory | Purpose |
 |---|---|
 | `support/` | Shared helpers (and `test_tmux_guard.py`); import as `from tests.support.x import ...`. The live suite's rig and the stack of processes it owns (`live_rig`, `live_stack`), obligations, coverage registry, declaration walker, tool and channel oracles, process table, mutations and probe sidecar (`compat_probe/`) live here |
-| `fixtures/` | Data only: recorded transcripts, schemas, compat evidence |
-| `native/` | Qualification helpers imported by `scripts/harness_compat` |
+| `fixtures/` | Data only: recorded transcripts and protocol payloads |
 | `daemon/controls/` | Send, steer, follow-up and dispatch control state machine |
 | `daemon/presence/` | Human-presence classification, monitor and provider access |
 | `daemon/handoff/` | `after` handoffs: gates, cards, evidence |
@@ -54,7 +53,7 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 | `boundaries/` | Import and process-boundary rules |
 | `packaging/` | Built distributions and artifacts |
 | `perf/` | Latency baselines and synthetic loads |
-| `integration/<vendor>/` | Real-binary, opt-in proofs (claude, codex, opencode, pi); skip unless their env vars are set |
+| `integration/<vendor>/` | Distribution and focused SDK integration regressions; not qualification authority |
 | `compat/` | Harness-compat pipeline tests |
 | `conformance/` | The live compatibility suite: binary-free completeness and guard tests here; `live/` (a real daemon, Régie bridge and stock CLI against a mock model; collected only under the pipeline sandbox token, run with `make suite HARNESS=<h>`) and `canaries/` (mutation canaries, opt-in with `make canaries`) |
 
@@ -66,10 +65,10 @@ Régie tests live in `packages/regie/tests`, grouped like `packages/regie/src/re
 
 - File name = subject. No history, wave or release names (`rc10_*`, `stack_d`) and no
   redundant directory prefix (`daemon/controls/test_send.py`, not `test_controls_send.py`).
-- Test directories get no `__init__.py` (only `support/`, `native/` are packages): pytest
+- Test directories get no `__init__.py` (only `support/` is a package): pytest
   runs with `--import-mode=importlib`, so the same basename may appear in different directories.
-- `tests/native` and `tests/fixtures` stay where they are because `scripts/harness_compat`
-  imports and digests them.
+- Shared test code lives in `tests/support`; fixture data describes behavior, never a history of
+  CLI releases that passed qualification.
 - Every module opens with a one-line docstring stating its subject.
 
 ## The live conformance suite

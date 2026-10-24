@@ -34,6 +34,8 @@ from theater.harness.contracts.channels import ChannelKind
 from theater.harness.manifests.compiler import compile_manifest
 from theater.models import Participant
 
+pytestmark = pytest.mark.usefixtures("available_harness_binaries")
+
 
 def test_plan_env_pins_config_dir_only_when_configured(tmp_path, monkeypatch) -> None:
     def context() -> LaunchContext:

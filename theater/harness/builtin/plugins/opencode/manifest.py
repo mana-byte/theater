@@ -39,7 +39,6 @@ from theater.harness.contracts.runtime import (
 )
 
 from .compat import COMPAT
-from .dialect import OpenCodeDialect
 from .launch import discover_models, plan_launch, resume_launch_overlay
 from .observer import (
     OpenCodeObserver,
@@ -51,12 +50,8 @@ from .observer import (
 )
 from .render_mcp import render_mcp_servers
 from .runtime_plan import (
-    OPENCODE_SERVER_MAX_VERSION,
-    OPENCODE_SERVER_MIN_VERSION,
-    OPENCODE_SERVER_V2_MAX_VERSION,
-    OPENCODE_SERVER_V2_MIN_VERSION,
     SERVER_STDOUT_MAX_BYTES,
-    release_text,
+    VERSION_POLICY,
 )
 from .server_discovery import parse_server_stdout_endpoint
 from .server_plan import (
@@ -64,7 +59,7 @@ from .server_plan import (
     plan_opencode_server,
     probe_opencode_server_compatibility,
 )
-from .server_runtime import opencode_server_runtime_factory
+from .server_runtime_v2 import opencode_server_runtime_factory
 
 _NATIVE_HOOKS = HookChannelManifest(
     declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
@@ -145,12 +140,7 @@ MANIFEST = HarnessManifest(
     models=ModelDiscoveryManifest(discoverer=discover_models),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
     native_compatibility=NativeCompatibilityManifest(
-        qualified_range=(
-            f">={release_text(OPENCODE_SERVER_MIN_VERSION)},"
-            f"<{release_text(OPENCODE_SERVER_MAX_VERSION)} || "
-            f">={release_text(OPENCODE_SERVER_V2_MIN_VERSION)},"
-            f"<{release_text(OPENCODE_SERVER_V2_MAX_VERSION)}"
-        ),
+        qualified_range=VERSION_POLICY.range_text,
         probe=probe_opencode_server_compatibility,
     ),
     runtime=RuntimeManifest(
@@ -177,9 +167,8 @@ MANIFEST = HarnessManifest(
 def manifest_for_paths(
     db: Path | None = None,
     correlation_dir: Path | None = None,
-    dialect: OpenCodeDialect | None = None,
 ) -> HarnessManifest:
-    if db is None and correlation_dir is None and dialect is None:
+    if db is None and correlation_dir is None:
         return MANIFEST
     observation = MANIFEST.observation
     primary = observation.primary
@@ -187,11 +176,6 @@ def manifest_for_paths(
         raise RuntimeError("OpenCode manifest has no primary source")
     return replace(
         MANIFEST,
-        launch=replace(
-            MANIFEST.launch,
-            planner=partial(plan_launch, db=db, dialect=dialect),
-            resume_planner=partial(resume_launch_overlay, db=db, dialect=dialect),
-        ),
         observation=replace(
             observation,
             primary=replace(

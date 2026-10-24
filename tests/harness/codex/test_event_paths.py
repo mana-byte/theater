@@ -351,7 +351,7 @@ def test_events_without_a_structured_file_field_yield_no_paths(payload):
 # ---- resume argv -------------------------------------------------------
 
 
-def test_resume_forks_the_session(tmp_path):
+def test_resume_forks_the_session(tmp_path, available_harness_binaries):
     plan = plan_launch(
         "codex",
         participant_id="abc123",
@@ -371,7 +371,7 @@ def test_resume_forks_the_session(tmp_path):
     assert plan.argv[-1] == "continue working"
 
 
-def test_resume_without_prompt_omits_positional(tmp_path):
+def test_resume_without_prompt_omits_positional(tmp_path, available_harness_binaries):
     plan = plan_launch(
         "codex",
         participant_id="abc",

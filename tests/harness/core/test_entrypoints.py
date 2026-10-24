@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
 
+from tests.support.opencode_recorder_v2 import RecorderV2, tool
 from tests.support.paths import FIXTURES
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
@@ -111,101 +111,24 @@ def test_transcript_entrypoints_preserve_public_parse_record_shape(
 
 
 async def test_opencode_entrypoint_preserves_public_source_shape(tmp_path: Path):
-    database = tmp_path / "opencode.db"
+    database = tmp_path / "opencode-v2.db"
     workdir = tmp_path / "work"
     workdir.mkdir()
-    connection = sqlite3.connect(database)
-    connection.executescript(
-        """
-        CREATE TABLE session (
-            id TEXT PRIMARY KEY, parent_id TEXT,
-            directory TEXT, time_created INTEGER
-        );
-        CREATE TABLE event (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, aggregate_id TEXT,
-            seq INTEGER, type TEXT, data TEXT
-        );
-        CREATE TABLE message (
-            id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
-            time_updated INTEGER, data TEXT
-        );
-        CREATE TABLE part (
-            id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
-            time_created INTEGER, time_updated INTEGER, data TEXT
-        );
-        """
-    )
-    connection.execute(
-        "INSERT INTO session (id, parent_id, directory, time_created) VALUES (?, NULL, ?, ?)",
-        ("session-1", str(workdir.resolve()), 1000),
-    )
-    connection.commit()
+    recorder = RecorderV2(database, "ses_one", str(workdir))
     source = OpenCodeObserver(db=database).open_source(cwd=str(workdir))
     try:
         attached = await source.read()
         assert attached.attached is not None
         source.commit_attachment()
-        events = [
-            (
-                "message.updated.1",
-                {"info": {"id": "user-1", "role": "user", "time": {"created": 1000}}},
-            ),
-            (
-                "message.part.updated.1",
-                {
-                    "part": {
-                        "id": "user-part",
-                        "messageID": "user-1",
-                        "type": "text",
-                        "text": "ask",
-                    },
-                    "time": 1010,
-                },
-            ),
-            (
-                "message.updated.1",
-                {
-                    "info": {
-                        "id": "assistant-1",
-                        "role": "assistant",
-                        "time": {"created": 1015},
-                    }
-                },
-            ),
-            (
-                "message.part.updated.1",
-                {
-                    "part": {
-                        "id": "tool-part",
-                        "messageID": "assistant-1",
-                        "type": "tool",
-                        "callID": "call-1",
-                        "tool": "read",
-                        "state": {"status": "completed", "input": {}, "output": "found"},
-                    },
-                    "time": 1020,
-                },
-            ),
-            (
-                "message.updated.1",
-                {
-                    "info": {
-                        "id": "assistant-1",
-                        "role": "assistant",
-                        "finish": "stop",
-                        "time": {"created": 1015, "completed": 1030},
-                    }
-                },
-            ),
-        ]
-        connection.executemany(
-            "INSERT INTO event (aggregate_id, seq, type, data) VALUES (?, ?, ?, ?)",
-            [
-                ("session-1", index, kind, json.dumps(payload))
-                for index, (kind, payload) in enumerate(events)
-            ],
+        recorder.user("user-1", "ask")
+        recorder.step(
+            "assistant-1",
+            recorder.tick(),
+            [tool("call-1", "completed", "file.txt", "found")],
+            finish="stop",
+            times={"completed": recorder.tick()},
         )
-        connection.commit()
+        recorder.idle("idle-1", "completed")
 
         batch = await source.read()
         call = next(fact for fact in batch.trajectory if fact.kind is TrajectoryKind.TOOL_CALL)
@@ -214,7 +137,7 @@ async def test_opencode_entrypoint_preserves_public_source_shape(tmp_path: Path)
             (EventKind.USER, "ask", None, False, None),
             (EventKind.TOOL_CALL, "", "read", False, None),
             (EventKind.TOOL_RESULT, "found", "read", False, None),
-            (EventKind.ASSISTANT, "", None, True, "assistant-1"),
+            (EventKind.ASSISTANT, "", None, True, "idle-1"),
         ]
         assert (call.native_id, result.native_id, result.call_id) == (
             "call-1",
@@ -223,7 +146,7 @@ async def test_opencode_entrypoint_preserves_public_source_shape(tmp_path: Path)
         )
     finally:
         await source.aclose()
-        connection.close()
+        recorder.conn.close()
 
 
 def _transcript_case(name: str, tmp_path: Path):

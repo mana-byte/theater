@@ -44,6 +44,8 @@ from theater.protocol import RemoteError
 from theater.trajectory.enums import TrajectoryKind
 from theater.transcript_identity import canonical_location
 
+pytestmark = pytest.mark.usefixtures("available_harness_binaries")
+
 
 def _rig(*native_ids):
     identity = HookAdmissionIdentity(harness="example", session_id="session-a")

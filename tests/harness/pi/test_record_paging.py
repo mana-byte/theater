@@ -284,6 +284,7 @@ def test_pi_history_seed_io_error_is_source_unavailable(tmp_path, monkeypatch) -
     assert failed.error_code == "transcript_source_unavailable"
 
 
+@pytest.mark.usefixtures("available_harness_binaries")
 def test_pi_history_reader_keeps_live_turn_context_and_resume_forks_into_new_session_dir(
     tmp_path, monkeypatch
 ) -> None:

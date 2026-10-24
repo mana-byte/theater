@@ -1,4 +1,4 @@
-"""Pure prompt and control facts shared by OpenCode's distinct runtimes."""
+"""Pure prompt admission and native control capabilities."""
 
 from __future__ import annotations
 

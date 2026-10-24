@@ -19,8 +19,8 @@ typecheck:
 	uv run mypy
 
 suite:         ## live conformance suite on the installed CLI (HARNESS=vibe ARGS="-- -k mcp")
-	uv run python -m scripts.harness_compat suite $(HARNESS) $(ARGS)
+	PYTHONDONTWRITEBYTECODE=1 uv run --no-sync --no-cache python -m scripts.harness_compat suite $(HARNESS) $(ARGS)
 canaries:      ## the live suite must notice deliberately broken plugins (slow; HARNESS=vibe to narrow)
-	HARNESS_COMPAT_CANARIES=1 uv run pytest tests/conformance/canaries $(if $(HARNESS),-k $(HARNESS)) -n auto
-compat:        ## qualify new upstream CLI releases locally, dry run (HARNESS=codex VERSION=0.162.1)
-	uv run python -m scripts.harness_compat run $(if $(HARNESS),--harness $(HARNESS)) $(if $(VERSION),--version $(VERSION))
+	PYTHONDONTWRITEBYTECODE=1 HARNESS_COMPAT_CANARIES=1 uv run --no-sync --no-cache pytest -p no:cacheprovider tests/conformance/canaries $(if $(HARNESS),-k $(HARNESS)) -n auto
+compat:        ## qualify one VERSION, or every release from the pinned minimum; local dry run
+	PYTHONDONTWRITEBYTECODE=1 uv run --no-sync --no-cache python -m scripts.harness_compat $(if $(VERSION),qualify $(HARNESS) $(VERSION),run $(HARNESS))

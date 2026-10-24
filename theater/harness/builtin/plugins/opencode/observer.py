@@ -22,10 +22,9 @@ from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFe
 from .constants import DB_NAME
 from .dialect import domain_for, is_v2_participant, v2_database_for_domain, v2_database_path
 from .identity import admit_operator_candidate, transcript_candidates, validate_receipt_session_id
-from .mcp import catalog_path, plugin_path
+from .mcp import catalog_path
 from .native_plugin_v2 import plugin_dir
 from .screen import is_idle_screen, screen_reading
-from .source import OpenCodeSource
 from .source_v2 import OpenCodeV2Source
 
 
@@ -69,7 +68,7 @@ class OpenCodeObserver:
         session_id: str | None = None,
         after: float | None = None,
     ) -> Source:
-        return OpenCodeSource(self.db, cwd=cwd, session_id=session_id, after=after)
+        return OpenCodeV2Source(self.db, cwd=cwd, session_id=session_id, after=after)
 
     def open_source_for(
         self,
@@ -86,13 +85,12 @@ class OpenCodeObserver:
             if self.correlation_dir is not None
             else paths.mcp_config_path(participant_id)
         )
-        receipt_plugin_path = plugin_path(config_path)
-        return OpenCodeSource(
+        return OpenCodeV2Source(
             self.db,
             cwd=cwd,
             session_id=session_id,
             after=after,
-            receipt_expected=receipt_plugin_path.exists(),
+            receipt_expected=plugin_dir(config_path).exists(),
             session_provenance=session_provenance,
             known_location=known_location,
             mcp_catalog_path=catalog_path(participant_id, self.correlation_dir),
@@ -106,25 +104,10 @@ class OpenCodeObserver:
             and is_v2_participant(context.participant_id)
         ):
             lineage = v2_database_path(context.participant_id)
-        if lineage is not None:
-            return self._open_v2_source(context, lineage)
-        if not context.participant_scoped:
-            return self.open_source(
-                cwd=context.cwd,
-                session_id=context.session_id,
-                after=context.after,
-            )
-        return self.open_source_for(
-            participant_id=context.participant_id,
-            cwd=context.cwd,
-            session_id=context.session_id,
-            after=context.after,
-            session_provenance=context.session_provenance,
-            known_location=context.known_location,
-        )
+        return self._open_v2_source(context, lineage or self.db)
 
     def _open_v2_source(self, context: ParticipantObservationContext, db: Path) -> Source:
-        """A 2.x participant reads its own lineage database, whatever the 1.x default is."""
+        """An isolated participant reads its own lineage database."""
         receipt_expected = False
         mcp_catalog = None
         if context.participant_scoped:

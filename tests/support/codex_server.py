@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from theater.harness.builtin.plugins.codex.runtime import CodexRuntime
 from theater.harness.builtin.plugins.codex.runtime_plan import (
-    CODEX_RUNTIME_QUALIFIED_FLOOR,
+    VERSION_POLICY,
 )
 from theater.harness.contracts.runtime import (
     RuntimeConnection,
@@ -31,8 +31,8 @@ CWD = "/repo"
 GENERATION = 7
 
 
-# Release the scripted protocol examples claim to talk to: the floor is always qualified.
-CAPTURED_CODEX_RELEASE = ".".join(map(str, CODEX_RUNTIME_QUALIFIED_FLOOR))
+# Release the fake backend reports: the current installed baseline.
+CAPTURED_CODEX_RELEASE = VERSION_POLICY.minimum
 
 
 class RequestFailure(Exception):

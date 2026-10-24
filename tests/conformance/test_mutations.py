@@ -43,11 +43,11 @@ def test_a_mutation_applies_only_to_obligations_the_harness_derives() -> None:
     assert set(applicable(manual, both[2:])) == set()
 
 
-def test_a_blanket_mutation_applies_to_every_harness_it_names() -> None:
+def test_a_blanket_mutation_requires_a_plugin_declaration() -> None:
     blanket = next(item for item in MUTATIONS if ANY in item.breaks)
 
-    assert blanket.only, "a blanket canary is only meaningful where the sandbox cannot cover for it"
-    assert all(applicable(blanket, (), name) == blanket.breaks for name in blanket.only)
+    assert applicable(blanket, (), (blanket.name,)) == blanket.breaks
+    assert not applicable(blanket, ())
 
 
 def test_a_refused_native_runtime_breaks_the_route_and_what_must_survive_on_it() -> None:
@@ -55,7 +55,12 @@ def test_a_refused_native_runtime_breaks_the_route_and_what_must_survive_on_it()
 
     expected = applicable(refused, required(HARNESSES["codex"]))
 
-    assert dict(expected) == {"runtime:native": "fail", "runtime:survival": "fail"}
+    assert dict(expected) == {
+        "runtime:native": "fail",
+        "runtime:survival": "fail",
+        "runtime:queue": "fail",
+        "runtime:settings": "fail",
+    }
 
 
 def _mutate(name: str, manifest):
@@ -176,10 +181,11 @@ def test_a_manifest_without_a_native_runtime_is_mutated_through_its_legacy_plann
     assert mutated.runtime is None and mutated.launch.planner is not plan
 
 
-def test_a_canary_with_a_harness_of_its_own_applies_only_there() -> None:
+def test_canary_applicability_is_declared_by_the_plugin() -> None:
     env = next(item for item in MUTATIONS if item.name == "launch-env-dropped")
     files = next(item for item in MUTATIONS if item.name == "launch-files-dropped")
+    vibe = HARNESSES["vibe"].compat.canaries
+    claude = HARNESSES["claude"].compat.canaries
 
-    assert applicable(env, (), "vibe") and not applicable(env, (), "claude")
-    assert applicable(files, (), "claude") and not applicable(files, (), "vibe")
-    assert not applicable(files, (), None)
+    assert applicable(env, (), vibe) and not applicable(env, (), claude)
+    assert applicable(files, (), claude) and not applicable(files, (), vibe)

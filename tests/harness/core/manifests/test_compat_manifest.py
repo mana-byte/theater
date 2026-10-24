@@ -96,6 +96,27 @@ _EDIT = NativeEdit("write_file", {"path": "{path}", "content": "{nonce}"})
             id="provision-not-callable",
         ),
         pytest.param(
+            CompatManifest(provision=provision, canaries="launch-files-dropped"),
+            _APPROVALS,
+            "compat.canaries",
+            "must be a tuple",
+            id="canaries-not-tuple",
+        ),
+        pytest.param(
+            CompatManifest(provision=provision, canaries=(" ",)),
+            _APPROVALS,
+            "compat.canaries",
+            "non-blank",
+            id="canary-blank-name",
+        ),
+        pytest.param(
+            CompatManifest(provision=provision, canaries=("a", "a")),
+            _APPROVALS,
+            "compat.canaries",
+            "unique",
+            id="canary-duplicate-name",
+        ),
+        pytest.param(
             CompatManifest(provision=provision, native_edit="write"),
             _APPROVALS,
             "compat.native_edit",

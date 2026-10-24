@@ -9,15 +9,20 @@ from theater.harness.base import (
     ResumeLaunchOverlay,
 )
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
+from theater.harness.contracts.runtime import RuntimeProbeContext
 from theater.harness.normalization import literal_prompt_argument
 from theater.harness.transcript.discovery import root_domain_overlay
 from theater.models import BadRequest
 
 from .homes import codex_home, home_for_launch, sessions_root
+from .runtime_plan import probe_codex_compatibility
 
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
-    argv = ["codex"]
+    compatibility = probe_codex_compatibility(RuntimeProbeContext(binary=context.binary))
+    if not compatibility.supported:
+        raise BadRequest(f"refusing to launch Codex: {compatibility.reason}")
+    argv = [context.binary or "codex"]
     if context.resume is not None:
         argv.append("fork")
         argv.append(context.resume)

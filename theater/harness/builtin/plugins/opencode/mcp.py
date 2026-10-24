@@ -12,7 +12,6 @@ from theater.constants.harness import HARNESS_MCP_SERVER_NAME
 from theater.harness.normalization.values import trajectory_identifier
 
 from .constants import (
-    CORRELATION_PLUGIN_SUFFIX,
     MCP_CATALOG_FILENAME,
     MCP_CATALOG_MAX_BYTES,
     MCP_CATALOG_MAX_SERVERS,
@@ -22,10 +21,6 @@ from .constants import (
 )
 
 type _Signature = tuple[int, int, int, int]
-
-
-def plugin_path(config_path: Path) -> Path:
-    return config_path.with_suffix(CORRELATION_PLUGIN_SUFFIX)
 
 
 def catalog_path(participant_id: str, correlation_dir: Path | None = None) -> Path:
@@ -143,4 +138,4 @@ class OpenCodeMcpCatalog:
         self._generation += 1
 
 
-__all__ = ["OpenCodeMcpCatalog", "catalog_path", "plugin_path"]
+__all__ = ["OpenCodeMcpCatalog", "catalog_path"]

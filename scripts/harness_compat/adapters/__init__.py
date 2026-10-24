@@ -6,7 +6,8 @@ import importlib
 
 from ..contract import Adapter
 
-ADAPTER_NAMES = ("codex", "claude", "opencode", "opencode2", "pi", "vibe")
+#: Canonical plugin names: the adapter, the plugin folder and the CLI binary share one name.
+ADAPTER_NAMES = ("claude", "codex", "opencode", "pi", "vibe")
 
 
 def load_adapter(name: str) -> Adapter:

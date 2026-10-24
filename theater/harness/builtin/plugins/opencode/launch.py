@@ -17,38 +17,26 @@ from theater.harness.contracts.callbacks import (
 )
 from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.harness.normalization import literal_prompt_argument
-from theater.harness.transcript.discovery import root_domain_overlay
 from theater.models import BadRequest
 
 from . import ids_v2
 from .approval_v2 import approval_ruleset
 from .constants import (
-    _APPROVAL_SESSION_RULES,
     BOOTSTRAP_CREDENTIAL_NAME,
     MODELS_TIMEOUT,
     TUI_CONFIG_ENV_V2,
     TUI_PROMPTED_PERMISSIONS_V2,
 )
 from .dialect import (
-    OpenCodeDialect,
     domain_for,
-    installed_dialect,
-    installed_version,
+    require_supported_version,
     resolve_binary,
     v2_database_for_domain,
     v2_database_path,
     v2_lineage_marker,
 )
 from .legacy_bootstrap_v2 import bootstrap_path, render_legacy_bootstrap
-from .mcp import plugin_path
-from .native_plugin import render_native_plugin
 from .native_plugin_v2 import plugin_dir, render_native_plugin_v2
-from .observer import database_path
-from .plugin_receipt import approval_requires_plugin
-from .runtime_plan import (
-    OPENCODE_SERVER_V2_MAX_VERSION,
-    OPENCODE_SERVER_V2_MIN_VERSION,
-)
 
 #: `$0` is the resolved binary, `$1` the create payload, the rest — after one
 #: `shift` — the full TUI argv, binary included. A failed create aborts pre-TUI.
@@ -59,60 +47,10 @@ _CREATE_THEN_EXEC = (
 
 def plan_launch(
     context: LaunchContext,
-    *,
-    db: Path | None = None,
-    dialect: OpenCodeDialect | None = None,
 ) -> LaunchPlan:
     binary = resolve_binary(context.binary or "opencode")
-    if (dialect or installed_dialect(binary)) is OpenCodeDialect.V2:
-        return _plan_launch_v2(context, binary=binary)
-    if approval_requires_plugin(context.approval):
-        # The TUI submits the prompt inside the opencode process, so no
-        # Theater-side proof can come between a broken plugin and the first
-        # model call — the fail-closed behavior is to refuse the launch.
-        raise BadRequest(
-            "the OpenCode 1.x TUI route cannot prove its approval plugin loaded: OpenCode "
-            "silently keeps a broken plugin running, and the prompt would run with the "
-            "agent's own permissions. Launch with yolo approval, or use the native server "
-            "topology, which refuses the session unless the plugin proves it loaded."
-        )
-    participant_id = context.participant_id
-    config_path = context.config_path
-    database = database_path(db)
-    config: dict[str, object] = {
-        "$schema": "https://opencode.ai/config.json",
-    }
-    native_plugin_path = plugin_path(config_path)
-    token_path = paths.participant_observation_dir(participant_id, "opencode") / "receipt-token"
-    config["plugin"] = [native_plugin_path.resolve().as_uri()]
-    argv = [binary]
-    if context.model:
-        argv += ["--model", context.model]
-    # The plugin appends the approval ruleset to the session permission, merged after
-    # agent rules; OPENCODE_PERMISSION lands in the global layer agents override.
-    session_rules = _APPROVAL_SESSION_RULES.get(context.approval, ())
-    if context.approval == "yolo":
-        argv.append("--auto")
-    if context.resume is not None:
-        argv += ["-s", context.resume, "--fork"]
-    elif context.prompt:
-        # yargs (1.x) and effect's CLI (2.x) both refuse a "-"-leading value
-        # after `--prompt`, so the prompt stays one literal element.
-        argv += ["--prompt", literal_prompt_argument(context.prompt)]
-    files = {
-        config_path: json.dumps(config, indent=2),
-        native_plugin_path: render_native_plugin(participant_id, token_path, session_rules),
-    }
-    env = {
-        "OPENCODE_CONFIG": str(config_path),
-        "OPENCODE_DB": str(database),
-    }
-    return LaunchPlan(
-        argv=argv,
-        env=env,
-        files=files,
-        receipt_token_path=token_path,
-    )
+    require_supported_version(binary)
+    return _plan_launch_v2(context, binary=binary)
 
 
 def _plan_launch_v2(context: LaunchContext, *, binary: str) -> LaunchPlan:
@@ -170,21 +108,7 @@ def _plan_launch_v2(context: LaunchContext, *, binary: str) -> LaunchPlan:
 def _plan_enforced_launch_v2(
     context: LaunchContext, *, binary: str, files: dict[Path, str], env: dict[str, str]
 ) -> LaunchPlan:
-    """`manual`/`edits`: only a qualified 2.x release gets the enforcing bootstrap.
-
-    Core swallows a plugin load failure and keeps running, so an unqualified release is
-    refused here rather than launched unprotected.
-    """
-    version = installed_version(binary)
-    rendered = "unreadable" if version is None else ".".join(str(part) for part in version)
-    if version is None or not (
-        OPENCODE_SERVER_V2_MIN_VERSION <= version < OPENCODE_SERVER_V2_MAX_VERSION
-    ):
-        raise BadRequest(
-            f"{binary} is OpenCode {rendered}; Theater enforces manual/edits approval on the "
-            "legacy route only for the qualified 2.x range (2.0.6 and later 2.0.x). Install a "
-            "qualified release, or launch with yolo approval."
-        )
+    """Verify the approval plugin on a private server before opening its TUI."""
     participant_id = context.participant_id
     config_path = context.config_path
     database = v2_database_path(participant_id)
@@ -237,33 +161,17 @@ def tui_env_v2(approval: str | None) -> dict[str, str]:
 
 def resume_launch_overlay(
     context: ResumeContext,
-    *,
-    db: Path | None = None,
-    dialect: OpenCodeDialect | None = None,
 ) -> ResumeLaunchOverlay:
-    predecessor = context.predecessor
-    lineage = v2_database_for_domain(predecessor.transcript_domain)
-    if (dialect or installed_dialect()) is OpenCodeDialect.V2:
-        return _resume_overlay_v2(context, lineage)
-    if lineage is not None:
-        raise BadRequest(
-            "cannot resume this OpenCode session: it was recorded by OpenCode 2.x, and the "
-            "opencode on PATH is 1.x. Put OpenCode 2.x first on PATH to resume it, or start a "
-            "new session."
-        )
-    if predecessor.transcript_domain is None:
-        return ResumeLaunchOverlay()
-    expected = f"opencode://{database_path(db)}"
-    return root_domain_overlay(predecessor, expected, "OpenCode")
+    lineage = v2_database_for_domain(context.predecessor.transcript_domain)
+    return _resume_overlay_v2(context, lineage)
 
 
 def _resume_overlay_v2(context: ResumeContext, lineage: Path | None) -> ResumeLaunchOverlay:
-    """Continue the session in its own lineage database, never in one 1.x also uses."""
+    """Continue only an authenticated, isolated database lineage."""
     if lineage is None:
         raise BadRequest(
-            "cannot resume this OpenCode session with OpenCode 2.x: it was recorded by OpenCode "
-            "1.x, and 2.x migrates (and clears the event log of) any 1.x database it opens. "
-            "Put OpenCode 1.x first on PATH to resume it, or start a new session."
+            "cannot resume this OpenCode session: it has no supported isolated database "
+            "lineage. Start a new session instead."
         )
     domain = domain_for(lineage)
     inside = lineage.expanduser().resolve().is_relative_to(paths.participants_dir().resolve())

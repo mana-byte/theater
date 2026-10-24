@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import stat
 import subprocess
 from collections.abc import Iterator
@@ -12,6 +13,32 @@ from pathlib import Path
 from .process import SANDBOX_ENV, stop_owned
 
 _SKIPPED_DIRS = frozenset({"node_modules", ".git", "uv-cache", "uv-tools", "npm"})
+
+
+class CleanupFailed(RuntimeError):
+    """Temporary data remains, so the whole run must authorize nothing."""
+
+
+def _unlock(directory: Path) -> None:
+    with contextlib.suppress(OSError):
+        directory.chmod(0o700)
+        for child in directory.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                _unlock(child)
+
+
+def remove_tree(path: Path) -> None:
+    """Delete an owned temporary tree; a cleanup failure must prevent authorization."""
+    if path.is_symlink():
+        path.unlink()
+        return
+    if not path.exists():
+        return
+    _unlock(path)
+    stuck: list[str] = []
+    shutil.rmtree(path, onexc=lambda _function, target, _error: stuck.append(str(target)))
+    if stuck or path.exists():
+        raise CleanupFailed(f"temporary data cleanup left {path} ({len(stuck)} paths)")
 
 
 def _sockets(root: Path) -> Iterator[Path]:

@@ -195,6 +195,8 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "RuntimeManifest.session_order=FRONTEND_FIRST",
         "RuntimeManifest.session_order=SESSION_FIRST",
         "RuntimeManifest.legacy_fallback",
+        "RuntimeManifest.legacy_fallback=QUEUE_FOLLOWUP",
+        "RuntimeManifest.legacy_fallback=SETTINGS_UPDATE",
         "RuntimeManifest.unavailable_capabilities",
         # Each derives runtime:unavailable-<name>; one with no public call to exercise it ends
         # inconclusive, never green.
@@ -227,10 +229,16 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "ModelDiscoveryManifest.discoverer",
     ),
     _exempt(
-        "the version gate and its probe are proven by the pipeline's bump consistency tests",
+        "policy validation proves version admission; the live suite temporarily admits only "
+        "its supplied version so a closed gate cannot substitute for behavioral testing",
         "HarnessManifest.native_compatibility",
         "NativeCompatibilityManifest.probe",
         "NativeCompatibilityManifest.qualified_range",
+    ),
+    _exempt(
+        "plugin-declared mutation choices are tooling checks of the suite, run separately from "
+        "release qualification and checked against the generic mutation catalogue",
+        "CompatManifest.canaries",
     ),
     _exempt(
         "declared v1 gap: stimulating a native child needs a CLI-specific task the mock cannot "
@@ -280,13 +288,6 @@ COVERAGE: Mapping[str, Coverage] = _merge(
             for binding in ("HookBinding", "OtelBinding")
             for signal in ("CONTENT", "IDENTITY", "LINEAGE", "MODEL", "TIMING", "TURN", "USAGE")
         ),
-    ),
-    _exempt(
-        "declared gap: no live scenario holds a turn and sends again (plan 5.5 item 4 'queue') or "
-        "updates the settings of a running participant; the refusal side is proven by "
-        "runtime:unavailable-<capability>",
-        "RuntimeManifest.legacy_fallback=QUEUE_FOLLOWUP",
-        "RuntimeManifest.legacy_fallback=SETTINGS_UPDATE",
     ),
     _exempt(
         "queue and payload bounds are enforced and unit-tested in channel ingress, not by a CLI",

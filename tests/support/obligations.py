@@ -101,7 +101,7 @@ def _edit(harness: Harness) -> tuple[str, ...]:
 
 
 def _runtime(harness: Harness) -> tuple[str, ...]:
-    """A native route that survives a daemon restart, its legacy fallback, and what is refused."""
+    """Native routing, reconnect, queue/settings behavior and declared refusals."""
     if harness.runtime is None:
         return ()
     refused = sorted(
@@ -109,7 +109,21 @@ def _runtime(harness: Harness) -> tuple[str, ...]:
         for capability in harness.runtime.unavailable_capabilities
         if capability is not RuntimeCapability.STEER  # the steer family proves its own refusal
     )
-    return ("native", "survival", "legacy", *(f"unavailable-{name}" for name in refused))
+    supported = tuple(
+        name
+        for name, capability in (
+            ("queue", RuntimeCapability.QUEUE_FOLLOWUP),
+            ("settings", RuntimeCapability.SETTINGS_UPDATE),
+        )
+        if capability not in harness.runtime.unavailable_capabilities
+    )
+    return (
+        "native",
+        "survival",
+        "legacy",
+        *supported,
+        *(f"unavailable-{name}" for name in refused),
+    )
 
 
 FAMILIES: tuple[Family, ...] = (

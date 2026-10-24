@@ -51,7 +51,7 @@ PYTEST_ADDOPTS=--cov make test # full suite with the 80% coverage gate
 uv run ruff check             # lint
 uv run ruff format --check    # verify formatting; omit --check to format
 uv run mypy                   # Theater, Régie, compat scripts; no --strict
-make compat HARNESS=vibe       # dry-run: qualify new upstream CLI releases (docs/harness-compat.md)
+make compat HARNESS=vibe VERSION=3.0.2 # qualify exactly one release, persist nothing
 make suite HARNESS=vibe        # live conformance suite on the installed CLI: ARGS="-- -k mcp -x"
 make canaries HARNESS=vibe     # the suite must notice deliberately broken plugins (slow, opt-in)
 ```
@@ -244,36 +244,34 @@ reports what loaded and why anything was rejected.
 
 ## Changing a version gate or native wiring
 
-Every harness's supported-version bound is one constant in its plugin, and the daily
-[compatibility pipeline](docs/harness-compat.md) proves new upstream releases against it:
-`scripts/harness_compat/adapters/<h>_bump.py` parses that constant by name and rewrites one
-literal (Claude `_QUALIFIED_MAX`, Codex/OpenCode `runtime_plan.py` (OpenCode has a 1.x and a 2.x
-ceiling, qualified as `opencode` and `opencode2`), Pi `runtime_constants.py`, Vibe `_CEILING`). Treat the gate and the pipeline as one contract:
+Every shipped plugin reads its inclusive `min`, `max` and `excluded` from its own
+`compatibility.json` through `theater.harness.contracts.version_policy.VersionPolicy`.
+The minimum is pinned to the installed CLI baseline; supporting older releases is out of scope.
+Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) as one contract:
 
-- Do not rename, move or reshape a gate constant without updating its `<h>_bump.py`,
-  `tests/compat/test_bump_size.py::_INPUTS` and the `paths:` filter of
-  `.github/workflows/harness-compat.yml`.
-- Changing what a harness does inside Theater (runtime, probe, launch argv, hooks, transcript or
-  store format) changes what "compatible" means. Update the adapter's `green_tests`,
-  `consistency_tests` and expected routes so the pipeline proves the behaviour Theater really
-  runs, and keep every declared gap in `docs/harness-compat.md`. Moving a proof test breaks its
-  selector.
-- The live conformance suite derives its obligations from the manifest and runs beside the old proofs
-  in shadow mode (`Result.shadow_checks`, never part of a verdict) until a harness's authority
-  switch; changing what a harness does inside Theater can add or remove obligations, and obligations
-  that vanish at an unchanged plugin turn a suite-driven green red.
-- Prove a candidate with `make compat HARNESS=<h> VERSION=<newest>` before moving a gate by hand.
-  Gate PRs change one literal; never hand-edit cached evidence, `.md` files or tests in them.
-- Check with `uv run python -m scripts.harness_compat check` and
-  `uv run pytest tests/compat tests/harness/<h>`.
+- Keep policy files compact: one JSON line with a trailing newline. A routine gate PR replaces
+  exactly that line in exactly one plugin; it adds no evidence, fixtures, docs or Python code.
+- The live manifest-derived conformance suite is the sole qualification authority. Changing
+  runtime, launch, hooks or transcript behavior requires corresponding suite obligations.
+- One qualification tests exactly its supplied version in a disposable code copy and home.
+  No run may change the checkout or real home, save results, update fixtures or retain success
+  history. Temporary CLI, daemon and test data must be deleted after the run.
+- The workflow rechecks every published stable release from the pinned minimum through latest,
+  including admitted and excluded releases, and continues after failures. Passing releases may
+  advance the maximum past failures only with explicit exclusions; failed/inconclusive releases
+  get issues. Missing or incomplete runs authorize nothing.
+- PR checks qualify the proposed code again. A policy refusal never substitutes for a behavioral
+  test: only the disposable copy may temporarily admit the supplied release.
+- Use `make compat HARNESS=<h> VERSION=<version>` for one release, or omit `VERSION` for the full
+  window. Check the implementation with `uv run pytest tests/compat tests/conformance tests/harness/<h>`.
 
-A plugin may also export an optional `compat=CompatManifest(provision, native_edit, mcp_call)` (see
+A plugin may also export an optional `compat=CompatManifest(provision, native_edit, mcp_call, canaries)` (see
 `docs/harness-plugins.md`, "Qualification"). It is read only by the live conformance suite, never at
 runtime; `provision` must stay endpoint, credential, catalog and onboarding setup. Scenarios are derived
 from the rest of the manifest, so a new manifest capability needs a mapping in
 `tests/support/coverage.py` (the completeness test fails until it has one) and, if it is provable,
-a scenario family. Adapters opt into the shadow run with `shadow_suite = True` and name the gate
-literals their bump rewrites in `gate_literals`.
+a scenario family. Extra generic mutation choices belong in the plugin's `compat.canaries`, not
+in shared harness-name branches. Canaries check the suite separately from release qualification.
 
 ## When adding a skill
 

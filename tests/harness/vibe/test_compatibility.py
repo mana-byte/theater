@@ -8,15 +8,14 @@ import pytest
 
 from theater import harness as harness_registry
 from theater.harness.builtin.plugins.vibe.compatibility import (
-    _CEILING,
-    _FLOOR,
+    VERSION_POLICY,
     probe_vibe_compatibility,
     vibe_qualified_range_text,
-    vibe_store_format_ceiling,
 )
 from theater.harness.builtin.plugins.vibe.manifest import manifest_for_roots
 from theater.harness.builtin.plugins.vibe.unified_store import STORE_FORMAT_MINOR
 from theater.harness.contracts.runtime import RuntimeProbeContext
+from theater.harness.contracts.version_policy import version_key
 from theater.harness.manifests.validation import validate_manifest
 
 
@@ -24,24 +23,20 @@ def _version(parts: tuple[int, int, int]) -> str:
     return ".".join(map(str, parts))
 
 
-_FLOOR_BELOW = (_FLOOR[0], _FLOOR[1] - 1, 99)
-_LAST_ADMITTED = (
-    (_CEILING[0], _CEILING[1], _CEILING[2] - 1)
-    if _CEILING[2]
-    else (_CEILING[0], _CEILING[1] - 1, 99)
-)
-_NEXT_MINOR = (_CEILING[0], _CEILING[1] + 1, 0)
+_MINIMUM = version_key(VERSION_POLICY.minimum)
+_MAXIMUM = version_key(VERSION_POLICY.maximum)
+_BELOW = (*_MINIMUM[:2], _MINIMUM[2] - 1)
+_ABOVE = (*_MAXIMUM[:2], _MAXIMUM[2] + 1)
 _REFUSAL = f"Vibe harness support requires {vibe_qualified_range_text()}"
 
 
 @pytest.mark.parametrize(
     ("sample", "supported", "reason"),
     [
-        (_FLOOR_BELOW, False, _REFUSAL),
-        (_FLOOR, True, None),
-        (_LAST_ADMITTED, True, None),
-        (_CEILING, False, _REFUSAL),
-        (_NEXT_MINOR, False, _REFUSAL),
+        (_BELOW, False, _REFUSAL),
+        (_MINIMUM, True, None),
+        (_MAXIMUM, True, None),
+        (_ABOVE, False, _REFUSAL),
     ],
 )
 def test_vibe_version_parse_table(sample, supported, reason, monkeypatch):
@@ -54,22 +49,20 @@ def test_vibe_version_parse_table(sample, supported, reason, monkeypatch):
     assert result.supported is supported
     assert result.native_version == version
     assert result.reason == reason
-    assert result.policy == f"vibe-harness-{_version(_FLOOR)}-compatible"
+    assert result.policy == f"vibe-harness-{VERSION_POLICY.minimum}-compatible"
 
 
 def test_malformed_version_is_refused(monkeypatch):
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=_version(_FLOOR)),
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=VERSION_POLICY.minimum),
     )
     assert probe_vibe_compatibility(RuntimeProbeContext()).reason == (
         "Vibe did not report a stable CLI version"
     )
 
 
-def test_ceiling_tracks_the_reader_store_minor():
-    """The launch ceiling and declared range use the probe's gate."""
-    assert vibe_store_format_ceiling() == _CEILING
+def test_display_range_uses_the_same_policy_as_admission():
     assert STORE_FORMAT_MINOR == 9
     declared = manifest_for_roots().native_compatibility
     assert declared is not None
@@ -79,7 +72,9 @@ def test_ceiling_tracks_the_reader_store_minor():
 def test_nonzero_exit_is_not_a_stable_version(monkeypatch):
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=f"vibe {_version(_FLOOR)}"),
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout=f"vibe {VERSION_POLICY.minimum}"
+        ),
     )
     result = probe_vibe_compatibility(RuntimeProbeContext())
     assert result.supported is False
@@ -101,7 +96,7 @@ def test_missing_or_timed_out_binary_fails_closed(monkeypatch):
 
 
 def test_installed_vibe_stays_legacy_only_with_its_version_shown(monkeypatch):
-    version = _version(_LAST_ADMITTED)
+    version = VERSION_POLICY.maximum
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=f"vibe {version}"),
