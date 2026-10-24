@@ -1095,8 +1095,8 @@ An unavailable native runtime on an admitted release keeps the ordinary launch.
 The Codex runtime re-checks the version at the connection handshake, so a
 binary that changed between probe and connect fails closed.
 Each shipped plugin reads its inclusive bounds and excluded releases from `compatibility.json`.
-The [compatibility pipeline](harness-compat.md) rechecks every stable release from the pinned
-minimum and proposes one JSON line. Probe or runtime changes need matching manifest-derived
+The [compatibility pipeline](harness-compat.md) tests every stable release above committed max
+and proposes one JSON line. Probe or runtime changes need matching manifest-derived
 live scenarios; adapters under `scripts/harness_compat/adapters/` only discover and install CLIs.
 
 Settings are separately gated: a runtime must not emulate `update_settings`
