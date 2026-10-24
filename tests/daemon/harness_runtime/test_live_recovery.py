@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 
 import pytest
@@ -611,6 +612,7 @@ async def test_history_interruption_only_cancels_its_original_followups(
         elif case == "old_finished_job":
             d.jobs.finish(pid, state=JobState.KILLED, error_code="interrupted")
 
+        interrupted_at = time.time()
         historical_turn = "old-ui-turn" if case == "old_ui" else "turn-1"
         current_turn = "turn-2" if case == "old_finished_job" else "turn-1"
         active = case != "missed_current"
@@ -629,7 +631,14 @@ async def test_history_interruption_only_cancels_its_original_followups(
         server.respond(
             "thread/turns/list",
             {
-                "data": [{"id": historical_turn, "status": "interrupted", "items": []}],
+                "data": [
+                    {
+                        "id": historical_turn,
+                        "status": "interrupted",
+                        "items": [],
+                        "completedAt": interrupted_at,
+                    }
+                ],
                 "nextCursor": None,
             },
         )

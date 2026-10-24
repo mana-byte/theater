@@ -167,7 +167,6 @@ class CodexRuntimeHistory(CodexRuntimeHost):
             await asyncio.sleep(runtime_constants.CODEX_RUNTIME_RECONCILE_IDLE_GRACE_SECONDS)
             if not self._history_owed():
                 return
-        rereads = 0
         delay = runtime_constants.CODEX_RUNTIME_RECONCILE_RETRY_SECONDS
         while self._native_session_id == session and self._connection is not None:
             await self._page_history(session)
@@ -178,11 +177,6 @@ class CodexRuntimeHistory(CodexRuntimeHost):
             delay = min(delay * 2, CODEX_RUNTIME_RECONCILE_MAX_RETRY_SECONDS)
             if not self._history_owed():
                 return
-            rereads += 1
-            if rereads > runtime_constants.CODEX_RUNTIME_RECONCILE_IDLE_REREADS:
-                # Idle throughout and history never showed an end: the turn was abandoned. Released,
-                # the last pass records it as interrupted, as it does for an attaching runtime.
-                self._in_flight_turns.clear()
 
     async def _page_history(self, session: str) -> None:
         """One pass over history, paging older exact terminals without unbounded retention."""
@@ -300,9 +294,9 @@ class CodexRuntimeHistory(CodexRuntimeHost):
         terminal = _TERMINAL_BY_STATUS.get(status)
         if terminal is None:
             return
+        if _unfinished(turn):
+            return  # An interrupted placeholder proves no end, including after a daemon restart.
         if turn_id in self._in_flight_turns:
-            if _unfinished(turn):
-                return
             self._in_flight_turns.discard(turn_id)
         # Authoritative history is lifecycle evidence too: a terminal turn's own
         # recorded interactions can no longer be answered; other turns survive.

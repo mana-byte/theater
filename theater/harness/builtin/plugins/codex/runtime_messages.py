@@ -69,7 +69,7 @@ def _completed_at(turn: Mapping[str, object]) -> float | None:
 
 def _unfinished(turn: Mapping[str, object]) -> bool:
     """How the app-server shows a turn it has not seen end: "interrupted" with no end time."""
-    return turn.get("status") == "interrupted" and turn.get("completedAt") is None
+    return turn.get("status") == "interrupted" and _completed_at(turn) is None
 
 
 def _history_turns(result: Mapping[str, object]) -> Sequence[object]:

@@ -95,26 +95,23 @@ async def test_a_running_turn_is_not_taken_for_interrupted_by_a_history_page() -
         await runtime.aclose()
 
 
-async def test_a_turn_left_unfinished_before_attaching_is_recorded_as_interrupted() -> None:
-    """Nothing here holds it as running, so the inferred ending is the truth; recovery keeps it."""
+@pytest.mark.parametrize("completed_at", [None, "bad", True, -1, float("nan")])
+async def test_an_unfinished_turn_on_attach_never_manufactures_a_terminal(completed_at) -> None:
     server = ScriptedCodexServer()
     server.respond(
         "thread/resume",
         {
             "thread": {"id": "ui-thread-1", "status": {"type": "idle"}},
-            "initialTurnsPage": {"data": [unfinished_turn_read_as_interrupted()]},
+            "initialTurnsPage": {
+                "data": [{**unfinished_turn_read_as_interrupted(), "completedAt": completed_at}]
+            },
         },
     )
     runtime = make_runtime(server)
     try:
         await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
 
-        (outcome,) = (await runtime.live_source().read()).terminal_evidence
-        assert (outcome.native_turn_id, outcome.terminal, outcome.from_history) == (
-            "turn-1",
-            NativeTurnTerminal.INTERRUPTED,
-            True,
-        )
+        assert not (await runtime.live_source().read()).terminal_evidence
     finally:
         await runtime.aclose()
 
@@ -519,11 +516,9 @@ async def test_a_second_idle_during_a_pass_does_not_lose_the_end_that_pass_misse
         await runtime.aclose()
 
 
-async def test_a_turn_history_never_shows_ending_is_recorded_interrupted_after_bounded_rereads(
-    monkeypatch: pytest.MonkeyPatch, fast_rereads: None
+async def test_idle_rereads_never_release_a_turn_without_positive_terminal_evidence(
+    fast_rereads: None,
 ) -> None:
-    """Idle throughout and no end in any read: abandoned, so interrupted, as for an attach."""
-    monkeypatch.setattr(codex_runtime_constants, "CODEX_RUNTIME_RECONCILE_IDLE_REREADS", 2)
     server = ScriptedCodexServer()
     server.respond("thread/resume", resume_response(unfinished_turn_read_as_interrupted()))
     runtime, _binding = await open_new(server)
@@ -539,15 +534,13 @@ async def test_a_turn_history_never_shows_ending_is_recorded_interrupted_after_b
         await runtime.send(operation_id="op-1", prompt="work")
         server.push(thread_status_changed("idle"))
 
+        assert await until(lambda: len(recorded_before_each_read) >= 8)
+        assert not (await source.read()).terminal_evidence
+        assert runtime._in_flight_turns == {"turn-1"}
+        assert all(count == 0 for count in recorded_before_each_read)
+        server.push(live_completion())
         (outcome,) = await read_outcomes(source)
-        assert (outcome.native_turn_id, outcome.terminal, outcome.from_history) == (
-            "turn-1",
-            NativeTurnTerminal.INTERRUPTED,
-            True,
-        )
-        assert outcome.completed_at is None
-        # The first read, two rereads, then the pass that records what they never saw end.
-        assert recorded_before_each_read == [0, 0, 0, 0]
+        assert outcome.terminal is NativeTurnTerminal.COMPLETED and not outcome.from_history
         await history_pass_done(runtime)
         assert not runtime._in_flight_turns
     finally:
