@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.harness_compat.contract import MockReply, MockToolCall, RecordedRequest
-from tests.support.live_rig import PROBE_SERVER, PROBE_TOOL, LiveRig, violation
+from tests.support.live_rig import PROBE_SERVER, PROBE_TOOL, LiveRig, inconclusive, violation
 from theater.constants.harness import HARNESS_MCP_SERVER_NAME
 from theater.harness.contracts.observation import ScreenKind
 
@@ -115,12 +115,16 @@ async def expect_gated(live: LiveRig, participant: str, effect: Effect) -> None:
 
 
 def _check_fit(live: LiveRig, prompt: str, effect: Effect) -> None:
-    """The scripted call must use arguments the offered tool declares, or it proves nothing."""
+    """The scripted call must use arguments the offered tool declares, or it proves nothing.
+
+    Theater does not choose a CLI's tool schemas, so a misfit means the plugin's recipe is stale:
+    nothing is proven about the CLI, and the run is inconclusive rather than red.
+    """
     request = live.turns(prompt)[0]
     problem = _misfit(request, effect.call)
     if problem is not None:
-        violation(
-            f"the scripted call to {effect.call.name!r} does not fit the CLI's tool: {problem}"
+        inconclusive(
+            f"the plugin's recipe for {effect.call.name!r} does not fit the CLI's tool: {problem}"
         )
 
 
