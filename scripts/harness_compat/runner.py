@@ -37,6 +37,7 @@ from .route_facts import RouteFacts
 from .sandbox import make_sandbox
 from .select import newest_in_range, plan_bump, select_candidates
 from .stale import stale_warnings
+from .suite_runner import shadow_checks
 
 #: Infrastructure noise gets a whole fresh unit again; a red or tooling verdict never does.
 MAX_ATTEMPTS = 3
@@ -252,6 +253,7 @@ def _qualify(
 ) -> tuple[Result, list[dict[str, Any]]]:
     with make_sandbox(adapter.name) as sandbox:
         verdict: Verdict
+        installed: Path | None = None
         try:
             if bump:
                 try:
@@ -282,6 +284,7 @@ def _qualify(
                         [],
                     )
             binary = adapter.install(sandbox, version)
+            installed = binary
             observed = adapter.qualify(root, version, sandbox, binary)
             relevant = tuple(
                 check for check in observed.checks if check.name in adapter.green_tests
@@ -308,6 +311,14 @@ def _qualify(
         except Exception as exc:
             result = Result(
                 adapter.name, version, "inconclusive", (Check("qualification", "error", str(exc)),)
+            )
+        shadowed = getattr(adapter, "shadow_suite", False)
+        if installed is not None and shadowed and result.verdict in ("green", "red"):
+            result = replace(
+                result,
+                shadow_checks=shadow_checks(
+                    root, sandbox, harness=adapter.name, binary=installed, version=version
+                ),
             )
         requests = sandbox.mock.requests
         return classify_routes(adapter, result, requests), _routes(adapter, requests)

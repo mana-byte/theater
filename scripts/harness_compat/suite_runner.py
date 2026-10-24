@@ -183,3 +183,14 @@ def _obligation_check(
 
 def _fault(problems: Sequence[str]) -> tuple[Check, ...]:
     return tuple(Check("conformance:reconcile", "error", problem) for problem in problems)
+
+
+def shadow_checks(
+    root: Path, sb: Sandbox, *, harness: str, binary: Path, version: str
+) -> tuple[Check, ...]:
+    """The suite's result as a second opinion: whatever goes wrong here never touches a verdict."""
+    try:
+        report = run_suite(root, sb, harness=harness, binary=binary, version=version)
+    except Exception as exc:
+        return (Check("shadow", "error", clip_diagnostic(f"{type(exc).__name__}: {exc}", 300)),)
+    return report.checks

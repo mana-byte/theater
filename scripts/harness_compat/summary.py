@@ -87,9 +87,47 @@ def render_harness(summary: Mapping[str, Any]) -> str:
         lines.append(_row(watch, "watch"))
     if not summary["results"] and not watch:
         lines.append("| — | — | no work | — | — |")
+    lines.extend(_shadow(summary, watch))
     for warning in summary.get("stale_warnings", ()):
         lines.append(f"\nReview: {warning}")
     return "\n".join(lines)
+
+
+def _shadow(summary: Mapping[str, Any], watch: Mapping[str, Any] | None) -> list[str]:
+    """The live conformance suite's second opinion, listed beside the verdict and never in it."""
+    rows = [
+        (row["version"], row["shadow"])
+        for row in [
+            *summary["results"],
+            *([watch] if watch and not summary["watch_reused"] else []),
+        ]
+        if row.get("shadow")
+    ]
+    if not rows:
+        return []
+    lines = [
+        "",
+        "**Shadow: live conformance suite (not part of the verdict)**",
+        "",
+        "| Release | Pass | Fail | Error | Skip | First problem |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for version, checks in rows:
+        counts = {
+            status: sum(1 for check in checks if check["status"] == status)
+            for status in ("pass", "fail", "error", "skip")
+        }
+        problem = next((c for c in checks if c["status"] in ("fail", "error")), None)
+        detail = (
+            clip_diagnostic(f"{problem['name']}: {problem.get('detail', '')}", 200, tail=True)
+            if problem
+            else ""
+        )
+        lines.append(
+            f"| {version} | {counts['pass']} | {counts['fail']} | {counts['error']} "
+            f"| {counts['skip']} | {_cell(detail)} |"
+        )
+    return lines
 
 
 def _composition(summary: Mapping[str, Any]) -> list[str]:

@@ -76,6 +76,7 @@ class OpenCodeAdapter:
     #: The routed mistral provider talks to the mock's OpenAI chat surface.
     expected_routes: frozenset[Route] = frozenset({("POST", "/v1/chat/completions")})
     ignorable_routes: frozenset[Route] = frozenset()
+    shadow_suite = False
     expected_skips: Mapping[str, str] = MappingProxyType(
         {
             f"{_STOCK_PROOF}::{test}": "set THEATER_OPENCODE_STOCK_CONFORMANCE=1"

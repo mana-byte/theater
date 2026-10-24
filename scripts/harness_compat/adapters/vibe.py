@@ -52,6 +52,7 @@ class VibeAdapter:
     expected_skips: Mapping[str, str] = {}
     expected_routes = frozenset({("POST", "/v1/chat/completions")})
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
+    shadow_suite = True
 
     def discover(self) -> list[str]:
         return github.pypi_versions("mistral-vibe")

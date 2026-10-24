@@ -54,6 +54,7 @@ class OpenCodeV2Adapter:
     #: Model-free: the proof never asks the mock for a completion.
     expected_routes: frozenset[Route] = frozenset()
     ignorable_routes: frozenset[Route] = frozenset()
+    shadow_suite = False
     expected_skips: Mapping[str, str] = MappingProxyType({})
 
     def discover(self) -> list[str]:

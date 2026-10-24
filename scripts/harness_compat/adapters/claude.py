@@ -76,6 +76,7 @@ class ClaudeAdapter:
         {("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens"), ("GET", "/v1/models")}
     )
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
+    shadow_suite = False
 
     def discover(self) -> list[str]:
         return github.npm_versions(_PACKAGE)

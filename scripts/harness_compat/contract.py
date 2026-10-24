@@ -87,19 +87,28 @@ class Result:
     checks: tuple[Check, ...] = ()
     evidence_dir: Path | None = None
     adapter_digest: str = ""
+    #: A non-authoritative second opinion (the live conformance suite during its shadow period):
+    #: recorded and summarised next to the verdict, never part of it.
+    shadow_checks: tuple[Check, ...] = ()
 
     def to_evidence(self) -> dict[str, Any]:
         """The deterministic JSON document committed as the release's evidence file."""
-        return {
+        document: dict[str, Any] = {
             "harness": self.harness,
             "version": self.version,
             "verdict": self.verdict,
             "adapter_digest": self.adapter_digest,
-            "checks": [
-                {"name": check.name, "status": check.status, "detail": check.detail}
-                for check in self.checks
-            ],
+            "checks": _checks_document(self.checks),
         }
+        if self.shadow_checks:
+            document["shadow"] = _checks_document(self.shadow_checks)
+        return document
+
+
+def _checks_document(checks: Sequence[Check]) -> list[dict[str, str]]:
+    return [
+        {"name": check.name, "status": check.status, "detail": check.detail} for check in checks
+    ]
 
 
 def verdict_from_checks(checks: Sequence[Check]) -> Verdict:
@@ -224,7 +233,12 @@ class Sandbox:
 
 
 class Adapter(Protocol):
-    """One harness. Streams implement this in ``adapters/<name>.py`` and export ``ADAPTER``."""
+    """One harness. Streams implement this in ``adapters/<name>.py`` and export ``ADAPTER``.
+
+    Optional attributes, read with their defaults: ``plugin`` and ``artifact_roots`` (inputs.py),
+    and ``shadow_suite``: run the live conformance suite after a conclusive verdict and record it
+    as a non-authoritative shadow result (default False).
+    """
 
     name: str
     #: Dotted ``package.module:function`` path of the plugin's compatibility probe.

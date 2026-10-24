@@ -175,6 +175,7 @@ class CodexAdapter:
     # Both proof mocks log calls; bootstrap asserts the exact scripted request count.
     expected_routes: frozenset[tuple[str, str]] = frozenset()
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
+    shadow_suite = False
 
     def discover(self) -> list[str]:
         try:

@@ -37,6 +37,7 @@ class PiAdapter:
     expected_skips: Mapping[str, str] = field(default_factory=dict)
     expected_routes: frozenset[tuple[str, str]] = frozenset()
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
+    shadow_suite = True
 
     def discover(self) -> list[str]:
         return github.npm_versions(_PACKAGE)
