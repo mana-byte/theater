@@ -1,18 +1,29 @@
-"""Local mock model server: Anthropic Messages and OpenAI chat, with request accounting."""
+"""Local mock model server: Anthropic Messages, OpenAI Chat and Responses, with accounting."""
 
 from __future__ import annotations
 
 import json
+import select
+import socket
 import threading
 from collections import deque
-from dataclasses import asdict
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 from urllib.parse import urlsplit
 
-from .contract import MOCK_REPLY, MockProtocol, MockReply, MockToolCall, RecordedRequest, Route
+from .contract import (
+    MOCK_REPLY,
+    Hold,
+    MockProtocol,
+    MockReply,
+    MockToolCall,
+    RecordedRequest,
+    Route,
+)
 
 #: Routes the mock answers; anything else gets UNHANDLED_STATUS and is recorded as unhandled.
 HANDLED_ROUTES: frozenset[Route] = frozenset(
@@ -21,10 +32,25 @@ HANDLED_ROUTES: frozenset[Route] = frozenset(
         ("POST", "/v1/messages"),
         ("POST", "/v1/messages/count_tokens"),
         ("POST", "/v1/chat/completions"),
+        ("POST", "/v1/responses"),
+        # Codex's turn-cost side channel: answered 204, never scripted.
+        ("POST", "/v1/analytics/codex/turn-costs"),
     }
 )
 UNHANDLED_STATUS = 599
 _MODEL = "mock-model"
+#: SSE comment cadence while a response is held; a failed write reveals a dropped client.
+_KEEPALIVE_SECONDS = 0.25
+#: A hold nobody releases ends by itself, so a stuck scenario cannot pin a handler thread.
+_MAX_HOLD_SECONDS = 120.0
+_PROTOCOLS: dict[str, MockProtocol] = {
+    "/v1/messages": "anthropic",
+    "/v1/messages/count_tokens": "anthropic",
+    "/v1/chat/completions": "openai",
+    "/v1/responses": "openai-responses",
+}
+_LAST_USER_CHARS = 300
+_MAX_TOOL_NAMES = 200
 
 
 def _sse(events: list[dict[str, Any]]) -> str:
@@ -45,12 +71,12 @@ def _anthropic_content(reply: MockReply) -> list[dict[str, Any]]:
     return content
 
 
-def _anthropic_message(reply: MockReply) -> dict[str, Any]:
+def _anthropic_message(reply: MockReply, model: str) -> dict[str, Any]:
     return {
         "id": "msg_mock",
         "type": "message",
         "role": "assistant",
-        "model": _MODEL,
+        "model": model,
         "content": _anthropic_content(reply),
         "stop_reason": "tool_use" if reply.tool_calls else "end_turn",
         "stop_sequence": None,
@@ -82,9 +108,10 @@ def _anthropic_tool_events(index: int, call: MockToolCall) -> list[dict[str, Any
     ]
 
 
-def _anthropic_stream(reply: MockReply) -> str:
-    start = {**_anthropic_message(MockReply("")), "content": [], "stop_reason": None}
-    events: list[dict[str, Any]] = [
+def _anthropic_stream(reply: MockReply, model: str) -> tuple[str, str]:
+    """(head up to the first text delta, tail): a hold splits the stream between them."""
+    start = {**_anthropic_message(MockReply(""), model), "content": [], "stop_reason": None}
+    head: list[dict[str, Any]] = [
         {"type": "message_start", "message": start},
         {
             "type": "content_block_start",
@@ -96,12 +123,12 @@ def _anthropic_stream(reply: MockReply) -> str:
             "index": 0,
             "delta": {"type": "text_delta", "text": reply.text},
         },
-        {"type": "content_block_stop", "index": 0},
     ]
+    tail: list[dict[str, Any]] = [{"type": "content_block_stop", "index": 0}]
     for index, call in enumerate(reply.tool_calls, start=1):
-        events.extend(_anthropic_tool_events(index, call))
+        tail.extend(_anthropic_tool_events(index, call))
     stop_reason = "tool_use" if reply.tool_calls else "end_turn"
-    events.extend(
+    tail.extend(
         [
             {
                 "type": "message_delta",
@@ -111,7 +138,7 @@ def _anthropic_stream(reply: MockReply) -> str:
             {"type": "message_stop"},
         ]
     )
-    return _sse(events)
+    return _sse(head), _sse(tail)
 
 
 def _openai_tool_call(index: int, call: MockToolCall) -> dict[str, Any]:
@@ -129,7 +156,7 @@ def _openai_tool_calls(reply: MockReply) -> list[dict[str, Any]]:
     return [_openai_tool_call(index, call) for index, call in enumerate(reply.tool_calls)]
 
 
-def _openai_completion(reply: MockReply) -> dict[str, Any]:
+def _openai_completion(reply: MockReply, model: str) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": reply.text}
     if reply.tool_calls:
         message["tool_calls"] = _openai_tool_calls(reply)
@@ -137,7 +164,7 @@ def _openai_completion(reply: MockReply) -> dict[str, Any]:
         "id": "chatcmpl-mock",
         "object": "chat.completion",
         "created": 1,
-        "model": _MODEL,
+        "model": model,
         "choices": [
             {
                 "index": 0,
@@ -149,8 +176,8 @@ def _openai_completion(reply: MockReply) -> dict[str, Any]:
     }
 
 
-def _openai_stream(reply: MockReply) -> str:
-    base = {"id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 1, "model": _MODEL}
+def _openai_stream(reply: MockReply, model: str) -> tuple[str, str]:
+    base = {"id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 1, "model": model}
     delta = {
         "index": 0,
         "delta": {"role": "assistant", "content": reply.text},
@@ -175,19 +202,192 @@ def _openai_stream(reply: MockReply) -> str:
     stop = {"index": 0, "delta": {}, "finish_reason": finish_reason}
     usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
     chunks.append({**base, "choices": [stop], "usage": usage})
-    return "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+    frames = [f"data: {json.dumps(chunk)}\n\n" for chunk in chunks]
+    return frames[0], "".join(frames[1:]) + "data: [DONE]\n\n"
+
+
+def _responses_stream(reply: MockReply) -> tuple[str, str]:
+    """The Responses wire shape Codex consumes; a tool-call-only reply has no message item."""
+    response_id, item_id = "resp-mock", "msg-mock"
+    head: list[dict[str, Any]] = [{"type": "response.created", "response": {"id": response_id}}]
+    tail: list[dict[str, Any]] = []
+    if reply.text:
+        head.extend(
+            [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"type": "message", "role": "assistant", "id": item_id, "content": []},
+                },
+                {
+                    "type": "response.content_part.added",
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "text": ""},
+                },
+                {
+                    "type": "response.output_text.delta",
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": reply.text,
+                },
+            ]
+        )
+        tail.append(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": item_id,
+                    "content": [{"type": "output_text", "text": reply.text}],
+                },
+            }
+        )
+    for index, call in enumerate(reply.tool_calls):
+        tail.append(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": f"call_mock_{index}",
+                    "name": call.name,
+                    "arguments": json.dumps(dict(call.arguments)),
+                },
+            }
+        )
+    tail.append(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "usage": {
+                    "input_tokens": 1,
+                    "input_tokens_details": None,
+                    "output_tokens": 1,
+                    "output_tokens_details": None,
+                    "total_tokens": 2,
+                },
+            },
+        }
+    )
+    return _sse(head), _sse(tail)
+
+
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _effort(body: dict[str, Any]) -> str | None:
+    """The requested reasoning effort, wherever the protocol carries it."""
+    for container, key in (
+        (body, "reasoning_effort"),
+        (body.get("reasoning"), "effort"),
+        (body.get("output_config"), "effort"),
+        (body, "effort"),
+    ):
+        if isinstance(container, dict) and isinstance(container.get(key), str):
+            return container[key]
+    return None
+
+
+def _tool_names(body: dict[str, Any]) -> tuple[str, ...]:
+    names: list[str] = []
+    for tool in body.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        name = tool.get("name") or (function.get("name") if isinstance(function, dict) else None)
+        if isinstance(name, str):
+            names.append(name)
+    return tuple(names[:_MAX_TOOL_NAMES])
+
+
+def _conversation(body: dict[str, Any]) -> list[Any]:
+    items = body["messages"] if "messages" in body else body.get("input")
+    if isinstance(items, list):
+        return items
+    return [items] if isinstance(items, str) else []
+
+
+def _last_user_text(body: dict[str, Any]) -> str | None:
+    """The newest human text; user messages that only carry tool results are skipped."""
+    for item in reversed(_conversation(body)):
+        if not isinstance(item, dict) or item.get("role") != "user":
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = "".join(
+                part["text"]
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type") in ("text", "input_text")
+                and isinstance(part.get("text"), str)
+            )
+        else:
+            continue
+        if text:
+            return text[:_LAST_USER_CHARS]
+    return None
+
+
+class _Hold:
+    """The concrete hold: set by the handler thread, driven by the scenario."""
+
+    def __init__(self) -> None:
+        self._reached = threading.Event()
+        self._released = threading.Event()
+        self._cancelled = threading.Event()
+
+    def wait_reached(self, timeout: float) -> bool:
+        return self._reached.wait(timeout)
+
+    def release(self) -> None:
+        self._released.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def mark_reached(self) -> None:
+        self._reached.set()
+
+    def mark_cancelled(self) -> None:
+        self._cancelled.set()
+
+    def wait_released(self, timeout: float) -> bool:
+        return self._released.wait(timeout)
+
+
+@dataclass(frozen=True, slots=True)
+class _Response:
+    """One answer: ``body`` alone, or ``body`` then ``tail`` once its hold is released."""
+
+    status: int
+    content_type: str
+    body: str
+    tail: str = ""
+    streaming: bool = False
+    hold: _Hold | None = None
 
 
 class MockServer:
     """Serves scripted or default replies on 127.0.0.1 and records every request it sees."""
 
-    def __init__(self, requests_path: Path) -> None:
+    def __init__(self, requests_path: Path, *, models: Sequence[str] = (_MODEL,)) -> None:
         self._requests_path = requests_path
+        self._models = tuple(models)
         self._replies: dict[MockProtocol, deque[MockReply]] = {
             "anthropic": deque(),
             "openai": deque(),
+            "openai-responses": deque(),
         }
         self._recorded: list[RecordedRequest] = []
+        self._holds: list[_Hold] = []
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -199,6 +399,10 @@ class MockServer:
         self._thread.start()
 
     def stop(self) -> None:
+        with self._lock:
+            holds = list(self._holds)
+        for hold in holds:
+            hold.release()
         if self._httpd is not None:
             self._httpd.shutdown()
             self._httpd.server_close()
@@ -222,11 +426,17 @@ class MockServer:
     def base_urls(self) -> dict[str, str]:
         assert self._httpd is not None, "start() the mock before asking for its URLs"
         root = f"http://127.0.0.1:{self._httpd.server_address[1]}"
-        return {"anthropic": root, "openai": f"{root}/v1"}
+        return {"anthropic": root, "openai": f"{root}/v1", "openai-responses": f"{root}/v1"}
 
     def queue(self, protocol: MockProtocol, reply: MockReply) -> None:
         with self._lock:
             self._replies[protocol].append(reply)
+
+    def hold(self) -> Hold:
+        hold = _Hold()
+        with self._lock:
+            self._holds.append(hold)
+        return hold
 
     @property
     def requests(self) -> tuple[RecordedRequest, ...]:
@@ -248,24 +458,64 @@ class MockServer:
             with self._requests_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(asdict(request)) + "\n")
 
-    def _respond(self, route: Route, body: dict[str, Any]) -> tuple[int, str, str]:
-        """(status, content type, payload) for one handled route."""
+    def _respond(self, route: Route, body: dict[str, Any]) -> _Response:
+        """The answer for one handled route."""
         stream = bool(body.get("stream"))
         _, path = route
+        model = _text(body.get("model")) or _MODEL
         if path == "/v1/models":
-            data = [{"id": _MODEL, "type": "model", "display_name": _MODEL}]
-            return 200, "application/json", json.dumps({"data": data, "has_more": False})
+            data = [
+                {"id": name, "object": "model", "type": "model", "display_name": name}
+                for name in self._models
+            ]
+            payload = {"object": "list", "data": data, "has_more": False}
+            return _Response(200, "application/json", json.dumps(payload))
         if path == "/v1/messages/count_tokens":
-            return 200, "application/json", json.dumps({"input_tokens": 1})
+            return _Response(200, "application/json", json.dumps({"input_tokens": 1}))
+        if path == "/v1/analytics/codex/turn-costs":
+            return _Response(204, "application/json", "")
         if path == "/v1/messages":
             reply = self._next_reply("anthropic")
             if stream:
-                return 200, "text/event-stream", _anthropic_stream(reply)
-            return 200, "application/json", json.dumps(_anthropic_message(reply))
+                return _streamed(reply, _anthropic_stream(reply, model))
+            return _complete(reply, json.dumps(_anthropic_message(reply, model)))
+        if path == "/v1/responses":
+            reply = self._next_reply("openai-responses")
+            return _streamed(reply, _responses_stream(reply))
         reply = self._next_reply("openai")
         if stream:
-            return 200, "text/event-stream", _openai_stream(reply)
-        return 200, "application/json", json.dumps(_openai_completion(reply))
+            return _streamed(reply, _openai_stream(reply, model))
+        return _complete(reply, json.dumps(_openai_completion(reply, model)))
+
+
+def _held(reply: MockReply) -> _Hold | None:
+    if reply.hold is None:
+        return None
+    if not isinstance(reply.hold, _Hold):
+        raise TypeError("a reply's hold must come from MockServer.hold()")
+    return reply.hold
+
+
+def _streamed(reply: MockReply, parts: tuple[str, str]) -> _Response:
+    head, tail = parts
+    hold = _held(reply)
+    if hold is None:
+        return _Response(200, "text/event-stream", head + tail)
+    return _Response(200, "text/event-stream", head, tail, streaming=True, hold=hold)
+
+
+def _complete(reply: MockReply, payload: str) -> _Response:
+    return _Response(200, "application/json", payload, hold=_held(reply))
+
+
+def _peer_closed(connection: socket.socket) -> bool:
+    readable, _, _ = select.select([connection], [], [], 0)
+    if not readable:
+        return False
+    try:
+        return connection.recv(1, socket.MSG_PEEK) == b""
+    except OSError:
+        return True
 
 
 def _make_handler(server: MockServer) -> type[BaseHTTPRequestHandler]:
@@ -297,20 +547,81 @@ def _make_handler(server: MockServer) -> type[BaseHTTPRequestHandler]:
                     authorized=bool(
                         self.headers.get("authorization") or self.headers.get("x-api-key")
                     ),
+                    protocol=_PROTOCOLS.get(route[1], ""),
+                    model=_text(body.get("model")),
+                    effort=_effort(body),
+                    tools=_tool_names(body),
+                    messages=len(_conversation(body)),
+                    last_user=_last_user_text(body),
+                    stream=bool(body.get("stream")),
                 )
             )
             if handled:
-                status, content_type, payload = server._respond(route, body)
+                response = server._respond(route, body)
             else:
-                status, content_type = UNHANDLED_STATUS, "application/json"
                 payload = json.dumps({"theater_mock": "unhandled"})
-            data = payload.encode("utf-8")
-            self.send_response(status)
-            self.send_header("content-type", content_type)
+                response = _Response(UNHANDLED_STATUS, "application/json", payload)
+            self._send(response, method)
+
+        def _send(self, response: _Response, method: str) -> None:
+            hold = response.hold
+            if hold is None:
+                self._write_whole(response, method)
+            elif response.streaming:
+                self._write_held_stream(response, hold)
+            else:
+                hold.mark_reached()
+                if self._wait_idle(hold):
+                    self._write_whole(response, method)
+
+        def _write_whole(self, response: _Response, method: str) -> None:
+            data = response.body.encode("utf-8")
+            self.send_response(response.status)
+            self.send_header("content-type", response.content_type)
             self.send_header("content-length", str(len(data)))
             self.end_headers()
             if method != "HEAD":
                 self.wfile.write(data)
+
+        def _write_held_stream(self, response: _Response, hold: _Hold) -> None:
+            self.close_connection = True
+            try:
+                self.send_response(response.status)
+                self.send_header("content-type", response.content_type)
+                self.send_header("connection", "close")
+                self.end_headers()
+                self.wfile.write(response.body.encode("utf-8"))
+                self.wfile.flush()
+                hold.mark_reached()
+                if self._wait_released(hold):
+                    self.wfile.write(response.tail.encode("utf-8"))
+                    self.wfile.flush()
+            except OSError:
+                hold.mark_cancelled()
+
+        def _wait_released(self, hold: _Hold) -> bool:
+            """Block on keepalive comments until released; a failed write means the client left."""
+            waited = 0.0
+            while waited < _MAX_HOLD_SECONDS:
+                if hold.wait_released(_KEEPALIVE_SECONDS):
+                    return True
+                self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+                waited += _KEEPALIVE_SECONDS
+            return True
+
+        def _wait_idle(self, hold: _Hold) -> bool:
+            """Withhold a JSON body until released; False once the client dropped the connection."""
+            waited = 0.0
+            while waited < _MAX_HOLD_SECONDS:
+                if hold.wait_released(_KEEPALIVE_SECONDS):
+                    return True
+                if _peer_closed(self.connection):
+                    hold.mark_cancelled()
+                    self.close_connection = True
+                    return False
+                waited += _KEEPALIVE_SECONDS
+            return True
 
         def __getattr__(self, name: str) -> Any:
             # Any HTTP method is accounted for, even one the stdlib server has no handler for.

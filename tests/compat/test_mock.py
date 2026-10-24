@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from http.client import HTTPConnection
+import threading
+import time
+from http.client import HTTPConnection, HTTPResponse
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -109,3 +111,210 @@ def test_every_http_method_is_accounted_for_and_unhandled_ones_get_599(tmp_path:
             assert response.status == 599, method
         seen = {(request.method, request.path) for request in server.unhandled}
         assert seen == {(method, "/v1/new-route") for method in methods}
+
+
+def _open(url: str, body: dict[str, object]) -> tuple[HTTPConnection, HTTPResponse]:
+    parsed = urlsplit(url)
+    connection = HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+    headers = {"content-type": "application/json", "authorization": "Bearer mock"}
+    connection.request("POST", parsed.path, json.dumps(body).encode(), headers)
+    return connection, connection.getresponse()
+
+
+def _read_events(response: HTTPResponse, *, count: int | None = None, until: str | None = None):
+    """SSE `data:` events as they arrive; keepalive comments are skipped, not returned."""
+    events: list[dict[str, object]] = []
+    while len(events) != count:
+        line = response.readline().decode()
+        if not line:
+            break
+        if line.startswith("data: ") and line.strip() != "data: [DONE]":
+            events.append(json.loads(line.removeprefix("data: ")))
+            if until is not None and events[-1].get("type") == until:
+                break
+    return events
+
+
+def _read_until_keepalive(response: HTTPResponse) -> bool:
+    return any(response.readline().decode().startswith(": keepalive") for _ in range(8))
+
+
+def _wait(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return bool(predicate())
+
+
+def test_responses_codec_streams_text_tool_calls_and_the_codex_side_channel(
+    tmp_path: Path,
+) -> None:
+    reply = MockReply("hello", (MockToolCall("exec_command", {"cmd": "touch x"}),))
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        server.queue("openai-responses", reply)
+        server.queue("openai-responses", MockReply("", (MockToolCall("only_call", {}),)))
+        url = f"{server.base_urls['openai-responses']}/responses"
+
+        status, payload = _request(url, {"stream": True, "model": "m"})
+        events = _sse_data(payload)
+        assert status == 200
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_item.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        assert events[3]["delta"] == "hello"
+        assert events[5]["item"] == {
+            "type": "function_call",
+            "call_id": "call_mock_0",
+            "name": "exec_command",
+            "arguments": '{"cmd": "touch x"}',
+        }
+
+        _, payload = _request(url, {"stream": True})
+        assert [event["type"] for event in _sse_data(payload)] == [
+            "response.created",
+            "response.output_item.done",
+            "response.completed",
+        ]
+
+        status, payload = _request(
+            f"{server.base_urls['openai']}/analytics/codex/turn-costs", {"cost": 1}
+        )
+        assert (status, payload) == (204, "")
+        assert not server.unhandled
+
+
+def test_requests_are_described_by_protocol_model_effort_tools_and_last_user_text(
+    tmp_path: Path,
+) -> None:
+    tools = [{"name": "Bash"}, {"function": {"name": "write_file"}}, "ignored"]
+    tool_result = {"role": "user", "content": [{"type": "tool_result", "content": "done"}]}
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        _request(
+            f"{server.base_urls['anthropic']}/v1/messages",
+            {
+                "model": "sonnet",
+                "output_config": {"effort": "high"},
+                "tools": tools,
+                "messages": [{"role": "user", "content": "first"}, tool_result],
+            },
+        )
+        _request(
+            f"{server.base_urls['openai']}/chat/completions",
+            {
+                "model": "gpt",
+                "reasoning_effort": "low",
+                "stream": True,
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "hi "}]},
+                    {"role": "assistant", "content": "ok"},
+                ],
+            },
+        )
+        _request(
+            f"{server.base_urls['openai-responses']}/responses",
+            {
+                "model": "gpt-r",
+                "reasoning": {"effort": "max"},
+                "stream": True,
+                "input": [{"type": "message", "role": "user", "content": "latest"}],
+            },
+        )
+        _request(f"{server.base_urls['anthropic']}/v1/models")
+        anthropic, chat, responses, models = server.requests
+
+    assert (anthropic.protocol, anthropic.model, anthropic.effort) == (
+        "anthropic",
+        "sonnet",
+        "high",
+    )
+    assert anthropic.tools == ("Bash", "write_file")
+    assert (anthropic.messages, anthropic.last_user, anthropic.stream) == (2, "first", False)
+    assert (chat.protocol, chat.model, chat.effort) == ("openai", "gpt", "low")
+    assert (chat.messages, chat.last_user, chat.stream) == (2, "hi ", True)
+    assert (responses.protocol, responses.model, responses.effort) == (
+        "openai-responses",
+        "gpt-r",
+        "max",
+    )
+    assert (responses.messages, responses.last_user) == (1, "latest")
+    assert (models.protocol, models.model, models.tools, models.last_user) == ("", None, (), None)
+    recorded = [json.loads(line) for line in (tmp_path / "requests.jsonl").read_text().splitlines()]
+    assert recorded[0]["effort"] == "high" and recorded[0]["tools"] == ["Bash", "write_file"]
+
+
+def test_a_held_stream_withholds_its_tail_until_released(tmp_path: Path) -> None:
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        hold = server.hold()
+        server.queue("anthropic", MockReply("partial", hold=hold))
+        connection, response = _open(
+            f"{server.base_urls['anthropic']}/v1/messages", {"stream": True}
+        )
+
+        head = _read_events(response, count=3)
+        assert [event["type"] for event in head] == [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+        ]
+        assert hold.wait_reached(2.0)
+        assert _read_until_keepalive(response), "the held stream stays open on keepalive comments"
+
+        hold.release()
+        tail = _read_events(response, until="message_stop")
+        assert [event["type"] for event in tail][-2:] == ["message_delta", "message_stop"]
+        assert not hold.cancelled
+        connection.close()
+
+
+def test_a_held_stream_reports_a_client_that_drops_the_connection(tmp_path: Path) -> None:
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        hold = server.hold()
+        server.queue("openai", MockReply("partial", hold=hold))
+        connection, response = _open(
+            f"{server.base_urls['openai']}/chat/completions", {"stream": True}
+        )
+        assert len(_read_events(response, count=1)) == 1
+        assert hold.wait_reached(2.0)
+
+        response.close()  # the response keeps the socket open until it is closed too
+        connection.close()
+
+        assert _wait(lambda: hold.cancelled)
+
+
+def test_a_held_json_reply_is_withheld_until_released(tmp_path: Path) -> None:
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        hold = server.hold()
+        server.queue("anthropic", MockReply("late", hold=hold))
+        answers: list[str] = []
+        worker = threading.Thread(
+            target=lambda: answers.append(
+                _request(f"{server.base_urls['anthropic']}/v1/messages", {})[1]
+            )
+        )
+        worker.start()
+
+        assert hold.wait_reached(2.0)
+        worker.join(timeout=0.6)
+        assert worker.is_alive() and not answers, "the body stays withheld while held"
+
+        hold.release()
+        worker.join(timeout=5)
+        assert json.loads(answers[0])["content"][0]["text"] == "late"
+
+
+def test_the_model_catalog_is_configurable_and_requested_models_are_echoed(tmp_path: Path) -> None:
+    with MockServer(tmp_path / "requests.jsonl", models=("mock-a", "mock-b")) as server:
+        _, payload = _request(f"{server.base_urls['anthropic']}/v1/models")
+        assert [item["id"] for item in json.loads(payload)["data"]] == ["mock-a", "mock-b"]
+
+        _, payload = _request(f"{server.base_urls['anthropic']}/v1/messages", {"model": "mock-b"})
+        assert json.loads(payload)["model"] == "mock-b"

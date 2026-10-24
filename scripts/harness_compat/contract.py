@@ -14,7 +14,8 @@ from typing import Any, Literal, Protocol
 #: ``tooling`` means our own machinery failed (mock gap, inconsistent bump), never upstream.
 Verdict = Literal["green", "red", "inconclusive", "tooling"]
 CheckStatus = Literal["pass", "fail", "skip", "error"]
-MockProtocol = Literal["anthropic", "openai"]
+#: Wire protocols the mock speaks; "openai" is Chat Completions.
+MockProtocol = Literal["anthropic", "openai", "openai-responses"]
 Route = tuple[str, str]  # (HTTP method, path without query string)
 
 #: Legacy evidence paths remain excluded from artifacts and stale-limit scans.
@@ -105,12 +106,31 @@ class MockToolCall:
     arguments: Mapping[str, Any]
 
 
+class Hold(Protocol):
+    """A response the mock keeps open mid-turn until it is released."""
+
+    def wait_reached(self, timeout: float) -> bool:
+        """Block until the held request is in flight and its first chunk was written."""
+        ...
+
+    def release(self) -> None:
+        """Let the held response finish."""
+        ...
+
+    @property
+    def cancelled(self) -> bool:
+        """The client dropped the connection while the response was held."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class MockReply:
     """One scripted model turn: text, or text plus tool calls."""
 
     text: str = MOCK_REPLY
     tool_calls: tuple[MockToolCall, ...] = ()
+    #: Streams the first chunk, then stays open until released (a JSON reply withholds its body).
+    hold: Hold | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +140,14 @@ class RecordedRequest:
     handled: bool
     body_keys: tuple[str, ...]
     authorized: bool
+    #: What the request asked for, read from the body: protocol is "" for non-model routes.
+    protocol: str = ""
+    model: str | None = None
+    effort: str | None = None
+    tools: tuple[str, ...] = ()
+    messages: int = 0
+    last_user: str | None = None
+    stream: bool = False
 
 
 class MockControl(Protocol):
@@ -127,6 +155,10 @@ class MockControl(Protocol):
 
     def queue(self, protocol: MockProtocol, reply: MockReply) -> None:
         """Serve ``reply`` once, FIFO, to the next model request on that protocol."""
+        ...
+
+    def hold(self) -> Hold:
+        """A new hold to attach to a queued reply."""
         ...
 
     @property
@@ -152,7 +184,8 @@ class Sandbox:
     evidence_dir: Path
     tmux_socket: Path
     mock: MockControl
-    mock_base_urls: Mapping[str, str]  # "anthropic": http://127.0.0.1:P, "openai": .../v1
+    #: "anthropic" is the origin http://127.0.0.1:P; "openai" and "openai-responses" end in /v1.
+    mock_base_urls: Mapping[str, str]
     mock_requests: Path  # JSONL the mock appends every request to
     env: Mapping[str, str]
     offline_env: Mapping[str, str]
