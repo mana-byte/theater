@@ -221,12 +221,16 @@ def _openai_stream(reply: MockReply, model: str) -> tuple[str, str]:
 
 
 def _responses_stream(reply: MockReply) -> tuple[str, str]:
-    """The Responses wire shape Codex consumes; a tool-call-only reply has no message item."""
+    """The Responses wire shape Codex consumes; a hold splits right after ``response.created``.
+
+    Codex draws its working indicator only until the first output text arrives, so a held turn
+    must still be output-less for a screen reader to see it as working.
+    """
     response_id, item_id = "resp-mock", "msg-mock"
     head: list[dict[str, Any]] = [{"type": "response.created", "response": {"id": response_id}}]
     tail: list[dict[str, Any]] = []
     if reply.text:
-        head.extend(
+        tail.extend(
             [
                 {
                     "type": "response.output_item.added",
@@ -247,25 +251,28 @@ def _responses_stream(reply: MockReply) -> tuple[str, str]:
                     "content_index": 0,
                     "delta": reply.text,
                 },
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": item_id,
+                        "content": [{"type": "output_text", "text": reply.text}],
+                    },
+                },
             ]
         )
-        tail.append(
-            {
-                "type": "response.output_item.done",
-                "item": {
-                    "type": "message",
-                    "role": "assistant",
-                    "id": item_id,
-                    "content": [{"type": "output_text", "text": reply.text}],
-                },
-            }
-        )
     for index, call in enumerate(reply.tool_calls):
-        item: dict[str, Any] = {"call_id": f"call_mock_{index}", "name": call.name}
+        item: dict[str, Any] = {"call_id": f"call_mock_{index}"}
         if isinstance(call.arguments, str):
-            item |= {"type": "custom_tool_call", "input": call.arguments}
+            item |= {"type": "custom_tool_call", "name": call.name, "input": call.arguments}
         else:
-            item |= {"type": "function_call", "arguments": json.dumps(dict(call.arguments))}
+            # A name offered as "<namespace>/<tool>" goes back as a namespaced function call.
+            namespace, _, name = call.name.rpartition("/")
+            item |= {"type": "function_call", "name": name}
+            item["arguments"] = json.dumps(dict(call.arguments))
+            if namespace:
+                item["namespace"] = namespace
         tail.append({"type": "response.output_item.done", "item": item})
     tail.append(
         {
@@ -307,11 +314,28 @@ def _tool_names(body: dict[str, Any]) -> tuple[str, ...]:
     for tool in body.get("tools") or []:
         if not isinstance(tool, dict):
             continue
+        if tool.get("type") == "namespace":
+            # A namespaced call must name its namespace, so each tool is offered as "<ns>/<tool>".
+            inner = [t.get("name") for t in tool.get("tools") or [] if isinstance(t, dict)]
+            names.extend(f"{tool.get('name')}/{name}" for name in inner if isinstance(name, str))
+            continue
         function = tool.get("function")
         name = tool.get("name") or (function.get("name") if isinstance(function, dict) else None)
         if isinstance(name, str):
             names.append(name)
     return tuple(names[:_MAX_TOOL_NAMES])
+
+
+def _shape(schema: object) -> ToolShape | None:
+    if not isinstance(schema, dict):
+        return None
+    properties, required = schema.get("properties"), schema.get("required")
+    return ToolShape(
+        tuple(sorted(properties))[:_MAX_TOOL_PROPERTIES] if isinstance(properties, dict) else (),
+        tuple(item for item in required if isinstance(item, str))[:_MAX_TOOL_PROPERTIES]
+        if isinstance(required, list)
+        else (),
+    )
 
 
 def _tool_shapes(body: dict[str, Any]) -> dict[str, ToolShape]:
@@ -320,21 +344,20 @@ def _tool_shapes(body: dict[str, Any]) -> dict[str, ToolShape]:
     for tool in (body.get("tools") or [])[:_MAX_TOOL_NAMES]:
         if not isinstance(tool, dict):
             continue
+        if tool.get("type") == "namespace":
+            for inner in tool.get("tools") or []:
+                name = inner.get("name") if isinstance(inner, dict) else None
+                shape = _shape(inner.get("parameters")) if isinstance(inner, dict) else None
+                if isinstance(name, str) and shape is not None:
+                    shapes[f"{tool.get('name')}/{name}"] = shape
+            continue
         function = tool["function"] if isinstance(tool.get("function"), dict) else {}
         name = tool.get("name") or function.get("name")
-        schema = tool.get("input_schema") or tool.get("parameters") or function.get("parameters")
-        if not isinstance(name, str) or not isinstance(schema, dict):
-            continue
-        properties = schema.get("properties")
-        required = schema.get("required")
-        shapes[name] = ToolShape(
-            tuple(sorted(properties))[:_MAX_TOOL_PROPERTIES]
-            if isinstance(properties, dict)
-            else (),
-            tuple(item for item in required if isinstance(item, str))[:_MAX_TOOL_PROPERTIES]
-            if isinstance(required, list)
-            else (),
+        shape = _shape(
+            tool.get("input_schema") or tool.get("parameters") or function.get("parameters")
         )
+        if isinstance(name, str) and shape is not None:
+            shapes[name] = shape
     return shapes
 
 

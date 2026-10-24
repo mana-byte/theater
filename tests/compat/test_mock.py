@@ -216,6 +216,63 @@ def test_responses_codec_streams_a_freeform_tool_call_and_reads_its_output(tmp_p
     assert server.requests[1].last_tool_result == "patched"
 
 
+def test_responses_codec_offers_namespaced_tools_and_calls_them_with_their_namespace(
+    tmp_path: Path,
+) -> None:
+    tools = [
+        {
+            "type": "namespace",
+            "name": "mcp__probe",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "mark",
+                    "parameters": {"properties": {"label": {}}, "required": ["label"]},
+                }
+            ],
+        },
+        {"type": "function", "name": "exec_command"},
+    ]
+    reply = MockReply("", (MockToolCall("mcp__probe/mark", {"label": "x"}),))
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        server.queue("openai-responses", reply)
+
+        _, payload = _request(
+            f"{server.base_urls['openai-responses']}/responses", {"stream": True, "tools": tools}
+        )
+
+    assert server.requests[0].tools == ("mcp__probe/mark", "exec_command")
+    assert server.requests[0].tool_shapes["mcp__probe/mark"].required == ("label",)
+    assert _sse_data(payload)[1]["item"] == {
+        "type": "function_call",
+        "call_id": "call_mock_0",
+        "name": "mark",
+        "namespace": "mcp__probe",
+        "arguments": '{"label": "x"}',
+    }
+
+
+def test_a_held_responses_stream_has_sent_no_output_when_it_is_held(tmp_path: Path) -> None:
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        hold = server.hold()
+        server.queue("openai-responses", MockReply("partial", hold=hold))
+        connection, response = _open(
+            f"{server.base_urls['openai-responses']}/responses", {"stream": True}
+        )
+
+        assert [event["type"] for event in _read_events(response, count=1)] == ["response.created"]
+        assert hold.wait_reached(2.0)
+        assert _read_until_keepalive(response), "the held stream stays open on keepalive comments"
+
+        hold.release()
+        tail = _read_events(response, until="response.completed")
+        assert [event["type"] for event in tail][-2:] == [
+            "response.output_item.done",
+            "response.completed",
+        ]
+        connection.close()
+
+
 def test_requests_are_described_by_protocol_model_effort_tools_and_last_user_text(
     tmp_path: Path,
 ) -> None:
