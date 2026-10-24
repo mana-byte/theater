@@ -43,9 +43,17 @@ class V2Fake(ServerFake):
         self.plugin_state = "active"
         self.session_directory = "/work"
         self.failed_directory: str | None = None
+        #: The server clock's stamp on an admitted prompt, and on the session's last idle.
+        self.prompt_created: int | None = 1_000
+        self.idle_at: int | None = None
 
     def bodies(self, suffix: str) -> list[dict[str, Any]]:
         return [json.loads(r["body"]) for r in self.requests if r["path"].endswith(suffix)]
+
+    def end_turn(self, *, idle_at: int | None) -> None:
+        """The session leaves `active`; a turn that ran to its end also gets an idle stamp."""
+        self.active.clear()
+        self.idle_at = idle_at
 
     def _plugin_entries(self) -> list[dict[str, Any]]:
         if self.plugin_state == "missing":
@@ -57,6 +65,23 @@ class V2Fake(ServerFake):
             else {"status": "active"}
         )
         return [{"id": PLUGIN_ID, "source": {"type": "local", "path": source}, "state": state}]
+
+    def _session_answer(
+        self, sid: str, rest: list[str], method: str, body: bytes
+    ) -> dict[str, Any] | None:
+        if rest == ["prompt"] and method == "POST":
+            self.active.add(sid)
+            admitted: dict[str, Any] = {"id": json.loads(body)["id"], "sessionID": sid}
+            if self.prompt_created is not None:
+                admitted["time"] = {"created": self.prompt_created}
+            return {"data": admitted}
+        if rest:
+            return None
+        times = {"created": 1, "updated": 1}
+        if self.idle_at is not None:
+            times["idle"] = self.idle_at
+        location = {"directory": self.session_directory}
+        return {"data": {"id": sid, "location": location, "time": times}}
 
     async def _route(self, record: dict[str, Any], writer, body: bytes) -> None:
         if not self._authorized(record):
@@ -81,12 +106,7 @@ class V2Fake(ServerFake):
         elif segments == ["api", "session", "active"]:
             answer = {"data": {sid: {} for sid in self.active}}
         elif segments[:2] == ["api", "session"] and segments[2] in self.sessions:
-            sid = segments[2]
-            if segments[3:] == ["prompt"] and method == "POST":
-                self.active.add(sid)
-                answer = {"data": {"id": json.loads(body)["id"], "sessionID": sid}}
-            elif len(segments) == 3:
-                answer = {"data": {"id": sid, "location": {"directory": self.session_directory}}}
+            answer = self._session_answer(segments[2], segments[3:], method, body)
         if answer is None:
             await self._send(writer, 404, "Not Found", b"{}")
         else:
@@ -192,6 +212,87 @@ async def test_a_2x_session_takes_prompts_over_http(server: V2Fake, runtime, fak
     await _settles(runtime, RuntimeExecutionState.IDLE)
     again = await runtime.send(operation_id="op-3", prompt="again")
     assert again.result is DeliveryResult.ACCEPTED
+    await runtime.aclose()
+
+
+@pytest.fixture
+def unpolled(runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No poll loop and no lapsing grace: only reads a call makes itself can see the server."""
+    monkeypatch.setattr(OpenCodeServerV2Runtime, "_start_polling", lambda self: None)
+    monkeypatch.setattr(server_live_v2, "_ADMISSION_GRACE_SECONDS", 3600.0)
+
+
+async def test_a_turn_that_ended_before_any_poll_saw_it_leaves_the_session_idle(
+    server: V2Fake, runtime, unpolled
+) -> None:
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert (await runtime.send(operation_id="op-1", prompt="hello")).result is (
+        DeliveryResult.ACCEPTED
+    )
+
+    # The whole turn fit between two polls: the server stamped idle after the admission.
+    server.end_turn(idle_at=server.prompt_created + 50)
+
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
+    again = await runtime.send(operation_id="op-2", prompt="again")
+    assert again.result is DeliveryResult.ACCEPTED
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    ("prompt_created", "idle_at"),
+    [
+        pytest.param(1_000, None, id="no_idle_stamp_yet"),
+        pytest.param(1_000, 999, id="idle_before_the_admission"),
+        pytest.param(1_000, 1_000, id="idle_at_the_admission"),
+        pytest.param(None, 5_000, id="admission_carries_no_time"),
+    ],
+)
+async def test_an_admitted_prompt_stays_busy_until_the_server_proves_its_turn_ended(
+    server: V2Fake, runtime, unpolled, prompt_created: int | None, idle_at: int | None
+) -> None:
+    server.prompt_created = prompt_created
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert (await runtime.send(operation_id="op-1", prompt="hello")).result is (
+        DeliveryResult.ACCEPTED
+    )
+    server.end_turn(idle_at=idle_at)
+
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
+    refused = await runtime.send(operation_id="op-2", prompt="again")
+    assert (refused.result, refused.error_code) == (DeliveryResult.REJECTED, "busy")
+    assert len(server.bodies("/prompt")) == 1
+    await runtime.aclose()
+
+
+async def test_a_snapshot_reads_the_server_rather_than_a_poll_that_may_predate_the_turn_end(
+    server: V2Fake, runtime, unpolled
+) -> None:
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.send(operation_id="op-1", prompt="hello")
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
+
+    # An interrupt ends the turn at once; no poll has run since the server last listed it.
+    server.end_turn(idle_at=server.prompt_created + 50)
+
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
+    assert (await runtime.send(operation_id="op-2", prompt="again")).result is (
+        DeliveryResult.ACCEPTED
+    )
+    await runtime.aclose()
+
+
+async def test_a_session_the_server_still_lists_is_busy_however_old_the_last_poll(
+    server: V2Fake, runtime, unpolled
+) -> None:
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.send(operation_id="op-1", prompt="hello")
+
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
+    refused = await runtime.send(operation_id="op-2", prompt="again")
+
+    assert (refused.result, refused.error_code) == (DeliveryResult.REJECTED, "busy")
+    assert len(server.bodies("/prompt")) == 1
     await runtime.aclose()
 
 
