@@ -15,7 +15,8 @@ from theater.harness.contracts.source import Batch, Source
 from theater.models import Status
 
 _CHANNEL_ID = "opencode-server-live"
-#: A just-admitted prompt may not run yet; idle is unproven until it has been seen, or this lapses.
+#: A just-admitted prompt may not run yet; idle is unproven until it has been seen or the server
+#: has stamped idle after it, or this lapses.
 _ADMISSION_GRACE_SECONDS = 5.0
 #: Consecutive failed reads after which the server counts as gone rather than hiccuping.
 _DISCONNECTED_AFTER = 3
@@ -29,6 +30,8 @@ class OpenCodeV2LiveSource(Source):
         self._state = RuntimeExecutionState.UNKNOWN
         self._health = ConnectionHealth.UNOPENED
         self._admitted_at: float | None = None
+        #: The server's own stamp on that prompt, to compare with the server's idle stamp.
+        self._admitted_created: int | None = None
         self._failures = 0
         self._revision = 0
         self._read_revision = -1
@@ -44,17 +47,27 @@ class OpenCodeV2LiveSource(Source):
     def current_execution_state(self) -> RuntimeExecutionState:
         return self._state
 
+    @property
+    def admission_unproven(self) -> bool:
+        """Whether an admitted prompt has been neither seen running nor proven finished."""
+        return self._admitted_at is not None
+
     def adopt(self, session_id: str, state: RuntimeExecutionState) -> None:
         self._session_id = session_id
         self._admitted_at = None
         self._set(state, self._health)
 
-    def note_submitted(self) -> None:
+    def note_submitted(self, created: int | None = None) -> None:
+        """``created`` is the server's stamp on the admitted prompt, when it reported one."""
         self._admitted_at = time.monotonic()
+        self._admitted_created = created
         self._set(RuntimeExecutionState.ACTIVE, self._health)
 
-    def observe(self, active: Mapping[str, object] | None) -> None:
-        """One `session.active` read; None is a failed read."""
+    def observe(self, active: Mapping[str, object] | None, idle_at: int | None = None) -> None:
+        """One `session.active` read, with the session's idle stamp when it was read too.
+
+        None is a failed read.
+        """
         if active is None:
             self._failures += 1
             health = (
@@ -69,12 +82,25 @@ class OpenCodeV2LiveSource(Source):
             self._admitted_at = None
             self._set(RuntimeExecutionState.ACTIVE, ConnectionHealth.CONNECTED)
             return
-        admitted = self._admitted_at
-        if admitted is not None and time.monotonic() - admitted < _ADMISSION_GRACE_SECONDS:
+        if self._admission_pending(idle_at):
             self._set(RuntimeExecutionState.ACTIVE, ConnectionHealth.CONNECTED)
             return
         self._admitted_at = None
         self._set(RuntimeExecutionState.IDLE, ConnectionHealth.CONNECTED)
+
+    def _admission_pending(self, idle_at: int | None) -> bool:
+        """A prompt too quick for any poll to see ends with the server's idle stamp after it.
+
+        The server stamps idle only once its loop has drained, so that stamp also covers any
+        work queued behind the prompt; without it the grace is all that bounds the wait.
+        """
+        admitted = self._admitted_at
+        if admitted is None:
+            return False
+        created = self._admitted_created
+        if idle_at is not None and created is not None and idle_at > created:
+            return False
+        return time.monotonic() - admitted < _ADMISSION_GRACE_SECONDS
 
     def disconnected(self) -> None:
         self._set(RuntimeExecutionState.UNKNOWN, ConnectionHealth.DISCONNECTED)

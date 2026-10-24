@@ -32,7 +32,7 @@ from . import ids_v2
 from .approval_v2 import require_plugin_active
 from .dialect import resolve_binary
 from .http import OpenCodeHttpError
-from .http_v2 import OpenCodeV2Client, model_ref, session_directory
+from .http_v2 import OpenCodeV2Client, model_ref, server_time, session_directory
 from .launch import tui_env_v2
 from .native_plugin_v2 import PLUGIN_ID, plugin_dir
 from .runtime_plan import (
@@ -63,6 +63,8 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
         self._source = OpenCodeV2LiveSource()
         self._session_id: str | None = None
         self._poll_task: asyncio.Task[None] | None = None
+        #: Serializes reads so a late answer never lands after a newer one.
+        self._poll_lock = asyncio.Lock()
         self._closed = False
 
     async def open_session(
@@ -144,6 +146,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
 
     async def snapshot(self) -> RuntimeSnapshot:
         self._start_polling()
+        await self._refresh()
         health = self._source.connection_health
         return RuntimeSnapshot(
             participant_id=self.context.participant_id,
@@ -174,8 +177,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
                 error_code="not_ready",
                 error="the OpenCode server runtime has no open session",
             )
-        if self._source.connection_health is not ConnectionHealth.CONNECTED:
-            await self._poll_once()
+        await self._refresh()
         state = self._source.current_execution_state()
         if state is RuntimeExecutionState.ACTIVE:
             return _receipt(
@@ -203,7 +205,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
             return _unknown(operation_id, f"the prompt request failed in an unmapped way ({exc})")
         if admitted.get("id") != message_id:
             return _unknown(operation_id, "the server admitted a different message than was sent")
-        self._source.note_submitted()
+        self._source.note_submitted(server_time(admitted, "created"))
         return _receipt(operation_id, DeliveryResult.ACCEPTED, native_turn_id=message_id)
 
     async def steer(
@@ -273,13 +275,31 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
             )
         return version
 
+    async def _refresh(self) -> None:
+        """Control decisions rest on the server's word now, not on a poll that may predate it."""
+        if self._session_id is not None and (
+            self._source.current_execution_state() is not RuntimeExecutionState.IDLE
+            or self._source.connection_health is not ConnectionHealth.CONNECTED
+        ):
+            await self._poll_once()
+
     async def _poll_once(self) -> None:
-        try:
-            active = await self._client.active()
-        except Exception:
-            self._source.observe(None)
-            return
-        self._source.observe(active)
+        async with self._poll_lock:
+            try:
+                active = await self._client.active()
+                idle_at = None
+                # `active` alone cannot tell a prompt that has not started from one that already
+                # ended between polls; the session's own idle stamp can.
+                if (
+                    self._session_id is not None
+                    and self._session_id not in active
+                    and self._source.admission_unproven
+                ):
+                    idle_at = server_time(await self._client.read_session(self._session_id), "idle")
+            except Exception:
+                self._source.observe(None)
+                return
+            self._source.observe(active, idle_at)
 
     def _start_polling(self) -> None:
         if self._poll_task is not None or self._closed or self._session_id is None:

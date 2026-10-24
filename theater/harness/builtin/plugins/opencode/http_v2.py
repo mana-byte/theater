@@ -109,6 +109,13 @@ def session_directory(session: Mapping[str, object]) -> str:
     return os.path.realpath(directory)
 
 
+def server_time(record: Mapping[str, object], stamp: str) -> int | None:
+    """One of a record's server-clock `time` stamps (epoch milliseconds), if it carries a number."""
+    times = record.get("time")
+    value = times.get(stamp) if isinstance(times, Mapping) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def model_ref(model: str) -> dict[str, str] | None:
     """`provider/model[#variant]`, as the TUI and config spell it, as a 2.x `Model.Ref`."""
     reference, _, variant = model.partition("#")
