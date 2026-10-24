@@ -1,4 +1,4 @@
-"""A fork's current turn must remain live even when it finishes before attachment."""
+"""Launch-local turns stay live across attachment and restored pins stay history."""
 
 from __future__ import annotations
 
@@ -178,3 +178,74 @@ def test_copied_future_timestamp_exposes_wall_clock_assumption():
     records = [(0, 10, "{}"), (1, 20, json.dumps(predecessor))]
     # Without a predecessor floor, a clock step makes copied history look launch-local.
     assert claude_source._live_turn_start(records, iso_epoch(LAUNCH), SESSION) == (1, 10)
+
+
+async def test_fresh_launch_drains_two_queued_turns_in_order(tmp_path, registry):
+    root = tmp_path / "projects"
+    path = root / "project" / f"{SESSION}.jsonl"
+    path.parent.mkdir(parents=True)
+    lines = []
+    parent = None
+    for number in (1, 2):
+        user, answer, marker = f"user_{number}", f"answer_{number}", f"marker_{number}"
+        lines.extend(
+            [
+                (
+                    claude_record(user, parent, "user", message={"content": f"prompt {number}"}),
+                    AFTER,
+                ),
+                (
+                    claude_fragment(
+                        answer, user, {"type": "text", "text": f"ANSWER {number}"}, f"msg_{number}"
+                    ),
+                    AFTER,
+                ),
+                (claude_marker(marker, answer), AFTER),
+            ]
+        )
+        parent = marker
+    _write(path, lines)
+    reader = ClaudeCodeObserver(root=root).open_source_for(
+        participant_id="claude",
+        cwd=str(tmp_path),
+        session_id=SESSION,
+        session_provenance=TranscriptProvenance.EXACT,
+        after=iso_epoch(LAUNCH),
+    )
+    reader.admit_exact_location(location=str(path), session_id=SESSION)
+    participant = registry.create_spawned(harness="claude", cwd=str(tmp_path))
+    jobs = JobManager(registry.store)
+    for number in (1, 2):
+        jobs.create(
+            handle=f"queued_{number}",
+            caller_id="caller",
+            target_id=participant.id,
+            kind="send",
+            prompt=f"prompt {number}",
+        )
+    daemon = Observer(registry, harnesses={}, jobs=jobs)
+    try:
+        attached = await reader.read()
+        assert attached.attached.last_event is None
+        assert daemon._accept_attachment(participant.id, reader, attached)
+        batch = await reader.read()
+        apply_batch(daemon, participant.id, batch, QuietClock(), TurnAccumulator(), source=reader)
+        assert [event.raw_text for event in batch.events if event.kind == EventKind.USER] == [
+            "prompt 1",
+            "prompt 2",
+        ]
+        assert [event.raw_text for event in batch.events if event.turn_end] == [
+            "ANSWER 1",
+            "ANSWER 2",
+        ]
+        assert [
+            (jobs.get(f"queued_{number}").state, jobs.get(f"queued_{number}").result)
+            for number in (1, 2)
+        ] == [
+            (JobState.DONE, "ANSWER 1"),
+            (JobState.DONE, "ANSWER 2"),
+        ]
+        assert reader.offset == path.stat().st_size
+        assert (await reader.read()).events == ()
+    finally:
+        await reader.aclose()
