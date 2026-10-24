@@ -167,6 +167,8 @@ class ToolShape:
 
     properties: tuple[str, ...] = ()
     required: tuple[str, ...] = ()
+    #: The schema forbids arguments beyond ``properties``.
+    closed: bool = False
 
 
 @dataclass(frozen=True, slots=True)

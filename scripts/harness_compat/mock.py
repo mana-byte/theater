@@ -335,6 +335,7 @@ def _shape(schema: object) -> ToolShape | None:
         tuple(item for item in required if isinstance(item, str))[:_MAX_TOOL_PROPERTIES]
         if isinstance(required, list)
         else (),
+        closed=schema.get("additionalProperties") is False,
     )
 
 
@@ -353,9 +354,8 @@ def _tool_shapes(body: dict[str, Any]) -> dict[str, ToolShape]:
             continue
         function = tool["function"] if isinstance(tool.get("function"), dict) else {}
         name = tool.get("name") or function.get("name")
-        shape = _shape(
-            tool.get("input_schema") or tool.get("parameters") or function.get("parameters")
-        )
+        declared = (tool.get("input_schema"), tool.get("parameters"), function.get("parameters"))
+        shape = _shape(next((item for item in declared if item is not None), None))
         if isinstance(name, str) and shape is not None:
             shapes[name] = shape
     return shapes

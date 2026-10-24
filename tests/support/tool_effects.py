@@ -121,7 +121,7 @@ def _misfit(request: RecordedRequest, call: MockToolCall) -> str | None:
     if shape is None or isinstance(call.arguments, str):
         return None  # a freeform (grammar) tool declares no arguments to compare against
     given = set(call.arguments)
-    unknown = sorted(given - set(shape.properties)) if shape.properties else []
+    unknown = sorted(given - set(shape.properties)) if shape.closed else []
     missing = sorted(set(shape.required) - given)
     if unknown or missing:
         return (

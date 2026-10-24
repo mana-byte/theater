@@ -366,6 +366,30 @@ def test_requests_carry_the_conversation_humans_and_the_last_tool_result(tmp_pat
     assert (empty.user_texts, empty.last_user, empty.last_tool_result) == ((), None, None)
 
 
+def test_each_offered_tool_records_the_arguments_its_schema_declares(tmp_path: Path) -> None:
+    schema = {"properties": {"path": {}, "content": {}}, "required": ["path"]}
+    tools = [
+        {"name": "Write", "input_schema": {**schema, "additionalProperties": False}},
+        {"type": "function", "function": {"name": "write_file", "parameters": schema}},
+        {"type": "function", "name": "patch", "parameters": {}},
+        {"type": "custom", "name": "apply_patch"},
+    ]
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        _request(f"{server.base_urls['anthropic']}/v1/messages", {"tools": tools})
+        (request,) = server.requests
+
+    shapes = request.tool_shapes
+    assert (shapes["Write"].properties, shapes["Write"].required) == (
+        ("content", "path"),
+        ("path",),
+    )
+    assert shapes["Write"].closed and not shapes["write_file"].closed
+    assert shapes["write_file"].properties == ("content", "path")
+    assert shapes["patch"].properties == () and "apply_patch" not in shapes
+    recorded = json.loads((tmp_path / "requests.jsonl").read_text())
+    assert recorded["tool_shapes"]["Write"]["closed"] is True
+
+
 def test_the_prompt_is_found_beside_context_the_cli_adds_to_the_same_message(
     tmp_path: Path,
 ) -> None:
