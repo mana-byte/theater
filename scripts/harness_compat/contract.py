@@ -7,8 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-#: green: every live obligation passed; red: the CLI broke a contract; inconclusive: no verdict
-#: (install, infrastructure, timeout); tooling: our own suite accounting broke, never upstream.
+#: red records a contract assertion failure; inconclusive/tooling do not establish a binary defect.
 Verdict = Literal["green", "red", "inconclusive", "tooling"]
 CheckStatus = Literal["pass", "fail", "skip", "error"]
 #: Wire protocols the mock speaks; "openai-chat" is Chat Completions.
@@ -29,7 +28,7 @@ SUITE_ENV_MUTATION = "HARNESS_COMPAT_MUTATION"
 #: Schema of ``required.json`` and ``inventory.json``, written transiently into the sandbox.
 SUITE_DOCUMENT_SCHEMA = 1
 #: How an obligation can end in ``inventory.json``; None means no scenario ran for it.
-SUITE_OUTCOMES = ("passed", "failed", "error", "skipped")
+SUITE_OUTCOMES = ("passed", "failed", "error", "skipped", "tooling")
 
 
 class SuiteDocumentError(ValueError):
@@ -129,7 +128,7 @@ class Check:
 
 @dataclass(frozen=True, slots=True)
 class Result:
-    """Outcome of qualifying one release: held in memory, never written anywhere."""
+    """One release's qualification/publication outcome, held only in memory."""
 
     harness: str
     version: str

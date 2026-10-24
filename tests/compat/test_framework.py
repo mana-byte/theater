@@ -101,6 +101,19 @@ def test_a_failed_case_is_not_hidden_by_a_later_passing_duplicate() -> None:
     assert _suite_check("tests/conformance/live", [failed, passed]).status == "fail"
 
 
+def test_a_non_clean_pytest_exit_cannot_pass_despite_all_passing_cases(tmp_path, monkeypatch):
+    def run(argv, **kwargs):
+        xml = Path(
+            next(arg.removeprefix("--junitxml=") for arg in argv if arg.startswith("--junitxml="))
+        )
+        xml.write_text('<testsuite><testcase name="test_ok"/></testsuite>')
+        return subprocess.CompletedProcess(argv, 1, "session completion failed", "")
+
+    monkeypatch.setattr("scripts.harness_compat.framework.run_group", run)
+    check = run_pytest(tmp_path, "test_x.py", env={})
+    assert check.status == "error" and "pytest exit 1" in check.detail
+
+
 def test_sandbox_keeps_unix_socket_paths_short(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

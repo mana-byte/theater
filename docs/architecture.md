@@ -1459,9 +1459,9 @@ separately, so daemon RPC latency is not mistaken for end-to-end UI latency.
 Catalog compatibility probes are daemon-local, coalesced, and cached for at most
 60 seconds, with executable identity, callback, and configuration invalidation.
 Filesystem fingerprinting and probes run on workers. Launch admission evaluates the plugin's
-current policy independently of catalog display results. Runtime version banners are shared
-through `theater.harness.contracts.version_probe`, cached by resolved path, mtime and size;
-replacement re-probes immediately and malformed banners retry after two seconds.
+current policy independently of catalog display results. Launch admission probes version banners
+afresh through `theater.harness.contracts.version_probe`: package updates need not change a CLI's
+entrypoint identity, so cached catalog banners cannot authorize launches.
 
 Dependency direction is strictly layered: `constants/observability.py` imports
 no feature package; `catalog.py` imports only dataclasses, enums, and constants;

@@ -11,7 +11,7 @@ import pytest
 from scripts.harness_compat import canaries
 from scripts.harness_compat.codecopy import code_copy
 from scripts.harness_compat.contract import InstallFailed, Sandbox
-from scripts.harness_compat.policy import load_policy
+from scripts.harness_compat.policy import load_policy, write_policy
 from theater.harness.contracts.version_policy import VersionPolicy
 
 
@@ -66,6 +66,24 @@ def test_the_policys_maximum_is_installed_and_every_caught_canary_passes(
     assert env[canaries.ENV_ENABLE] == "1" and env[canaries.ENV_HARNESS] == "claude"
     assert env[canaries.ENV_BINARY].endswith("claude")
     assert seen[0]["argv"][-3:] == ["-k", "claude", canaries.CANARIES_TARGET]
+
+
+def test_an_excluded_max_uses_the_newest_admitted_release(repo: Path, monkeypatch) -> None:
+    _pytest(monkeypatch, 0, "4 passed")
+    write_policy(repo, "claude", VersionPolicy("1.0.0", "1.2.0", ("1.2.0",)))
+    adapter = _Adapter("1.1.0")
+    monkeypatch.setattr(adapter, "discover", lambda: ["1.0.0", "1.1.0", "1.2.0", "1.3.0"])
+    assert canaries.run_canaries(repo, adapter).status == "pass"
+    assert adapter.installed == ["1.1.0"]
+
+
+def test_no_admitted_release_cannot_be_used_as_a_canary_baseline(repo: Path, monkeypatch) -> None:
+    write_policy(repo, "claude", VersionPolicy("1.2.0", "1.2.0", ("1.2.0",)))
+    adapter = _Adapter()
+    monkeypatch.setattr(adapter, "discover", lambda: ["1.2.0", "1.3.0"])
+    with pytest.raises(ValueError, match="no admitted release"):
+        canaries.run_canaries(repo, adapter)
+    assert not adapter.installed
 
 
 def test_a_canary_the_suite_missed_is_a_failure(

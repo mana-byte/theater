@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,7 @@ from scripts.harness_compat.contract import (
     SuiteRow,
 )
 from scripts.harness_compat.sandbox import make_sandbox
-from scripts.harness_compat.suite_runner import _load, reconcile, suite_environment
+from scripts.harness_compat.suite_runner import _load, reconcile, suite_environment, verdict
 
 SUITE = Check("tests/conformance/live", "pass", "10 passed")
 
@@ -71,6 +72,18 @@ def test_every_obligation_becomes_one_check_with_its_outcome() -> None:
     assert "nonce missing" in report.checks[2].detail
 
 
+def test_an_unexpected_test_exception_is_tooling_even_if_junit_marks_the_case_failed() -> None:
+    report = reconcile(
+        Check("tests/conformance/live", "fail", "RuntimeError: broken helper"),
+        _required(_entry("launch:manual")),
+        _inventory(("launch:manual", "executed", "tooling", "RuntimeError: broken helper")),
+        harness="acme",
+        version="1.2.3",
+    )
+    assert verdict(report) == "tooling"
+    assert "broken helper" in report.checks[1].detail
+
+
 def test_a_scenario_that_never_ran_is_a_tooling_problem_in_a_full_run() -> None:
     required = _required(_entry("mcp:call"))
     inventory = _inventory(("mcp:call", "unproven", None, ""))
@@ -91,6 +104,15 @@ def test_an_obligation_missing_from_the_inventory_is_a_tooling_problem() -> None
 
     assert report.problems == ("obligation launch:yolo is missing from inventory.json",)
     assert report.checks[-1].status == "error"
+
+
+@pytest.mark.parametrize("changes", [{"family": "other"}, {"scenario": "test_other.py"}])
+def test_an_inventory_cannot_borrow_a_pass_from_a_different_scenario(changes: dict) -> None:
+    inventory = _inventory(("launch:yolo", "executed", "passed", ""))
+    inventory = replace(inventory, rows=(replace(inventory.rows[0], **changes),))
+    report = _reconcile(_required(_entry("launch:yolo")), inventory)
+    assert verdict(report) == "tooling"
+    assert report.problems == ("obligation launch:yolo names a different family or scenario",)
 
 
 def test_an_obligation_nobody_promised_is_a_tooling_problem_unless_partial() -> None:

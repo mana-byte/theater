@@ -1,302 +1,250 @@
-"""Publication: one issue per unsuccessful release, deduped by existence, and one guarded PR."""
+"""Failures and passes accumulate in one remote JSON-only PR without checkout writes."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from scripts.harness_compat.contract import Check, Result
-from scripts.harness_compat.git import git as read_git
+from scripts.harness_compat.diagnostics import exception_detail
+from scripts.harness_compat.git import git
 from scripts.harness_compat.policy import PolicyChangeError, load_policy
-from scripts.harness_compat.publish import (
-    file_issues,
-    issue_body,
-    issue_title,
-    pr_body,
-    prepare_proposal,
-    publish,
-    write_outputs,
-)
+from scripts.harness_compat.publish import file_issues, issue_body, issue_title, publish
 from scripts.harness_compat.run import Run
-from theater.harness.contracts.version_policy import VersionPolicy, version_key
+from tests.support.compat_github import POLICY_PATH, CompatGithub
+from theater.harness.contracts.version_policy import VersionPolicy
 
 Make = Callable[..., Result]
-Git = Callable[..., str]
 URL = "https://github.com/o/r/actions/runs/7"
+POLICY = VersionPolicy("1.0.0", "1.2.0")
 
 
-class _Gh:
-    """A recording stand-in for the ``gh`` CLI: existing issue titles in, calls out."""
-
-    def __init__(self, existing: tuple[str, ...] = ()) -> None:
-        self.existing = existing
-        self.calls: list[tuple[str, ...]] = []
-        self.bodies: list[str] = []
-        self.body_paths: list[Path] = []
-
-    def __call__(self, *args: str) -> str:
-        self.calls.append(args)
-        if args[0] == "api":
-            return "\n".join(self.existing)
-        if args[:2] == ("issue", "create"):
-            path = Path(args[args.index("--body-file") + 1])
-            self.body_paths.append(path)
-            self.bodies.append(path.read_text(encoding="utf-8"))
-        return ""
-
-    def created(self) -> list[tuple[str, ...]]:
-        return [call for call in self.calls if call[:2] == ("issue", "create")]
+def _run(*results: Result) -> Run:
+    return Run("claude", POLICY, tuple(r.version for r in results), results)
 
 
-def _run(results: tuple[Result, ...], policy: VersionPolicy | None = None) -> Run:
-    """A run over ``results`` plus a passing outcome for any pinned bound they leave out."""
-    policy = policy or VersionPolicy("1.0.0", "1.2.0")
-    held = {result.version: result for result in results}
-    for bound in (policy.minimum, policy.maximum):
-        held.setdefault(bound, Result("claude", bound, "green"))
-    ordered = tuple(sorted(held.values(), key=lambda result: version_key(result.version)))
-    return Run("claude", policy, tuple(result.version for result in ordered), ordered)
-
-
-def _context(repo: Path, tmp_path: Path) -> dict[str, str]:
+def _context(repo: Path) -> dict[str, str]:
     return {
         "GITHUB_ACTIONS": "true",
         "GITHUB_REF": "refs/heads/main",
         "GITHUB_EVENT_NAME": "schedule",
-        "GITHUB_SHA": read_git(repo, "rev-parse", "HEAD").strip(),
-        "GITHUB_OUTPUT": str(tmp_path / "output"),
-        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_SHA": git(repo, "rev-parse", "HEAD").strip(),
     }
 
 
-def test_an_issue_names_harness_version_check_and_the_ci_run(result: Make) -> None:
-    failing = result("1.1.0", "red", Check("conformance:interrupt", "fail", "turn never stopped"))
-
-    body = issue_body(failing, policy=VersionPolicy("1.0.0", "1.2.0"), run_url=URL)
-
-    assert issue_title("claude", "1.1.0") == "Harness compatibility: claude 1.1.0"
-    assert "claude 1.1.0" in body and URL in body
-    assert "conformance:interrupt (fail): turn never stopped" in body
+def _github(repo: Path) -> CompatGithub:
+    return CompatGithub(_context(repo)["GITHUB_SHA"], POLICY)
 
 
-def test_an_incompatibility_is_told_apart_from_a_run_that_proved_nothing(result: Make) -> None:
-    policy = VersionPolicy("1.0.0", "1.2.0")
-
-    red = issue_body(result("1.1.0", "red"), policy=policy, run_url=URL)
-    inconclusive = issue_body(result("1.1.0", "inconclusive"), policy=policy, run_url=URL)
-    tooling = issue_body(result("1.1.0", "tooling"), policy=policy, run_url=URL)
-
-    assert "breaks a contract" in red and "No verdict" not in red
-    assert "No verdict" in inconclusive and "breaks a contract" not in inconclusive
-    assert "not a CLI incompatibility" in tooling
+def _publish(repo: Path, gh: CompatGithub, *results: Result):
+    return publish(repo, _run(*results), run_url=URL, gh=gh, environ=_context(repo))
 
 
-def test_only_unsuccessful_releases_get_issues_with_their_verdict_labels(result: Make) -> None:
-    gh = _Gh()
-    run = _run(
-        (
-            result("1.0.0"),
-            result("1.1.0", "red"),
-            result("1.2.0", "inconclusive"),
-            result("1.3.0", "tooling"),
-        )
-    )
-
-    created, existing = file_issues(run, run_url=URL, gh=gh)
-
-    assert created == [issue_title("claude", v) for v in ("1.1.0", "1.2.0", "1.3.0")]
-    assert existing == []
-    labels = {
-        call[call.index("--title") + 1]: [
-            call[i + 1] for i, item in enumerate(call) if item == "--label"
-        ]
-        for call in gh.created()
-    }
-    assert labels[issue_title("claude", "1.1.0")] == [
-        "compat:claude",
-        "incompatible",
-        "admitted-regression",
+def _one_line(gh: CompatGithub) -> None:
+    assert gh.changed_files(gh.refs["main"], gh.refs["chore/compat-claude"]) == [
+        {"filename": POLICY_PATH, "additions": 1, "deletions": 1},
     ]
-    assert labels[issue_title("claude", "1.2.0")] == [
-        "compat:claude",
-        "inconclusive",
-        "admitted-regression",
-    ]
-    assert labels[issue_title("claude", "1.3.0")] == ["compat:claude", "tooling"]
+    assert not any(call[:2] == ("pr", "close") for call in gh.calls)
 
 
-def test_open_issues_are_the_dedupe_and_every_page_is_read(result: Make) -> None:
-    gh = _Gh(existing=(issue_title("claude", "1.1.0"), "Harness compatibility failures: claude"))
-    run = _run((result("1.1.0", "red"), result("1.3.0", "red")))
-
-    created, existing = file_issues(run, run_url=URL, gh=gh)
-
-    assert created == [issue_title("claude", "1.3.0")]
-    assert existing == [issue_title("claude", "1.1.0")]
-    listing = next(call for call in gh.calls if call[0] == "api")
-    assert "--paginate" in listing and "state=open" in listing
-    assert "labels=compat:claude" in listing and "--limit" not in listing
+def test_passing_newer_version_advances_only_the_shared_json_pr(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    published = _publish(repo, gh, result("1.3.0"))
+    assert published.proposal == VersionPolicy("1.0.0", "1.3.0") and published.pr == 17
+    assert load_policy(repo, "claude") == POLICY and git(repo, "status", "--short") == ""
+    _one_line(gh)
 
 
-def test_a_clean_run_calls_gh_for_nothing(result: Make) -> None:
-    gh = _Gh()
-
-    assert file_issues(_run((result("1.0.0"), result("1.1.0"))), run_url=URL, gh=gh) == ([], [])
-    assert gh.calls == []
-
-
-def test_issue_bodies_travel_in_temporary_files_that_are_removed(result: Make) -> None:
-    gh = _Gh()
-
-    file_issues(_run((result("1.1.0", "red"),)), run_url=URL, gh=gh)
-
-    assert gh.bodies and gh.bodies[0].startswith("claude 1.1.0 ended **red**")
-    assert not gh.body_paths[0].exists()
-    # No call interpolates a body into its arguments.
-    assert all(gh.bodies[0] not in " ".join(call) for call in gh.calls)
+@pytest.mark.parametrize("verdict", ["red", "inconclusive", "tooling"])
+def test_every_known_newer_failure_gets_an_issue_and_exclusion_only_pr(
+    repo: Path, result: Make, verdict: str
+) -> None:
+    gh = _github(repo)
+    published = _publish(repo, gh, result("1.3.0", verdict))
+    assert published.proposal == VersionPolicy("1.0.0", "1.2.0", ("1.3.0",))
+    assert issue_title("claude", "1.3.0") in gh.issues and published.pr == 17
+    assert f"**{verdict}**" in gh.bodies[0]
+    assert "binary defect" in gh.bodies[0] if verdict != "red" else "Investigation" in gh.bodies[0]
+    _one_line(gh)
 
 
-def test_a_failing_gh_still_removes_the_body_file(result: Make) -> None:
-    paths: list[Path] = []
-
-    def gh(*args: str) -> str:
-        if args[:2] == ("issue", "create"):
-            paths.append(Path(args[args.index("--body-file") + 1]))
-            raise RuntimeError("gh issue create failed")
-        return ""
-
-    with pytest.raises(RuntimeError, match="gh issue create failed"):
-        file_issues(_run((result("1.1.0", "red"),)), run_url=URL, gh=gh)
-
-    assert paths and not paths[0].exists()
-
-
-def _evidence(result: Make) -> tuple[Result, ...]:
-    return (
-        result("1.0.0"),
-        result("1.1.0", "red"),
-        result("1.2.0"),
-        result("1.3.0"),
-        result("1.4.0", "inconclusive"),
+def test_failure_at_admitted_max_keeps_the_range_and_excludes_max(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    assert _publish(repo, gh, result("1.2.0", "red")).proposal == VersionPolicy(
+        "1.0.0",
+        "1.2.0",
+        ("1.2.0",),
     )
 
 
-def test_a_proposal_rewrites_only_the_policy_line_and_announces_it(
-    repo: Path, result: Make, tmp_path: Path
+def test_all_failures_still_create_one_policy_pr(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    published = _publish(repo, gh, result("1.3.0", "red"), result("1.4.0", "inconclusive"))
+    assert published.proposal == VersionPolicy("1.0.0", "1.2.0", ("1.3.0", "1.4.0"))
+    assert len(gh.issues) == 2 and gh.pr == 17
+    _one_line(gh)
+
+
+def test_mixed_results_advance_past_failed_versions_without_admitting_them(
+    repo: Path, result: Make
 ) -> None:
-    output = tmp_path / "output"
-    environ = {"GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(tmp_path)}
+    gh = _github(repo)
+    _publish(repo, gh, result("1.3.0", "red"), result("1.4.0"), result("1.5.0", "tooling"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.4.0", ("1.3.0", "1.5.0"))
+    assert len(gh.issues) == 2
+    _one_line(gh)
 
-    published = prepare_proposal(repo, _run(_evidence(result)), run_url=URL, environ=environ)
 
-    assert published.pr_action == "propose"
-    assert load_policy(repo, "claude") == VersionPolicy("1.0.0", "1.3.0", ("1.1.0",))
-    lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert lines["pr_action"] == "propose"
-    assert lines["pr_title"] == "chore(compat): update claude version policy"
-    body = Path(lines["pr_body_path"])
-    assert body.parent == tmp_path
-    assert body.read_text() == (
-        f"claude policy: `>=1.0.0,<=1.2.0` to `>=1.0.0,<=1.3.0 excluding 1.1.0`\n\nRun: {URL}\n"
+def test_existing_pr_keeps_prior_max_and_exclusions_when_new_outcomes_arrive(
+    repo: Path, result: Make
+) -> None:
+    gh = _github(repo)
+    gh.seed_pending(VersionPolicy("1.0.0", "1.4.0", ("1.3.0", "1.6.0")))
+    _publish(repo, gh, result("1.5.0"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.5.0", ("1.3.0", "1.6.0"))
+    assert gh.pr == 17 and any(
+        call[:2] == ("api", "repos/{owner}/{repo}/pulls/17") for call in gh.calls
     )
-    body.unlink()
+    assert not any(call[:2] == ("api", "repos/{owner}/{repo}/pulls") for call in gh.calls)
+    _one_line(gh)
 
 
-def test_no_proposal_when_the_evidence_agrees_with_the_policy(
-    repo: Path, result: Make, tmp_path: Path
+def test_a_failed_pending_max_is_excluded_without_shrinking_or_retiring_the_pr(
+    repo: Path, result: Make
 ) -> None:
-    run = _run((result("1.0.0"), result("1.1.0"), result("1.2.0"), result("1.3.0", "red")))
-    output = tmp_path / "output"
-
-    published = publish(repo, run, run_url=URL, gh=_Gh(), environ=_context(repo, tmp_path))
-
-    assert published.pr_action == "retire"
-    assert output.read_text() == "pr_action=retire\n"
+    gh = _github(repo)
+    gh.seed_pending(VersionPolicy("1.0.0", "1.4.0", ("1.3.0",)))
+    _publish(repo, gh, result("1.4.0", "inconclusive"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.4.0", ("1.3.0", "1.4.0"))
+    _one_line(gh)
 
 
-def test_no_passing_release_leaves_open_pull_requests_alone(
-    repo: Path, result: Make, tmp_path: Path
+def test_multiple_runs_reuse_one_pr_and_preserve_earlier_failures(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    _publish(repo, gh, result("1.3.0", "red"))
+    _publish(repo, gh, result("1.4.0"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.4.0", ("1.3.0",))
+    assert sum(call[:2] == ("api", "repos/{owner}/{repo}/pulls") for call in gh.calls) == 1
+    _one_line(gh)
+
+
+def test_matching_pending_change_is_kept_and_an_orphan_branch_gets_its_pr(
+    repo: Path, result: Make
 ) -> None:
-    output = tmp_path / "output"
-    run = _run((result("1.0.0", "inconclusive"), result("1.1.0", "red"), result("1.2.0", "red")))
-
-    published = publish(repo, run, run_url=URL, gh=_Gh(), environ=_context(repo, tmp_path))
-
-    assert published.pr_action == "keep"
-    assert output.read_text() == "pr_action=keep\n"
-    assert load_policy(repo, "claude") == VersionPolicy("1.0.0", "1.2.0")
+    gh = _github(repo)
+    gh.seed_pending(VersionPolicy("1.0.0", "1.2.0", ("1.3.0",)), pr=False)
+    _publish(repo, gh, result("1.3.0", "tooling"))
+    assert gh.pr == 17 and gh.refs["chore/compat-claude"] == "pending"
 
 
-def test_a_dirty_checkout_blocks_the_proposal(repo: Path, result: Make, tmp_path: Path) -> None:
-    (repo / "tracked.txt").write_text("edited\n", encoding="utf-8")
+def test_existing_issue_is_updated_with_the_current_observed_cause(
+    repo: Path, result: Make
+) -> None:
+    gh = _github(repo)
+    title = issue_title("claude", "1.3.0")
+    gh.issues[title] = 42
+    published = _publish(
+        repo, gh, result("1.3.0", "tooling", Check("suite", "error", "unexpected ValueError"))
+    )
+    assert published.existing == (title,) and published.created == ()
+    assert any(call[:3] == ("issue", "edit", "42") for call in gh.calls)
+    assert "unexpected ValueError" in gh.bodies[0] and "not proof" in gh.bodies[0]
 
-    with pytest.raises(PolicyChangeError, match=r"tracked\.txt"):
-        prepare_proposal(
-            repo, _run(_evidence(result)), run_url=URL, environ={"RUNNER_TEMP": str(tmp_path)}
-        )
+
+def test_all_request_and_body_files_are_removed_even_after_publication_failure(
+    repo: Path, result: Make
+) -> None:
+    gh = _github(repo)
+    gh.fail.add("pr create")
+    with pytest.raises(ExceptionGroup):
+        _publish(repo, gh, result("1.3.0", "red"))
+    assert gh.temporary_paths and all(not path.exists() for path in gh.temporary_paths)
+    assert issue_title("claude", "1.3.0") in gh.issues
+    gh.fail.clear()
+    _publish(repo, gh, result("1.3.0", "red"))
+    assert gh.pr == 17
+    _one_line(gh)
 
 
-def test_a_dirty_checkout_publishes_nothing(repo: Path, result: Make, tmp_path: Path) -> None:
-    (repo / "tracked.txt").write_text("edited\n", encoding="utf-8")
-    gh = _Gh()
+def test_issue_failure_does_not_block_the_required_exclusion_pr(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    gh.fail.add("issue create")
+    with pytest.raises(ExceptionGroup) as caught:
+        _publish(repo, gh, result("1.3.0", "red"), result("1.4.0"))
+    assert "issue create unavailable" in exception_detail(caught.value)
+    assert gh.policy() == VersionPolicy("1.0.0", "1.4.0", ("1.3.0",)) and gh.pr == 17
 
+
+def test_concurrent_branch_updates_are_refused_and_issues_are_still_attempted(
+    repo: Path, result: Make
+) -> None:
+    gh = _github(repo)
+    gh.seed_pending(VersionPolicy("1.0.0", "1.3.0"))
+    gh.fail.add("ref-update")
+    with pytest.raises(ExceptionGroup) as caught:
+        _publish(repo, gh, result("1.4.0", "red"))
+    assert "non-fast-forward" in exception_detail(caught.value)
+    assert gh.refs["chore/compat-claude"] == "pending"
+    assert issue_title("claude", "1.4.0") in gh.issues
+
+
+def test_dirty_checkout_blocks_publication_without_touching_github(
+    repo: Path, result: Make
+) -> None:
+    gh = _github(repo)
+    (repo / "tracked.txt").write_text("edited\n")
     with pytest.raises(PolicyChangeError):
-        publish(
-            repo, _run(_evidence(result)), run_url=URL, gh=gh,
-            environ=_context(repo, tmp_path),
-        )  # fmt: skip
-
+        _publish(repo, gh, result("1.3.0"))
     assert gh.calls == []
 
 
-def test_the_pr_body_is_the_policy_delta_and_the_run_url_only(result: Make) -> None:
-    run = _run((result("1.0.0"), result("1.1.0", "red"), result("1.2.0"), result("2.0.0")))
+def test_pending_code_changes_are_never_overwritten(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    gh.seed_pending(VersionPolicy("1.0.0", "1.3.0"))
+    gh.trees["tree-pending"]["tracked.txt"] = "edited\n"
+    with pytest.raises(ExceptionGroup) as caught:
+        _publish(repo, gh, result("1.4.0", "red"))
+    assert "more than one policy line" in exception_detail(caught.value)
+    assert gh.refs["chore/compat-claude"] == "pending"
 
-    body = pr_body(run, VersionPolicy("1.0.0", "2.0.0", ("1.1.0",)), run_url=URL)
 
-    assert body == (
-        f"claude policy: `>=1.0.0,<=1.2.0` to `>=1.0.0,<=2.0.0 excluding 1.1.0`\n\nRun: {URL}\n"
+def test_main_advance_prevents_a_pass_authorizing_untested_code(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    gh.refs["main"] = "new-main"
+    gh.commits["new-main"] = gh.commits[_context(repo)["GITHUB_SHA"]]
+    with pytest.raises(ExceptionGroup) as caught:
+        _publish(repo, gh, result("1.3.0"))
+    assert "main advanced" in exception_detail(caught.value)
+    assert "chore/compat-claude" not in gh.refs
+    _publish(repo, gh, result("1.3.0", "inconclusive"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.2.0", ("1.3.0",))
+
+
+def test_clean_run_needs_no_failure_issue_calls(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    assert file_issues(_run(result("1.3.0")), run_url=URL, gh=gh) == ([], [])
+    assert gh.calls == []
+
+
+def test_main_advance_never_drops_failures_beside_a_previously_completed_pass(
+    repo: Path, result: Make
+) -> None:
+    gh = _github(repo)
+    gh.refs["main"] = "new-main"
+    gh.commits["new-main"] = gh.commits[_context(repo)["GITHUB_SHA"]]
+    with pytest.raises(ExceptionGroup):
+        _publish(repo, gh, result("1.3.0"), result("1.4.0", "tooling"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.2.0", ("1.4.0",))
+    assert issue_title("claude", "1.4.0") in gh.issues and gh.pr == 17
+    _one_line(gh)
+
+
+def test_issue_explanation_has_the_exact_check_and_run(result: Make) -> None:
+    body = issue_body(
+        result("1.3.0", "red", Check("conformance:interrupt", "fail", "turn never stopped")),
+        policy=POLICY,
+        run_url=URL,
     )
-    assert "|" not in body and "major" not in body.lower()
-
-
-def test_outputs_are_single_lines_only(tmp_path: Path) -> None:
-    target = tmp_path / "out"
-    write_outputs(target, {"a": "1", "b": "two words"})
-
-    assert target.read_text() == "a=1\nb=two words\n"
-    with pytest.raises(ValueError, match="one line"):
-        write_outputs(target, {"body": "line\nforged=1"})
-
-
-def test_the_outputs_file_content_matches_the_policy_json(
-    repo: Path, result: Make, tmp_path: Path
-) -> None:
-    prepare_proposal(repo, _run(_evidence(result)), run_url=URL, environ=_context(repo, tmp_path))
-    text = (repo / "theater/harness/builtin/plugins/claude/compatibility.json").read_text()
-
-    assert text == '{"min":"1.0.0","max":"1.3.0","excluded":["1.1.0"]}\n'
-    assert json.loads(text)["max"] == "1.3.0"
-    for body in tmp_path.glob("compat-pr-*.md"):
-        body.unlink()
-
-
-def test_a_failing_issue_call_does_not_block_the_proposal_but_is_still_raised(
-    repo: Path, result: Make, tmp_path: Path
-) -> None:
-    def gh(*args: str) -> str:
-        raise RuntimeError("gh label create failed")
-
-    output = tmp_path / "output"
-    environ = _context(repo, tmp_path)
-
-    with pytest.raises(RuntimeError, match="gh label create failed"):
-        publish(repo, _run(_evidence(result)), run_url=URL, gh=gh, environ=environ)
-
-    assert "pr_action=propose" in output.read_text()
-    assert load_policy(repo, "claude").maximum == "1.3.0"
-    for body in tmp_path.glob("compat-pr-*.md"):
-        body.unlink()
+    assert "conformance:interrupt (fail): turn never stopped" in body and URL in body

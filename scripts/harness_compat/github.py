@@ -8,7 +8,7 @@ import urllib.request
 from collections.abc import Iterable, Mapping
 from urllib.parse import quote
 
-from theater.harness.contracts.version_policy import version_key
+from theater.version_policy import version_key
 
 _TIMEOUT_SECONDS = 30.0
 _GITHUB_API = "https://api.github.com/"

@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from theater.harness.contracts.version_policy import version_key
+from theater.version_policy import version_key
 
 from .contract import (
     SUITE_ENV_BINARY,
@@ -189,7 +189,14 @@ def reconcile(
         if found is None:
             problems.append(f"obligation {promised.id} is missing from inventory.json")
             continue
+        if (found.family, found.scenario) != (promised.family, promised.scenario):
+            problems.append(f"obligation {promised.id} names a different family or scenario")
+            continue
         check, never_ran = _obligation_check(promised, found, partial=partial)
+        if found.outcome == "tooling":
+            problems.append(
+                f"obligation {promised.id} raised an unexpected exception: {found.detail}"
+            )
         if never_ran:
             problems.append(f"obligation {promised.id} has a scenario that never ran")
         checks.append(check)
@@ -220,16 +227,18 @@ def _fault(problems: Sequence[str]) -> tuple[Check, ...]:
 def verdict(report: SuiteReport) -> Verdict:
     """The suite is the sole authority, and only a whole, clean pass is green.
 
-    A failed obligation is red. Reconciliation problems beside a clean pytest run are our own
-    accounting (tooling). Anything unproven (an error, a skipped or unrun obligation, a filtered
-    run, or no passing obligation at all) says nothing about the release, so it is inconclusive.
+    Only an obligation's assertion failure is red; a pytest failure alone proves no binary defect.
     """
     checks = report.checks
-    if any(check.status == "fail" for check in checks):
+    if not checks:
+        return "inconclusive"
+    if any(check.status == "fail" for check in checks[1:]):
         return "red"
-    if report.problems and checks[0].status == "pass":
+    if report.problems and checks[0].status in ("pass", "fail"):
         return "tooling"
     if report.partial or any(check.status in ("error", "skip") for check in checks):
         return "inconclusive"
+    if checks[0].status == "fail":
+        return "tooling"
     proven = any(check.name.startswith("conformance:") for check in checks)
     return "green" if proven and checks[0].status == "pass" else "inconclusive"

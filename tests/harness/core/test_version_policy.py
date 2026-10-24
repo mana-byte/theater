@@ -7,6 +7,13 @@ import pytest
 from theater.harness.contracts.version_policy import VersionPolicy, version_key
 
 
+def test_the_public_contract_reexports_the_dependency_free_policy_owner():
+    from theater import version_policy
+
+    assert VersionPolicy is version_policy.VersionPolicy
+    assert version_key is version_policy.version_key
+
+
 def test_inclusive_bounds_exclusions_and_numeric_ordering():
     policy = VersionPolicy("0.84.4", "1.4.0", ("0.85.0",))
     assert all(policy.admits(version) for version in ("0.84.4", "0.84.10", "0.85.1", "1.4.0"))
@@ -55,7 +62,6 @@ def test_only_canonical_stable_versions_have_keys_or_admission(version):
         ("1.2.3", "1.2.4", []),
         ("1.2.3", "1.2.4", ("1.2.3", "1.2.3")),
         ("1.2.3", "1.2.4", ("1.2.2",)),
-        ("1.2.3", "1.2.4", ("1.2.5",)),
         ("1.2.3", "1.2.4", ("1.2.3-beta",)),
         ("1.2.3", "1.2.4", (None,)),
         ("1.2.3", "1.2.4", ({},)),
@@ -78,7 +84,6 @@ def test_invalid_direct_policies_fail_closed(minimum, maximum, excluded):
         {"min": "1.2.3", "max": False, "excluded": []},
         {"min": "1.2.3", "max": "1.2.4", "excluded": ()},
         {"min": "1.2.3", "max": "1.2.4", "excluded": [3]},
-        {"min": "1.2.3", "max": "1.2.4", "excluded": ["1.2.5"]},
     ],
 )
 def test_json_requires_exact_keys_and_typed_values(value):
@@ -109,3 +114,11 @@ def test_load_reads_a_single_release_policy(tmp_path):
     policy = VersionPolicy.load(path)
     assert policy.admits("3.0.2") and not policy.admits("3.0.3")
     assert list(policy.to_json()) == ["min", "max", "excluded"]
+
+
+def test_above_max_exclusions_round_trip_and_block_a_later_range_extension():
+    policy = VersionPolicy.from_text('{"min":"1.2.3","max":"1.2.4","excluded":["1.2.5"]}')
+    assert not policy.admits("1.2.5")
+    assert VersionPolicy.from_json(policy.to_json()) == policy
+    extended = VersionPolicy(policy.minimum, "1.2.6", policy.excluded)
+    assert extended.admits("1.2.6") and not extended.admits("1.2.5")

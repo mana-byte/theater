@@ -1,106 +1,82 @@
 # Harness compatibility
 
-Each shipped plugin reads its support policy from its own
-`theater/harness/builtin/plugins/<harness>/compatibility.json`:
+Each plugin owns one compact `compatibility.json`, read by runtime admission and scripts:
 
 ```json
 {"min":"0.163.0","max":"0.164.0","excluded":[]}
 ```
 
-Bounds are inclusive. The minimum is pinned to the installed CLI baseline; the pipeline changes
-the maximum and exclusions. The public
-`theater.harness.contracts.version_policy.VersionPolicy` validates and reads the same policy
-for runtime gates and tooling. Invalid policies and unsupported releases fail closed.
-OpenCode has one plugin and release channel, `opencode` (`@opencode/cli`); 1.x support is removed.
+Bounds are inclusive. Min is pinned to the installed CLI baseline. Exclusions may exceed max:
+a failed newer release needs an exclusion PR even when no release passes. Invalid policies and
+unsupported binaries fail closed. OpenCode has one plugin/channel (`@opencode/cli`); 1.x is removed.
 
-## Local commands
+## Ownership and flow
 
-Qualify exactly one supplied version:
+Only GitHub workflows invoke `scripts/harness_compat`; there are no local qualification targets.
 
-```sh
-make compat HARNESS=codex VERSION=0.164.0
-# Equivalent:
-uv run python -m scripts.harness_compat qualify codex 0.164.0
+```text
+workflow → scripts → exact harness/version → generic live suite
+                   → passing release: advance max
+                   → red/inconclusive/tooling: issue + exclusion
+                   → one shared policy PR per harness
 ```
 
-Run every published stable release from the pinned minimum through latest locally:
+The daily workflow discovers every stable release **above committed max**, tests them in ascending
+order and continues after failures. It does not start above the pending PR's max: pending releases
+are rechecked on subsequent runs, without a passing-version cache.
 
-```sh
-make compat HARNESS=codex
-```
+Scripts publish completed outcomes before testing the next release. Updates include earlier
+outcomes from the same run, so a temporary publication failure cannot let a later pass admit a
+known failed version. Discovery failure reports a workflow issue and authorizes no untested release.
+An outcome whose publication fails is retained as a tooling failure (or an interrupted run),
+so the next prefix proposes its exclusion before authorizing later releases.
 
-Development checks on the installed CLI:
+Passing versions may advance max; **failures never move either bound**. Every red, inconclusive or
+tooling result gets an issue and an exclusion, including failures above max and all-failure batches.
+Issues distinguish failed contract assertions from infrastructure, timeout and unexpected exceptions;
+none of those outcomes alone establishes an upstream binary defect.
 
-```sh
-make suite HARNESS=vibe
-make suite HARNESS=vibe ARGS="-- -k mcp -x"
-make canaries HARNESS=vibe
-```
+Scripts create or update `chore/compat-<harness>`, preserving pending range/exclusion changes.
+A routine PR changes **exactly one file, +1/−1**: the plugin's JSON line. It contains no fixture,
+history, evidence, Python or documentation edits. Publication uses GitHub APIs without editing the
+qualification checkout. Concurrent branch updates are refused rather than overwritten.
 
-A filtered run cannot authorize a policy change. Local commands publish nothing.
+Routine PR checks cover the proposed extension and every changed exclusion, including removals;
+unrelated newer upstream releases cannot make them fail. Wiring/code PRs recheck the current policy
+window. Excluded contract failures do not admit that release; inconclusive checks still fail CI.
 
-## Qualification
+A separate `workflow_run` reporter uses trusted main code and system Python, independent of uv
+setup. It files issues for discovery, setup/static-check, timeout, cleanup and publication failures.
+It recovers unfinished or failed known versions from qualification, PR verification and canary
+logs, then proposes exclusions through the same shared PR. Only logged version identities are
+used; reporting never invents a version, executes PR code or authorizes a pass from logs.
 
-`tests/conformance/live/` is the sole qualification authority. It drives a real daemon,
-Régie bridge, private tmux server and unmodified stock CLI through the public frontend API
-against a local scripted model. Ordinary parser, safety/recovery and distinct SDK integration
-regressions remain supplementary; they do not authorize a gate.
+## Suite and temporary data
 
-The production manifest determines the obligations: launch approvals, prompt completion and
-transcript binding, interrupt, steer or refusal, resume, model/effort selection, MCP tools and
-refusal, native edits, declared hook/OTel channels, native route binding, daemon-restart survival,
-legacy fallback, queue-followup and settings updates.
-`tests/support/coverage.py` maps every declaration to a scenario family or an explicit reason
-it cannot be observed live; completeness checks reject unmapped declarations.
+`tests/conformance/live/` is the sole qualification authority. Its scenarios derive from the
+selected plugin's production manifest and exercise a real daemon, Régie provider, private tmux
+server and stock CLI through public contracts against a scripted local model.
 
-Only endpoints, dummy credentials, model catalog and onboarding/trust setup belong in
-`CompatManifest.provision`. Native edit/MCP recipes supply CLI-specific tool syntax.
-Extra generic mutation choices belong in the plugin's `compat.canaries`; shared scenarios
-and assertions contain no harness-name branches.
+Harness-specific onboarding, endpoints, dummy credentials and tool syntax live in the plugin's
+`CompatManifest`. Canary declarations also live there; shared scenarios, assertions and mutations
+are generic. Canaries check suite sensitivity separately, weekly and when wiring changes.
 
-Each qualification installs **exactly its supplied release** and verifies the reported version.
-It runs the proposed code in a disposable copy and home. A policy refusal never substitutes
-for behavioral testing: only the disposable copy may temporarily admit the supplied release.
-Missing scenarios, unexpected skips, install failures, timeouts and incomplete inventories
-authorize nothing. Proven contract violations are red.
+Each qualification installs and verifies **exactly its supplied version**, then runs in a disposable
+source copy and home. Only that copy may temporarily admit the candidate. Required/inventory
+reports, CLI/daemon files and mock traffic are temporary and deleted after the run. No source
+checkout or real home writes, saved results, fixture updates, artifacts or success history.
 
-Required/inventory documents, mock traffic and CLI/daemon files live only in temporary sandboxes
-and are deleted after the run. Qualification never edits the checkout or real home, saves results,
-updates fixtures or retains successful-version history. There is no `--keep`, qualification cache,
-fixture promotion or evidence artifact.
+Only a complete passing suite can advance max. Missing scenarios, skips, invalid inventories,
+timeouts, non-clean subprocess exits and cleanup failures cannot authorize a pass.
+Distinct parser, safety/recovery and SDK regressions remain supplementary.
 
-## Workflow and policy PRs
+## Remaining suite limits
 
-The daily workflow tests every published stable release from the pinned minimum through latest,
-in ascending order, including admitted and excluded releases. It continues after failures and
-never skips a version based on an earlier result. Discovery and outcomes belong only to that run.
+Available OTel channels have no live payload scenario and make qualification inconclusive.
+Native child stimulation, timing/usage accounting and foreground MCP timeouts retain explicit
+exemptions in `tests/support/coverage.py`; ordinary regressions cover their current behavior.
 
-Passing releases authorize a maximum up to the newest pass. Failed or inconclusive releases below
-it must be explicitly excluded, and get issues. Later passes can advance the maximum past a
-failure without admitting it. Missing discovery or incomplete results authorize no proposal.
-
-A routine policy PR changes **one file, +1/−1**: one compact JSON line with a trailing newline.
-It adds no fixtures, history, evidence, Python code or docs. PR checks qualify the proposed code
-again and reject disagreement between the policy and fresh outcomes. Durable workflow outputs
-are policy PRs and failure issues.
-
-Canaries run separately when suite wiring changes and weekly. They deliberately break generic
-manifest values and require the suite to notice; they are never a release verdict.
-
-## Declared limitations
-
-Available OTel channels have no live payload scenario yet and make qualification inconclusive;
-they cannot authorize a gate. Hook channels have a correlated tool-fact scenario.
-
-Native child stimulation has no generic scripted scenario. Timing/usage and decoder payload
-details use ordinary parser regressions because the live suite has no independent accounting
-oracle. Foreground MCP timeout limits require a multi-minute held call and remain unit-tested.
-See the reasoned exemptions in `tests/support/coverage.py`.
-
-Hosted CI jobs stop the full release sweep after 320 minutes, with five minutes reserved for
-interruption cleanup inside the 350-minute job. A window that outgrows that limit fails explicitly
-and authorizes nothing; it needs a longer runner or further execution parallelism. Local runs have
-no sweep deadline.
-
-OpenCode's renderer recovery for 2.0.17–2.0.20 remains behavior-specific and independent of the
-support policy: the installed baseline 2.0.18 still needs it.
+Hosted sweeps interrupt after 320 minutes, leaving five minutes for cleanup and publication.
+Finished outcomes are retained in the shared PR/issues; an unfinished known version is excluded.
+OpenCode's 2.0.17–2.0.20 renderer recovery remains independent of policy because baseline 2.0.18
+needs it.

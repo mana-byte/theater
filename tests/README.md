@@ -55,7 +55,7 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 | `perf/` | Latency baselines and synthetic loads |
 | `integration/<vendor>/` | Distribution and focused SDK integration regressions; not qualification authority |
 | `compat/` | Harness-compat pipeline tests |
-| `conformance/` | The live compatibility suite: binary-free completeness and guard tests here; `live/` (a real daemon, Régie bridge and stock CLI against a mock model; collected only under the pipeline sandbox token, run with `make suite HARNESS=<h>`) and `canaries/` (mutation canaries, opt-in with `make canaries`) |
+| `conformance/` | Generic completeness and guard tests; `live/` exercises a real daemon, Régie provider and stock CLI against a mock model; `canaries/` checks deliberately broken plugins. Live checks run only in workflow-owned compatibility sandboxes |
 
 Régie tests live in `packages/regie/tests`, grouped like `packages/regie/src/regie`
 (`ambience/`, `app/`, `bridge/`, `controllers/`, `dashboard/`, `motions/`, `render/`, `tmux/`,
@@ -77,5 +77,5 @@ Régie tests live in `packages/regie/tests`, grouped like `packages/regie/src/re
 sandbox (`HARNESS_COMPAT_SANDBOX`), so it can never touch a developer's `~/.theater`, CLI homes or
 tmux server. Its scenarios are derived from each plugin's manifest (`tests/support/obligations.py`);
 `tests/support/coverage.py` must map every manifest declaration to a scenario family or a reasoned
-exemption, and `tests/conformance/test_completeness.py` fails when it does not. Run it with
-`make suite HARNESS=vibe ARGS="-- -k mcp"`; see `docs/harness-compat.md`.
+exemption, and `tests/conformance/test_completeness.py` fails when it does not. GitHub workflows
+own qualification and canary runs; see [`docs/harness-compat.md`](../docs/harness-compat.md).

@@ -1,18 +1,11 @@
-"""The version policy a run proposes, and the checks that keep a proposal honest.
-
-The policy is one compact line of JSON per plugin, read by the plugin at runtime. Evidence decides
-it: a release is admitted only when the live suite passed it, and every other release beneath the
-newest pass is excluded by name. The minimum is pinned by people and never moves.
-"""
+"""Incremental policy updates and the guards for a one-line plugin JSON PR."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
-from theater.harness.contracts.version_policy import VersionPolicy, version_key
+from theater.version_policy import VersionPolicy, version_key
 
 from . import git
 from .adapters import ADAPTER_NAMES
@@ -26,16 +19,7 @@ class PolicyChangeError(ValueError):
 
 
 class Unproposable(ValueError):
-    """The evidence cannot support any policy; the message says why."""
-
-
-@dataclass(frozen=True, slots=True)
-class Mismatch:
-    """A release whose current outcome disagrees with what the policy says about it."""
-
-    version: str
-    kind: Literal["regression", "stale-exclusion", "advance"]
-    verdict: str
+    """Invalid qualification outcomes cannot change a policy."""
 
 
 def policy_relative(name: str) -> Path:
@@ -62,50 +46,39 @@ def admit_only(root: Path, name: str, version: str) -> None:
         raise RuntimeError(f"could not admit {name} {version} in the code copy")
 
 
-def mismatches(policy: VersionPolicy, results: tuple[Result, ...]) -> list[Mismatch]:
-    """Every fresh outcome whose admission disagrees with the policy."""
-    low, high = version_key(policy.minimum), version_key(policy.maximum)
-    found: list[Mismatch] = []
-    for result in sorted(results, key=lambda item: version_key(item.version)):
-        if version_key(result.version) < low:
-            continue
-        green = result.verdict == "green"
-        if policy.admits(result.version) and not green:
-            found.append(Mismatch(result.version, "regression", result.verdict))
-        elif not policy.admits(result.version) and green:
-            kind: Literal["stale-exclusion", "advance"] = (
-                "stale-exclusion" if version_key(result.version) <= high else "advance"
-            )
-            found.append(Mismatch(result.version, kind, result.verdict))
-    return found
-
-
 def derive(policy: VersionPolicy, results: tuple[Result, ...]) -> VersionPolicy:
-    """The newest pass is the maximum; every other tested release below it is excluded."""
+    """Passes may advance max; every failure adds an exclusion without moving either bound."""
     verdicts = {result.version: result.verdict for result in results}
     if len(verdicts) != len(results):
         raise Unproposable("a release has more than one outcome")
-    required = {policy.minimum, policy.maximum, *policy.excluded}
-    if missing := required - verdicts.keys():
-        raise Unproposable(f"no outcome for policy releases {sorted(missing, key=version_key)}")
     if any(version_key(version) < version_key(policy.minimum) for version in verdicts):
         raise Unproposable("an outcome is below the pinned minimum")
-    greens = [version for version, verdict in verdicts.items() if verdict == "green"]
-    if not greens:
-        raise Unproposable("no release passed the full suite")
-    maximum = max(greens, key=version_key)
-    excluded = sorted(
-        (version for version, verdict in verdicts.items() if verdict != "green"),
-        key=version_key,
-    )
+    maximum = policy.maximum
+    excluded = set(policy.excluded)
+    for version, outcome in verdicts.items():
+        if outcome == "green":
+            maximum = max(maximum, version, key=version_key)
+            excluded.discard(version)
+        elif outcome in {"red", "inconclusive", "tooling"}:
+            excluded.add(version)
+        else:
+            raise Unproposable(f"unknown verdict {outcome!r} for {version}")
+    return VersionPolicy(policy.minimum, maximum, tuple(sorted(excluded, key=version_key)))
+
+
+def merge_pending(
+    current: VersionPolicy, original: VersionPolicy, pending: VersionPolicy
+) -> VersionPolicy:
+    """Apply the pending PR's exclusion delta to main, preserving both maxima."""
+    if current.minimum != original.minimum or current.minimum != pending.minimum:
+        raise PolicyChangeError("the pinned minimum differs in the pending PR")
+    removed = set(original.excluded) - set(pending.excluded)
+    added = set(pending.excluded) - set(original.excluded)
+    excluded = (set(current.excluded) - removed) | added
     return VersionPolicy(
-        policy.minimum,
-        maximum,
-        tuple(
-            v
-            for v in excluded
-            if version_key(policy.minimum) <= version_key(v) < version_key(maximum)
-        ),
+        current.minimum,
+        max(current.maximum, pending.maximum, key=version_key),
+        tuple(sorted(excluded, key=version_key)),
     )
 
 
@@ -119,15 +92,8 @@ def check_change(old_text: str, new_text: str) -> None:
         raise PolicyChangeError("the policy is not the canonical single compact line")
     if new.minimum != old.minimum:
         raise PolicyChangeError(f"the pinned minimum moved: {old.minimum} to {new.minimum}")
-
-
-def check_working_tree(root: Path, name: str) -> None:
-    """The proposal is exactly one file with one line replaced; nothing else is dirty."""
-    relative = policy_relative(name).as_posix()
-    if (touched := git.changed_paths(root)) != {relative}:
-        raise PolicyChangeError(f"the change touches {sorted(touched)}, not only {relative}")
-    if (counts := git.numstat(root, relative)) != (1, 1):
-        raise PolicyChangeError(f"the change is +{counts[0]}/-{counts[1]} lines, not +1/-1")
+    if version_key(new.maximum) < version_key(old.maximum):
+        raise PolicyChangeError(f"the maximum shrank: {old.maximum} to {new.maximum}")
 
 
 def changed_gates(root: Path, base: str) -> list[str]:

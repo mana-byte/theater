@@ -33,7 +33,7 @@ def resolve_vibe_binary(binary: str | None = None) -> str | None:
 
 
 def installed_vibe_version(binary: str | None = None) -> tuple[int, int, int] | None:
-    """The verified release on PATH, cached by executable identity."""
+    """The verified release on PATH, probed afresh for launch admission."""
     try:
         version = version_probe.probe_release(binary or "vibe", _VERSION, timeout=5)
         return version_key(version) if version is not None else None

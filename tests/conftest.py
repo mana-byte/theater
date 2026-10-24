@@ -53,13 +53,6 @@ def available_harness_binaries(monkeypatch, shipped_harnesses, theater_home) -> 
     monkeypatch.setenv("VIBE_HOME", str(theater_home / "vibe"))
 
 
-@pytest.fixture(autouse=True)
-def fresh_release_probes(monkeypatch):
-    from theater.harness.contracts import version_probe
-
-    monkeypatch.setattr(version_probe, "_cache", {})
-
-
 @pytest.fixture
 def terminal_provider(monkeypatch, available_harness_binaries) -> FakeTerminalProvider:
     provider = FakeTerminalProvider()

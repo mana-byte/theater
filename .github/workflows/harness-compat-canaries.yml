@@ -55,4 +55,4 @@ jobs:
       - name: Break each plugin on purpose and require the suite to notice
         env:
           HARNESS: ${{ matrix.harness }}
-        run: uv run --no-sync --no-cache python -m scripts.harness_compat canaries "$HARNESS"
+        run: timeout --signal=INT --kill-after=5m 50m .venv/bin/python -m scripts.harness_compat canaries "$HARNESS"

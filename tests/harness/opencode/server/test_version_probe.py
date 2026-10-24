@@ -1,4 +1,4 @@
-"""OpenCode version and flag probes: qualified windows, failures, cached results."""
+"""OpenCode version and flag probes: qualified windows, failures and fresh results."""
 
 from __future__ import annotations
 
@@ -28,7 +28,6 @@ from theater.harness.builtin.plugins.opencode.runtime_plan import (
 from theater.harness.builtin.plugins.opencode.server_plan import (
     probe_opencode_server_compatibility,
 )
-from theater.harness.contracts import version_probe
 from theater.harness.contracts.runtime import (
     RuntimeProbeContext,
 )
@@ -182,34 +181,18 @@ def _counting_binary(directory: Path, body: str) -> tuple[Path, Path]:
     return binary, counter
 
 
-def test_a_failed_probe_caches_within_the_backoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _binary, counter = _counting_binary(tmp_path, "echo not-a-version")
-    monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.delenv(dialect.VERSION_ENV, raising=False)
-
-    assert installed_version("opencode") is None
-    assert installed_version("opencode") is None
-    assert len(counter.read_text().splitlines()) == 1  # the failure cached
-
-
-def test_a_failed_probe_expires_and_recovers_on_an_unchanged_file(
+def test_a_failed_probe_recovers_immediately_on_an_unchanged_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     binary, counter = _counting_binary(tmp_path, "echo not-a-version")
     identity = binary.stat()
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.delenv(dialect.VERSION_ENV, raising=False)
-    monkeypatch.setattr(version_probe, "_FAILURE_BACKOFF", 0.05)
-    clock = [1000.0]
-    monkeypatch.setattr(version_probe.time, "monotonic", lambda: clock[0])
-
     assert installed_version("opencode") is None
-    assert len(counter.read_text().splitlines()) == 1
+    assert installed_version("opencode") is None
+    assert len(counter.read_text().splitlines()) == 2
 
-    # Repair the CLI with the same size and mtime: only the failure's expiry
-    # (not a file-identity change) can drive the re-probe.
+    # An unchanged entrypoint identity must not hide a repaired CLI.
     repaired = f'#!/bin/sh\necho run >> "{counter}"\necho {VERSION_POLICY.minimum}\n'
     padding = identity.st_size - len(repaired.encode())
     assert padding >= 2
@@ -218,6 +201,5 @@ def test_a_failed_probe_expires_and_recovers_on_an_unchanged_file(
     os.utime(binary, ns=(identity.st_atime_ns, identity.st_mtime_ns))
     assert binary.stat().st_size == identity.st_size
 
-    clock[0] += 0.1
     assert installed_version("opencode") == version_key(VERSION_POLICY.minimum)
-    assert len(counter.read_text().splitlines()) == 2
+    assert len(counter.read_text().splitlines()) == 3

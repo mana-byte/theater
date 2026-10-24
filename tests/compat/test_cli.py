@@ -1,21 +1,30 @@
-"""The command line: argument shapes, exit codes and what each command refuses to do."""
+"""Workflow-only commands, incremental publication, and bounded PR verification."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from scripts.harness_compat import cli
-from scripts.harness_compat.contract import Check, Result, Verdict
-from scripts.harness_compat.policy import write_policy
+from scripts.harness_compat.contract import Check, Result
+from scripts.harness_compat.git import git
+from scripts.harness_compat.policy import derive, write_policy
 from scripts.harness_compat.publish import Published
-from scripts.harness_compat.run import Run
-from theater.harness.contracts.version_policy import VersionPolicy, version_key
+from scripts.harness_compat.run import Run, run_harness
+from theater.harness.contracts.version_policy import VersionPolicy
 
-Git = Callable[..., str]
+POLICY = VersionPolicy("1.0.0", "1.2.0")
+
+
+@pytest.fixture(autouse=True)
+def _actions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/1/merge")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setenv("GITHUB_RUN_ID", "7")
 
 
 def _main(monkeypatch: pytest.MonkeyPatch, root: Path, *argv: str) -> int:
@@ -23,252 +32,231 @@ def _main(monkeypatch: pytest.MonkeyPatch, root: Path, *argv: str) -> int:
     return cli.main(list(argv))
 
 
-def _run(verdicts: dict[str, Verdict], policy: VersionPolicy | None = None) -> Run:
-    """A run over ``verdicts`` plus a passing outcome for any pinned bound they leave out."""
-    policy = policy or VersionPolicy("1.0.0", "1.2.0")
-    held: dict[str, Verdict] = {policy.minimum: "green", policy.maximum: "green", **verdicts}
-    versions = tuple(sorted(held, key=version_key))
-    return Run(
-        "claude",
-        policy,
-        versions,
-        tuple(Result("claude", version, held[version]) for version in versions),
-    )
-
-
-@pytest.mark.parametrize(
-    ("verdict", "code"), [("green", 0), ("red", 1), ("inconclusive", 2), ("tooling", 2)]
-)
-def test_qualify_runs_just_the_named_release_and_maps_the_verdict(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    verdict: Verdict, code: int,
-) -> None:  # fmt: skip
-    seen: list[tuple[str, str, tuple[str, ...]]] = []
-
-    def qualify(root: Path, adapter: object, version: str, *, pytest_args: list[str]) -> Result:
-        seen.append((adapter.name, version, tuple(pytest_args)))  # type: ignore[attr-defined]
-        return Result("claude", version, verdict, (Check("conformance:turn", "pass", "ok"),))
-
-    monkeypatch.setattr(cli, "qualify_release", qualify)
-
-    assert _main(monkeypatch, repo, "qualify", "claude", "1.7.0", "--", "-k", "mcp") == code
-    assert seen == [("claude", "1.7.0", ("-k", "mcp"))]
-    assert f"claude 1.7.0: {verdict}" in capsys.readouterr().out
-
-
-def test_an_unknown_harness_is_a_usage_error(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
-    monkeypatch.chdir(repo)
-
-    with pytest.raises(SystemExit) as stopped:
-        cli.main(["qualify", "opencode2", "2.0.18"])
-
-    assert stopped.value.code == 2
-
-
-def test_suite_runs_only_the_installed_version_in_a_throwaway_sandbox(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    binary = tmp_path / "claude"
-    binary.write_text("#!/bin/sh\necho '1.1.0 (Claude Code)'\n")
-    binary.chmod(0o755)
-    seen: list[tuple[str, str, list[str]]] = []
-
-    def qualify(root: Path, sb: object, name: str, found: Path, version: str, **kwargs) -> Result:
-        seen.append((name, version, kwargs["pytest_args"]))
-        return Result(name, version, "green")
-
-    monkeypatch.setattr(cli, "qualify_binary", qualify)
-
-    assert _main(monkeypatch, repo, "suite", "claude", "--binary", str(binary), "--", "-x") == 0
-    assert seen == [("claude", "1.1.0", ["-x"])]
-
-
-def test_suite_without_a_binary_says_so(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("PATH", "/nonexistent")
-
-    assert _main(monkeypatch, repo, "suite", "vibe") == 2
-    assert "no 'vibe' binary on PATH" in capsys.readouterr().err
-
-
-def test_publishing_is_reserved_for_github_actions(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    monkeypatch.setattr(cli, "run_harness", lambda *a, **k: pytest.fail("ran before refusing"))
-
-    assert _main(monkeypatch, repo, "run", "claude", "--publish") == 2
-    assert "reserved for GitHub Actions" in capsys.readouterr().err
-
-
-def test_check_and_publish_exclude_each_other(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(repo)
-
-    with pytest.raises(SystemExit):
-        cli.main(["run", "claude", "--check", "--publish"])
-
-
-def _patch_run(monkeypatch: pytest.MonkeyPatch, run: Run) -> list[object]:
-    published: list[object] = []
-    monkeypatch.setattr(cli, "run_harness", lambda root, adapter: run)
-    monkeypatch.setattr(
-        cli,
-        "publish",
-        lambda root, ran, run_url: (
-            published.append((ran, run_url)) or Published("keep", None, (), ())
-        ),
-    )
-    return published
-
-
-def test_a_plain_run_reports_and_publishes_nothing(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    published = _patch_run(monkeypatch, _run({"1.0.0": "green", "1.1.0": "green", "1.3.0": "red"}))
-
-    assert _main(monkeypatch, repo, "run", "claude") == 0
-    assert published == []
-    out = capsys.readouterr().out
-    assert "| 1.3.0 | no | red |" in out
-
-
-def test_an_admitted_release_that_fails_makes_the_run_fail(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    _patch_run(monkeypatch, _run({"1.0.0": "green", "1.1.0": "red", "1.2.0": "green"}))
-
-    assert _main(monkeypatch, repo, "run", "claude") == 1
-
-
-def test_a_stale_exclusion_only_fails_the_pr_check(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    policy = VersionPolicy("1.0.0", "1.2.0", ("1.1.0",))
-    _patch_run(monkeypatch, _run({"1.0.0": "green", "1.1.0": "green", "1.2.0": "green"}, policy))
-
-    assert _main(monkeypatch, repo, "run", "claude") == 0
-    assert _main(monkeypatch, repo, "run", "claude", "--check") == 1
-
-
-def test_check_passes_when_admission_and_outcome_agree_everywhere(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    policy = VersionPolicy("1.0.0", "1.2.0", ("1.1.0",))
-    _patch_run(
-        monkeypatch,
-        _run({"1.0.0": "green", "1.1.0": "red", "1.2.0": "green", "1.3.0": "red"}, policy),
-    )
-
-    assert _main(monkeypatch, repo, "run", "claude", "--check") == 0
-
-
-def test_publish_runs_only_after_the_whole_run_and_uses_the_workflow_run_url(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, git: Git
-) -> None:
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+def _publishing(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
     monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
     monkeypatch.setenv("GITHUB_SHA", git(repo, "rev-parse", "HEAD").strip())
-    run = _run({"1.0.0": "green", "1.2.0": "green"})
-    published = _patch_run(monkeypatch, run)
-
-    assert _main(monkeypatch, repo, "run", "claude", "--publish") == 0
-    assert published == [(run, "https://github.com/o/r/actions/runs/42")]
 
 
-def test_a_regression_is_annotated_on_github(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    _patch_run(monkeypatch, _run({"1.0.0": "green", "1.1.0": "red", "1.2.0": "green"}))
+def _run(*results: Result) -> Run:
+    return Run("claude", POLICY, tuple(r.version for r in results), results)
 
-    assert _main(monkeypatch, repo, "run", "claude") == 1
-    assert "::error title=Harness compatibility::claude 1.1.0 is admitted but ended red" in (
-        capsys.readouterr().out
+
+def _patch_run(monkeypatch: pytest.MonkeyPatch, run: Run) -> None:
+    monkeypatch.setattr(cli, "run_harness", lambda *args, **kwargs: run)
+
+
+class _Adapter:
+    name = "claude"
+
+    def __init__(self, releases: list[str]) -> None:
+        self.releases = releases
+
+    def discover(self) -> list[str]:
+        return self.releases
+
+    def install(self, *args):
+        raise AssertionError("installer was called")
+
+
+def _scripted(monkeypatch: pytest.MonkeyPatch, releases: list[str], outcomes: dict):
+    asked: list[str] = []
+    monkeypatch.setattr(cli, "load_adapter", lambda _: _Adapter(releases))
+
+    def qualify(root, adapter, version):
+        asked.append(version)
+        return Result(adapter.name, version, outcomes.get(version, "green"))
+
+    monkeypatch.setattr(
+        cli,
+        "run_harness",
+        lambda root, adapter, **kwargs: run_harness(root, adapter, qualify=qualify, **kwargs),
     )
+    return asked
 
 
-def test_an_error_is_exit_two_with_a_message(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_entry_points_refuse_non_workflow_calls(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    def boom(root: Path, adapter: object) -> Run:
+    monkeypatch.delenv("GITHUB_ACTIONS")
+    assert _main(monkeypatch, repo, "run", "claude") == 2
+    assert "reserved for GitHub workflows" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["qualify", "suite", "gates"])
+def test_old_local_entry_points_are_removed(command: str) -> None:
+    with pytest.raises(SystemExit):
+        cli.main([command, "claude"])
+
+
+def test_unknown_harness_is_a_usage_error() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["run", "opencode2"])
+
+
+@pytest.mark.parametrize(
+    "outcome,code", [("green", 0), ("red", 1), ("inconclusive", 2), ("tooling", 2)]
+)
+def test_workflow_run_returns_a_failure_for_every_unsuccessful_outcome(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, code: int
+) -> None:
+    _patch_run(monkeypatch, _run(Result("claude", "1.3.0", outcome)))
+    assert _main(monkeypatch, repo, "run", "claude") == code
+
+
+def test_run_prints_results_without_writing_a_summary_file(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    target = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(target))
+    _patch_run(monkeypatch, _run(Result("claude", "1.3.0", "green")))
+    assert _main(monkeypatch, repo, "run", "claude") == 0
+    assert "| 1.3.0 | no | green |" in capsys.readouterr().out and not target.exists()
+
+
+def test_main_publishes_completed_prefixes_and_reuses_the_same_run_url(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publishing(monkeypatch, repo)
+    asked = _scripted(monkeypatch, ["1.0.0", "1.2.0", "1.3.0", "1.4.0"], {"1.3.0": "red"})
+    published: list[Run] = []
+
+    def publish(root, run, *, run_url):
+        assert run_url == "https://github.com/o/r/actions/runs/7"
+        assert asked == [r.version for r in run.results]
+        published.append(run)
+        return Published(derive(run.policy, run.results), 17)
+
+    monkeypatch.setattr(cli, "publish", publish)
+    assert _main(monkeypatch, repo, "run", "claude") == 1
+    assert [len(run.results) for run in published] == [1, 2]
+    assert published[-1].results[0].verdict == "red"
+
+
+@pytest.mark.parametrize("first", ["red", "green"])
+def test_a_failed_publication_is_retried_with_all_known_results_before_later_admission(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, first: str
+) -> None:
+    _publishing(monkeypatch, repo)
+    _scripted(monkeypatch, ["1.0.0", "1.2.0", "1.3.0", "1.4.0"], {"1.3.0": first})
+    proposals = []
+    attention: list[str] = []
+
+    def publish(root, run, *, run_url):
+        proposal = derive(run.policy, run.results)
+        proposals.append(proposal)
+        if len(proposals) == 1:
+            raise RuntimeError("temporary publication failure")
+        return Published(proposal, 17)
+
+    monkeypatch.setattr(cli, "publish", publish)
+    monkeypatch.setattr(cli, "_attention", attention.append)
+    assert _main(monkeypatch, repo, "run", "claude") == 2
+    assert proposals[-1] == VersionPolicy("1.0.0", "1.4.0", ("1.3.0",))
+    assert attention and "temporary publication failure" in attention[0]
+
+
+def test_discovery_failure_reports_an_issue_without_inventing_a_version(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publishing(monkeypatch, repo)
+    messages: list[str] = []
+
+    def broken(*args, **kwargs):
         raise OSError("registry unreachable")
 
-    monkeypatch.setattr(cli, "run_harness", boom)
-
+    monkeypatch.setattr(cli, "run_harness", broken)
+    monkeypatch.setattr(cli, "_attention", messages.append)
     assert _main(monkeypatch, repo, "run", "claude") == 2
-    assert "harness-compat: registry unreachable" in capsys.readouterr().err
+    assert messages == ["OSError: registry unreachable"]
 
 
-def test_gates_lists_the_harnesses_whose_policy_a_change_edits(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], git: Git
+def test_issue_publication_failure_is_explicitly_visible(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    git(repo, "checkout", "-q", "-b", "chore/compat-claude")
-    write_policy(repo, "claude", VersionPolicy("1.0.0", "1.5.0"))
-    git(repo, "commit", "-qam", "gate")
+    _publishing(monkeypatch, repo)
+    monkeypatch.setattr(
+        cli, "run_harness", lambda *a, **k: (_ for _ in ()).throw(OSError("discovery"))
+    )
 
-    assert _main(monkeypatch, repo, "gates", "--base", "main", "--routine") == 0
-    assert json.loads(capsys.readouterr().out) == ["claude"]
+    def unavailable(message):
+        raise RuntimeError("GitHub issues unavailable")
+
+    monkeypatch.setattr(cli, "_attention", unavailable)
+    assert _main(monkeypatch, repo, "run", "claude") == 2
+    assert "Failure issue publication" in capsys.readouterr().err
 
 
-def test_a_routine_change_that_also_edits_code_fails_the_gates_command(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, git: Git, capsys: pytest.CaptureFixture[str]
+def test_routine_check_does_not_depend_on_newer_upstream_heads(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    git(repo, "checkout", "-q", "-b", "chore/compat-claude")
-    write_policy(repo, "claude", VersionPolicy("1.0.0", "1.5.0"))
-    (repo / "tracked.txt").write_text("edited\n", encoding="utf-8")
-    git(repo, "commit", "-qam", "gate and code")
+    git(
+        repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "checkout",
+        "-qb",
+        "chore/compat-claude",
+    )
+    write_policy(repo, "claude", VersionPolicy("1.0.0", "1.4.0", ("1.3.0", "1.5.0")))
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qam", "gate")
+    asked = _scripted(
+        monkeypatch,
+        ["1.0.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"],
+        {"1.3.0": "red", "1.5.0": "red"},
+    )
+    assert _main(monkeypatch, repo, "verify", "claude", "--base", "main", "--routine") == 0
+    assert asked == ["1.3.0", "1.4.0", "1.5.0"]
 
-    assert _main(monkeypatch, repo, "gates", "--base", "main", "--routine") == 2
-    assert "exactly one compatibility.json" in capsys.readouterr().err
-    assert _main(monkeypatch, repo, "gates", "--base", "main") == 0
 
-
-def test_canaries_default_to_the_policy_maximum(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_code_verification_fails_on_an_admitted_contract_regression(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen: list[str | None] = []
+    asked = _scripted(monkeypatch, ["1.0.0", "1.1.0", "1.2.0", "1.3.0"], {"1.2.0": "red"})
+    assert _main(monkeypatch, repo, "verify", "claude", "--base", "main") == 1
+    assert asked == ["1.0.0", "1.1.0", "1.2.0"]
 
-    def fake(root: Path, adapter: object, *, version: str | None) -> Check:
-        seen.append(version)
-        return Check("canaries", "pass", "ok")
 
-    monkeypatch.setattr(cli, "run_canaries", fake)
+def test_the_initial_json_migration_qualifies_its_current_policy_window(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    relative = "theater/harness/builtin/plugins/claude/compatibility.json"
+    git(repo, "rm", relative)
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "old gates")
+    git(repo, "checkout", "-qb", "migration")
+    (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+    write_policy(repo, "claude", POLICY)
+    git(repo, "add", relative)
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "JSON gates")
+    asked = _scripted(monkeypatch, ["1.0.0", "1.1.0", "1.2.0", "1.3.0"], {})
+    assert _main(monkeypatch, repo, "verify", "claude", "--base", "main") == 0
+    assert asked == ["1.0.0", "1.1.0", "1.2.0"]
 
+
+def test_workflow_plan_selects_requested_or_all_harnesses(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    assert _main(monkeypatch, repo, "plan", "codex") == 0
+    assert json.loads(capsys.readouterr().out) == ["codex"]
+    assert _main(monkeypatch, repo, "plan") == 0
+    assert len(json.loads(capsys.readouterr().out)) == 5
+
+
+def test_canary_entry_point_is_for_workflow_self_checks(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "run_canaries", lambda *args, **kwargs: Check("canaries", "pass"))
     assert _main(monkeypatch, repo, "canaries", "claude") == 0
-    assert seen == [None]
 
 
-def test_results_are_printed_and_never_written_to_a_summary_file(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_report_entry_point_uses_the_supplied_workflow_run(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    summary = tmp_path / "step-summary.md"
-    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    _patch_run(monkeypatch, _run({"1.0.0": "green", "1.2.0": "green"}))
-
-    assert _main(monkeypatch, repo, "run", "claude") == 0
-    assert "| 1.2.0 | yes | green |" in capsys.readouterr().out
-    assert not summary.exists()
-
-
-def test_a_plugin_wiring_edit_selects_its_harness_without_the_routine_rules(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], git: Git
-) -> None:
-    git(repo, "checkout", "-q", "-b", "feature")
-    launch = repo / "theater/harness/builtin/plugins/claude/launch.py"
-    launch.write_text("x = 1\n")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-qm", "launch")
-
-    assert _main(monkeypatch, repo, "gates", "--base", "main") == 0
-    assert json.loads(capsys.readouterr().out) == ["claude"]
-    assert _main(monkeypatch, repo, "gates", "--base", "main", "--routine") == 2
+    seen = []
+    monkeypatch.setattr(
+        cli, "report_workflow_failure", lambda root, run_id: seen.append((root, run_id))
+    )
+    assert _main(monkeypatch, repo, "report", "42") == 0
+    assert seen == [(repo, 42)]

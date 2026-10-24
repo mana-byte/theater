@@ -15,6 +15,13 @@ def clean_diagnostic(value: str) -> str:
     return " ".join(_CONTROL.sub("", _ANSI.sub("", value)).split())
 
 
+def exception_detail(error: BaseException) -> str:
+    """Keep publication causes visible even when several operations failed."""
+    if isinstance(error, BaseExceptionGroup):
+        return "; ".join(exception_detail(cause) for cause in error.exceptions)
+    return f"{type(error).__name__}: {error}"
+
+
 def clip_diagnostic(value: str, limit: int, *, tail: bool = False) -> str:
     """Clip cleaned text, retaining the end when it contains the failure cause."""
     cleaned = clean_diagnostic(value)

@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
-from theater.harness.contracts.version_policy import version_key
+from theater.version_policy import version_key
 
 from .cleanup import CleanupFailed
 from .codecopy import code_copy

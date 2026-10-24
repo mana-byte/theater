@@ -1,89 +1,69 @@
-"""One harness, every published stable release from the pinned minimum to the latest."""
+"""Qualify newer releases in order, publishing each finished outcome before the next."""
 
 from __future__ import annotations
 
-from collections import Counter
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from theater.harness.contracts.version_policy import VersionPolicy, version_key
+from theater.version_policy import VersionPolicy, version_key
 
-from .contract import Adapter, Result
+from .cleanup import CleanupFailed
+from .contract import Adapter, Check, Result
+from .diagnostics import clip_diagnostic, exception_detail
 from .policy import load_policy
 from .qualify import qualify_release
 
-#: A release that ended inconclusive gets one more fresh attempt; red and tooling never do.
-ATTEMPTS = 2
-
 Qualifier = Callable[[Path, Adapter, str], Result]
-
-
-def _say(text: str) -> None:
-    """Progress straight to the log: a run lasts hours and CI buffers a piped stdout."""
-    print(text, flush=True)
-
-
-_VERDICTS = ("green", "red", "inconclusive", "tooling")
+_VERDICTS = {"green", "red", "inconclusive", "tooling"}
 
 
 class DiscoveryError(RuntimeError):
-    """The upstream release list cannot be trusted, so no release may be authorized from it."""
+    """The upstream release list cannot be trusted."""
 
 
 class IncompleteRun(RuntimeError):
-    """The outcomes do not match the releases one for one, so nothing may be proposed from them."""
+    """An outcome does not identify the release requested."""
 
 
 @dataclass(frozen=True, slots=True)
 class Run:
-    """Everything one run learned, held in memory until it is reported or published.
-
-    ``releases`` is every release the run set out to test; ``results`` must hold exactly one
-    outcome per release, in the same order, from this harness. Anything else cannot exist.
-    """
+    """Planned releases and their completed prefix, held only in memory."""
 
     harness: str
     policy: VersionPolicy
     releases: tuple[str, ...]
     results: tuple[Result, ...]
+    errors: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         keys = [version_key(version) for version in self.releases]
         if keys != sorted(set(keys)):
             raise IncompleteRun(f"{self.harness} releases are not unique and ascending")
-        for bound in (self.policy.minimum, self.policy.maximum, *self.policy.excluded):
-            if bound not in self.releases:
-                raise IncompleteRun(f"{self.harness} run never covered the pinned release {bound}")
-        if self.releases[0] != self.policy.minimum:
-            raise IncompleteRun(f"{self.harness} run starts above the pinned minimum")
-        versions = [result.version for result in self.results]
-        problems = [
-            *(f"missing outcome for {v}" for v in self.releases if v not in versions),
-            *(f"outcome for unexpected release {v}" for v in versions if v not in self.releases),
-            *(f"duplicate outcome for {v}" for v, n in Counter(versions).items() if n > 1),
-            *(
-                f"outcome of {r.harness} among {self.harness} results"
-                for r in self.results
-                if r.harness != self.harness
-            ),
-            *(
-                f"unknown verdict {r.verdict!r} for {r.version}"
-                for r in self.results
-                if r.verdict not in _VERDICTS
-            ),
-        ]
-        if not problems and versions != list(self.releases):
-            problems.append("outcomes are out of order")
-        if problems:
-            raise IncompleteRun(f"{self.harness} run is incomplete: {'; '.join(problems)}")
+        if tuple(result.version for result in self.results) != self.releases[: len(self.results)]:
+            raise IncompleteRun(f"{self.harness} outcomes are not the completed release prefix")
+        if len(self.results) > len(self.releases):
+            raise IncompleteRun(f"{self.harness} has unexpected outcomes")
+        for result in self.results:
+            _check_identity(result, self.harness, result.version)
 
 
-def discover_releases(adapter: Adapter, policy: VersionPolicy) -> list[str]:
-    """Every stable release from ``policy.minimum`` up, ascending: admitted, excluded and new.
+def _check_identity(result: Result, harness: str, version: str) -> None:
+    if (result.harness, result.version) != (harness, version) or result.verdict not in _VERDICTS:
+        raise IncompleteRun(
+            f"qualifying {harness} {version} returned {result.harness} {result.version} "
+            f"with verdict {result.verdict!r}"
+        )
 
-    A list that lacks the pinned bounds is incomplete or wrong, and is refused whole.
-    """
+
+def discover_releases(
+    adapter: Adapter,
+    policy: VersionPolicy,
+    *,
+    base: VersionPolicy | None = None,
+    routine: bool = False,
+) -> list[str]:
+    """Sweeps start above committed max; PR checks stop at the proposed max."""
     found = adapter.discover()
     try:
         keys = [version_key(version) for version in found]
@@ -91,36 +71,80 @@ def discover_releases(adapter: Adapter, policy: VersionPolicy) -> list[str]:
         raise DiscoveryError(f"{adapter.name} discovery holds a non-stable release: {exc}") from exc
     if keys != sorted(set(keys)):
         raise DiscoveryError(f"{adapter.name} discovery is not unique and ascending")
-    for bound in (policy.minimum, policy.maximum, *policy.excluded):
-        if bound not in found:
-            raise DiscoveryError(f"{adapter.name} discovery lacks the pinned release {bound}")
-    low = version_key(policy.minimum)
-    return [version for version in found if version_key(version) >= low]
+    changed_exclusions = set(policy.excluded) ^ set(base.excluded) if base else set()
+    for required in {policy.minimum, policy.maximum, *changed_exclusions}:
+        if required not in found:
+            raise DiscoveryError(f"{adapter.name} discovery lacks the policy release {required}")
+    if base is None:
+        return [version for version in found if version_key(version) > version_key(policy.maximum)]
+    low = version_key(base.maximum) if routine else version_key(policy.minimum)
+    high = version_key(policy.maximum)
+    return [
+        version
+        for version in found
+        if (low < version_key(version) <= high if routine else low <= version_key(version) <= high)
+        or version in changed_exclusions
+    ]
 
 
 def run_harness(
     root: Path,
     adapter: Adapter,
     *,
+    releases: Sequence[str] | None = None,
     qualify: Qualifier = qualify_release,
-    say: Callable[[str], None] = _say,
+    publish: Callable[[Run], None] | None = None,
+    say: Callable[[str], None] = lambda line: print(line, flush=True),
 ) -> Run:
-    """Qualify every discovered release, ascending and sequentially, continuing past failures."""
+    """Continue after failed versions; an interruption or failed cleanup stops after publication."""
     policy = load_policy(root, adapter.name)
-    releases = discover_releases(adapter, policy)
-    say(f"{adapter.name}: {len(releases)} releases from {policy.minimum} ({policy.range_text})")
+    chosen = tuple(discover_releases(adapter, policy) if releases is None else releases)
+    Run(adapter.name, policy, chosen, ())
     results: list[Result] = []
-    for version in releases:
-        for attempt in range(1, ATTEMPTS + 1):
+    errors: list[str] = []
+    for version in chosen:
+        say(f"compat:start {adapter.name} {version}")
+        stop = False
+        try:
             result = qualify(root, adapter, version)
-            if result.verdict != "inconclusive":
-                break
-            say(f"{adapter.name} {version}: inconclusive (attempt {attempt} of {ATTEMPTS})")
-        if (result.harness, result.version) != (adapter.name, version):
-            raise IncompleteRun(
-                f"qualifying {adapter.name} {version} returned the outcome of "
-                f"{result.harness} {result.version}"
+            _check_identity(result, adapter.name, version)
+        except (Exception, KeyboardInterrupt) as exc:
+            detail = clip_diagnostic(exception_detail(exc), 500, tail=True)
+            interrupted = isinstance(exc, KeyboardInterrupt)
+            result = Result(
+                adapter.name,
+                version,
+                "inconclusive" if interrupted else "tooling",
+                (Check("qualification", "error", detail),),
             )
+            stop = isinstance(exc, (KeyboardInterrupt, CleanupFailed, IncompleteRun))
+            if stop:
+                errors.append(detail)
         results.append(result)
-        say(f"{adapter.name} {version}: {result.verdict}")
-    return Run(adapter.name, policy, tuple(releases), tuple(results))
+        say(f"compat:result {adapter.name} {version} {result.verdict}")
+        for check in result.checks:
+            say(f"{check.status:5} {check.name}: {check.detail}")
+        if publish is not None:
+            try:
+                publish(Run(adapter.name, policy, chosen, tuple(results), tuple(errors)))
+                say(f"compat:published {adapter.name} {version}")
+            except (Exception, KeyboardInterrupt) as exc:
+                detail = clip_diagnostic(
+                    f"publication of {adapter.name} {version}: {exception_detail(exc)}",
+                    500,
+                    tail=True,
+                )
+                errors.append(detail)
+                say(detail)
+                results[-1] = replace(
+                    result,
+                    verdict=("inconclusive" if isinstance(exc, KeyboardInterrupt) else "tooling")
+                    if result.verdict == "green"
+                    else result.verdict,
+                    checks=(*result.checks, Check("publication", "error", detail)),
+                )
+                say(f"compat:result {adapter.name} {version} {results[-1].verdict}")
+                stop = stop or isinstance(exc, KeyboardInterrupt)
+        if stop:
+            break
+    return Run(adapter.name, policy, chosen, tuple(results), tuple(errors))

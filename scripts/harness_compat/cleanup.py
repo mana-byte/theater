@@ -16,7 +16,7 @@ _SKIPPED_DIRS = frozenset({"node_modules", ".git", "uv-cache", "uv-tools", "npm"
 
 
 class CleanupFailed(RuntimeError):
-    """Temporary data remains, so the whole run must authorize nothing."""
+    """Temporary data remains, so this qualification must never authorize a pass."""
 
 
 def _unlock(directory: Path) -> None:

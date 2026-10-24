@@ -146,4 +146,7 @@ def run_pytest(
             cases = list(ET.parse(xml).iter("testcase"))
         except ET.ParseError as exc:
             return Check(target, "error", f"invalid junit XML: {exc}")
-        return _suite_check(target, cases)
+        check = _suite_check(target, cases)
+        if run.returncode != 0 and check.status == "pass":
+            return Check(target, "error", f"pytest exit {run.returncode} despite passing cases")
+        return check

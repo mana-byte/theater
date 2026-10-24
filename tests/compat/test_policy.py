@@ -17,12 +17,10 @@ from scripts.harness_compat.policy import (
     changed_gates,
     check_change,
     check_routine_change,
-    check_working_tree,
     derive,
     format_policy,
     load_policy,
-    mismatches,
-    policy_relative,
+    merge_pending,
     write_policy,
 )
 from theater.harness.contracts.version_policy import VersionPolicy
@@ -35,7 +33,7 @@ def _policy(minimum: str = "1.0.0", maximum: str = "1.2.0", *excluded: str) -> V
     return VersionPolicy(minimum, maximum, excluded)
 
 
-def test_the_newest_pass_becomes_the_maximum_and_every_other_release_beneath_it_is_excluded(
+def test_passes_advance_the_maximum_and_failures_are_excluded_even_above_it(
     result: Make,
 ) -> None:
     results = (
@@ -50,19 +48,19 @@ def test_the_newest_pass_becomes_the_maximum_and_every_other_release_beneath_it_
 
     proposed = derive(_policy(), results)
 
-    assert proposed == _policy("1.0.0", "1.5.0", "1.1.0", "1.3.0", "1.4.0")
+    assert proposed == _policy("1.0.0", "1.5.0", "1.1.0", "1.3.0", "1.4.0", "1.6.0")
 
 
 def test_inconclusive_and_tooling_results_are_never_passes(result: Make) -> None:
     results = (result("1.0.0"), result("1.1.0", "inconclusive"), result("1.2.0", "tooling"))
 
-    assert derive(_policy(), results) == _policy("1.0.0", "1.0.0")
+    assert derive(_policy(), results) == _policy("1.0.0", "1.2.0", "1.1.0", "1.2.0")
 
 
-def test_the_proposal_may_narrow_what_the_policy_admitted(result: Make) -> None:
+def test_a_failure_at_the_maximum_adds_an_exclusion_and_never_shrinks_it(result: Make) -> None:
     results = (result("1.0.0"), result("1.1.0"), result("1.2.0", "red"))
 
-    assert derive(_policy(), results) == _policy("1.0.0", "1.1.0")
+    assert derive(_policy(), results) == _policy("1.0.0", "1.2.0", "1.2.0")
 
 
 def test_a_previously_excluded_release_that_now_passes_is_admitted_again(result: Make) -> None:
@@ -79,32 +77,10 @@ def test_a_failing_minimum_is_excluded_without_blocking_later_passes(
     assert derive(_policy(), results) == _policy("1.0.0", "1.2.0", "1.0.0")
 
 
-def test_no_passing_release_proposes_nothing(result: Make) -> None:
-    with pytest.raises(Unproposable, match="no release passed"):
-        derive(_policy(), (result("1.0.0", "red"), result("1.2.0", "inconclusive")))
-
-
-def test_admitted_releases_that_failed_and_excluded_releases_that_passed_disagree(
-    result: Make,
-) -> None:
-    policy = _policy("1.0.0", "1.3.0", "1.2.0")
-    results = (
-        result("0.9.0", "red"),
-        result("1.0.0"),
-        result("1.1.0", "inconclusive"),
-        result("1.2.0"),
-        result("1.3.0"),
-        result("1.4.0", "red"),
-        result("1.5.0"),
+def test_all_failures_propose_exclusions_without_changing_the_range(result: Make) -> None:
+    assert derive(_policy(), (result("1.3.0", "red"), result("1.4.0", "inconclusive"))) == (
+        _policy("1.0.0", "1.2.0", "1.3.0", "1.4.0")
     )
-
-    found = [(item.version, item.kind) for item in mismatches(policy, results)]
-
-    assert found == [
-        ("1.1.0", "regression"),
-        ("1.2.0", "stale-exclusion"),
-        ("1.5.0", "advance"),
-    ]
 
 
 def test_the_file_is_one_compact_line() -> None:
@@ -133,6 +109,7 @@ def test_the_old_policy_must_also_be_unambiguous_and_one_line(old_text: str) -> 
     ("new_text", "needle"),
     [
         (format_policy(_policy("1.0.1", "1.2.0")), "pinned minimum moved"),
+        (format_policy(_policy("1.0.0", "1.1.0")), "maximum shrank"),
         (json.dumps(_policy().to_json(), indent=2) + "\n", "canonical single compact line"),
         ('{"min":"1.0.0","max":"1.2.0","excluded":[]}', "canonical single compact line"),
         ('{"min":"1.0.0","max":"1.2.0"}\n', "not valid"),
@@ -142,36 +119,6 @@ def test_the_old_policy_must_also_be_unambiguous_and_one_line(old_text: str) -> 
 def test_anything_but_a_canonical_edit_is_refused(new_text: str, needle: str) -> None:
     with pytest.raises(PolicyChangeError, match=needle):
         check_change(format_policy(_policy()), new_text)
-
-
-def test_the_working_tree_guard_accepts_exactly_one_replaced_line(repo: Path) -> None:
-    write_policy(repo, "claude", _policy("1.0.0", "1.5.0", "1.1.0"))
-
-    check_working_tree(repo, "claude")
-
-
-def test_the_working_tree_guard_refuses_a_second_dirty_file(repo: Path) -> None:
-    write_policy(repo, "claude", _policy("1.0.0", "1.5.0"))
-    (repo / "tracked.txt").write_text("edited\n", encoding="utf-8")
-
-    with pytest.raises(PolicyChangeError, match=r"tracked\.txt"):
-        check_working_tree(repo, "claude")
-
-
-def test_the_working_tree_guard_refuses_a_new_untracked_file(repo: Path) -> None:
-    write_policy(repo, "claude", _policy("1.0.0", "1.5.0"))
-    (repo / "stray.md").write_text("x\n", encoding="utf-8")
-
-    with pytest.raises(PolicyChangeError, match=r"stray\.md"):
-        check_working_tree(repo, "claude")
-
-
-def test_the_working_tree_guard_refuses_a_change_of_more_than_one_line(repo: Path) -> None:
-    path = repo / policy_relative("claude")
-    path.write_text(json.dumps(_policy("1.0.0", "1.5.0").to_json(), indent=1) + "\n")
-
-    with pytest.raises(PolicyChangeError, match=r"\+\d+/-1 lines"):
-        check_working_tree(repo, "claude")
 
 
 def test_admitting_one_release_rewrites_only_the_given_tree(
@@ -224,22 +171,38 @@ def test_a_release_with_two_outcomes_proposes_nothing(result: Make) -> None:
         derive(_policy(), (result("1.0.0"), result("1.1.0"), result("1.1.0", "red")))
 
 
-def test_a_missing_exclusion_cannot_authorize_a_proposal(result: Make) -> None:
+def test_an_unrelated_exclusion_is_preserved_without_retesting_it(result: Make) -> None:
     policy = _policy("1.0.0", "1.4.0", "1.1.0", "1.3.0")
     results = (result("1.0.0"), result("1.2.0"), result("1.3.0"), result("1.4.0"), result("1.5.0"))
 
-    with pytest.raises(Unproposable, match="no outcome"):
-        derive(policy, results)
+    assert derive(policy, results) == _policy("1.0.0", "1.5.0", "1.1.0")
 
 
-def test_an_incomplete_window_cannot_narrow_the_policy(
+def test_partial_outcomes_preserve_untested_bounds_and_exclusions(
     result: Make,
 ) -> None:
     policy = _policy("1.0.0", "1.4.0", "1.1.0", "1.3.0")
     results = (result("1.0.0"), result("1.1.0", "red"), result("1.2.0"))
 
-    with pytest.raises(Unproposable, match="no outcome"):
-        derive(policy, results)
+    assert derive(policy, results) == policy
+
+
+def test_an_empty_run_has_no_policy_effect() -> None:
+    assert derive(_policy(), ()) == _policy()
+
+
+def test_pending_range_and_exclusion_deltas_survive_main_updates() -> None:
+    original = _policy("1.0.0", "1.2.0", "1.1.0")
+    current = _policy("1.0.0", "1.4.0", "1.1.0", "1.3.0")
+    pending = _policy("1.0.0", "1.5.0", "1.6.0")
+    assert merge_pending(current, original, pending) == _policy("1.0.0", "1.5.0", "1.3.0", "1.6.0")
+
+
+def test_pending_updates_do_not_restore_an_exclusion_already_removed_on_main() -> None:
+    original = _policy("1.0.0", "1.2.0", "1.1.0")
+    current = _policy("1.0.0", "1.4.0", "1.3.0")
+    pending = _policy("1.0.0", "1.5.0", "1.1.0", "1.6.0")
+    assert merge_pending(current, original, pending) == _policy("1.0.0", "1.5.0", "1.3.0", "1.6.0")
 
 
 def test_a_plugin_edit_selects_its_harness_for_a_retest_not_only_a_policy_edit(

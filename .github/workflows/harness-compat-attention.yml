@@ -1,0 +1,32 @@
+name: Harness compatibility attention
+on:
+  workflow_run:
+    workflows: [Harness compatibility, Harness compatibility canaries]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  report:
+    if: contains(fromJSON('["failure","timed_out","cancelled","action_required","startup_failure"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # Trusted default-branch code only. Reporting must work even if uv/dependency setup failed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Report failures and recover known pending exclusions
+        env:
+          FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN || github.token }}
+        run: python3 -m scripts.harness_compat report "$FAILED_RUN_ID"

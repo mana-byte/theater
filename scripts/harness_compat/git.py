@@ -64,15 +64,6 @@ def changed_paths(root: Path) -> set[str]:
     return paths
 
 
-def numstat(root: Path, path: str) -> tuple[int, int]:
-    """Lines added and removed in ``path`` against HEAD."""
-    line = git(root, "diff", "--numstat", "HEAD", "--", path).strip()
-    if not line:
-        return 0, 0
-    added, removed, _ = line.split("\t", 2)
-    return int(added), int(removed)
-
-
 def diff_names(root: Path, base: str) -> list[str]:
     """Paths that differ between ``base`` and HEAD."""
     return [

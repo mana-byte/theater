@@ -51,9 +51,6 @@ PYTEST_ADDOPTS=--cov make test # full suite with the 80% coverage gate
 uv run ruff check             # lint
 uv run ruff format --check    # verify formatting; omit --check to format
 uv run mypy                   # Theater, Régie, compat scripts; no --strict
-make compat HARNESS=vibe VERSION=3.0.2 # qualify exactly one release, persist nothing
-make suite HARNESS=vibe        # live conformance suite on the installed CLI: ARGS="-- -k mcp -x"
-make canaries HARNESS=vibe     # the suite must notice deliberately broken plugins (slow, opt-in)
 ```
 
 Schema changes (see architecture §5):
@@ -256,14 +253,16 @@ Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) 
 - One qualification tests exactly its supplied version in a disposable code copy and home.
   No run may change the checkout or real home, save results, update fixtures or retain success
   history. Temporary CLI, daemon and test data must be deleted after the run.
-- The workflow rechecks every published stable release from the pinned minimum through latest,
-  including admitted and excluded releases, and continues after failures. Passing releases may
-  advance the maximum past failures only with explicit exclusions; failed/inconclusive releases
-  get issues. Missing or incomplete runs authorize nothing.
+- Only GitHub workflows invoke compatibility scripts. Daily runs test every stable release above
+  committed max, in order; pending PR releases are rechecked without a success-history cache.
+  Passes may advance max. Red, inconclusive and tooling outcomes add exclusions (even above max)
+  and get issues; failures never move either bound. Publish each outcome before the next release.
+  Reuse one per-harness PR and preserve its pending range and exclusion changes.
 - PR checks qualify the proposed code again. A policy refusal never substitutes for a behavioral
   test: only the disposable copy may temporarily admit the supplied release.
-- Use `make compat HARNESS=<h> VERSION=<version>` for one release, or omit `VERSION` for the full
-  window. Check the implementation with `uv run pytest tests/compat tests/conformance tests/harness/<h>`.
+- Routine PR verification tests its proposed extension and changed exclusions; unrelated new
+  upstream releases cannot fail it. Workflow failures need issues, including setup and timeouts.
+  Check the implementation with `uv run pytest tests/compat tests/conformance tests/harness/<h>`.
 
 A plugin may also export an optional `compat=CompatManifest(provision, native_edit, mcp_call, canaries)` (see
 `docs/harness-plugins.md`, "Qualification"). It is read only by the live conformance suite, never at

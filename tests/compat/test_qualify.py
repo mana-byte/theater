@@ -262,7 +262,7 @@ SUITE = Check("tests/conformance/live", "pass", "")
         ),
         (_report(SUITE), "inconclusive"),
         (_report(SUITE, Check("conformance:a", "pass"), Check("conformance:b", "fail")), "red"),
-        (_report(Check(SUITE.name, "fail"), Check("conformance:a", "pass")), "red"),
+        (_report(Check(SUITE.name, "fail"), Check("conformance:a", "pass")), "tooling"),
         (
             _report(Check(SUITE.name, "error", "timed out"), Check("conformance:a", "pass")),
             "inconclusive",

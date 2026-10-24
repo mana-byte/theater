@@ -531,8 +531,9 @@ a sensitive modal.
 
 Shipped plugins keep their inclusive `min`, `max` and `excluded` in a compact, one-line
 `compatibility.json`. Runtime gates use the public `VersionPolicy` reader/predicate; the daily
-pipeline proposes only a +1/−1 edit to that file after testing every stable release from the
-pinned minimum through latest. See [`harness-compat.md`](harness-compat.md).
+pipeline proposes only a +1/−1 edit to that file after testing every stable release above committed
+max. Failures add exclusions even above max, without changing the bounds; all failure categories
+need issues. See [`harness-compat.md`](harness-compat.md).
 
 `HarnessManifest.compat` is optional and read only by the compatibility suite,
 never at runtime. The suite derives every scenario from the rest of the

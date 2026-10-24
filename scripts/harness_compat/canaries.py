@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from theater.version_policy import version_key
+
 from .codecopy import code_copy
 from .contract import Adapter, Check, InstallFailed
 from .diagnostics import clip_diagnostic
@@ -32,6 +34,17 @@ _PARALLEL_WORKERS = "2"
 _TALLY = re.compile(r"(\d+) (passed|failed|skipped|error)")
 
 
+def canary_version(root: Path, adapter: Adapter) -> str:
+    """Use the newest admitted release, including when max has been excluded."""
+    policy = load_policy(root, adapter.name)
+    if policy.admits(policy.maximum):
+        return policy.maximum
+    admitted = [version for version in adapter.discover() if policy.admits(version)]
+    if not admitted:
+        raise ValueError(f"{adapter.name} has no admitted release for suite canaries")
+    return max(admitted, key=version_key)
+
+
 def run_canaries(
     root: Path,
     adapter: Adapter,
@@ -40,7 +53,7 @@ def run_canaries(
     timeout: float = CANARIES_TIMEOUT_SECONDS,
 ) -> Check:
     """pass: every applicable canary was caught; fail: the suite missed one; error: no verdict."""
-    chosen = version or load_policy(root, adapter.name).maximum
+    chosen = version or canary_version(root, adapter)
     with make_sandbox(adapter.name) as sb:
         try:
             binary = install_verified(adapter, sb, chosen)

@@ -1,7 +1,7 @@
 """Mutation canaries: the live suite must notice each deliberate breakage of a plugin's wiring.
 
-Slow and real-binary: opt in with ``make canaries`` (``HARNESS_COMPAT_CANARIES=1``). They run when
-the suite or a plugin changes and weekly, never per release.
+Slow and real-binary: enabled by the canary workflow. They run when the suite or a plugin changes
+and weekly, never per release.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from theater.harness.builtin import plugin_dir
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(os.environ.get(ENV_ENABLE) != "1", reason="opt in with: make canaries"),
+    pytest.mark.skipif(os.environ.get(ENV_ENABLE) != "1", reason="enabled by the canary workflow"),
 ]
 #: Read from disk: the registry is only populated after collection.
 SHIPPED = sorted(path.parent.name for path in plugin_dir().glob("*/manifest.py"))

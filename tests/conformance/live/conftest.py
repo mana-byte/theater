@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Generator
 from pathlib import Path
 
 import pytest
@@ -25,6 +25,7 @@ from tests.support.obligations import (
     obligations_for,
     required,
 )
+from tests.support.scenario_outcome import failure_outcome
 from theater import config as theater_config
 from theater import harness as harness_registry
 from theater import paths as theater_paths
@@ -88,11 +89,24 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         items[:] = kept
 
 
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[object]
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    report = yield
+    if report.failed and call.when == "call" and call.excinfo is not None:
+        report.user_properties.append(("compat_outcome", failure_outcome(call.excinfo.value)))
+    return report
+
+
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     obligation = _BY_NODE.get(report.nodeid)
     if obligation is None:
         return
-    _PHASES.setdefault(obligation.id, {})[report.when or "call"] = report.outcome
+    outcome = report.outcome
+    if report.failed and report.when == "call":
+        outcome = dict(report.user_properties).get("compat_outcome", "tooling")
+    _PHASES.setdefault(obligation.id, {})[report.when or "call"] = outcome
     if report.outcome != "passed":
         _DETAILS.setdefault(obligation.id, _detail(report))
 
@@ -111,6 +125,8 @@ def _outcome(phases: dict[str, str]) -> str | None:
         return None
     if phases.get("call") == "failed":
         return "failed"
+    if phases.get("call") == "tooling":
+        return "tooling"
     if "failed" in phases.values():
         return "error"
     if "skipped" in phases.values():

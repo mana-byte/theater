@@ -1,25 +1,16 @@
 name: Harness compatibility
-run-name: >-
-  Harness compatibility · ${{ github.event_name == 'pull_request'
-  && format('PR #{0}', github.event.pull_request.number)
-  || format('{0} ({1})', inputs.harness || 'all', github.event_name) }}
-
-# Every run qualifies every published stable release of a harness, from its pinned minimum to the
-# latest, with the live conformance suite as the only authority. Nothing is cached, stored or
-# uploaded, and no summary file is written: results live in the run's memory and the log, and
-# end up as issues and one reviewed policy PR.
+run-name: Harness compatibility (${{ github.event_name }})
 on:
   schedule:
     - cron: "43 5 * * *"
   workflow_dispatch:
     inputs:
       harness:
-        description: Harness to qualify
+        description: Harness whose newer releases should be tested
         required: true
         default: all
         type: choice
         options: [all, claude, codex, opencode, pi, vibe]
-  # gate-plan is the only authority for which code changes need real-binary qualification.
   pull_request:
 
 permissions:
@@ -29,13 +20,12 @@ env:
   PYTHONDONTWRITEBYTECODE: "1"
 
 concurrency:
-  # PR checks supersede each other; qualification runs queue per harness (see the qualify job).
   group: ${{ github.event_name == 'pull_request' && format('harness-compat-pr-{0}', github.ref) || format('harness-compat-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   static-checks:
-    name: Static checks (no upstream release is qualified)
+    name: Static checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -46,48 +36,47 @@ jobs:
         with:
           enable-cache: false
       - run: uv sync --locked --all-packages --group dev
-      - run: uv run ruff check scripts/harness_compat
-      - run: uv run ruff format --check scripts/harness_compat
+      - run: uv run ruff check --no-cache scripts/harness_compat
+      - run: uv run ruff format --check --no-cache scripts/harness_compat
       - run: uv run mypy
-      - run: uv run --no-sync --no-cache pytest -p no:cacheprovider tests/compat -q
-      # No binaries: the completeness, guard and derivation tests; the live and canary scenarios skip.
-      - run: uv run --no-sync --no-cache pytest -p no:cacheprovider tests/conformance -q
+      - run: uv run --no-sync --no-cache pytest -p no:cacheprovider tests/compat tests/conformance -q
 
   plan:
     name: Select harnesses
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       harnesses: ${{ steps.plan.outputs.harnesses }}
-      publish: ${{ steps.plan.outputs.publish }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - id: plan
         env:
+          EVENT: ${{ github.event_name }}
           REQUESTED_HARNESS: ${{ inputs.harness || 'all' }}
-          REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          if [[ "$REQUESTED_HARNESS" == "all" ]]; then
-            harnesses='["claude","codex","opencode","pi","vibe"]'
-          else
-            harnesses="[\"$REQUESTED_HARNESS\"]"
+          args=(plan "$REQUESTED_HARNESS")
+          if [[ "$EVENT" == "pull_request" ]]; then
+            args=(plan --base "$BASE_SHA")
+            if [[ "$HEAD_REF" == chore/compat-* ]]; then args+=(--routine); fi
           fi
-          # Policy PRs and issues come from main only; any other ref is a dry run of its own code.
-          publish=false
-          if [[ "$REF" == "refs/heads/main" ]]; then publish=true; fi
+          harnesses="$(python3 -m scripts.harness_compat "${args[@]}")"
           echo "harnesses=$harnesses" >> "$GITHUB_OUTPUT"
-          echo "publish=$publish" >> "$GITHUB_OUTPUT"
-          echo "harnesses=$harnesses publish=$publish ref=$REF"
 
   qualify:
     name: Qualify ${{ matrix.harness }}
     needs: [static-checks, plan]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    # Reserve time for setup, interruption cleanup and publication below the hosted-runner ceiling.
     timeout-minutes: 350
     permissions:
-      contents: read
+      contents: write
       issues: write
+      pull-requests: write
     concurrency:
       group: harness-compat-${{ matrix.harness }}
       cancel-in-progress: false
@@ -97,8 +86,8 @@ jobs:
         harness: ${{ fromJSON(needs.plan.outputs.harnesses) }}
     env:
       HARNESS: ${{ matrix.harness }}
-      PUBLISH: ${{ needs.plan.outputs.publish }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PR_AUTOMATION_TOKEN || github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,73 +99,26 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
-      - name: Sync project
-        run: uv sync --locked --all-packages --group dev
-      - name: Qualify every release and prepare publication
-        id: compat
-        continue-on-error: true
-        env:
-          # Read-only discovery rate limit, and `gh issue` when publishing.
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          args=(run "$HARNESS" --run-url "$RUN_URL")
-          if [[ "$PUBLISH" == "true" ]]; then
-            args+=(--publish)
-          fi
-          echo "The complete release window has 320 minutes; an incomplete run authorizes nothing."
-          if timeout --signal=INT --kill-after=5m 320m \
-            uv run --no-sync --no-cache python -m scripts.harness_compat "${args[@]}"; then
-            exit 0
-          else
-            status=$?
-            if [[ "$status" == 124 || "$status" == 137 ]]; then
-              echo "::error::The full release window exceeded 320 minutes; no policy was authorized."
-            fi
-            exit "$status"
-          fi
-      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
-        id: pr
-        if: steps.compat.outputs.pr_action == 'propose'
-        continue-on-error: true
-        with:
-          token: ${{ secrets.PR_AUTOMATION_TOKEN }}
-          base: main
-          branch: chore/compat-${{ matrix.harness }}
-          add-paths: theater/harness/builtin/plugins/${{ matrix.harness }}/compatibility.json
-          commit-message: "chore(compat): update ${{ matrix.harness }} version policy"
-          title: ${{ steps.compat.outputs.pr_title }}
-          body-path: ${{ steps.compat.outputs.pr_body_path }}
-          delete-branch: true
-      - name: Close the policy PR the evidence no longer asks for
-        if: steps.compat.outputs.pr_action == 'retire'
-        env:
-          GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN }}
-        run: |
-          set -euo pipefail
-          number="$(gh pr list --head "chore/compat-$HARNESS" --state open --json number --jq '.[0].number // empty')"
-          if [[ -n "$number" ]]; then
-            gh pr close "$number" --delete-branch \
-              --comment "A fresh run of every release agrees with the policy on main: $RUN_URL"
-          fi
-      - name: Remove the temporary PR body
-        if: always() && steps.compat.outputs.pr_body_path != ''
-        env:
-          PR_BODY_PATH: ${{ steps.compat.outputs.pr_body_path }}
-        run: rm -f -- "$PR_BODY_PATH"
-      - name: Preserve the qualification result
-        if: steps.compat.outcome == 'failure' || steps.pr.outcome == 'failure'
-        run: exit 1
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: uv sync --locked --all-packages --group dev
+      - name: Test every newer release and publish each completed outcome
+        run: timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat run "$HARNESS"
 
-  gate-plan:
-    name: Select changed plugins
-    if: github.event_name == 'pull_request'
+  verify-gate:
+    name: Verify ${{ matrix.harness }} plugin and policy
+    needs: [static-checks, plan]
+    if: github.event_name == 'pull_request' && needs.plan.outputs.harnesses != '[]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      harnesses: ${{ steps.gates.outputs.harnesses }}
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: ${{ fromJSON(needs.plan.outputs.harnesses) }}
+    env:
+      HARNESS: ${{ matrix.harness }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_REF: ${{ github.head_ref }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -185,62 +127,13 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: false
-      - run: uv sync --locked --all-packages --group dev
-      - id: gates
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          set -euo pipefail
-          args=(gates --base "$BASE_SHA")
-          # The pipeline's own branches may change one policy line and nothing else; any other
-          # edit to a plugin selects that harness for a full re-test of the proposed code.
-          if [[ "$HEAD_REF" == chore/compat-* ]]; then
-            args+=(--routine)
-          fi
-          harnesses="$(uv run --no-sync --no-cache python -m scripts.harness_compat "${args[@]}")"
-          echo "harnesses=$harnesses" >> "$GITHUB_OUTPUT"
-
-  verify-gate:
-    name: Verify ${{ matrix.harness }} plugin and policy
-    needs: [static-checks, gate-plan]
-    if: needs.gate-plan.outputs.harnesses != '[]'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-    # Read-only: the proposed code is re-tested against every release, and nothing is published.
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        harness: ${{ fromJSON(needs.gate-plan.outputs.harnesses) }}
-    env:
-      HARNESS: ${{ matrix.harness }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          enable-cache: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: sudo apt-get update && sudo apt-get install -y tmux
       - run: uv sync --locked --all-packages --group dev
-      - name: Re-test the proposed plugin and policy against every release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verify the proposed range without qualifying unrelated newer releases
         run: |
-          echo "The complete release window has 320 minutes; an incomplete run authorizes nothing."
-          if timeout --signal=INT --kill-after=5m 320m \
-            uv run --no-sync --no-cache python -m scripts.harness_compat run "$HARNESS" --check; then
-            exit 0
-          else
-            status=$?
-            if [[ "$status" == 124 || "$status" == 137 ]]; then
-              echo "::error::The full release window exceeded 320 minutes; the policy check is incomplete."
-            fi
-            exit "$status"
-          fi
+          args=(verify "$HARNESS" --base "$BASE_SHA")
+          if [[ "$HEAD_REF" == chore/compat-* ]]; then args+=(--routine); fi
+          timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat "${args[@]}"

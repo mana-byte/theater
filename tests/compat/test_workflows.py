@@ -1,4 +1,4 @@
-"""The workflows keep their promises: nothing persisted, PR checks read-only, one publisher."""
+"""Thin workflow invocation, publication ownership, and independent failure reporting."""
 
 from __future__ import annotations
 
@@ -14,155 +14,109 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
 
 def _load(name: str) -> dict[str, Any]:
-    document = yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
-    document["on"] = document.pop(True)  # YAML reads a bare ``on`` as a boolean
+    document = yaml.safe_load((WORKFLOWS / name).read_text())
+    document["on"] = document.pop(True)
     return document
 
 
-def _steps(job: dict[str, Any]) -> list[dict[str, Any]]:
-    return job["steps"]
-
-
-@pytest.fixture(scope="module")
-def compat() -> dict[str, Any]:
-    return _load("harness-compat.yml")
-
-
-@pytest.mark.parametrize("name", ["harness-compat.yml", "harness-compat-canaries.yml"])
-def test_nothing_is_cached_or_uploaded(name: str) -> None:
-    text = (WORKFLOWS / name).read_text(encoding="utf-8")
-
+@pytest.mark.parametrize(
+    "name", ["harness-compat.yml", "harness-compat-canaries.yml", "harness-compat-attention.yml"]
+)
+def test_no_workflow_retains_test_data_or_a_history_cache(name: str) -> None:
+    text = (WORKFLOWS / name).read_text()
     for forbidden in (
         "actions/cache",
         "upload-artifact",
         "download-artifact",
-        "DIAGNOSTICS",
         "STEP_SUMMARY",
         "enable-cache: true",
     ):
         assert forbidden not in text
 
 
-def test_every_harness_has_one_matrix_leg_and_no_opencode_alias(compat: dict[str, Any]) -> None:
-    plan = _steps(compat["jobs"]["plan"])[0]["run"]
-    options = compat["on"]["workflow_dispatch"]["inputs"]["harness"]["options"]
-    canaries = _load("harness-compat-canaries.yml")["jobs"]["canaries"]
-
-    for name in ADAPTER_NAMES:
-        assert f'"{name}"' in plan and name in options
-    assert "opencode2" not in plan + str(options)
-    assert canaries["strategy"]["matrix"]["harness"] == list(ADAPTER_NAMES)
-
-
-def test_a_dispatch_discovers_every_release_and_has_no_version_input(
-    compat: dict[str, Any],
-) -> None:
+def test_dispatch_selects_a_harness_and_scripts_discover_the_versions() -> None:
+    compat = _load("harness-compat.yml")
     inputs = compat["on"]["workflow_dispatch"]["inputs"]
-
     assert set(inputs) == {"harness"}
-    assert "REQUESTED_VERSION" not in str(compat)
+    assert inputs["harness"]["options"] == ["all", *ADAPTER_NAMES]
+    assert 'args=(plan "$REQUESTED_HARNESS")' in compat["jobs"]["plan"]["steps"][-1]["run"]
 
 
-def test_pull_request_jobs_have_read_permission_and_no_publishing(compat: dict[str, Any]) -> None:
-    text = (WORKFLOWS / "harness-compat.yml").read_text(encoding="utf-8")
+def test_pr_jobs_are_read_only_and_have_no_automation_secret() -> None:
+    compat = _load("harness-compat.yml")
     assert compat["permissions"] == {"contents": "read"}
-    for job in ("static-checks", "gate-plan", "verify-gate"):
-        permissions = compat["jobs"][job].get("permissions", compat["permissions"])
-        assert permissions == {"contents": "read"}, job
-        body = yaml.safe_dump(compat["jobs"][job])
-        for forbidden in ("--publish", "PR_AUTOMATION_TOKEN", "issues", "create-pull-request"):
-            assert forbidden not in body, (job, forbidden)
-    assert "pull_request_target" not in text
+    assert compat["on"]["pull_request"] is None
+    for name in ("static-checks", "plan", "verify-gate"):
+        job = compat["jobs"][name]
+        assert job.get("permissions", compat["permissions"]) == {"contents": "read"}
+        assert "PR_AUTOMATION_TOKEN" not in yaml.safe_dump(job)
 
 
-def test_the_gate_pr_check_retests_the_proposed_code_in_check_mode(compat: dict[str, Any]) -> None:
-    verify = compat["jobs"]["verify-gate"]
-    commands = [step.get("run", "") for step in _steps(verify)]
+def test_scripts_own_all_issue_and_pr_operations() -> None:
+    for name in (
+        "harness-compat.yml",
+        "harness-compat-canaries.yml",
+        "harness-compat-attention.yml",
+    ):
+        text = (WORKFLOWS / name).read_text()
+        for forbidden in (
+            "create-pull-request",
+            "gh pr ",
+            "gh issue ",
+            "--delete-branch",
+            "pr_action",
+        ):
+            assert forbidden not in text
+    job = _load("harness-compat.yml")["jobs"]["qualify"]
+    assert job["permissions"] == {"contents": "write", "issues": "write", "pull-requests": "write"}
+    assert 'harness_compat run "$HARNESS"' in job["steps"][-1]["run"]
+    assert job["concurrency"]["cancel-in-progress"] is False
 
-    assert any('run "$HARNESS" --check' in command for command in commands)
-    assert verify["if"] == "needs.gate-plan.outputs.harnesses != '[]'"
-    assert compat["on"]["pull_request"] is None, "gate-plan alone selects affected harnesses"
-    gates = " ".join(step.get("run", "") for step in _steps(compat["jobs"]["gate-plan"]))
-    assert "--routine" in gates and "chore/compat-" in gates
 
-
-def test_publishing_happens_only_in_the_qualify_job_and_only_on_main(
-    compat: dict[str, Any],
-) -> None:
-    plan = _steps(compat["jobs"]["plan"])[0]["run"]
-    qualify = compat["jobs"]["qualify"]
-    run = next(step for step in _steps(qualify) if step.get("id") == "compat")
-
-    assert 'if [[ "$REF" == "refs/heads/main" ]]; then publish=true; fi' in plan
-    assert 'if [[ "$PUBLISH" == "true" ]]; then' in run["run"] and "--publish" in run["run"]
-    assert qualify["permissions"] == {"contents": "read", "issues": "write"}
-    assert qualify["timeout-minutes"] <= 360
+def test_routine_pr_checks_use_the_base_and_stop_at_the_proposed_policy() -> None:
+    compat = _load("harness-compat.yml")
+    verify = compat["jobs"]["verify-gate"]["steps"][-1]["run"]
+    assert 'args=(verify "$HARNESS" --base "$BASE_SHA")' in verify
+    assert "--routine" in verify and "chore/compat-" in verify
+    assert " --check" not in verify
+    assert "pull_request_target" not in str(compat)
 
 
 @pytest.mark.parametrize("name", ["qualify", "verify-gate"])
-def test_release_sweeps_interrupt_before_the_job_limit(compat: dict[str, Any], name: str) -> None:
-    job = compat["jobs"][name]
-    run = next(step["run"] for step in _steps(job) if "320m" in step.get("run", ""))
-
+def test_sweeps_interrupt_with_time_left_to_clean_up_and_publish(name: str) -> None:
+    job = _load("harness-compat.yml")["jobs"][name]
     assert job["timeout-minutes"] > 325
-    assert "timeout --signal=INT --kill-after=5m 320m" in run
-    assert '"$status" == 124 || "$status" == 137' in run
-    assert "::error::The full release window exceeded" in run
-    assert 'exit "$status"' in run
+    assert "timeout --signal=INT --kill-after=5m 320m" in job["steps"][-1]["run"]
 
 
-def test_the_policy_pr_reads_its_body_from_a_file_and_touches_one_path(
-    compat: dict[str, Any],
-) -> None:
-    steps = _steps(compat["jobs"]["qualify"])
-    pr = next(step for step in steps if step.get("id") == "pr")
-    cleanup = next(step for step in steps if "Remove the temporary PR body" in step.get("name", ""))
-
-    assert pr["with"]["body-path"] == "${{ steps.compat.outputs.pr_body_path }}"
-    assert "body" not in pr["with"]
-    assert pr["with"]["add-paths"].endswith("/compatibility.json")
-    assert pr["if"] == "steps.compat.outputs.pr_action == 'propose'"
-    assert cleanup["if"].startswith("always()") and "rm -f" in cleanup["run"]
-
-
-def test_untrusted_context_reaches_scripts_only_through_environment(compat: dict[str, Any]) -> None:
-    for job in compat["jobs"].values():
-        for step in _steps(job):
-            assert "${{ github.head_ref }}" not in step.get("run", "")
-            assert "${{ github.event" not in step.get("run", "")
+def test_failure_reporter_runs_from_trusted_main_without_project_setup() -> None:
+    report = _load("harness-compat-attention.yml")
+    assert report["on"]["workflow_run"]["workflows"] == [
+        "Harness compatibility",
+        "Harness compatibility canaries",
+    ]
+    job = report["jobs"]["report"]
+    assert "timed_out" in job["if"] and "failure" in job["if"]
+    assert job["steps"][0]["with"]["ref"] == "${{ github.sha }}"
+    assert job["steps"][-1]["run"] == 'python3 -m scripts.harness_compat report "$FAILED_RUN_ID"'
+    assert "uv sync" not in yaml.safe_dump(job)
 
 
-def test_the_run_keeps_going_to_publish_after_a_red_result_and_then_fails(
-    compat: dict[str, Any],
-) -> None:
-    steps = _steps(compat["jobs"]["qualify"])
-    run = next(step for step in steps if step.get("id") == "compat")
-
-    assert run["continue-on-error"] is True
-    assert steps[-1]["run"] == "exit 1"
-    assert "steps.compat.outcome == 'failure'" in steps[-1]["if"]
+def test_untrusted_values_are_passed_as_environment_data() -> None:
+    for name in ("harness-compat.yml", "harness-compat-attention.yml"):
+        workflow = _load(name)
+        for job in workflow["jobs"].values():
+            for step in job["steps"]:
+                assert "${{ github.head_ref }}" not in step.get("run", "")
+                assert "${{ github.event" not in step.get("run", "")
 
 
-def test_the_canary_workflow_watches_its_entire_support_and_production_tree() -> None:
-    paths = _load("harness-compat-canaries.yml")["on"]["pull_request"]["paths"]
-
-    for path in (
-        "scripts/harness_compat/**",
-        "tests/support/**",
-        "tests/conformance/**",
-        "theater/**",
-        "packages/regie/src/**",
-        "tests/conftest.py",
-    ):
-        assert path in paths
-
-
-def test_every_invocation_rechecks_every_release_with_no_stored_state(
-    compat: dict[str, Any],
-) -> None:
-    text = (WORKFLOWS / "harness-compat.yml").read_text(encoding="utf-8")
-    commands = " ".join(step.get("run", "") for step in _steps(compat["jobs"]["qualify"]))
-
-    for stored in ("restore-keys", "--version", "--max-candidates", "known_bad", "OPEN_FAILURES"):
-        assert stored not in text, stored
-    assert 'args=(run "$HARNESS"' in commands
+def test_canaries_are_workflow_self_checks_for_each_plugin() -> None:
+    workflow = _load("harness-compat-canaries.yml")
+    job = workflow["jobs"]["canaries"]
+    assert job["strategy"]["matrix"]["harness"] == list(ADAPTER_NAMES)
+    assert 'harness_compat canaries "$HARNESS"' in job["steps"][-1]["run"]
+    assert "tests/support/**" in workflow["on"]["pull_request"]["paths"]
+    makefile = (REPO_ROOT / "Makefile").read_text()
+    for removed in ("compat:", "suite:", "canaries:"):
+        assert removed not in makefile
