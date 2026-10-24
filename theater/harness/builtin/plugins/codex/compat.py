@@ -41,6 +41,10 @@ def _catalog_entry(slug: str) -> dict[str, object]:
     }
 
 
+#: Two harness-native efforts the CLI maps to different wire values.
+_EFFORTS = ("low", "high")
+
+
 def provision(context: ProvisionContext) -> Provisioned:
     """A CODEX_HOME whose config serves each logical model over Responses from a trusted workdir."""
     models = context.models or _DEFAULT_MODELS
@@ -72,6 +76,7 @@ def provision(context: ProvisionContext) -> Provisioned:
             catalog: json.dumps({"models": [_catalog_entry(name) for name in models]}),
         },
         models=models,
+        efforts=_EFFORTS,
     )
 
 

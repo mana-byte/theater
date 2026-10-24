@@ -10,6 +10,9 @@ from theater.harness.contracts.compat import CompatManifest, ProvisionContext, P
 _DEFAULT_MODELS = ("mock-a", "mock-b")
 _PROVIDER = "mockprov"
 
+#: Two harness-native efforts the CLI maps to different wire values.
+_EFFORTS = ("low", "high")
+
 
 def provision(context: ProvisionContext) -> Provisioned:
     """A custom provider serving each logical model from the mock over OpenAI completions."""
@@ -22,7 +25,8 @@ def provision(context: ProvisionContext) -> Provisioned:
                 "baseUrl": context.mock_urls["openai-chat"],
                 "api": "openai-completions",
                 "apiKey": "mock-key",
-                "models": [{"id": name} for name in models],
+                # Pi sends a reasoning effort only for a model declared as reasoning-capable.
+                "models": [{"id": name, "reasoning": True} for name in models],
             }
         }
     }
@@ -46,6 +50,7 @@ def provision(context: ProvisionContext) -> Provisioned:
             agent_dir / "trust.json": json.dumps(trust, indent=2) + "\n",
         },
         models=models,
+        efforts=_EFFORTS,
     )
 
 

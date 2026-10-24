@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from scripts.harness_compat.contract import SUITE_DOCUMENT_SCHEMA
 from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.manifest import HookChannelManifest, OtelChannelManifest
+from theater.harness.contracts.runtime import RuntimeCapability
 
 SCHEMA = SUITE_DOCUMENT_SCHEMA
 
@@ -61,8 +62,17 @@ def _interrupt(harness: Harness) -> bool:
     return harness.controls is not None and harness.controls.interrupt is not None
 
 
-def _steer(harness: Harness) -> bool:
-    return harness.controls is not None and harness.controls.steer is not None
+def _unavailable(harness: Harness, capability: RuntimeCapability) -> bool:
+    """Whether the runtime manifest declares ``capability`` unavailable, so it must be refused."""
+    return harness.runtime is not None and capability in harness.runtime.unavailable_capabilities
+
+
+def _steer(harness: Harness) -> tuple[str, ...]:
+    """A declared steer is proven; a declared-unavailable one must be refused, never queued."""
+    if _unavailable(harness, RuntimeCapability.STEER):
+        return ("refused",)
+    declared = harness.controls is not None and harness.controls.steer is not None
+    return ("steer",) if declared else ()
 
 
 def _gating(harness: Harness, details: dict[str, str]) -> tuple[str, ...]:
@@ -87,7 +97,7 @@ FAMILIES: tuple[Family, ...] = (
     Family("launch", _approvals, "test_launch.py"),
     Family("turn", _always, "test_turn.py"),
     Family("interrupt", _flag("interrupt", _interrupt), "test_interrupt.py"),
-    Family("steer", _flag("steer", _steer), None, "scenario pending"),
+    Family("steer", _steer, "test_steer.py"),
     Family(
         "resume", _flag("resume", lambda h: h.launch_parameter_support.resume), "test_resume.py"
     ),
@@ -95,8 +105,7 @@ FAMILIES: tuple[Family, ...] = (
     Family(
         "effort",
         _flag("effort", lambda h: h.launch_parameter_support.reasoning_effort),
-        None,
-        "scenario pending",
+        "test_effort.py",
     ),
     Family("mcp", _mcp, "test_mcp.py"),
     Family("edit", _edit, "test_edit.py"),

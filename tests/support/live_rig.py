@@ -187,6 +187,14 @@ def _toml_list(values: tuple[str, ...]) -> str:
     return "[" + ", ".join(f'"{value}"' for value in values) + "]"
 
 
+@dataclass(frozen=True)
+class HeldTurn:
+    """A turn whose model answer is held open, and the job that will carry its result."""
+
+    hold: Hold
+    handle: str
+
+
 @dataclass
 class LiveRig:
     """One scenario's world: boot it with :meth:`open`, drive it through the SDK."""
@@ -444,6 +452,32 @@ class LiveRig:
         if operation.state != "succeeded":
             detail = operation.error.to_wire() if operation.error is not None else operation.state
             violation(f"interrupting participant {participant_id} did not succeed: {detail}")
+
+    async def hold_turn(self, participant_id: str, prompt: str) -> HeldTurn:
+        """Send ``prompt``, hold its answer until released, and wait until the CLI looks busy."""
+        hold = self.hold()
+        self.queue(MockReply("thinking", hold=hold))
+        accepted = (
+            await self.client.controls.send(
+                participant_id, prompt, idempotency_key=uuid.uuid4().hex
+            )
+        ).value
+        assert accepted.job_handle is not None
+        if not await asyncio.to_thread(hold.wait_reached, 60):
+            violation("the held request never reached the model")
+        await self.expect_screen(participant_id, ScreenKind.WORKING)
+        return HeldTurn(hold, accepted.job_handle)
+
+    async def steer(self, participant_id: str, prompt: str) -> None:
+        accepted = (
+            await self.client.controls.steer(
+                participant_id, prompt, idempotency_key=uuid.uuid4().hex
+            )
+        ).value
+        operation = await self._settled(accepted.operation_id)
+        if operation.state != "succeeded":
+            detail = operation.error.to_wire() if operation.error is not None else operation.state
+            violation(f"steering participant {participant_id} did not succeed: {detail}")
 
     async def retire(self, participant_id: str) -> None:
         """Terminate one participant and wait for it to be dead; the rig tears the rest down."""

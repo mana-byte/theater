@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 
 import pytest
@@ -16,22 +17,15 @@ pytestmark = [pytest.mark.integration, pytest.mark.family("interrupt")]
 async def test_interrupt_ends_a_held_turn_and_the_next_turn_still_works(live, obligation):
     participant = await live.spawn(live.approval)
     await live.ready(participant)
-    hold = live.hold()
-    live.queue(MockReply("thinking", hold=hold))
-    held = (
-        await live.client.controls.send(
-            participant, "Take your time", idempotency_key=uuid.uuid4().hex
-        )
-    ).value
-    assert await asyncio.to_thread(hold.wait_reached, 60), "the held request never arrived"
-    await live.expect_screen(participant, ScreenKind.WORKING)
+    held = await live.hold_turn(participant, "Take your time")
 
     await live.interrupt(participant)
 
     await live.expect_screen(participant, ScreenKind.PROMPT)
-    assert await asyncio.to_thread(_wait, lambda: hold.cancelled, 30), "the CLI kept its request"
-    held_job = await live.job(held.job_handle)
-    assert held_job.state in ("done", "killed", "crashed")
+    assert await asyncio.to_thread(_wait, lambda: held.hold.cancelled, 30), (
+        "the CLI kept its request"
+    )
+    assert (await live.job(held.handle)).state in ("done", "killed", "crashed")
     nonce = f"AFTER-{uuid.uuid4().hex[:8]}"
     live.queue(MockReply(nonce))
     job = await live.send(participant, f"Reply with {nonce}")
@@ -40,8 +34,6 @@ async def test_interrupt_ends_a_held_turn_and_the_next_turn_still_works(live, ob
 
 
 def _wait(predicate, seconds: float) -> bool:
-    import time
-
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if predicate():

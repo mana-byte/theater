@@ -13,6 +13,7 @@ from tests.support.manifest_rig import manifest, plan
 from tests.support.obligations import FAMILIES, document, required
 from theater.harness import HARNESSES
 from theater.harness.builtin import plugin_dir
+from theater.harness.contracts.compat import COMPAT_PROTOCOLS, ProvisionContext
 from theater.harness.contracts.manifest import (
     ControlManifest,
     InterruptPlan,
@@ -159,3 +160,34 @@ def test_enabling_mcp_rendering_adds_the_mcp_obligations() -> None:
     added = {item.id for item in required(enabled)} - {item.id for item in required(base)}
 
     assert added == {"mcp:gated", "mcp:call", "mcp:refusal"}
+
+
+@pytest.mark.parametrize("name", SHIPPED)
+def test_a_provisioning_plugin_offers_what_its_declared_capabilities_need(
+    name: str, tmp_path: Path
+) -> None:
+    harness = HARNESSES[name]
+    if harness.compat is None:
+        pytest.skip(f"{name} declares no compat manifest yet")
+    context = ProvisionContext(
+        sandbox_root=tmp_path,
+        home=tmp_path / "home",
+        config_dir=tmp_path / "home" / ".config",
+        workdir=tmp_path / "work",
+        mock_urls={protocol: f"http://127.0.0.1:1/{protocol}" for protocol in COMPAT_PROTOCOLS},
+        binary=tmp_path / name,
+        version="1.2.3",
+        models=("mock-a", "mock-b"),
+    )
+
+    provisioned = harness.compat.provision(context)
+
+    support = harness.launch_parameter_support
+    assert provisioned.protocol in COMPAT_PROTOCOLS
+    assert not support.model or len(provisioned.models) >= 2, "model selection needs two models"
+    assert not support.reasoning_effort or len(provisioned.efforts) >= 2, (
+        "effort selection needs two efforts"
+    )
+    assert all(path.is_relative_to(tmp_path) for path in provisioned.files), (
+        "provisioning writes only inside the sandbox"
+    )

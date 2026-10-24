@@ -14,6 +14,9 @@ from theater.harness.contracts.compat import (
 _DEFAULT_MODELS = ("mock-a", "mock-b")
 _API_KEY = "compat-dummy-key"
 
+#: Two harness-native efforts the CLI maps to different wire values.
+_EFFORTS = ("low", "high")
+
 
 def provision(context: ProvisionContext) -> Provisioned:
     """Point Messages requests at the mock and pre-answer fresh-home consent dialogs."""
@@ -52,6 +55,7 @@ def provision(context: ProvisionContext) -> Provisioned:
             + "\n",
         },
         models=models,
+        efforts=_EFFORTS,
     )
 
 
