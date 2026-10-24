@@ -5,9 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -17,7 +15,7 @@ from .adapters import ADAPTER_NAMES, load_adapter
 from .publication import prepare_publication
 from .runner import run_harness_state
 from .sandbox import make_sandbox
-from .suite import run_suite
+from .suite import installed_version, run_suite
 from .summary import error_annotation, render_harness, render_overview, workflow_annotations
 
 
@@ -149,20 +147,11 @@ def _run(args: argparse.Namespace, root: Path, adapters: list[Any]) -> int:
     return exit_code(summaries)
 
 
-_VERSION = re.compile(r"\d+\.\d+\.\d+")
-
-
 def _suite(args: argparse.Namespace, root: Path) -> int:
     """Dev entry point: the suite against an installed binary, in a throwaway sandbox."""
     binary = args.binary or shutil.which(args.harness)
     if binary is None:
         raise ValueError(f"no {args.harness!r} binary on PATH; pass --binary")
-    shown = subprocess.run(
-        [binary, "--version"], capture_output=True, text=True, timeout=30, check=False
-    ).stdout
-    found = _VERSION.search(shown)
-    if found is None:
-        raise ValueError(f"cannot read a version from {binary} --version: {shown.strip()!r}")
     pytest_args = [item for item in args.pytest_args if item != "--"]
     with make_sandbox(args.harness) as sb:
         report = run_suite(
@@ -170,7 +159,7 @@ def _suite(args: argparse.Namespace, root: Path) -> int:
             sb,
             harness=args.harness,
             binary=Path(binary),
-            version=found.group(0),
+            version=installed_version(Path(binary)),
             pytest_args=pytest_args,
         )
         if args.keep:

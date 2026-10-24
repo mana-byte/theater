@@ -9,6 +9,8 @@ The suite runs in a pytest subprocess inside the pipeline sandbox; this module n
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +37,7 @@ SUITE_TIMEOUT_SECONDS = 20 * 60.0
 _DETAIL_LIMIT = 300
 _OUTCOMES: Mapping[str, CheckStatus] = {"passed": "pass", "failed": "fail"}
 _NEVER_RAN = "its scenario never ran"
+_VERSION = re.compile(r"\d+\.\d+\.\d+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +47,17 @@ class SuiteReport:
     checks: tuple[Check, ...]
     #: Reconciliation failures: our machinery lost an obligation, not the CLI misbehaving.
     problems: tuple[str, ...] = ()
+
+
+def installed_version(binary: Path) -> str:
+    """The MAJOR.MINOR.PATCH an installed CLI reports for ``--version``."""
+    shown = subprocess.run(
+        [binary, "--version"], capture_output=True, text=True, timeout=30, check=False
+    ).stdout
+    found = _VERSION.search(shown)
+    if found is None:
+        raise ValueError(f"cannot read a version from {binary} --version: {shown.strip()!r}")
+    return found.group(0)
 
 
 def suite_environment(sb: Sandbox, *, harness: str, binary: Path, version: str) -> dict[str, str]:

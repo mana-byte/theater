@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +29,7 @@ from scripts.harness_compat.contract import (
     SUITE_ENV_BINARY,
     SUITE_ENV_EVIDENCE_DIR,
     SUITE_ENV_HARNESS,
+    SUITE_ENV_MUTATION,
     SUITE_ENV_SANDBOX_ROOT,
     SUITE_ENV_VERSION,
     Hold,
@@ -37,6 +38,7 @@ from scripts.harness_compat.contract import (
 )
 from scripts.harness_compat.mock import MockServer
 from scripts.harness_compat.process import SANDBOX_ENV
+from tests.support import mutations
 from tests.support.paths import REPO_ROOT
 from theater.frontend import FrontendClient
 from theater.frontend.dto import Controls, Job, Participant
@@ -56,6 +58,7 @@ CAPABILITIES = ("orchestration.v1", "state.follow.v1", "catalogs.v1")
 _BOOT_SECONDS = 90.0
 _STOP_SECONDS = 20.0
 _PANE_CAPTURE_LINES = 200
+_JOB_SLICE_SECONDS = 3.0
 #: One short directory per scenario: unix socket paths cap near 100 bytes.
 _ROOMS = itertools.count(1)
 #: The probe sidecar's server (plugin) name and the one tool it serves; see ``compat_probe/``.
@@ -256,6 +259,8 @@ class LiveRig:
                 _config_toml(session.harness, provisioned, marker_dir), encoding="utf-8"
             )
             shutil.copytree(_PROBE_SOURCE, theater_dir / "plugins" / PROBE_SERVER)
+            if mutation := os.environ.get(SUITE_ENV_MUTATION):
+                mutations.install(mutation, session.harness, theater_dir / "plugins")
             socket = theater_dir / "var" / "run" / "daemon.sock"
             _boot(env, socket)
             client = FrontendClient(
@@ -388,20 +393,42 @@ class LiveRig:
             inconclusive("a suite component died before the CLI reached readiness")
         violation(f"the stock CLI exited before readiness (participant {participant_id})")
 
-    async def send(self, participant_id: str, prompt: str, *, seconds: float = 90.0) -> Job:
+    async def send(
+        self,
+        participant_id: str,
+        prompt: str,
+        *,
+        seconds: float = 90.0,
+        guard: Callable[[], Awaitable[None]] | None = None,
+    ) -> Job:
         accepted = (
             await self.client.controls.send(
                 participant_id, prompt, idempotency_key=uuid.uuid4().hex
             )
         ).value
         assert accepted.job_handle is not None
-        return await self.job(accepted.job_handle, seconds=seconds)
+        return await self.job(accepted.job_handle, seconds=seconds, guard=guard)
 
-    async def job(self, handle: str, *, seconds: float = 90.0) -> Job:
-        job = (await self.client.jobs.await_([handle], wait_seconds=seconds)).value.jobs[0]
-        if job.state == "running":
-            inconclusive(f"job {handle} was still running after {seconds:g}s")
-        return job
+    async def job(
+        self,
+        handle: str,
+        *,
+        seconds: float = 90.0,
+        guard: Callable[[], Awaitable[None]] | None = None,
+    ) -> Job:
+        """Await a job; ``guard`` runs between waits so a stuck turn can be attributed early."""
+        deadline = time.monotonic() + seconds
+        while True:
+            slice_seconds = max(1.0, min(_JOB_SLICE_SECONDS, deadline - time.monotonic()))
+            job = (await self.client.jobs.await_([handle], wait_seconds=slice_seconds)).value.jobs[
+                0
+            ]
+            if job.state != "running":
+                return job
+            if guard is not None:
+                await guard()
+            if time.monotonic() >= deadline:
+                inconclusive(f"job {handle} was still running after {seconds:g}s")
 
     async def interrupt(self, participant_id: str) -> None:
         accepted = (

@@ -65,7 +65,11 @@ async def expect_runs(live: LiveRig, participant: str, effect: Effect) -> None:
     live.queue(effect.reply)
     live.queue(MockReply(final))
 
-    job = await live.send(participant, f"Use the tool, then reply with {final}")
+    async def not_gated() -> None:
+        if not effect.happened() and (await live.reading(participant)).kind is ScreenKind.APPROVAL:
+            violation("the tool is waiting for approval although the approval policy allows it")
+
+    job = await live.send(participant, f"Use the tool, then reply with {final}", guard=not_gated)
 
     assert job.state == "done", job.error
     assert final in str(job.result)
