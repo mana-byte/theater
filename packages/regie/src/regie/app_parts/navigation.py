@@ -51,6 +51,14 @@ class TreeNavigation(_AppBase):
         if tree.selected_participant_id is not None:
             self._navigation.select(tree.selected_participant_id)
 
+    def action_jump_attention(self, direction: int) -> None:
+        """Jump to the next or previous row that wants the human."""
+        if self._usage_panel.in_footer:
+            self._leave_usage_metrics()
+        tree = self.query_one(ParticipantTree)
+        if tree.jump_attention(direction) is not None and tree.selected_participant_id is not None:
+            self._navigation.select(tree.selected_participant_id)
+
     def action_cursor_down(self) -> None:
         metric = self._usage_panel.keyboard_metric
         if metric is not None:

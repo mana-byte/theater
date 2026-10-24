@@ -22,6 +22,28 @@ layout, bridge state), `run/` (the bridge's pid, status and locks) and `logs/`
 (`bridge.log`, `ui/`, `bridge-stderr/`). An older, flat `regie/` moves itself there
 on the next start, stopping a bridge still running from it first.
 
+## Reading the tree
+
+The tree is the whole interface; every signal is a state of something it already draws.
+
+- **Status glyph.** A spinner is an agent computing; `!` needs you (awaiting input); `✗` is
+  dead. A turning arc `◜◠◝` is an agent blocked on a peer, in the colour of that wait; a ring
+  filling `○◔◑◕●` is a spawn starting, with the daemon's phase on the row's third line.
+- **Bar.** A `▌` in the gutter marks a row that needs you; the newest three breathe.
+- **Sweep.** A block runs across a row when its status changes, a send lands on it, or an
+  operation aimed at it settles.
+- **Sends and waits.** A send travels the rails as a comet in its sender's colour. Waits show
+  `◂` on the agent being waited on (`◂2` for two); only a new wait and the selected row's waits
+  draw their route.
+- **Marks.** After the name: `⋯` queued, `✓` delivered (fades), `⊘` blocked (not now: human
+  present, busy), `✗` failed, `?` unconfirmed. Failures say why on the third line and stop
+  asking once the cursor has rested on the row.
+- **`]` / `[`** jump to the next or previous row that needs you, wrapping round. A folded
+  section shows the worst state it hides.
+
+`reduce_motion = true` in `config.toml` keeps every signal and drops the motion: no sweeps,
+breathing or comets, and waits draw their route without a travelling head.
+
 ## Ambience plugins
 
 The animations under the tree are package-manifest plugins, like Theater's harnesses. Put one

@@ -272,6 +272,11 @@ _C = REGIE_DASHBOARD_TIP_HEADING_STYLE
 REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
     (("Tree · ", _C), ("j/k or ↑/↓", _T), (" moves between agents", _D)),
     (("Tree · ", _C), ("o", _T), (" opens the spawn menu", _D)),
+    (
+        ("Tree · ", _C),
+        ("]/[", _T),
+        (" jump to the next or previous agent that needs you", _D),
+    ),
     (("Tree · ", _C), ("Enter", _T), (" stages or unstages the selected agent", _D)),
     (
         ("Tree · ", _C),

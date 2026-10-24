@@ -486,6 +486,39 @@ class ParticipantTree(VerticalScroll):
                 widget.set_overlay(cells)
         self._overlaid = set(overlays)
 
+    def attention_keys(self) -> tuple[Key, ...]:
+        """Rows that want the human, top to bottom: waiting, dead or failed agents, and folds
+        hiding one."""
+        wanted = {"awaiting_input", "dead"}
+        keys: list[Key] = []
+        for _, node, key, _, _ in self._lines_data:
+            mark = node.get("mark")
+            if key[0] == "s":
+                needs = node.get("folded_status") in wanted
+            else:
+                needs = _is_managed_key(key) and (
+                    node.get("status") in wanted or (isinstance(mark, RowMark) and mark.attention)
+                )
+            if needs:
+                keys.append(key)
+        return tuple(keys)
+
+    def jump_attention(self, direction: int) -> str | None:
+        """Move the cursor to the next (1) or previous (-1) row that wants the human, wrapping
+        round; None when nothing does."""
+        keys = self.attention_keys()
+        if not keys:
+            return None
+        order = [key for _, _, key, _, _ in self._lines_data]
+        here = order.index(self._selected_key) if self._selected_key in order else -1
+        positions = sorted(order.index(key) for key in keys)
+        ahead = [p for p in positions if (p > here if direction > 0 else p < here)]
+        target = (
+            ahead[0 if direction > 0 else -1] if ahead else positions[0 if direction > 0 else -1]
+        )
+        self.select_key(order[target])
+        return self.selected_id
+
     def leaf_keys(self) -> tuple[Key, ...]:
         return tuple(
             key
