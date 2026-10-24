@@ -1,14 +1,26 @@
-"""The live suite's obligations follow each shipped manifest, and no family is silently dropped."""
+"""The live suite accounts for every declaration a manifest can make, and follows each manifest."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from tests.support.coverage import COVERAGE, NoLive
+from tests.support.declarations import declarations
+from tests.support.manifest_rig import manifest, plan
 from tests.support.obligations import FAMILIES, document, required
 from theater.harness import HARNESSES
 from theater.harness.builtin import plugin_dir
+from theater.harness.contracts.manifest import (
+    ControlManifest,
+    InterruptPlan,
+    LaunchManifest,
+    McpRenderingManifest,
+    SteerPlan,
+)
+from theater.harness.manifests.compiler import compile_manifest
 
 LIVE = Path(__file__).parent / "live"
 #: Read from disk: the registry is only populated after collection.
@@ -72,3 +84,78 @@ def test_the_required_document_lists_every_obligation_once(name: str) -> None:
 
 def test_the_shipped_plugins_are_all_discovered() -> None:
     assert set(SHIPPED) == set(HARNESSES)
+
+
+def test_every_declaration_a_manifest_can_make_is_mapped_or_exempted() -> None:
+    found = declarations()
+
+    assert not found - set(COVERAGE), (
+        "map each of these to a family or a reasoned NoLive in tests/support/coverage.py: "
+        f"{sorted(found - set(COVERAGE))}"
+    )
+    assert not set(COVERAGE) - found, (
+        f"the coverage registry names declarations that no longer exist: "
+        f"{sorted(set(COVERAGE) - found)}"
+    )
+
+
+def test_every_mapped_family_exists_and_every_family_proves_something() -> None:
+    families = {family.name for family in FAMILIES}
+    mapped = {covered for covered in COVERAGE.values() if isinstance(covered, str)}
+
+    assert mapped <= families, mapped - families
+    assert families <= mapped, f"families that prove no declaration: {families - mapped}"
+
+
+def test_every_exemption_states_a_reason_that_is_not_a_placeholder() -> None:
+    reasons = [covered.reason for covered in COVERAGE.values() if isinstance(covered, NoLive)]
+
+    assert all(len(reason) >= 40 for reason in reasons), reasons
+
+
+_STEER = SteerPlan()
+_INTERRUPT = ControlManifest(interrupt=InterruptPlan(keys=("Escape",)))
+
+
+def _launch(**support: bool) -> LaunchManifest:
+    """The baseline launch declaration (same approvals) with one capability switched on."""
+    return LaunchManifest(planner=plan, approvals=("manual", "edits", "yolo"), **support)
+
+
+@pytest.mark.parametrize(
+    ("declared", "adds"),
+    [
+        pytest.param(
+            {"launch": _launch(supports_model=True)},
+            {"model:model"},
+            id="model",
+        ),
+        pytest.param(
+            {"launch": _launch(supports_resume=True)},
+            {"resume:resume"},
+            id="resume",
+        ),
+        pytest.param({"controls": _INTERRUPT}, {"interrupt:interrupt"}, id="interrupt"),
+        pytest.param({"controls": ControlManifest(steer=_STEER)}, {"steer:steer"}, id="steer"),
+    ],
+)
+def test_enabling_a_capability_adds_exactly_its_obligations(
+    declared: dict[str, object], adds: set[str]
+) -> None:
+    base = {item.id for item in required(compile_manifest("acme", manifest()))}
+
+    enabled = {item.id for item in required(compile_manifest("acme", manifest(**declared)))}
+
+    assert enabled - base == adds
+    assert base <= enabled
+
+
+def test_enabling_mcp_rendering_adds_the_mcp_obligations() -> None:
+    base = compile_manifest("acme", manifest())
+    enabled = compile_manifest(
+        "acme", replace(manifest(), mcp=McpRenderingManifest(renderer=lambda context: None))
+    )
+
+    added = {item.id for item in required(enabled)} - {item.id for item in required(base)}
+
+    assert added == {"mcp:gated", "mcp:call", "mcp:refusal"}
