@@ -35,6 +35,7 @@ from scripts.harness_compat.contract import (
     Hold,
     MockProtocol,
     MockReply,
+    RecordedRequest,
 )
 from scripts.harness_compat.mock import MockServer
 from scripts.harness_compat.process import SANDBOX_ENV
@@ -446,6 +447,10 @@ class LiveRig:
                 participant_id, idempotency_key=uuid.uuid4().hex
             )
         await self.until(participant_id, lambda item: item.status == "dead", what="died")
+
+    def turns(self, prompt: str) -> list[RecordedRequest]:
+        """The model requests carrying ``prompt``; one offering no tools is background work."""
+        return [r for r in self.mock.requests if r.tools and r.carries(prompt)]
 
     def queue(self, reply: MockReply) -> None:
         self.mock.queue(self.protocol, reply)

@@ -22,4 +22,4 @@ async def test_a_prompt_becomes_a_done_job_with_the_scripted_answer(live, obliga
 
     assert job.state == "done", job.error
     assert nonce in str(job.result)
-    assert len([request for request in live.mock.requests if request.last_user == prompt]) == 1
+    assert len(live.turns(prompt)) == 1

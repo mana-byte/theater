@@ -9,14 +9,19 @@ from http.client import HTTPConnection, HTTPResponse
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from scripts.harness_compat.contract import MockReply, MockToolCall
+from scripts.harness_compat.contract import MOCK_REPLY, MockReply, MockToolCall
 from scripts.harness_compat.mock import MockServer
+
+
+def _foreground(body: dict[str, object]) -> dict[str, object]:
+    """A request offering at least one tool is foreground work; the mock scripts only those."""
+    return body if "tools" in body else {**body, "tools": [{"name": "Bash"}]}
 
 
 def _request(url: str, body: dict[str, object] | None = None) -> tuple[int, str]:
     parsed = urlsplit(url)
     connection = HTTPConnection(parsed.hostname, parsed.port)
-    payload = json.dumps(body).encode() if body is not None else None
+    payload = json.dumps(_foreground(body)).encode() if body is not None else None
     headers = {"content-type": "application/json", "authorization": "Bearer mock"}
     connection.request("POST" if body is not None else "GET", parsed.path, payload, headers)
     response = connection.getresponse()
@@ -117,7 +122,7 @@ def _open(url: str, body: dict[str, object]) -> tuple[HTTPConnection, HTTPRespon
     parsed = urlsplit(url)
     connection = HTTPConnection(parsed.hostname, parsed.port, timeout=5)
     headers = {"content-type": "application/json", "authorization": "Bearer mock"}
-    connection.request("POST", parsed.path, json.dumps(body).encode(), headers)
+    connection.request("POST", parsed.path, json.dumps(_foreground(body)).encode(), headers)
     return connection, connection.getresponse()
 
 
@@ -282,6 +287,47 @@ def test_requests_carry_the_conversation_humans_and_the_last_tool_result(tmp_pat
     assert anthropic.last_tool_result == "anthropic result"
     assert responses.last_tool_result == "responses result"
     assert (empty.user_texts, empty.last_user, empty.last_tool_result) == ((), None, None)
+
+
+def test_the_prompt_is_found_beside_context_the_cli_adds_to_the_same_message(
+    tmp_path: Path,
+) -> None:
+    reminder = "<system-reminder>" + "x" * 600 + "</system-reminder>"
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": reminder},
+            {"type": "text", "text": "Reply with NONCE-1"},
+        ],
+    }
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        _request(f"{server.base_urls['anthropic']}/v1/messages", {"messages": [message]})
+        (request,) = server.requests
+
+    assert request.last_user == "Reply with NONCE-1"
+    assert len(request.last_user_parts) == 2 and len(request.last_user_parts[0]) == 300
+    assert request.carries("NONCE-1") and not request.carries("NONCE-2")
+    assert request.user_texts[-1] == "Reply with NONCE-1"
+
+
+def test_a_request_offering_no_tools_is_background_work_and_never_consumes_the_script(
+    tmp_path: Path,
+) -> None:
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        hold = server.hold()
+        server.queue("anthropic", MockReply("scripted", hold=hold))
+        url = f"{server.base_urls['anthropic']}/v1/messages"
+
+        _, title = _request(url, {"tools": [], "messages": []})
+        connection, response = _open(url, {"stream": True})
+        try:
+            assert hold.wait_reached(5), "the scripted reply was spent on a background request"
+        finally:
+            hold.release()
+            response.close()
+            connection.close()
+
+    assert MOCK_REPLY in title and "scripted" not in title
 
 
 def test_a_held_stream_withholds_its_tail_until_released(tmp_path: Path) -> None:

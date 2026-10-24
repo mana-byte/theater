@@ -157,12 +157,19 @@ class RecordedRequest:
     effort: str | None = None
     tools: tuple[str, ...] = ()
     messages: int = 0
+    #: The last text part of the newest human message, usually the prompt itself.
     last_user: str | None = None
-    #: Every human message in the conversation, oldest first: proves history was carried over.
+    #: Every text part of the newest human message: a CLI may put its own context beside the prompt.
+    last_user_parts: tuple[str, ...] = ()
+    #: Every human text part in the conversation, oldest first: proves history was carried over.
     user_texts: tuple[str, ...] = ()
     #: The newest tool result the client returned to the model, if the conversation has one.
     last_tool_result: str | None = None
     stream: bool = False
+
+    def carries(self, prompt: str) -> bool:
+        """Whether the newest human message holds ``prompt`` in one of its text parts."""
+        return any(prompt in part for part in self.last_user_parts)
 
 
 class MockControl(Protocol):

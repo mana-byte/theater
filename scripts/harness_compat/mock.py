@@ -51,6 +51,7 @@ _PROTOCOLS: dict[str, MockProtocol] = {
 }
 _USER_TEXT_CHARS = 300
 _MAX_USER_TEXTS = 20
+_MAX_USER_PARTS = 12
 _MAX_TOOL_NAMES = 200
 
 
@@ -313,29 +314,37 @@ def _conversation(body: dict[str, Any]) -> list[Any]:
     return [items] if isinstance(items, str) else []
 
 
-def _human_text(item: object) -> str | None:
-    """The text of a user message; one that only carries tool results has none."""
+def _human_parts(item: object) -> tuple[str, ...]:
+    """The text parts of a user message; one that only carries tool results has none."""
     if not isinstance(item, dict) or item.get("role") != "user":
-        return None
+        return ()
     content = item.get("content")
     if isinstance(content, str):
-        return content or None
-    if isinstance(content, list):
-        text = "".join(
-            part["text"]
-            for part in content
-            if isinstance(part, dict)
-            and part.get("type") in ("text", "input_text")
-            and isinstance(part.get("text"), str)
-        )
-        return text or None
-    return None
+        return (content,) if content else ()
+    if not isinstance(content, list):
+        return ()
+    return tuple(
+        part["text"]
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") in ("text", "input_text")
+        and isinstance(part.get("text"), str)
+        and part["text"]
+    )
 
 
 def _user_texts(body: dict[str, Any]) -> tuple[str, ...]:
-    """Every human message in the conversation, oldest first, each clipped and the list bounded."""
-    texts = [text for item in _conversation(body) if (text := _human_text(item))]
-    return tuple(text[:_USER_TEXT_CHARS] for text in texts[-_MAX_USER_TEXTS:])
+    """Every human text part in the conversation, oldest first, clipped and bounded."""
+    parts = [part for item in _conversation(body) for part in _human_parts(item)]
+    return tuple(part[:_USER_TEXT_CHARS] for part in parts[-_MAX_USER_TEXTS:])
+
+
+def _last_user_parts(body: dict[str, Any]) -> tuple[str, ...]:
+    """The text parts of the newest human message; a CLI may add context beside the prompt."""
+    for item in reversed(_conversation(body)):
+        if parts := _human_parts(item):
+            return tuple(part[:_USER_TEXT_CHARS] for part in parts[-_MAX_USER_PARTS:])
+    return ()
 
 
 def _joined_text(content: object) -> str:
@@ -479,10 +488,14 @@ class MockServer:
     def unhandled(self) -> tuple[RecordedRequest, ...]:
         return tuple(request for request in self.requests if not request.handled)
 
-    def _next_reply(self, protocol: MockProtocol) -> MockReply:
+    def _next_reply(self, protocol: MockProtocol, body: dict[str, Any]) -> MockReply:
+        """The scripted reply for a foreground turn; a request offering no tools is background
+        work (a session title, a summary) and gets the default without consuming the script."""
         with self._lock:
             queue = self._replies[protocol]
-            return queue.popleft() if queue else MockReply(MOCK_REPLY)
+            if queue and body.get("tools"):
+                return queue.popleft()
+            return MockReply(MOCK_REPLY)
 
     def _record(self, request: RecordedRequest) -> None:
         with self._lock:
@@ -507,14 +520,14 @@ class MockServer:
         if path == "/v1/analytics/codex/turn-costs":
             return _Response(204, "application/json", "")
         if path == "/v1/messages":
-            reply = self._next_reply("anthropic")
+            reply = self._next_reply("anthropic", body)
             if stream:
                 return _streamed(reply, _anthropic_stream(reply, model))
             return _complete(reply, json.dumps(_anthropic_message(reply, model)))
         if path == "/v1/responses":
-            reply = self._next_reply("openai-responses")
+            reply = self._next_reply("openai-responses", body)
             return _streamed(reply, _responses_stream(reply))
-        reply = self._next_reply("openai")
+        reply = self._next_reply("openai", body)
         if stream:
             return _streamed(reply, _openai_stream(reply, model))
         return _complete(reply, json.dumps(_openai_completion(reply, model)))
@@ -584,8 +597,9 @@ def _make_handler(server: MockServer) -> type[BaseHTTPRequestHandler]:
                     effort=_effort(body),
                     tools=_tool_names(body),
                     messages=len(_conversation(body)),
-                    user_texts=(texts := _user_texts(body)),
-                    last_user=texts[-1] if texts else None,
+                    user_texts=_user_texts(body),
+                    last_user_parts=(parts := _last_user_parts(body)),
+                    last_user=parts[-1] if parts else None,
                     last_tool_result=_last_tool_result(body),
                     stream=bool(body.get("stream")),
                 )

@@ -100,9 +100,7 @@ async def _offered_probe(live: LiveRig, participant: str) -> tuple[tuple[str, ..
         live.queue(MockReply("warm"))
         job = await live.send(participant, prompt)
         assert job.state == "done", job.error
-        (request,) = [
-            item for item in live.mock.requests if item.last_user == prompt and item.tools
-        ]
+        (request,) = live.turns(prompt)
         name = _probe_tool(live, request.tools)
         if name is not None:
             return request.tools, name

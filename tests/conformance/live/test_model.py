@@ -20,7 +20,7 @@ async def _wire_model(live, selector: str) -> str | None:
     job = await live.send(participant, prompt)
     assert job.state == "done", job.error
     await live.retire(participant)
-    (request,) = [request for request in live.mock.requests if request.last_user == prompt]
+    (request,) = live.turns(prompt)
     return request.model
 
 

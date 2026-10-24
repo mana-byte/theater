@@ -35,8 +35,6 @@ async def test_a_resumed_participant_continues_its_conversation(live, obligation
 
     assert job.state == "done", job.error
     assert nonce in str(job.result)
-    (resumed,) = [request for request in live.mock.requests if request.last_user == prompt]
+    (resumed,) = live.turns(prompt)
     assert earlier in resumed.user_texts, "the resumed conversation lost its history"
-    assert len([r for r in live.mock.requests if r.last_user == earlier]) == 1, (
-        "the earlier prompt was submitted again"
-    )
+    assert len(live.turns(earlier)) == 1, "the earlier prompt was submitted again"
