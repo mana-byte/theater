@@ -175,10 +175,11 @@ once and the daemon records the lineage), `model` and `effort` (two selections r
 values, a repeat is stable), `mcp:gated|call|refusal` (the approval policy gates or runs the probe
 sidecar's tool; a refusal from Theater's own MCP server reaches the model), `edit:gated|runs` (the
 CLI's own file-write tool is gated under `manual` and runs under `edits`) and
-`runtime:native|legacy|unavailable-<capability>` (a native runtime is a connected route with a session
-identity; under a manifest variant whose probe refuses the release, which is what an unqualified release
-gets in production, the pane path still carries a turn; a capability the runtime declares unavailable is
-refused). The `channels` family derives obligations but has no scenario yet; it is reported as a declared
+`runtime:native|legacy|survival|unavailable-<capability>` (a native runtime is a connected route with a
+session identity; under a manifest variant whose probe refuses the release, which is what an unqualified
+release gets in production, the pane path still carries a turn; after a graceful daemon restart the same
+backend and UI processes are still alive and the next turn continues the same conversation; a capability
+the runtime declares unavailable is refused). The `channels` family derives obligations but has no scenario yet; it is reported as a declared
 gap. Every manifest declaration is mapped to a family or a reasoned exemption in
 `tests/support/coverage.py`, and `tests/conformance/test_completeness.py` fails when one is not.
 
