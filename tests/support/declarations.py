@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-import types
 import typing
 from collections import abc
 from collections.abc import Iterator
-from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, get_args, get_origin, get_type_hints
 
 from theater.harness.contracts.manifest import HarnessManifest
 
@@ -34,38 +33,35 @@ def declarations(root: type = HarnessManifest) -> frozenset[str]:
                 continue
             key = f"{current.__name__}.{field.name}"
             found.add(key)
-            for alternative in _alternatives(hints[field.name]):
-                found.update(f"{key}={value}" for value in _values(alternative))
-                pending.extend(_dataclasses(alternative))
+            for leaf in _leaves(hints[field.name]):
+                found.update(f"{key}={value}" for value in _values(leaf))
+                if isinstance(leaf, type) and dataclasses.is_dataclass(leaf):
+                    pending.append(leaf)
     return frozenset(found)
 
 
-def _alternatives(annotation: Any) -> Iterator[Any]:
-    """The members of a union (recursively, through ``type`` aliases), or the annotation itself."""
+def _leaves(annotation: Any, aliases: frozenset[Any] = frozenset()) -> Iterator[Any]:
+    """What a field can hold: through unions, ``type`` aliases (once each) and generic arguments.
+
+    A ``Literal`` is a leaf (its values are the declarations); a callable is skipped, because the
+    callbacks a manifest takes are declared as a whole, never by what they return.
+    """
     if isinstance(annotation, typing.TypeAliasType):
-        yield from _alternatives(annotation.__value__)
-    elif get_origin(annotation) in (Union, types.UnionType):
-        for member in get_args(annotation):
-            yield from _alternatives(member)
-    else:
+        if annotation not in aliases:
+            yield from _leaves(annotation.__value__, aliases | {annotation})
+        return
+    origin = get_origin(annotation)
+    if origin is Literal or origin is None:
         yield annotation
+    elif origin is not abc.Callable:
+        for argument in get_args(annotation):
+            yield from _leaves(argument, aliases)
 
 
-def _values(alternative: Any) -> Iterator[str]:
-    if get_origin(alternative) is Literal:
-        for value in get_args(alternative):
+def _values(leaf: Any) -> Iterator[str]:
+    if get_origin(leaf) is Literal:
+        for value in get_args(leaf):
             yield repr(value)
-    elif isinstance(alternative, type) and issubclass(alternative, enum.Enum):
-        for member in alternative:
+    elif isinstance(leaf, type) and issubclass(leaf, enum.Enum):
+        for member in leaf:
             yield member.name
-
-
-def _dataclasses(annotation: Any) -> Iterator[type]:
-    """Dataclasses named in an annotation, through unions and generics but not callables."""
-    for alternative in _alternatives(annotation):
-        origin = get_origin(alternative)
-        if isinstance(alternative, type) and dataclasses.is_dataclass(alternative):
-            yield alternative
-        elif origin is not None and origin is not Literal and origin is not abc.Callable:
-            for argument in get_args(alternative):
-                yield from _dataclasses(argument)

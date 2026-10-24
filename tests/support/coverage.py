@@ -78,6 +78,7 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "ChannelCapability.signal=TURN",
         "ChannelCapability.ownership",
         "ChannelCapability.ownership=PRIMARY",
+        "RuntimeManifest.legacy_fallback=SEND",
     ),
     # --- interrupt, steer
     _family(
@@ -86,8 +87,14 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "ControlManifest.interrupt",
         "InterruptPlan.keys",
         "InterruptPlan.inter_key_delay_seconds",
+        "RuntimeManifest.legacy_fallback=INTERRUPT",
     ),
-    _family("steer", "ControlManifest.steer"),
+    _family(
+        "steer",
+        "ControlManifest.steer",
+        "RuntimeManifest.legacy_fallback=STEER",
+        "RuntimeManifest.unavailable_capabilities=STEER",
+    ),
     # --- resume: history reaches the model once and the daemon records the lineage
     _family(
         "resume",
@@ -140,6 +147,8 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "HookChannelManifest.probe",
         "HookBinding.event",
         "HookBinding.signals",
+        "HookBinding.signals=LIFECYCLE",
+        "HookBinding.signals=TOOL",
         "HookBinding.delivery",
         "HookBinding.delivery=BEST_EFFORT",
         "HookBinding.delivery=ORDERED",
@@ -157,6 +166,8 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "OtelBinding.signal",
         "OtelBinding.signal=LOGS",
         "OtelBinding.signals",
+        "OtelBinding.signals=LIFECYCLE",
+        "OtelBinding.signals=TOOL",
         "OtelBinding.correlation",
         "OtelBinding.decoder",
         "OtelCorrelation.auth_header",
@@ -185,6 +196,12 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "RuntimeManifest.session_order=SESSION_FIRST",
         "RuntimeManifest.legacy_fallback",
         "RuntimeManifest.unavailable_capabilities",
+        # Each derives runtime:unavailable-<name>; one with no public call to exercise it ends
+        # inconclusive, never green.
+        "RuntimeManifest.unavailable_capabilities=INTERRUPT",
+        "RuntimeManifest.unavailable_capabilities=QUEUE_FOLLOWUP",
+        "RuntimeManifest.unavailable_capabilities=SEND",
+        "RuntimeManifest.unavailable_capabilities=SETTINGS_UPDATE",
         "LiveChannelDeclaration.channel",
         "LiveChannelDeclaration.drives_job_completion",
         "LiveChannelDeclaration.durable_fallback",
@@ -238,6 +255,38 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "TrajectoryCapabilities.supported",
         "TrajectoryCapabilities.unsupported",
         "TrajectoryCapabilities.observed",
+        *(
+            f"TrajectoryCapabilities.{flag}={feature}"
+            for flag in ("supported", "unsupported", "observed")
+            for feature in (
+                "CONTEXT",
+                "LIVE_UPDATES",
+                "MODELS",
+                "REASONING",
+                "REQUESTS",
+                "RETRIES",
+                "TIMING",
+                "TOOLS",
+                "USAGE",
+            )
+        ),
+    ),
+    _exempt(
+        "the channels scenario proves tool-lifecycle delivery and correlation; a fact of another "
+        "signal has no oracle independent of the plugin's own decoder, which is unit-tested "
+        "against recorded payloads",
+        *(
+            f"{binding}.signals={signal}"
+            for binding in ("HookBinding", "OtelBinding")
+            for signal in ("CONTENT", "IDENTITY", "LINEAGE", "MODEL", "TIMING", "TURN", "USAGE")
+        ),
+    ),
+    _exempt(
+        "declared gap: no live scenario holds a turn and sends again (plan 5.5 item 4 'queue') or "
+        "updates the settings of a running participant; the refusal side is proven by "
+        "runtime:unavailable-<capability>",
+        "RuntimeManifest.legacy_fallback=QUEUE_FOLLOWUP",
+        "RuntimeManifest.legacy_fallback=SETTINGS_UPDATE",
     ),
     _exempt(
         "queue and payload bounds are enforced and unit-tested in channel ingress, not by a CLI",

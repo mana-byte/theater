@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import enum
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -232,3 +236,53 @@ def test_the_legacy_obligation_runs_under_the_variant_that_refuses_the_native_ru
     assert legacy.variant == "native-runtime-refused"
     assert native.variant is None
     assert legacy.variant in {mutation.name for mutation in MUTATIONS}
+
+
+class _Mode(enum.Enum):
+    FAST = 1
+    SLOW = 2
+
+
+@dataclasses.dataclass
+class _Leaf:
+    label: Literal["a", "b"]
+
+
+type _Tree = dict[str, _Tree] | _Mode
+
+
+@dataclasses.dataclass
+class _Root:
+    modes: frozenset[_Mode]
+    nested: tuple[Literal["x", "y"] | None, ...]
+    leaves: Mapping[str, _Leaf]
+    tree: _Tree
+    callback: Callable[[_Mode], _Leaf]
+    _private: int = 0
+
+
+def test_the_walker_reads_enum_and_literal_alternatives_inside_containers() -> None:
+    found = declarations(_Root)
+
+    assert {"_Root.modes=FAST", "_Root.modes=SLOW"} <= found, "a frozenset of enum members"
+    assert {"_Root.nested='x'", "_Root.nested='y'"} <= found, "a Literal inside tuple and union"
+    assert {"_Leaf.label='a'", "_Leaf.label='b'"} <= found, "a dataclass held by a mapping"
+
+
+def test_the_walker_survives_a_recursive_alias_and_never_looks_through_a_callable() -> None:
+    found = declarations(_Root)
+
+    assert {"_Root.tree=FAST", "_Root.tree=SLOW"} <= found
+    assert "_Root.callback" in found and not any(
+        item.startswith("_Root.callback=") for item in found
+    )
+    assert "_Root._private" not in found
+
+
+def test_the_real_runtime_capabilities_are_declared_one_by_one() -> None:
+    found = declarations()
+
+    assert {
+        "RuntimeManifest.legacy_fallback=INTERRUPT",
+        "RuntimeManifest.unavailable_capabilities=SETTINGS_UPDATE",
+    } <= found
