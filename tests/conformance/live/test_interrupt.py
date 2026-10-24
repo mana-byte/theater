@@ -1,0 +1,50 @@
+"""Interrupting a held turn returns the CLI to a ready prompt, and the next turn still works."""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+
+import pytest
+
+from scripts.harness_compat.contract import MockReply
+from theater.harness.contracts.observation import ScreenKind
+
+pytestmark = [pytest.mark.integration, pytest.mark.family("interrupt")]
+
+
+async def test_interrupt_ends_a_held_turn_and_the_next_turn_still_works(live, obligation):
+    participant = await live.spawn(live.approval)
+    await live.ready(participant)
+    hold = live.hold()
+    live.queue(MockReply("thinking", hold=hold))
+    held = (
+        await live.client.controls.send(
+            participant, "Take your time", idempotency_key=uuid.uuid4().hex
+        )
+    ).value
+    assert await asyncio.to_thread(hold.wait_reached, 60), "the held request never arrived"
+    await live.expect_screen(participant, ScreenKind.WORKING)
+
+    await live.interrupt(participant)
+
+    await live.expect_screen(participant, ScreenKind.PROMPT)
+    assert await asyncio.to_thread(_wait, lambda: hold.cancelled, 30), "the CLI kept its request"
+    held_job = await live.job(held.job_handle)
+    assert held_job.state in ("done", "killed", "crashed")
+    nonce = f"AFTER-{uuid.uuid4().hex[:8]}"
+    live.queue(MockReply(nonce))
+    job = await live.send(participant, f"Reply with {nonce}")
+    assert job.state == "done", job.error
+    assert nonce in str(job.result)
+
+
+def _wait(predicate, seconds: float) -> bool:
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.1)
+    return predicate()
