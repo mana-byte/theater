@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 
 from theater.harness.contracts.runtime import (
+    NativeTurnTerminal,
     ResultCompleteness,
     ResultProvenance,
     RuntimeConnectionClosed,
@@ -222,6 +223,14 @@ class CodexRuntimeHistory(CodexRuntimeHost):
             return
         terminal = _TERMINAL_BY_STATUS.get(status)
         if terminal is None:
+            return
+        if (
+            terminal is NativeTurnTerminal.INTERRUPTED
+            and turn.get("completedAt") is None
+            and turn_id == self._active_turn_id
+        ):
+            # A running turn the rollout has no end for reads as "interrupted" without a completion
+            # time; its live turn/completed is the exact evidence, a real interrupt carries a time.
             return
         # Authoritative history is lifecycle evidence too: a terminal turn's own
         # recorded interactions can no longer be answered; other turns survive.
