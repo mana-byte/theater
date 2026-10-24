@@ -61,9 +61,7 @@ def provision(context: ProvisionContext) -> Provisioned:
         f"[model_providers.{_PROVIDER}]\n"
         'name = "Theater compatibility mock"\n'
         f'base_url = "{context.mock_urls["openai-responses"]}"\n'
-        'wire_api = "responses"\n'
-        "request_max_retries = 0\n"
-        "stream_max_retries = 0\n\n"
+        'wire_api = "responses"\n\n'
         f"[projects.{json.dumps(str(workdir))}]\n"
         'trust_level = "trusted"\n'
     )
