@@ -68,8 +68,10 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
         self._poll_task: asyncio.Task[None] | None = None
         #: Serializes reads so a late answer never lands after a newer one.
         self._poll_lock = asyncio.Lock()
-        #: A read that began after a caller asked is as fresh as one of its own.
+        #: A read that was published after a caller asked is as fresh as one of its own: one that
+        #: began but was cancelled before publishing proved nothing.
         self._reads_begun = 0
+        self._last_observed_read = 0
         self._closed = False
 
     async def open_session(
@@ -286,15 +288,15 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
         return version
 
     async def _refresh(self) -> None:
-        """Control decisions rest on a read that began after they asked, not on a poll before."""
+        """Control decisions rest on a read published after they asked, not on a poll before."""
         await self._poll_once(newer_than=self._reads_begun)
 
     async def _poll_once(self, *, newer_than: int | None = None) -> None:
-        """One read of the server, unless one began after `newer_than` (a `_reads_begun` count)."""
+        """One read of the server, unless one was published after `newer_than` (a read count)."""
         async with self._poll_lock:
             if self._closed or self._session_id is None:
                 return
-            if newer_than is not None and self._reads_begun > newer_than:
+            if newer_than is not None and self._last_observed_read > newer_than:
                 return
             self._reads_begun += 1
             try:
@@ -303,6 +305,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
                 active, idle_at = None, None
             if not self._closed:
                 self._source.observe(active, idle_at)
+                self._last_observed_read = self._reads_begun
 
     async def _read_server(self, session_id: str) -> tuple[Mapping[str, object], int | None]:
         """`session.active`, plus the session's idle stamp when a prompt may have ended unseen."""
