@@ -231,6 +231,10 @@ class LiveRig:
     def theater_home(self) -> Path:
         return self.root / "th"
 
+    @property
+    def daemon_pid(self) -> int:
+        return _daemon_pid(self.theater_home)
+
     @classmethod
     @asynccontextmanager
     async def open(
@@ -394,6 +398,18 @@ class LiveRig:
         if route is None:
             return ""
         return _tmux(self.env, "capture-pane", "-p", "-t", route.identity.terminal_id)
+
+    async def pane_pid(self, participant_id: str) -> int:
+        """The process the participant's pane runs: the stock UI, a child of the private tmux."""
+        route = (await self.participant(participant_id)).terminal_route
+        if route is None:
+            inconclusive(f"participant {participant_id} has no terminal route")
+        shown = _tmux(
+            self.env, "display-message", "-p", "-t", route.identity.terminal_id, "#{pane_pid}"
+        )
+        if not shown.strip().isdigit():
+            inconclusive(f"tmux reported no pane process for {route.identity.terminal_id}")
+        return int(shown)
 
     async def reading(self, participant_id: str) -> ScreenReading:
         return self.harness.observer.screen_reading(await self.screen(participant_id))

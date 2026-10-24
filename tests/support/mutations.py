@@ -130,7 +130,7 @@ MUTATIONS: tuple[Mutation, ...] = (
                 return replace(manifest, runtime=replace(manifest.runtime, probe=probe))
             """
         ),
-        {"runtime:native": "fail"},
+        {"runtime:native": "fail", "runtime:survival": "fail"},
         "runtime",
     ),
     Mutation(
