@@ -13,15 +13,12 @@ import os
 import pwd
 import re
 import shutil
-import signal
-import subprocess
 import sys
-import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -40,8 +37,9 @@ from scripts.harness_compat.contract import (
 )
 from scripts.harness_compat.mock import MockServer
 from scripts.harness_compat.process import SANDBOX_ENV
+from scripts.harness_compat.sandbox import sandbox_environment
 from tests.support import mutations
-from tests.support.paths import REPO_ROOT
+from tests.support.live_stack import BOOT_SECONDS, Stack
 from theater.frontend import FrontendClient
 from theater.frontend.dto import Controls, Job, Participant
 from theater.harness.contracts.compat import ProvisionContext, Provisioned
@@ -57,14 +55,8 @@ ENV_EVIDENCE_DIR = SUITE_ENV_EVIDENCE_DIR
 #: Logical model names the suite requests; ``provision`` makes the CLI accept them.
 LOGICAL_MODELS = ("mock-a", "mock-b")
 CAPABILITIES = ("orchestration.v1", "state.follow.v1", "catalogs.v1")
-_BOOT_SECONDS = 90.0
-#: A loaded machine can miss the bridge's own start deadline once; a second miss is inconclusive.
-_BOOT_ATTEMPTS = 2
-_STOP_SECONDS = 20.0
 #: How long a send must stay admissible before the CLI counts as ready: screen reads lag redraws.
 _READY_SETTLE_SECONDS = 1.0
-_PANE_CAPTURE_LINES = 200
-_DAEMON_START_LOG = Path("regie") / "var" / "logs" / "daemon-start.log"
 _JOB_SLICE_SECONDS = 3.0
 #: One short directory per scenario: unix socket paths cap near 100 bytes.
 _ROOMS = itertools.count(1)
@@ -72,9 +64,6 @@ _ROOMS = itertools.count(1)
 PROBE_SERVER = "compat_probe"
 PROBE_TOOL = "compat_probe_mark"
 _PROBE_SOURCE = Path(__file__).with_name("compat_probe")
-#: Nothing listens on the dead proxy, so a CLI honouring it cannot leave the machine.
-_DEAD_PROXY = "http://127.0.0.1:9"
-_LOOPBACK = "127.0.0.1,localhost"
 
 
 def inconclusive(reason: str) -> None:
@@ -152,26 +141,18 @@ def hermetic_environment(
             ]
         )
     )
-    return {
-        "HOME": str(home),
-        "PATH": path,
-        "TERM": "xterm-256color",
-        "LANG": "en_US.UTF-8",
-        "XDG_CONFIG_HOME": str(home / ".config"),
-        "XDG_CACHE_HOME": str(home / ".cache"),
-        "XDG_DATA_HOME": str(home / ".local" / "share"),
-        "XDG_STATE_HOME": str(home / ".local" / "state"),
-        "TMPDIR": str(root / "t"),
-        "TMUX_TMPDIR": str(root / "t"),
-        "THEATER_HOME": str(root / "th"),
-        "NO_PROXY": _LOOPBACK,
-        "no_proxy": _LOOPBACK,
-        "HTTP_PROXY": _DEAD_PROXY,
-        "HTTPS_PROXY": _DEAD_PROXY,
-        "ALL_PROXY": _DEAD_PROXY,
-        SANDBOX_ENV: token,
-        **extra,
-    }
+    env = sandbox_environment(
+        token=token,
+        home=home,
+        config=home / ".config",
+        cache=home / ".cache",
+        data=home / ".local" / "share",
+        state=home / ".local" / "state",
+        temp=root / "t",
+        path=path,
+        offline=True,
+    )
+    return {**env, "LANG": "en_US.UTF-8", "THEATER_HOME": str(root / "th"), **extra}
 
 
 def _config_toml(harness: str, provisioned: Provisioned, marker_dir: Path) -> str:
@@ -207,15 +188,13 @@ class LiveRig:
 
     session: LiveSession
     harness: Harness
-    root: Path
-    env: dict[str, str]
+    stack: Stack
     provisioned: Provisioned
     mock: MockServer
     client: FrontendClient
     workdir: Path
     marker_dir: Path
     label: str
-    spawned: list[str] = field(default_factory=list)
 
     @property
     def protocol(self) -> MockProtocol:
@@ -228,12 +207,8 @@ class LiveRig:
         return "manual" if "manual" in approvals else approvals[0]
 
     @property
-    def theater_home(self) -> Path:
-        return self.root / "th"
-
-    @property
     def daemon_pid(self) -> int:
-        return _daemon_pid(self.theater_home)
+        return self.stack.daemon_pid
 
     @classmethod
     @asynccontextmanager
@@ -248,59 +223,37 @@ class LiveRig:
         for directory in (root / "h", root / "t", root / "th", workdir, marker_dir):
             directory.mkdir(parents=True, exist_ok=True)
         assert_isolated(session.sandbox_root, root, workdir, marker_dir)
-        mock = MockServer(session.evidence_dir / f"{label}.requests.jsonl", models=LOGICAL_MODELS)
-        mock.start()
-        env: dict[str, str] = {}
-        client: FrontendClient | None = None
-        rig: LiveRig | None = None
-        try:
-            provisioned = harness.compat.provision(
-                ProvisionContext(
-                    sandbox_root=root,
-                    home=root / "h",
-                    config_dir=root / "h" / ".config",
-                    workdir=workdir,
-                    mock_urls=mock.base_urls,
-                    binary=session.binary,
-                    version=session.version,
-                    models=LOGICAL_MODELS,
-                )
+        evidence = session.evidence_dir / label
+        async with contextlib.AsyncExitStack() as cleanup:  # undone in reverse, whatever came up
+            mock = MockServer(
+                session.evidence_dir / f"{label}.requests.jsonl", models=LOGICAL_MODELS
             )
-            for path, text in provisioned.files.items():
-                assert_isolated(session.sandbox_root, path)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(text, encoding="utf-8")
-            env = hermetic_environment(
-                root, token=session.token, binary_dir=session.binary.parent, extra=provisioned.env
-            )
-            assert_isolated(session.sandbox_root, Path(env["THEATER_HOME"]), Path(env["HOME"]))
-            theater_dir = root / "th"
-            (theater_dir / "config.toml").write_text(
-                _config_toml(session.harness, provisioned, marker_dir), encoding="utf-8"
-            )
-            shutil.copytree(_PROBE_SOURCE, theater_dir / "plugins" / PROBE_SERVER)
-            if mutation := variant or os.environ.get(SUITE_ENV_MUTATION):
-                mutations.install(mutation, session.harness, theater_dir / "plugins")
-            failure = _boot_with_retry(env, theater_dir, session.evidence_dir / label)
-            if failure is not None:
+            mock.start()
+            cleanup.callback(mock.stop)
+            provisioned, env = _prepare(session, harness, root, workdir, marker_dir, mock, variant)
+            stack = Stack(root, env)
+            cleanup.callback(stack.stop)
+            cleanup.callback(stack.capture, evidence)
+            if failure := stack.boot(evidence):
                 inconclusive(failure)
-            client = _client(theater_dir / "var" / "run" / "daemon.sock")
-            await client.connect()
             rig = cls(
-                session, harness, root, env, provisioned, mock, client, workdir, marker_dir, label
+                session,
+                harness,
+                stack,
+                provisioned,
+                mock,
+                _client(stack.socket),
+                workdir,
+                marker_dir,
+                label,
             )
-            try:
-                yield rig
-            finally:
-                rig.capture_evidence()
-        finally:
-            if (current := rig.client if rig is not None else client) is not None:
-                with contextlib.suppress(Exception):
-                    await current.close()
-            if rig is None:  # the stack never came up: keep what it said before it is removed
-                _copy_logs(root / "th", session.evidence_dir / label / "boot")
-            _stop(env, root / "th")
-            mock.stop()
+            cleanup.push_async_callback(rig._close_client)
+            await rig.client.connect()
+            yield rig
+
+    async def _close_client(self) -> None:
+        with contextlib.suppress(Exception):  # the daemon may already have dropped it
+            await self.client.close()
 
     # -- driving the participant through the public SDK ---------------------------------------
 
@@ -331,7 +284,6 @@ class LiveRig:
             detail = operation.error.to_wire() if operation.error is not None else operation.state
             violation(f"spawning with approval {approval!r} did not succeed: {detail}")
         assert accepted.participant_id is not None
-        self.spawned.append(accepted.participant_id)
         return accepted.participant_id
 
     async def _settled(self, operation_id: str, *, seconds: float = 60.0):
@@ -397,15 +349,15 @@ class LiveRig:
         route = (await self.participant(participant_id)).terminal_route
         if route is None:
             return ""
-        return _tmux(self.env, "capture-pane", "-p", "-t", route.identity.terminal_id)
+        return self.stack.tmux("capture-pane", "-p", "-t", route.identity.terminal_id)
 
     async def pane_pid(self, participant_id: str) -> int:
         """The process the participant's pane runs: the stock UI, a child of the private tmux."""
         route = (await self.participant(participant_id)).terminal_route
         if route is None:
             inconclusive(f"participant {participant_id} has no terminal route")
-        shown = _tmux(
-            self.env, "display-message", "-p", "-t", route.identity.terminal_id, "#{pane_pid}"
+        shown = self.stack.tmux(
+            "display-message", "-p", "-t", route.identity.terminal_id, "#{pane_pid}"
         )
         if not shown.strip().isdigit():
             inconclusive(f"tmux reported no pane process for {route.identity.terminal_id}")
@@ -542,19 +494,18 @@ class LiveRig:
     async def restart_daemon(self) -> None:
         """SIGTERM the daemon and start another as Régie does; the bridge reconnects by itself."""
         await self.client.close()
-        if not _terminate_daemon(_daemon_pid(self.theater_home)):
+        if not self.stack.stop_daemon():
             inconclusive("the daemon did not exit on SIGTERM")
-        _start_daemon(self.env)
-        socket = self.theater_home / "var" / "run" / "daemon.sock"
-        deadline = time.monotonic() + _BOOT_SECONDS
+        self.stack.start_daemon()
+        deadline = time.monotonic() + BOOT_SECONDS
         while True:
-            client = _client(socket)
+            client = _client(self.stack.socket)
             try:
                 await client.connect()
             except Exception:  # the new daemon is still starting: its socket is not answering yet
                 await client.close()
                 if time.monotonic() > deadline:
-                    inconclusive(f"the restarted daemon did not answer within {_BOOT_SECONDS:g}s")
+                    inconclusive(f"the restarted daemon did not answer within {BOOT_SECONDS:g}s")
                 await asyncio.sleep(0.25)
             else:
                 self.client = client
@@ -580,14 +531,14 @@ class LiveRig:
         for an exit that no suite component can explain.
         """
         try:
-            os.kill(_daemon_pid(self.theater_home), 0)
+            os.kill(self.stack.daemon_pid, 0)
         except (OSError, ValueError, IndexError):
             return "the daemon"
         if not self.client.connected:
             return "the daemon connection"
         if not self.mock.serving:
             return "the mock model server"
-        if not _tmux_running(self.env):
+        if not self.stack.tmux_running():
             return "the private tmux server"
         try:
             online = await self._provider_online()
@@ -595,134 +546,51 @@ class LiveRig:
             return "the terminal provider registry"
         return None if online else "the terminal provider"
 
-    def capture_evidence(self) -> None:
-        """Copy logs and pane captures to the evidence directory; bounded and best effort."""
-        target = self.session.evidence_dir / self.label
-        target.mkdir(parents=True, exist_ok=True)
-        _copy_logs(self.theater_home, target)
-        for pane in _panes(self.env):
-            capture = _tmux(
-                self.env, "capture-pane", "-p", "-t", pane, "-S", f"-{_PANE_CAPTURE_LINES}"
-            )
-            (target / f"pane-{pane.lstrip('%')}.txt").write_text(capture, encoding="utf-8")
 
+def _prepare(
+    session: LiveSession,
+    harness: Harness,
+    root: Path,
+    workdir: Path,
+    marker_dir: Path,
+    mock: MockServer,
+    variant: str | None,
+) -> tuple[Provisioned, dict[str, str]]:
+    """Write what the stack reads before it starts, and the environment it starts in.
 
-def _regie(env: Mapping[str, str], *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
-    socket = Path(env["THEATER_HOME"]) / "var" / "run" / "daemon.sock"
-    return subprocess.run(
-        [sys.executable, "-m", "regie", "--socket", str(socket), *args],
-        env=dict(env),
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
+    The CLI's provisioning, Theater's own config, the probe sidecar and, for a canary or a variant,
+    the mutation of the plugin; every file lands inside the sandbox.
+    """
+    assert harness.compat is not None
+    provisioned = harness.compat.provision(
+        ProvisionContext(
+            sandbox_root=root,
+            home=root / "h",
+            config_dir=root / "h" / ".config",
+            workdir=workdir,
+            mock_urls=mock.base_urls,
+            binary=session.binary,
+            version=session.version,
+            models=LOGICAL_MODELS,
+        )
     )
-
-
-def _boot(env: Mapping[str, str], socket: Path) -> str | None:
-    """Start the bridge, which starts the daemon and the private tmux server; why not, if not."""
-    result = _regie(env, "bridge", "start", timeout=_BOOT_SECONDS)
-    if result.returncode != 0:
-        return f"the Regie bridge did not start: {result.stderr.strip()[-400:]}"
-    if not socket.exists():
-        return "the daemon socket never appeared"
-    return None
-
-
-def _boot_with_retry(env: Mapping[str, str], theater_home: Path, evidence: Path) -> str | None:
-    """Boot the stack, again after a miss; an attempt that is cleaned up leaves its logs behind."""
-    failure: str | None = None
-    for attempt in range(1, _BOOT_ATTEMPTS + 1):
-        failure = _boot(env, theater_home / "var" / "run" / "daemon.sock")
-        if failure is None or attempt == _BOOT_ATTEMPTS:
-            break
-        _copy_logs(theater_home, evidence / f"boot-{attempt}")
-        _stop(env, theater_home)
-    return failure
-
-
-def _copy_logs(theater_home: Path, target: Path) -> None:
-    """Copy the daemon and bridge logs that exist; a stack that never started leaves none."""
-    for source in (
-        theater_home / "var" / "logs" / "daemon" / "daemon.log",
-        theater_home / _DAEMON_START_LOG,
-        theater_home / "regie" / "var" / "logs" / "bridge.log",
-    ):
-        if source.is_file():
-            target.mkdir(parents=True, exist_ok=True)
-            with contextlib.suppress(OSError):
-                shutil.copyfile(source, target / source.name)
+    for path, text in provisioned.files.items():
+        assert_isolated(session.sandbox_root, path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    env = hermetic_environment(
+        root, token=session.token, binary_dir=session.binary.parent, extra=provisioned.env
+    )
+    assert_isolated(session.sandbox_root, Path(env["THEATER_HOME"]), Path(env["HOME"]))
+    theater_dir = root / "th"
+    (theater_dir / "config.toml").write_text(
+        _config_toml(session.harness, provisioned, marker_dir), encoding="utf-8"
+    )
+    shutil.copytree(_PROBE_SOURCE, theater_dir / "plugins" / PROBE_SERVER)
+    if mutation := variant or os.environ.get(SUITE_ENV_MUTATION):
+        mutations.install(mutation, session.harness, theater_dir / "plugins")
+    return provisioned, env
 
 
 def _client(socket: Path) -> FrontendClient:
     return FrontendClient(socket, client_id="compat-suite", required_capabilities=CAPABILITIES)
-
-
-def _daemon_pid(theater_home: Path) -> int:
-    return int((theater_home / "var" / "run" / "daemon.pid").read_text().split()[0])
-
-
-def _terminate_daemon(pid: int) -> bool:
-    """SIGTERM ``pid`` and wait for it; SIGKILL after the deadline. Whether SIGTERM was enough."""
-    os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + _STOP_SECONDS
-    while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return True
-        time.sleep(0.1)
-    os.kill(pid, signal.SIGKILL)
-    return False
-
-
-def _start_daemon(env: Mapping[str, str]) -> None:
-    """Start a detached daemon the way Régie does, its output appended to the same start log."""
-    log = Path(env["THEATER_HOME"]) / _DAEMON_START_LOG
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("ab") as output:
-        process = subprocess.Popen(
-            [sys.executable, "-m", "theater.cli", "daemon"],
-            stdin=subprocess.DEVNULL,
-            stdout=output,
-            stderr=output,
-            start_new_session=True,
-            env=dict(env),
-            cwd=REPO_ROOT,
-        )
-    # Reap it as init would a daemon the bridge started: a zombie still answers ``kill -0``.
-    threading.Thread(target=process.wait, daemon=True).start()
-
-
-def _stop(env: Mapping[str, str], theater_home: Path) -> None:
-    """Stop the bridge, the daemon and the private tmux server; every step is attempted."""
-    if not env:
-        return
-    with contextlib.suppress(Exception):
-        _regie(env, "bridge", "stop", timeout=_STOP_SECONDS)
-    with contextlib.suppress(OSError, ValueError, IndexError):
-        _terminate_daemon(_daemon_pid(theater_home))
-    with contextlib.suppress(Exception):
-        _tmux(env, "kill-server")
-
-
-def _tmux_run(env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["tmux", *args], env=dict(env), capture_output=True, text=True, timeout=10, check=False
-    )
-
-
-def _tmux(env: Mapping[str, str], *args: str) -> str:
-    return _tmux_run(env, *args).stdout
-
-
-def _tmux_running(env: Mapping[str, str]) -> bool:
-    try:
-        return _tmux_run(env, "list-sessions").returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-def _panes(env: Mapping[str, str]) -> list[str]:
-    return _tmux(env, "list-panes", "-a", "-F", "#{pane_id}").split()

@@ -21,6 +21,47 @@ _DEAD_PROXY = "http://127.0.0.1:9"
 _LOOPBACK = "127.0.0.1,localhost"
 
 
+def sandbox_environment(
+    *,
+    token: str,
+    home: Path,
+    config: Path,
+    cache: Path,
+    data: Path,
+    state: Path,
+    temp: Path,
+    path: str,
+    offline: bool,
+) -> dict[str, str]:
+    """The one environment policy of everything a sandbox starts, here and in the live suite's rig.
+
+    Private homes and caches, the sandbox token, user git, pip and npm configuration discarded and,
+    when ``offline``, every proxy variable (either case) aimed at a dead port: a CLI that honours
+    one cannot leave the machine, and loopback stays reachable for the mock.
+    """
+    env = {
+        SANDBOX_ENV: token,
+        "HOME": str(home),
+        "PATH": path,
+        "TERM": "xterm-256color",
+        "XDG_CONFIG_HOME": str(config),
+        "XDG_CACHE_HOME": str(cache),
+        "XDG_DATA_HOME": str(data),
+        "XDG_STATE_HOME": str(state),
+        "TMPDIR": str(temp),
+        "TMUX_TMPDIR": str(temp),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "PIP_CONFIG_FILE": os.devnull,
+        "NPM_CONFIG_CACHE": str(cache / "npm"),
+        "NO_PROXY": _LOOPBACK,
+        "no_proxy": _LOOPBACK,
+    }
+    if offline:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            env[name] = env[name.lower()] = _DEAD_PROXY
+    return env
+
+
 def _short_temp_dir() -> Path | None:
     temp = Path("/tmp")
     return temp.resolve() if temp.is_dir() else None
@@ -100,32 +141,21 @@ def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
     mock = MockServer(mock_requests)
     mock.start()
     token = new_token()
-    env = {
-        SANDBOX_ENV: token,
-        "HOME": str(home),
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-        "TERM": "xterm-256color",
-        "XDG_CONFIG_HOME": str(config_dir),
-        "XDG_CACHE_HOME": str(cache_dir),
-        "XDG_DATA_HOME": str(data_dir),
-        "XDG_STATE_HOME": str(state_dir),
-        "TMPDIR": str(temp_dir),
-        "TMUX_TMPDIR": str(temp_dir),
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "PIP_CONFIG_FILE": os.devnull,
-        "NPM_CONFIG_CACHE": str(cache_dir / "npm"),
-        "NO_PROXY": _LOOPBACK,
-        "no_proxy": _LOOPBACK,
-    }
-    offline_env = {
-        **env,
-        "HTTP_PROXY": _DEAD_PROXY,
-        "HTTPS_PROXY": _DEAD_PROXY,
-        "ALL_PROXY": _DEAD_PROXY,
-        "http_proxy": _DEAD_PROXY,
-        "https_proxy": _DEAD_PROXY,
-        "all_proxy": _DEAD_PROXY,
-    }
+
+    def environment(*, offline: bool) -> dict[str, str]:
+        return sandbox_environment(
+            token=token,
+            home=home,
+            config=config_dir,
+            cache=cache_dir,
+            data=data_dir,
+            state=state_dir,
+            temp=temp_dir,
+            path=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            offline=offline,
+        )
+
+    env, offline_env = environment(offline=False), environment(offline=True)
     try:
         yield Sandbox(
             root=base,
