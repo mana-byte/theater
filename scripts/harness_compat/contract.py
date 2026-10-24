@@ -70,18 +70,27 @@ class SuiteRow:
     def parse(cls, body: object, *, inventory: bool) -> SuiteRow:
         if not isinstance(body, dict):
             raise SuiteDocumentError("holds a row that is not an object")
-        name, family, scenario = body.get("id"), body.get("family"), body.get("scenario")
+        name, family = body.get("id"), body.get("family")
         if not (isinstance(name, str) and name and isinstance(family, str) and family):
             raise SuiteDocumentError(f"holds a row without an id and a family: {body!r}")
-        if scenario is not None and not isinstance(scenario, str):
-            raise SuiteDocumentError(f"gives {name} a scenario that is not a module name")
+        # A missing key is not a declared gap: only an explicit null says no scenario exists yet.
+        if "scenario" not in body or not isinstance(
+            scenario := body["scenario"], (str, type(None))
+        ):
+            raise SuiteDocumentError(f"gives {name} no scenario module name (or an explicit null)")
         if not inventory:
             return cls(name, family, scenario)
         status, outcome, detail = body.get("status"), body.get("outcome"), body.get("detail", "")
-        if status not in ("executed", "unproven") or not isinstance(detail, str):
-            raise SuiteDocumentError(f"gives {name} no valid status and detail")
-        if (status == "executed") != (outcome in SUITE_OUTCOMES):
-            raise SuiteDocumentError(f"gives {name} status {status!r} with outcome {outcome!r}")
+        if not isinstance(detail, str):
+            raise SuiteDocumentError(f"gives {name} a detail that is not text")
+        if status == "executed":
+            if outcome not in SUITE_OUTCOMES:
+                raise SuiteDocumentError(f"gives executed {name} the outcome {outcome!r}")
+        elif status == "unproven":
+            if outcome is not None:
+                raise SuiteDocumentError(f"gives unproven {name} the outcome {outcome!r}")
+        else:
+            raise SuiteDocumentError(f"gives {name} the status {status!r}")
         return cls(name, family, scenario, status == "executed", outcome, detail)
 
 

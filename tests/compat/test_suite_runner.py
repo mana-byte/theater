@@ -156,18 +156,33 @@ def test_a_document_round_trips_through_its_one_contract() -> None:
             None,
             id="a-promise-may-carry-an-account",
         ),
-        pytest.param(_body(_row("a:b")), True, "no valid status", id="inventory-without-status"),
+        pytest.param(_body(_row("a:b")), True, "the status None", id="inventory-without-status"),
         pytest.param(
             _body(_row("a:b", status="executed", outcome=None, detail="")),
             True,
-            "status 'executed' with outcome None",
+            "executed a:b the outcome None",
             id="executed-without-outcome",
         ),
         pytest.param(
             _body(_row("a:b", status="unproven", outcome="passed", detail="")),
             True,
-            "status 'unproven' with outcome 'passed'",
+            "unproven a:b the outcome 'passed'",
             id="unproven-with-outcome",
+        ),
+        *(
+            pytest.param(
+                _body(_row("a:b", status="unproven", outcome=garbage, detail="")),
+                True,
+                "unproven a:b the outcome",
+                id=f"unproven-with-{garbage!r}",
+            )
+            for garbage in ("garbage", [], 42)
+        ),
+        pytest.param(
+            _body({"id": "a:b", "family": "a"}), False, "no scenario module name", id="no-scenario"
+        ),
+        pytest.param(
+            _body(_row("a:b", scenario=7)), False, "no scenario module name", id="odd-scenario"
         ),
     ],
 )
@@ -211,3 +226,14 @@ def test_the_suite_environment_is_hermetic_and_names_the_sandbox(tmp_path: Path)
         assert Path(env["THEATER_HOME"]) == sb.root / "theater"
         assert env["HTTPS_PROXY"] == "http://127.0.0.1:9"
         assert env["HARNESS_COMPAT_SANDBOX"]
+
+
+def test_an_inventory_row_that_dropped_its_scenario_cannot_turn_an_unrun_obligation_green(
+    tmp_path: Path,
+) -> None:
+    unproven = _row("mcp:call", status="unproven", outcome=None, detail="")
+    del unproven["scenario"]
+
+    loaded = _load(_written(tmp_path, _body(unproven)), inventory=True)
+
+    assert isinstance(loaded, str) and "no scenario module name" in loaded
