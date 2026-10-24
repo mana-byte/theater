@@ -25,6 +25,7 @@ from theater.harness.builtin.plugins.opencode.server_runtime import (
 from theater.harness.builtin.plugins.opencode.server_runtime_v2 import OpenCodeServerV2Runtime
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
+    ConnectionHealth,
     DeliveryResult,
     RuntimeCapability,
     RuntimeContext,
@@ -294,6 +295,148 @@ async def test_a_session_the_server_still_lists_is_busy_however_old_the_last_pol
     assert (refused.result, refused.error_code) == (DeliveryResult.REJECTED, "busy")
     assert len(server.bodies("/prompt")) == 1
     await runtime.aclose()
+
+
+def _hold_first_active(
+    runtime: OpenCodeServerV2Runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    then_fail: bool = False,
+) -> tuple[asyncio.Event, asyncio.Event]:
+    """The first `session.active` read is answered by the server, then held back from its caller."""
+    real = runtime._client.active
+    answered, release = asyncio.Event(), asyncio.Event()
+    held = False
+
+    async def delayed():
+        nonlocal held
+        answer = await real()
+        if not held:
+            held = True
+            answered.set()
+            await release.wait()
+            if then_fail:
+                raise OpenCodeHttpError("GET", "/api/session/active", "reset", written=True)
+        return answer
+
+    monkeypatch.setattr(runtime._client, "active", delayed)
+    return answered, release
+
+
+async def test_a_delayed_empty_poll_does_not_hide_a_turn_that_began_after_it_was_read(
+    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.send(operation_id="op-1", prompt="hello")
+    # A's whole turn passed unseen: the session carries A's idle stamp, past A's admission.
+    server.end_turn(idle_at=server.prompt_created + 50)
+    answered, release = _hold_first_active(runtime, monkeypatch)
+
+    poll = asyncio.create_task(runtime._poll_once())
+    await answered.wait()
+    # B, started by someone else, begins after the empty answer was produced and before it lands.
+    server.active.add(binding.native_session_id)
+    release.set()
+    await poll
+
+    refused = await runtime.send(operation_id="op-2", prompt="again")
+    assert (refused.result, refused.error_code) == (DeliveryResult.REJECTED, "busy")
+    assert len(server.bodies("/prompt")) == 1
+    await runtime.aclose()
+
+
+async def test_a_send_reads_the_server_even_when_the_last_poll_said_idle(
+    server: V2Fake, runtime, unpolled
+) -> None:
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
+    server.active.add(binding.native_session_id)  # a turn begun since, e.g. from the TUI
+
+    refused = await runtime.send(operation_id="op-1", prompt="hello")
+
+    assert (refused.result, refused.error_code) == (DeliveryResult.REJECTED, "busy")
+    assert server.bodies("/prompt") == []
+    await runtime.aclose()
+
+
+async def test_a_slow_idle_stamp_read_does_not_extend_the_admission_grace(
+    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server_live_v2, "_ADMISSION_GRACE_SECONDS", 0.2)
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.send(operation_id="op-1", prompt="hello")
+    server.end_turn(idle_at=server.prompt_created + 50)
+
+    async def never(_session_id: str):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runtime._client, "read_session", never)
+    poll = asyncio.create_task(runtime._poll_once())
+
+    try:
+        # The server is idle and the grace is 0.2 s: a stamp that never arrives must not outlast it.
+        await asyncio.wait_for(_settles(runtime, RuntimeExecutionState.IDLE), 3)
+    finally:
+        poll.cancel()
+    await runtime.aclose()
+
+
+async def test_concurrent_snapshots_of_a_busy_session_share_their_reads(
+    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.send(operation_id="op-1", prompt="hello")
+    real, reads = runtime._client.active, 0
+
+    async def slow_active():
+        nonlocal reads
+        reads += 1
+        await asyncio.sleep(0.05)
+        return await real()
+
+    monkeypatch.setattr(runtime._client, "active", slow_active)
+
+    snapshots = await asyncio.gather(*(runtime.snapshot() for _ in range(4)))
+
+    assert [s.execution_state for s in snapshots] == [RuntimeExecutionState.ACTIVE] * 4
+    # The read already running when they arrived may predate them: one more serves all four.
+    assert reads == 2
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize("then_fail", [False, True], ids=["answered", "failed"])
+async def test_a_snapshot_in_flight_cannot_reopen_a_closed_runtime(
+    server: V2Fake, runtime, unpolled, monkeypatch: pytest.MonkeyPatch, then_fail: bool
+) -> None:
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.send(operation_id="op-1", prompt="hello")
+    answered, release = _hold_first_active(runtime, monkeypatch, then_fail=then_fail)
+
+    snapshot = asyncio.create_task(runtime.snapshot())
+    await answered.wait()
+    await runtime.aclose()
+    release.set()
+    result = await snapshot
+
+    assert result.health is ConnectionHealth.DISCONNECTED
+    assert result.execution_state is RuntimeExecutionState.UNKNOWN
+    assert RuntimeCapability.SEND not in result.capabilities.available
+
+
+async def test_a_closed_runtime_neither_reads_the_server_nor_offers_send(
+    server: V2Fake, runtime, unpolled
+) -> None:
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.aclose()
+    served = len(server.requests)
+
+    snapshot = await runtime.snapshot()
+    refused = await runtime.send(operation_id="op-1", prompt="hello")
+
+    assert len(server.requests) == served
+    assert snapshot.health is ConnectionHealth.DISCONNECTED
+    assert RuntimeCapability.SEND not in snapshot.capabilities.available
+    assert (refused.result, refused.error_code) == (DeliveryResult.REJECTED, "not_ready")
 
 
 @pytest.mark.parametrize(
