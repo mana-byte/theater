@@ -263,7 +263,12 @@ class LiveRig:
             if mutation := os.environ.get(SUITE_ENV_MUTATION):
                 mutations.install(mutation, session.harness, theater_dir / "plugins")
             socket = theater_dir / "var" / "run" / "daemon.sock"
-            _boot(env, socket)
+            failure = _boot(env, socket)
+            if failure is not None:  # a loaded machine can miss the bridge's own start deadline
+                _stop(env, theater_dir)
+                failure = _boot(env, socket)
+            if failure is not None:
+                inconclusive(failure)
             client = FrontendClient(
                 socket, client_id="compat-suite", required_capabilities=CAPABILITIES
             )
@@ -500,13 +505,14 @@ def _regie(env: Mapping[str, str], *args: str, timeout: float) -> subprocess.Com
     )
 
 
-def _boot(env: Mapping[str, str], socket: Path) -> None:
-    """Start the bridge, which starts the daemon and the private tmux server."""
+def _boot(env: Mapping[str, str], socket: Path) -> str | None:
+    """Start the bridge, which starts the daemon and the private tmux server; why not, if not."""
     result = _regie(env, "bridge", "start", timeout=_BOOT_SECONDS)
     if result.returncode != 0:
-        inconclusive(f"the Regie bridge did not start: {result.stderr.strip()[-400:]}")
+        return f"the Regie bridge did not start: {result.stderr.strip()[-400:]}"
     if not socket.exists():
-        inconclusive("the daemon socket never appeared")
+        return "the daemon socket never appeared"
+    return None
 
 
 def _stop(env: Mapping[str, str], theater_home: Path) -> None:

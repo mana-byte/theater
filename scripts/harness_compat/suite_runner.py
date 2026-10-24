@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,10 +59,22 @@ class SuiteReport:
 
 
 def installed_version(binary: Path) -> str:
-    """The MAJOR.MINOR.PATCH an installed CLI reports for ``--version``."""
-    shown = subprocess.run(
-        [binary, "--version"], capture_output=True, text=True, timeout=30, check=False
-    ).stdout
+    """The MAJOR.MINOR.PATCH an installed CLI reports for ``--version``, from a throwaway home.
+
+    A CLI may log or write config on any start, so it never sees the real home.
+    """
+    with tempfile.TemporaryDirectory(prefix="v") as home:
+        env = {
+            "HOME": home,
+            "PATH": os.environ.get("PATH", ""),
+            "XDG_CONFIG_HOME": f"{home}/.config",
+            "XDG_CACHE_HOME": f"{home}/.cache",
+            "XDG_DATA_HOME": f"{home}/.local/share",
+            "XDG_STATE_HOME": f"{home}/.local/state",
+        }
+        shown = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=30, check=False, env=env
+        ).stdout
     found = _VERSION.search(shown)
     if found is None:
         raise ValueError(f"cannot read a version from {binary} --version: {shown.strip()!r}")
