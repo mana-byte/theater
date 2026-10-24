@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from theater.constants.harness import HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES
 from theater.harness.channels.filesystem import WatchGate
 from theater.harness.contracts.events import clip
 from theater.harness.source import (
@@ -67,20 +68,32 @@ def _check_attachment_snapshot(stat: os.stat_result, point: StreamPoint, mtime: 
 
 def _attachment_context(path: Path, point: StreamPoint, mtime: int) -> list[tuple[int, int, str]]:
     """Read bounded causal context from the scanned prefix, refusing a changed snapshot."""
-    assert point.size is not None
-    records: deque[tuple[int, int, str]] = deque(maxlen=SEAL_NODE_LIMIT)
+    assert point.size is not None and point.records is not None
+    chunks: deque[bytes] = deque()
     with path.open("rb") as handle:
         _check_attachment_snapshot(os.fstat(handle.fileno()), point, mtime)
-        offset = index = 0
-        while offset < point.size:
-            raw = handle.readline(point.size - offset)
-            if not raw.endswith(b"\n"):
+        start = point.size
+        newlines = 0
+        # One extra newline proves the oldest retained record starts inside the snapshot.
+        while start > 0 and newlines <= SEAL_NODE_LIMIT:
+            length = min(start, HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES)
+            start -= length
+            handle.seek(start)
+            raw = handle.read(length)
+            if len(raw) != length:
+                raise OSError(errno.ESTALE, "transcript changed during attachment")
+            if not chunks and not raw.endswith(b"\n"):
                 raise OSError(errno.ESTALE, "transcript attachment ends in an incomplete record")
-            offset += len(raw)
-            records.append((index, offset, raw.decode("utf-8", errors="replace")))
-            index += 1
+            chunks.appendleft(raw)
+            newlines += raw.count(b"\n")
         _check_attachment_snapshot(os.fstat(handle.fileno()), point, mtime)
-    return list(records)
+    lines = b"".join(chunks).split(b"\n")[-SEAL_NODE_LIMIT - 1 : -1]
+    offset = point.size - sum(len(line) + 1 for line in lines)
+    records = []
+    for index, raw in enumerate(lines, start=point.records - len(lines)):
+        offset += len(raw) + 1
+        records.append((index, offset, raw.decode("utf-8", errors="replace")))
+    return records
 
 
 class _ClaudeSource(TranscriptSource):

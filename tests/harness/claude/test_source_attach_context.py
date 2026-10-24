@@ -12,10 +12,13 @@ import pytest
 
 from tests.support.claude_seal import claude_fragment, claude_marker, claude_record
 from tests.support.observation import apply_batch
+from theater.constants.harness import HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
+from theater.harness.builtin.plugins.claude import source as claude_source
 from theater.harness.builtin.plugins.claude.constants import SEAL_NODE_LIMIT
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
+from theater.harness.source import StreamPoint
 from theater.models import JobState
 from theater.provenance import TranscriptProvenance
 from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
@@ -141,14 +144,19 @@ async def test_file_changes_during_context_read_discard_the_candidate(source, mo
     class ChangingReader:
         def __init__(self, handle):
             self.handle = handle
+            self.seeking = False
 
         def __getattr__(self, name):
             return getattr(self.handle, name)
 
-        def readline(self, size):
+        def seek(self, offset):
+            self.seeking = True
+            return self.handle.seek(offset)
+
+        def read(self, size):
             nonlocal changed
-            raw = self.handle.readline(size)
-            if not changed:
+            raw = self.handle.read(size)
+            if self.seeking and not changed:
                 changed = True
                 if change == "replace":
                     replacement = path.with_suffix(".replacement")
@@ -245,21 +253,73 @@ async def test_incomplete_attach_record_is_retried_without_losing_its_prefix(sou
 
 async def test_large_transcript_primes_only_a_bounded_suffix(source, monkeypatch):
     path, reader = source
-    lines = [METADATA] * (SEAL_NODE_LIMIT * 3) + [*INITIAL, *ANSWER, METADATA]
+    lines = [METADATA] * (SEAL_NODE_LIMIT * 32) + [*INITIAL, *ANSWER, METADATA]
     _write(path, *lines)
     parse = reader._observer.parse
     indices = []
+    original_open = Path.open
+    reads = []
+
+    class TrackingReader:
+        def __init__(self, handle, positions):
+            self.handle = handle
+            self.positions = positions
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def read(self, size):
+            offset = self.handle.tell()
+            raw = self.handle.read(size)
+            self.positions.append((offset, len(raw)))
+            return raw
+
+        def readline(self, size):
+            offset = self.handle.tell()
+            raw = self.handle.readline(size)
+            self.positions.append((offset, len(raw)))
+            return raw
+
+    @contextmanager
+    def tracking_open(target, *args, **kwargs):
+        with original_open(target, *args, **kwargs) as handle:
+            if target == path and args == ("rb",):
+                positions = []
+                reads.append(positions)
+                yield TrackingReader(handle, positions)
+            else:
+                yield handle
 
     def counting_parse(line, index, **kwargs):
         indices.append(index)
         return parse(line, index, **kwargs)
 
     monkeypatch.setattr(reader._observer, "parse", counting_parse)
+    monkeypatch.setattr(Path, "open", tracking_open)
     batch = await reader.read()
 
     assert batch.attached.last_event.raw_text == "DONE"
     assert 0 < len(indices) <= SEAL_NODE_LIMIT
     assert min(indices) >= len(lines) - SEAL_NODE_LIMIT
     assert batch.attached.last_event.raw_index == len(lines) - 2
+    context_reads = reads[-1]
+    assert context_reads and min(offset for offset, _ in context_reads) > 0
+    assert sum(size for _, size in context_reads) <= HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES
     reader.commit_attachment()
     assert (await reader.read()).events == ()
+
+
+@pytest.mark.parametrize("chunk_bytes", [7, 64, 4096])
+def test_tail_chunks_preserve_record_indices_and_byte_offsets(tmp_path, monkeypatch, chunk_bytes):
+    path = tmp_path / "records.jsonl"
+    lines = [json.dumps({"text": "é" * index}, ensure_ascii=False) for index in range(20)]
+    _write(path, *lines)
+    stat = path.stat()
+    point = StreamPoint(records=len(lines), size=stat.st_size, dev=stat.st_dev, ino=stat.st_ino)
+    monkeypatch.setattr(claude_source, "SEAL_NODE_LIMIT", 3)
+    monkeypatch.setattr(claude_source, "HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES", chunk_bytes)
+
+    context = claude_source._attachment_context(path, point, stat.st_mtime_ns)
+
+    offsets = [len("\n".join(lines[: index + 1]).encode()) + 1 for index in range(len(lines))]
+    assert context == [(index, offsets[index], lines[index]) for index in range(17, 20)]
