@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
+from scripts.harness_compat.contract import SuiteDocument, SuiteRow
 from scripts.harness_compat.process import SANDBOX_ENV
 from tests.support.live_rig import LiveRig, LiveSession, assert_isolated
 from tests.support.obligations import (
     FAMILIES,
-    SCHEMA,
     Obligation,
     document,
     obligations_for,
@@ -45,7 +45,7 @@ install.install(
 HARNESS: Harness = harness_registry.HARNESSES[SESSION.harness]
 REQUIRED = required(HARNESS)
 (SESSION.evidence_dir / "required.json").write_text(
-    json.dumps(document(SESSION.harness, SESSION.version, REQUIRED), indent=2, sort_keys=True),
+    json.dumps(document(SESSION.harness, SESSION.version, REQUIRED).to_json(), indent=2),
     encoding="utf-8",
 )
 
@@ -120,27 +120,22 @@ def _outcome(phases: dict[str, str]) -> str | None:
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
     scenarios = {family.name: family.scenario for family in FAMILIES}
-    entries = []
+    rows = []
     for obligation in REQUIRED:
         outcome = _outcome(_PHASES.get(obligation.id, {}))
-        entries.append(
-            {
-                "id": obligation.id,
-                "family": obligation.family,
-                "scenario": scenarios[obligation.family],
-                "status": "executed" if outcome is not None else "unproven",
-                "outcome": outcome,
-                "detail": _DETAILS.get(obligation.id, ""),
-            }
+        rows.append(
+            SuiteRow(
+                obligation.id,
+                obligation.family,
+                scenarios[obligation.family],
+                executed=outcome is not None,
+                outcome=outcome,
+                detail=_DETAILS.get(obligation.id, ""),
+            )
         )
-    body = {
-        "schema": SCHEMA,
-        "harness": SESSION.harness,
-        "version": SESSION.version,
-        "obligations": entries,
-    }
+    body = SuiteDocument(SESSION.harness, SESSION.version, tuple(rows)).to_json()
     (SESSION.evidence_dir / "inventory.json").write_text(
-        json.dumps(body, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(body, indent=2), encoding="utf-8"
     )
 
 

@@ -17,10 +17,8 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from .contract import (
-    SUITE_DOCUMENT_SCHEMA,
     SUITE_ENV_BINARY,
     SUITE_ENV_EVIDENCE_DIR,
     SUITE_ENV_HARNESS,
@@ -29,6 +27,9 @@ from .contract import (
     Check,
     CheckStatus,
     Sandbox,
+    SuiteDocument,
+    SuiteDocumentError,
+    SuiteRow,
 )
 from .diagnostics import clip_diagnostic
 from .framework import run_pytest
@@ -43,7 +44,6 @@ _OUTCOMES: Mapping[str, CheckStatus] = {"passed": "pass", "failed": "fail"}
 DIAGNOSTICS_ENV = "THEATER_COMPAT_DIAGNOSTICS"
 _KEPT_FILE_BYTES = 1_000_000
 _KEPT_TOTAL_BYTES = 20_000_000
-_NEVER_RAN = "its scenario never ran"
 _VERSION = re.compile(r"\d+\.\d+\.\d+")
 
 
@@ -120,87 +120,80 @@ def run_suite(
     )
     return reconcile(
         suite,
-        _document(sb.evidence_dir / "required.json"),
-        _document(sb.evidence_dir / "inventory.json"),
+        _load(sb.evidence_dir / "required.json", inventory=False),
+        _load(sb.evidence_dir / "inventory.json", inventory=True),
         harness=harness,
         version=version,
         partial=bool(pytest_args),
     )
 
 
-def _document(path: Path) -> Mapping[str, Any] | None:
+def _load(path: Path, *, inventory: bool) -> SuiteDocument | str:
+    """The parsed document, or why it cannot be trusted."""
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
-    return body if isinstance(body, dict) else None
+        return f"{path.name} is missing or unreadable: the suite did not run to the end"
+    try:
+        return SuiteDocument.parse(body, inventory=inventory)
+    except SuiteDocumentError as exc:
+        return f"{path.name} {exc}"
 
 
 def reconcile(
     suite: Check,
-    required: Mapping[str, Any] | None,
-    inventory: Mapping[str, Any] | None,
+    required: SuiteDocument | str,
+    inventory: SuiteDocument | str,
     *,
     harness: str,
     version: str,
     partial: bool = False,
 ) -> SuiteReport:
-    """Turn the suite's own accounting into checks; a promised obligation never vanishes quietly."""
-    problems = _document_problems(required, inventory, harness, version)
+    """Turn the suite's own accounting into checks; a promised obligation never vanishes quietly.
+
+    A document that could not be loaded arrives as the reason it cannot be trusted.
+    """
+    problems = [document for document in (required, inventory) if isinstance(document, str)]
+    for label, document in (("required.json", required), ("inventory.json", inventory)):
+        if isinstance(document, SuiteDocument) and (document.harness, document.version) != (
+            harness,
+            version,
+        ):
+            problems.append(f"{label} describes {document.harness} {document.version}")
     if problems:
         return SuiteReport((suite, *_fault(problems)), tuple(problems))
-    assert required is not None and inventory is not None
-    results = {entry["id"]: entry for entry in inventory["obligations"]}
+    assert isinstance(required, SuiteDocument) and isinstance(inventory, SuiteDocument)
+    results = {row.id: row for row in inventory.rows}
     checks: list[Check] = [suite]
-    for entry in required["obligations"]:
-        found = results.get(entry["id"])
+    for promised in required.rows:
+        found = results.get(promised.id)
         if found is None:
-            problems.append(f"obligation {entry['id']} is missing from inventory.json")
+            problems.append(f"obligation {promised.id} is missing from inventory.json")
             continue
-        check = _obligation_check(entry, found, partial=partial)
-        if check.detail == _NEVER_RAN:
-            problems.append(f"obligation {entry['id']} has a scenario that never ran")
+        check, never_ran = _obligation_check(promised, found, partial=partial)
+        if never_ran:
+            problems.append(f"obligation {promised.id} has a scenario that never ran")
         checks.append(check)
     if not partial:
-        for extra in sorted(set(results) - {entry["id"] for entry in required["obligations"]}):
+        promised_ids = {row.id for row in required.rows}
+        for extra in sorted(set(results) - promised_ids):
             problems.append(f"inventory.json holds {extra}, which required.json never promised")
     checks.extend(_fault(problems))
-    promised = tuple(entry["id"] for entry in required["obligations"])
-    return SuiteReport(tuple(checks), tuple(problems), promised)
+    return SuiteReport(tuple(checks), tuple(problems), tuple(row.id for row in required.rows))
 
 
-def _document_problems(
-    required: Mapping[str, Any] | None,
-    inventory: Mapping[str, Any] | None,
-    harness: str,
-    version: str,
-) -> list[str]:
-    problems: list[str] = []
-    for label, document in (("required.json", required), ("inventory.json", inventory)):
-        if document is None:
-            problems.append(f"{label} is missing or unreadable: the suite did not run to the end")
-        elif document.get("schema") != SUITE_DOCUMENT_SCHEMA:
-            problems.append(f"{label} has schema {document.get('schema')!r}")
-        elif (document.get("harness"), document.get("version")) != (harness, version):
-            problems.append(
-                f"{label} describes {document.get('harness')} {document.get('version')}"
-            )
-    return problems
-
-
-def _obligation_check(
-    entry: Mapping[str, Any], found: Mapping[str, Any], *, partial: bool
-) -> Check:
-    name = f"conformance:{entry['id']}"
-    detail = clip_diagnostic(str(found.get("detail") or ""), _DETAIL_LIMIT)
-    if found.get("status") != "executed":
-        if entry.get("scenario") is None:
-            return Check(name, "skip", "no live scenario yet")
+def _obligation_check(promised: SuiteRow, found: SuiteRow, *, partial: bool) -> tuple[Check, bool]:
+    """The obligation's check, and whether its scenario was owed but never ran."""
+    name = f"conformance:{promised.id}"
+    if not found.executed:
+        if promised.scenario is None:
+            return Check(name, "skip", "no live scenario yet"), False
         if partial:
-            return Check(name, "skip", "not selected in this partial run")
-        return Check(name, "error", _NEVER_RAN)
-    outcome = str(found.get("outcome"))
-    return Check(name, _OUTCOMES.get(outcome, "error"), detail or outcome)
+            return Check(name, "skip", "not selected in this partial run"), False
+        return Check(name, "error", "its scenario never ran"), True
+    detail = clip_diagnostic(found.detail, _DETAIL_LIMIT)
+    assert found.outcome is not None
+    return Check(name, _OUTCOMES.get(found.outcome, "error"), detail or found.outcome), False
 
 
 def _fault(problems: Sequence[str]) -> tuple[Check, ...]:

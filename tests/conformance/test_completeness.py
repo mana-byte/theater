@@ -80,10 +80,10 @@ def test_the_required_document_lists_every_obligation_once(name: str) -> None:
 
     body = document(name, "1.2.3", required(harness))
 
-    ids = [entry["id"] for entry in body["obligations"]]
+    ids = [row.id for row in body.rows]
     assert len(ids) == len(set(ids))
     assert ids == [item.id for item in required(harness)]
-    assert {entry["family"] for entry in body["obligations"]} <= {f.name for f in FAMILIES}
+    assert {row.family for row in body.rows} <= {f.name for f in FAMILIES}
 
 
 def test_the_shipped_plugins_are_all_discovered() -> None:

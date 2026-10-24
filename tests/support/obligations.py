@@ -5,13 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from scripts.harness_compat.contract import SUITE_DOCUMENT_SCHEMA
+from scripts.harness_compat.contract import SuiteDocument, SuiteRow
 from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.manifest import HookChannelManifest, OtelChannelManifest
 from theater.harness.contracts.runtime import RuntimeCapability
-
-SCHEMA = SUITE_DOCUMENT_SCHEMA
-
 
 #: Obligations proven under a plugin configured on purpose: the mutation of that name, applied as
 #: a variant of the shipped manifest (an unqualified release is a real state, not only a canary).
@@ -148,19 +145,14 @@ def required(harness: Harness) -> tuple[Obligation, ...]:
     )
 
 
-def document(harness: str, version: str, obligations: tuple[Obligation, ...]) -> dict[str, object]:
+def document(harness: str, version: str, obligations: tuple[Obligation, ...]) -> SuiteDocument:
     """The ``required.json`` body: the pipeline reconciles results against it."""
     scenarios = {family.name: family.scenario for family in FAMILIES}
-    return {
-        "schema": SCHEMA,
-        "harness": harness,
-        "version": version,
-        "obligations": [
-            {
-                "id": obligation.id,
-                "family": obligation.family,
-                "scenario": scenarios[obligation.family],
-            }
+    return SuiteDocument(
+        harness,
+        version,
+        tuple(
+            SuiteRow(obligation.id, obligation.family, scenarios[obligation.family])
             for obligation in obligations
-        ],
-    }
+        ),
+    )

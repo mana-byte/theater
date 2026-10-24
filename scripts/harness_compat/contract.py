@@ -33,8 +33,88 @@ SUITE_ENV_EVIDENCE_DIR = "HARNESS_COMPAT_EVIDENCE_DIR"
 SUITE_ENV_MUTATION = "HARNESS_COMPAT_MUTATION"
 #: Schema of ``required.json`` and ``inventory.json`` in the evidence directory.
 SUITE_DOCUMENT_SCHEMA = 1
+#: How an obligation can end in ``inventory.json``; None means no scenario ran for it.
+SUITE_OUTCOMES = ("passed", "failed", "error", "skipped")
 
 _STABLE = re.compile(r"\d+\.\d+\.\d+")
+
+
+class SuiteDocumentError(ValueError):
+    """A ``required.json`` or ``inventory.json`` that cannot be trusted, and why."""
+
+
+@dataclass(frozen=True, slots=True)
+class SuiteRow:
+    """One obligation: promised in ``required.json``, accounted for in ``inventory.json``."""
+
+    id: str
+    family: str
+    #: The live test module that proves the family; None while no scenario exists.
+    scenario: str | None
+    #: Inventory only: whether a scenario ran for it (None in a promise), and how it ended.
+    executed: bool | None = None
+    outcome: str | None = None
+    detail: str = ""
+
+    def to_json(self) -> dict[str, object]:
+        row: dict[str, object] = {"id": self.id, "family": self.family, "scenario": self.scenario}
+        if self.executed is not None:
+            row |= {
+                "status": "executed" if self.executed else "unproven",
+                "outcome": self.outcome,
+                "detail": self.detail,
+            }
+        return row
+
+    @classmethod
+    def parse(cls, body: object, *, inventory: bool) -> SuiteRow:
+        if not isinstance(body, dict):
+            raise SuiteDocumentError("holds a row that is not an object")
+        name, family, scenario = body.get("id"), body.get("family"), body.get("scenario")
+        if not (isinstance(name, str) and name and isinstance(family, str) and family):
+            raise SuiteDocumentError(f"holds a row without an id and a family: {body!r}")
+        if scenario is not None and not isinstance(scenario, str):
+            raise SuiteDocumentError(f"gives {name} a scenario that is not a module name")
+        if not inventory:
+            return cls(name, family, scenario)
+        status, outcome, detail = body.get("status"), body.get("outcome"), body.get("detail", "")
+        if status not in ("executed", "unproven") or not isinstance(detail, str):
+            raise SuiteDocumentError(f"gives {name} no valid status and detail")
+        if (status == "executed") != (outcome in SUITE_OUTCOMES):
+            raise SuiteDocumentError(f"gives {name} status {status!r} with outcome {outcome!r}")
+        return cls(name, family, scenario, status == "executed", outcome, detail)
+
+
+@dataclass(frozen=True, slots=True)
+class SuiteDocument:
+    """``required.json`` (every promised obligation) or ``inventory.json`` (what each one did)."""
+
+    harness: str
+    version: str
+    rows: tuple[SuiteRow, ...]
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "schema": SUITE_DOCUMENT_SCHEMA,
+            "harness": self.harness,
+            "version": self.version,
+            "obligations": [row.to_json() for row in self.rows],
+        }
+
+    @classmethod
+    def parse(cls, body: object, *, inventory: bool) -> SuiteDocument:
+        if not isinstance(body, dict):
+            raise SuiteDocumentError("is not a JSON object")
+        if body.get("schema") != SUITE_DOCUMENT_SCHEMA:
+            raise SuiteDocumentError(f"has schema {body.get('schema')!r}")
+        harness, version, rows = body.get("harness"), body.get("version"), body.get("obligations")
+        if not (isinstance(harness, str) and isinstance(version, str) and isinstance(rows, list)):
+            raise SuiteDocumentError("lacks a harness, a version and a list of obligations")
+        parsed = tuple(SuiteRow.parse(row, inventory=inventory) for row in rows)
+        ids = [row.id for row in parsed]
+        if twice := sorted({name for name in ids if ids.count(name) > 1}):
+            raise SuiteDocumentError(f"lists {', '.join(twice)} more than once")
+        return cls(harness, version, parsed)
 
 
 class InstallFailed(RuntimeError):
