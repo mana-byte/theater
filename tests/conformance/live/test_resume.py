@@ -37,4 +37,11 @@ async def test_a_resumed_participant_continues_its_conversation(live, obligation
     assert nonce in str(job.result)
     (resumed,) = live.turns(prompt)
     assert earlier in resumed.user_texts, "the resumed conversation lost its history"
+    successor = await live.participant(second)
+    assert successor.transcript_identity is not None
+    assert successor.transcript_identity.state == "trusted", successor.transcript_identity
+    lineage = await live.until(
+        first, lambda p: p.resume_state == "owned_by_live", what="been continued by its successor"
+    )
+    assert lineage.resume_state == "owned_by_live"
     assert len(live.turns(earlier)) == 1, "the earlier prompt was submitted again"

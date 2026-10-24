@@ -23,6 +23,7 @@ from .contract import (
     MockToolCall,
     RecordedRequest,
     Route,
+    ToolShape,
 )
 
 #: Routes the mock answers; anything else gets UNHANDLED_STATUS and is recorded as unhandled.
@@ -53,6 +54,7 @@ _USER_TEXT_CHARS = 300
 _MAX_USER_TEXTS = 20
 _MAX_USER_PARTS = 12
 _MAX_TOOL_NAMES = 200
+_MAX_TOOL_PROPERTIES = 24
 
 
 def _sse(events: list[dict[str, Any]]) -> str:
@@ -305,6 +307,30 @@ def _tool_names(body: dict[str, Any]) -> tuple[str, ...]:
         if isinstance(name, str):
             names.append(name)
     return tuple(names[:_MAX_TOOL_NAMES])
+
+
+def _tool_shapes(body: dict[str, Any]) -> dict[str, ToolShape]:
+    """Each offered tool's declared top-level arguments, wherever the protocol keeps its schema."""
+    shapes: dict[str, ToolShape] = {}
+    for tool in (body.get("tools") or [])[:_MAX_TOOL_NAMES]:
+        if not isinstance(tool, dict):
+            continue
+        function = tool["function"] if isinstance(tool.get("function"), dict) else {}
+        name = tool.get("name") or function.get("name")
+        schema = tool.get("input_schema") or tool.get("parameters") or function.get("parameters")
+        if not isinstance(name, str) or not isinstance(schema, dict):
+            continue
+        properties = schema.get("properties")
+        required = schema.get("required")
+        shapes[name] = ToolShape(
+            tuple(sorted(properties))[:_MAX_TOOL_PROPERTIES]
+            if isinstance(properties, dict)
+            else (),
+            tuple(item for item in required if isinstance(item, str))[:_MAX_TOOL_PROPERTIES]
+            if isinstance(required, list)
+            else (),
+        )
+    return shapes
 
 
 def _conversation(body: dict[str, Any]) -> list[Any]:
@@ -596,6 +622,7 @@ def _make_handler(server: MockServer) -> type[BaseHTTPRequestHandler]:
                     model=_text(body.get("model")),
                     effort=_effort(body),
                     tools=_tool_names(body),
+                    tool_shapes=_tool_shapes(body),
                     messages=len(_conversation(body)),
                     user_texts=_user_texts(body),
                     last_user_parts=(parts := _last_user_parts(body)),

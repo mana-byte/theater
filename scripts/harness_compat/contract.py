@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -145,6 +145,14 @@ class MockReply:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolShape:
+    """The top-level arguments an offered tool declares."""
+
+    properties: tuple[str, ...] = ()
+    required: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class RecordedRequest:
     method: str
     path: str
@@ -156,6 +164,8 @@ class RecordedRequest:
     model: str | None = None
     effort: str | None = None
     tools: tuple[str, ...] = ()
+    #: Declared arguments per offered tool name, to check a scripted call fits its schema.
+    tool_shapes: Mapping[str, ToolShape] = field(default_factory=dict)
     messages: int = 0
     #: The last text part of the newest human message, usually the prompt itself.
     last_user: str | None = None

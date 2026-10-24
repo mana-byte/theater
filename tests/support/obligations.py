@@ -74,7 +74,7 @@ def _gating(harness: Harness, details: dict[str, str]) -> tuple[str, ...]:
 def _mcp(harness: Harness) -> tuple[str, ...]:
     if not harness.supports_mcp_rendering:
         return ()
-    return _gating(harness, {"gated": "manual", "call": "yolo"})
+    return _gating(harness, {"gated": "manual", "call": "yolo", "refusal": "yolo"})
 
 
 def _edit(harness: Harness) -> tuple[str, ...]:
