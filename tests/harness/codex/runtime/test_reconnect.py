@@ -540,3 +540,98 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store)
         assert reasons[job.handle] == REASON_JOB_TERMINAL
     finally:
         await rig.aclose()
+
+
+def unfinished_turn_read_as_interrupted() -> dict:
+    """What the app-server returns for a persisted turn it has not seen end: no end time."""
+    return {
+        "id": "turn-1",
+        "status": "interrupted",
+        "items": [],
+        "completedAt": None,
+        "durationMs": None,
+    }
+
+
+async def test_a_running_turn_is_not_taken_for_interrupted_by_the_resume_snapshot_after_send() -> (
+    None
+):
+    """The snapshot taken right after turn/start says the thread is active and the turn ended."""
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume",
+        {
+            "thread": {"id": "ui-thread-1", "status": {"type": "active"}},
+            "initialTurnsPage": {"data": [unfinished_turn_read_as_interrupted()]},
+        },
+    )
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    try:
+        await runtime.send(operation_id="op-1", prompt="work")
+        assert runtime._subscribed is True
+        assert not (await source.read()).terminal_evidence
+
+        # The exact evidence is the live completion of the same turn.
+        server.push(
+            summary_turn_completed(
+                turn_id="turn-1",
+                items_view="summary",
+                items=[{"id": "i-final", "type": "agentMessage", "text": "answer"}],
+            )
+        )
+        await asyncio.sleep(0.05)
+        (outcome,) = (await source.read()).terminal_evidence
+        assert (outcome.native_turn_id, outcome.terminal, outcome.result, outcome.from_history) == (
+            "turn-1",
+            NativeTurnTerminal.COMPLETED,
+            "answer",
+            False,
+        )
+    finally:
+        await runtime.aclose()
+
+
+async def test_a_running_turn_is_not_taken_for_interrupted_by_a_history_page() -> None:
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume",
+        {
+            "thread": {"id": "ui-thread-1", "status": {"type": "active"}},
+            "initialTurnsPage": {"data": [{"id": "turn-1", "status": "inProgress", "items": []}]},
+        },
+    )
+    server.respond("thread/turns/list", {"data": [unfinished_turn_read_as_interrupted()]})
+    runtime = make_runtime(server)
+    try:
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
+        await asyncio.wait_for(asyncio.shield(runtime._history_reconcile_task), timeout=2)
+
+        assert len(server.requested("thread/turns/list")) == 1
+        assert not (await runtime.live_source().read()).terminal_evidence
+    finally:
+        await runtime.aclose()
+
+
+async def test_a_turn_left_unfinished_before_attaching_is_recorded_as_interrupted() -> None:
+    """Nothing here holds it as running, so the inferred ending is the truth; recovery keeps it."""
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume",
+        {
+            "thread": {"id": "ui-thread-1", "status": {"type": "idle"}},
+            "initialTurnsPage": {"data": [unfinished_turn_read_as_interrupted()]},
+        },
+    )
+    runtime = make_runtime(server)
+    try:
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
+
+        (outcome,) = (await runtime.live_source().read()).terminal_evidence
+        assert (outcome.native_turn_id, outcome.terminal, outcome.from_history) == (
+            "turn-1",
+            NativeTurnTerminal.INTERRUPTED,
+            True,
+        )
+    finally:
+        await runtime.aclose()
