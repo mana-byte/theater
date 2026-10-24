@@ -57,6 +57,8 @@ ENV_EVIDENCE_DIR = SUITE_ENV_EVIDENCE_DIR
 LOGICAL_MODELS = ("mock-a", "mock-b")
 CAPABILITIES = ("orchestration.v1", "state.follow.v1", "catalogs.v1")
 _BOOT_SECONDS = 90.0
+#: A loaded machine can miss the bridge's own start deadline once; a second miss is inconclusive.
+_BOOT_ATTEMPTS = 2
 _STOP_SECONDS = 20.0
 _PANE_CAPTURE_LINES = 200
 _JOB_SLICE_SECONDS = 3.0
@@ -242,6 +244,7 @@ class LiveRig:
         mock.start()
         env: dict[str, str] = {}
         client: FrontendClient | None = None
+        rig: LiveRig | None = None
         try:
             provisioned = harness.compat.provision(
                 ProvisionContext(
@@ -270,15 +273,13 @@ class LiveRig:
             shutil.copytree(_PROBE_SOURCE, theater_dir / "plugins" / PROBE_SERVER)
             if mutation := os.environ.get(SUITE_ENV_MUTATION):
                 mutations.install(mutation, session.harness, theater_dir / "plugins")
-            socket = theater_dir / "var" / "run" / "daemon.sock"
-            failure = _boot(env, socket)
-            if failure is not None:  # a loaded machine can miss the bridge's own start deadline
-                _stop(env, theater_dir)
-                failure = _boot(env, socket)
+            failure = _boot_with_retry(env, theater_dir, session.evidence_dir / label)
             if failure is not None:
                 inconclusive(failure)
             client = FrontendClient(
-                socket, client_id="compat-suite", required_capabilities=CAPABILITIES
+                theater_dir / "var" / "run" / "daemon.sock",
+                client_id="compat-suite",
+                required_capabilities=CAPABILITIES,
             )
             await client.connect()
             rig = cls(
@@ -292,6 +293,8 @@ class LiveRig:
             if client is not None:
                 with contextlib.suppress(Exception):
                     await client.close()
+            if rig is None:  # the stack never came up: keep what it said before it is removed
+                _copy_logs(root / "th", session.evidence_dir / label / "boot")
             _stop(env, root / "th")
             mock.stop()
 
@@ -349,7 +352,7 @@ class LiveRig:
         while time.monotonic() < deadline:
             participant = await self.participant(participant_id)
             if participant.status == "dead":
-                self._classify_exit(participant_id)
+                await self._classify_exit(participant_id)
             send = (await self.controls(participant_id)).actions.get("send")
             if send is not None and send.admissible:
                 return
@@ -386,14 +389,24 @@ class LiveRig:
         return self.harness.observer.screen_reading(await self.screen(participant_id))
 
     async def expect_screen(
-        self, participant_id: str, kind: ScreenKind, *, seconds: float = 20.0
+        self,
+        participant_id: str,
+        kind: ScreenKind,
+        *,
+        seconds: float = 20.0,
+        guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        """The plugin's own classifier must recognise the live screen as ``kind``."""
+        """The plugin's own classifier must recognise the live screen as ``kind``.
+
+        ``guard`` runs on every poll, so a turn that ended instead is named, not timed out.
+        """
         deadline = time.monotonic() + seconds
         while True:
             reading = await self.reading(participant_id)
             if reading.kind is kind:
                 return
+            if guard is not None:
+                await guard()
             if time.monotonic() > deadline:
                 shown = "\n".join((await self.screen(participant_id)).splitlines()[-8:])
                 violation(
@@ -402,9 +415,9 @@ class LiveRig:
                 )
             await asyncio.sleep(0.3)
 
-    def _classify_exit(self, participant_id: str) -> None:
-        if not self.healthy():
-            inconclusive("a suite component died before the CLI reached readiness")
+    async def _classify_exit(self, participant_id: str) -> None:
+        if (broken := await self.broken_component()) is not None:
+            inconclusive(f"{broken} stopped before the CLI reached readiness")
         violation(f"the stock CLI exited before readiness (participant {participant_id})")
 
     async def send(
@@ -499,26 +512,36 @@ class LiveRig:
 
     # -- health, evidence --------------------------------------------------------------------
 
-    def healthy(self) -> bool:
-        """Whether every suite-controlled component is still alive."""
+    async def broken_component(self) -> str | None:
+        """The first suite-controlled component not proven alive, or None when all are.
+
+        A component that cannot be inspected counts as broken, so a stock CLI is only ever blamed
+        for an exit that no suite component can explain.
+        """
         pidfile = self.theater_home / "var" / "run" / "daemon.pid"
         try:
             os.kill(int(pidfile.read_text().split()[0]), 0)
         except (OSError, ValueError, IndexError):
-            return False
-        return self.client.connected
+            return "the daemon"
+        if not self.client.connected:
+            return "the daemon connection"
+        if not self.mock.serving:
+            return "the mock model server"
+        if not _tmux_running(self.env):
+            return "the private tmux server"
+        try:
+            providers = (await self.client.providers.list()).value.items
+        except Exception:  # an unreadable registry is no evidence that a provider is up
+            return "the terminal provider registry"
+        if not any(provider.health == "online" for provider in providers):
+            return "the terminal provider"
+        return None
 
     def capture_evidence(self) -> None:
         """Copy logs and pane captures to the evidence directory; bounded and best effort."""
         target = self.session.evidence_dir / self.label
         target.mkdir(parents=True, exist_ok=True)
-        for source in (
-            self.theater_home / "var" / "logs" / "daemon" / "daemon.log",
-            self.theater_home / "regie" / "var" / "logs" / "daemon-start.log",
-            self.theater_home / "regie" / "var" / "logs" / "bridge.log",
-        ):
-            with contextlib.suppress(OSError):
-                shutil.copyfile(source, target / source.name)
+        _copy_logs(self.theater_home, target)
         for pane in _panes(self.env):
             capture = _tmux(
                 self.env, "capture-pane", "-p", "-t", pane, "-S", f"-{_PANE_CAPTURE_LINES}"
@@ -549,6 +572,31 @@ def _boot(env: Mapping[str, str], socket: Path) -> str | None:
     return None
 
 
+def _boot_with_retry(env: Mapping[str, str], theater_home: Path, evidence: Path) -> str | None:
+    """Boot the stack, again after a miss; an attempt that is cleaned up leaves its logs behind."""
+    failure: str | None = None
+    for attempt in range(1, _BOOT_ATTEMPTS + 1):
+        failure = _boot(env, theater_home / "var" / "run" / "daemon.sock")
+        if failure is None or attempt == _BOOT_ATTEMPTS:
+            break
+        _copy_logs(theater_home, evidence / f"boot-{attempt}")
+        _stop(env, theater_home)
+    return failure
+
+
+def _copy_logs(theater_home: Path, target: Path) -> None:
+    """Copy the daemon and bridge logs that exist; a stack that never started leaves none."""
+    for source in (
+        theater_home / "var" / "logs" / "daemon" / "daemon.log",
+        theater_home / "regie" / "var" / "logs" / "daemon-start.log",
+        theater_home / "regie" / "var" / "logs" / "bridge.log",
+    ):
+        if source.is_file():
+            target.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                shutil.copyfile(source, target / source.name)
+
+
 def _stop(env: Mapping[str, str], theater_home: Path) -> None:
     """Stop the bridge, the daemon and the private tmux server; every step is attempted."""
     if not env:
@@ -572,11 +620,21 @@ def _stop(env: Mapping[str, str], theater_home: Path) -> None:
         _tmux(env, "kill-server")
 
 
-def _tmux(env: Mapping[str, str], *args: str) -> str:
-    result = subprocess.run(
+def _tmux_run(env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         ["tmux", *args], env=dict(env), capture_output=True, text=True, timeout=10, check=False
     )
-    return result.stdout
+
+
+def _tmux(env: Mapping[str, str], *args: str) -> str:
+    return _tmux_run(env, *args).stdout
+
+
+def _tmux_running(env: Mapping[str, str]) -> bool:
+    try:
+        return _tmux_run(env, "list-sessions").returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _panes(env: Mapping[str, str]) -> list[str]:

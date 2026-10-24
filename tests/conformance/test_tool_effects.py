@@ -56,3 +56,10 @@ def test_a_freeform_tool_declares_nothing_to_compare_against() -> None:
     assert (
         _misfit(_request(("write", OPEN)), MockToolCall("apply_patch", "*** Begin Patch")) is None
     )
+
+
+def test_a_freeform_payload_for_a_tool_declaring_arguments_is_a_misfit() -> None:
+    found = _misfit(_request(("write", OPEN)), MockToolCall("write", "not an object"))
+
+    assert found is not None
+    assert "freeform payload" in found

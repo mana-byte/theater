@@ -79,8 +79,9 @@ async def expect_runs(live: LiveRig, participant: str, effect: Effect) -> None:
 
     job = await live.send(participant, prompt, guard=not_gated)
 
-    _check_fit(live, prompt, effect)
+    # A turn the CLI never took has no request to compare: its own error comes first.
     assert job.state == "done", job.error
+    _check_fit(live, prompt, effect)
     assert final in str(job.result)
     assert effect.happened(), "the tool call finished without leaving its effect"
     assert any(request.last_tool_result for request in live.mock.requests), (
@@ -92,9 +93,18 @@ async def expect_gated(live: LiveRig, participant: str, effect: Effect) -> None:
     prompt = "Use the tool"
     live.queue(effect.reply)
     live.queue(MockReply("the gated call must not reach this reply"))
-    await live.client.controls.send(participant, prompt, idempotency_key=uuid.uuid4().hex)
+    accepted = (
+        await live.client.controls.send(participant, prompt, idempotency_key=uuid.uuid4().hex)
+    ).value
+    assert accepted.job_handle is not None
+    handle = accepted.job_handle
 
-    await live.expect_screen(participant, ScreenKind.APPROVAL)
+    async def still_waiting() -> None:
+        job = (await live.client.jobs.get(handle)).value
+        if job.state != "running":
+            violation(f"the turn ended ({job.state}) before its tool met an approval: {job.error}")
+
+    await live.expect_screen(participant, ScreenKind.APPROVAL, guard=still_waiting)
 
     _check_fit(live, prompt, effect)
     await asyncio.sleep(GATE_SETTLE_SECONDS)
@@ -118,8 +128,10 @@ def _misfit(request: RecordedRequest, call: MockToolCall) -> str | None:
     if call.name not in request.tools:
         return "the model was not offered it"
     shape = request.tool_shapes.get(call.name)
-    if shape is None or isinstance(call.arguments, str):
+    if shape is None:
         return None  # a freeform (grammar) tool declares no arguments to compare against
+    if isinstance(call.arguments, str):
+        return f"a freeform payload was scripted for a tool that declares {shape.properties}"
     given = set(call.arguments)
     unknown = sorted(given - set(shape.properties)) if shape.closed else []
     missing = sorted(set(shape.required) - given)

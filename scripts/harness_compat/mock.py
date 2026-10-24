@@ -505,6 +505,10 @@ class MockServer:
             self._thread.join(timeout=5)
         self._httpd = self._thread = None
 
+    @property
+    def serving(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def __enter__(self) -> MockServer:
         self.start()
         return self

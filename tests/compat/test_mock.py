@@ -446,6 +446,16 @@ def test_every_anthropic_message_gets_its_own_id_so_answers_never_merge(tmp_path
     assert not ids & set(streamed)
 
 
+def test_a_mock_serves_only_between_start_and_stop(tmp_path: Path) -> None:
+    server = MockServer(tmp_path / "requests.jsonl")
+    assert not server.serving
+
+    with server:
+        assert server.serving
+
+    assert not server.serving
+
+
 def test_a_held_stream_withholds_its_tail_until_released(tmp_path: Path) -> None:
     with MockServer(tmp_path / "requests.jsonl") as server:
         hold = server.hold()
