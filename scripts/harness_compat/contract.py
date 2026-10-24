@@ -90,6 +90,10 @@ class Result:
     #: A non-authoritative second opinion (the live conformance suite during its shadow period):
     #: recorded and summarised next to the verdict, never part of it.
     shadow_checks: tuple[Check, ...] = ()
+    #: Every obligation the live suite derived and accounted for in this run (empty otherwise).
+    inventory: tuple[str, ...] = ()
+    #: The plugin tree with its verified gate literals normalised: the inventory baseline's key.
+    plugin_digest: str = ""
 
     def to_evidence(self) -> dict[str, Any]:
         """The deterministic JSON document committed as the release's evidence file."""
@@ -102,6 +106,9 @@ class Result:
         }
         if self.shadow_checks:
             document["shadow"] = _checks_document(self.shadow_checks)
+        if self.inventory:
+            document["inventory"] = sorted(self.inventory)
+            document["plugin_digest"] = self.plugin_digest
         return document
 
 
@@ -235,9 +242,11 @@ class Sandbox:
 class Adapter(Protocol):
     """One harness. Streams implement this in ``adapters/<name>.py`` and export ``ADAPTER``.
 
-    Optional attributes, read with their defaults: ``plugin`` and ``artifact_roots`` (inputs.py),
-    and ``shadow_suite``: run the live conformance suite after a conclusive verdict and record it
-    as a non-authoritative shadow result (default False).
+    Optional attributes, read with their defaults: ``plugin`` and ``artifact_roots`` (inputs.py);
+    ``gate_literals``, ``((repo-relative path, (assignment names, ...)), ...)``, the verified gate
+    literals a bump rewrites, so the obligation baseline survives an ordinary bump; and
+    ``shadow_suite``: run the live conformance suite after a conclusive verdict and record it as a
+    non-authoritative shadow result (default False).
     """
 
     name: str

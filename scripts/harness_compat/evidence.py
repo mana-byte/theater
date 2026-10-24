@@ -19,6 +19,7 @@ __all__ = [
     "cache_artifacts_dir",
     "cache_root",
     "drop_evidence",
+    "prior_inventories",
     "reusable_evidence",
     "write_evidence",
 ]
@@ -135,6 +136,25 @@ def reusable_evidence(
                 ):
                     versions[path.stem] = document
     return versions
+
+
+def prior_inventories(
+    root: Path, harness: str, plugin_digest: str, *, exclude: str = ""
+) -> dict[str, tuple[bool, set[str]]]:
+    """Each cached green release's obligations, flagged when its plugin digest matches."""
+    found: dict[str, tuple[bool, set[str]]] = {}
+    directory = cache_root(root) / harness
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
+        if not is_stable(path.stem) or path.stem == exclude:
+            continue
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        inventory = document.get("inventory") if isinstance(document, dict) else None
+        if isinstance(document, dict) and document.get("verdict") == "green" and inventory:
+            found[path.stem] = (document.get("plugin_digest") == plugin_digest, set(inventory))
+    return found
 
 
 def write_evidence(

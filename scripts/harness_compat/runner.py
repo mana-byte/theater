@@ -28,11 +28,12 @@ from .evidence import (
     adapter_digest,
     cache_artifacts_dir,
     drop_evidence,
+    prior_inventories,
     reusable_evidence,
     write_evidence,
 )
 from .framework import check_bump, run_pytest
-from .inputs import adapter_metadata
+from .inputs import adapter_metadata, plugin_digest
 from .route_facts import RouteFacts
 from .sandbox import make_sandbox
 from .select import newest_in_range, plan_bump, select_candidates
@@ -248,6 +249,30 @@ def classify_routes(
     )
 
 
+def _check_inventory(adapter: Adapter, root: Path, result: Result) -> Result:
+    """Obligations may only disappear when the plugin changed; at the same plugin it is red."""
+    plugin = plugin_digest(root, adapter.name, adapter)
+    result = replace(result, plugin_digest=plugin)
+    current = set(result.inventory)
+    dropped: set[str] = set()
+    changed: set[str] = set()
+    for same_plugin, prior in prior_inventories(
+        root, adapter.name, plugin, exclude=result.version
+    ).values():
+        (dropped if same_plugin else changed).update(prior - current)
+    if dropped:
+        detail = f"obligations dropped at an unchanged plugin: {', '.join(sorted(dropped))}"
+        verdict = "red" if result.verdict == "green" else result.verdict
+        return replace(
+            result, verdict=verdict, checks=(*result.checks, Check("inventory", "fail", detail))
+        )
+    if changed:
+        gone = ", ".join(sorted(changed))
+        detail = f"obligations removed since the last green (the plugin changed): {gone}"
+        return replace(result, checks=(*result.checks, Check("inventory", "skip", detail)))
+    return result
+
+
 def _qualify(
     adapter: Adapter, root: Path, version: str, *, bump: bool
 ) -> tuple[Result, list[dict[str, Any]]]:
@@ -304,6 +329,8 @@ def _qualify(
             else:
                 verdict = verdict_from_checks(relevant)
             result = replace(observed, verdict=verdict)
+            if result.inventory:
+                result = _check_inventory(adapter, root, result)
         except InstallFailed as exc:
             result = Result(
                 adapter.name, version, "inconclusive", (Check("install", "error", str(exc)),)

@@ -53,6 +53,8 @@ class SuiteReport:
     checks: tuple[Check, ...]
     #: Reconciliation failures: our machinery lost an obligation, not the CLI misbehaving.
     problems: tuple[str, ...] = ()
+    #: Every obligation id the manifest promised, for the cross-run baseline.
+    inventory: tuple[str, ...] = ()
 
 
 def installed_version(binary: Path) -> str:
@@ -150,7 +152,8 @@ def reconcile(
         for extra in sorted(set(results) - {entry["id"] for entry in required["obligations"]}):
             problems.append(f"inventory.json holds {extra}, which required.json never promised")
     checks.extend(_fault(problems))
-    return SuiteReport(tuple(checks), tuple(problems))
+    promised = tuple(entry["id"] for entry in required["obligations"])
+    return SuiteReport(tuple(checks), tuple(problems), promised)
 
 
 def _document_problems(

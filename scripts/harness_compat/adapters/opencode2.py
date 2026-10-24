@@ -54,6 +54,12 @@ class OpenCodeV2Adapter:
     #: Model-free: the proof never asks the mock for a completion.
     expected_routes: frozenset[Route] = frozenset()
     ignorable_routes: frozenset[Route] = frozenset()
+    gate_literals = (
+        (
+            "theater/harness/builtin/plugins/opencode/runtime_plan.py",
+            ("OPENCODE_TUI_MAX_VERSION", "OPENCODE_SERVER_V2_MAX_VERSION"),
+        ),
+    )
     shadow_suite = False
     expected_skips: Mapping[str, str] = MappingProxyType({})
 

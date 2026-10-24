@@ -37,6 +37,9 @@ class PiAdapter:
     expected_skips: Mapping[str, str] = field(default_factory=dict)
     expected_routes: frozenset[tuple[str, str]] = frozenset()
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
+    gate_literals = (
+        ("theater/harness/builtin/plugins/pi/runtime_constants.py", ("PI_FRONTEND_QUALIFIED_MAX",)),
+    )
     shadow_suite = True
 
     def discover(self) -> list[str]:

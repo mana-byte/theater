@@ -76,6 +76,9 @@ class ClaudeAdapter:
         {("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens"), ("GET", "/v1/models")}
     )
     ignorable_routes: frozenset[tuple[str, str]] = frozenset()
+    gate_literals = (
+        ("theater/harness/builtin/plugins/claude/compatibility.py", ("_QUALIFIED_MAX",)),
+    )
     shadow_suite = False
 
     def discover(self) -> list[str]:
