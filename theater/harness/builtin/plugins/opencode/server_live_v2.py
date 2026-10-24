@@ -47,10 +47,11 @@ class OpenCodeV2LiveSource(Source):
     def current_execution_state(self) -> RuntimeExecutionState:
         return self._state
 
-    @property
-    def admission_unproven(self) -> bool:
-        """Whether an admitted prompt has been neither seen running nor proven finished."""
-        return self._admitted_at is not None
+    def admission_grace_left(self) -> float:
+        """Seconds an admitted prompt, not yet seen running or finished, is presumed running."""
+        if self._admitted_at is None:
+            return 0.0
+        return max(0.0, _ADMISSION_GRACE_SECONDS - (time.monotonic() - self._admitted_at))
 
     def adopt(self, session_id: str, state: RuntimeExecutionState) -> None:
         self._session_id = session_id
@@ -64,7 +65,7 @@ class OpenCodeV2LiveSource(Source):
         self._set(RuntimeExecutionState.ACTIVE, self._health)
 
     def observe(self, active: Mapping[str, object] | None, idle_at: int | None = None) -> None:
-        """One `session.active` read, with the session's idle stamp when it was read too.
+        """One `session.active` read, taken after the session's idle stamp when that was read.
 
         None is a failed read.
         """
@@ -94,13 +95,10 @@ class OpenCodeV2LiveSource(Source):
         The server stamps idle only once its loop has drained, so that stamp also covers any
         work queued behind the prompt; without it the grace is all that bounds the wait.
         """
-        admitted = self._admitted_at
-        if admitted is None:
-            return False
         created = self._admitted_created
         if idle_at is not None and created is not None and idle_at > created:
             return False
-        return time.monotonic() - admitted < _ADMISSION_GRACE_SECONDS
+        return self.admission_grace_left() > 0
 
     def disconnected(self) -> None:
         self._set(RuntimeExecutionState.UNKNOWN, ConnectionHealth.DISCONNECTED)

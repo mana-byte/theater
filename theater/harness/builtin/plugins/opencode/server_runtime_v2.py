@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Mapping
 from pathlib import Path
 
 from theater import paths
@@ -47,6 +48,8 @@ from .server_plan import SERVER_SECRET_ENV
 
 _PROTOCOL = "opencode-server-http-v2"
 _POLL_SECONDS = 0.5
+#: One read of the server, however many requests it takes: callers wait on it holding locks.
+_READ_SECONDS = 5.0
 
 
 class OpenCodeServerV2Runtime(HarnessRuntime):
@@ -65,6 +68,8 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
         self._poll_task: asyncio.Task[None] | None = None
         #: Serializes reads so a late answer never lands after a newer one.
         self._poll_lock = asyncio.Lock()
+        #: A read that began after a caller asked is as fresh as one of its own.
+        self._reads_begun = 0
         self._closed = False
 
     async def open_session(
@@ -146,7 +151,11 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
 
     async def snapshot(self) -> RuntimeSnapshot:
         self._start_polling()
-        await self._refresh()
+        if (
+            self._source.current_execution_state() is not RuntimeExecutionState.IDLE
+            or self._source.connection_health is not ConnectionHealth.CONNECTED
+        ):
+            await self._refresh()
         health = self._source.connection_health
         return RuntimeSnapshot(
             participant_id=self.context.participant_id,
@@ -177,6 +186,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
                 error_code="not_ready",
                 error="the OpenCode server runtime has no open session",
             )
+        # Never the cache: a turn begun since the last poll must not be queued behind.
         await self._refresh()
         state = self._source.current_execution_state()
         if state is RuntimeExecutionState.ACTIVE:
@@ -276,30 +286,42 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
         return version
 
     async def _refresh(self) -> None:
-        """Control decisions rest on the server's word now, not on a poll that may predate it."""
-        if self._session_id is not None and (
-            self._source.current_execution_state() is not RuntimeExecutionState.IDLE
-            or self._source.connection_health is not ConnectionHealth.CONNECTED
-        ):
-            await self._poll_once()
+        """Control decisions rest on a read that began after they asked, not on a poll before."""
+        await self._poll_once(newer_than=self._reads_begun)
 
-    async def _poll_once(self) -> None:
+    async def _poll_once(self, *, newer_than: int | None = None) -> None:
+        """One read of the server, unless one began after `newer_than` (a `_reads_begun` count)."""
         async with self._poll_lock:
-            try:
-                active = await self._client.active()
-                idle_at = None
-                # `active` alone cannot tell a prompt that has not started from one that already
-                # ended between polls; the session's own idle stamp can.
-                if (
-                    self._session_id is not None
-                    and self._session_id not in active
-                    and self._source.admission_unproven
-                ):
-                    idle_at = server_time(await self._client.read_session(self._session_id), "idle")
-            except Exception:
-                self._source.observe(None)
+            if self._closed or self._session_id is None:
                 return
-            self._source.observe(active, idle_at)
+            if newer_than is not None and self._reads_begun > newer_than:
+                return
+            self._reads_begun += 1
+            try:
+                active, idle_at = await self._read_server(self._session_id)
+            except Exception:
+                active, idle_at = None, None
+            if not self._closed:
+                self._source.observe(active, idle_at)
+
+    async def _read_server(self, session_id: str) -> tuple[Mapping[str, object], int | None]:
+        """`session.active`, plus the session's idle stamp when a prompt may have ended unseen."""
+        loop = asyncio.get_running_loop()
+        until = loop.time() + _READ_SECONDS
+        async with asyncio.timeout_at(until):
+            active = await self._client.active()
+        grace = self._source.admission_grace_left()
+        if session_id in active or grace <= 0:
+            return active, None
+        # `active` cannot tell a prompt that has not started from one that ended between polls;
+        # the idle stamp can, but only a read after it shows that nothing began since. A proof
+        # that outlasts the grace is worth nothing, so a slow or failed one is simply dropped.
+        try:
+            async with asyncio.timeout_at(min(until, loop.time() + grace)):
+                idle_at = server_time(await self._client.read_session(session_id), "idle")
+                return await self._client.active(), idle_at
+        except (OpenCodeHttpError, TimeoutError):
+            return active, None
 
     def _start_polling(self) -> None:
         if self._poll_task is not None or self._closed or self._session_id is None:
