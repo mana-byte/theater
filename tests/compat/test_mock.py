@@ -330,6 +330,21 @@ def test_a_request_offering_no_tools_is_background_work_and_never_consumes_the_s
     assert MOCK_REPLY in title and "scripted" not in title
 
 
+def test_every_anthropic_message_gets_its_own_id_so_answers_never_merge(tmp_path: Path) -> None:
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        url = f"{server.base_urls['anthropic']}/v1/messages"
+        ids = {json.loads(_request(url, {"stream": False})[1])["id"] for _ in range(3)}
+        streamed = [
+            event["message"]["id"]
+            for _ in range(2)
+            for event in _sse_data(_request(url, {"stream": True})[1])
+            if event.get("type") == "message_start"
+        ]
+
+    assert len(ids) == 3 and len(set(streamed)) == 2
+    assert not ids & set(streamed)
+
+
 def test_a_held_stream_withholds_its_tail_until_released(tmp_path: Path) -> None:
     with MockServer(tmp_path / "requests.jsonl") as server:
         hold = server.hold()

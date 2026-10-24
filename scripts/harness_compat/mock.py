@@ -6,6 +6,7 @@ import json
 import select
 import socket
 import threading
+import uuid
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -77,7 +78,7 @@ def _anthropic_content(reply: MockReply) -> list[dict[str, Any]]:
 
 def _anthropic_message(reply: MockReply, model: str) -> dict[str, Any]:
     return {
-        "id": "msg_mock",
+        "id": "msg_" + uuid.uuid4().hex,
         "type": "message",
         "role": "assistant",
         "model": model,
