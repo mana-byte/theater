@@ -132,6 +132,22 @@ REGIE_STARTUP_REVEAL_MAX_SECONDS = 4.0
 #: Skip startup animation when an unusually large tree would repaint too much.
 REGIE_STARTUP_REVEAL_MAX_LEAVES = 100
 
+#: A row-wide sweep announces a status change: its length, frame period, and the widths of the
+#: reversed leading block and the bold wake behind it. Foreground styles only: an ANSI theme
+#: cannot blend a background tint, it would paint the whole row solid.
+REGIE_WIPE_SECONDS = 0.5
+REGIE_WIPE_INTERVAL_SECONDS = 0.035
+REGIE_WIPE_BAND_CELLS = 3
+REGIE_WIPE_WAKE_CELLS = 6
+
+#: A row that needs the human gets a bar in its gutter; only the newest few breathe, so a crowd
+#: of waiting rows is steady instead of a flicker.
+REGIE_ATTENTION_PULSE_LIMIT = 3
+REGIE_ATTENTION_PULSE_INTERVAL = 0.4
+
+#: Hollow rotating arc: an agent that is blocked on a peer, not computing.
+REGIE_WAITING_FRAMES = "◜◠◝◞◡◟"
+
 #: Hidden Textual binding targeted by the tmux return command.
 REGIE_RETURN_SIGNAL_TEXTUAL = "ctrl+g"
 #: tmux spelling for the same control key.

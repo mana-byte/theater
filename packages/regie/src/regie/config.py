@@ -24,7 +24,7 @@ _FLOATS = frozenset(
     }
 )
 _POSITIVE_INTS = frozenset({"bus_batch", "cwd_segments", "trajectory_page_size"})
-_BOOLEANS = frozenset({"bus_visible", "startup_reveal", "usage_visible"})
+_BOOLEANS = frozenset({"bus_visible", "reduce_motion", "startup_reveal", "usage_visible"})
 
 
 class SettingsError(ValueError):

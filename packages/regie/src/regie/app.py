@@ -300,6 +300,7 @@ class RegieApp(
                 yield ParticipantTree(
                     id="participant-tree",
                     startup_reveal=self.settings.startup_reveal,
+                    motion=not self.settings.reduce_motion,
                 )
                 yield UsageBreakdownPanel(id="usage-breakdown")
                 yield AmbienceBand(id="ambience-band")

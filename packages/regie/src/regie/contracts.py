@@ -23,6 +23,8 @@ class RegieSettings:
     bus_visible: bool = False
     usage_visible: bool = False
     startup_reveal: bool = True
+    #: Status changes, sends and waits are drawn without motion: instant states, steady tints.
+    reduce_motion: bool = False
     #: What plays under the tree: a shipped or plugin ambience, see regie.ambience.registry.
     tree_ambience: str = "footer"
     #: When it plays: "away" while you work in a staged terminal or trajectory, "tree" while

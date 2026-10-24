@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Collection, Mapping
 from typing import Literal, cast
 
@@ -16,12 +17,19 @@ from textual.widgets import Label
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
 from regie.motions.routes import LeafOverlay
+from regie.motions.wipe import LeafWipeController, status_wipe_color
 from regie.render.layout import Key, RenderedLine, is_root_prefix, render_tree
 from regie.render.routing import RailArms, heavy_overlays, section_arms
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout
 from regie.tree_nodes import RawRenderNode, RenderNode, TreeNode
-from regie.ui_constants import REGIE_EMPTY_TREE_KEY, REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
+from regie.ui_constants import (
+    REGIE_ATTENTION_PULSE_INTERVAL,
+    REGIE_ATTENTION_PULSE_LIMIT,
+    REGIE_EMPTY_TREE_KEY,
+    REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
+    REGIE_WIPE_INTERVAL_SECONDS,
+)
 from regie.widgets.chrome import EmptyTreeState
 from regie.widgets.leaf import AgentLeaf
 from regie.widgets.separator import SeparatorRow
@@ -71,7 +79,10 @@ class ParticipantTree(VerticalScroll):
     }
     """
 
-    def __init__(self, *args, startup_reveal: bool = True, **kwargs) -> None:
+    #: Breathing steps of the attention bar (dim, steady, bold), in order.
+    _ATTENTION_BREATH = (-1, 0, 1, 0)
+
+    def __init__(self, *args, startup_reveal: bool = True, motion: bool = True, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._lines_data: list[RenderedLine] = []
         self._key_widgets: dict[Key, Widget] = {}
@@ -95,6 +106,13 @@ class ParticipantTree(VerticalScroll):
         self._leaf_retirement = LeafRetirementController(enabled=startup_reveal)
         self._leaf_reveal_timer: Timer | None = None
         self._leaf_retirement_timer: Timer | None = None
+        self._motion = motion
+        self._wipes = LeafWipeController(enabled=motion)
+        self._wipe_timer: Timer | None = None
+        self._statuses: dict[Key, str] = {}
+        self._attention_since: dict[Key, float] = {}
+        self._attention_phase = 0
+        self._attention_timer: Timer | None = None
 
     @property
     def selected_id(self) -> str | None:
@@ -168,6 +186,7 @@ class ParticipantTree(VerticalScroll):
         self._add_stage_reasons(tree, reasons)
         lines = render_tree(tree, unmanaged=unmanaged, cwd_segments=cwd_segments)
         self._sync_retirement(projection)
+        self._observe_statuses(projection)
         self._participant_detail = "description" if participant_detail == "description" else "cwd"
         self._cwd_segments = cwd_segments
         self._lines_data = lines
@@ -195,6 +214,7 @@ class ParticipantTree(VerticalScroll):
             if participant.parent_id
         }
         self._sync_reveal()
+        self._sync_attention()
         return self.selected_participant_id
 
     def set_usage_costs(self, costs: Mapping[str, int]) -> None:
@@ -572,12 +592,75 @@ class ParticipantTree(VerticalScroll):
             self._leaf_retirement_timer.stop()
             self._leaf_retirement_timer = None
 
+    def _observe_statuses(self, projection: StateProjection) -> None:
+        """Sweep a row whose status changed; a row seen for the first time is the reveal's."""
+        current = {
+            ("p", participant.participant_id): participant.status
+            for participant in projection.participants.values()
+        }
+        for key, status in current.items():
+            previous = self._statuses.get(key)
+            if previous is None or previous == status:
+                continue
+            if (color := status_wipe_color(previous, status)) is not None:
+                self._wipes.start(key, color)
+        self._wipes.cancel(set(self._statuses) - set(current))
+        now = time.monotonic()
+        self._attention_since = {
+            key: self._attention_since.get(key, now)
+            for key, status in current.items()
+            if status == "awaiting_input"
+        }
+        self._statuses = current
+        if self._wipes.active and self._wipe_timer is None:
+            self._wipe_timer = self.set_interval(REGIE_WIPE_INTERVAL_SECONDS, self._tick_wipe)
+
+    def _tick_wipe(self) -> None:
+        frame = self._wipes.tick()
+        for key, wipe in frame.running.items():
+            if isinstance(widget := self._key_widgets.get(key), AgentLeaf):
+                widget.set_wipe(wipe)
+        for key in frame.finished:
+            if isinstance(widget := self._key_widgets.get(key), AgentLeaf):
+                widget.set_wipe(None)
+        if not frame.active and self._wipe_timer is not None:
+            self._wipe_timer.stop()
+            self._wipe_timer = None
+
+    def _sync_attention(self) -> None:
+        """Breathe the newest few waiting rows; the rest hold the steady tint."""
+        if not self._attention_since or not self._motion:
+            self._stop_attention()
+            return
+        if self._attention_timer is None:
+            self._attention_timer = self.set_interval(
+                REGIE_ATTENTION_PULSE_INTERVAL, self._tick_attention
+            )
+
+    def _tick_attention(self) -> None:
+        self._attention_phase = (self._attention_phase + 1) % len(self._ATTENTION_BREATH)
+        newest = sorted(self._attention_since, key=self._attention_since.__getitem__, reverse=True)
+        breathing = set(newest[:REGIE_ATTENTION_PULSE_LIMIT])
+        level = self._ATTENTION_BREATH[self._attention_phase]
+        for key in self._attention_since:
+            if isinstance(widget := self._key_widgets.get(key), AgentLeaf):
+                widget.set_attention_level(level if key in breathing else 0)
+
+    def _stop_attention(self) -> None:
+        if self._attention_timer is not None:
+            self._attention_timer.stop()
+            self._attention_timer = None
+
     def _remove_widget(self, widget: Widget) -> None:
         widget.remove()
 
     def on_unmount(self) -> None:
         self._stop_reveal()
         self._stop_retirement()
+        self._stop_attention()
+        if self._wipe_timer is not None:
+            self._wipe_timer.stop()
+            self._wipe_timer = None
         self._leaf_retirement.clear()
 
 

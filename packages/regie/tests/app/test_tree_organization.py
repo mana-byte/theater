@@ -273,6 +273,8 @@ async def test_x_on_a_folded_separator_kills_the_agents_it_hides(tmp_path: Path)
         (("idle", "idle"), None),
         (("working", "idle"), "spinner"),
         (("working", "awaiting_input"), "!"),
+        (("working", "dead"), "✗"),
+        (("dead", "awaiting_input"), "!"),
     ],
 )
 def test_a_folded_heading_shows_the_strongest_status_it_hides(statuses, glyph) -> None:
@@ -298,7 +300,7 @@ def test_a_folded_heading_shows_the_strongest_status_it_hides(statuses, glyph) -
             "Backend", "├── ", count=2, collapsed=collapsed, status=node.get("folded_status")
         ).plain.splitlines()[1]
 
-    marker = {None: "▸", "spinner": spinner_frame(0), "!": "!"}[glyph]  # replaces the chevron
+    marker = {None: "▸", "spinner": spinner_frame(0), "!": "!", "✗": "✗"}[glyph]  # replaces the chevron
     assert heading(collapsed=True) == f"├── {marker} BACKEND · 2"
     assert heading(collapsed=False) == "├── ▾ BACKEND · 2"  # open: the agents show themselves
 

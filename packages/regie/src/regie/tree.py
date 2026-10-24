@@ -105,11 +105,11 @@ def _agents(node: TreeNode) -> list[TreeNode]:
 
 
 #: The status a folded heading shows for its hidden agents, strongest first.
-_FOLD_STATUSES = ("awaiting_input", "working")
+_FOLD_STATUSES = ("awaiting_input", "dead", "working")
 
 
 def _fold_status(agents: list[TreeNode]) -> str | None:
-    """Awaiting input outranks working; an all-idle fold shows nothing."""
+    """Needing a human outranks a dead agent, which outranks working; an all-idle fold is blank."""
     statuses = {agent.get("status") for agent in agents}
     return next((status for status in _FOLD_STATUSES if status in statuses), None)
 

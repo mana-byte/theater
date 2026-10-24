@@ -528,6 +528,7 @@ def build_app(
     usage_visible: bool = True,
     tree_layout_path: Path | None = None,
     projection: StateProjection | None = None,
+    reduce_motion: bool = False,
 ) -> tuple[RegieApp, FakeClient, FakePresentation]:
     """Most UI tests exercise the footer, so they opt into showing it."""
     client = FakeClient()
@@ -539,6 +540,7 @@ def build_app(
             bus_interval=60,
             startup_reveal=False,
             usage_visible=usage_visible,
+            reduce_motion=reduce_motion,
         ),
         presentation=presentation,
         tree_layout_path=tree_layout_path,

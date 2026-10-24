@@ -13,7 +13,14 @@ from regie.motions.footer import CountingValue
 from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.motions.routes import LeafOverlay
 from regie.motions.spinner import advance_spinner_frame
-from regie.render.glyphs import node_label, shown_name, visible_name_span, with_stage_marker
+from regie.motions.wipe import Wipe, apply_wipe
+from regie.render.glyphs import (
+    node_label,
+    shown_name,
+    visible_name_span,
+    with_gutter_bar,
+    with_stage_marker,
+)
 from regie.render.layout import Key, shorten_path
 from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.ui_constants import (
@@ -26,6 +33,9 @@ from regie.widgets.animation_clock import AnimationSubscription, animation_clock
 from regie.widgets.renameable import RenameableRow
 
 type StageMarker = Literal["tmux", "trajectory"]
+
+#: The bar of a row that needs the human, by breathing step (-1, 0, 1): dim, steady, bold.
+_ATTENTION_BAR = {-1: "$warning dim", 0: "$warning", 1: "bold $warning"}
 type LeafNode = RenderNode | dict
 
 
@@ -57,7 +67,8 @@ class AgentLeaf(RenameableRow):
         background: $accent 10%;
     }
     AgentLeaf.tree-staged,
-    AgentLeaf.tree-trajectory-staged {
+    AgentLeaf.tree-trajectory-staged,
+    AgentLeaf.tree-attention {
         padding: 0 2 0 0;
     }
     AgentLeaf.tree-cursor {
@@ -97,6 +108,8 @@ class AgentLeaf(RenameableRow):
         self._cursor_selected = False
         self._stage_marker: StageMarker | None = None
         self._overlay: LeafOverlay | None = None
+        self._wipe: Wipe | None = None
+        self._attention_level = 0
         self._cost = CountingValue(_format_leaf_cost)
         self._cost.set_target(_microcents(node), animate=False)
         self._cost_sub: AnimationSubscription | None = None
@@ -105,6 +118,7 @@ class AgentLeaf(RenameableRow):
         # Textual's is_mounted is still False inside on_mount, where timers already work.
         self._mounted = False
         self.tooltip = self._tooltip_text()
+        self._sync_attention()
         self.update(self._render_label(), layout=False)
 
     @property
@@ -138,7 +152,37 @@ class AgentLeaf(RenameableRow):
             cost=self._shown_cost(),
             width=self._label_width(),
         )
+        if self._wipe is not None:
+            content = apply_wipe(content, self._wipe, width=self._label_width())
+        if self._stage_marker is None and self.needs_attention:
+            return with_gutter_bar(content, _ATTENTION_BAR[self._attention_level])
         return with_stage_marker(content, self._stage_marker)
+
+    def set_wipe(self, wipe: Wipe | None) -> None:
+        """Draw one frame of the sweep that announces a change on this row, or end it."""
+        if wipe != self._wipe:
+            self._wipe = wipe
+            self.update(self._render_label(), layout=False)
+
+    @property
+    def needs_attention(self) -> bool:
+        return self._node.get("status") == "awaiting_input"
+
+    def _sync_attention(self) -> None:
+        self.set_class(self.needs_attention, "tree-attention")
+        if not self.needs_attention:
+            self._attention_level = 0
+
+    def set_attention_level(self, level: int) -> None:
+        """Breathe the attention bar: -1 dim, 0 steady, 1 bold."""
+        if level != self._attention_level:
+            self._attention_level = level
+            if self.needs_attention:
+                self.update(self._render_label(), layout=False)
+
+    def _gutter(self) -> int:
+        """Columns a bar takes from the label: the stage bar, or the bar of a waiting row."""
+        return 2 if self._stage_marker is not None or self.needs_attention else 0
 
     def set_highlight(self, highlight: LeafOverlay | None) -> None:
         """Heavy rails leading to this agent from a hovered or selected separator above.
@@ -173,13 +217,12 @@ class AgentLeaf(RenameableRow):
     def _detail_width(self) -> int | None:
         if not self.is_mounted or self.content_size.width <= 0:
             return None
-        gutter = 2 if self._stage_marker is not None else 0
-        return max(0, self.content_size.width - cell_len(self._cont_prefix) - gutter)
+        return max(0, self.content_size.width - cell_len(self._cont_prefix) - self._gutter())
 
     def _label_width(self) -> int | None:
         if not self.is_mounted or self.content_size.width <= 0:
             return None
-        return max(0, self.content_size.width - (2 if self._stage_marker is not None else 0))
+        return max(0, self.content_size.width - self._gutter())
 
     def _should_marquee(self) -> bool:
         width = self._detail_width()
@@ -389,6 +432,7 @@ class AgentLeaf(RenameableRow):
             self._retarget_cost()
         self.tooltip = self._tooltip_text()
         label = self._render_label()
+        self._sync_attention()
         if _content_changed(previous_label, label):
             self.update(label, layout=False)
         if node.get("status") == "working":
@@ -405,9 +449,8 @@ class AgentLeaf(RenameableRow):
         span = visible_name_span(self._node, self._prefix, reveal=self._reveal)
         if span is None:
             return None
-        if self._stage_marker is not None:
-            span = (span[0] + 2, span[1] + 2)
-        return span
+        gutter = self._gutter()
+        return (span[0] + gutter, span[1] + gutter)
 
     def _rename_value(self) -> str:
         current = self._node.get("name")
