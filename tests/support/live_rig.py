@@ -354,9 +354,10 @@ class LiveRig:
             if participant.status == "dead":
                 await self._classify_exit(participant_id)
             send = (await self.controls(participant_id)).actions.get("send")
-            if send is not None and send.admissible:
+            if send is not None and send.admissible and participant.presence == "absent":
                 return
             reason = "no send action" if send is None else f"{send.reason}: {send.detail}"
+            reason += f"; presence {participant.presence}"
             await asyncio.sleep(0.25)
         inconclusive(f"send never became admissible within {seconds:g}s ({reason})")
 
@@ -451,6 +452,9 @@ class LiveRig:
                 0
             ]
             if job.state != "running":
+                if job.state == "crashed" and job.error and job.error.code == "human_present":
+                    # Nobody is attached to the rig: this is a presence flap, not the CLI's fault.
+                    inconclusive(f"job {handle} was refused as human_present on an unattended rig")
                 return job
             if guard is not None:
                 await guard()

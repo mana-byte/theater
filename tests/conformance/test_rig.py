@@ -14,14 +14,25 @@ from tests.support import live_rig
 from tests.support.live_rig import LiveRig, LiveSession
 
 
+class _Jobs:
+    """Reports whatever job state a test sets, as the SDK's await would."""
+
+    def __init__(self) -> None:
+        self.job = SimpleNamespace(state="running", error=None)
+
+    async def await_(self, handles: list[str], *, wait_seconds: float) -> Any:
+        return SimpleNamespace(value=SimpleNamespace(jobs=[self.job]))
+
+
 class _Client:
-    """Just what the health check reads: a connection flag and the provider registry."""
+    """Just what the rig reads: a connection flag, the provider registry and job states."""
 
     def __init__(self, *healths: str, connected: bool = True, unreadable: bool = False) -> None:
         self.connected = connected
         self._healths = healths
         self._unreadable = unreadable
         self.providers = self
+        self.jobs = _Jobs()
 
     async def list(self) -> Any:
         if self._unreadable:
@@ -156,3 +167,42 @@ def test_two_missed_boots_report_the_last_reason_and_leave_cleanup_to_the_caller
 
     assert [path.name for path in evidence.iterdir()] == ["boot-1"]
     assert stopped == [home]
+
+
+async def test_a_presence_refusal_on_an_unattended_rig_is_inconclusive_not_a_cli_failure(
+    tmp_path: Path,
+) -> None:
+    client = _Client("online")
+    rig, mock = _rig(tmp_path, client)
+    client.jobs.job = SimpleNamespace(state="crashed", error=SimpleNamespace(code="human_present"))
+    try:
+        with pytest.raises(pytest.skip.Exception, match="human_present on an unattended rig"):
+            await rig.job("j1")
+        client.jobs.job = SimpleNamespace(state="crashed", error=SimpleNamespace(code="busy"))
+        assert (await rig.job("j1")).error.code == "busy"
+    finally:
+        mock.stop()
+
+
+async def test_a_send_is_awaited_until_presence_is_reported_absent(tmp_path: Path) -> None:
+    rig, mock = _rig(tmp_path, _Client("online"))
+    readings = iter(["unknown", "present", "absent"])
+    reported: list[str] = []
+
+    async def participant(_participant_id: str) -> Any:
+        reported.append(next(readings))
+        return SimpleNamespace(status="idle", presence=reported[-1])
+
+    async def controls(_participant_id: str) -> Any:
+        return SimpleNamespace(
+            actions={"send": SimpleNamespace(admissible=True, reason="", detail="")}
+        )
+
+    rig.participant = participant  # type: ignore[method-assign]
+    rig.controls = controls  # type: ignore[method-assign]
+    try:
+        await rig.ready("p1", seconds=10)
+    finally:
+        mock.stop()
+
+    assert reported == ["unknown", "present", "absent"]
