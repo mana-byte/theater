@@ -115,6 +115,25 @@ MUTATIONS: tuple[Mutation, ...] = (
         "interrupt",
     ),
     Mutation(
+        "native-runtime-refused",
+        dedent(
+            """
+            def mutate(manifest):
+                from theater.harness.contracts.runtime import RuntimeCompatibility
+
+                if manifest.runtime is None:
+                    return manifest
+
+                def probe(context):
+                    return RuntimeCompatibility(supported=False, policy="canary", reason="canary")
+
+                return replace(manifest, runtime=replace(manifest.runtime, probe=probe))
+            """
+        ),
+        {"runtime:native": "fail"},
+        "runtime",
+    ),
+    Mutation(
         "launch-env-dropped",
         _planner(_drop("env", "env")),
         {ANY: "not-pass"},
