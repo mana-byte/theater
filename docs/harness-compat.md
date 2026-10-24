@@ -179,8 +179,11 @@ CLI's own file-write tool is gated under `manual` and runs under `edits`) and
 session identity; under a manifest variant whose probe refuses the release, which is what an unqualified
 release gets in production, the pane path still carries a turn; after a graceful daemon restart the same
 backend and UI processes are still alive and the next turn continues the same conversation; a capability
-the runtime declares unavailable is refused). The `channels` family derives obligations but has no scenario yet; it is reported as a declared
-gap. Every manifest declaration is mapped to a family or a reasoned exemption in
+the runtime declares unavailable is refused) and `channels:<id>` for each available hook channel (the stock CLI delivers an accepted event on
+the declared channel during a tool turn, and a source other than the transcript contributes a trajectory
+fact carrying the same tool-call id the mock issued; an available OTel channel ends inconclusive until a
+scenario exists, and an unavailable channel has no obligation: the day it is declared available it is
+derived and proven). Every manifest declaration is mapped to a family or a reasoned exemption in
 `tests/support/coverage.py`, and `tests/conformance/test_completeness.py` fails when one is not.
 
 Oracles do not rely on the plugin's own parsers except where the plugin's screen classifier is itself the
