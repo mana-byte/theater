@@ -190,7 +190,7 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         )
         if self._active_turn_id == turn_id:
             self._active_turn_id = None
-        self._unfinished_turns.discard(turn_id)
+        self._in_flight_turns.discard(turn_id)
         # A terminal turn's own requests can no longer be answered; other
         # turns' unresolved interactions are never collateral damage.
         self._drop_turn_interactions(turn_id)

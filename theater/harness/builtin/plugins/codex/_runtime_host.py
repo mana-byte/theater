@@ -41,7 +41,7 @@ if TYPE_CHECKING:
         _receive_task: asyncio.Task[None] | None
         _history_reconcile_task: asyncio.Task[None] | None
         _subscription_recovery_task: asyncio.Task[None] | None
-        _unfinished_turns: set[str]
+        _in_flight_turns: set[str]
         _live_source: Source | None
         _native_session_id: str | None
         _active_turn_id: str | None

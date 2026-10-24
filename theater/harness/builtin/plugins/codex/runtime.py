@@ -52,7 +52,7 @@ class CodexRuntime(
         self._subscription_recovery_task: asyncio.Task[None] | None = None
         # Turns known to be running: acknowledged, started or seen in progress. One leaves only on
         # positive evidence of its end; until then the app-server may show it as "interrupted".
-        self._unfinished_turns: set[str] = set()
+        self._in_flight_turns: set[str] = set()
         self._live_source: CodexLiveSource | None = None
         self._native_session_id: str | None = None
         self._active_turn_id: str | None = None

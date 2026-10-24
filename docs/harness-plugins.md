@@ -976,15 +976,19 @@ backoff; the pass limit is not a permanent history cutoff.
 The app-server shows a turn it has not yet seen end as `interrupted` with no
 `completedAt`, whatever the thread status. The runtime therefore keeps the ids
 of turns it knows are running (acknowledged `turn/start`, `turn/started`, or
-`inProgress` in a snapshot) until positive evidence of their end — the live
-`turn/completed`, or a snapshot with a real end; no snapshot ends one earlier.
-A turn first seen unfinished in the newest position of a snapshot taken while
-the thread is not known idle is held the same way. Idle precedes
-`turn/completed` by tens of milliseconds; if turns are still held after a short
-grace on an idle thread, the history task pages again from page one with capped
-backoff until they resolve. After five idle rereads that never show an end the
-turn is taken for abandoned and recorded `interrupted`, as an attaching runtime
-does for one that ended while the daemon was down.
+`inProgress` in a snapshot) until positive evidence of their end: the live
+`turn/completed`, or a snapshot with a real end. A snapshot that still shows
+them unfinished never ends them. A turn this runtime never started is held the
+same way when it is the newest turn of a resume response whose own thread status
+is `active`, or of a history page requested while the runtime does not know the
+thread idle. Idle precedes `turn/completed` by tens of milliseconds; if turns are
+still held after a short grace on an idle thread, the history task pages again
+from page one with capped backoff until they resolve. After about 18 seconds of
+such rereads (five, with capped backoff) that never show an end, the turn is taken
+for abandoned and recorded `interrupted`, as an attaching runtime does for one that
+ended while the daemon was down. That can end a turn that is genuinely still running
+only if the thread reports idle while it runs, which the stock app-server never
+did in testing.
 
 `RuntimeBinding` carries the persisted wiring, backend generation, lifecycle
 phase, endpoint, verified pid, native session id, and protocol/version facts.

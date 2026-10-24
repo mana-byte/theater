@@ -43,7 +43,7 @@ from .runtime_messages import (
 class CodexRuntimeHistory(CodexRuntimeHost):
     _history_reconcile_task: asyncio.Task[None] | None
     _subscription_recovery_task: asyncio.Task[None] | None
-    _unfinished_turns: set[str]
+    _in_flight_turns: set[str]
     _native_session_id: str | None
     _active_turn_id: str | None
     _thread_status: str | None
@@ -101,18 +101,16 @@ class CodexRuntimeHistory(CodexRuntimeHost):
         """Hold a running turn until positive evidence of its end; never one already over."""
         if self._outcome_buffer.has_outcome(session, turn_id):
             return
-        self._unfinished_turns.add(turn_id)
+        self._in_flight_turns.add(turn_id)
 
     def _recover_in_flight_turns(self) -> None:
         """Let history decide turns still in flight on an idle thread, if their live end is lost."""
-        if self._unfinished_turns and self._native_session_id is not None:
+        if self._in_flight_turns and self._native_session_id is not None:
             self._start_history_reconciliation(self._native_session_id, recovery=True)
 
     def _history_owed(self) -> bool:
         """Idle with turns in flight: their live completion is due, or was lost."""
-        return (
-            bool(self._unfinished_turns) and self._execution_state() is RuntimeExecutionState.IDLE
-        )
+        return bool(self._in_flight_turns) and self._execution_state() is RuntimeExecutionState.IDLE
 
     async def _reconcile_thread(
         self,
@@ -184,7 +182,7 @@ class CodexRuntimeHistory(CodexRuntimeHost):
             if rereads > runtime_constants.CODEX_RUNTIME_RECONCILE_IDLE_REREADS:
                 # Idle throughout and history never showed an end: the turn was abandoned. Released,
                 # the last pass records it as interrupted, as it does for an attaching runtime.
-                self._unfinished_turns.clear()
+                self._in_flight_turns.clear()
 
     async def _page_history(self, session: str) -> None:
         """One pass over history, paging older exact terminals without unbounded retention."""
@@ -267,11 +265,13 @@ class CodexRuntimeHistory(CodexRuntimeHost):
     ) -> str | None:
         """Record a snapshot's exact ends, oldest first; return the running turn it shows.
 
-        ``newest``: the last turn is the thread's newest, the only one that can be running.
-        Oldest first lets a real end resolve its turn before the newest is judged. The newest
-        turn read as unfinished while the thread may be running it, and no other turn is known to
-        be, is held as running: nothing recorded from history may end a running turn.
+        ``newest``: the last turn is the thread's newest, the only one that can be running, and
+        read as unfinished while the thread may be running it, it is held rather than recorded.
+        Oldest first lets a real end resolve its turn before the newest is judged.
         """
+        # A held turn this snapshot lacks started after it was taken: its newest turn is older.
+        shown = {_bounded_str(turn.get("id"), limit=512) for turn in turns}
+        newer_held = any(held not in shown for held in self._in_flight_turns)
         active = None
         for turn in turns:
             turn_id = _bounded_str(turn.get("id"), limit=512)
@@ -284,7 +284,7 @@ class CodexRuntimeHistory(CodexRuntimeHost):
                     active = turn_id
                     self._register_in_flight(session, turn_id)
                 continue
-            if current and running and _unfinished(turn) and not self._unfinished_turns:
+            if current and running and _unfinished(turn) and not newer_held:
                 self._register_in_flight(session, turn_id)
             await self._record_snapshot_terminal_turn(session, turn)
         return active
@@ -300,10 +300,10 @@ class CodexRuntimeHistory(CodexRuntimeHost):
         terminal = _TERMINAL_BY_STATUS.get(status)
         if terminal is None:
             return
-        if turn_id in self._unfinished_turns:
+        if turn_id in self._in_flight_turns:
             if _unfinished(turn):
                 return
-            self._unfinished_turns.discard(turn_id)
+            self._in_flight_turns.discard(turn_id)
         # Authoritative history is lifecycle evidence too: a terminal turn's own
         # recorded interactions can no longer be answered; other turns survive.
         self._drop_turn_interactions(turn_id)
