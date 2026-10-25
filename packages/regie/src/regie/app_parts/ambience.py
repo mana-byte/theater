@@ -30,7 +30,7 @@ class TreeAmbience(_AppBase):
     _ambience_band: AmbienceBand | None = None
     _ambience_bands: tuple[AmbienceBand, ...] = ()
     _free_band_cache: tuple[int, int] | None = None
-    _free_band_key: tuple[Size, int] | None = None
+    _free_band_key: tuple[Size, int, int] | None = None
 
     def _initialize_ambience(self) -> None:
         scene = scene_for(self.settings.tree_ambience)
@@ -76,10 +76,11 @@ class TreeAmbience(_AppBase):
     def _free_band(self) -> tuple[int, int]:
         """The empty rows under the tree's last row; cached against the tree's size and rows.
 
-        Rows leave without a sync when a retirement finishes, so the key re-measures on change.
+        Rows leave without a sync when a retirement finishes, and the card comes and goes with the
+        cursor, so the key re-measures on change.
         """
         tree = self._ambience_tree
-        key = None if tree is None else (tree.size, len(tree.children))
+        key = None if tree is None else (tree.size, len(tree.children), tree.card_rows)
         if self._free_band_cache is None or key != self._free_band_key:
             self._free_band_cache = self._measure_free_band()
             self._free_band_key = key
@@ -92,7 +93,11 @@ class TreeAmbience(_AppBase):
             return 0, 0
         width = tree.size.width - band.styles.padding.left - band.styles.padding.right
         # The viewport never reports less than its own height, so sum the rows themselves.
-        rows = sum(child.outer_size.height for child in tree.children if child.display)
+        rows = sum(
+            child.outer_size.height + child.styles.margin.height
+            for child in tree.children
+            if child.display
+        )
         return max(0, width), max(0, tree.size.height - rows)
 
     def _sync_ambience(self) -> None:

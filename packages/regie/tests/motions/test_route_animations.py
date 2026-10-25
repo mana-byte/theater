@@ -54,6 +54,8 @@ def test_each_await_marks_its_waiter_and_counts_the_peers_waiting_on_a_target():
     marks = controller.marks()
     assert set(marks.waiting) == {"aaa", "bbb"}
     assert marks.awaited == {"ccc": 2, "bbb": 1}
+    assert marks.waiting_on == {"aaa": ("bbb", "ccc"), "bbb": ("ccc",)}  # who, for the card
+    assert marks.waited_by == {"ccc": ("aaa", "bbb"), "bbb": ("aaa",)}
 
 
 def test_marks_clear_with_the_await_that_made_them():

@@ -60,6 +60,13 @@ The tree is the whole interface; every signal is a state of something it already
   focus shows `▾` when it has children; a click on the badge folds or unfolds. Folds are
   remembered across restarts.
 
+- **Spawn row.** The tree ends in a dim `+ spawn  o`: click it, or press `o`, to pick a
+  harness. The cursor never lands on it, and it steps aside while a new agent asks for its
+  directory.
+- **Card.** Where the tree leaves rows free, a few dim lines under it say what the row in
+  focus is: name, harness and state, the full directory, its description, cost and age, its
+  parent, and who it waits on or who waits on it. It gives way as the tree fills.
+
 `reduce_motion = true` in `config.toml` keeps every signal and drops the motion: no sweeps,
 breathing, comets or reveal and retire animations, and waits draw their route without a
 travelling head.

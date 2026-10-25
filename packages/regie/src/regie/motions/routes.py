@@ -149,6 +149,9 @@ class AwaitMarks:
 
     waiting: Mapping[str, str] = field(default_factory=dict)
     awaited: Mapping[str, int] = field(default_factory=dict)
+    #: The peers each blocked agent waits on, and the agents waiting on each row, by id.
+    waiting_on: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    waited_by: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -238,6 +241,7 @@ class RouteAnimationController:
         the row that stands for it.
         """
         waiting: dict[str, str] = {}
+        targets: dict[str, set[str]] = {}
         waiters: dict[str, set[str]] = {}
         for anim in self._await_anims.values():
             rows = self._rows(anim.from_id, anim.to_id, resolve)
@@ -246,9 +250,15 @@ class RouteAnimationController:
             from_row, to_row = rows
             if from_row == anim.from_id:  # a waiter folded out of sight leaves no mark
                 waiting.setdefault(anim.from_id, self._colors.color(anim.from_id))
+                targets.setdefault(anim.from_id, set()).add(anim.to_id)
             if to_row != from_row:  # one row has nothing to be waited on by itself
                 waiters.setdefault(to_row, set()).add(anim.from_id)
-        return AwaitMarks(waiting, {target: len(who) for target, who in waiters.items()})
+        return AwaitMarks(
+            waiting,
+            {target: len(who) for target, who in waiters.items()},
+            {waiter: tuple(sorted(peers)) for waiter, peers in targets.items()},
+            {target: tuple(sorted(who)) for target, who in waiters.items()},
+        )
 
     def _release_colors(self) -> None:
         active = {anim.from_id for anim in self._await_anims.values()}
