@@ -34,7 +34,7 @@ async def test_a_resumed_participant_continues_its_conversation(live, obligation
     job = await live.send(second, prompt)
 
     assert job.state == "done", job.error
-    assert nonce in str(job.result)
+    assert nonce in str(job.result), f"the resumed send answered {job.result!r}; error: {job.error}"
     (resumed,) = live.turns(prompt)
     assert earlier in resumed.user_texts, "the resumed conversation lost its history"
     successor = await live.participant(second)
