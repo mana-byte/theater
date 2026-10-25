@@ -459,7 +459,11 @@ async def test_terminated_trajectory_switches_immediately_when_refresh_fails(
 
 
 def test_kill_binding_is_visible_with_the_kill_label() -> None:
-    binding = next(binding for binding in RegieApp.BINDINGS if binding.key == "x")
+    bindings = [binding for binding in RegieApp.BINDINGS if binding.key == "x"]
+    assert (
+        bindings[0].action == "menu('close')"
+    )  # first: it acts only while the cursor is in the menu
+    binding = next(binding for binding in bindings if binding.action == "kill")
 
     assert binding.action == "kill"
     assert binding.description == "kill"

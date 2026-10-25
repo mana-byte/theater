@@ -425,6 +425,8 @@ class ParticipantTree(VerticalScroll):
 
     def open_menu(self, option: str | None = None) -> None:
         """Put the cursor in the menu: on its root, or on the first choice of *option*, unfolded."""
+        if self._menu_hidden:  # a new agent is asking for its directory
+            return
         if option is not None:
             self._menu_view = replace(self._menu_view, expanded=self._menu_view.expanded | {option})
         self._set_selected(("g", ROOT_ID))

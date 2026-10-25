@@ -75,8 +75,7 @@ async def test_usage_footer_starts_hidden_and_dollar_toggles_only_the_footer() -
 
         await pilot.press("dollar_sign")
         assert all(app.query_one(footer).display for footer in footers)
-        await pilot.press("j")
-        assert app._usage_panel.in_footer
+        await press_until(pilot, "j", lambda: app._usage_panel.in_footer)
 
         await pilot.press("dollar_sign")
         assert not any(app.query_one(footer).display for footer in footers)

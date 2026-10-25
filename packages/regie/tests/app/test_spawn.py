@@ -15,7 +15,6 @@ from regie.dashboard.widgets import WelcomeDashboard
 from regie.state import StateController
 from regie.widgets import ParticipantTree
 from regie.widgets.name_editor import DirectoryEditor
-from textual.command import CommandInput, CommandPalette
 
 from packages.regie.tests.support.app_fakes import (
     FakePresentation,
@@ -41,18 +40,12 @@ async def test_spawn_palette_accepts_a_completed_explicit_directory(
     app, client, _presentation = build_app()
 
     async with app.run_test() as pilot:
-        await pilot.press("ctrl+p")
-        palette = app.screen.query_one(CommandInput)
-        palette.value = "spawn"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen, CommandPalette)
-        palette = app.screen.query_one(CommandInput)
-        palette.value = "codex"
-        await pilot.press("enter")
-        await pilot.pause()
-        # The new agent's row is in the tree; its directory is typed where it will show.
         tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: app._catalog_ready.is_set() and tree.selectable_keys)
+        await pilot.press("o")  # the options menu, Spawn unfolded, the cursor on the first harness
+        await wait_until(pilot, lambda: tree.selected_key == ("m", "spawn/codex"))
+        await pilot.press("enter")
+        # The new agent's row is in the tree; its directory is typed where it will show.
         await wait_until(pilot, lambda: bool(app.query(DirectoryEditor)))
         row = tree._key_widgets[("n", "new")]
         cwd_input = app.query_one(DirectoryEditor)

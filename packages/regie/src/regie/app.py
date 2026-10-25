@@ -22,6 +22,7 @@ from regie.app_parts import (
     ActionTracking,
     ControlActions,
     DiagnosticsDisplay,
+    MenuActions,
     ProjectionSync,
     RenameActions,
     SpawnResume,
@@ -115,6 +116,7 @@ class RegieApp(
     StagingActions,
     TrajectoryActions,
     TranscriptRecovery,
+    MenuActions,
     SpawnResume,
     ControlActions,
     RenameActions,
@@ -139,6 +141,13 @@ class RegieApp(
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
+        # The menu's keys come first: they act only while the cursor is in the menu
+        # (check_action), and otherwise the same key falls through to the binding below it.
+        Binding("enter", "menu('activate')", show=False),
+        Binding("l,L,shift+l,right", "menu('expand')", show=False),
+        Binding("space", "menu('toggle')", show=False),
+        Binding("h,left", "menu('fold')", show=False),
+        Binding("x", "menu('close')", show=False),
         Binding("j", "cursor_down", "down", show=False),
         Binding("down", "cursor_down", "down", show=False),
         Binding("k", "cursor_up", "up", show=False),
@@ -339,6 +348,7 @@ class RegieApp(
             self.notify(f"tmux presentation unavailable: {exc}", severity="warning")
         self.query_one("#sidebar").styles.width = self.settings.sidebar_width
         self.query_one(ParticipantTree).loading = True
+        self._initialize_menu()
         if self.settings.theme and self.settings.theme in self.available_themes:
             self.theme = self.settings.theme
         elif self.settings.theme:

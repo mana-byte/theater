@@ -8,7 +8,7 @@ from pathlib import Path
 from textual.command import CommandPalette
 
 from regie.app_parts._shared import _AppBase
-from regie.palette import ResumeSessionCommands, SpawnHarnessCommands
+from regie.palette import ResumeSessionCommands
 from regie.resume import ResumeCandidate, ResumeDiscovery, discover_resume_sessions
 from regie.spawn import SpawnChoice, spawn_approval, spawn_choices
 from regie.widgets import ParticipantTree
@@ -47,12 +47,8 @@ class SpawnResume(_AppBase):
         return next((entry.icon for entry in self._harnesses if entry.name == harness), None)
 
     def action_spawn(self) -> None:
-        self.push_screen(
-            CommandPalette(
-                providers=[SpawnHarnessCommands],
-                placeholder="Spawn a fresh session…",
-            )
-        )
+        """Open the options menu on the harnesses, the cursor on the first."""
+        self.query_one(ParticipantTree).open_menu("spawn")
 
     def spawn_harness(self, harness: str) -> None:
         """Show the new agent's row in the tree and ask for its directory on it."""
