@@ -732,3 +732,68 @@ def test_an_agent_peers_wait_on_wears_a_double_arrow_in_its_connector_whatever_t
 
 def test_the_awaited_marker_leaves_a_rooted_row_without_a_connector_alone():
     assert "«" not in _row2(node_label({**CHILD, "name": "x"}, "", awaited=2))
+
+
+# ---- the cost lives on row three -----------------------------------------------------------
+
+
+COST = [("$", "$text dim"), ("12.34", "$text dim")]
+
+
+def _row3(label) -> str:
+    return label_rows(label)[2]
+
+
+def test_the_cost_is_right_aligned_on_row_three_and_row_two_stays_free_of_it():
+    node = {**CHILD, "name": "orchestrator", "cwd": "/p/api"}
+    label = node_label(node, "├── ", cont_prefix="│   ", width=40, cost=COST, show_harness=False)
+    assert "$12.34" not in _row2(label)
+    assert _row3(label).endswith("$12.34") and cell_len(_row3(label)) == 40
+    assert _row3(label).startswith("│   ") and "/p/api" in _row3(label)
+
+
+def test_a_row_two_full_of_badges_still_shows_its_cost():
+    # What used to drop the cost: a long name, a fold badge and a mark, all on row two.
+    from regie.marks import MarkKind, RowMark
+
+    node = {
+        **CHILD,
+        "name": LONG,
+        "cwd": "/p/api",
+        "hidden_count": 5,
+        "hidden_states": {"awaiting_input": 1, "working": 2},
+        "mark": RowMark(MarkKind.SENT, "op", "✓", "$success"),
+    }
+    label = node_label(node, "│   ├── ", cont_prefix="│   │   ", width=38, cost=COST)
+    assert "$12.34" in _row3(label) and "$12.34" not in _row2(label)
+
+
+def test_a_long_directory_gives_way_to_the_cost_not_the_other_way_round():
+    from regie.render.glyphs import fit_name
+
+    detail = fit_name("/Users/me/some/deep/project/service", 20)  # what the leaf passes in
+    label = node_label(
+        {**CHILD, "name": "x"}, "├── ", cont_prefix="│   ", width=40, cost=COST, detail=detail
+    )
+    assert _row3(label).endswith("$12.34") and cell_len(_row3(label)) <= 40
+
+
+def test_a_marks_reason_is_cut_to_leave_room_for_the_cost_and_never_wraps():
+    from regie.marks import MarkKind, RowMark
+
+    reason = "blocked · awaiting a decision from the human at the keyboard"
+    node = {
+        **CHILD,
+        "name": "x",
+        "mark": RowMark(MarkKind.BLOCKED, "op", "⊘", "$warning", reason),
+    }
+    label = node_label(node, "├── ", cont_prefix="│   ", width=36, cost=COST)
+    row3 = _row3(label)
+    assert "…" in row3 and row3.endswith("$12.34") and cell_len(row3) <= 36
+
+
+def test_the_hint_stays_on_row_two_for_the_row_that_asks_for_a_directory():
+    label = node_label(
+        {**CHILD, "name": "new agent"}, "└── ", width=40, hint=[("⏎ spawn", "$text-muted")]
+    )
+    assert _row2(label).endswith("⏎ spawn") and "⏎" not in _row3(label)

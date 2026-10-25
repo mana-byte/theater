@@ -103,6 +103,9 @@ REGIE_USAGE_TOP_PARTICIPANTS_TITLE_STYLE = "bold"
 REGIE_USAGE_PARTICIPANT_QUERY_LIMIT = 500
 #: Style for compact per-participant cost on tree rows.
 REGIE_TREE_USAGE_COST_STYLE = "$text dim"
+#: Cells row three keeps for the cost of the row in focus, at least, so the directory beside it
+#: does not move when the amount rolls over to another digit.
+REGIE_TREE_COST_MIN_CELLS = 6
 
 #: Stable key for the placeholder shown when the tree is empty.
 REGIE_EMPTY_TREE_KEY = ("empty", "")

@@ -31,6 +31,7 @@ from regie.ui_constants import (
     REGIE_LEAF_FRAME_CYCLE,
     REGIE_LEAF_MARQUEE_INTERVAL,
     REGIE_LEAF_SPINNER_INTERVAL,
+    REGIE_TREE_COST_MIN_CELLS,
     REGIE_TREE_USAGE_COST_STYLE,
 )
 from regie.widgets.animation_clock import AnimationSubscription, animation_clock
@@ -236,10 +237,19 @@ class AgentLeaf(RenameableRow):
             return description
         return shorten_path(tilde(self._node.get("cwd")), keep=self._cwd_segments)
 
+    def _cost_reserve(self) -> int:
+        """Cells row three keeps for the cost of a row in focus, and the gap before it."""
+        cost = self._shown_cost()
+        if not cost:
+            return 0
+        cells = sum(cell_len(part if isinstance(part, str) else part[0]) for part in cost)
+        return max(cells, REGIE_TREE_COST_MIN_CELLS) + 1
+
     def _detail_width(self) -> int | None:
         if not self.is_mounted or self.content_size.width <= 0:
             return None
-        return max(0, self.content_size.width - cell_len(self._cont_prefix) - self._gutter())
+        room = self.content_size.width - cell_len(self._cont_prefix) - self._gutter()
+        return max(0, room - self._cost_reserve())
 
     def _label_width(self) -> int | None:
         if not self.is_mounted or self.content_size.width <= 0:

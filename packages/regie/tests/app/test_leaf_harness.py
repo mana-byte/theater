@@ -186,3 +186,35 @@ async def test_renaming_a_long_name_keeps_one_line_and_the_editor_inside_the_row
         span = long._name_span()
         assert span is not None and span[1] <= long.content_size.width
         assert editor.styles.max_width is not None
+
+
+# ---- the cost on row three ---------------------------------------------------------------------
+
+
+async def test_a_focused_folded_row_still_shows_its_cost_on_row_three(tmp_path) -> None:
+    from regie.tree_layout import TreeLayout
+
+    people = [
+        make_participant("participant-1", name=LONG, cwd="/Users/me/proj"),
+        make_participant("participant-2", name="kid", parent_id="participant-1", status="working"),
+        make_participant("participant-3", name="kin", parent_id="participant-1"),
+    ]
+    projection = replace(
+        make_projection(),
+        participants=MappingProxyType({item.participant_id: item for item in people}),
+    )
+    path = tmp_path / "layout.json"
+    TreeLayout(folded={"participant-1"}).save(path)
+    app, _client, _presentation = build_app(projection=projection, tree_layout_path=path)
+
+    async with app.run_test(size=(52, 30)) as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: tree.participant_ids == ("participant-1",))
+        leaf = _leaf(tree, "participant-1")
+        tree.select("participant-1")  # focused: harness, fold badge, cost, all competing
+        await wait_until(pilot, lambda: "$0.42" in _rows(leaf)[2], timeout=8)  # it counts up
+
+        _, second, third = _rows(leaf)
+        assert "$" not in second and "▸2" in second  # row two is identity and state
+        assert third.endswith("$0.42")  # at the right edge of row three
+        assert "…/me/proj" in third  # and the directory is still there beside it

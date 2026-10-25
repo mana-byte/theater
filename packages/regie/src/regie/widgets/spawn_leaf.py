@@ -52,7 +52,7 @@ class SpawnLeaf(RenameableRow):
             self._prefix,
             cont_prefix=self._cont_prefix,
             detail="" if self.renaming else self._value,
-            cost=[(_HINT, "$text-muted")],
+            hint=[(_HINT, "$text-muted")],
             width=width,
         )
         return content if self._wipe is None else apply_wipe(content, self._wipe, width=width)

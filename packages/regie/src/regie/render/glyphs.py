@@ -15,6 +15,7 @@ from textual.content import Content
 
 from regie.ui_constants import (
     REGIE_NAME_MIN_CELLS as NAME_MIN_CELLS,
+    REGIE_TREE_COST_MIN_CELLS as COST_MIN_CELLS,
     REGIE_SEND_TRACE_STYLE as SEND_STYLE,
     REGIE_WAITING_FRAMES as WAITING_FRAMES,
     REGIE_WAITING_STEP_FRAMES as WAITING_STEP_FRAMES,
@@ -399,6 +400,38 @@ def visible_name_span(
     return start, start + _parts_width(shown)
 
 
+def _right_aligned(
+    parts: list, tail: Sequence[str | tuple[str, str]] | None, width: int | None
+) -> list:
+    """*parts* with *tail* pushed to the right edge, when the row has room for both."""
+    if tail and width is not None:
+        gap = width - _parts_width(parts) - _parts_width(tail)
+        if gap > 0:
+            return [*parts, " " * gap, *tail]
+    return parts
+
+
+def _row3_parts(
+    view: RawRenderNode,
+    cont_prefix: str,
+    cwd: str,
+    cost: Sequence[str | tuple[str, str]] | None,
+    width: int | None,
+) -> list:
+    """Row three: continuation rails, the directory (or an operation's reason), then the cost."""
+    parts: list = [(cont_prefix, "$text dim")] if cont_prefix else []
+    mark = _mark(view)
+    if mark is not None and mark.detail:
+        reason = mark.detail
+        if width is not None:  # a long reason must neither wrap nor push the cost out
+            reserve = max(_parts_width(cost or ()), COST_MIN_CELLS) + 1 if cost else 0
+            reason = fit_name(reason, max(1, width - cell_len(cont_prefix) - reserve))
+        parts.append((reason, mark.style))
+    else:
+        parts.append((cwd, "$text dim"))
+    return _right_aligned(parts, cost, width)
+
+
 def node_label(
     node: RenderNode | dict,
     prefix: str = "",
@@ -411,6 +444,7 @@ def node_label(
     reveal: int | None = None,
     detail: str | None = None,
     cost: Sequence[str | tuple[str, str]] | None = None,
+    hint: Sequence[str | tuple[str, str]] | None = None,
     width: int | None = None,
     waiting: str | None = None,
     awaited: int = 0,
@@ -473,17 +507,8 @@ def node_label(
     row2_parts.extend(_mark_parts(view))
     if width is not None and _parts_width(row2_parts) > width:
         row2_parts = clip_parts(row2_parts, width)  # too deep or too narrow even for "…": crop
-    mark = _mark(view)
-    if cost is not None and width is not None:
-        gap = width - _parts_width(row2_parts) - _parts_width(cost)
-        if gap > 0:
-            row2_parts.extend((" " * gap, *cost))
-
-    # Row 3: continuation rails (not the branch prefix), shortened cwd, dim.
-    row3_parts: list = []
-    if cont_prefix:
-        row3_parts.append((cont_prefix, "$text dim"))
-    row3_parts.append((mark.detail, mark.style) if mark and mark.detail else (cwd, "$text dim"))
+    row2_parts = _right_aligned(row2_parts, hint, width)
+    row3_parts = _row3_parts(view, cont_prefix, cwd, cost, width)
 
     if overlay:
         row1_parts = _overlay_row(row1_parts, {c: g for (r, c), g in overlay.items() if r == 0})

@@ -26,6 +26,8 @@ on the next start, stopping a bridge still running from it first.
 
 The tree is the whole interface; every signal is a state of something it already draws.
 
+- **Cost.** The row in focus shows its cost at the right edge of its third line, beside the
+  directory, so it never competes with the name and badges on row two.
 - **Name.** A row is its status glyph and the agent's name. The harness (`claude`, `codex`) is
   spelled out only on the row under the cursor or the pointer, and always on a row with no name
   of its own. A working agent pulses its name; on the focused row the pulse stays on the harness.
