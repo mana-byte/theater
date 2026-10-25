@@ -100,8 +100,11 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      # Codex's Linux sandbox needs bubblewrap: without it a workspace patch asks for an approval.
-      - run: sudo apt-get update && sudo apt-get install -y tmux bubblewrap
+      # Codex's Linux sandbox needs bubblewrap, and Ubuntu 24.04 denies it the user namespace it
+      # needs: without both a workspace patch asks for an approval.
+      - run: |
+          sudo apt-get update && sudo apt-get install -y tmux bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: uv sync --locked --all-packages --group dev
       - name: Test every newer release and publish each completed outcome
         run: timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat run "$HARNESS"
@@ -131,8 +134,11 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      # Codex's Linux sandbox needs bubblewrap: without it a workspace patch asks for an approval.
-      - run: sudo apt-get update && sudo apt-get install -y tmux bubblewrap
+      # Codex's Linux sandbox needs bubblewrap, and Ubuntu 24.04 denies it the user namespace it
+      # needs: without both a workspace patch asks for an approval.
+      - run: |
+          sudo apt-get update && sudo apt-get install -y tmux bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: uv sync --locked --all-packages --group dev
       - name: Verify the proposed range without qualifying unrelated newer releases
         run: |

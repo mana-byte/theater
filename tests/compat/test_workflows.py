@@ -84,11 +84,13 @@ def test_routine_pr_checks_use_the_base_and_stop_at_the_proposed_policy() -> Non
 
 @pytest.mark.parametrize("name", ["harness-compat.yml", "harness-compat-canaries.yml"])
 def test_the_live_suite_runners_can_sandbox_codex(name: str) -> None:
-    # Without bubblewrap codex's workspace-write sandbox is unavailable on Linux and every edit
-    # asks for an approval, so the suite would fail codex on a release that is fine.
+    # Without bubblewrap, and the user namespace Ubuntu 24.04 denies it, codex's workspace-write
+    # sandbox is unavailable on Linux and every edit asks for an approval, so the suite would fail
+    # codex on a release that is fine.
     text = (WORKFLOWS / name).read_text()
     installs = [line for line in text.splitlines() if "apt-get install" in line]
     assert installs and all("bubblewrap" in line for line in installs)
+    assert text.count("apparmor_restrict_unprivileged_userns=0") == len(installs)
 
 
 def test_pr_checks_diff_against_the_base_the_pr_is_merged_into_not_the_one_it_opened_on() -> None:
