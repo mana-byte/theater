@@ -69,7 +69,8 @@ The tree is the whole interface; every signal is a state of something it already
   with why one cannot return), the transcripts the daemon found, the themes. `h` or `←` folds back.
   Long lists show five rows and a `… N more` leaf that opens the rest. `o` opens the menu with the
   cursor on the first harness. `/` filters everything the menu lists; `Enter` keeps the filter,
-  `Esc` drops it. A pick closes the menu and puts the cursor back where it was (a theme applies at
+  `Esc` drops it. A description too long for its row scrolls while the row is in focus, as an
+  agent's does. A pick closes the menu and puts the cursor back where it was (a theme applies at
   once and the menu stays open, for this session only); `x` closes the menu the same way. The menu
   steps aside while a new agent asks for its directory.
 
