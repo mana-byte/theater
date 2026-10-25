@@ -14,7 +14,9 @@ from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.motions.routes import LeafOverlay
 from regie.motions.wipe import Wipe, apply_wipe
 from regie.render.glyphs import (
+    fit_name,
     harness_shown,
+    name_room,
     node_label,
     shown_name,
     visible_name_span,
@@ -138,12 +140,8 @@ class AgentLeaf(RenameableRow):
         return reason if isinstance(reason, str) and reason else None
 
     def _render_label(self) -> Content:
-        node = self._node
-        if self.renaming:
-            # The editor draws the name; a blank of the same width keeps the row in place.
-            node = {**node, "name": " " * cell_len(shown_name(node))}
         content = node_label(
-            node,
+            self._node,
             self._prefix,
             cont_prefix=self._cont_prefix,
             cwd_segments=self._cwd_segments,
@@ -157,6 +155,7 @@ class AgentLeaf(RenameableRow):
             waiting=self._waiting,
             awaited=self._awaited,
             show_harness=self._harness_shown(),
+            name_text=self._displayed_name(),
         )
         if self._wipe is not None:
             content = apply_wipe(content, self._wipe, width=self._label_width())
@@ -245,21 +244,55 @@ class AgentLeaf(RenameableRow):
             return None
         return max(0, self.content_size.width - self._gutter())
 
-    def _should_marquee(self) -> bool:
+    def _name_room(self) -> int | None:
+        return name_room(
+            self._node,
+            self._prefix,
+            width=self._label_width(),
+            show_harness=self._harness_shown(),
+            awaited=self._awaited,
+        )
+
+    def _name_scrolls(self) -> bool:
+        """A name wider than its room reads in full by scrolling, on the row in focus."""
+        room = self._name_room()
+        return (
+            self._cost_in_focus()
+            and room is not None
+            and overflows_cells(shown_name(self._node), room)
+        )
+
+    def _displayed_name(self) -> str | None:
+        """The name as drawn: a window of it while it scrolls, blanks under the editor, else the
+        name cut to its room with an ellipsis. None before the row has a width."""
+        room = self._name_room()
+        if room is None:
+            return None
+        name = shown_name(self._node)
+        if self.renaming:
+            return " " * min(cell_len(name), room)  # the editor draws the name over these
+        if self._name_scrolls():
+            return marquee_cells(name, room, self._marquee_offset)
+        return fit_name(name, room)
+
+    def _detail_scrolls(self) -> bool:
         width = self._detail_width()
         return (
-            (self._hovered or self._cursor_selected)
+            self._cost_in_focus()
             and self._description() is not None
             and width is not None
             and overflows_cells(self._detail(), width)
         )
+
+    def _should_marquee(self) -> bool:
+        return self._name_scrolls() or self._detail_scrolls()
 
     def _visible_detail(self) -> str:
         detail = self._detail()
         width = self._detail_width()
         if width is None:
             return detail
-        if self._should_marquee():
+        if self._detail_scrolls():
             return marquee_cells(detail, width, self._marquee_offset)
         return clip_cells(detail, width)
 
@@ -474,7 +507,11 @@ class AgentLeaf(RenameableRow):
         if self._key[0] != "p":
             return None
         span = visible_name_span(
-            self._node, self._prefix, reveal=self._reveal, show_harness=self._harness_shown()
+            self._node,
+            self._prefix,
+            reveal=self._reveal,
+            show_harness=self._harness_shown(),
+            name_text=self._displayed_name(),
         )
         if span is None:
             return None

@@ -12,6 +12,7 @@ from regie.render.layout import render_tree, selected_participant, shorten_path
 from regie.render.routing import cell_leaf
 from regie.ui_constants import REGIE_SEND_TRACE_STYLE as SEND_STYLE
 from regie.ui_constants import REGIE_SPINNER_FRAMES, REGIE_WORKING_HARNESS_STYLES
+from rich.cells import cell_len
 
 from packages.regie.tests.support.tree_nodes import (
     CHILD,
@@ -580,3 +581,61 @@ def test_the_name_starts_earlier_when_the_harness_is_hidden():
     hidden = visible_name_span(named, "├── ", show_harness=False)
     assert shown is not None and hidden is not None
     assert shown[0] - hidden[0] == len("claude") + 1  # the harness and its gap, less one space
+
+
+# ---- a name too long for row two ends in an ellipsis instead of wrapping -----------------------
+
+LONG = "a-really-quite-long-participant-name-that-keeps-going"
+
+
+def test_a_name_that_fits_is_left_alone_and_one_that_does_not_ends_in_an_ellipsis():
+    from regie.render.glyphs import fit_name
+
+    assert fit_name("builder", 7) == "builder" and fit_name("builder", 20) == "builder"
+    assert fit_name("builder", 5) == "buil…" and fit_name("builder", 1) == "…"
+    assert cell_len(fit_name("構築構築構築", 5)) <= 5  # wide characters count by cells
+
+
+def test_the_room_for_a_name_shrinks_with_the_harness_and_the_badges():
+    from regie.marks import MarkKind, RowMark
+    from regie.render.glyphs import name_room
+
+    named = {**CHILD, "name": "builder", "harness": "claude"}
+    plain = name_room(named, "├── ", width=40, show_harness=False)
+    with_harness = name_room(named, "├── ", width=40, show_harness=True)
+    with_badges = name_room(
+        {**named, "mark": RowMark(MarkKind.SENT, "op", "✓", "$success")},
+        "├── ",
+        width=40,
+        show_harness=False,
+        awaited=2,
+    )
+    assert plain is not None and with_harness is not None and with_badges is not None
+    assert plain - with_harness == len("claude") + 1
+    assert plain - with_badges == len("  ◂2") + len("  ✓")
+    assert name_room(named, "├── ", width=None, show_harness=False) is None
+
+
+@pytest.mark.parametrize("width", [33, 48])
+def test_row_two_never_outgrows_the_width_and_keeps_its_badges(width):
+    from regie.marks import MarkKind, RowMark
+
+    node = {
+        **CHILD,
+        "name": LONG,
+        "mark": RowMark(MarkKind.BLOCKED, "op", "⊘", "$warning", "blocked · busy"),
+    }
+    row = _row2(node_label(node, "├── ", width=width, awaited=1, show_harness=True))
+    assert cell_len(row) <= width
+    assert "…" in row and row.endswith("◂  ⊘")  # the name gave way, the badges did not
+
+
+def test_without_a_width_the_whole_name_is_drawn_and_a_callers_window_wins():
+    node = {**CHILD, "name": LONG}
+    assert _row2(node_label(node, "├── ")).endswith(LONG)
+    assert _row2(node_label(node, "├── ", width=30, name_text="window")).endswith("window")
+
+
+def test_a_row_too_narrow_even_for_its_badges_is_cropped_not_wrapped():
+    node = {**CHILD, "name": LONG}
+    assert cell_len(_row2(node_label(node, "│   │   ├── ", width=18, show_harness=True))) <= 18

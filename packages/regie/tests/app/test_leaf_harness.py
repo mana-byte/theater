@@ -97,3 +97,92 @@ async def test_the_rename_editor_follows_the_name_when_the_harness_comes_or_goes
         first.update(first._render_label(), layout=False)
         first._sync_rename_geometry()
         assert editor.styles.offset.x.value < focused_x  # the name, and the editor, moved left
+
+
+# ---- a long name -------------------------------------------------------------------------------
+
+LONG = "a-really-quite-long-participant-name-that-keeps-going"
+
+
+def _long_name_app():
+    people = [
+        make_participant("participant-1", name="short", cwd="/Users/me/proj"),
+        make_participant(
+            "participant-2", name=LONG, cwd="/Users/me/proj/api", parent_id="participant-1"
+        ),
+    ]
+    projection = replace(
+        make_projection(),
+        participants=MappingProxyType({item.participant_id: item for item in people}),
+    )
+    return build_app(projection=projection)
+
+
+def _rows(leaf: AgentLeaf) -> list[str]:
+    return [leaf.render_line(row).text.rstrip() for row in range(3)]
+
+
+async def test_a_long_name_is_cut_with_an_ellipsis_and_never_hides_the_directory() -> None:
+    app, _client, _presentation = _long_name_app()
+
+    async with app.run_test(size=(52, 30)) as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        long = _leaf(tree, "participant-2")
+        await wait_until(pilot, lambda: "…" in _rows(long)[1])
+
+        first, second, third = _rows(long)
+        assert first.strip() == "│" and second.endswith("…")  # one line, ending in an ellipsis
+        assert third.strip().endswith("…/proj/api")  # and the directory is where it belongs
+        assert long._marquee_sub is None  # nothing scrolls on a row that is not in focus
+
+
+async def test_the_long_name_scrolls_on_the_focused_row_and_settles_when_it_leaves() -> None:
+    app, _client, _presentation = _long_name_app()
+
+    async with app.run_test(size=(52, 30)) as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        long = _leaf(tree, "participant-2")
+        tree.select("participant-2")
+        await wait_until(pilot, lambda: long._marquee_sub is not None)
+
+        seen = {_rows(long)[1]}
+        await wait_until(pilot, lambda: seen.add(_rows(long)[1]) or len(seen) >= 3, timeout=10)
+        assert all("codex" in row for row in seen)  # the harness is back on the focused row
+        assert all(_rows(long)[2].strip().endswith("…/proj/api") for _ in seen)
+
+        tree.select("participant-1")
+        await wait_until(pilot, lambda: long._marquee_sub is None)
+        assert _rows(long)[1].endswith("…") and long._marquee_offset == 0
+
+
+async def test_a_name_that_fits_never_starts_a_scroll() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(52, 30)) as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        tree.select("participant-2")
+        await pilot.pause(0.3)
+        assert _leaf(tree, "participant-2")._marquee_sub is None
+
+
+async def test_renaming_a_long_name_keeps_one_line_and_the_editor_inside_the_row() -> None:
+    app, _client, _presentation = _long_name_app()
+
+    async with app.run_test(size=(52, 30)) as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        long = _leaf(tree, "participant-2")
+        tree.select("participant-2")
+        await long.begin_rename()
+        editor = long._name_editor
+        assert editor is not None
+        await pilot.pause(0.2)
+
+        rows = _rows(long)
+        assert "…" not in rows[1] and rows[2].strip().endswith("…/proj/api")
+        span = long._name_span()
+        assert span is not None and span[1] <= long.content_size.width
+        assert editor.styles.max_width is not None

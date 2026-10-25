@@ -24,6 +24,7 @@ from regie.ui_constants import (
 )
 from regie.formatting import harness_icon, short_id, tilde
 from regie.marks import RowMark
+from regie.motions.marquee import clip_cells
 from regie.motions.pulse import working_harness_style
 from regie.motions.spinner import spinner_frame
 from regie.tree_nodes import RawRenderNode, RenderNode
@@ -273,21 +274,60 @@ def _row2_lead(
     return parts
 
 
+def _trailing_parts(view: RawRenderNode, awaited: int) -> list:
+    """What follows the name on row two: how many peers wait on it, and its operation mark."""
+    parts: list = []
+    if awaited:
+        parts.append((f"  ◂{awaited if awaited > 1 else ''}", "$text-muted"))
+    mark = _mark(view)
+    if mark is not None and not mark.replaces_status:
+        parts.append((f"  {mark.glyph}", mark.style))
+    return parts
+
+
+def name_room(
+    node: RenderNode | dict,
+    prefix: str,
+    *,
+    width: int | None,
+    show_harness: bool,
+    awaited: int = 0,
+) -> int | None:
+    """Cells row two leaves for the name once the glyph, harness and badges have theirs.
+
+    None while the row has no width yet.
+    """
+    if width is None:
+        return None
+    view = cast(RawRenderNode, node)
+    lead = _parts_width(_row2_lead(view, prefix, show_harness=show_harness))
+    return max(1, width - lead - _parts_width(_trailing_parts(view, awaited)))
+
+
+def fit_name(name: str, room: int) -> str:
+    """*name* as it fits in *room* cells: a name too long ends in ``…`` instead of wrapping."""
+    if cell_len(name) <= room:
+        return name
+    return clip_cells(name, room - 1) + "…" if room > 1 else "…"
+
+
 def visible_name_span(
     node: RenderNode | dict,
     prefix: str = "",
     *,
     reveal: int | None = None,
     show_harness: bool = True,
+    name_text: str | None = None,
 ) -> tuple[int, int] | None:
     """Row-2 cell span of the name after the renderer's reveal clipping; None while hidden.
 
-    Reveal counts codepoints while columns are cells, so clip then measure.
+    Reveal counts codepoints while columns are cells, so clip then measure. *name_text* is the
+    name as drawn when that is not the whole name (clipped to the room, or scrolled).
     """
     from regie.motions.reveal import clip_parts
 
     lead = _row2_lead(cast(RawRenderNode, node), prefix, show_harness=show_harness)
-    name = shown_name(node)
+    name = shown_name(node) if name_text is None else name_text
     lead_pts = sum(len(part if isinstance(part, str) else part[0]) for part in lead)
     start = _parts_width(lead)
     if reveal is None:
@@ -314,13 +354,16 @@ def node_label(
     waiting: str | None = None,
     awaited: int = 0,
     show_harness: bool = True,
+    name_text: str | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
     Row 1 is a leading spacer carrying the parent rail (blank for the first root);
     row 3 uses ``cont_prefix`` so it doesn't look like a new node. *waiting* is the colour of
     the await this agent is blocked in; *awaited* is how many peers are blocked on it. Without
-    *show_harness* the working pulse runs along the name instead of the harness text.
+    *show_harness* the working pulse runs along the name instead of the harness text. A name
+    wider than the room ends in ``…`` so row two never wraps over the directory; *name_text*
+    replaces it with the caller's own window of the name (scrolling, or blanks under an editor).
     """
     # Function-level imports avoid layout ↔ glyphs and reveal ↔ glyphs cycles.
     from regie.motions.reveal import clip_parts
@@ -328,6 +371,12 @@ def node_label(
 
     view = cast(RawRenderNode, node)
     sid = shown_name(view)
+    if name_text is not None:
+        sid = name_text
+    elif (
+        room := name_room(view, prefix, width=width, show_harness=show_harness, awaited=awaited)
+    ) is not None:
+        sid = fit_name(sid, room)
     id_style = _id_style(view)
     cwd = shorten_path(tilde(view.get("cwd")), keep=cwd_segments) if detail is None else detail
 
@@ -346,11 +395,10 @@ def node_label(
         _append_pulsing_name(row2_parts, sid, id_style, frame=frame)
     else:
         row2_parts.append((sid, id_style) if id_style else sid)
-    if awaited:
-        row2_parts.append((f"  ◂{awaited if awaited > 1 else ''}", "$text-muted"))
+    row2_parts.extend(_trailing_parts(view, awaited))
+    if width is not None and _parts_width(row2_parts) > width:
+        row2_parts = clip_parts(row2_parts, width)  # too deep or too narrow even for "…": crop
     mark = _mark(view)
-    if mark is not None and not mark.replaces_status:
-        row2_parts.append((f"  {mark.glyph}", mark.style))
     if cost is not None and width is not None:
         gap = width - _parts_width(row2_parts) - _parts_width(cost)
         if gap > 0:
