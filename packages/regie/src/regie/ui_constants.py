@@ -168,14 +168,14 @@ REGIE_WIPE_WAKE_CELLS = 6
 REGIE_ATTENTION_PULSE_LIMIT = 3
 REGIE_ATTENTION_PULSE_INTERVAL = 0.4
 
-#: An hourglass that fills, turns on its side, drains and turns back: an agent blocked on a
-#: peer, not computing. A second a glyph, so it never reads as work in progress.
-REGIE_WAITING_FRAMES = "⧖⧗⧓⧑"
+#: A clock quadrant sweeping clockwise: an agent blocked on a peer, not computing. A second a
+#: glyph, so it never reads as work in progress.
+REGIE_WAITING_FRAMES = "◴◷◶◵"
 
 #: A fold badge shortens before the name gets fewer cells than this (or its own length).
 REGIE_NAME_MIN_CELLS = 10
 
-#: Leaf frames (one spinner step each) the hourglass rests on before it moves on.
+#: Leaf frames (one spinner step each) the clock rests on before it moves on.
 REGIE_WAITING_STEP_FRAMES = 10
 
 #: How long the row of a participant wears what an operation aimed at it did: a send that
@@ -189,7 +189,7 @@ REGIE_MARK_OUTCOME_MAX_SECONDS = 600.0
 REGIE_MARK_SEEN_SECONDS = 1.0
 
 #: Frames before a leaf's counter wraps: a whole number of turns of both the spinner and the
-#: waiting hourglass, or the wrap would stutter one of them.
+#: waiting clock, or the wrap would stutter one of them.
 REGIE_LEAF_FRAME_CYCLE = math.lcm(
     len(REGIE_SPINNER_FRAMES), len(REGIE_WAITING_FRAMES) * REGIE_WAITING_STEP_FRAMES
 )

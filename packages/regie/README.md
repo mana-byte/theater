@@ -34,7 +34,7 @@ The tree is the whole interface; every signal is a state of something it already
   A name too long for the row ends in `…` rather than wrapping over the directory, and scrolls
   to be read in full while the row is in focus.
 - **Status glyph.** A spinner is an agent computing; `!` needs you (awaiting input); `✗` is
-  dead. A slow hourglass `⧖⧗⧓⧑`, filling and turning every second, is an agent blocked on a peer, in the colour of that
+  dead. A slow clock quadrant `◴◷◶◵`, a step every second, is an agent blocked on a peer, in the colour of that
   wait; a ring filling `○◔◑◕●` is a spawn starting, with the daemon's phase on the row's
   third line; `✕` is a kill in flight.
 - **Bar.** A `▌` in the gutter marks a row that needs you; the newest three breathe.
@@ -44,8 +44,8 @@ The tree is the whole interface; every signal is a state of something it already
   blocked or in doubt. A row the daemon has already dropped stays until its sweep ends, then
   leaves with the reverse reveal if it was killed, roots included.
 - **Sends and waits.** A send travels the rails as a comet in its sender's colour. An agent
-  peers are waiting on wears `❮` in its connector (`├──❮⠹`), where the
-  route arrives; only a new wait and the selected row's waits draw their route.
+  peers are waiting on wears `╴` in its connector (`├──╴⠹`), a stub
+  reaching toward its glyph, where the route arrives; only a new wait and the selected row's waits draw their route.
 - **Marks.** After the name: `⋯` queued, `✓` delivered (fades), `⊘` blocked (not now: human
   present, busy), `✗` failed, `?` unconfirmed. Failures say why on the third line and stop
   asking once the cursor has rested on the row.

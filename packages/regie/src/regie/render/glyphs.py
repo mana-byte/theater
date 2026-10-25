@@ -125,7 +125,7 @@ def _status_glyph(
     """The one-character status mark and the theme slot it renders in.
 
     Idle uses the harness's own icon so the glyph does double duty; there is no
-    separate harness-glyph column. An agent blocked on a peer shows a slowly turning hourglass
+    separate harness-glyph column. An agent blocked on a peer shows a slow clock quadrant
     in its await's colour instead: it is not computing, so it must not look like it is.
     """
     status = node.get("status", "?")
@@ -260,15 +260,15 @@ def _row2_lead(
 ) -> list:
     """Row-2 parts before the name: prefix rail, status glyph, harness text (when shown).
 
-    An agent peers are waiting on wears ``❮`` in the connector's spacer cell, where the await
-    route arrives: the cell is blank otherwise, so it costs no width.
+    An agent peers are waiting on wears ``╴`` in the connector's spacer cell, a half-cell stub
+    reaching toward its glyph: the cell is blank otherwise, so it costs no width.
     """
     glyph, glyph_style = _status_glyph(node, frame, waiting=waiting)
     glyph_style = _presence_glyph_style(node, glyph_style)
     harness = node.get("harness", "?")
     parts: list = []
     if prefix and awaited and prefix.endswith(" "):
-        parts.extend([(prefix[:-1], "$text dim"), ("❮", "$text-muted")])
+        parts.extend([(prefix[:-1], "$text dim"), ("╴", "$text")])
     elif prefix:
         parts.append((prefix, "$text dim"))
     parts.append((glyph, glyph_style))
@@ -457,7 +457,7 @@ def node_label(
     Row 1 is a leading spacer carrying the parent rail (blank for the first root);
     row 3 uses ``cont_prefix`` so it doesn't look like a new node. *waiting* is the colour of
     the await this agent is blocked in; *awaited* is how many peers are blocked on it (the row
-    wears ``❮`` in its connector whatever the number). Without *show_harness* the working pulse
+    wears ``╴`` in its connector whatever the number). Without *show_harness* the working pulse
     runs along the name instead of the harness text. A name wider than the room ends in ``…`` so
     row two never wraps over the directory; *name_text* replaces it with the caller's own window
     of the name (scrolling, or blanks under an editor).
