@@ -11,6 +11,7 @@ from collections import deque
 from typing import NamedTuple
 
 from regie.ui_constants import (
+    REGIE_AWAITED_MARK as AWAITED_MARK,
     REGIE_TREE_BRANCH as BRANCH,
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
     REGIE_TREE_LEAF_ROWS as LEAF_ROWS,
@@ -264,8 +265,10 @@ def await_highlight_cells(
 
     route = _await_route(path)
     cells: list[AwaitCell] = []
+    mark_cell = (path[-1][0], path[-1][1] + len(BRANCH) - 1)  # the target's spacer cell
     for index, cell in enumerate(route):
-        glyph = tree_glyph_at(lines, cell)
+        # The target is awaited by this very route, so its bar is part of the route's last cell.
+        glyph = AWAITED_MARK if cell == mark_cell else tree_glyph_at(lines, cell)
         if glyph is None:
             continue
         row, col = cell
@@ -295,6 +298,7 @@ _RAIL_ARMS: dict[str, frozenset[Direction]] = {
     "─": frozenset({LEFT, RIGHT}),
     "└": frozenset({UP, RIGHT}),
     "├": frozenset({UP, DOWN, RIGHT}),
+    AWAITED_MARK: frozenset({LEFT}),
 }
 
 #: The heavy form of each rail glyph by which of its arms are drawn heavy.
@@ -315,6 +319,7 @@ _HEAVY_RAILS: dict[tuple[str, frozenset[Direction]], str] = {
     ("├", frozenset({UP})): "┞",
     ("├", frozenset({DOWN})): "┟",
     ("├", frozenset({RIGHT})): "┝",
+    (AWAITED_MARK, frozenset({LEFT})): "▎",
 }
 
 #: A separator's heavy rails keep the tree's own dim colour: only their weight changes, so they

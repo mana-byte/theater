@@ -42,6 +42,10 @@ REGIE_TREE_LAST_BRANCH = "└── "
 REGIE_TREE_RAIL = "│   "
 REGIE_TREE_GAP = "    "
 
+#: A thin bar closing the connector of an agent peers are waiting on: part of the tree, so an
+#: await's route ends on it.
+REGIE_AWAITED_MARK = "▏"
+
 #: How often a travelling tree trace moves (seconds). Slower than the spinners.
 REGIE_TRACE_ANIM_INTERVAL = 0.10
 

@@ -111,6 +111,16 @@ def test_only_the_selected_rows_awaits_stay_drawn():
     assert other and not set(other) & set(drawn)  # a different row, a different route
 
 
+def test_a_new_await_ends_on_the_targets_bar_in_the_waiters_colour():
+    lines = _lines("aaa", "bbb")
+    controller = RouteAnimationController(motion=False)
+    _await(controller, lines, "aaa", "bbb")
+
+    drawn = _glyphs(_tick(controller, lines, now=0.0))
+
+    assert drawn[(("p", "bbb"), (1, 3))] == ("▎", controller.marks().waiting["aaa"])
+
+
 def test_a_stuck_await_expires_with_its_marks():
     lines = _lines("aaa", "bbb")
     controller = RouteAnimationController()

@@ -15,8 +15,10 @@ from regie.render.routing import (
     AwaitCell,
     await_highlight_cells,
     cell_leaf,
+    heavy_rail,
     send_path,
 )
+from regie.ui_constants import REGIE_AWAITED_MARK as AWAITED_MARK
 from regie.ui_constants import REGIE_ROUTE_COLORS
 
 from packages.regie.tests.support.tree_nodes import (
@@ -168,12 +170,12 @@ def test_await_highlight_only_tints_visible_cells_on_the_actual_route():
     assert cells[(10, 4)].glyph == "└"
     assert cells[(10, 5)].glyph == "─"  # target branch reaches toward the leaf
     assert cells[(10, 6)].glyph == "─"
-    assert (10, 7) not in cells  # branch spacer
+    assert cells[(10, 7)].glyph == AWAITED_MARK  # the branch spacer holds the target's bar
     assert (10, 8) not in cells  # status glyph
     assert (11, 0) not in cells  # below the target branch is not part of the await route
     assert (4, 4) not in cells  # passing the side leaf's ancestry rail does not light its branch
     assert (13, 0) not in cells  # the third root is not on the route at all
-    assert {cell.glyph for cell in cells.values()} <= set("│├└─")
+    assert {cell.glyph for cell in cells.values()} <= set("│├└─" + AWAITED_MARK)
 
 
 def test_an_ancestor_awaiting_a_descendant_lights_its_own_run():
@@ -195,7 +197,8 @@ def test_an_ancestor_awaiting_a_descendant_lights_its_own_run():
     assert cells[(1, 2)].directions == frozenset({LEFT, RIGHT})
     assert cells[(3, 4)].directions == frozenset({UP, DOWN})  # the rail down to the child
     assert cells[(4, 4)].directions == frozenset({UP, RIGHT})  # the awaited leaf's corner: ┗
-    assert max(col for row, col in cells if row == 4) == 6  # stops at the branch's last dash
+    assert cells[(4, 6)].glyph == "─" and cells[(4, 7)].glyph == AWAITED_MARK
+    assert max(col for row, col in cells if row == 4) == 7  # ends on the target's bar
 
 
 def test_await_highlight_is_the_same_picture_in_reverse():
@@ -212,9 +215,12 @@ def test_await_highlight_is_the_same_picture_in_reverse():
     down = _await_cells(lines, "aaaa", "bbbb")
     up = _await_cells(lines, "bbbb", "aaaa")
 
-    assert {cell: entry.directions for cell, entry in down.items()} == {
-        cell: entry.directions for cell, entry in up.items()
-    }
+    def rails(cells):
+        return {c: e.directions for c, e in cells.items() if e.glyph != AWAITED_MARK}
+
+    assert rails(down) == rails(up)  # the bar alone says which end is awaited
+    assert down[(4, 7)].glyph == AWAITED_MARK and (1, 3) not in down
+    assert up[(1, 3)].glyph == AWAITED_MARK and (4, 7) not in up
     assert down[(1, 0)].directions == frozenset({RIGHT})  # ┕ at the parent
     assert down[(4, 4)].directions == frozenset({UP, RIGHT})  # ┗ at the child
 
@@ -350,8 +356,23 @@ def test_await_highlight_never_lands_on_anything_but_a_rail():
     for a, b in (("aaa", "ddd"), ("ddd", "aaa"), ("zzz", "ddd"), ("bbb", "ccc")):
         for cell in await_highlight_cells(lines, a, b) or ():
             drawn = _char_at(grid, cell.cell)
+            if cell.glyph == AWAITED_MARK:  # the target's bar, over its blank spacer cell
+                assert drawn == " "
+                continue
             assert drawn in "│├└─", (a, b, cell.cell, drawn)
             assert drawn == cell.glyph
+
+
+def test_the_awaited_bar_is_the_last_cell_of_the_route_and_goes_a_step_heavier():
+    lines = render_tree([_agent("aaa"), _agent("bbb")])
+
+    cells = await_highlight_cells(lines, "aaa", "bbb")
+    assert cells is not None
+
+    last = cells[-1]
+    assert last.glyph == AWAITED_MARK and last.cell == (4, 3)  # bbb's spacer: past its two dashes
+    assert heavy_rail(last.glyph, last.directions) == "▎"
+    assert [c.glyph for c in cells if c.glyph == AWAITED_MARK] == [AWAITED_MARK]  # not aaa's end
 
 
 def test_await_highlight_needs_both_ends_on_screen():

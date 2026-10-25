@@ -14,6 +14,7 @@ from rich.cells import cell_len
 from textual.content import Content
 
 from regie.ui_constants import (
+    REGIE_AWAITED_MARK as AWAITED_MARK,
     REGIE_NAME_MIN_CELLS as NAME_MIN_CELLS,
     REGIE_TREE_COST_MIN_CELLS as COST_MIN_CELLS,
     REGIE_SEND_TRACE_STYLE as SEND_STYLE,
@@ -261,14 +262,14 @@ def _row2_lead(
     """Row-2 parts before the name: prefix rail, status glyph, harness text (when shown).
 
     An agent peers are waiting on wears ``▏`` in the connector's spacer cell, a thin bar on the
-    cell's left edge: the cell is blank otherwise, so it costs no width.
+    cell's left edge drawn like the rails: the cell is blank otherwise, so it costs no width.
     """
     glyph, glyph_style = _status_glyph(node, frame, waiting=waiting)
     glyph_style = _presence_glyph_style(node, glyph_style)
     harness = node.get("harness", "?")
     parts: list = []
     if prefix and awaited and prefix.endswith(" "):
-        parts.extend([(prefix[:-1], "$text dim"), ("▏", "$text")])
+        parts.append((prefix[:-1] + AWAITED_MARK, "$text dim"))
     elif prefix:
         parts.append((prefix, "$text dim"))
     parts.append((glyph, glyph_style))

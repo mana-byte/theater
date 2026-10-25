@@ -45,7 +45,8 @@ The tree is the whole interface; every signal is a state of something it already
   leaves with the reverse reveal if it was killed, roots included.
 - **Sends and waits.** A send travels the rails as a comet in its sender's colour. An agent
   peers are waiting on wears `▏` in its connector (`├──▏⠹`), a thin bar
-  on the cell's left edge, where the route arrives; only a new wait and the selected row's waits draw their route.
+  drawn like the rails, where the route ends: the comet runs on into it and it thickens to `▎`.
+  Only a new wait and the selected row's waits draw their route.
 - **Marks.** After the name: `⋯` queued, `✓` delivered (fades), `⊘` blocked (not now: human
   present, busy), `✗` failed, `?` unconfirmed. Failures say why on the third line and stop
   asking once the cursor has rested on the row.
