@@ -216,3 +216,40 @@ async def test_an_await_on_a_folded_agent_still_changes_the_waiters_glyph(tmp_pa
 
         app._animate_bus_row(event("job.await.end"))
         await wait_until(pilot, lambda: waiter._waiting is None and target._awaited == 0)
+
+
+async def test_a_parent_awaiting_its_folded_child_shows_the_waiting_glyph_and_keeps_it_on_unfold(
+    tmp_path: Path,
+) -> None:
+    from regie.ui_constants import REGIE_WAITING_FRAMES
+
+    path = tmp_path / "layout.json"
+    TreeLayout(folded={"participant-1"}).save(path)
+    app, _client, _presentation = build_app(projection=_family(), tree_layout_path=path)
+
+    def event(kind: str) -> dict:
+        return {
+            "kind": kind,
+            "from_id": "participant-1",  # the parent, on screen
+            "to_id": "participant-4",  # its own child, folded under it
+            "payload": {"token": "t", "handle": "h"},
+        }
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: tree.participant_ids == ("participant-1", "participant-5"))
+        parent = _leaf(tree, "participant-1")
+
+        app._animate_bus_row(event("job.await.start"))
+        await wait_until(pilot, lambda: parent._waiting is not None)
+        assert _row(parent).lstrip("└├│─┢┡┠━┃┗┏ ")[0] in REGIE_WAITING_FRAMES
+
+        tree.select("participant-1")
+        await pilot.press("space")  # unfold: the wait must still be there
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 5)
+        child = _leaf(tree, "participant-4")
+        await wait_until(pilot, lambda: child._awaited == 1)
+        assert parent._waiting is not None
+
+        app._animate_bus_row(event("job.await.end"))
+        await wait_until(pilot, lambda: parent._waiting is None and child._awaited == 0)

@@ -226,22 +226,33 @@ def test_a_waiter_folded_out_of_sight_leaves_no_mark_but_its_target_still_counts
     assert marks.waiting == {} and marks.awaited == {"bbb": 1}
 
 
-def test_two_agents_under_one_fold_have_no_row_to_show_between_them():
+def test_two_agents_under_one_fold_start_a_wait_with_nothing_to_draw_until_it_opens():
     lines = _lines("boss")
-    resolve = _resolver({"kid": "boss", "kin": "boss"}, {"boss"})
-    assert (
-        not RouteAnimationController().start_await(lines, "t", "h", "kid", "kin", resolve).started
-    )
+    controller = RouteAnimationController()
+    folded = _resolver({"kid": "boss", "kin": "boss"}, {"boss"})
+
+    assert controller.start_await(lines, "t", "h", "kid", "kin", folded).started
+    assert controller.marks(folded).waiting == {} and controller.marks(folded).awaited == {}
+    assert not _glyphs(_tick(controller, lines, now=0.0, resolve=folded))  # no second row
+
+    open_ = _resolver({}, {"boss", "kid", "kin"})  # unfolded: the wait was real all along
+    assert set(controller.marks(open_).waiting) == {"kid"}
+    assert controller.marks(open_).awaited == {"kin": 1}
 
 
-def test_an_agent_waiting_on_its_own_folded_child_shows_the_wait_not_a_badge_on_itself():
+def test_a_parent_awaiting_the_child_folded_under_it_still_shows_that_it_is_waiting():
     lines = _lines("boss", "other")
-    resolve = _resolver({"kid": "boss"}, {"boss", "other"})
+    folded = _resolver({"kid": "boss"}, {"boss", "other"})
     controller = RouteAnimationController()
 
-    assert not controller.start_await(lines, "t", "h", "boss", "kid", resolve).started  # one row
-    # (the ring still needs a row to show between: nothing to draw, nothing to mark)
-    assert controller.marks(resolve).awaited == {}
+    assert controller.start_await(lines, "t", "h", "boss", "kid", folded).started
+    marks = controller.marks(folded)
+    assert set(marks.waiting) == {"boss"}  # the waiting glyph on the parent
+    assert marks.awaited == {}  # but no badge on itself: it is the only row there is
+
+    unfolded = _resolver({}, {"boss", "other", "kid"})  # open the fold: the child is waited on
+    marks = controller.marks(unfolded)
+    assert set(marks.waiting) == {"boss"} and marks.awaited == {"kid": 1}
 
 
 def test_an_end_that_is_nowhere_in_the_tree_is_still_refused():

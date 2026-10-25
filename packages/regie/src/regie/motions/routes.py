@@ -211,16 +211,25 @@ class RouteAnimationController:
         return bool(self._route_anims or self._await_anims)
 
     @staticmethod
-    def _ends(
+    def _rows(
         from_id: str | None, to_id: str | None, resolve: Resolve | None
     ) -> tuple[str, str] | None:
-        """The visible rows for both ends of a relation; None when either is out of sight or the
-        two are one row (both under the same fold)."""
+        """The rows standing for both ends of a relation, which may be one row (a parent and the
+        child folded under it); None when either end is nowhere in the tree."""
         if resolve is not None and from_id and to_id:
             from_id, to_id = resolve(from_id), resolve(to_id)
-        if not from_id or not to_id or from_id == to_id:
+        if not from_id or not to_id:
             return None
         return from_id, to_id
+
+    @classmethod
+    def _ends(
+        cls, from_id: str | None, to_id: str | None, resolve: Resolve | None
+    ) -> tuple[str, str] | None:
+        """The two rows a route runs between; None when there are not two (an end out of the
+        tree, or both under one fold): nothing to draw, though the wait still counts."""
+        rows = cls._rows(from_id, to_id, resolve)
+        return None if rows is None or rows[0] == rows[1] else rows
 
     def marks(self, resolve: Resolve | None = None) -> AwaitMarks:
         """The waiting and waited-on rows right now, for the end marks every await leaves.
@@ -231,11 +240,14 @@ class RouteAnimationController:
         waiting: dict[str, str] = {}
         waiters: dict[str, set[str]] = {}
         for anim in self._await_anims.values():
-            row = anim.to_id if resolve is None else resolve(anim.to_id)
-            if resolve is None or resolve(anim.from_id) == anim.from_id:
+            rows = self._rows(anim.from_id, anim.to_id, resolve)
+            if rows is None:
+                continue
+            from_row, to_row = rows
+            if from_row == anim.from_id:  # a waiter folded out of sight leaves no mark
                 waiting.setdefault(anim.from_id, self._colors.color(anim.from_id))
-            if row is not None and row != anim.from_id:
-                waiters.setdefault(row, set()).add(anim.from_id)
+            if to_row != from_row:  # one row has nothing to be waited on by itself
+                waiters.setdefault(to_row, set()).add(anim.from_id)
         return AwaitMarks(waiting, {target: len(who) for target, who in waiters.items()})
 
     def _release_colors(self) -> None:
@@ -272,15 +284,16 @@ class RouteAnimationController:
         """Begin an await pulse, reaping expired ones first.
 
         With a *resolve*, an end folded out of sight is judged by the row standing for it: the
-        wait still marks its waiter even when there is no route to draw.
+        wait still marks its waiter even when there is no route to draw: a parent awaiting the
+        child folded under it has no second row, and its glyph must still show the wait.
         """
         self._reap_await_anims()
         if len(self._await_anims) >= REGIE_MAX_AWAIT_ANIMS:
             return StartAwaitDecision(started=False)
         if not token or not handle or not from_id or not to_id or from_id == to_id:
             return StartAwaitDecision(started=False)
-        ends = self._ends(from_id, to_id, resolve)
-        if ends is None or (resolve is None and await_path(tree_lines, *ends) is None):
+        rows = self._rows(from_id, to_id, resolve)
+        if rows is None or (resolve is None and await_path(tree_lines, *rows) is None):
             return StartAwaitDecision(started=False)
         anim = AwaitRouteAnim(str(token), str(handle), from_id, to_id)
         self._await_anims[anim.key] = anim
