@@ -36,31 +36,60 @@ def _marks(content: Content, style: str) -> list[tuple[int, int]]:
     ]
 
 
-def test_a_reversed_block_leads_and_a_bold_wake_follows():
+def _first_row(content: Content) -> str:
+    return content.plain.split("\n")[0]
+
+
+def test_a_reversed_block_leads_and_runs_right():
     content = Content.assemble("├── abc\n", "│   ~/p")
 
-    def sweep(progress: float):
-        swept = apply_wipe(content, (progress, "$warning"), width=20)
-        return _marks(swept, "reverse $warning"), _marks(swept, "bold $warning")
+    def block(progress: float):
+        return _marks(apply_wipe(content, (progress, "$warning"), width=20), "reverse $warning")
 
-    (early_block, early_wake), (late_block, late_wake) = sweep(0.3), sweep(0.6)
-    assert early_block and late_block
-    assert late_block[0][0] > early_block[0][0]  # the block runs right
-    assert early_wake and early_wake[0][1] == early_block[0][0]  # the wake trails right behind it
-    assert late_wake and late_wake[0][1] == late_block[0][0]
+    early, late = block(0.3), block(0.6)
+    assert early and late
+    assert late[0][0] > early[0][0]
 
 
-def test_the_trail_fades_from_bold_to_plain_to_dim_away_from_the_block():
-    swept = apply_wipe(Content("├── abc"), (0.6, "$warning"), width=20)
+def test_on_an_ansi_theme_the_trail_is_shade_blocks_thinning_away_from_the_block():
+    swept = apply_wipe(Content("├── abc"), (0.6, "$warning"), width=30)
 
-    (block,), (bold,) = _marks(swept, "reverse $warning"), _marks(swept, "bold $warning")
-    (plain,), (dim,) = _marks(swept, "$warning"), _marks(swept, "dim $warning")
-    assert bold[1] == block[0] and plain[1] == bold[0] and dim[1] == plain[0]  # one run, no gaps
+    (block,) = _marks(swept, "reverse $warning")
+    row = _first_row(swept)
+    assert row[block[0] - 9 : block[0]] == "░░░▒▒▒▓▓▓"  # nine cells, densest next to the block
+    assert all("on " not in str(span.style) for span in swept.spans)  # an ANSI theme can't blend
 
 
-def test_the_sweep_only_uses_foreground_styles_an_ansi_theme_can_draw():
-    swept = apply_wipe(Content("├── abc"), (0.5, "$error"), width=20)
-    assert all("on " not in str(span.style) for span in swept.spans)
+def test_on_an_ansi_theme_text_under_the_trail_stays_and_fades_by_weight():
+    swept = apply_wipe(Content("abcdefghijklmnopqrstuvwxyz"), (0.6, "$warning"), width=26)
+
+    (block,) = _marks(swept, "reverse $warning")
+    assert _first_row(swept)[: block[0]] == "abcdefghijklmnopqrstuvwxyz"[: block[0]]
+
+    def cells(style: str) -> set[int]:
+        return {col for start, stop in _marks(swept, style) for col in range(start, stop)}
+
+    nearest = block[0]
+    assert cells("bold $warning") == set(range(nearest - 3, nearest))
+    assert cells("$warning") == set(range(nearest - 6, nearest - 3))
+    assert cells("dim $warning") == set(range(nearest - 9, nearest - 6))
+
+
+def test_on_a_truecolor_theme_the_trail_is_blocks_of_fading_opacity_over_anything():
+    content = Content("├── abc")
+    swept = apply_wipe(content, (0.6, "$warning"), width=30, blend=True)
+
+    (block,) = _marks(swept, "reverse $warning")
+    alphas = {
+        span.start: int(str(span.style).split()[-1].rstrip("%"))
+        for span in swept.spans
+        if str(span.style).startswith("on $warning ")
+    }
+    cells = [block[0] - 1 - behind for behind in range(9)]  # nearest the block first
+    fading = [alphas[cell] for cell in cells]
+    assert fading == sorted(fading, reverse=True) and len(set(fading)) == len(fading)
+    assert fading[0] < 100 and fading[-1] > 0
+    assert _first_row(swept)[: len(content.plain)] == "├── abc"  # the text is untouched
 
 
 def test_every_row_is_padded_so_the_sweep_crosses_the_whole_leaf():

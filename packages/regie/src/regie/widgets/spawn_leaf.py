@@ -55,7 +55,11 @@ class SpawnLeaf(RenameableRow):
             hint=[(_HINT, "$text-muted")],
             width=width,
         )
-        return content if self._wipe is None else apply_wipe(content, self._wipe, width=width)
+        return (
+            content
+            if self._wipe is None
+            else apply_wipe(content, self._wipe, width=width, blend=not self.app.native_ansi_color)
+        )
 
     def set_wipe(self, wipe: Wipe | None) -> None:
         """Draw one frame of the sweep that greets this row when it opens, or end it."""

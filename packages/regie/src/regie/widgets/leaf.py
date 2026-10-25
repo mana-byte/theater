@@ -161,7 +161,12 @@ class AgentLeaf(RenameableRow):
             fold_hint=self._cost_in_focus(),
         )
         if self._wipe is not None:
-            content = apply_wipe(content, self._wipe, width=self._label_width())
+            content = apply_wipe(
+                content,
+                self._wipe,
+                width=self._label_width(),
+                blend=not self.app.native_ansi_color,
+            )
         if self._stage_marker is None and self.needs_attention:
             return with_gutter_bar(content, _ATTENTION_BAR[self._attention_level])
         return with_stage_marker(content, self._stage_marker)

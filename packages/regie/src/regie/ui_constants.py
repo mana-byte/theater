@@ -158,14 +158,16 @@ REGIE_STARTUP_REVEAL_MAX_SECONDS = 4.0
 REGIE_STARTUP_REVEAL_MAX_LEAVES = 100
 
 #: A row-wide sweep announces a status change: its length, frame period, and the widths of the
-#: reversed leading block and the fading trail behind it. Foreground styles only: an ANSI theme
-#: cannot blend a background tint, it would paint the whole row solid.
+#: reversed leading block and the fading trail behind it. A truecolor theme fades the trail with
+#: background tints; an ANSI theme cannot blend (a tint paints solid), so it uses shade blocks.
 REGIE_WIPE_SECONDS = 0.5
 #: Death is abrupt: a kill's sweep, and an agent dying, run at half the pace of the rest.
 REGIE_WIPE_DEATH_SECONDS = 0.25
 REGIE_WIPE_INTERVAL_SECONDS = 0.035
 REGIE_WIPE_BAND_CELLS = 3
 REGIE_WIPE_WAKE_CELLS = 9
+#: Opacity (percent) of the trail cell next to the block; each cell behind it is fainter.
+REGIE_WIPE_TRAIL_ALPHA = 60
 
 #: A row that needs the human gets a bar in its gutter; only the newest few breathe, so a crowd
 #: of waiting rows is steady instead of a flicker.

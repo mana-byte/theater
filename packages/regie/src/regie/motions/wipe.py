@@ -16,6 +16,7 @@ from regie.render.layout import Key
 from regie.ui_constants import (
     REGIE_WIPE_BAND_CELLS,
     REGIE_WIPE_SECONDS,
+    REGIE_WIPE_TRAIL_ALPHA,
     REGIE_WIPE_WAKE_CELLS,
 )
 
@@ -34,10 +35,14 @@ def status_wipe_color(previous: str, status: str) -> str | None:
     return None
 
 
-def apply_wipe(content: Content, wipe: Wipe, *, width: int | None = None) -> Content:
+def apply_wipe(
+    content: Content, wipe: Wipe, *, width: int | None = None, blend: bool = False
+) -> Content:
     """Mark *content* with a reversed block that runs left to right, a fading trail behind it.
 
-    Short rows are padded first: a sweep that stops where the text does reads as a glitch.
+    The trail is blocks of fading opacity: background tints when the theme can *blend*, shade
+    glyphs over blanks (and fading text weight) when it cannot. Short rows are padded first: a
+    sweep that stops where the text does reads as a glitch.
     """
     progress, color = wipe
     lines = content.split("\n", allow_blank=True)
@@ -46,23 +51,43 @@ def apply_wipe(content: Content, wipe: Wipe, *, width: int | None = None) -> Con
         return content
     edge = round(progress * (span + REGIE_WIPE_BAND_CELLS + REGIE_WIPE_WAKE_CELLS))
     return Content("\n").join(
-        _mark_row(line, span, edge - REGIE_WIPE_BAND_CELLS, edge, color) for line in lines
+        _mark_row(line, span, edge - REGIE_WIPE_BAND_CELLS, edge, color, blend) for line in lines
     )
 
 
-#: The trail behind the block, nearest cells first: a colour cannot blend on an ANSI theme, so it
-#: fades by weight instead.
-_TRAIL_STYLES = ("bold {}", "{}", "dim {}")
+#: Away from the block the trail thins in three tiers: shade glyphs over blanks, and the weight
+#: of the text under it, where a tint cannot be drawn.
+_TRAIL_SHADES = "▓▒░"
+_TRAIL_WEIGHTS = ("bold {}", "{}", "dim {}")
 
 
-def _mark_row(row: Content, span: int, band_start: int, edge: int, color: str) -> Content:
+def _fade_trail(row: Content, band_start: int, color: str, blend: bool) -> Content:
+    for behind in range(REGIE_WIPE_WAKE_CELLS):
+        col = band_start - 1 - behind
+        if not 0 <= col < len(row):
+            continue
+        if blend:
+            alpha = (
+                REGIE_WIPE_TRAIL_ALPHA * (REGIE_WIPE_WAKE_CELLS - behind) // REGIE_WIPE_WAKE_CELLS
+            )
+            row = row.stylize(f"on {color} {alpha}%", col, col + 1)
+            continue
+        tier = behind * len(_TRAIL_SHADES) // REGIE_WIPE_WAKE_CELLS
+        if row.plain[col] == " ":
+            plain = row.plain
+            row = Content(plain[:col] + _TRAIL_SHADES[tier] + plain[col + 1 :], list(row.spans))
+            row = row.stylize(color, col, col + 1)
+        else:
+            row = row.stylize(_TRAIL_WEIGHTS[tier].format(color), col, col + 1)
+    return row
+
+
+def _mark_row(
+    row: Content, span: int, band_start: int, edge: int, color: str, blend: bool
+) -> Content:
     row += " " * (span - cell_len(row.plain))
     end = len(row)
-    step = REGIE_WIPE_WAKE_CELLS // len(_TRAIL_STYLES)
-    for index, style in enumerate(_TRAIL_STYLES):
-        stop = band_start - index * step
-        if (start := max(0, stop - step)) < min(stop, end):
-            row = row.stylize(style.format(color), start, min(stop, end))
+    row = _fade_trail(row, band_start, color, blend)
     if (start := max(0, band_start)) < min(edge, end):
         row = row.stylize(f"reverse {color}", start, min(edge, end))
     return row
