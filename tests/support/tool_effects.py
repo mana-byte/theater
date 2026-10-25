@@ -93,11 +93,7 @@ async def expect_gated(live: LiveRig, participant: str, effect: Effect) -> None:
     live.queue(effect.reply)
     live.queue(MockReply("the gated call must not reach this reply"))
     mark = _mark(live)
-    accepted = (
-        await live.client.controls.send(participant, prompt, idempotency_key=uuid.uuid4().hex)
-    ).value
-    assert accepted.job_handle is not None
-    handle = accepted.job_handle
+    handle = await live.submit(participant, prompt)
 
     async def still_waiting() -> None:
         _check_fit(live, prompt, effect)

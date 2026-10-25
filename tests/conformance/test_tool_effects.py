@@ -86,9 +86,7 @@ class _Live:
         self._requests = requests
         self._job = job
         self.mock = SimpleNamespace(requests=tuple(requests))
-        self.client = SimpleNamespace(
-            controls=SimpleNamespace(send=self._accept), jobs=SimpleNamespace(get=self._get)
-        )
+        self.client = SimpleNamespace(jobs=SimpleNamespace(get=self._get))
 
     def queue(self, reply: object) -> None:
         """The scripted reply goes nowhere: the job below has already ended."""
@@ -107,8 +105,8 @@ class _Live:
         await guard()
         pytest.fail("the screen never reached an approval")
 
-    async def _accept(self, participant: str, prompt: str, *, idempotency_key: str) -> Any:
-        return SimpleNamespace(value=SimpleNamespace(job_handle="j1"))
+    async def submit(self, participant: str, prompt: str) -> str:
+        return "j1"
 
     async def _get(self, handle: str) -> Any:
         return SimpleNamespace(value=self._job)

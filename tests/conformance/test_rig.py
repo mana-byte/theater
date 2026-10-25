@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -233,6 +234,76 @@ async def test_a_presence_refusal_on_an_unattended_rig_is_inconclusive_not_a_cli
             await rig.job("j1")
         client.jobs.job = SimpleNamespace(state="crashed", error=SimpleNamespace(code="busy"))
         assert (await rig.job("j1")).error.code == "busy"
+    finally:
+        mock.stop()
+
+
+_real_sleep = asyncio.sleep
+
+
+async def _no_wait(_seconds: float) -> None:
+    await _real_sleep(0)
+
+
+class _Sends:
+    """Answers each send with the next scripted operation, as the daemon's public API would."""
+
+    def __init__(self, *outcomes: tuple[str, str | None]) -> None:
+        self._outcomes = iter(outcomes)
+        self.controls = self
+        self.operations = self
+        self.sent = 0
+
+    async def send(self, participant_id: str, prompt: str, *, idempotency_key: str) -> Any:
+        self.sent += 1
+        accepted = SimpleNamespace(job_handle=f"p1#{self.sent}", operation_id=f"op{self.sent}")
+        return SimpleNamespace(value=accepted)
+
+    async def wait(self, operation_id: str, *, wait_seconds: float) -> Any:
+        state, code = next(self._outcomes)
+        error = None if code is None else SimpleNamespace(code=code, message=f"refused: {code}")
+        return SimpleNamespace(
+            value=SimpleNamespace(operation=SimpleNamespace(state=state, error=error))
+        )
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "handle"),
+    [
+        pytest.param([("succeeded", None)], "p1#1", id="delivered"),
+        pytest.param(
+            [("failed", "busy"), ("failed", "busy"), ("succeeded", None)], "p1#3", id="busy-retried"
+        ),
+        pytest.param(
+            [("failed", "stale_target")], "p1#1", id="another-refusal-is-the-jobs-to-report"
+        ),
+    ],
+)
+async def test_a_send_is_repeated_only_while_the_daemon_refuses_it_as_busy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[tuple[str, str | None]],
+    handle: str,
+) -> None:
+    monkeypatch.setattr(live_rig.asyncio, "sleep", _no_wait)
+    rig, mock = _rig(tmp_path, cast(Any, _Sends(*outcomes)))
+    try:
+        assert await rig.submit("p1", "hello") == handle
+    finally:
+        mock.stop()
+
+
+async def test_a_terminal_that_stays_busy_is_a_failure_that_names_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(live_rig.asyncio, "sleep", _no_wait)
+    monkeypatch.setattr(live_rig, "_SUBMIT_RETRY_SECONDS", 0.0)
+    rig, mock = _rig(tmp_path, cast(Any, _Sends(*[("failed", "busy")] * 3)))
+    try:
+        with pytest.raises(
+            pytest.fail.Exception, match="kept refusing the send as busy: refused: busy"
+        ):
+            await rig.submit("p1", "hello")
     finally:
         mock.stop()
 

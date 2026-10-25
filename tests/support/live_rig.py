@@ -61,6 +61,8 @@ CAPABILITIES = ("orchestration.v1", "state.follow.v1", "catalogs.v1")
 #: How long a send must stay admissible before the CLI counts as ready: screen reads lag redraws.
 _READY_SETTLE_SECONDS = 1.0
 _JOB_SLICE_SECONDS = 3.0
+#: How long a send refused as busy is retried: a CLI that has not drawn its prompt again yet.
+_SUBMIT_RETRY_SECONDS = 20.0
 #: One short directory per scenario: unix socket paths cap near 100 bytes.
 _ROOMS = itertools.count(1)
 #: The probe sidecar's server (plugin) name and the one tool it serves; see ``compat_probe/``.
@@ -433,13 +435,33 @@ class LiveRig:
         seconds: float = 90.0,
         guard: Callable[[], Awaitable[None]] | None = None,
     ) -> Job:
-        accepted = (
-            await self.client.controls.send(
-                participant_id, prompt, idempotency_key=uuid.uuid4().hex
-            )
-        ).value
-        assert accepted.job_handle is not None
-        return await self.job(accepted.job_handle, seconds=seconds, guard=guard)
+        handle = await self.submit(participant_id, prompt)
+        return await self.job(handle, seconds=seconds, guard=guard)
+
+    async def submit(self, participant_id: str, prompt: str) -> str:
+        """Send ``prompt`` and return its job handle once the daemon has delivered or refused it.
+
+        A busy refusal typed nothing: the CLI had not drawn its prompt again after a start or a
+        turn, which proves nothing about it, so the send is repeated. A terminal that stays busy
+        is the failure.
+        """
+        deadline = time.monotonic() + _SUBMIT_RETRY_SECONDS
+        while True:
+            accepted = (
+                await self.client.controls.send(
+                    participant_id, prompt, idempotency_key=uuid.uuid4().hex
+                )
+            ).value
+            assert accepted.job_handle is not None
+            operation = (
+                await self.client.operations.wait(accepted.operation_id, wait_seconds=5)
+            ).value.operation
+            refusal = operation.error if operation.state == "failed" else None
+            if refusal is None or refusal.code != "busy":
+                return accepted.job_handle
+            if time.monotonic() > deadline:
+                violation(f"the daemon kept refusing the send as busy: {refusal.message}")
+            await asyncio.sleep(0.5)
 
     async def job(
         self,
@@ -478,16 +500,11 @@ class LiveRig:
         """Send ``prompt``, hold its answer until released, and wait until the CLI looks busy."""
         hold = self.hold()
         self.queue(MockReply("thinking", hold=hold))
-        accepted = (
-            await self.client.controls.send(
-                participant_id, prompt, idempotency_key=uuid.uuid4().hex
-            )
-        ).value
-        assert accepted.job_handle is not None
+        handle = await self.submit(participant_id, prompt)
         if not await asyncio.to_thread(hold.wait_reached, 60):
             violation("the held request never reached the model")
         await self.expect_screen(participant_id, ScreenKind.WORKING)
-        return HeldTurn(hold, accepted.job_handle)
+        return HeldTurn(hold, handle)
 
     async def steer(self, participant_id: str, prompt: str) -> None:
         accepted = (
