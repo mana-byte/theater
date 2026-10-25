@@ -1,7 +1,8 @@
 name: Harness compatibility attention
 on:
   workflow_run:
-    workflows: [Harness compatibility, Harness compatibility canaries]
+    # Not the canaries: a red one says the suite missed a planted break, not that a release is bad.
+    workflows: [Harness compatibility]
     types: [completed]
 
 permissions:

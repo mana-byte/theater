@@ -57,7 +57,6 @@ def _report(
     log: str,
     event: str = "schedule",
     stage: str = "failure",
-    job: str | None = None,
     head_branch: str = "main",
     head_repository: str | None = "o/r",
     path: str | None = None,
@@ -74,8 +73,7 @@ def _report(
     log_reads: list[str] = []
     job_specs = [
         (
-            job
-            or ("Verify claude plugin and policy" if event == "pull_request" else "Qualify claude"),
+            "Verify claude plugin and policy" if event == "pull_request" else "Qualify claude",
             stage,
             log,
         ),
@@ -90,13 +88,11 @@ def _report(
         for identifier, (_, _, detail) in enumerate(job_specs, start=3)
     }
 
-    canaries = bool(job and job.startswith("Canaries "))
     workflow = {
         "id": 42,
-        "workflow_id": 9,
         # A run-name appends the event, so the API never reports the bare workflow name.
-        "name": f"Harness compatibility{' canaries' if canaries else ''} ({event})",
-        "path": path or f".github/workflows/harness-compat{'-canaries' if canaries else ''}.yml",
+        "name": f"Harness compatibility ({event})",
+        "path": path or ".github/workflows/harness-compat.yml",
         "conclusion": stage,
         "event": event,
         "html_url": URL,
@@ -111,16 +107,6 @@ def _report(
             return {
                 "state": "open",
                 "head": {"sha": "new-head" if superseded else "tested-head"},
-            }
-        if endpoint.startswith("actions/workflows/"):
-            return {
-                "workflow_runs": [
-                    {
-                        **workflow,
-                        "id": 43 if superseded else 42,
-                        "path": workflow["path"].partition("@")[0],
-                    }
-                ]
             }
         return workflow
 
@@ -204,44 +190,12 @@ def test_dispatch_from_a_feature_branch_reports_failures_without_authorizing_gre
     ]
 
 
-def test_canary_failures_report_the_known_version_as_suite_tooling(repo: Path, monkeypatch) -> None:
-    issues, proposals, _ = _report(
-        monkeypatch,
-        repo,
-        job="Canaries claude",
-        log="compat:start claude 1.2.0\ncompat:result claude 1.2.0 tooling",
-    )
-    assert issues and proposals[0].results[0].verdict == "tooling"
-
-
-@pytest.mark.parametrize(
-    "event,job,path",
-    [
-        ("pull_request", None, None),
-        ("schedule", "Canaries claude", None),
-        ("workflow_dispatch", "Canaries claude", None),
-        (
-            "schedule",
-            "Canaries claude",
-            ".github/workflows/harness-compat-canaries.yml@refs/heads/main",
-        ),
-    ],
-)
 def test_supersession_never_manufactures_an_unfinished_version_failure(
-    repo: Path, monkeypatch, event: str, job: str | None, path: str | None
+    repo: Path, monkeypatch
 ) -> None:
-    log = "compat:start claude 1.3.0"
-    if job is None:
-        log += "\ncompat:result claude 1.3.0 green\ncompat:start claude 1.4.0"
+    log = "compat:start claude 1.3.0\ncompat:result claude 1.3.0 green\ncompat:start claude 1.4.0"
     issues, proposals, _ = _report(
-        monkeypatch,
-        repo,
-        event=event,
-        job=job,
-        stage="cancelled",
-        superseded=True,
-        log=log,
-        path=path,
+        monkeypatch, repo, event="pull_request", stage="cancelled", superseded=True, log=log
     )
     assert not issues and not proposals
 
@@ -293,15 +247,13 @@ def test_a_completed_failure_survives_supersession_without_excluding_unfinished_
     ]
 
 
-@pytest.mark.parametrize("job", [None, "Canaries claude"])
 def test_an_ordinary_cancellation_still_needs_attention_and_a_known_version_exclusion(
-    repo: Path, monkeypatch, job: str | None
+    repo: Path, monkeypatch
 ) -> None:
     issues, proposals, _ = _report(
         monkeypatch,
         repo,
         event="pull_request",
-        job=job,
         stage="cancelled",
         log="compat:start claude 1.3.0",
     )

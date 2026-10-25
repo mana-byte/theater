@@ -122,10 +122,8 @@ def _plan(args: argparse.Namespace, root: Path) -> int:
 def _canaries(args: argparse.Namespace, root: Path) -> int:
     adapter = load_adapter(args.harness)
     version = canary_version(root, adapter)
-    print(f"compat:start {args.harness} {version}", flush=True)
+    print(f"canaries {args.harness} {version}", flush=True)
     check = run_canaries(root, adapter, version=version)
-    verdict = "green" if check.status == "pass" else "tooling"
-    print(f"compat:result {args.harness} {version} {verdict}", flush=True)
     print(f"{check.status:5} {check.name}: {check.detail}")
     return {"pass": 0, "fail": 1}.get(check.status, 2)
 

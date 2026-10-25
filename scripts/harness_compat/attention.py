@@ -7,7 +7,6 @@ import os
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
 
 from theater.version_policy import version_key
 
@@ -25,10 +24,8 @@ from .publish import (
 )
 from .run import Run
 
-_WORKFLOWS = {
-    "Harness compatibility": ".github/workflows/harness-compat.yml",
-    "Harness compatibility canaries": ".github/workflows/harness-compat-canaries.yml",
-}
+_WORKFLOW = "Harness compatibility"
+_WORKFLOW_PATH = ".github/workflows/harness-compat.yml"
 _FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
 _RECOVERY_JOBS = {
     label: (name, publication_required)
@@ -36,7 +33,6 @@ _RECOVERY_JOBS = {
     for label, publication_required in (
         (f"Qualify {name}", True),
         (f"Verify {name} plugin and policy", False),
-        (f"Canaries {name}", False),
     )
 }
 _RECOVERED: dict[str, Verdict] = {
@@ -106,25 +102,14 @@ def _workflow(run: dict[str, Any]) -> str:
 
 
 def _superseded(run: dict[str, Any], gh: Gh) -> bool:
-    """Whether concurrency replaced this PR or canary run with a newer candidate."""
-    if run["event"] == "pull_request":
-        for reference in run["pull_requests"]:
-            current = api(gh, f"pulls/{reference['number']}")
-            if current["state"] == "closed" or current["head"]["sha"] != run["head_sha"]:
-                return True
+    """Whether concurrency replaced this PR run with a newer candidate; sweeps queue instead."""
+    if run["event"] != "pull_request":
         return False
-    if _workflow(run) != "Harness compatibility canaries" or run["event"] not in SWEEP_EVENTS:
-        return False
-    query = urlencode({"branch": run["head_branch"], "per_page": 100})
-    newer = api(gh, f"actions/workflows/{run['workflow_id']}/runs?{query}")["workflow_runs"]
-    return any(
-        other["id"] > run["id"]
-        and other["path"].partition("@")[0] == _WORKFLOWS[_workflow(run)]
-        and (other["head_repository"] or {}).get("full_name") == run["head_repository"]["full_name"]
-        and other["head_branch"] == run["head_branch"]
-        and other["event"] in SWEEP_EVENTS
-        for other in newer
-    )
+    for reference in run["pull_requests"]:
+        current = api(gh, f"pulls/{reference['number']}")
+        if current["state"] == "closed" or current["head"]["sha"] != run["head_sha"]:
+            return True
+    return False
 
 
 def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None:
@@ -132,8 +117,8 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
     check_publication_context(root, os.environ)
     failed_run = api(gh, f"actions/runs/{run_id}")
     workflow = _workflow(failed_run)
-    if workflow not in _WORKFLOWS or failed_run["event"] == "workflow_run":
-        raise ValueError("not a compatibility qualification or canary run")
+    if workflow != _WORKFLOW or failed_run["event"] == "workflow_run":
+        raise ValueError("not a compatibility qualification run")
     if failed_run["conclusion"] not in _FAILED:
         return
     pages = json.loads(
@@ -149,7 +134,7 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
     run_url = failed_run["html_url"]
     failures: list[Exception] = []
     trusted_logs = (
-        failed_run["path"].partition("@")[0] == _WORKFLOWS[workflow]
+        failed_run["path"].partition("@")[0] == _WORKFLOW_PATH
         and (failed_run["head_repository"] or {}).get("full_name")
         == os.environ["GITHUB_REPOSITORY"]
     )

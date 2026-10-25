@@ -48,12 +48,14 @@ window. Excluded contract failures do not admit that release; inconclusive check
 
 A separate `workflow_run` reporter uses trusted main code and system Python, independent of uv
 setup. It files issues for discovery, setup/static-check, timeout, cleanup and publication failures.
-It recovers unfinished or failed known versions from qualification, PR verification and canary
-logs, then proposes exclusions through the same shared PR. Only identities from this repository's
-two expected workflow files can propose exclusions; foreign/fork source failures get a workflow
-issue without trusting their claimed versions. Reporting never executes PR code or authorizes
-a pass from logs. Superseded cancelled jobs do not fail unfinished versions; completed failures
-and genuinely failed jobs are still reported. Ordinary cancellations require attention.
+It recovers unfinished or failed known versions from qualification and PR verification logs, then
+proposes exclusions through the same shared PR. Only identities from this repository's expected
+workflow file can propose exclusions; foreign/fork source failures get a workflow issue without
+trusting their claimed versions. Reporting never executes PR code or authorizes a pass from
+logs. Superseded cancelled jobs do not fail unfinished versions; completed failures and genuinely
+failed jobs are still reported. Ordinary cancellations require attention. Canary runs are not
+reported: a red one says the suite missed a planted break, not that a release is bad, so it stays
+a red check or run instead of an issue and an exclusion.
 
 ## Suite and temporary data
 

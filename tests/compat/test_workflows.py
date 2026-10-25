@@ -110,10 +110,8 @@ def test_sweeps_interrupt_with_time_left_to_clean_up_and_publish(name: str) -> N
 
 def test_failure_reporter_runs_from_trusted_main_without_project_setup() -> None:
     report = _load("harness-compat-attention.yml")
-    assert report["on"]["workflow_run"]["workflows"] == [
-        "Harness compatibility",
-        "Harness compatibility canaries",
-    ]
+    # Not the canaries: a red one says the suite missed a planted break, not that a release is bad.
+    assert report["on"]["workflow_run"]["workflows"] == ["Harness compatibility"]
     job = report["jobs"]["report"]
     assert "timed_out" in job["if"] and "failure" in job["if"]
     assert job["steps"][0]["with"]["ref"] == "${{ github.sha }}"
