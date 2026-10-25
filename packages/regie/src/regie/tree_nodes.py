@@ -32,6 +32,10 @@ class ParticipantNode(TypedDict):
     children: list[TreeNode]
     stage_reason: NotRequired[str]
     mark: NotRequired[RowMark]
+    #: Set when the participant's children are folded away: how many, which, and the worst state.
+    hidden_count: NotRequired[int]
+    hidden_ids: NotRequired[list[str]]
+    hidden_status: NotRequired[str | None]
 
 
 class SeparatorNode(TypedDict):
@@ -75,6 +79,9 @@ class RawRenderNode(TypedDict, total=False):
     stage_reason: str
     usage_cost_microcents: int | None
     mark: RowMark | None
+    hidden_count: int
+    hidden_ids: list[str]
+    hidden_status: str | None
     collapsed: bool
     count: int
     folded: list[str]

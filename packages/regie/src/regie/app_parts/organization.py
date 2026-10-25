@@ -93,6 +93,32 @@ class TreeOrganization(_AppBase):
             self._show_projection(projection)
         self.query_one(ParticipantTree).select_key(("s", separator_id))
 
+    def toggle_fold(self, participant_id: str) -> None:
+        """Fold or unfold an agent's children; the row keeps the cursor."""
+        projection = self._state.projection
+        if projection is None or participant_id not in projection.participants:
+            return
+        has_children = bool(participant_groups(projection).siblings.get(participant_id))
+        if not has_children and participant_id not in self._tree_layout.folded:
+            return  # nothing to fold, and nothing hidden to bring back
+        self._tree_layout.toggle_fold(participant_id)
+        self._tree_layout.prune_folded(projection.participants)
+        self._save_tree_layout()
+        self._show_projection(projection)
+        self.query_one(ParticipantTree).select_key(("p", participant_id))
+
+    def action_toggle_fold(self) -> None:
+        """Fold the selected row: an agent's children, or a section."""
+        if self._usage_panel.in_footer:
+            return
+        key = self.query_one(ParticipantTree).selected_key
+        if key is None:
+            return
+        if key[0] == "s":
+            self.toggle_separator(key[1])
+        elif key[0] == "p":
+            self.toggle_fold(key[1])
+
     def _separator_selected(self) -> bool:
         key = self.query_one(ParticipantTree).selected_key
         return key is not None and key[0] == "s"

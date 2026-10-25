@@ -274,9 +274,30 @@ def _row2_lead(
     return parts
 
 
-def _trailing_parts(view: RawRenderNode, awaited: int) -> list:
-    """What follows the name on row two: how many peers wait on it, and its operation mark."""
-    parts: list = []
+def fold_parts(view: RawRenderNode, frame: int = 0, *, hint: bool = False) -> list:
+    """The fold badge after the name.
+
+    A folded row says how many it hides and the worst thing happening to them (``▸3 !``), so a
+    branch closed over trouble still shows it. An open one shows ``▾`` only when *hint* asks,
+    on the row in focus: the tree stays free of chevrons until you look at a row.
+    """
+    count = view.get("hidden_count")
+    if count:
+        status = view.get("hidden_status")
+        if not status:
+            return [(f"  ▸{count}", "$text-muted")]
+        glyph, style = _status_glyph({"status": status}, frame)
+        return [(f"  ▸{count}", style), (f" {glyph}", style)]
+    if hint and view.get("children"):
+        return [("  ▾", "$text-muted")]
+    return []
+
+
+def _trailing_parts(
+    view: RawRenderNode, awaited: int, *, frame: int = 0, fold_hint: bool = False
+) -> list:
+    """What follows the name on row two: its fold badge, how many peers wait on it, its mark."""
+    parts: list = fold_parts(view, frame, hint=fold_hint)
     if awaited:
         parts.append((f"  ◂{awaited if awaited > 1 else ''}", "$text-muted"))
     mark = _mark(view)
@@ -292,6 +313,7 @@ def name_room(
     width: int | None,
     show_harness: bool,
     awaited: int = 0,
+    fold_hint: bool = False,
 ) -> int | None:
     """Cells row two leaves for the name once the glyph, harness and badges have theirs.
 
@@ -301,7 +323,8 @@ def name_room(
         return None
     view = cast(RawRenderNode, node)
     lead = _parts_width(_row2_lead(view, prefix, show_harness=show_harness))
-    return max(1, width - lead - _parts_width(_trailing_parts(view, awaited)))
+    trailing = _parts_width(_trailing_parts(view, awaited, fold_hint=fold_hint))
+    return max(1, width - lead - trailing)
 
 
 def fit_name(name: str, room: int) -> str:
@@ -355,6 +378,7 @@ def node_label(
     awaited: int = 0,
     show_harness: bool = True,
     name_text: str | None = None,
+    fold_hint: bool = False,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
@@ -395,7 +419,7 @@ def node_label(
         _append_pulsing_name(row2_parts, sid, id_style, frame=frame)
     else:
         row2_parts.append((sid, id_style) if id_style else sid)
-    row2_parts.extend(_trailing_parts(view, awaited))
+    row2_parts.extend(_trailing_parts(view, awaited, frame=frame, fold_hint=fold_hint))
     if width is not None and _parts_width(row2_parts) > width:
         row2_parts = clip_parts(row2_parts, width)  # too deep or too narrow even for "…": crop
     mark = _mark(view)

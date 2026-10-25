@@ -639,3 +639,40 @@ def test_without_a_width_the_whole_name_is_drawn_and_a_callers_window_wins():
 def test_a_row_too_narrow_even_for_its_badges_is_cropped_not_wrapped():
     node = {**CHILD, "name": LONG}
     assert cell_len(_row2(node_label(node, "│   │   ├── ", width=18, show_harness=True))) <= 18
+
+
+# ---- the fold badge -------------------------------------------------------------------------
+
+
+def test_a_folded_row_says_how_many_it_hides_and_the_worst_thing_going_on_there():
+    folded = {**CHILD, "name": "boss", "hidden_count": 3, "hidden_status": "awaiting_input"}
+    assert _row2(node_label(folded, "├── ", show_harness=False)).endswith("boss  ▸3 !")
+
+    working = {**folded, "hidden_status": "working"}
+    assert _row2(node_label(working, "├── ", show_harness=False, frame=0)).endswith(
+        f"boss  ▸3 {REGIE_SPINNER_FRAMES[0]}"
+    )
+    calm = {**folded, "hidden_status": None}
+    assert _row2(node_label(calm, "├── ", show_harness=False)).endswith("boss  ▸3")
+
+
+def test_the_fold_badge_wears_the_colour_of_what_it_hides():
+    folded = {**CHILD, "name": "boss", "hidden_count": 2, "hidden_status": "dead"}
+    label = node_label(folded, "├── ", show_harness=False)
+    assert "$error" in label_styles(label)
+    calm = node_label({**folded, "hidden_status": None}, "├── ", show_harness=False)
+    assert "$text-muted" in label_styles(calm) and "$error" not in label_styles(calm)
+
+
+def test_an_open_row_shows_its_chevron_only_when_asked_and_only_with_children():
+    parent = {**CHILD, "name": "boss", "children": [{**CHILD, "id": "kid"}]}
+    assert _row2(node_label(parent, "├── ", show_harness=False, fold_hint=True)).endswith("boss  ▾")
+    assert _row2(node_label(parent, "├── ", show_harness=False)).endswith("boss")
+    childless = {**CHILD, "name": "solo"}
+    assert _row2(node_label(childless, "├── ", show_harness=False, fold_hint=True)).endswith("solo")
+
+
+def test_a_long_name_leaves_room_for_the_fold_badge():
+    folded = {**CHILD, "name": LONG, "hidden_count": 12, "hidden_status": "working"}
+    row = _row2(node_label(folded, "├── ", width=36, show_harness=False))
+    assert cell_len(row) <= 36 and "…" in row and row.endswith("▸12 " + REGIE_SPINNER_FRAMES[0])

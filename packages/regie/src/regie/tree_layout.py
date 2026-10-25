@@ -23,6 +23,8 @@ class TreeLayout:
     separators: dict[str, LayoutSeparator] = field(default_factory=dict)
     #: A separator still waiting for its first name: shown, never saved.
     pending: str | None = None
+    #: Participants whose children are folded away; saved only while there are any.
+    folded: set[str] = field(default_factory=set)
 
     @classmethod
     def load(cls, path: Path) -> tuple[TreeLayout, str | None]:
@@ -48,7 +50,9 @@ class TreeLayout:
         orders = _orders_from_wire(raw_orders)
         separators = _separators_from_wire(raw_separators)
         _validate_separator_ownership(orders)
-        return cls(orders, separators)
+        layout = cls(orders, separators)
+        layout.folded = _folded_from_wire(value.get("folded", []))
+        return layout
 
     def save(self, path: Path) -> None:
         pending = self.pending
@@ -59,6 +63,7 @@ class TreeLayout:
                 for parent, entries in self.orders.items()
             },
             "separators": {k: v for k, v in self.separators.items() if k != pending},
+            **({"folded": sorted(self.folded)} if self.folded else {}),
         }
         atomic_write(
             path,
@@ -156,6 +161,18 @@ class TreeLayout:
             record["collapsed"] = True
         return True
 
+    def toggle_fold(self, participant_id: str) -> bool:
+        """Fold or unfold a participant's children; true when they are now folded."""
+        if participant_id in self.folded:
+            self.folded.discard(participant_id)
+            return False
+        self.folded.add(participant_id)
+        return True
+
+    def prune_folded(self, active_participant_ids: Collection[str]) -> None:
+        """Forget folds of participants that are gone, so the file does not grow."""
+        self.folded &= set(active_participant_ids)
+
     def delete_separator(self, separator_id: str) -> bool:
         if self.separators.pop(separator_id, None) is None:
             return False
@@ -220,6 +237,12 @@ def _separators_from_wire(raw_separators: dict[Any, Any]) -> dict[str, LayoutSep
             separator["collapsed"] = True
         separators[separator_id] = separator
     return separators
+
+
+def _folded_from_wire(raw: Any) -> set[str]:
+    if not isinstance(raw, list) or not all(isinstance(entry, str) and entry for entry in raw):
+        raise TypeError("folded must be a list of non-empty participant ids")
+    return set(raw)
 
 
 def _validate_separator_ownership(orders: dict[str, list[str]]) -> None:

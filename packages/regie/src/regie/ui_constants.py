@@ -285,6 +285,13 @@ REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
     (("Tree · ", _C), ("o", _T), (" opens the spawn menu", _D)),
     (
         ("Tree · ", _C),
+        ("Space", _T),
+        (" folds an agent's children; a click on its ", _D),
+        ("▾", _T),
+        (" does too", _D),
+    ),
+    (
+        ("Tree · ", _C),
         ("]/[", _T),
         (" jump to the next or previous agent that needs you", _D),
     ),

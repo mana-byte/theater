@@ -188,3 +188,100 @@ def test_corrupt_or_unknown_layout_is_ignored_without_being_overwritten(tmp_path
     assert layout == TreeLayout()
     assert warning == "tree layout ignored: unsupported or missing version"
     assert path.read_text(encoding="utf-8") == original
+
+
+# ---- folding an agent's children -------------------------------------------------------------
+
+
+def _family(statuses: dict[str, str] | None = None) -> StateProjection:
+    """root -> (a -> a1, b), plus an unrelated other."""
+    parents = {"a": "root", "a1": "a", "b": "root"}
+    people = {"root": _participant("root", name="root"), "other": _participant("other")}
+    for pid, parent in parents.items():
+        people[pid] = _participant(pid, parent_id=parent, name=pid)
+    for pid, status in (statuses or {}).items():
+        people[pid] = Participant.from_wire({**people[pid].to_wire(), "status": status})
+    return StateProjection(
+        cursor=EventCursor("stream", 1),
+        participants=MappingProxyType(people),
+        operations=MappingProxyType({}),
+        jobs=MappingProxyType({}),
+        providers=MappingProxyType({}),
+        workspaces=MappingProxyType({}),
+    )
+
+
+def _flatten(nodes) -> list[str]:
+    return [item for node in nodes for item in (node["id"], *_flatten(node["children"]))]
+
+
+def test_a_folded_participant_hides_every_descendant_and_counts_them() -> None:
+    layout = TreeLayout(folded={"root"})
+    forest = tree_for_projection(_family(), layout=layout)
+
+    assert _flatten(forest) == ["root", "other"]
+    root = forest[0]
+    assert root["hidden_count"] == 3  # a, a1 and b: every level, not just the children
+    assert sorted(root["hidden_ids"]) == ["a", "a1", "b"]
+    assert root["hidden_status"] is None and root["children"] == []
+
+
+def test_folding_an_inner_agent_leaves_the_rest_of_the_tree_alone() -> None:
+    forest = tree_for_projection(_family(), layout=TreeLayout(folded={"a"}))
+    assert _flatten(forest) == ["root", "a", "b", "other"]
+    assert forest[0]["children"][0]["hidden_count"] == 1
+
+
+def test_a_fold_shows_the_worst_state_it_hides() -> None:
+    awaiting = tree_for_projection(
+        _family({"a1": "awaiting_input", "b": "working"}), layout=TreeLayout(folded={"root"})
+    )
+    assert awaiting[0]["hidden_status"] == "awaiting_input"
+    working = tree_for_projection(_family({"b": "working"}), layout=TreeLayout(folded={"root"}))
+    assert working[0]["hidden_status"] == "working"
+
+
+def test_a_participant_with_nothing_below_it_has_nothing_to_fold() -> None:
+    forest = tree_for_projection(_family(), layout=TreeLayout(folded={"other", "b"}))
+    assert "hidden_count" not in forest[1] and _flatten(forest) == _flatten(
+        tree_for_projection(_family())
+    )
+
+
+def test_a_fold_counts_what_a_folded_section_below_it_already_hides() -> None:
+    layout = TreeLayout(
+        orders={"root": ["sep:1234abcd", "a", "b"]},
+        separators={"sep:1234abcd": {"name": "Later", "collapsed": True}},
+        folded={"root"},
+    )
+    forest = tree_for_projection(_family(), layout=layout)
+    assert forest[0]["hidden_count"] == 3  # the section's agents are still below root
+
+
+def test_folds_are_saved_only_while_there_are_any_and_forgotten_when_the_agent_is_gone(
+    tmp_path,
+) -> None:
+    path = tmp_path / "tree-layout.json"
+    layout = TreeLayout()
+    layout.save(path)
+    assert "folded" not in json.loads(path.read_text())  # files stay as older Régies wrote them
+
+    assert layout.toggle_fold("root") is True and layout.toggle_fold("a") is True
+    layout.save(path)
+    loaded, warning = TreeLayout.load(path)
+    assert warning is None and loaded.folded == {"root", "a"}
+
+    loaded.prune_folded(["root", "other"])
+    assert loaded.folded == {"root"}
+    assert loaded.toggle_fold("root") is False and loaded.folded == set()
+
+
+def test_a_corrupt_folded_list_discards_the_layout_without_overwriting_it(tmp_path) -> None:
+    path = tmp_path / "tree-layout.json"
+    original = json.dumps({"version": 1, "orders": {}, "separators": {}, "folded": [1]})
+    path.write_text(original, encoding="utf-8")
+
+    layout, warning = TreeLayout.load(path)
+
+    assert layout == TreeLayout() and warning is not None and "folded" in warning
+    assert path.read_text(encoding="utf-8") == original

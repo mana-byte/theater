@@ -15,6 +15,7 @@ from regie.motions.routes import LeafOverlay
 from regie.motions.wipe import Wipe, apply_wipe
 from regie.render.glyphs import (
     fit_name,
+    fold_parts,
     harness_shown,
     name_room,
     node_label,
@@ -156,6 +157,7 @@ class AgentLeaf(RenameableRow):
             awaited=self._awaited,
             show_harness=self._harness_shown(),
             name_text=self._displayed_name(),
+            fold_hint=self._cost_in_focus(),
         )
         if self._wipe is not None:
             content = apply_wipe(content, self._wipe, width=self._label_width())
@@ -251,6 +253,7 @@ class AgentLeaf(RenameableRow):
             width=self._label_width(),
             show_harness=self._harness_shown(),
             awaited=self._awaited,
+            fold_hint=self._cost_in_focus(),
         )
 
     def _name_scrolls(self) -> bool:
@@ -414,7 +417,11 @@ class AgentLeaf(RenameableRow):
 
     def _sync_timer(self) -> None:
         """Tick while something on the row turns: the working spinner or the waiting arc."""
-        if self._node.get("status") == "working" or self._waiting is not None:
+        if (
+            self._node.get("status") == "working"
+            or self._waiting is not None
+            or self._node.get("hidden_status") == "working"
+        ):
             self._start_timer()
         else:
             self._stop_timer()
@@ -518,6 +525,24 @@ class AgentLeaf(RenameableRow):
         gutter = self._gutter()
         return (span[0] + gutter, span[1] + gutter)
 
+    def _fold_span(self) -> tuple[int, int] | None:
+        """Columns of the fold badge: where a click folds or unfolds the children."""
+        parts = fold_parts(self._node, self._frame, hint=self._cost_in_focus())
+        span = self._name_span()
+        if not parts or span is None or self.renaming:
+            return None
+        return span[1], span[1] + sum(cell_len(text) for text, _ in parts)
+
+    def _fold_clicked(self, event: events.Click) -> bool:
+        span = self._fold_span()
+        offset = event.get_content_offset(self)
+        return (
+            span is not None
+            and offset is not None
+            and offset.y == 1
+            and span[0] <= offset.x < span[1]
+        )
+
     def _rename_value(self) -> str:
         current = self._node.get("name")
         return current if isinstance(current, str) and current else ""
@@ -534,7 +559,9 @@ class AgentLeaf(RenameableRow):
         if participant_id is None:
             return
         # Measured before selecting: selecting brings the harness back and moves the name.
-        on_name = event.button == 1 and event.chain == 1 and self._name_clicked(event)
+        left = event.button == 1 and event.chain == 1
+        on_name = left and self._name_clicked(event)
+        on_fold = left and self._fold_clicked(event)
         select_tree_item = getattr(self.app, "select_tree_item", None)
         if callable(select_tree_item):
             select_tree_item(self.key, participant_id)
@@ -543,6 +570,11 @@ class AgentLeaf(RenameableRow):
             if not callable(select_participant):
                 return
             select_participant(participant_id)
+        if on_fold:
+            toggle = getattr(self.app, "toggle_fold", None)
+            if callable(toggle):
+                toggle(participant_id)
+            return
         if event.button == 3:
             action = getattr(self.app, "action_toggle_trajectory", None)
         elif event.button == 1 and event.chain == 1:

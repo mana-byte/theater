@@ -65,6 +65,18 @@ _MARK_WIPES: dict[MarkKind, tuple[str, float | None]] = {
 }
 
 
+def _hidden_owners(nodes: list[TreeNode]) -> dict[Key, Key]:
+    """Map each participant folded out of sight to the row that stands for it on screen."""
+    owners: dict[Key, Key] = {}
+    pending = list(nodes)
+    while pending:
+        node = pending.pop()
+        for hidden in cast(RawRenderNode, node).get("hidden_ids", []):
+            owners[("p", hidden)] = ("p", node["id"])
+        pending.extend(node["children"])
+    return owners
+
+
 class ParticipantTree(VerticalScroll):
     """Keep one interactive leaf per stable public participant ID."""
 
@@ -136,6 +148,8 @@ class ParticipantTree(VerticalScroll):
         self._attention_timer: Timer | None = None
         self._await_marks = AwaitMarks()
         self._mark_kinds: dict[str, MarkKind] | None = None
+        #: A folded-away participant's key, and the visible row that stands for it.
+        self._hidden_owner: dict[Key, Key] = {}
         self._seen_timer: Timer | None = None
         self._seen_pending: str | None = None
         #: Rows asked to be killed, and rows gone from the projection that stay on screen, widget
@@ -213,6 +227,7 @@ class ParticipantTree(VerticalScroll):
             pending_spawn=pending_spawn,
             marks=marks,
         )
+        self._hidden_owner = _hidden_owners(tree)
         reasons = stage_reasons or {}
         self._add_stage_reasons(tree, reasons)
         lines = render_tree(tree, unmanaged=unmanaged, cwd_segments=cwd_segments)
@@ -438,10 +453,15 @@ class ParticipantTree(VerticalScroll):
                 continue
             participant_id = node.get("id")
             managed = _is_managed_key(key)
-            staged = (managed and participant_id == self._staged_id) or (
-                not managed and key[1] == self._staged_unmanaged_id
+            under = cast(RawRenderNode, node).get("hidden_ids") or ()  # folded under this row
+            staged = (
+                managed and (participant_id == self._staged_id or self._staged_id in under)
+            ) or (not managed and key[1] == self._staged_unmanaged_id)
+            trajectory = (
+                managed
+                and (participant_id == self._trajectory_id or self._trajectory_id in under)
+                and not staged
             )
-            trajectory = managed and participant_id == self._trajectory_id and not staged
             widget.set_class(staged, "tree-staged")
             widget.set_class(trajectory, "tree-trajectory-staged")
             widget.set_stage_marker("tmux" if staged else "trajectory" if trajectory else None)
@@ -505,7 +525,9 @@ class ParticipantTree(VerticalScroll):
                 needs = node.get("folded_status") in wanted
             else:
                 needs = _is_managed_key(key) and (
-                    node.get("status") in wanted or (isinstance(mark, RowMark) and mark.attention)
+                    node.get("status") in wanted
+                    or node.get("hidden_status") in wanted
+                    or (isinstance(mark, RowMark) and mark.attention)
                 )
             if needs:
                 keys.append(key)
@@ -702,9 +724,15 @@ class ParticipantTree(VerticalScroll):
             if previous is None or previous == status:
                 continue
             if (color := status_wipe_color(previous, status)) is not None:
-                self._wipes.start(
-                    key, color, seconds=REGIE_WIPE_DEATH_SECONDS if status == "dead" else None
-                )
+                # A row folded out of sight cannot sweep: the one standing for it does, but only
+                # for what needs the human.
+                target = self._hidden_owner.get(key, key)
+                if target == key or status in {"awaiting_input", "dead"}:
+                    self._wipes.start(
+                        target,
+                        color,
+                        seconds=REGIE_WIPE_DEATH_SECONDS if status == "dead" else None,
+                    )
         now = time.monotonic()
         self._attention_since = {
             key: self._attention_since.get(key, now)

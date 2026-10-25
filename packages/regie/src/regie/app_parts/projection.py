@@ -37,7 +37,7 @@ def _tree_layout_fingerprint(layout: TreeLayout) -> tuple[object, ...]:
             for separator_id, record in layout.separators.items()
         )
     )
-    return orders, separators, layout.pending
+    return orders, separators, layout.pending, tuple(sorted(layout.folded))
 
 
 _STATE_READ_ERRORS = (

@@ -134,6 +134,18 @@ def _is_separator(node: TreeNode) -> TypeGuard[SeparatorNode]:
     return node.get("kind") == "separator"
 
 
+def _descendants(nodes: list[TreeNode]) -> list[TreeNode]:
+    """Every participant below *nodes*, including those a folded section already hides."""
+    found: list[TreeNode] = []
+    for node in nodes:
+        if _is_separator(node):
+            found.extend(node.get("folded_agents", []))  # already flat: each with its subtree
+        else:
+            found.append(node)
+            found.extend(_descendants(node["children"]))
+    return found
+
+
 def _sections(built: list[TreeNode]) -> list[TreeNode]:
     """Count each separator's agents; a collapsed one folds them away and records their ids."""
     visible: list[TreeNode] = []
@@ -193,6 +205,12 @@ def tree_for_projection(
             groups.siblings.get(participant_id, []),
             ancestry | {participant_id},
         )
+        if participant_id in active_layout.folded and node["children"]:
+            hidden = _descendants(node["children"])
+            node["hidden_count"] = len(hidden)
+            node["hidden_ids"] = [agent["id"] for agent in hidden]
+            node["hidden_status"] = _fold_status(hidden)
+            node["children"] = []
         return node
 
     def build_siblings(

@@ -49,6 +49,11 @@ The tree is the whole interface; every signal is a state of something it already
   asking once the cursor has rested on the row.
 - **`]` / `[`** jump to the next or previous row that needs you, wrapping round. A folded
   section shows the worst state it hides.
+- **Folding.** `Space` folds the selected agent's children (any depth) into its row, which then
+  reads `▸3 !`: how many it hides and the worst thing happening to them, so a closed branch
+  cannot hide trouble. `]` stops on it, and a hidden agent that starts needing you sweeps the
+  row. The row in focus shows `▾` when it has children; a click on the badge folds or unfolds.
+  Folds are remembered across restarts.
 
 `reduce_motion = true` in `config.toml` keeps every signal and drops the motion: no sweeps,
 breathing, comets or reveal and retire animations, and waits draw their route without a

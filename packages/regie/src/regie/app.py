@@ -146,6 +146,7 @@ class RegieApp(
         Binding("J,shift+j", "move_tree_row(1)", "move down", show=False),
         Binding("K,shift+k", "move_tree_row(-1)", "move up", show=False),
         Binding("minus", "add_separator", "add separator", show=False),
+        Binding("space", "toggle_fold", "fold", show=False),
         Binding("right_square_bracket", "jump_attention(1)", "next attention", show=False),
         Binding("left_square_bracket", "jump_attention(-1)", "previous attention", show=False),
         Binding("h", "request_trajectory('left')", "trajectory", show=False),
