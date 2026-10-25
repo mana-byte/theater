@@ -206,16 +206,16 @@ async def test_an_await_on_a_folded_agent_still_changes_the_waiters_glyph(tmp_pa
         app._animate_bus_row(event("job.await.start"))
         await wait_until(pilot, lambda: waiter._waiting is not None)
         assert _row(waiter).lstrip("└├│─ ")[0] in REGIE_WAITING_FRAMES  # the waiting glyph
-        assert boss._awaited == 1  # the fold that hides the target says it is being waited on
+        assert boss._awaited is not None  # the fold that hides the target says it is waited on
 
         tree.select("participant-1")  # unfold: the marks follow the target out of the fold
         await pilot.press("space")
         await wait_until(pilot, lambda: len(tree.participant_ids) == 5)
         target = _leaf(tree, "participant-3")
-        await wait_until(pilot, lambda: target._awaited == 1 and boss._awaited == 0)
+        await wait_until(pilot, lambda: target._awaited is not None and boss._awaited is None)
 
         app._animate_bus_row(event("job.await.end"))
-        await wait_until(pilot, lambda: waiter._waiting is None and target._awaited == 0)
+        await wait_until(pilot, lambda: waiter._waiting is None and target._awaited is None)
 
 
 async def test_a_parent_awaiting_its_folded_child_shows_the_waiting_glyph_and_keeps_it_on_unfold(
@@ -248,8 +248,8 @@ async def test_a_parent_awaiting_its_folded_child_shows_the_waiting_glyph_and_ke
         await pilot.press("space")  # unfold: the wait must still be there
         await wait_until(pilot, lambda: len(tree.participant_ids) == 5)
         child = _leaf(tree, "participant-4")
-        await wait_until(pilot, lambda: child._awaited == 1)
+        await wait_until(pilot, lambda: child._awaited is not None)
         assert parent._waiting is not None
 
         app._animate_bus_row(event("job.await.end"))
-        await wait_until(pilot, lambda: parent._waiting is None and child._awaited == 0)
+        await wait_until(pilot, lambda: parent._waiting is None and child._awaited is None)

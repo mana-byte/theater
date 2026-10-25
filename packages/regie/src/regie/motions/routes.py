@@ -145,10 +145,11 @@ class RouteColors:
 
 @dataclass(frozen=True, slots=True)
 class AwaitMarks:
-    """Who is blocked on a peer, in the colour of that await, and who is being waited on."""
+    """Who is blocked on a peer, and who is waited on: each in the colour of that await, the
+    waited-on row's being its first waiter's."""
 
     waiting: Mapping[str, str] = field(default_factory=dict)
-    awaited: Mapping[str, int] = field(default_factory=dict)
+    awaited: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -234,11 +235,11 @@ class RouteAnimationController:
     def marks(self, resolve: Resolve | None = None) -> AwaitMarks:
         """The waiting and waited-on rows right now, for the end marks every await leaves.
 
-        A waiter folded out of sight leaves no mark; a target folded out of sight is counted on
+        A waiter folded out of sight leaves no mark; a target folded out of sight is marked on
         the row that stands for it.
         """
         waiting: dict[str, str] = {}
-        waiters: dict[str, set[str]] = {}
+        awaited: dict[str, str] = {}
         for anim in self._await_anims.values():
             rows = self._rows(anim.from_id, anim.to_id, resolve)
             if rows is None:
@@ -247,8 +248,8 @@ class RouteAnimationController:
             if from_row == anim.from_id:  # a waiter folded out of sight leaves no mark
                 waiting.setdefault(anim.from_id, self._colors.color(anim.from_id))
             if to_row != from_row:  # one row has nothing to be waited on by itself
-                waiters.setdefault(to_row, set()).add(anim.from_id)
-        return AwaitMarks(waiting, {target: len(who) for target, who in waiters.items()})
+                awaited.setdefault(to_row, self._colors.color(anim.from_id))
+        return AwaitMarks(waiting, awaited)
 
     def _release_colors(self) -> None:
         active = {anim.from_id for anim in self._await_anims.values()}

@@ -53,7 +53,12 @@ def test_each_await_marks_its_waiter_and_counts_the_peers_waiting_on_a_target():
 
     marks = controller.marks()
     assert set(marks.waiting) == {"aaa", "bbb"}
-    assert marks.awaited == {"ccc": 2, "bbb": 1}
+    assert set(marks.awaited) == {"ccc", "bbb"}
+    # the waited-on row wears the colour of its first waiter, so the bar matches the comet
+    assert (
+        marks.awaited["ccc"] == marks.waiting["aaa"]
+        and marks.awaited["bbb"] == marks.waiting["aaa"]
+    )
 
 
 def test_marks_clear_with_the_await_that_made_them():
@@ -210,7 +215,8 @@ def test_an_await_on_a_folded_agent_still_marks_its_waiter_and_the_fold_that_hid
 
     assert controller.start_await(lines, "t", "h", "aaa", "kid", resolve).started
     marks = controller.marks(resolve)
-    assert set(marks.waiting) == {"aaa"} and marks.awaited == {"boss": 1}
+    assert set(marks.waiting) == {"aaa"} and set(marks.awaited) == {"boss"}
+    assert marks.awaited["boss"] == marks.waiting["aaa"]
 
     # and a new await draws its route to the row standing in for the target
     assert _glyphs(_tick(controller, lines, now=0.0, resolve=resolve))
@@ -223,7 +229,7 @@ def test_a_waiter_folded_out_of_sight_leaves_no_mark_but_its_target_still_counts
 
     assert controller.start_await(lines, "t", "h", "kid", "bbb", resolve).started
     marks = controller.marks(resolve)
-    assert marks.waiting == {} and marks.awaited == {"bbb": 1}
+    assert marks.waiting == {} and set(marks.awaited) == {"bbb"}
 
 
 def test_two_agents_under_one_fold_start_a_wait_with_nothing_to_draw_until_it_opens():
@@ -237,7 +243,7 @@ def test_two_agents_under_one_fold_start_a_wait_with_nothing_to_draw_until_it_op
 
     open_ = _resolver({}, {"boss", "kid", "kin"})  # unfolded: the wait was real all along
     assert set(controller.marks(open_).waiting) == {"kid"}
-    assert controller.marks(open_).awaited == {"kin": 1}
+    assert set(controller.marks(open_).awaited) == {"kin"}
 
 
 def test_a_parent_awaiting_the_child_folded_under_it_still_shows_that_it_is_waiting():
@@ -252,7 +258,7 @@ def test_a_parent_awaiting_the_child_folded_under_it_still_shows_that_it_is_wait
 
     unfolded = _resolver({}, {"boss", "other", "kid"})  # open the fold: the child is waited on
     marks = controller.marks(unfolded)
-    assert set(marks.waiting) == {"boss"} and marks.awaited == {"kid": 1}
+    assert set(marks.waiting) == {"boss"} and set(marks.awaited) == {"kid"}
 
 
 def test_an_end_that_is_nowhere_in_the_tree_is_still_refused():
@@ -268,10 +274,10 @@ def test_a_fold_opening_moves_the_marks_to_the_agent_itself():
     controller = RouteAnimationController()
     folded = _resolver({"kid": "boss"}, {"aaa", "boss"})
     assert controller.start_await(lines, "t", "h", "aaa", "kid", folded).started
-    assert controller.marks(folded).awaited == {"boss": 1}
+    assert set(controller.marks(folded).awaited) == {"boss"}
 
     unfolded = _resolver({}, {"aaa", "boss", "kid"})
-    assert controller.marks(unfolded).awaited == {"kid": 1}
+    assert set(controller.marks(unfolded).awaited) == {"kid"}
 
 
 def test_a_send_to_a_folded_agent_travels_to_its_fold_and_lands_there():

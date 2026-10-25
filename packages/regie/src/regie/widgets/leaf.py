@@ -21,8 +21,7 @@ from regie.render.glyphs import (
     node_label,
     shown_name,
     visible_name_span,
-    with_gutter_bar,
-    with_stage_marker,
+    with_gutter,
 )
 from regie.render.layout import Key, shorten_path
 from regie.tree_nodes import RawRenderNode, RenderNode
@@ -73,7 +72,8 @@ class AgentLeaf(RenameableRow):
     }
     AgentLeaf.tree-staged,
     AgentLeaf.tree-trajectory-staged,
-    AgentLeaf.tree-attention {
+    AgentLeaf.tree-attention,
+    AgentLeaf.tree-awaited {
         padding: 0 2 0 0;
     }
     AgentLeaf.tree-cursor {
@@ -116,7 +116,7 @@ class AgentLeaf(RenameableRow):
         self._wipe: Wipe | None = None
         self._attention_level = 0
         self._waiting: str | None = None
-        self._awaited = 0
+        self._awaited: str | None = None
         self._cost = CountingValue(_format_leaf_cost)
         self._cost.set_target(_microcents(node), animate=False)
         self._cost_sub: AnimationSubscription | None = None
@@ -155,23 +155,25 @@ class AgentLeaf(RenameableRow):
             cost=self._shown_cost(),
             width=self._label_width(),
             waiting=self._waiting,
-            awaited=self._awaited,
             show_harness=self._harness_shown(),
             name_text=self._displayed_name(),
             fold_hint=self._cost_in_focus(),
         )
         if self._wipe is not None:
             content = apply_wipe(content, self._wipe, width=self._label_width())
-        if self._stage_marker is None and self.needs_attention:
-            return with_gutter_bar(content, _ATTENTION_BAR[self._attention_level])
-        return with_stage_marker(content, self._stage_marker)
+        return with_gutter(content, bar=self._gutter_bar(), awaited=self._awaited)
 
-    def set_await_marks(self, waiting: str | None, awaited: int) -> None:
-        """Mark this agent blocked on a peer (in that await's colour) and/or waited on by peers."""
+    def set_await_marks(self, waiting: str | None, awaited: str | None) -> None:
+        """Mark this agent as blocked on a peer and/or waited on by one, in that await's colour."""
         if (waiting, awaited) != (self._waiting, self._awaited):
+            gutter_moves = (awaited is None) != (self._awaited is None)
             self._waiting, self._awaited = waiting, awaited
             if self._mounted:
                 self._sync_timer()
+            if gutter_moves:
+                self.set_class(awaited is not None, "tree-awaited")
+                # The gutter moves the content box; redraw once the padding has applied.
+                self.call_after_refresh(lambda: self.update(self._render_label(), layout=False))
             self.update(self._render_label(), layout=False)
 
     def set_wipe(self, wipe: Wipe | None) -> None:
@@ -199,9 +201,15 @@ class AgentLeaf(RenameableRow):
             if self.needs_attention:
                 self.update(self._render_label(), layout=False)
 
+    def _gutter_bar(self) -> str | None:
+        """The style of the first gutter cell: staged beats needing you, or None for neither."""
+        if self._stage_marker is not None:
+            return "$primary" if self._stage_marker == "tmux" else "$accent"
+        return _ATTENTION_BAR[self._attention_level] if self.needs_attention else None
+
     def _gutter(self) -> int:
-        """Columns a bar takes from the label: the stage bar, or the bar of a waiting row."""
-        return 2 if self._stage_marker is not None or self.needs_attention else 0
+        """Columns the gutter takes from the label: a stage bar, an attention bar, an await bar."""
+        return 2 if self._gutter_bar() is not None or self._awaited is not None else 0
 
     def set_highlight(self, highlight: LeafOverlay | None) -> None:
         """Heavy rails leading to this agent from a hovered or selected separator above.
