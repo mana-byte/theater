@@ -225,7 +225,8 @@ def test_pending_code_changes_are_never_overwritten(repo: Path, result: Make) ->
     gh.trees["tree-pending"]["tracked.txt"] = "edited\n"
     with pytest.raises(ExceptionGroup) as caught:
         _publish(repo, gh, result("1.4.0", "red"))
-    assert "more than one policy line" in exception_detail(caught.value)
+    assert "must change exactly one line of" in exception_detail(caught.value)
+    assert "tracked.txt" in exception_detail(caught.value)
     assert gh.refs["chore/compat-claude"] == "pending"
 
 
