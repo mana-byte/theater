@@ -34,7 +34,7 @@ The tree is the whole interface; every signal is a state of something it already
   A name too long for the row ends in `…` rather than wrapping over the directory, and scrolls
   to be read in full while the row is in focus.
 - **Status glyph.** A spinner is an agent computing; `!` needs you (awaiting input); `✗` is
-  dead. A slow hourglass `⧖⧔⧗⧕`, filling and turning, is an agent blocked on a peer, in the colour of that
+  dead. A slow hourglass `⧖⧗⧓⧑`, filling and turning every second, is an agent blocked on a peer, in the colour of that
   wait; a ring filling `○◔◑◕●` is a spawn starting, with the daemon's phase on the row's
   third line; `✕` is a kill in flight.
 - **Bar.** A `▌` in the gutter marks a row that needs you; the newest three breathe.

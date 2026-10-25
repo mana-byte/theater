@@ -168,15 +168,15 @@ REGIE_WIPE_WAKE_CELLS = 6
 REGIE_ATTENTION_PULSE_LIMIT = 3
 REGIE_ATTENTION_PULSE_INTERVAL = 0.4
 
-#: An hourglass that fills and turns, slowly: an agent blocked on a peer, not computing. A
-#: fraction of the spinner's pace, so it never reads as work in progress.
-REGIE_WAITING_FRAMES = "⧖⧔⧗⧕"
+#: An hourglass that fills, turns on its side, drains and turns back: an agent blocked on a
+#: peer, not computing. A second a glyph, so it never reads as work in progress.
+REGIE_WAITING_FRAMES = "⧖⧗⧓⧑"
 
 #: A fold badge shortens before the name gets fewer cells than this (or its own length).
 REGIE_NAME_MIN_CELLS = 10
 
 #: Leaf frames (one spinner step each) the hourglass rests on before it moves on.
-REGIE_WAITING_STEP_FRAMES = 4
+REGIE_WAITING_STEP_FRAMES = 10
 
 #: How long the row of a participant wears what an operation aimed at it did: a send that
 #: arrived (a moment), one still queued or a spawn still starting (until it settles or goes
