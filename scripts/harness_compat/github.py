@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import http.client
 import json
 import os
 import urllib.request
@@ -11,6 +13,7 @@ from urllib.parse import quote
 from theater.version_policy import version_key
 
 _TIMEOUT_SECONDS = 30.0
+_ATTEMPTS = 3
 _GITHUB_API = "https://api.github.com/"
 
 
@@ -20,9 +23,15 @@ def _get(url: str, headers: Mapping[str, str] | None = None) -> str:
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if token and url.startswith(_GITHUB_API):
         sent["Authorization"] = f"Bearer {token}"
-    with urllib.request.urlopen(
-        urllib.request.Request(url, headers=sent), timeout=_TIMEOUT_SECONDS
-    ) as response:
+    request = urllib.request.Request(url, headers=sent)
+    for _ in range(_ATTEMPTS - 1):
+        with contextlib.suppress(http.client.IncompleteRead):  # a dropped transfer is transient
+            return _read(request)
+    return _read(request)
+
+
+def _read(request: urllib.request.Request) -> str:
+    with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
         return response.read().decode("utf-8")
 
 

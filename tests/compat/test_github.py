@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 
 import pytest
@@ -104,3 +105,35 @@ def test_the_token_is_sent_to_the_github_api_and_nowhere_else(
 
     assert sent[0][1]["Authorization"] == "Bearer secret"
     assert "Authorization" not in sent[1][1]
+
+
+class _Dropping:
+    """A response whose body keeps cutting off for the first ``drops`` reads."""
+
+    def __init__(self, drops: int) -> None:
+        self.drops = drops
+
+    def __enter__(self) -> _Dropping:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        if self.drops:
+            self.drops -= 1
+            raise http.client.IncompleteRead(b"[", 27_000_000)
+        return b"[]"
+
+
+def test_a_dropped_transfer_is_retried_but_a_persistent_one_still_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _Dropping(drops=2)
+    monkeypatch.setattr(github.urllib.request, "urlopen", lambda request, timeout: response)
+
+    assert github._get("https://api.github.com/repos/o/r/releases") == "[]"
+
+    response.drops = github._ATTEMPTS
+    with pytest.raises(http.client.IncompleteRead):
+        github._get("https://api.github.com/repos/o/r/releases")
