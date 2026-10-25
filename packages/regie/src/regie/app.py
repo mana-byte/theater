@@ -71,6 +71,7 @@ from regie.tree_layout import TreeLayout
 from regie.ui_constants import (
     REGIE_BUS_LONG_POLL_SECONDS,
     REGIE_COST_WINDOW_LABELS,
+    REGIE_MENU_KEY,
     REGIE_RETURN_SIGNAL_TEXTUAL,
 )
 from regie.usage import UsageController
@@ -164,7 +165,7 @@ class RegieApp(
         Binding("v", "toggle_bus", "bus", show=False),
         Binding("dollar_sign", "toggle_usage", "usage", show=False),
         Binding("x", "kill", "kill"),
-        Binding("ctrl+p", "open_menu", "options", show=False),
+        Binding(REGIE_MENU_KEY, "open_menu", "options", show=False),
         Binding("q", "quit", "quit"),
     ]
 

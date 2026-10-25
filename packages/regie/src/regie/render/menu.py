@@ -68,14 +68,16 @@ def help_room(cont_prefix: str, width: int) -> int:
 
 
 def _root_label(node: RawRenderNode, prefix: str, *, is_first_root: bool, editing: bool) -> Content:
-    title = node.get("title", "")
+    title, shortcut = node.get("title", ""), node.get("shortcut")
+    key = [(" · ", _RAIL), (shortcut, "$text dim")] if shortcut else []
     if not node.get("open"):
-        return Content.assemble((prefix, _RAIL), (title, "$text-muted"))
+        return Content.assemble((prefix, _RAIL), (title, "$text-muted"), *key)
     return Content.assemble(
         *([] if is_first_root else [(_rail_above(prefix), _RAIL)]),
         "\n",
         (prefix, _RAIL),
         (title, "bold $secondary"),
+        *key,
         "\n",
         (separator_prefix(prefix), _RAIL),
         *_third_row(node, editing),

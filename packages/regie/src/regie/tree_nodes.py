@@ -97,6 +97,7 @@ class RawRenderNode(TypedDict, total=False):
     chevron: str | None
     enabled: bool
     open: bool
+    shortcut: str
     filter: str
     children: list[RenderNode]
 

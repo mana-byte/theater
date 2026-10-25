@@ -43,7 +43,7 @@ def test_folded_the_menu_is_one_line_and_the_last_agent_stops_being_last():
 
     assert [key for _, _, key, _, _ in lines][-1] == ROOT
     assert [prefix for _, _, _, prefix, _ in lines] == ["├── ", "├── ", "└── "]
-    assert label_rows(lines[-1][0]) == ["└── + options"]
+    assert label_rows(lines[-1][0]) == ["└── + options · ctrl+p"]
     assert row_count(ROOT, lines[-1][1]) == 1
 
 
@@ -51,7 +51,7 @@ def test_open_it_is_three_rows_with_a_hint_and_its_options_hang_from_it():
     lines = _lines(open=True)
 
     assert row_count(ROOT, lines[2][1]) == 3
-    assert label_rows(lines[2][0]) == ["│", "└── + options", "    x closes · / filters"]
+    assert label_rows(lines[2][0]) == ["│", "└── + options · ctrl+p", "    x closes · / filters"]
     assert [(key, prefix) for _, _, key, prefix, _ in lines[3:]] == [
         (("m", "spawn"), "    ├── "),
         (("m", "bus"), "    └── "),

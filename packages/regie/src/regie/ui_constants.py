@@ -459,6 +459,8 @@ REGIE_CONTROLS_REPORT_LINE_MAX = 200
 
 #: The options menu closing the tree: its root's title and the hint on its unfolded third row.
 REGIE_MENU_TITLE = "+ options"
+#: The key that opens the menu from anywhere, shown beside its title and bound in the app.
+REGIE_MENU_KEY = "ctrl+p"
 REGIE_MENU_HINT = "x closes · / filters"
 #: A long list in the menu shows this many choices, then a leaf that shows them all.
 REGIE_MENU_PREVIEW_ROWS = 5

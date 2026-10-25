@@ -60,7 +60,7 @@ The tree is the whole interface; every signal is a state of something it already
   focus shows `▾` when it has children; a click on the badge folds or unfolds. Folds are
   remembered across restarts.
 
-- **Options.** The tree ends in `+ options`, a dim line until the cursor reaches it (`j` past the
+- **Options.** The tree ends in `+ options · ctrl+p`, a dim line until the cursor reaches it (`j` past the
   last agent, `Ctrl+P`, or a click); then it unfolds into the options, three rows each:
   **Spawn**, **Resume**, **Recover transcript** (for an agent whose transcript is not trusted),
   **Add separator**, the **bus panel** and **usage footer** toggles, **Retry** (after an uncertain

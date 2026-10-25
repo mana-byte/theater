@@ -13,6 +13,7 @@ from typing import Literal
 from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.ui_constants import (
     REGIE_MENU_HINT,
+    REGIE_MENU_KEY,
     REGIE_MENU_MORE_ID,
     REGIE_MENU_PREVIEW_ROWS,
     REGIE_MENU_TITLE,
@@ -138,6 +139,7 @@ def menu_nodes(items: Sequence[MenuItem], view: MenuView, *, open: bool) -> RawR
         "id": ROOT_ID,
         "title": REGIE_MENU_TITLE,
         "help": REGIE_MENU_HINT,
+        "shortcut": REGIE_MENU_KEY,
         "open": open,
         "filter": view.query,
         "children": _option_rows(items, view) if open else [],
