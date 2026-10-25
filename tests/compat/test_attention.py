@@ -94,7 +94,8 @@ def _report(
     workflow = {
         "id": 42,
         "workflow_id": 9,
-        "name": "Harness compatibility canaries" if canaries else "Harness compatibility",
+        # A run-name appends the event, so the API never reports the bare workflow name.
+        "name": f"Harness compatibility{' canaries' if canaries else ''} ({event})",
         "path": path or f".github/workflows/harness-compat{'-canaries' if canaries else ''}.yml",
         "conclusion": stage,
         "event": event,

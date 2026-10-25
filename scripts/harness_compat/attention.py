@@ -100,6 +100,11 @@ def recover_failures(
     )
 
 
+def _workflow(run: dict[str, Any]) -> str:
+    """The workflow's own name: its ``run-name`` makes the API report ``<name> (<event>)``."""
+    return run["name"].removesuffix(f" ({run['event']})")
+
+
 def _superseded(run: dict[str, Any], gh: Gh) -> bool:
     """Whether concurrency replaced this PR or canary run with a newer candidate."""
     if run["event"] == "pull_request":
@@ -108,13 +113,13 @@ def _superseded(run: dict[str, Any], gh: Gh) -> bool:
             if current["state"] == "closed" or current["head"]["sha"] != run["head_sha"]:
                 return True
         return False
-    if run["name"] != "Harness compatibility canaries" or run["event"] not in SWEEP_EVENTS:
+    if _workflow(run) != "Harness compatibility canaries" or run["event"] not in SWEEP_EVENTS:
         return False
     query = urlencode({"branch": run["head_branch"], "per_page": 100})
     newer = api(gh, f"actions/workflows/{run['workflow_id']}/runs?{query}")["workflow_runs"]
     return any(
         other["id"] > run["id"]
-        and other["path"].partition("@")[0] == _WORKFLOWS[run["name"]]
+        and other["path"].partition("@")[0] == _WORKFLOWS[_workflow(run)]
         and (other["head_repository"] or {}).get("full_name") == run["head_repository"]["full_name"]
         and other["head_branch"] == run["head_branch"]
         and other["event"] in SWEEP_EVENTS
@@ -126,7 +131,8 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
     """Run from trusted main via workflow_run, including when qualification never started."""
     check_publication_context(root, os.environ)
     failed_run = api(gh, f"actions/runs/{run_id}")
-    if failed_run["name"] not in _WORKFLOWS or failed_run["event"] == "workflow_run":
+    workflow = _workflow(failed_run)
+    if workflow not in _WORKFLOWS or failed_run["event"] == "workflow_run":
         raise ValueError("not a compatibility qualification or canary run")
     if failed_run["conclusion"] not in _FAILED:
         return
@@ -143,7 +149,7 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
     run_url = failed_run["html_url"]
     failures: list[Exception] = []
     trusted_logs = (
-        failed_run["path"].partition("@")[0] == _WORKFLOWS[failed_run["name"]]
+        failed_run["path"].partition("@")[0] == _WORKFLOWS[workflow]
         and (failed_run["head_repository"] or {}).get("full_name")
         == os.environ["GITHUB_REPOSITORY"]
     )
