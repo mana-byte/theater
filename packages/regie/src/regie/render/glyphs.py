@@ -16,6 +16,7 @@ from textual.content import Content
 from regie.ui_constants import (
     REGIE_SEND_TRACE_STYLE as SEND_STYLE,
     REGIE_WAITING_FRAMES as WAITING_FRAMES,
+    REGIE_WAITING_STEP_FRAMES as WAITING_STEP_FRAMES,
     REGIE_TREE_BRANCH as BRANCH,
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
     REGIE_TREE_RAIL as RAIL,
@@ -121,14 +122,14 @@ def _status_glyph(
     """The one-character status mark and the theme slot it renders in.
 
     Idle uses the harness's own icon so the glyph does double duty; there is no
-    separate harness-glyph column. An agent blocked on a peer shows a hollow turning arc
-    in its await's colour instead: it is not computing, so it must not look like it is.
+    separate harness-glyph column. An agent blocked on a peer shows a slowly walking square
+    quadrant in its await's colour instead: it is not computing, so it must not look like it is.
     """
     status = node.get("status", "?")
     if (mark := _mark(node)) is not None and mark.kind is MarkKind.LAUNCHING:
         return mark.glyph, mark.style
     if waiting is not None and status in ("working", "idle"):
-        return WAITING_FRAMES[frame % len(WAITING_FRAMES)], waiting
+        return WAITING_FRAMES[frame // WAITING_STEP_FRAMES % len(WAITING_FRAMES)], waiting
     if status == "working":
         return spinner_frame(frame), "$primary"
     if status == "awaiting_input":

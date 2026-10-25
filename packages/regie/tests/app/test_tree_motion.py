@@ -137,7 +137,7 @@ async def test_an_await_marks_both_its_ends_until_it_finishes() -> None:
         app._animate_bus_row(_await_row("job.await.start"))
         await wait_until(pilot, lambda: waiter._waiting is not None)
         assert target._awaited == 1
-        assert render_text(waiter)[0] in REGIE_WAITING_FRAMES  # a turning arc, not the spinner
+        assert render_text(waiter)[0] in REGIE_WAITING_FRAMES  # the waiting square, not the spinner
         assert "◂" in render_text(target)
 
         app._animate_bus_row(_await_row("job.await.end"))

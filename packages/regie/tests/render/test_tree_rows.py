@@ -456,3 +456,34 @@ def test_tilde_only_abbreviates_paths_inside_home(monkeypatch):
     assert tilde("/Users/bob/repo") == "~/repo"
     assert tilde("/Users/bob2/repo") == "/Users/bob2/repo"
     assert tilde(None) == "-"
+
+
+def _waiting_glyph(frame: int) -> str:
+    return label_rows(node_label({**CHILD, "status": "working"}, frame=frame, waiting="$accent"))[
+        1
+    ][0]
+
+
+def test_a_blocked_agent_shows_a_square_that_moves_slower_than_the_spinner():
+    from regie.ui_constants import (
+        REGIE_LEAF_FRAME_CYCLE,
+        REGIE_WAITING_FRAMES,
+        REGIE_WAITING_STEP_FRAMES,
+    )
+
+    assert set(REGIE_WAITING_FRAMES) <= set("▖▗▘▝")  # squares, like the rails around them
+    assert REGIE_WAITING_STEP_FRAMES > 1  # the spinner moves every frame
+
+    glyphs = [_waiting_glyph(frame) for frame in range(REGIE_LEAF_FRAME_CYCLE)]
+    assert (
+        glyphs[:REGIE_WAITING_STEP_FRAMES] == [REGIE_WAITING_FRAMES[0]] * REGIE_WAITING_STEP_FRAMES
+    )
+    assert len(set(glyphs)) == len(REGIE_WAITING_FRAMES)
+    # The counter wraps without a stutter: the glyph after the last frame is the first's, or
+    # the next in the walk, never a jump.
+    steps = [
+        (REGIE_WAITING_FRAMES.index(glyphs[(i + 1) % len(glyphs)]) - REGIE_WAITING_FRAMES.index(g))
+        % len(REGIE_WAITING_FRAMES)
+        for i, g in enumerate(glyphs)
+    ]
+    assert set(steps) <= {0, 1}

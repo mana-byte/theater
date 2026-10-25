@@ -27,7 +27,7 @@ on the next start, stopping a bridge still running from it first.
 The tree is the whole interface; every signal is a state of something it already draws.
 
 - **Status glyph.** A spinner is an agent computing; `!` needs you (awaiting input); `✗` is
-  dead. A turning arc `◜◠◝` is an agent blocked on a peer, in the colour of that wait; a ring
+  dead. A slow square quadrant `▘▝▗▖` is an agent blocked on a peer, in the colour of that wait; a ring
   filling `○◔◑◕●` is a spawn starting, with the daemon's phase on the row's third line.
 - **Bar.** A `▌` in the gutter marks a row that needs you; the newest three breathe.
 - **Sweep.** A block runs across a row when the agent starts needing you, dies or finishes a
