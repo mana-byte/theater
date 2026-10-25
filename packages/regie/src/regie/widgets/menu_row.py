@@ -4,18 +4,27 @@ from __future__ import annotations
 
 from typing import cast
 
+from rich.cells import cell_len
 from textual import events
 from textual.content import Content
 from textual.message import Message
 
+from regie.render.glyphs import separator_prefix
 from regie.render.layout import Key, row_count
 from regie.render.menu import menu_label
 from regie.tree_nodes import RawRenderNode, RenderNode
-from regie.widgets.chrome import NonSelectableStatic
+from regie.widgets.name_editor import FilterEditor, InlineEditor
+from regie.widgets.renameable import RenameableRow
 
 
-class MenuRow(NonSelectableStatic):
-    """Drawn like an agent leaf, but a click picks it and never stages anything."""
+class MenuRow(RenameableRow):
+    """Drawn like an agent leaf, but a click picks it and never stages anything.
+
+    The root also hosts the filter: its editor sits on the third row, after ``/ ``.
+    """
+
+    _edit_row = 2
+    _commit_unchanged = True  # Enter on the untouched filter keeps it
 
     can_focus = False
 
@@ -59,6 +68,7 @@ class MenuRow(NonSelectableStatic):
     def _sync(self) -> None:
         self.styles.height = row_count(self.key, self._node)
         self.update(self._label(), layout=False)
+        self._sync_rename_geometry()
 
     def _label(self) -> Content:
         return menu_label(
@@ -67,7 +77,42 @@ class MenuRow(NonSelectableStatic):
             self._cont_prefix,
             width=self.content_size.width or None,
             is_first_root=self._is_first_root,
+            editing=self.renaming,
         )
+
+    # ---- the filter, on the root's third row -----------------------------------------------
+
+    def _render_label(self) -> Content:
+        return self._label()
+
+    def _name_span(self) -> tuple[int, int] | None:
+        if self._node.get("kind") != "menu_root" or not self._node.get("open"):
+            return None
+        start = cell_len(separator_prefix(self._prefix)) + len("/ ")
+        return start, start + cell_len(self._rename_value())
+
+    def _rename_value(self) -> str:
+        return str(self._node.get("filter") or "")
+
+    def _make_editor(self, value: str) -> InlineEditor:
+        return FilterEditor(
+            value,
+            submit=self._rename_submitted,
+            cancel=self._rename_cancelled,
+            changed=self._filter_changed,
+        )
+
+    def _filter_changed(self, value: str) -> None:
+        if callable(changed := getattr(self.app, "menu_filter_changed", None)):
+            changed(value)
+
+    def _commit_rename(self, name: str) -> None:
+        if callable(closed := getattr(self.app, "menu_filter_closed", None)):
+            closed(kept=True)
+
+    def _edit_closed(self, *, committed: bool) -> None:
+        if not committed and callable(closed := getattr(self.app, "menu_filter_closed", None)):
+            closed(kept=False)
 
     def on_resize(self, _event: events.Resize) -> None:
         self.update(self._label(), layout=False)

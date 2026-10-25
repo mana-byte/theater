@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from regie.menu import Loaded, MenuItem, MenuView, menu_nodes
 from regie.render.layout import render_tree, row_count
+from regie.render.menu import menu_label
 from regie.render.routing import section_arms
 
 from packages.regie.tests.support.tree_nodes import PARENT
@@ -94,3 +95,12 @@ def test_the_menu_of_an_empty_tree_is_the_first_root_and_draws_no_rail_above_it(
 
     assert lines[0][2] == ROOT
     assert label_rows(lines[0][0])[0] == ""
+
+
+def test_the_roots_third_row_shows_the_filter_or_leaves_its_place_to_the_editor():
+    menu = menu_nodes(_items(), MenuView(query="bus"), open=True)
+    lines = render_tree([_agent("aaa")], menu=menu)
+
+    assert label_rows(lines[1][0])[2] == "    / bus"
+    editing = menu_label(lines[1][1], "└── ", "    ", editing=True)
+    assert label_rows(editing)[2] == "    /"

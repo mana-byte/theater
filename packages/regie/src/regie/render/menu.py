@@ -17,6 +17,7 @@ def menu_label(
     *,
     width: int | None = None,
     is_first_root: bool = False,
+    editing: bool = False,
 ) -> Content:
     """One menu row: ``+ options`` (a line folded, three open), an option or choice (three), info.
 
@@ -25,7 +26,7 @@ def menu_label(
     """
     kind = node.get("kind")
     if kind == "menu_root":
-        return _root_label(node, prefix, is_first_root=is_first_root)
+        return _root_label(node, prefix, is_first_root=is_first_root, editing=editing)
     if kind == "info":
         text = _fit(node.get("title", ""), prefix, width, 0)
         return Content.assemble((prefix, _RAIL), (text, "$text-muted italic"))
@@ -51,7 +52,7 @@ def menu_label(
     )
 
 
-def _root_label(node: RawRenderNode, prefix: str, *, is_first_root: bool) -> Content:
+def _root_label(node: RawRenderNode, prefix: str, *, is_first_root: bool, editing: bool) -> Content:
     title = node.get("title", "")
     if not node.get("open"):
         return Content.assemble((prefix, _RAIL), (title, "$text-muted"))
@@ -62,8 +63,18 @@ def _root_label(node: RawRenderNode, prefix: str, *, is_first_root: bool) -> Con
         (title, "bold $secondary"),
         "\n",
         (separator_prefix(prefix), _RAIL),
-        (node.get("help") or "", "$text-muted dim"),
+        *_third_row(node, editing),
     )
+
+
+def _third_row(node: RawRenderNode, editing: bool) -> list:
+    """The hint, or the filter: ``/ `` then what was typed (left to the editor while it is open)."""
+    query = node.get("filter") or ""
+    if editing:
+        return [("/ ", "$text-muted")]
+    if query:
+        return [("/ ", "$text-muted"), (query, "$text")]
+    return [(node.get("help") or "", "$text-muted dim")]
 
 
 def _fit(text: str, prefix: str, width: int | None, lead: int) -> str:

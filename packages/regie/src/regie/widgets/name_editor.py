@@ -92,6 +92,25 @@ class InlineEditor(Input):
         event.stop()
 
 
+class FilterEditor(InlineEditor):
+    """Type to filter the menu: it reports every keystroke, Enter keeps the filter, Esc drops it."""
+
+    def __init__(
+        self,
+        value: str,
+        *,
+        submit: Callable[[str], None],
+        cancel: Callable[[], None],
+        changed: Callable[[str], None],
+    ) -> None:
+        super().__init__(value=value, submit=submit, cancel=cancel)
+        self._changed = changed
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self.styles.width = cell_len(event.value) + 1
+        self._changed(event.value)
+
+
 class NameEditor(InlineEditor):
     """Edit an agent's live alias or a separator's name."""
 
@@ -117,4 +136,4 @@ class DirectoryEditor(InlineEditor, DirectoryInput):
         super().__init__(value=value, base_dir=base_dir, submit=submit, cancel=cancel)
 
 
-__all__ = ["DirectoryEditor", "InlineEditor", "NameEditor"]
+__all__ = ["DirectoryEditor", "FilterEditor", "InlineEditor", "NameEditor"]

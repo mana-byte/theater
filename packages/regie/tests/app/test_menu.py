@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from regie.widgets import ParticipantTree
-from regie.widgets.name_editor import DirectoryEditor
+from regie.widgets.name_editor import DirectoryEditor, FilterEditor
 
 from packages.regie.tests.support.app_fakes import build_app
 from packages.regie.tests.support.waiting import wait_until
@@ -253,3 +253,50 @@ async def test_recover_transcript_binds_a_candidate_to_the_row_the_cursor_came_f
         await pilot.press("enter")
         await wait_until(pilot, lambda: bool(client.transcripts.bind_calls))
         assert client.transcripts.bind_calls[0]["participant_id"] == "participant-1"
+
+
+@pytest.mark.asyncio
+async def test_slash_filters_the_menu_enter_keeps_it_and_x_clears_it_with_the_menu() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.select("participant-1")
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "bus") in tree._key_widgets)
+
+        await pilot.press("slash")
+        await wait_until(pilot, lambda: bool(app.query(FilterEditor)))
+        await pilot.press("u", "s", "a", "g", "e")
+        await wait_until(pilot, lambda: ("m", "bus") not in tree._key_widgets)
+        assert ("m", "usage") in tree._key_widgets and tree.selected_key == ROOT
+
+        await pilot.press("enter")  # keep the filter, walk to the first match
+        await wait_until(pilot, lambda: tree.selected_key == ("m", "usage"))
+        assert not app.query(FilterEditor) and app.focused is None
+        assert "/ usage" in "".join(_row(tree, ROOT))
+
+        await pilot.press("x")  # closes the menu, and the filter goes with it
+        await wait_until(pilot, lambda: not tree.in_menu)
+        assert tree.menu_view.query == ""
+
+
+@pytest.mark.asyncio
+async def test_escape_drops_the_filter_and_a_match_inside_a_sub_menu_shows_unfolded() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "spawn") in tree._key_widgets)
+
+        await pilot.press("slash")
+        await wait_until(pilot, lambda: bool(app.query(FilterEditor)))
+        await pilot.press("c", "o", "d", "e", "x")  # o and x are letters while the editor has focus
+        await wait_until(pilot, lambda: CODEX in tree._key_widgets)  # codex, under a folded Spawn
+        assert ("m", "bus") not in tree._key_widgets
+
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: ("m", "bus") in tree._key_widgets)
+        assert CODEX not in tree._key_widgets and tree.selected_key == ROOT
+        assert tree.menu_view.query == "" and not app.query(FilterEditor)

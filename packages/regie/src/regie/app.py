@@ -148,6 +148,7 @@ class RegieApp(
         Binding("space", "menu('toggle')", show=False),
         Binding("h,left", "menu('fold')", show=False),
         Binding("x", "menu('close')", show=False),
+        Binding("slash", "menu_filter", show=False),
         Binding("j", "cursor_down", "down", show=False),
         Binding("down", "cursor_down", "down", show=False),
         Binding("k", "cursor_up", "up", show=False),

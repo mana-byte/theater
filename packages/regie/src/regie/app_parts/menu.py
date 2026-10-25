@@ -10,7 +10,7 @@ from functools import partial
 
 from regie.app_parts._shared import _AppBase
 from regie.formatting import harness_icon, short_identifier, tilde
-from regie.menu import Loaded, MenuItem, find_item
+from regie.menu import ROOT_ID, Loaded, MenuItem, find_item
 from regie.render.layout import Key
 from regie.resume import ResumeCandidate
 from regie.spawn import SpawnChoice
@@ -38,7 +38,7 @@ class MenuActions(_AppBase):
         return bool(trees) and trees.first().in_menu and not self._usage_panel.in_footer
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action == "menu":
+        if action in {"menu", "menu_filter"}:
             return self._menu_has_cursor()
         return super().check_action(action, parameters)
 
@@ -244,6 +244,29 @@ class MenuActions(_AppBase):
 
     def action_open_menu(self) -> None:
         self._menu_tree().open_menu()
+
+    def action_menu_filter(self) -> None:
+        """/ : type to narrow the options and what they list; the editor sits on the root."""
+        tree = self._menu_tree()
+        tree.select_key(("g", ROOT_ID))
+        if (root := tree.menu_root()) is not None:
+            self.run_worker(root.begin_rename(), exclusive=False)
+
+    def menu_filter_changed(self, value: str) -> None:
+        tree = self._menu_tree()
+        tree.set_menu_view(replace(tree.menu_view, query=value))
+
+    def menu_filter_closed(self, *, kept: bool) -> None:
+        """The filter editor left: Enter keeps it and walks to the first match, Esc drops it."""
+        tree = self._menu_tree()
+        if kept:
+            first = next((k for k in tree.selectable_keys if k[0] == "m"), None)
+            if first is not None:
+                tree.select_key(first)
+        else:
+            tree.set_menu_view(replace(tree.menu_view, query=""))
+            tree.select_key(("g", ROOT_ID))
+        self._restore_tree_focus()
 
     def on_participant_tree_menu_clicked(self, message: ParticipantTree.MenuClicked) -> None:
         tree = self._menu_tree()

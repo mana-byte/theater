@@ -119,7 +119,8 @@ async def test_a_folded_row_shows_trouble_below_it_and_the_cursor_can_jump_to_it
         tree = app.query_one(ParticipantTree)
         await wait_until(pilot, lambda: tree.participant_ids == ("participant-1", "participant-5"))
         boss = _leaf(tree, "participant-1")
-        assert "▸3" in _row(boss) and "!" not in _row(boss)
+        await wait_until(pilot, lambda: "▸3" in _row(boss))
+        assert "!" not in _row(boss)
 
         projection = _family({"participant-3": "awaiting_input"})  # a hidden grandchild needs you
         app._state.projection = projection

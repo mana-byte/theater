@@ -448,6 +448,11 @@ class ParticipantTree(VerticalScroll):
         self._apply_selection()
         return back
 
+    def menu_root(self) -> MenuRow | None:
+        """The ``+ options`` row, where the filter is typed."""
+        root = self._key_widgets.get(("g", ROOT_ID))
+        return root if isinstance(root, MenuRow) else None
+
     def set_menu_view(self, view: MenuView) -> None:
         """Change what is opened in the menu (an option unfolded, a list shown whole, a filter)."""
         if view != self._menu_view:

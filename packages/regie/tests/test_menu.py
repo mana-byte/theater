@@ -106,3 +106,9 @@ def test_a_row_is_found_by_the_path_in_its_id():
     assert find_item(items, "bus") is items[2]
     assert find_item(items, "spawn/harness1") is items[0].choices.items[1]  # type: ignore[union-attr]
     assert find_item(items, "spawn/nope") is None and find_item(items, "nope") is None
+
+
+def test_the_filter_ignores_case_and_surrounding_blanks_and_the_root_shows_it():
+    root = menu_nodes(_items(), MenuView(query="  BUS "), open=True)
+
+    assert _ids(root) == ["bus"] and root["filter"] == "  BUS "

@@ -60,8 +60,9 @@ class MenuView:
     query: str = ""
 
 
-def _matches(item: MenuItem, query: str) -> bool:
-    return query in item.title.lower() or query in (item.help or "").lower()
+def _matches(item: MenuItem, needle: str) -> bool:
+    """Whether the lower-case *needle* is in the item's title or help."""
+    return needle in item.title.lower() or needle in (item.help or "").lower()
 
 
 def _info(path: str, text: str) -> RawRenderNode:
@@ -94,12 +95,13 @@ def _choice_rows(option: MenuItem, view: MenuView) -> list[RenderNode]:
     if choices.state == "failed":
         return [_info(f"{path}/failed", choices.note or "could not load")]
     items = choices.items
-    if view.query:
-        items = tuple(item for item in items if _matches(item, view.query))
+    needle = view.query.strip().lower()
+    if needle:
+        items = tuple(item for item in items if _matches(item, needle))
     if not items:
         return [_info(f"{path}/empty", choices.note or "nothing here")]
     shown = items
-    if not view.query and path not in view.more and len(items) > REGIE_MENU_PREVIEW_ROWS + 1:
+    if not needle and path not in view.more and len(items) > REGIE_MENU_PREVIEW_ROWS + 1:
         shown = items[:REGIE_MENU_PREVIEW_ROWS]
     rows: list[RenderNode] = [_row(item, f"{path}/{item.id}", None) for item in shown]
     if len(shown) < len(items):
@@ -111,14 +113,15 @@ def _choice_rows(option: MenuItem, view: MenuView) -> list[RenderNode]:
 
 def _option_rows(items: Sequence[MenuItem], view: MenuView) -> list[RenderNode]:
     rows: list[RenderNode] = []
+    needle = view.query.strip().lower()
     for item in items:
         if item.choices is None:
-            if not view.query or _matches(item, view.query):
+            if not needle or _matches(item, needle):
                 rows.append(_row(item, item.id, None))
             continue
         loaded = item.choices.items
-        hit = bool(view.query) and any(_matches(choice, view.query) for choice in loaded)
-        if view.query and not hit and not _matches(item, view.query):
+        hit = bool(needle) and any(_matches(choice, needle) for choice in loaded)
+        if needle and not hit and not _matches(item, needle):
             continue
         unfolded = item.id in view.expanded or hit
         node = _row(item, item.id, "▾" if unfolded else "▸")
@@ -136,6 +139,7 @@ def menu_nodes(items: Sequence[MenuItem], view: MenuView, *, open: bool) -> RawR
         "title": REGIE_MENU_TITLE,
         "help": REGIE_MENU_HINT,
         "open": open,
+        "filter": view.query,
         "children": _option_rows(items, view) if open else [],
     }
 
