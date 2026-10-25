@@ -133,6 +133,6 @@ async def test_add_separator_is_disabled_when_the_menu_was_entered_from_nowhere(
     app, _client, _presentation = build_app()
 
     async with app.run_test(size=(60, 40)) as pilot:
-        tree = await _ready(app, pilot)
+        await _ready(app, pilot)
         item = next(item for item in app._menu_items() if item.id == "separator")
         assert not item.enabled  # no origin row yet: the cursor has not been to the menu
