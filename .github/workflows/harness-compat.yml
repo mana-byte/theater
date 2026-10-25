@@ -100,7 +100,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - run: sudo apt-get update && sudo apt-get install -y tmux
+      # Codex's Linux sandbox needs bubblewrap: without it a workspace patch asks for an approval.
+      - run: sudo apt-get update && sudo apt-get install -y tmux bubblewrap
       - run: uv sync --locked --all-packages --group dev
       - name: Test every newer release and publish each completed outcome
         run: timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat run "$HARNESS"
@@ -130,7 +131,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - run: sudo apt-get update && sudo apt-get install -y tmux
+      # Codex's Linux sandbox needs bubblewrap: without it a workspace patch asks for an approval.
+      - run: sudo apt-get update && sudo apt-get install -y tmux bubblewrap
       - run: uv sync --locked --all-packages --group dev
       - name: Verify the proposed range without qualifying unrelated newer releases
         run: |
