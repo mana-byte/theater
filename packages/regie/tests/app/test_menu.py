@@ -300,3 +300,17 @@ async def test_escape_drops_the_filter_and_a_match_inside_a_sub_menu_shows_unfol
         await wait_until(pilot, lambda: ("m", "bus") in tree._key_widgets)
         assert CODEX not in tree._key_widgets and tree.selected_key == ROOT
         assert tree.menu_view.query == "" and not app.query(FilterEditor)
+
+
+@pytest.mark.asyncio
+async def test_ctrl_p_opens_the_menu_at_its_root_and_no_palette_exists() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(60, 40)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.select("participant-1")
+
+        await pilot.press("ctrl+p")
+        await wait_until(pilot, lambda: tree.selected_key == ROOT and tree.in_menu)
+        assert app.screen is app.screen_stack[0]  # nothing was pushed over the tree
+        assert not app.use_command_palette

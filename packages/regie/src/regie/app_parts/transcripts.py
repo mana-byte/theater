@@ -1,13 +1,10 @@
-"""Transcript identity recovery through the candidate palette."""
+"""Transcript identity recovery: the candidates the daemon admits, and binding one."""
 
 from __future__ import annotations
-
-from textual.command import CommandPalette
 
 from regie.app_parts._shared import _AppBase
 from regie.app_parts.projection import attempt_snapshot
 from regie.controllers.transcripts import TranscriptBindState
-from regie.palette import TranscriptCandidateCommands
 from theater.frontend import (
     FrontendClientError,
     FrontendResponseError,
@@ -17,37 +14,11 @@ from theater.frontend import (
 
 
 class TranscriptRecovery(_AppBase):
-    def action_recover_transcript(self) -> None:
-        participant_id = self._selected_id()
-        if participant_id is None:
-            message = (
-                "adopt this pane before recovering transcript identity"
-                if self._selected_unmanaged_pane() is not None
-                else "no participant selected"
-            )
-            self.notify(message, severity="warning")
-            return
-        if not self.transcript_recovery_available(participant_id):
-            self.notify("transcript identity is already trusted", severity="information")
-            return
-        self._transcript_recovery_target = participant_id
-        self.push_screen(
-            CommandPalette(
-                providers=[TranscriptCandidateCommands],
-                placeholder="Choose a transcript candidate…",
-            ),
-            self._transcript_palette_closed,
-        )
-
     def transcript_recovery_available(self, participant_id: str) -> bool:
         projection = self._state.projection
         participant = None if projection is None else projection.participants.get(participant_id)
         identity = None if participant is None else participant.transcript_identity
         return participant is not None and (identity is None or identity.state != "trusted")
-
-    def _transcript_palette_closed(self, _result: object = None) -> None:
-        self._transcript_recovery_target = None
-        self._restore_tree_focus()
 
     async def load_transcript_candidates(self) -> tuple[TranscriptCandidate, ...]:
         participant_id = self._transcript_recovery_target

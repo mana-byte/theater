@@ -1245,9 +1245,9 @@ input, hides the tmux status line, and owns `<prefix> h` only while the TUI is
 running. On exit it unstages and restores each borrowed value in `action_quit`,
 before Textual tears down the event loop.
 
-`regie/palette.py` adds one `Spawn <harness>` entry per public catalog entry to
-the Spawn submenu in Textual's ctrl+p palette. Each entry opens the directory
-picker before launch. It goes through the public spawn API with no prompt and
+`regie/menu.py` and `regie/app_parts/menu.py` add one `<harness>` choice per
+public catalog entry under the Spawn option of the options menu that closes the
+tree. Each choice opens the directory prompt before launch. It goes through the public spawn API with no prompt and
 no parent, so the régie gains no privileged path to the daemon.
 
 Trajectory is a logical right-hand surface, not another tmux pane. The public

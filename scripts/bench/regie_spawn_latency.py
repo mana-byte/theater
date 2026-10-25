@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure Régie palette spawn latency in an isolated Theater and tmux stack.
+"""Measure Régie options-menu spawn latency in an isolated Theater and tmux stack.
 
 Run from any checkout while selecting the code under test explicitly:
 
@@ -261,17 +261,19 @@ class Stack:
     ) -> dict[str, float | int | str | None]:
         assert self.ui_pane is not None and self.ui_log is not None
         offset = self.ui_log.stat().st_size
-        self.tmux("send-keys", "-t", self.ui_pane, "C-p")
+        self.tmux("send-keys", "-l", "-t", self.ui_pane, "o")  # the options menu, on Spawn
         self.wait_for(
-            lambda: "search for commands" in self.capture().casefold(),
-            "root command palette",
+            lambda: "choose a directory" in self.capture().casefold(),
+            "harness choices in the options menu",
         )
-        self.tmux("send-keys", "-l", "-t", self.ui_pane, "spawn")
-        self.tmux("send-keys", "-t", self.ui_pane, "Enter")
-        self.wait_for(lambda: "spawn synth" in self.capture().casefold(), "synth palette choice")
-        self.tmux("send-keys", "-t", self.ui_pane, "C-a")
+        self.tmux("send-keys", "-l", "-t", self.ui_pane, "/")
+        self.wait_for(  # the filter editor replaces the hint; only then are letters its own
+            lambda: "x closes" not in self.capture().casefold(),
+            "menu filter editor",
+        )
         self.tmux("send-keys", "-l", "-t", self.ui_pane, "synth")
-        self.tmux("send-keys", "-t", self.ui_pane, "Enter")
+        self.tmux("send-keys", "-t", self.ui_pane, "Enter")  # keep the filter, cursor on the match
+        self.tmux("send-keys", "-t", self.ui_pane, "Enter")  # pick it
         self.wait_for(
             lambda: "esc cancel" in self.capture().casefold(),
             "spawn directory editor",

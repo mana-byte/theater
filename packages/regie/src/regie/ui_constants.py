@@ -115,11 +115,11 @@ REGIE_TREE_COST_MIN_CELLS = 6
 REGIE_EMPTY_TREE_KEY = ("empty", "")
 
 #: Empty-tree call-to-action shortcut text.
-REGIE_EMPTY_TREE_SHORTCUT = "Ctrl+P"
+REGIE_EMPTY_TREE_SHORTCUT = "o"
 #: Style for the empty-tree shortcut text.
 REGIE_EMPTY_TREE_SHORTCUT_STYLE = "$text-accent bold"
 #: Tail appended after the shortcut in the empty-tree hint.
-REGIE_EMPTY_TREE_TAIL = " to get started"
+REGIE_EMPTY_TREE_TAIL = " to spawn your first agent"
 
 #: Leaf spinner/animation timer interval in seconds.
 REGIE_LEAF_SPINNER_INTERVAL = 0.1
@@ -204,9 +204,6 @@ REGIE_LEAF_FRAME_CYCLE = math.lcm(
 REGIE_RETURN_SIGNAL_TEXTUAL = "ctrl+g"
 #: tmux spelling for the same control key.
 REGIE_RETURN_SIGNAL_TMUX = "C-g"
-
-#: Textual system-command title replaced by the dashboard tips.
-REGIE_PALETTE_KEYS_COMMAND_TITLE = "Keys"
 
 #: Availability markers and styles for the dashboard's compact harness list.
 REGIE_DASHBOARD_HARNESS_AVAILABLE_GLYPH = "✓"
@@ -293,7 +290,7 @@ _C = REGIE_DASHBOARD_TIP_HEADING_STYLE
 #: Cycling tips covering the régie's user-facing controls and discovery surfaces.
 REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
     (("Tree · ", _C), ("j/k or ↑/↓", _T), (" moves between agents", _D)),
-    (("Tree · ", _C), ("o", _T), (" opens the spawn menu", _D)),
+    (("Tree · ", _C), ("o", _T), (" opens the options menu on Spawn", _D)),
     (
         ("Tree · ", _C),
         ("Space", _T),
@@ -402,12 +399,18 @@ REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
         ("click JSON arrows", _T),
         (" to collapse or expand nested values", _D),
     ),
-    (("Palette · ", _C), ("Ctrl+P", _T), (" opens every régie command", _D)),
-    (("Palette · ", _C), ("Spawn", _T), (" starts any available harness", _D)),
-    (("Palette · ", _C), ("Resume sessions", _T), (" revives a compatible dead session", _D)),
-    (("Palette · ", _C), ("Show/Hide bus panel", _T), (" toggles coordination traffic", _D)),
-    (("Palette · ", _C), ("Theme", _T), (" changes the régie color scheme", _D)),
-    (("Palette · ", _C), ("SVG screenshot", _T), (" saves the current screen", _D)),
+    (
+        ("Options · ", _C),
+        ("Ctrl+P", _T),
+        (" opens the menu closing the tree; ", _D),
+        ("x", _T),
+        (" closes it", _D),
+    ),
+    (("Options · ", _C), ("Spawn", _T), (" starts any available harness", _D)),
+    (("Options · ", _C), ("Resume", _T), (" revives a compatible dead session", _D)),
+    (("Options · ", _C), ("/", _T), (" filters the menu and what it lists", _D)),
+    (("Options · ", _C), ("Show/Hide bus panel", _T), (" toggles coordination traffic", _D)),
+    (("Options · ", _C), ("Theme", _T), (" changes the régie color scheme for this session", _D)),
     (
         ("Config · ", _C),
         ("regie.cost_window", _T),

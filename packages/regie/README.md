@@ -13,7 +13,7 @@ window on the bridge's exact tmux server. `regie bridge start`, `status`, and
 The first UI frame appears after reversible tmux presentation setup, before
 initial data reads. Catalog, state, usage, and event reads then run concurrently;
 the tree waits for catalog-backed icons and pane discovery, not the usage footer.
-Its reveal animation is unchanged. The spawn palette waits for catalog loading,
+Its reveal animation is unchanged. The Spawn menu waits for catalog loading,
 and quitting cancels pending startup reads before restoring presentation.
 
 Régie keeps its own tree, apart from Theater's: `$THEATER_HOME/regie/config.toml` is
@@ -60,9 +60,18 @@ The tree is the whole interface; every signal is a state of something it already
   focus shows `▾` when it has children; a click on the badge folds or unfolds. Folds are
   remembered across restarts.
 
-- **Spawn row.** The tree ends in a dim `+ spawn  o`: click it, or press `o`, to pick a
-  harness. The cursor never lands on it, and it steps aside while a new agent asks for its
-  directory.
+- **Options.** The tree ends in `+ options`, a dim line until the cursor reaches it (`j` past the
+  last agent, `Ctrl+P`, or a click); then it unfolds into the options, three rows each:
+  **Spawn**, **Resume**, **Recover transcript** (for an agent whose transcript is not trusted),
+  **Add separator**, the **bus panel** and **usage footer** toggles, **Retry** (after an uncertain
+  action), **Theme** and **Quit**. Options with a `▸` unfold on `Enter`, `l`, `→`, `Space` or a click
+  into their choices: the harnesses, the dead sessions you can bring back (drawn as dead agents,
+  with why one cannot return), the transcripts the daemon found, the themes. `h` or `←` folds back.
+  Long lists show five rows and a `… N more` leaf that opens the rest. `o` opens the menu with the
+  cursor on the first harness. `/` filters everything the menu lists; `Enter` keeps the filter,
+  `Esc` drops it. A pick closes the menu and puts the cursor back where it was (a theme applies at
+  once and the menu stays open, for this session only); `x` closes the menu the same way. The menu
+  steps aside while a new agent asks for its directory.
 
 `reduce_motion = true` in `config.toml` keeps every signal and drops the motion: no sweeps,
 breathing, comets or reveal and retire animations, and waits draw their route without a
@@ -106,8 +115,8 @@ Python imports and CLI preflight. They are not shell-to-interactive measurements
 or reveal-animation completion times; `ready` means initial reads have settled,
 including recoverable failures.
 
-The Spawn submenu shows one `Spawn <harness>` entry per harness. Selecting it
-opens a directory picker with filesystem completion; nothing launches until the
+The Spawn option lists one `<harness>` choice per installed harness. Picking it
+opens a directory prompt on the new agent's row with filesystem completion; nothing launches until the
 directory is confirmed. Accept the prefilled path to use Régie's current directory.
 
 Killing the staged participant first restores its terminal to a background

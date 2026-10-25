@@ -54,7 +54,7 @@ https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 | **Cross-harness orchestration** | Agents can spawn, manage, and communicate with other coding-agent harnesses. |
 | **Input requests** | `await_sessions` reports detected prompts as `awaiting_input` once its presence gate is clear, while the child's job stays running. |
 | **Parallel worktrees** | Give a task its own Git worktree, or deliberately share one between cooperating agents. |
-| **Sessions that keep going** | Leave the régie, come back later, and resume previous sessions from the command palette. |
+| **Sessions that keep going** | Leave the régie, come back later, and resume previous sessions from the options menu. |
 | **Local control** | Theater's state stays on your machine; there is no Theater-hosted control plane. |
 
 ## Install
@@ -161,8 +161,8 @@ Your first five keys:
 
 | Key | Action |
 | --- | --- |
-| `o` | Open the spawn menu |
-| `Ctrl+P` | Open the command palette for spawn, resume, and views |
+| `o` | Open the options menu on Spawn |
+| `Ctrl+P` | Open the options menu: spawn, resume, views, theme |
 | `j` / `k` or arrows | Move through the agent tree |
 | `Enter` | Show the selected agent on the right |
 | `q` | Leave the régie without stopping your agents |
@@ -261,13 +261,13 @@ connected harness can use it.
 | `h` / `l` | Stage its trajectory / live terminal; press again to focus |
 | `H` / `L` | Open and focus its trajectory / live terminal immediately |
 | `s` / `f` / `i` | Send a message / queue a followup / interrupt the selected agent |
-| `o` | Open the spawn menu |
-| `Ctrl+P` | Open the command palette |
+| `o` | Open the options menu on Spawn |
+| `Ctrl+P` | Open the options menu |
 | `Esc` | Close a focused trajectory and return to the tree |
 | `<tmux prefix> h` | Return from a staged terminal or a trajectory to the tree |
 | `r` | Rename the selected agent's live alias or separator in place (or click its name); Enter saves, Esc or a click elsewhere cancels |
 | `x` | Kill the selected agent's pane, or delete the selected separator; a folded one also kills every agent it hides |
-| `$` | Show or hide the usage footer (hidden by default; also in the palette) |
+| `$` | Show or hide the usage footer (hidden by default; also in the options menu) |
 | `q` | Leave the régie; agents keep running |
 
 While you work in a staged terminal or trajectory, a small animation plays in the empty space

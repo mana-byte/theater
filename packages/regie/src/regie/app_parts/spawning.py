@@ -1,14 +1,11 @@
-"""Spawn and resume palettes, prompts, and approval choice."""
+"""Spawning and resuming: the harnesses on offer, the directory prompt, the approval choice."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
 
-from textual.command import CommandPalette
-
 from regie.app_parts._shared import _AppBase
-from regie.palette import ResumeSessionCommands
 from regie.resume import ResumeCandidate, ResumeDiscovery, discover_resume_sessions
 from regie.spawn import SpawnChoice, spawn_approval, spawn_choices
 from regie.widgets import ParticipantTree
@@ -17,16 +14,8 @@ from regie.widgets.spawn_leaf import SpawnLeaf
 
 
 class SpawnResume(_AppBase):
-    def action_resume_palette(self) -> None:
-        self.push_screen(
-            CommandPalette(
-                providers=[ResumeSessionCommands],
-                placeholder="Search for dead sessions…",
-            )
-        )
-
     async def load_resume_sessions(self) -> ResumeDiscovery:
-        """Load palette candidates on its isolated ordinary-request connection."""
+        """Load the dead sessions on the resume lane's isolated ordinary-request connection."""
         async with self._resume_discovery_lock:
             discovery = await discover_resume_sessions(self._clients.resume)
         if not self._harnesses:  # catalog not loaded yet: nothing to judge by
@@ -119,7 +108,7 @@ class SpawnResume(_AppBase):
         return approval
 
     def resume_dead_session(self, candidate: ResumeCandidate) -> None:
-        """Resume the trusted session selected in the RC9-style palette."""
+        """Resume the trusted dead session picked in the options menu."""
         if not candidate.available:
             self.notify(candidate.reason or "session cannot be resumed", severity="warning")
             return

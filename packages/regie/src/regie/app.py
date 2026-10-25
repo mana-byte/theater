@@ -10,11 +10,10 @@ from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, ClassVar
 
-from textual.app import App, ComposeResult, SystemCommand
+from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical
 from textual.css.query import NoMatches
-from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import RichLog
 
@@ -60,15 +59,6 @@ from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_phase
 from regie.motions.routes import RouteAnimationController
 from regie.observability import lag_monitor, log_exception
-from regie.palette import (
-    AddSeparatorCommand,
-    ResumeSessionCommand,
-    RetryActionCommand,
-    SpawnCommand,
-    TranscriptRecoveryCommand,
-    UsageViewCommand,
-    ViewCommands,
-)
 from regie.state import StateController
 from regie.trajectory.adapter import TrajectoryFollowAdapter, TrajectoryQueryAdapter
 from regie.trajectory.rich import (
@@ -81,7 +71,6 @@ from regie.tree_layout import TreeLayout
 from regie.ui_constants import (
     REGIE_BUS_LONG_POLL_SECONDS,
     REGIE_COST_WINDOW_LABELS,
-    REGIE_PALETTE_KEYS_COMMAND_TITLE,
     REGIE_RETURN_SIGNAL_TEXTUAL,
 )
 from regie.usage import UsageController
@@ -175,19 +164,12 @@ class RegieApp(
         Binding("v", "toggle_bus", "bus", show=False),
         Binding("dollar_sign", "toggle_usage", "usage", show=False),
         Binding("x", "kill", "kill"),
-        Binding("ctrl+p", "command_palette", "palette", show=False),
+        Binding("ctrl+p", "open_menu", "options", show=False),
         Binding("q", "quit", "quit"),
     ]
 
-    COMMANDS = App.COMMANDS | {
-        AddSeparatorCommand,
-        ResumeSessionCommand,
-        RetryActionCommand,
-        SpawnCommand,
-        TranscriptRecoveryCommand,
-        UsageViewCommand,
-        ViewCommands,
-    }
+    #: The options menu closing the tree replaces the command palette.
+    ENABLE_COMMAND_PALETTE = False
 
     title = "theater régie"
 
@@ -333,12 +315,6 @@ class RegieApp(
                 tip_char_interval=self.settings.dashboard_tip_char_interval,
                 id="catalog-dashboard",
             )
-
-    def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
-        """Replace Textual's redundant Keys entry with the dashboard hints."""
-        for command in super().get_system_commands(screen):
-            if command.title != REGIE_PALETTE_KEYS_COMMAND_TITLE:
-                yield command
 
     async def on_mount(self) -> None:
         self._lag_task = asyncio.create_task(lag_monitor(self._lag_stopping))

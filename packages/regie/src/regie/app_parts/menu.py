@@ -175,7 +175,10 @@ class MenuActions(_AppBase):
         self._menu_loaded("resume")
 
     async def _menu_fetch_transcripts(self, participant_id: str) -> None:
-        candidates = await self.load_transcript_candidates()
+        try:
+            candidates = await self.load_transcript_candidates()
+        finally:
+            self._transcript_recovery_target = None  # it only steers this one read
         self._menu_transcripts = Loaded(
             tuple(self._menu_candidate(i, c, participant_id) for i, c in enumerate(candidates)),
             note="no transcript can be bound",

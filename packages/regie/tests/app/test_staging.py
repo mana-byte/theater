@@ -282,7 +282,7 @@ async def test_textual_prompts_kill_bus_and_safe_quit() -> None:
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert "Keys" not in {command.title for command in app.get_system_commands(app.screen)}
+        assert not app.use_command_palette  # the options menu replaces the palette
 
         bar = app.query_one(CommandBar)
         await pilot.press("s")

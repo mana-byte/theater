@@ -10,7 +10,6 @@ from typing import cast
 import pytest
 from regie.controllers.transcripts import TranscriptBindingController, TranscriptBindState
 from regie.state import StateController
-from textual.command import CommandInput
 
 from packages.regie.tests.support.app_fakes import (
     FakeClient,
@@ -91,43 +90,6 @@ async def test_transcript_recovery_hides_for_trusted_identity_and_filters_reject
         assert app.transcript_recovery_available("participant-2")
         app._transcript_recovery_target = "participant-2"
         assert await app.load_transcript_candidates() == (accepted,)
-
-
-@pytest.mark.asyncio
-async def test_transcript_recovery_palette_preserves_target_through_selection_and_cancel() -> None:
-    app, client, _presentation = build_app()
-    candidate = TranscriptCandidate(
-        "/tmp/accepted.jsonl",
-        session_id="accepted",
-        provenance="exact",
-    )
-    client.transcripts.candidate_rows = (candidate,)
-
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.action_recover_transcript()
-        await pilot.pause()
-        assert app._transcript_recovery_target == "participant-1"
-
-        palette = app.screen.query_one(CommandInput)
-        palette.value = "accepted.jsonl"
-        await pilot.press("enter")
-        for _ in range(20):
-            if client.transcripts.bind_calls:
-                break
-            await pilot.pause()
-
-        assert client.transcripts.bind_calls[0]["participant_id"] == "participant-1"
-        assert app._transcript_recovery_target is None
-        assert app.focused is None
-
-        app.action_recover_transcript()
-        await pilot.pause()
-        assert app._transcript_recovery_target == "participant-1"
-        await pilot.press("escape")
-        await pilot.pause()
-        assert app._transcript_recovery_target is None
-        assert app.focused is None
 
 
 @pytest.mark.asyncio

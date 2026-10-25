@@ -102,7 +102,7 @@ class StartupLoading(_AppBase):
             self._catalog_ready.set()
 
     async def wait_for_catalog(self) -> None:
-        """A palette may wait for startup without owning or cancelling its reads."""
+        """Wait for startup's catalog read without owning or cancelling it."""
         await self._catalog_ready.wait()
 
     async def _load_catalog(self) -> bool:
