@@ -11,7 +11,7 @@ from regie.render.glyphs import node_label
 from regie.render.layout import render_tree, selected_participant, shorten_path
 from regie.render.routing import cell_leaf
 from regie.ui_constants import REGIE_SEND_TRACE_STYLE as SEND_STYLE
-from regie.ui_constants import REGIE_SPINNER_FRAMES
+from regie.ui_constants import REGIE_SPINNER_FRAMES, REGIE_WORKING_HARNESS_STYLES
 
 from packages.regie.tests.support.tree_nodes import (
     CHILD,
@@ -487,3 +487,96 @@ def test_a_blocked_agent_shows_a_square_that_moves_slower_than_the_spinner():
         for i, g in enumerate(glyphs)
     ]
     assert set(steps) <= {0, 1}
+
+
+# ---- the harness is spelled out only where the row is in focus ------------------------------
+
+
+def _row2(label) -> str:
+    return label_rows(label)[1]
+
+
+def test_without_the_harness_row_two_is_the_glyph_and_the_name():
+    named = {**CHILD, "name": "builder", "harness": "claude"}
+    shown = _row2(node_label(named, "├── ", show_harness=True))
+    hidden = _row2(node_label(named, "├── ", show_harness=False))
+
+    assert "claude" in shown and "claude" not in hidden
+    assert hidden.endswith("builder") and hidden.startswith("├── ")
+    assert shown.endswith("claude  builder")
+
+
+@pytest.mark.parametrize(
+    ("name", "focused", "shown"),
+    [
+        ("builder", False, False),
+        ("builder", True, True),
+        (None, False, True),  # no name of its own: the id says little, the harness a lot
+        ("", False, True),
+    ],
+)
+def test_the_harness_shows_on_the_focused_row_and_wherever_there_is_no_name(name, focused, shown):
+    from regie.render.glyphs import harness_shown
+
+    assert harness_shown({**CHILD, "name": name}, focused=focused) is shown
+
+
+def _name_spans(label, name: str):
+    """The spans styling *name*'s characters on row two."""
+    rows = label_rows(label)
+    begin = len(rows[0]) + 1 + rows[1].index(name)
+    return [span for span in label.spans if begin <= span.start < begin + len(name)]
+
+
+def test_a_working_agent_pulses_its_name_not_its_hidden_harness():
+    working = {**CHILD, "name": "builder", "status": "working", "harness": "claude"}
+    label = node_label(working, "├── ", frame=3, show_harness=False)
+    assert "claude" not in _row2(label) and _row2(label).endswith("builder")
+
+    styles = [str(span.style) for span in _name_spans(label, "builder")]
+    assert len(styles) == len("builder") and set(styles) <= set(REGIE_WORKING_HARNESS_STYLES)
+    assert len(set(styles)) > 1  # a wave along the name, not one flat colour
+
+
+def test_with_the_harness_shown_the_pulse_stays_on_the_harness_as_before():
+    working = {**CHILD, "name": "builder", "status": "working", "harness": "claude"}
+    label = node_label(working, "├── ", frame=3, show_harness=True)
+    rows = label_rows(label)
+    harness_begin = len(rows[0]) + 1 + rows[1].index("claude")
+    pulsed = [
+        span for span in label.spans if harness_begin <= span.start < harness_begin + len("claude")
+    ]
+    assert {str(span.style) for span in pulsed} <= set(REGIE_WORKING_HARNESS_STYLES) and pulsed
+    assert not [
+        span
+        for span in _name_spans(label, "builder")
+        if str(span.style) in REGIE_WORKING_HARNESS_STYLES
+    ]
+
+
+def test_an_unreachable_names_italic_survives_the_pulse():
+    unreachable = {**CHILD, "name": "ghost", "status": "working", "addressable": False}
+    label = node_label(unreachable, "├── ", frame=0, show_harness=False)
+    styles = [str(span.style) for span in _name_spans(label, "ghost")]
+    assert len(styles) == len("ghost") and all(style.startswith("italic ") for style in styles)
+    assert all(style.split()[-1] in REGIE_WORKING_HARNESS_STYLES for style in styles)
+
+
+def test_a_blocked_agent_does_not_pulse_its_name():
+    blocked = {**CHILD, "name": "builder", "status": "working"}
+    label = node_label(blocked, "├── ", frame=3, waiting="$accent", show_harness=False)
+    assert not [
+        span
+        for span in _name_spans(label, "builder")
+        if str(span.style) in REGIE_WORKING_HARNESS_STYLES
+    ]
+
+
+def test_the_name_starts_earlier_when_the_harness_is_hidden():
+    from regie.render.glyphs import visible_name_span
+
+    named = {**CHILD, "name": "builder", "harness": "claude"}
+    shown = visible_name_span(named, "├── ", show_harness=True)
+    hidden = visible_name_span(named, "├── ", show_harness=False)
+    assert shown is not None and hidden is not None
+    assert shown[0] - hidden[0] == len("claude") + 1  # the harness and its gap, less one space

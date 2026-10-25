@@ -14,6 +14,7 @@ from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.motions.routes import LeafOverlay
 from regie.motions.wipe import Wipe, apply_wipe
 from regie.render.glyphs import (
+    harness_shown,
     node_label,
     shown_name,
     visible_name_span,
@@ -155,6 +156,7 @@ class AgentLeaf(RenameableRow):
             width=self._label_width(),
             waiting=self._waiting,
             awaited=self._awaited,
+            show_harness=self._harness_shown(),
         )
         if self._wipe is not None:
             content = apply_wipe(content, self._wipe, width=self._label_width())
@@ -207,6 +209,10 @@ class AgentLeaf(RenameableRow):
         if highlight != self._highlight:
             self._highlight = highlight
             self.update(self._render_label(), layout=False)
+
+    def _harness_shown(self) -> bool:
+        """The harness is spelled out only where the row is in focus: the name carries the rest."""
+        return harness_shown(self._node, focused=self._cost_in_focus())
 
     def _cost_in_focus(self) -> bool:
         """Only the selected or hovered agent shows its cost: the tree is not a running bill."""
@@ -270,6 +276,7 @@ class AgentLeaf(RenameableRow):
             cwd_segments=self._cwd_segments,
             frame=self._frame,
             is_first_root=self._is_first_root,
+            show_harness=self._harness_shown(),
         )
         return max((len(line) for line in content.plain.splitlines()), default=0)
 
@@ -424,6 +431,7 @@ class AgentLeaf(RenameableRow):
         self._sync_cost_focus()
         self.set_class(selected, "tree-cursor")
         self.update(self._render_label(), layout=False)
+        self._sync_rename_geometry()  # the harness came or went: the name moved with it
         self._sync_marquee()
 
     def update_node(
@@ -465,7 +473,9 @@ class AgentLeaf(RenameableRow):
         """Column range of the row-2 name text within this leaf's content area."""
         if self._key[0] != "p":
             return None
-        span = visible_name_span(self._node, self._prefix, reveal=self._reveal)
+        span = visible_name_span(
+            self._node, self._prefix, reveal=self._reveal, show_harness=self._harness_shown()
+        )
         if span is None:
             return None
         gutter = self._gutter()
@@ -486,6 +496,8 @@ class AgentLeaf(RenameableRow):
         participant_id = self.participant_id
         if participant_id is None:
             return
+        # Measured before selecting: selecting brings the harness back and moves the name.
+        on_name = event.button == 1 and event.chain == 1 and self._name_clicked(event)
         select_tree_item = getattr(self.app, "select_tree_item", None)
         if callable(select_tree_item):
             select_tree_item(self.key, participant_id)
@@ -497,7 +509,7 @@ class AgentLeaf(RenameableRow):
         if event.button == 3:
             action = getattr(self.app, "action_toggle_trajectory", None)
         elif event.button == 1 and event.chain == 1:
-            if self._name_clicked(event):
+            if on_name:
                 await self.begin_rename()
                 return
             action = getattr(self.app, "action_stage", None)
@@ -527,6 +539,7 @@ class AgentLeaf(RenameableRow):
         self._sync_cost_focus()
         self._stop_marquee()
         self.update(self._render_label(), layout=False)
+        self._sync_rename_geometry()
         self._sync_marquee()
 
     def on_leave(self, _event: events.Leave) -> None:
@@ -534,6 +547,7 @@ class AgentLeaf(RenameableRow):
         self._sync_cost_focus()
         self._stop_marquee()
         self.update(self._render_label(), layout=False)
+        self._sync_rename_geometry()
         self._sync_marquee()
 
     def on_resize(self, _event: events.Resize) -> None:

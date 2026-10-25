@@ -233,10 +233,28 @@ def shown_name(node: RenderNode | dict) -> str:
     return view.get("name") or short_id(view.get("id"))
 
 
+def harness_shown(node: RenderNode | dict, *, focused: bool) -> bool:
+    """Whether row 2 spells out the harness: on the focused row, and wherever the row has no
+    name of its own (its id says little, the harness a lot)."""
+    return focused or not cast(RawRenderNode, node).get("name")
+
+
+def _append_pulsing_name(parts: list, name: str, id_style: str, *, frame: int) -> None:
+    """The name with the working pulse running along it; an unreachable id keeps its italic."""
+    italic = "italic " if "italic" in id_style else ""
+    for offset, char in enumerate(name):
+        parts.append((char, f"{italic}{working_harness_style(frame, offset)}"))
+
+
 def _row2_lead(
-    node: RawRenderNode, prefix: str, *, frame: int = 0, waiting: str | None = None
+    node: RawRenderNode,
+    prefix: str,
+    *,
+    frame: int = 0,
+    waiting: str | None = None,
+    show_harness: bool = True,
 ) -> list:
-    """Row-2 parts before the name: prefix rail, status glyph, harness text."""
+    """Row-2 parts before the name: prefix rail, status glyph, harness text (when shown)."""
     glyph, glyph_style = _status_glyph(node, frame, waiting=waiting)
     glyph_style = _presence_glyph_style(node, glyph_style)
     harness = node.get("harness", "?")
@@ -244,7 +262,9 @@ def _row2_lead(
     if prefix:
         parts.append((prefix, "$text dim"))
     parts.append((glyph, glyph_style))
-    if node.get("status") == "working" and waiting is None:
+    if not show_harness:
+        parts.append("  ")
+    elif node.get("status") == "working" and waiting is None:
         parts.append(" ")
         _append_working_harness_text(parts, harness, frame=frame, offset=0)
         parts.append("  ")
@@ -254,7 +274,11 @@ def _row2_lead(
 
 
 def visible_name_span(
-    node: RenderNode | dict, prefix: str = "", *, reveal: int | None = None
+    node: RenderNode | dict,
+    prefix: str = "",
+    *,
+    reveal: int | None = None,
+    show_harness: bool = True,
 ) -> tuple[int, int] | None:
     """Row-2 cell span of the name after the renderer's reveal clipping; None while hidden.
 
@@ -262,7 +286,7 @@ def visible_name_span(
     """
     from regie.motions.reveal import clip_parts
 
-    lead = _row2_lead(cast(RawRenderNode, node), prefix)
+    lead = _row2_lead(cast(RawRenderNode, node), prefix, show_harness=show_harness)
     name = shown_name(node)
     lead_pts = sum(len(part if isinstance(part, str) else part[0]) for part in lead)
     start = _parts_width(lead)
@@ -289,12 +313,14 @@ def node_label(
     width: int | None = None,
     waiting: str | None = None,
     awaited: int = 0,
+    show_harness: bool = True,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
     Row 1 is a leading spacer carrying the parent rail (blank for the first root);
     row 3 uses ``cont_prefix`` so it doesn't look like a new node. *waiting* is the colour of
-    the await this agent is blocked in; *awaited* is how many peers are blocked on it.
+    the await this agent is blocked in; *awaited* is how many peers are blocked on it. Without
+    *show_harness* the working pulse runs along the name instead of the harness text.
     """
     # Function-level imports avoid layout ↔ glyphs and reveal ↔ glyphs cycles.
     from regie.motions.reveal import clip_parts
@@ -313,8 +339,13 @@ def node_label(
             row1_parts.append((lead, "$text dim"))
 
     # Row 2: rails, glyph, harness, short id; the id is split out so dim-italic applies to it only.
-    row2_parts: list = _row2_lead(view, prefix, frame=frame, waiting=waiting)
-    row2_parts.append((sid, id_style) if id_style else sid)
+    row2_parts: list = _row2_lead(
+        view, prefix, frame=frame, waiting=waiting, show_harness=show_harness
+    )
+    if view.get("status") == "working" and waiting is None and not show_harness:
+        _append_pulsing_name(row2_parts, sid, id_style, frame=frame)
+    else:
+        row2_parts.append((sid, id_style) if id_style else sid)
     if awaited:
         row2_parts.append((f"  ◂{awaited if awaited > 1 else ''}", "$text-muted"))
     mark = _mark(view)

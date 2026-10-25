@@ -26,6 +26,9 @@ on the next start, stopping a bridge still running from it first.
 
 The tree is the whole interface; every signal is a state of something it already draws.
 
+- **Name.** A row is its status glyph and the agent's name. The harness (`claude`, `codex`) is
+  spelled out only on the row under the cursor or the pointer, and always on a row with no name
+  of its own. A working agent pulses its name; on the focused row the pulse stays on the harness.
 - **Status glyph.** A spinner is an agent computing; `!` needs you (awaiting input); `✗` is
   dead. A slow square quadrant `▘▝▗▖` is an agent blocked on a peer, in the colour of that
   wait; a ring filling `○◔◑◕●` is a spawn starting, with the daemon's phase on the row's
