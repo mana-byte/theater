@@ -379,3 +379,26 @@ async def test_harnesses_without_an_executable_are_not_offered(
         assert app.icon_for_harness("codex") == "◈"  # the full catalog still names icons
         rows = app.query_one(WelcomeDashboard)._harnesses or []
         assert [row["name"] for row in rows] == ["codex"]
+
+
+@pytest.mark.asyncio
+async def test_opening_the_spawn_row_reports_when_each_step_arrived(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO, logger="regie.latency")
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2 and bool(app._harnesses))
+        app.spawn_harness("codex")
+        await wait_until(pilot, lambda: bool(app.query(DirectoryEditor)))
+        await wait_until(
+            pilot, lambda: "interaction.spawn_menu.prompt" in "\n".join(caplog.messages)
+        )
+
+    steps = [m.split()[0] for m in caplog.messages if m.startswith("interaction.spawn_menu")]
+    assert steps == ["interaction.spawn_menu.row", "interaction.spawn_menu.prompt"]
+    assert app._spawn_menu_started is None  # reported once, then cleared
