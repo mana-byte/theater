@@ -8,6 +8,7 @@ from typing import cast
 from rich.cells import cell_len
 from textual.content import Content
 
+from regie.motions.wipe import Wipe, apply_wipe
 from regie.render.glyphs import node_label
 from regie.render.layout import Key
 from regie.tree_nodes import RawRenderNode, RenderNode
@@ -34,6 +35,7 @@ class SpawnLeaf(RenameableRow):
         self._cont_prefix = cont_prefix
         self._value = str(node.get("cwd") or Path.cwd())
         self._reopen = False
+        self._wipe: Wipe | None = None
         super().__init__()
         self.key = key
         self.update(self._render_label(), layout=False)
@@ -44,14 +46,22 @@ class SpawnLeaf(RenameableRow):
         self._sync_rename_geometry()
 
     def _render_label(self) -> Content:
-        return node_label(
+        width = self.content_size.width or None
+        content = node_label(
             self._node,
             self._prefix,
             cont_prefix=self._cont_prefix,
             detail="" if self.renaming else self._value,
             cost=[(_HINT, "$text-muted")],
-            width=self.content_size.width or None,
+            width=width,
         )
+        return content if self._wipe is None else apply_wipe(content, self._wipe, width=width)
+
+    def set_wipe(self, wipe: Wipe | None) -> None:
+        """Draw one frame of the sweep that greets this row when it opens, or end it."""
+        if wipe != self._wipe:
+            self._wipe = wipe
+            self.update(self._render_label(), layout=False)
 
     def on_resize(self) -> None:
         self.update(self._render_label(), layout=False)

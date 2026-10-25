@@ -155,7 +155,7 @@ class ControlActions(_AppBase):
                     )
                 self._show_stage_result(result)
         # A kill announces itself: the row leaves with the reverse reveal, roots included.
-        self.query_one(ParticipantTree).allow_retirement(participant_id)
+        self.query_one(ParticipantTree).announce_kill(participant_id)
         return await self._actions.terminate(participant_id)
 
     async def submit_spawn(

@@ -56,7 +56,6 @@ def _is_selectable_key(key: Key) -> bool:
 
 #: The sweep that announces a mark arriving on a row.
 _MARK_WIPE_COLORS = {
-    MarkKind.LAUNCHING: "$secondary",
     MarkKind.TERMINATING: "$error",
     MarkKind.SENT: "$success",
     MarkKind.BLOCKED: "$warning",
@@ -138,6 +137,10 @@ class ParticipantTree(VerticalScroll):
         self._mark_kinds: dict[str, MarkKind] | None = None
         self._seen_timer: Timer | None = None
         self._seen_pending: str | None = None
+        #: Rows asked to be killed, and rows gone from the projection that stay on screen, widget
+        #: and width kept, until the sweep still running on them ends: ``key -> (animate, width)``.
+        self._kills: set[Key] = set()
+        self._held: dict[Key, tuple[bool, int]] = {}
 
     @property
     def selected_id(self) -> str | None:
@@ -212,9 +215,9 @@ class ParticipantTree(VerticalScroll):
         reasons = stage_reasons or {}
         self._add_stage_reasons(tree, reasons)
         lines = render_tree(tree, unmanaged=unmanaged, cwd_segments=cwd_segments)
-        self._sync_retirement(projection)
         self._observe_statuses(projection)
         self._observe_marks(marks or {})
+        self._sync_retirement(projection)
         self._participant_detail = "description" if participant_detail == "description" else "cwd"
         self._cwd_segments = cwd_segments
         self._lines_data = lines
@@ -369,6 +372,8 @@ class ParticipantTree(VerticalScroll):
             widget = SeparatorRow(node, prefix, key=key, is_first_root=first_root)
         elif key[0] == "n":
             widget = SpawnLeaf(node, prefix, cont_prefix=cont_prefix, key=key)
+            self._wipes.start(key, "$secondary")  # the row that asks for the directory opens
+            self._ensure_wipe_timer()
         elif _is_participant_key(key):
             widget = AgentLeaf(
                 node,
@@ -570,22 +575,53 @@ class ParticipantTree(VerticalScroll):
             self._leaf_reveal_timer = None
 
     def _sync_retirement(self, projection: StateProjection) -> None:
-        participants = {
+        current = {
             ("p", participant.participant_id): bool(participant.parent_id)
             for participant in projection.participants.values()
         }
-        change = self._leaf_retirement.observe(participants)
+        # A row gone from the projection stays until its sweep has ended, even if it is already
+        # dead: the sweep is what tells the human what happened.
+        departed = {key for key in self._key_widgets if key[0] == "p" and key not in current}
+        for key in departed & self._kills:
+            if not self._wipes.has(key):
+                self._wipes.start(key, "$error")  # a kill too quick for its mark to be seen
+        self._kills -= departed
+        held = {key for key in departed if self._wipes.has(key)}
+        self._wipes.cancel(departed - held)
+        self._ensure_wipe_timer()
+        returned = {key for key in self._held if key in current}
+        change = self._leaf_retirement.observe(current)
         self._leaf_reveal.cancel(change.retire)
         if not self._leaf_reveal.active:
             self._stop_reveal()
-        self.restore_retiring(change.restore)
-        if change.restore and not self._leaf_retirement.active:
+        self.restore_retiring(change.restore | returned)
+        if (change.restore or returned) and not self._leaf_retirement.active:
             self._stop_retirement()
-        if change.retire:
+        if held:
+            for key, width in self.retire(held).items():
+                self._held[key] = (key in change.retire, width)
+        if change.retire - held:
             frame = self._leaf_retirement.begin(
-                self.retire(change.retire), candidates=change.retire
+                self.retire(change.retire - held), candidates=change.retire - held
             )
             self._apply_retirement(frame)
+
+    def _release_held(self, key: Key) -> None:
+        """Its sweep is over: the row now retires, with the reverse reveal if it may, or goes."""
+        if key not in self._held:  # a row retiring on its own is not ours to cut short
+            return
+        animate, width = self._held.pop(key)
+        widget = self._retiring.get(key)
+        if widget is None:
+            return
+        if animate:
+            self._apply_retirement(self._leaf_retirement.begin({key: width}, candidates={key}))
+            return
+        self._retiring.pop(key)
+        self._retiring_predecessors.pop(key, None)
+        self._remove_widget(widget)
+        if not self._lines_data and not self._retiring:
+            self._reconcile_empty()
 
     def retire(self, keys: Collection[Key]) -> dict[Key, int]:
         candidates = set(keys)
@@ -612,15 +648,19 @@ class ParticipantTree(VerticalScroll):
 
     def restore_retiring(self, keys: Collection[Key]) -> None:
         for key in keys:
+            self._held.pop(key, None)
             widget = self._retiring.pop(key, None)
             if widget is not None:
                 self._retiring_predecessors.pop(key, None)
                 widget.set_reveal(None)
                 self._key_widgets[key] = widget
 
-    def allow_retirement(self, participant_id: str) -> None:
-        """Let a participant leave with the reverse reveal, as a kill does for any row."""
-        self._leaf_retirement.allow(("p", participant_id))
+    def announce_kill(self, participant_id: str) -> None:
+        """A kill was asked for: the row will leave with the reverse reveal, roots included, and
+        a red sweep first if its termination mark is never seen."""
+        key = ("p", participant_id)
+        self._leaf_retirement.allow(key)
+        self._kills.add(key)
 
     def _apply_retirement(self, frame: LeafRetirementFrame) -> None:
         for key, reveal in frame.widths.items():
@@ -661,7 +701,6 @@ class ParticipantTree(VerticalScroll):
                 continue
             if (color := status_wipe_color(previous, status)) is not None:
                 self._wipes.start(key, color)
-        self._wipes.cancel(set(self._statuses) - set(current))
         now = time.monotonic()
         self._attention_since = {
             key: self._attention_since.get(key, now)
@@ -674,7 +713,8 @@ class ParticipantTree(VerticalScroll):
     def _observe_marks(self, marks: Mapping[str, RowMark]) -> None:
         """Sweep a row whose operation just produced something worth announcing.
 
-        A spawn starts cyan and ends green; a kill is red; a delivery green; a refusal yellow.
+        A spawn ends green; a kill is red; a delivery green; a refusal yellow. (A spawn begins
+        cyan, but that is the spawn row opening, not a mark.)
         """
         previous = self._mark_kinds
         # What the first projection already carries happened before the human looked.
@@ -755,14 +795,19 @@ class ParticipantTree(VerticalScroll):
     def _tick_wipe(self) -> None:
         frame = self._wipes.tick()
         for key, wipe in frame.running.items():
-            if isinstance(widget := self._key_widgets.get(key), AgentLeaf):
+            if isinstance(widget := self._sweepable(key), AgentLeaf | SpawnLeaf):
                 widget.set_wipe(wipe)
         for key in frame.finished:
-            if isinstance(widget := self._key_widgets.get(key), AgentLeaf):
+            if isinstance(widget := self._sweepable(key), AgentLeaf | SpawnLeaf):
                 widget.set_wipe(None)
+            self._release_held(key)
         if not frame.active and self._wipe_timer is not None:
             self._wipe_timer.stop()
             self._wipe_timer = None
+
+    def _sweepable(self, key: Key) -> Widget | None:
+        """The row a sweep draws on: a held row is no longer in the tree but is still drawn."""
+        return self._key_widgets.get(key) or self._retiring.get(key)
 
     def _sync_attention(self) -> None:
         """Breathe the newest few waiting rows; the rest hold the steady tint."""
@@ -796,6 +841,7 @@ class ParticipantTree(VerticalScroll):
         self._stop_retirement()
         self._stop_attention()
         self._stop_mark_seen()
+        self._held.clear()
         if self._wipe_timer is not None:
             self._wipe_timer.stop()
             self._wipe_timer = None

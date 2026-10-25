@@ -121,8 +121,9 @@ async def test_a_kill_retires_even_a_root_with_the_reverse_reveal() -> None:
         await app.submit_termination(root[1])
         state.projection = replace(state.projection, participants=MappingProxyType(others))
         app._show_projection(state.projection)
-        assert root in tree._retiring  # the row leaves with the animation, not instantly
-        assert tree._leaf_retirement.active
+        assert root in tree._retiring  # the row stays while its red sweep plays...
+        await wait_until(pilot, lambda: tree._leaf_retirement.active)  # ...then it retires
+        await wait_until(pilot, lambda: root not in tree._retiring)
 
 
 @pytest.mark.asyncio

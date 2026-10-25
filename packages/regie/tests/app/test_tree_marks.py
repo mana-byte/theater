@@ -169,7 +169,22 @@ async def test_a_folded_heading_shows_a_hidden_agents_failed_operation(
         await wait_until(pilot, lambda: glyph in heading.render_line(1).text)
 
 
-async def test_a_spawn_sweeps_cyan_when_it_begins_and_green_when_it_is_up() -> None:
+async def test_opening_the_spawn_row_sweeps_it_cyan() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2 and bool(app._harnesses))
+
+        app.spawn_harness("codex")
+        await wait_until(pilot, lambda: ("n", "new") in tree._key_widgets)
+        row = tree._key_widgets[("n", "new")]
+        await wait_until(pilot, lambda: row._wipe is not None)
+        assert row._wipe[1] == "$secondary"
+        await wait_until(pilot, lambda: row._wipe is None)  # and the sweep ends
+
+
+async def test_a_launching_row_sweeps_green_once_it_is_up_and_not_when_it_begins() -> None:
     app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
@@ -182,15 +197,16 @@ async def test_a_spawn_sweeps_cyan_when_it_begins_and_green_when_it_is_up() -> N
             pilot,
             make_operation("spawn", "running", "launch_preparing", target="participant-2"),
         )
-        await wait_until(pilot, lambda: leaf._wipe is not None)
-        assert leaf._wipe[1] == "$secondary"
+        await wait_until(pilot, lambda: "◔" in _rows(leaf)[1])
+        assert leaf._wipe is None  # the menu already greeted this spawn
 
         await _publish(
             app,
             pilot,
             make_operation("spawn", "succeeded", "terminal_bound", target="participant-2"),
         )
-        await wait_until(pilot, lambda: leaf._wipe is not None and leaf._wipe[1] == "$success")
+        await wait_until(pilot, lambda: leaf._wipe is not None)
+        assert leaf._wipe[1] == "$success"
 
 
 async def test_a_kill_in_flight_sweeps_red_and_shows_that_it_is_terminating() -> None:
@@ -214,26 +230,114 @@ async def test_a_kill_in_flight_sweeps_red_and_shows_that_it_is_terminating() ->
         assert leaf._wipe[1] == "$error"
 
 
-async def test_a_kill_seen_in_the_projection_lets_its_row_retire_with_the_animation() -> None:
+def _without(app, participant_id: str) -> None:
+    """The daemon forgets *participant_id*, as it does once an exit is verified."""
+    remaining = {
+        key: item
+        for key, item in app._state.projection.participants.items()
+        if key != participant_id
+    }
+    app._state.projection = replace(app._state.projection, participants=MappingProxyType(remaining))
+    app._show_projection(app._state.projection)
+
+
+async def test_a_killed_row_stays_until_its_sweep_ends_then_retires() -> None:
     app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
         await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
         tree._leaf_retirement._enabled = True
+        key = ("p", "participant-2")
+        leaf = _leaf(tree, "participant-2")
         await _publish(
             app,
             pilot,
             make_operation("participants.terminate", "running", "accepted", target="participant-2"),
         )
-        # An agent that killed it, not Régie: the projection is the only witness.
-        remaining = {
-            key: item
-            for key, item in app._state.projection.participants.items()
-            if key != "participant-2"
-        }
+        await wait_until(pilot, lambda: leaf._wipe is not None)  # the red sweep is running
+
+        # The daemon already says it is gone; the sweep has not finished.
+        _without(app, "participant-2")
+        assert key in tree._retiring and key in tree._held
+        assert not tree._leaf_retirement.active  # not shrinking yet
+        assert leaf._wipe is not None
+        assert "participant-2" not in tree.participant_ids
+
+        await wait_until(pilot, lambda: key not in tree._held)  # the sweep ended...
+        await wait_until(pilot, lambda: key not in tree._retiring)  # ...then it retired
+        await wait_until(pilot, lambda: leaf not in list(tree.query(AgentLeaf)))
+
+
+async def test_a_kill_too_quick_for_its_mark_still_sweeps_red_before_the_row_goes() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        tree._leaf_retirement._enabled = True
+        key = ("p", "participant-2")
+        leaf = _leaf(tree, "participant-2")
+
+        tree.announce_kill("participant-2")  # what Régie does when you press the key
+        _without(app, "participant-2")  # no terminating mark was ever shown
+        assert key in tree._held
+        await wait_until(pilot, lambda: leaf._wipe is not None)
+        assert leaf._wipe[1] == "$error"
+        await wait_until(pilot, lambda: key not in tree._retiring)
+
+
+async def test_a_dead_row_that_is_not_a_kill_lingers_for_its_sweep_then_just_goes() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        tree._leaf_retirement._enabled = True
+        key = ("p", "participant-1")  # a root: not eligible for the reverse reveal
+        participants = dict(app._state.projection.participants)
+        participants["participant-1"] = replace(participants["participant-1"], status="dead")
         app._state.projection = replace(
-            app._state.projection, participants=MappingProxyType(remaining)
+            app._state.projection, participants=MappingProxyType(participants)
         )
         app._show_projection(app._state.projection)
-        assert ("p", "participant-2") in tree._retiring
+        leaf = _leaf(tree, "participant-1")
+        await wait_until(pilot, lambda: leaf._wipe is not None)
+
+        _without(app, "participant-1")
+        assert key in tree._retiring
+        await wait_until(pilot, lambda: key not in tree._retiring)
+        assert not tree._leaf_retirement.active  # never animated: it was not a kill
+
+
+async def test_a_held_row_whose_participant_returns_is_restored_not_duplicated() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        tree._leaf_retirement._enabled = True
+        key = ("p", "participant-2")
+        original = app._state.projection
+        leaf = _leaf(tree, "participant-2")
+        tree.announce_kill("participant-2")
+        _without(app, "participant-2")
+        assert key in tree._held
+
+        app._state.projection = original  # the exit was never verified after all
+        app._show_projection(original)
+        assert key not in tree._held and key not in tree._retiring
+        assert tree._key_widgets[key] is leaf
+        assert len([w for w in tree.query(AgentLeaf) if w.key == key]) == 1
+
+
+async def test_without_motion_a_killed_row_goes_at_once() -> None:
+    app, _client, _presentation = build_app(reduce_motion=True)
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        tree.announce_kill("participant-2")
+        _without(app, "participant-2")
+        assert ("p", "participant-2") not in tree._held
+        await wait_until(pilot, lambda: ("p", "participant-2") not in tree._key_widgets)

@@ -88,6 +88,10 @@ class LeafWipeController:
     def active(self) -> bool:
         return bool(self._sweeps)
 
+    def has(self, key: Key) -> bool:
+        """Whether a sweep is still running on *key*."""
+        return key in self._sweeps
+
     def start(self, key: Key, color: str, *, now: float | None = None) -> None:
         if self._enabled:
             self._sweeps[key] = _Sweep(color, time.monotonic() if now is None else now)
