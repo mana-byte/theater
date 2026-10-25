@@ -88,7 +88,7 @@ jobs:
     env:
       HARNESS: ${{ matrix.harness }}
       GH_REPO: ${{ github.repository }}
-      GH_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PR_AUTOMATION_TOKEN || github.token }}
+      GH_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.HARNESS_COMPAT || github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

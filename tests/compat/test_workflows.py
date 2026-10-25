@@ -49,7 +49,14 @@ def test_pr_jobs_are_read_only_and_have_no_automation_secret() -> None:
     for name in ("static-checks", "plan", "verify-gate"):
         job = compat["jobs"][name]
         assert job.get("permissions", compat["permissions"]) == {"contents": "read"}
-        assert "PR_AUTOMATION_TOKEN" not in yaml.safe_dump(job)
+        assert "secrets.HARNESS_COMPAT" not in yaml.safe_dump(job)
+
+
+@pytest.mark.parametrize("name", ["harness-compat.yml", "harness-compat-attention.yml"])
+def test_publication_and_reporting_use_the_compat_token_not_the_pricing_one(name: str) -> None:
+    # PR_AUTOMATION_TOKEN belongs to the pricing workflow; compat has its own broader token.
+    text = (WORKFLOWS / name).read_text()
+    assert "secrets.HARNESS_COMPAT" in text and "PR_AUTOMATION_TOKEN" not in text
 
 
 def test_scripts_own_all_issue_and_pr_operations() -> None:

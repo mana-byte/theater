@@ -29,5 +29,5 @@ jobs:
         env:
           FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
           GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.HARNESS_COMPAT || github.token }}
         run: python3 -m scripts.harness_compat report "$FAILED_RUN_ID"
