@@ -89,6 +89,14 @@ class RawRenderNode(TypedDict, total=False):
     count: int
     folded: list[str]
     folded_status: str | None
+    #: Options-menu rows: what is drawn, in which style, and whether the root is unfolded.
+    title: str
+    help: str | None
+    glyph: str
+    style: str
+    chevron: str | None
+    enabled: bool
+    open: bool
     children: list[RenderNode]
 
 

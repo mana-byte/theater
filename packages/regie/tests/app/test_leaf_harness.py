@@ -31,7 +31,7 @@ async def test_the_harness_comes_back_with_the_cursor_and_with_the_pointer() -> 
         await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
         first, second = _leaf(tree, "participant-1"), _leaf(tree, "participant-2")
 
-        assert "codex" in _row(first)  # the cursor is on it
+        await wait_until(pilot, lambda: "codex" in _row(first))  # the cursor is on it
         assert "codex" not in _row(second) and "second" in _row(second)
 
         tree.select("participant-2")

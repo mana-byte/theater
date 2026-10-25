@@ -19,7 +19,7 @@ from regie.widgets.separator import SeparatorRow
 from textual.geometry import Offset
 
 from packages.regie.tests.support.app_fakes import build_app, make_participant, make_projection
-from packages.regie.tests.support.waiting import wait_until
+from packages.regie.tests.support.waiting import press_until, wait_until
 
 
 async def test_jk_reorders_roots_and_stays_out_of_the_usage_footer(tmp_path: Path) -> None:
@@ -37,8 +37,7 @@ async def test_jk_reorders_roots_and_stays_out_of_the_usage_footer(tmp_path: Pat
         )
         assert tree.selected_key == ("p", "participant-1")
 
-        await pilot.press("j")
-        assert app._usage_panel.in_footer
+        await press_until(pilot, "j", lambda: app._usage_panel.in_footer)
         await pilot.press("shift+k", "minus")
         assert tree.participant_ids == ("participant-2", "participant-1")
         assert not app.query(NameEditor)

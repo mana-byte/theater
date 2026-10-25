@@ -16,7 +16,7 @@ from packages.regie.tests.support.app_fakes import (
     build_app,
     make_projection,
 )
-from packages.regie.tests.support.waiting import wait_until
+from packages.regie.tests.support.waiting import press_until, wait_until
 from theater.frontend import (
     FrontendTransportError,
     StateProjection,
@@ -31,7 +31,9 @@ async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> 
         await pilot.pause()
         tree = app.query_one(ParticipantTree)
         panel = app.query_one(UsageBreakdownPanel)
-        await pilot.press("j", "j")
+        await press_until(
+            pilot, "j", lambda: app._usage_panel.in_footer
+        )  # past the menu closing the tree
         assert app._usage_panel.keyboard_metric == "input"
         assert panel.has_class("-visible")
         assert not list(tree.query(".tree-cursor"))

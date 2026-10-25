@@ -15,3 +15,14 @@ async def wait_until(pilot: Pilot, condition: Callable[[], bool], timeout: float
             return
         await pilot.pause(0.02)
     assert condition(), f"condition not met within {timeout}s"
+
+
+async def press_until(
+    pilot: Pilot, key: str, condition: Callable[[], bool], limit: int = 40
+) -> None:
+    """Press *key* until *condition* holds: how far a cursor has to travel is not the point."""
+    for _ in range(limit):
+        if condition():
+            return
+        await pilot.press(key)
+    assert condition(), f"{key!r} x{limit} never made it so"

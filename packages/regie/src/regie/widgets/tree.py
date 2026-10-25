@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import replace
 from typing import Literal, cast
 
 from textual import events
@@ -16,11 +17,12 @@ from textual.widget import Widget
 from textual.widgets import Label
 
 from regie.marks import MarkKind, RowMark
+from regie.menu import ROOT_ID, MenuItem, MenuView, menu_nodes
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
 from regie.motions.routes import AwaitMarks, LeafOverlay
 from regie.motions.wipe import LeafWipeController, status_wipe_color
-from regie.render.layout import Key, RenderedLine, is_root_prefix, render_tree
+from regie.render.layout import Key, RenderedLine, TreeLines, is_root_prefix, render_tree
 from regie.render.routing import RailArms, heavy_overlays, section_arms
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout
@@ -36,9 +38,9 @@ from regie.ui_constants import (
 )
 from regie.widgets.chrome import EmptyTreeState
 from regie.widgets.leaf import AgentLeaf
+from regie.widgets.menu_row import MenuRow
 from regie.widgets.separator import SeparatorRow
 from regie.widgets.spawn_leaf import SpawnLeaf
-from regie.widgets.spawn_row import SpawnRow
 from regie.widgets.usage_breakdown import UsageBreakdownPanel
 from theater.frontend import StateProjection
 
@@ -53,7 +55,12 @@ def _is_managed_key(key: Key) -> bool:
 
 
 def _is_selectable_key(key: Key) -> bool:
-    return key[0] in {"p", "s", "u"}
+    return key[0] in {"p", "s", "u", "g", "m"}
+
+
+def _is_menu_key(key: Key | None) -> bool:
+    """Whether a row belongs to the options menu closing the tree."""
+    return key is not None and key[0] in {"g", "m"}
 
 
 #: The sweep that announces a mark arriving on a row.
@@ -80,6 +87,13 @@ def _hidden_owners(nodes: list[TreeNode]) -> dict[Key, Key]:
 
 class ParticipantTree(VerticalScroll):
     """Keep one interactive leaf per stable public participant ID."""
+
+    class MenuClicked(Message):
+        """A menu row was clicked and the cursor is on it: the app picks it."""
+
+        def __init__(self, key: Key) -> None:
+            super().__init__()
+            self.key = key
 
     class MarkSeen(Message):
         """The cursor rested on a row long enough that its failure counts as seen."""
@@ -157,6 +171,15 @@ class ParticipantTree(VerticalScroll):
         #: and width kept, until the sweep still running on them ends: ``key -> (animate, width)``.
         self._kills: set[Key] = set()
         self._held: dict[Key, tuple[bool, int]] = {}
+        #: The options menu: what it holds (set by the app), what the human has opened, the row
+        #: the cursor left to enter it, and the inputs it is redrawn from without a projection.
+        self.menu_source: Callable[[], Sequence[MenuItem]] = lambda: ()
+        self._menu_view = MenuView()
+        self._menu_return: Key | None = None
+        self._menu_hidden = False
+        self._menu_built_open = False
+        self._tree_nodes: list[TreeNode] = []
+        self._unmanaged: list[dict] | None = None
 
     @property
     def selected_id(self) -> str | None:
@@ -238,29 +261,21 @@ class ParticipantTree(VerticalScroll):
         self._hidden_owner = _hidden_owners(tree)
         reasons = stage_reasons or {}
         self._add_stage_reasons(tree, reasons)
-        lines = render_tree(
-            tree, unmanaged=unmanaged, cwd_segments=cwd_segments, spawn_row=pending_spawn is None
-        )
+        self._tree_nodes, self._unmanaged = tree, unmanaged
+        self._menu_hidden = pending_spawn is not None  # the new agent's row is where to look
+        self._participant_detail = "description" if participant_detail == "description" else "cwd"
+        self._cwd_segments = cwd_segments
+        lines = self._render_lines()
         self._observe_statuses(projection)
         self._observe_marks(marks or {})
         self._sync_retirement(projection)
-        self._participant_detail = "description" if participant_detail == "description" else "cwd"
-        self._cwd_segments = cwd_segments
         self._lines_data = lines
         self._revision += 1
         self._stale = projection.stale
         self._reconcile(lines)
-
-        keys = self.selectable_keys
-        preferred = ("p", selected_id) if selected_id is not None else None
-        if self._selected_key not in keys:
-            self._selected_key = (
-                preferred
-                if preferred in keys
-                else keys[min(old_index, len(keys) - 1)]
-                if keys
-                else None
-            )
+        self._settle_selection(selected_id, old_index)
+        if self._in_menu() != self._menu_built_open:  # the settled cursor entered or left the menu
+            self._rerender()
         self._staged_id = staged_id
         self._staged_unmanaged_id = staged_unmanaged_id
         self._trajectory_id = trajectory_id
@@ -301,13 +316,13 @@ class ParticipantTree(VerticalScroll):
     def select(self, participant_id: str | None) -> str | None:
         key = ("p", participant_id or "")
         if key in self.selectable_keys:
-            self._selected_key = key
+            self._set_selected(key)
             self._apply_selection()
         return self.selected_participant_id
 
     def select_key(self, key: Key) -> str | None:
         if key in self.selectable_keys:
-            self._selected_key = key
+            self._set_selected(key)
             self._apply_selection()
         return self.selected_id
 
@@ -320,7 +335,7 @@ class ParticipantTree(VerticalScroll):
             index = keys.index(self._selected_key) if self._selected_key is not None else 0
         except ValueError:
             index = 0
-        self._selected_key = keys[max(0, min(len(keys) - 1, index + offset))]
+        self._set_selected(keys[max(0, min(len(keys) - 1, index + offset))])
         self._apply_selection()
         return self.selected_id
 
@@ -339,6 +354,114 @@ class ParticipantTree(VerticalScroll):
     def set_cursor_visible(self, visible: bool) -> None:
         self._cursor_visible = visible
         self._apply_selection()
+
+    def _in_menu(self) -> bool:
+        return _is_menu_key(self._selected_key)
+
+    @property
+    def in_menu(self) -> bool:
+        """Whether the cursor is on the options menu (the root, an option or a choice)."""
+        return self._in_menu()
+
+    @property
+    def menu_return(self) -> Key | None:
+        """The row the cursor was on before it entered the menu."""
+        return self._menu_return
+
+    @property
+    def menu_view(self) -> MenuView:
+        return self._menu_view
+
+    def _render_lines(self) -> TreeLines:
+        """The agents as rows, then the menu as one more root, open while the cursor is in it."""
+        opened = self._in_menu()
+        self._menu_built_open = opened
+        menu = None
+        if not self._menu_hidden and (self._tree_nodes or opened):
+            menu = menu_nodes(self.menu_source(), self._menu_view, open=opened)
+        return render_tree(
+            self._tree_nodes,
+            unmanaged=self._unmanaged,
+            cwd_segments=self._cwd_segments,
+            menu=menu,
+        )
+
+    def _rerender(self) -> None:
+        """Draw the rows again from what the tree knows: the menu opened, closed or changed."""
+        lines = self._render_lines()
+        self._lines_data = lines
+        self._revision += 1
+        self._reconcile(lines)
+        self._settle_selection(None, 0)  # a choice may have gone with the list that held it
+        self._apply_selection()
+
+    def _set_selected(self, key: Key | None) -> None:
+        """Move the cursor, opening the menu as it enters and closing it as it leaves."""
+        entered, left = (
+            not self._in_menu() and _is_menu_key(key),
+            self._in_menu() and not _is_menu_key(key),
+        )
+        if entered:
+            self._menu_return = self._selected_key
+        if left:
+            self._menu_view, self._menu_return = MenuView(), None
+        self._selected_key = key
+        if entered or left:
+            self._rerender()
+
+    def _settle_selection(self, selected_id: str | None, old_index: int) -> None:
+        """Keep the cursor on a row that exists; never fall into the menu when an agent remains."""
+        keys = self.selectable_keys
+        if self._selected_key in keys:
+            return
+        preferred = ("p", selected_id) if selected_id is not None else None
+        rows = [key for key in keys if not _is_menu_key(key)] or list(keys)
+        if preferred in keys:
+            self._selected_key = preferred
+        elif _is_menu_key(self._selected_key) and any(_is_menu_key(key) for key in keys):
+            self._selected_key = ("g", ROOT_ID)  # an option went away: back to the menu's root
+        else:
+            self._selected_key = rows[min(old_index, len(rows) - 1)] if rows else None
+
+    def open_menu(self, option: str | None = None) -> None:
+        """Put the cursor in the menu: on its root, or on the first choice of *option*, unfolded."""
+        if option is not None:
+            self._menu_view = replace(self._menu_view, expanded=self._menu_view.expanded | {option})
+        self._set_selected(("g", ROOT_ID))
+        if option is not None:
+            self._rerender()
+            first = next(
+                (key for key in self.selectable_keys if key[1].startswith(f"{option}/")), None
+            )
+            self._set_selected(first or ("m", option))
+        self._apply_selection()
+
+    def close_menu(self) -> Key | None:
+        """Take the cursor back to the row it left, or the nearest agent if that row is gone."""
+        back = self._menu_return
+        rows = [key for key in self.selectable_keys if not _is_menu_key(key)]
+        if back not in rows:
+            back = rows[-1] if rows else None
+        self._set_selected(back)
+        self._apply_selection()
+        return back
+
+    def set_menu_view(self, view: MenuView) -> None:
+        """Change what is opened in the menu (an option unfolded, a list shown whole, a filter)."""
+        if view != self._menu_view:
+            self._menu_view = view
+            if self._in_menu():
+                self._rerender()
+
+    def refresh_menu(self) -> None:
+        """Redraw the menu after what it holds changed (a list finished loading, a theme picked)."""
+        if self._in_menu():
+            self._rerender()
+
+    def on_menu_row_clicked(self, message: MenuRow.Clicked) -> None:
+        message.stop()
+        self.select_key(message.key)
+        self.post_message(self.MenuClicked(message.key))
 
     def _reconcile(self, lines: list[RenderedLine]) -> None:
         if not lines:
@@ -391,14 +514,16 @@ class ParticipantTree(VerticalScroll):
         if isinstance(widget, SpawnLeaf):
             widget.update_node(node, prefix, cont_prefix=cont_prefix)
             return widget
-        if isinstance(widget, SpawnRow):
-            widget.set_label(label)
+        if isinstance(widget, MenuRow):
+            widget.update_node(node, prefix, cont_prefix=cont_prefix, is_first_root=first_root)
             return widget
         if isinstance(widget, Label):
             widget.update(label)
             return widget
-        if key[0] == "g":
-            widget = SpawnRow(label)
+        if key[0] in {"g", "m"}:
+            widget = MenuRow(
+                node, prefix, cont_prefix=cont_prefix, key=key, is_first_root=first_root
+            )
         elif key[0] == "s":
             widget = SeparatorRow(node, prefix, key=key, is_first_root=first_root)
         elif key[0] == "n":
@@ -462,6 +587,9 @@ class ParticipantTree(VerticalScroll):
                     if self._trajectory_id in folded
                     else None
                 )
+                widget.set_cursor(self._cursor_visible and key == self._selected_key)
+                continue
+            if isinstance(widget, MenuRow):
                 widget.set_cursor(self._cursor_visible and key == self._selected_key)
                 continue
             if not isinstance(widget, AgentLeaf):

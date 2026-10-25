@@ -20,7 +20,8 @@ from regie.ui_constants import (
     REGIE_TREE_RAIL as RAIL,
     REGIE_TREE_SEPARATOR_ROWS as SEPARATOR_ROWS,
 )
-from regie.render.glyphs import node_label, separator_label, spawn_row_label
+from regie.render.glyphs import node_label, separator_label
+from regie.render.menu import menu_label
 from regie.tree_nodes import RawRenderNode, RenderNode, TreeNode
 
 #: A stable row identity for widget reconciliation; the first element namespaces the row kind.
@@ -28,9 +29,12 @@ type Key = tuple[str, str]
 type RenderedLine = tuple[Content, RenderNode, Key, str, str]
 
 
-def row_count(key: Key) -> int:
-    """Rendered rows for one tree line: separators are shorter than leaves, the spawn row one."""
-    return {"s": SEPARATOR_ROWS, "g": 1}.get(key[0], LEAF_ROWS)
+def row_count(key: Key, node: RenderNode | None = None) -> int:
+    """Rendered rows for one tree line: a separator is shorter than a leaf, the folded menu and
+    its info rows one line."""
+    if key[0] == "g":
+        return LEAF_ROWS if node is not None and node.get("open") else 1
+    return {"s": SEPARATOR_ROWS, "i": 1}.get(key[0], LEAF_ROWS)
 
 
 class TreeLines(list[RenderedLine]):
@@ -42,8 +46,8 @@ class TreeLines(list[RenderedLine]):
         super().__init__(lines)
         self.row_lookup = tuple(
             (line_index, row)
-            for line_index, (_, _, key, _, _) in enumerate(self)
-            for row in range(row_count(key))
+            for line_index, (_, node, key, _, _) in enumerate(self)
+            for row in range(row_count(key, node))
         )
 
 
@@ -102,7 +106,9 @@ def _walk(
             first_root = False
         # cont_prefix for row 3 is the rail/gap children inherit — already child_prefix.
         cont_prefix = child_prefix
-        kind = {"separator": "s", "spawn": "n", "ghost": "g"}.get(str(node.get("kind")), "p")
+        kind = {"separator": "s", "spawn": "n", "menu_root": "g", "menu": "m", "info": "i"}.get(
+            str(node.get("kind")), "p"
+        )
         key: Key = (kind, node.get("id", ""))
         rows.append((prefix + branch, node, key, cont_prefix, first_root))
         rows += _walk(node.get("children") or [], child_prefix, depth + 1)
@@ -113,8 +119,11 @@ def _labelled(
     row: tuple[str, RenderNode, Key, str, bool], *, cwd_segments: int = 2, frame: int = 0
 ) -> RenderedLine:
     prefix, node, key, cont_prefix, is_first_root = row
-    if key[0] == "g":
-        return spawn_row_label(prefix), node, key, prefix, cont_prefix
+    if key[0] in "gmi":
+        label = menu_label(
+            cast(RawRenderNode, node), prefix, cont_prefix, is_first_root=is_first_root
+        )
+        return label, node, key, prefix, cont_prefix
     if key[0] == "s":
         view = cast(RawRenderNode, node)
         label = separator_label(
@@ -147,7 +156,7 @@ def render_tree(
     unmanaged: list[dict] | None = None,
     *,
     cwd_segments: int = 2,
-    spawn_row: bool = False,
+    menu: RawRenderNode | None = None,
 ) -> TreeLines:
     """Produce (label, data, key, prefix, cont_prefix) 5-tuples for the Tree widget.
 
@@ -156,8 +165,8 @@ def render_tree(
     """
     # Raw renderer callers retain their dictionaries and missing-field fallbacks.
     nodes = cast(Sequence[RenderNode], tree)
-    if spawn_row and nodes:  # one more root, last: the invitation to add an agent
-        nodes = [*nodes, {"kind": "ghost", "id": "spawn", "children": []}]
+    if menu is not None:  # the options menu is one more root, last
+        nodes = [*nodes, menu]
     lines = [_labelled(row, cwd_segments=cwd_segments) for row in _walk(nodes, is_first_root=True)]
     if unmanaged:
         lines.append(

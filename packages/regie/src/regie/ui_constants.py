@@ -46,10 +46,6 @@ REGIE_TREE_GAP = "    "
 #: await's route ends on it.
 REGIE_AWAITED_MARK = "▏"
 
-#: The tree's last row, an invitation to spawn: the key that does the same is shown beside it.
-REGIE_SPAWN_ROW_TEXT = "+ spawn"
-REGIE_SPAWN_ROW_KEY = "o"
-
 #: How often a travelling tree trace moves (seconds). Slower than the spinners.
 REGIE_TRACE_ANIM_INTERVAL = 0.10
 
@@ -457,3 +453,11 @@ REGIE_CONTROLS_REPORT_MAX_LINES = 20
 
 #: Character cap per session-controls report line; reasons must fit a toast.
 REGIE_CONTROLS_REPORT_LINE_MAX = 200
+
+#: The options menu closing the tree: its root's title and the hint on its unfolded third row.
+REGIE_MENU_TITLE = "+ options"
+REGIE_MENU_HINT = "x closes · / filters"
+#: A long list in the menu shows this many choices, then a leaf that shows them all.
+REGIE_MENU_PREVIEW_ROWS = 5
+#: What the leaf standing for the rest of a list is called in a row key.
+REGIE_MENU_MORE_ID = "…"
