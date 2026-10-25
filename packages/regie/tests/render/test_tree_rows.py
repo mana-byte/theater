@@ -634,7 +634,7 @@ def test_row_two_never_outgrows_the_width_and_keeps_its_badges(width):
     row = _row2(node_label(node, "├── ", width=width, awaited=1, show_harness=True))
     assert cell_len(row) <= width
     assert "…" in row and row.endswith("  ⊘")  # the name gave way, the mark did not
-    assert row.startswith("├──╴")  # the wait is in the connector: it takes no room from the name
+    assert row.startswith("├──▏")  # the wait is in the connector: it takes no room from the name
 
 
 def test_without_a_width_the_whole_name_is_drawn_and_a_callers_window_wins():
@@ -725,13 +725,13 @@ def test_a_short_name_keeps_the_full_badge_where_a_long_one_would_force_it_down(
 
 def test_an_agent_peers_wait_on_wears_a_double_arrow_in_its_connector_whatever_the_number():
     row = lambda n: _row2(node_label({**CHILD, "name": "tester"}, "├── ", awaited=n))  # noqa: E731
-    assert row(0).startswith("├── ") and "╴" not in row(0)
-    assert row(1).startswith("├──╴") and row(1) == row(5)  # one waiter or many: the same glyph
+    assert row(0).startswith("├── ") and "▏" not in row(0)
+    assert row(1).startswith("├──▏") and row(1) == row(5)  # one waiter or many: the same glyph
     assert len(row(1)) == len(row(0))  # the connector keeps its width, so the name does not move
 
 
 def test_the_awaited_marker_leaves_a_rooted_row_without_a_connector_alone():
-    assert "╴" not in _row2(node_label({**CHILD, "name": "x"}, "", awaited=2))
+    assert "▏" not in _row2(node_label({**CHILD, "name": "x"}, "", awaited=2))
 
 
 # ---- the cost lives on row three -----------------------------------------------------------
