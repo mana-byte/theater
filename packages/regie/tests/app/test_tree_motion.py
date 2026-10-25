@@ -19,9 +19,13 @@ def _with_status(projection, participant_id: str, status: str):
     return replace(projection, participants=MappingProxyType(participants))
 
 
-async def _change(app, pilot, participant_id: str, status: str) -> None:
+def _set_status(app, participant_id: str, status: str) -> None:
     app._state.projection = _with_status(app._state.projection, participant_id, status)
     app._show_projection(app._state.projection)
+
+
+async def _change(app, pilot, participant_id: str, status: str) -> None:
+    _set_status(app, participant_id, status)
     await pilot.pause()
 
 
@@ -181,8 +185,9 @@ async def test_death_sweeps_at_twice_the_pace_of_the_other_announcements() -> No
         tree = app.query_one(ParticipantTree)
         await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
 
-        await _change(app, pilot, "participant-1", "awaiting_input")
-        await _change(app, pilot, "participant-2", "dead")
+        # No await between the changes and the read: a 0.25 s sweep can end under a loaded CPU.
+        _set_status(app, "participant-1", "awaiting_input")
+        _set_status(app, "participant-2", "dead")
         needs_you = tree._wipes._sweeps[("p", "participant-1")]
         died = tree._wipes._sweeps[("p", "participant-2")]
         assert (needs_you.seconds, died.seconds) == (REGIE_WIPE_SECONDS, REGIE_WIPE_DEATH_SECONDS)

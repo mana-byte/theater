@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
+from regie.motions.wipe import LeafWipeController
 from regie.ui_constants import REGIE_WIPE_DEATH_SECONDS
 from regie.widgets import ParticipantTree
 from regie.widgets.leaf import AgentLeaf
@@ -60,7 +61,15 @@ async def test_a_spawn_in_flight_fills_its_ring_and_names_the_phase() -> None:
         assert "workspace ready" not in _rows(leaf)[2]
 
 
-async def test_a_refused_send_marks_its_target_and_says_why() -> None:
+async def test_a_refused_send_marks_its_target_and_says_why(monkeypatch) -> None:
+    sweeps: list[tuple] = []
+    start = LeafWipeController.start
+
+    def recording_start(self, key, color, **kwargs) -> None:
+        sweeps.append((key, color))
+        start(self, key, color, **kwargs)
+
+    monkeypatch.setattr(LeafWipeController, "start", recording_start)
     app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
@@ -79,10 +88,11 @@ async def test_a_refused_send_marks_its_target_and_says_why() -> None:
                 error_code="human_present",
             ),
         )
-        await wait_until(pilot, lambda: "⊘" in _rows(leaf)[1])
+        # A sweep redraws blanks as shade blocks, so the text is read once the row has settled.
+        await wait_until(pilot, lambda: sweeps and leaf._wipe is None)
+        assert "⊘" in _rows(leaf)[1]
         assert _rows(leaf)[2].endswith("blocked · human present")
-        await wait_until(pilot, lambda: leaf._wipe is not None)  # the row announces it
-        assert leaf._wipe[1] == "$warning"
+        assert sweeps == [(("p", "participant-2"), "$warning")]  # the row announced it
 
 
 async def test_a_failure_stops_asking_once_the_cursor_has_rested_on_it(monkeypatch) -> None:
