@@ -90,6 +90,12 @@ def interaction_milestone(name: str, started_at: float) -> None:
         logger.log(level, "interaction.%s %.1fms", name, elapsed * 1000)
 
 
+def interaction_note(what: str) -> None:
+    """Record that something outside Régie changed what the human is looking at."""
+    with contextlib.suppress(Exception):
+        logger.info("interaction.%s", what.replace(" ", "_"))
+
+
 def startup_milestone(phase: str, started_at: float) -> None:
     """Report elapsed launch time; direct app users fall back to construction time."""
     with contextlib.suppress(Exception):

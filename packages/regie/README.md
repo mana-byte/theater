@@ -95,6 +95,12 @@ means the delay was in the terminal.
 screen that is late while Régie itself is on time: every timer and animation inside Régie keeps
 running, but the human sees the result later.
 
+`interaction.terminal_lost_focus` and `_gained_focus` record the terminal's own focus changes,
+and an inline editor (the spawn directory, a rename) logs `interaction.editor.cancelled by=…`
+with how long it was open, or `interaction.editor.kept` when it stayed open because the terminal,
+not the editor, lost focus. An editor survives the terminal losing focus: Textual hands it focus
+back when the terminal returns.
+
 Local `startup.*` logs separate presentation, catalog, snapshot, unmanaged-pane,
 projection, usage, and event-read time. `first_frame`, `participants_ready`, and
 `ready` mark after-refresh milestones measured from app construction, excluding

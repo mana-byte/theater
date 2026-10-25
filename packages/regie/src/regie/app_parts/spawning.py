@@ -6,10 +6,11 @@ from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 
+from textual import events
 from textual.command import CommandPalette
 
 from regie.app_parts._shared import _AppBase
-from regie.latency import interaction_milestone
+from regie.latency import interaction_milestone, interaction_note
 from regie.palette import (
     ResumeSessionCommands,
     SpawnChoice,
@@ -83,6 +84,12 @@ class SpawnResume(_AppBase):
         }
         self._show_projection(self._state.projection)
         self.call_after_refresh(self._begin_spawn_directory)
+
+    def on_app_focus(self, _event: events.AppFocus) -> None:
+        interaction_note("terminal gained focus")
+
+    def on_app_blur(self, _event: events.AppBlur) -> None:
+        interaction_note("terminal lost focus")
 
     def spawn_menu_opened(self) -> None:
         """The directory prompt is up and focused."""
