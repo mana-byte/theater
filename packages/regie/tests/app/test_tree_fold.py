@@ -181,3 +181,38 @@ async def test_folds_survive_a_restart(tmp_path: Path) -> None:
         await wait_until(pilot, lambda: len(tree.participant_ids) == 4)
         assert "participant-3" not in tree.participant_ids
         assert "▸1" in _row(_leaf(tree, "participant-2"))
+
+
+async def test_an_await_on_a_folded_agent_still_changes_the_waiters_glyph(tmp_path: Path) -> None:
+    from regie.ui_constants import REGIE_WAITING_FRAMES
+
+    path = tmp_path / "layout.json"
+    TreeLayout(folded={"participant-1"}).save(path)
+    app, _client, _presentation = build_app(projection=_family(), tree_layout_path=path)
+
+    def event(kind: str) -> dict:
+        return {
+            "kind": kind,
+            "from_id": "participant-5",
+            "to_id": "participant-3",  # folded away under participant-1
+            "payload": {"token": "t", "handle": "h"},
+        }
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: tree.participant_ids == ("participant-1", "participant-5"))
+        waiter, boss = _leaf(tree, "participant-5"), _leaf(tree, "participant-1")
+
+        app._animate_bus_row(event("job.await.start"))
+        await wait_until(pilot, lambda: waiter._waiting is not None)
+        assert _row(waiter).lstrip("└├│─ ")[0] in REGIE_WAITING_FRAMES  # the waiting glyph
+        assert boss._awaited == 1  # the fold that hides the target says it is being waited on
+
+        tree.select("participant-1")  # unfold: the marks follow the target out of the fold
+        await pilot.press("space")
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 5)
+        target = _leaf(tree, "participant-3")
+        await wait_until(pilot, lambda: target._awaited == 1 and boss._awaited == 0)
+
+        app._animate_bus_row(event("job.await.end"))
+        await wait_until(pilot, lambda: waiter._waiting is None and target._awaited == 0)

@@ -36,6 +36,7 @@ class ParticipantNode(TypedDict):
     hidden_count: NotRequired[int]
     hidden_ids: NotRequired[list[str]]
     hidden_status: NotRequired[str | None]
+    hidden_agents: NotRequired[list[TreeNode]]
 
 
 class SeparatorNode(TypedDict):

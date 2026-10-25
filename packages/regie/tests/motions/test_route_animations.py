@@ -25,8 +25,8 @@ def _lines(*ids: str):
     return render_tree([_agent(pid) for pid in ids])
 
 
-def _tick(controller, lines, *, focus=None, now=None):
-    return controller.tick(lines, 1, await_highlight_cells, focus=focus, now=now)
+def _tick(controller, lines, *, focus=None, now=None, resolve=None):
+    return controller.tick(lines, 1, await_highlight_cells, focus=focus, now=now, resolve=resolve)
 
 
 def _await(controller, lines, waiter: str, target: str, token: str = "t") -> None:
@@ -187,3 +187,89 @@ def test_reduced_motion_does_not_send_a_comet_at_all():
     lines = _lines("aaa", "bbb")
     controller = RouteAnimationController(motion=False)
     assert not controller.start_route(lines, "aaa", "bbb").started
+
+
+# ---- rows folded out of sight ------------------------------------------------------------------
+
+
+def _resolver(hidden: dict[str, str], visible: set[str]):
+    """Ids on screen stand for themselves, folded ones for the agent hiding them."""
+
+    def resolve(participant_id: str) -> str | None:
+        if participant_id in visible:
+            return participant_id
+        return hidden.get(participant_id)
+
+    return resolve
+
+
+def test_an_await_on_a_folded_agent_still_marks_its_waiter_and_the_fold_that_hides_it():
+    lines = _lines("aaa", "boss")
+    resolve = _resolver({"kid": "boss"}, {"aaa", "boss"})
+    controller = RouteAnimationController()
+
+    assert controller.start_await(lines, "t", "h", "aaa", "kid", resolve).started
+    marks = controller.marks(resolve)
+    assert set(marks.waiting) == {"aaa"} and marks.awaited == {"boss": 1}
+
+    # and a new await draws its route to the row standing in for the target
+    assert _glyphs(_tick(controller, lines, now=0.0, resolve=resolve))
+
+
+def test_a_waiter_folded_out_of_sight_leaves_no_mark_but_its_target_still_counts_it():
+    lines = _lines("boss", "bbb")
+    resolve = _resolver({"kid": "boss"}, {"boss", "bbb"})
+    controller = RouteAnimationController()
+
+    assert controller.start_await(lines, "t", "h", "kid", "bbb", resolve).started
+    marks = controller.marks(resolve)
+    assert marks.waiting == {} and marks.awaited == {"bbb": 1}
+
+
+def test_two_agents_under_one_fold_have_no_row_to_show_between_them():
+    lines = _lines("boss")
+    resolve = _resolver({"kid": "boss", "kin": "boss"}, {"boss"})
+    assert (
+        not RouteAnimationController().start_await(lines, "t", "h", "kid", "kin", resolve).started
+    )
+
+
+def test_an_agent_waiting_on_its_own_folded_child_shows_the_wait_not_a_badge_on_itself():
+    lines = _lines("boss", "other")
+    resolve = _resolver({"kid": "boss"}, {"boss", "other"})
+    controller = RouteAnimationController()
+
+    assert not controller.start_await(lines, "t", "h", "boss", "kid", resolve).started  # one row
+    # (the ring still needs a row to show between: nothing to draw, nothing to mark)
+    assert controller.marks(resolve).awaited == {}
+
+
+def test_an_end_that_is_nowhere_in_the_tree_is_still_refused():
+    lines = _lines("aaa", "bbb")
+    resolve = _resolver({}, {"aaa", "bbb"})
+    assert (
+        not RouteAnimationController().start_await(lines, "t", "h", "aaa", "ghost", resolve).started
+    )
+
+
+def test_a_fold_opening_moves_the_marks_to_the_agent_itself():
+    lines = _lines("aaa", "boss", "kid")
+    controller = RouteAnimationController()
+    folded = _resolver({"kid": "boss"}, {"aaa", "boss"})
+    assert controller.start_await(lines, "t", "h", "aaa", "kid", folded).started
+    assert controller.marks(folded).awaited == {"boss": 1}
+
+    unfolded = _resolver({}, {"aaa", "boss", "kid"})
+    assert controller.marks(unfolded).awaited == {"kid": 1}
+
+
+def test_a_send_to_a_folded_agent_travels_to_its_fold_and_lands_there():
+    lines = _lines("aaa", "boss")
+    resolve = _resolver({"kid": "boss"}, {"aaa", "boss"})
+    controller = RouteAnimationController()
+    assert controller.start_route(lines, "aaa", "kid", resolve).started
+
+    landings = []
+    while controller.has_active():
+        landings += _tick(controller, lines, now=LATER, resolve=resolve).landed
+    assert [target for target, _ in landings] == ["boss"]

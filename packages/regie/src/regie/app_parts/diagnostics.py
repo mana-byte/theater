@@ -111,7 +111,7 @@ class DiagnosticsDisplay(_AppBase):
 
     def start_route_animation(self, from_id: str | None, to_id: str | None) -> None:
         tree = self.query_one(ParticipantTree)
-        if self._animation.start_route(tree.tree_lines, from_id, to_id).started:
+        if self._animation.start_route(tree.tree_lines, from_id, to_id, tree.stand_in).started:
             self._ensure_animation_timer()
 
     def start_await_animation(
@@ -122,8 +122,10 @@ class DiagnosticsDisplay(_AppBase):
         to_id: str | None,
     ) -> None:
         tree = self.query_one(ParticipantTree)
-        if self._animation.start_await(tree.tree_lines, token, handle, from_id, to_id).started:
-            tree.set_await_marks(self._animation.marks())
+        if self._animation.start_await(
+            tree.tree_lines, token, handle, from_id, to_id, tree.stand_in
+        ).started:
+            tree.set_await_marks(self._animation.marks(tree.stand_in))
             self._ensure_animation_timer()
 
     def stop_await_animation(
@@ -135,7 +137,7 @@ class DiagnosticsDisplay(_AppBase):
     ) -> None:
         decision = self._animation.stop_await(token, handle, from_id, to_id)
         tree = self.query_one(ParticipantTree)
-        tree.set_await_marks(self._animation.marks())
+        tree.set_await_marks(self._animation.marks(tree.stand_in))
         if decision.clear_overlays:
             tree.set_overlays({})
         if decision.stop_timer:
@@ -154,9 +156,11 @@ class DiagnosticsDisplay(_AppBase):
             tree.revision,
             await_highlight_cells,
             focus=tree.selected_participant_id,
+            resolve=tree.stand_in,
         )
         tree.set_overlays(result.overlays)
-        tree.set_await_marks(self._animation.marks())  # an expired await takes its marks with it
+        # An expired await takes its marks with it, and a fold opening or closing moves them.
+        tree.set_await_marks(self._animation.marks(tree.stand_in))
         for participant_id, color in result.landed:
             tree.flash(participant_id, color)
         if result.stop_timer:

@@ -187,6 +187,13 @@ class ParticipantTree(VerticalScroll):
     def tree_lines(self) -> list[RenderedLine]:
         return self._lines_data
 
+    def stand_in(self, participant_id: str) -> str | None:
+        """The row that shows *participant_id*: itself, the folded agent hiding it, or None."""
+        if ("p", participant_id) in self._key_widgets:
+            return participant_id
+        owner = self._hidden_owner.get(("p", participant_id))
+        return None if owner is None else owner[1]
+
     @property
     def revision(self) -> int:
         return self._revision

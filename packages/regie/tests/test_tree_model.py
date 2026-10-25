@@ -285,3 +285,12 @@ def test_a_corrupt_folded_list_discards_the_layout_without_overwriting_it(tmp_pa
 
     assert layout == TreeLayout() and warning is not None and "folded" in warning
     assert path.read_text(encoding="utf-8") == original
+
+
+def test_an_outer_fold_counts_and_summarises_what_an_inner_fold_already_hides() -> None:
+    forest = tree_for_projection(
+        _family({"a1": "awaiting_input"}), layout=TreeLayout(folded={"a", "root"})
+    )
+    root = forest[0]
+    assert root["hidden_count"] == 3 and sorted(root["hidden_ids"]) == ["a", "a1", "b"]
+    assert root["hidden_status"] == "awaiting_input"  # the inner fold's trouble is not lost

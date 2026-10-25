@@ -142,6 +142,7 @@ def _descendants(nodes: list[TreeNode]) -> list[TreeNode]:
             found.extend(node.get("folded_agents", []))  # already flat: each with its subtree
         else:
             found.append(node)
+            found.extend(cast(ParticipantNode, node).get("hidden_agents", []))  # inner folds
             found.extend(_descendants(node["children"]))
     return found
 
@@ -210,6 +211,7 @@ def tree_for_projection(
             node["hidden_count"] = len(hidden)
             node["hidden_ids"] = [agent["id"] for agent in hidden]
             node["hidden_status"] = _fold_status(hidden)
+            node["hidden_agents"] = hidden
             node["children"] = []
         return node
 
