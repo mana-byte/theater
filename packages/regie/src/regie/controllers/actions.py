@@ -14,6 +14,7 @@ from typing import Literal
 from uuid import uuid4
 
 from regie.constants import REGIE_ACTION_HISTORY_LIMIT, REGIE_IDLE_ACTION_CLIENTS
+from regie.controllers.spawn_trace import SpawnTrace
 from theater.frontend import (
     AcceptedOperation,
     FrontendClient,
@@ -105,6 +106,7 @@ class OperationController:
         self._client_locks: dict[int, asyncio.Lock] = {}
         self._spawn_targets: dict[tuple[str, str, str, str], str] = {}
         self._closed = False
+        self.spawn_trace = SpawnTrace()
 
     @property
     def records(self) -> tuple[ActionRecord, ...]:

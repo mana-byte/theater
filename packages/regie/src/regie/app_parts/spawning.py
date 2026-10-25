@@ -104,6 +104,7 @@ class SpawnResume(_AppBase):
         pending = self._pending_spawn
         if pending is None:
             return None
+        self._actions.spawn_trace.entered(monotonic())
         try:
             cwd = normalize_directory(value, base_dir=Path.cwd())
         except ValueError as exc:

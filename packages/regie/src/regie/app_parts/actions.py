@@ -89,7 +89,7 @@ class ActionTracking(_AppBase):
             self.call_after_refresh(self._record_action_rendered, record, monotonic())
             self.run_worker(self._refresh_unmanaged_after(record, projection), exclusive=False)
             if record.action == "spawn" and participant_id is not None:
-                self._present_spawned(participant_id)
+                self._present_spawned(participant_id, record)
         finally:
             self._action_presentation.finish_reconciliation(record, succeeded=succeeded)
 
@@ -103,12 +103,16 @@ class ActionTracking(_AppBase):
         projection = self._state.projection
         return projection if holds_routed(projection, participant_id) else None
 
-    def _present_spawned(self, participant_id: str) -> None:
+    def _present_spawned(self, participant_id: str, record: ActionRecord) -> None:
         """A participant spawned from Régie opens staged and focused, ready for input."""
         self.select_participant(participant_id)
-        self._submit_presentation(
-            "open", partial(self._stage_selected, "open", participant_id, None)
-        )
+        stage = partial(self._stage_selected, "open", participant_id, None)
+
+        async def staged() -> None:
+            await stage()
+            self._actions.spawn_trace.staged(record, monotonic())
+
+        self._submit_presentation("open", staged)
 
     async def _refresh_unmanaged_after(
         self, record: ActionRecord, projection: StateProjection
@@ -121,6 +125,8 @@ class ActionTracking(_AppBase):
     def _record_action_rendered(self, record: ActionRecord, projected_at: float) -> None:
         self._actions.acknowledge(record)
         displayed_at = monotonic()
+        if record.action in {"spawn", "resume"}:
+            self._actions.spawn_trace.visible(record, displayed_at)
         logger.info(
             "action.%s.rendered %.1fms operation=%s after_observation_ms=%s "
             "after_projection_ms=%.1f",

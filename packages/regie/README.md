@@ -80,6 +80,16 @@ reconciliation order or indicate that an unconfirmed operation has completed.
 Routine success and background refreshes do not produce pop-up notifications;
 action failures, uncertain outcomes, and startup failures remain visible.
 
+A spawn is traced from the Enter on its directory row to the staged terminal, one line per step,
+all carrying the daemon's operation id: `spawn.enter_to_submit` (Régie's own delay), `spawn.phase`
+(each daemon phase, with `daemon_at`, how long into the operation the daemon wrote it, and `late`,
+how long after that Régie drew it; a warning past 250ms), `spawn.participant` (when the new row
+appears, gets a terminal route, changes status), then `spawn.visible` and `spawn.staged` (a
+warning past one second). The `+Nms` on each is counted from the Enter. Picking a harness is
+timed separately by `interaction.spawn_menu.row` and `.prompt`. `late` large means the update
+reached Régie slowly; `daemon_at` large means the daemon was slow; both small with a slow screen
+means the delay was in the terminal.
+
 Local `startup.*` logs separate presentation, catalog, snapshot, unmanaged-pane,
 projection, usage, and event-read time. `first_frame`, `participants_ready`, and
 `ready` mark after-refresh milestones measured from app construction, excluding

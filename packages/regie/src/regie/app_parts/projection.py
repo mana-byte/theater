@@ -186,6 +186,9 @@ class ProjectionSync(_AppBase):
     def _show_projection(self, projection: StateProjection) -> None:
         if not self._view_active:
             return
+        self._actions.spawn_trace.observe(
+            projection, self._actions.records, now=monotonic(), wall=time()
+        )
         stage_reasons = {
             participant.participant_id: eligibility.reason
             for participant in projection.participants.values()
