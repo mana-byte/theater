@@ -8,6 +8,8 @@ from regie.widgets.name_editor import DirectoryEditor
 
 from packages.regie.tests.support.app_fakes import build_app
 from packages.regie.tests.support.waiting import wait_until
+from theater.frontend import ResumeCandidate as PublicResumeCandidate
+from theater.frontend import TranscriptCandidate
 
 ROOT = ("g", "options")
 CODEX = ("m", "spawn/codex")
@@ -136,3 +138,118 @@ async def test_add_separator_is_disabled_when_the_menu_was_entered_from_nowhere(
         await _ready(app, pilot)
         item = next(item for item in app._menu_items() if item.id == "separator")
         assert not item.enabled  # no origin row yet: the cursor has not been to the menu
+
+
+def _dead(n: int, *, state: str = "resumable") -> PublicResumeCandidate:
+    session = f"session-{n}"
+    return PublicResumeCandidate.from_wire(
+        {
+            "participant_id": f"dead-{n}",
+            "harness": "codex",
+            "name": f"old {n}",
+            "cwd": f"/workspace/{n}",
+            "resume_state": state,
+            "transcript_identity": {
+                "state": "trusted" if state == "resumable" else "untrusted",
+                "session_id": session,
+                "provenance": "exact",
+                "location": f"/tmp/{n}",
+                "domain": None,
+                "detail": None,
+            },
+        }
+    )
+
+
+def _row(tree: ParticipantTree, key) -> list[str]:
+    widget = tree._key_widgets[key]
+    return [widget.render_line(y).text.strip() for y in range(widget.size.height)]
+
+
+@pytest.mark.asyncio
+async def test_resume_lists_the_dead_sessions_as_dead_agents_and_a_pick_brings_one_back() -> None:
+    app, client, _presentation = build_app()
+    client.participants.dead_rows = (_dead(1), _dead(2, state="untrusted"))
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.select("participant-1")
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "resume") in tree._key_widgets)
+        tree.select_key(("m", "resume"))
+
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: ("m", "resume/dead-1") in tree._key_widgets)
+        good, bad = _row(tree, ("m", "resume/dead-1")), _row(tree, ("m", "resume/dead-2"))
+        assert "✗ codex  old 1" in good[1] and "/workspace/1" in good[2]
+        assert "transcript identity" in bad[2]  # why it cannot come back
+
+        tree.select_key(("m", "resume/dead-1"))
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: bool(client.participants.spawned))
+        assert client.participants.spawn_options[0]["resume"] == "session-1"
+        assert not tree.in_menu and tree.selected_key == ("p", "participant-1")
+
+
+@pytest.mark.asyncio
+async def test_a_long_list_shows_five_and_enter_on_the_rest_shows_them_all() -> None:
+    app, client, _presentation = build_app()
+    client.participants.dead_rows = tuple(_dead(n) for n in range(12))
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "resume") in tree._key_widgets)
+        tree.select_key(("m", "resume"))
+        await pilot.press("l")
+        await wait_until(pilot, lambda: ("m", "resume/…") in tree._key_widgets)
+        shown = [key for key in tree._key_widgets if key[1].startswith("resume/dead-")]
+        assert len(shown) == 5 and "7 more" in _row(tree, ("m", "resume/…"))[1]
+
+        tree.select_key(("m", "resume/…"))
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: ("m", "resume/dead-11") in tree._key_widgets)
+        assert ("m", "resume/…") not in tree._key_widgets
+        assert tree.selected_key == ("m", "resume/dead-5")  # the first row that was hidden
+
+
+@pytest.mark.asyncio
+async def test_a_theme_pick_applies_at_once_and_leaves_the_menu_open() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "theme") in tree._key_widgets)
+        tree.select_key(("m", "theme"))
+        await pilot.press("l")
+        name = next(n for n in sorted(app.available_themes) if n != app.theme)
+        await wait_until(pilot, lambda: ("m", f"theme/{name}") in tree._key_widgets)
+
+        tree.select_key(("m", f"theme/{name}"))
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: app.theme == name)
+        assert tree.in_menu and "●" in _row(tree, ("m", f"theme/{name}"))[1]
+
+
+@pytest.mark.asyncio
+async def test_recover_transcript_binds_a_candidate_to_the_row_the_cursor_came_from() -> None:
+    app, client, _presentation = build_app()
+    client.transcripts.candidate_rows = (
+        TranscriptCandidate("/tmp/accepted.jsonl", session_id="accepted", provenance="exact"),
+    )
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.select("participant-1")
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "transcript") in tree._key_widgets)
+        tree.select_key(("m", "transcript"))
+
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: ("m", "transcript/0") in tree._key_widgets)
+        assert "/tmp/accepted.jsonl" in _row(tree, ("m", "transcript/0"))[1]
+
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: bool(client.transcripts.bind_calls))
+        assert client.transcripts.bind_calls[0]["participant_id"] == "participant-1"
