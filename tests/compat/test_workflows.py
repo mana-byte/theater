@@ -76,10 +76,18 @@ def test_scripts_own_all_issue_and_pr_operations() -> None:
 def test_routine_pr_checks_use_the_base_and_stop_at_the_proposed_policy() -> None:
     compat = _load("harness-compat.yml")
     verify = compat["jobs"]["verify-gate"]["steps"][-1]["run"]
-    assert 'args=(verify "$HARNESS" --base "$BASE_SHA")' in verify
+    assert 'args=(verify "$HARNESS" --base "$(git rev-parse HEAD^1)")' in verify
     assert "--routine" in verify and "chore/compat-" in verify
     assert " --check" not in verify
     assert "pull_request_target" not in str(compat)
+
+
+def test_pr_checks_diff_against_the_base_the_pr_is_merged_into_not_the_one_it_opened_on() -> None:
+    # The event's base SHA is frozen when the PR opens: once the base branch moves, every commit
+    # that landed meanwhile looks like part of a policy PR.
+    text = (WORKFLOWS / "harness-compat.yml").read_text()
+    assert "pull_request.base.sha" not in text
+    assert text.count('"$(git rev-parse HEAD^1)"') == 2
 
 
 @pytest.mark.parametrize("name", ["qualify", "verify-gate"])
