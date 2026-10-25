@@ -44,10 +44,8 @@ The tree is the whole interface; every signal is a state of something it already
   blocked or in doubt. A row the daemon has already dropped stays until its sweep ends, then
   leaves with the reverse reveal if it was killed, roots included.
 - **Sends and waits.** A send travels the rails as a comet in its sender's colour. An agent
-  peers are waiting on wears a thin `▎` in the left gutter, in the colour of whoever waits on
-  it (the comet's colour too). It sits beside the other gutter bars: `▌▎` is an agent that
-  needs you or is staged and is waited on. Only a new wait and the selected row's waits draw
-  their route.
+  peers are waiting on wears `«` in its connector (`├──«⠹`), pointing into its glyph where the
+  route arrives; only a new wait and the selected row's waits draw their route.
 - **Marks.** After the name: `⋯` queued, `✓` delivered (fades), `⊘` blocked (not now: human
   present, busy), `✗` failed, `?` unconfirmed. Failures say why on the third line and stop
   asking once the cursor has rested on the row.

@@ -38,26 +38,10 @@ type OverlayGlyph = str | tuple[str, str]
 type LeafCell = tuple[int, int]
 
 
-def with_gutter(content: Content, *, bar: str | None = None, awaited: str | None = None) -> Content:
-    """Prefix every row with the two gutter cells the padding gave up.
-
-    The first cell carries what the row is: a ``▌`` in *bar*'s style (staged, or needing you).
-    The second carries what peers do to it: a thinner ``▎`` in the colour of whoever waits on
-    it. A row with only one of them puts it first.
-    """
-    cells = [("▌", bar)] if bar else []
-    if awaited:
-        cells.append(("▎", awaited))
-    cells = [*cells, *[(" ", "")] * (2 - len(cells))]
-    if not bar and not awaited:
-        return content
-    lines = content.split("\n", allow_blank=True)
-    return Content("\n").join(Content.assemble(*cells, line) for line in lines)
-
-
 def with_gutter_bar(content: Content, style: str) -> Content:
     """Prefix every row with a ``▌`` bar in *style*, taking the two columns the padding gave up."""
-    return with_gutter(content, bar=style)
+    lines = content.split("\n", allow_blank=True)
+    return Content("\n").join(Content.assemble(("▌", style), " ", line) for line in lines)
 
 
 def with_stage_marker(content: Content, marker: str | None) -> Content:
@@ -272,13 +256,20 @@ def _row2_lead(
     frame: int = 0,
     waiting: str | None = None,
     show_harness: bool = True,
+    awaited: bool = False,
 ) -> list:
-    """Row-2 parts before the name: prefix rail, status glyph, harness text (when shown)."""
+    """Row-2 parts before the name: prefix rail, status glyph, harness text (when shown).
+
+    An agent peers are waiting on wears ``«`` in the connector's spacer cell, pointing into its
+    glyph where the await route arrives: the cell is blank otherwise, so it costs no width.
+    """
     glyph, glyph_style = _status_glyph(node, frame, waiting=waiting)
     glyph_style = _presence_glyph_style(node, glyph_style)
     harness = node.get("harness", "?")
     parts: list = []
-    if prefix:
+    if prefix and awaited and prefix.endswith(" "):
+        parts.extend([(prefix[:-1], "$text dim"), ("«", "$text-muted")])
+    elif prefix:
         parts.append((prefix, "$text dim"))
     parts.append((glyph, glyph_style))
     if not show_harness:
@@ -456,16 +447,17 @@ def node_label(
     hint: Sequence[str | tuple[str, str]] | None = None,
     width: int | None = None,
     waiting: str | None = None,
+    awaited: int = 0,
     show_harness: bool = True,
     name_text: str | None = None,
     fold_hint: bool = False,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
-    Row 1 is a leading spacer carrying the parent rail (blank for the first root); row 3 uses
-    ``cont_prefix`` so it doesn't look like a new node, and carries *cost* at its right edge (row
-    two is already full of identity and state). *hint* is right-aligned on row two. *waiting* is
-    the colour of the await this agent is blocked in. Without *show_harness* the working pulse
+    Row 1 is a leading spacer carrying the parent rail (blank for the first root);
+    row 3 uses ``cont_prefix`` so it doesn't look like a new node. *waiting* is the colour of
+    the await this agent is blocked in; *awaited* is how many peers are blocked on it (the row
+    wears ``«`` in its connector whatever the number). Without *show_harness* the working pulse
     runs along the name instead of the harness text. A name wider than the room ends in ``…`` so
     row two never wraps over the directory; *name_text* replaces it with the caller's own window
     of the name (scrolling, or blanks under an editor).
@@ -501,7 +493,7 @@ def node_label(
 
     # Row 2: rails, glyph, harness, short id; the id is split out so dim-italic applies to it only.
     row2_parts: list = _row2_lead(
-        view, prefix, frame=frame, waiting=waiting, show_harness=show_harness
+        view, prefix, frame=frame, waiting=waiting, show_harness=show_harness, awaited=bool(awaited)
     )
     if view.get("status") == "working" and waiting is None and not show_harness:
         _append_pulsing_name(row2_parts, sid, id_style, frame=frame)

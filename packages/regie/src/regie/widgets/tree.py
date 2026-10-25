@@ -829,7 +829,7 @@ class ParticipantTree(VerticalScroll):
         marks = self._await_marks
         for key, widget in self._key_widgets.items():
             if isinstance(widget, AgentLeaf) and _is_managed_key(key):
-                widget.set_await_marks(marks.waiting.get(key[1]), marks.awaited.get(key[1]))
+                widget.set_await_marks(marks.waiting.get(key[1]), marks.awaited.get(key[1], 0))
 
     def _tick_wipe(self) -> None:
         frame = self._wipes.tick()

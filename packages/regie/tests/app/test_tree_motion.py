@@ -30,11 +30,6 @@ def render_text(leaf: AgentLeaf) -> str:
     return leaf.render_line(1).text.strip().lstrip("├└│─ ")
 
 
-def _row_cells(leaf: AgentLeaf) -> str:
-    """The leaf's second row exactly as drawn: its first two characters are the gutter."""
-    return leaf.render_line(1).text
-
-
 def _leaf(tree: ParticipantTree, participant_id: str) -> AgentLeaf:
     leaf = tree._key_widgets[("p", participant_id)]
     assert isinstance(leaf, AgentLeaf)
@@ -141,13 +136,13 @@ async def test_an_await_marks_both_its_ends_until_it_finishes() -> None:
 
         app._animate_bus_row(_await_row("job.await.start"))
         await wait_until(pilot, lambda: waiter._waiting is not None)
-        assert target._awaited is not None
+        assert target._awaited == 1
         assert render_text(waiter)[0] in REGIE_WAITING_FRAMES  # the waiting square, not the spinner
-        assert _row_cells(target)[0] == "▎"  # the gutter bar, in the waiter's colour
+        assert render_text(target).startswith("«")  # the connector's spacer, pointing in
 
         app._animate_bus_row(_await_row("job.await.end"))
-        await wait_until(pilot, lambda: waiter._waiting is None and target._awaited is None)
-        assert _row_cells(target)[0] != "▎" and not target.has_class("tree-awaited")
+        await wait_until(pilot, lambda: waiter._waiting is None and target._awaited == 0)
+        assert "«" not in render_text(target)
 
 
 async def test_a_send_that_lands_sweeps_its_target() -> None:
@@ -192,58 +187,3 @@ async def test_death_sweeps_at_twice_the_pace_of_the_other_announcements() -> No
         died = tree._wipes._sweeps[("p", "participant-2")]
         assert (needs_you.seconds, died.seconds) == (REGIE_WIPE_SECONDS, REGIE_WIPE_DEATH_SECONDS)
         assert REGIE_WIPE_DEATH_SECONDS <= REGIE_WIPE_SECONDS / 2
-
-
-async def test_a_waited_on_row_wears_a_thin_bar_in_the_waiters_colour_and_keeps_its_column() -> (
-    None
-):
-    app, _client, _presentation = build_app()
-
-    async with app.run_test() as pilot:
-        tree = app.query_one(ParticipantTree)
-        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
-        waiter, target = _leaf(tree, "participant-1"), _leaf(tree, "participant-2")
-        bare = _row_cells(target)
-
-        app._animate_bus_row(_await_row("job.await.start"))
-        await wait_until(pilot, lambda: target._awaited is not None)
-        await wait_until(pilot, lambda: _row_cells(target).startswith("▎ "))
-
-        assert target._awaited in REGIE_ROUTE_COLORS
-        assert target._awaited == waiter._waiting  # the bar and the waiter share the await's colour
-        assert target._awaited in label_styles_of(target)
-        # The content keeps its column: the bar took the padding, not the room of the tree.
-        assert _row_cells(target)[2:].startswith(bare[:3])
-
-
-async def test_a_row_that_needs_you_and_is_waited_on_shows_both_bars_side_by_side() -> None:
-    app, _client, _presentation = build_app()
-
-    async with app.run_test() as pilot:
-        tree = app.query_one(ParticipantTree)
-        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
-        target = _leaf(tree, "participant-2")
-        await _change(app, pilot, "participant-2", "awaiting_input")
-        app._animate_bus_row(_await_row("job.await.start"))
-        await wait_until(pilot, lambda: target._awaited is not None)
-
-        await wait_until(pilot, lambda: _row_cells(target).startswith("▌▎"))  # attention, then wait
-
-
-async def test_a_staged_row_that_is_waited_on_keeps_its_stage_bar_and_gains_the_wait_bar() -> None:
-    app, _client, _presentation = build_app()
-
-    async with app.run_test() as pilot:
-        tree = app.query_one(ParticipantTree)
-        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
-        target = _leaf(tree, "participant-2")
-        tree.mark_surfaces(staged_id="participant-2", trajectory_id=None)
-        app._animate_bus_row(_await_row("job.await.start"))
-        await wait_until(pilot, lambda: target._awaited is not None)
-
-        await wait_until(pilot, lambda: _row_cells(target).startswith("▌▎"))
-        assert "$primary" in label_styles_of(target)  # the stage bar's own colour
-
-
-def label_styles_of(leaf: AgentLeaf) -> list[str]:
-    return [str(span.style) for span in leaf._render_label().spans]
