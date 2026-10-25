@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import PurePath
 from typing import Any
 
 import pytest
 import yaml
 
 from scripts.harness_compat.adapters import ADAPTER_NAMES
+from scripts.harness_compat.policy import policy_relative
 from tests.support.paths import REPO_ROOT
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
@@ -144,3 +146,12 @@ def test_canaries_are_workflow_self_checks_for_each_plugin() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text()
     for removed in ("compat:", "suite:", "canaries:"):
         assert removed not in makefile
+
+
+def test_a_policy_gate_pr_does_not_run_the_canaries() -> None:
+    # They test the suite, never a release: a gate PR edits only one plugin's policy file.
+    paths = _load("harness-compat-canaries.yml")["on"]["pull_request"]["paths"]
+    exclusion = "!theater/harness/builtin/plugins/*/compatibility.json"
+    assert paths.index(exclusion) > paths.index("theater/**"), "the later pattern wins"
+    for name in ADAPTER_NAMES:
+        assert PurePath(policy_relative(name)).match(exclusion.removeprefix("!"))
