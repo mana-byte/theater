@@ -294,3 +294,21 @@ def test_an_outer_fold_counts_and_summarises_what_an_inner_fold_already_hides() 
     root = forest[0]
     assert root["hidden_count"] == 3 and sorted(root["hidden_ids"]) == ["a", "a1", "b"]
     assert root["hidden_status"] == "awaiting_input"  # the inner fold's trouble is not lost
+
+
+def test_a_fold_counts_hidden_agents_by_state_worst_first_each_agent_once() -> None:
+    from regie.marks import MarkKind, RowMark
+
+    statuses = {"a": "working", "a1": "awaiting_input", "b": "dead"}
+    forest = tree_for_projection(_family(statuses), layout=TreeLayout(folded={"root"}))
+    assert forest[0]["hidden_states"] == {"dead": 1, "awaiting_input": 1, "working": 1}
+
+    # A blocked send beside a working turn counts once, as the thing that needs the human.
+    marks = {"a": RowMark(MarkKind.BLOCKED, "op", "⊘", "$warning", "blocked · busy")}
+    marked = tree_for_projection(
+        _family({"a": "working"}), layout=TreeLayout(folded={"root"}), marks=marks
+    )
+    assert marked[0]["hidden_states"] == {"awaiting_input": 1}
+
+    calm = tree_for_projection(_family(), layout=TreeLayout(folded={"root"}))
+    assert calm[0]["hidden_states"] == {}

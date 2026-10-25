@@ -14,6 +14,7 @@ from rich.cells import cell_len
 from textual.content import Content
 
 from regie.ui_constants import (
+    REGIE_NAME_MIN_CELLS as NAME_MIN_CELLS,
     REGIE_SEND_TRACE_STYLE as SEND_STYLE,
     REGIE_WAITING_FRAMES as WAITING_FRAMES,
     REGIE_WAITING_STEP_FRAMES as WAITING_STEP_FRAMES,
@@ -254,13 +255,20 @@ def _row2_lead(
     frame: int = 0,
     waiting: str | None = None,
     show_harness: bool = True,
+    awaited: bool = False,
 ) -> list:
-    """Row-2 parts before the name: prefix rail, status glyph, harness text (when shown)."""
+    """Row-2 parts before the name: prefix rail, status glyph, harness text (when shown).
+
+    An agent peers are waiting on wears ``«`` in the connector's spacer cell, pointing into its
+    glyph where the await route arrives: the cell is blank otherwise, so it costs no width.
+    """
     glyph, glyph_style = _status_glyph(node, frame, waiting=waiting)
     glyph_style = _presence_glyph_style(node, glyph_style)
     harness = node.get("harness", "?")
     parts: list = []
-    if prefix:
+    if prefix and awaited and prefix.endswith(" "):
+        parts.extend([(prefix[:-1], "$text dim"), ("«", "$text-muted")])
+    elif prefix:
         parts.append((prefix, "$text dim"))
     parts.append((glyph, glyph_style))
     if not show_harness:
@@ -274,36 +282,64 @@ def _row2_lead(
     return parts
 
 
-def fold_parts(view: RawRenderNode, frame: int = 0, *, hint: bool = False) -> list:
-    """The fold badge after the name.
+def _fold_variants(view: RawRenderNode, frame: int, *, hint: bool) -> list[list]:
+    """The fold badge from fullest to barest: ``▸5 !1 ⠹2``, then ``▸5 !``, then ``▸5``.
 
-    A folded row says how many it hides and the worst thing happening to them (``▸3 !``), so a
-    branch closed over trouble still shows it. An open one shows ``▾`` only when *hint* asks,
-    on the row in focus: the tree stays free of chevrons until you look at a row.
+    A folded row says how many it hides and how many of them are dead, waiting for you or
+    working, worst first, so a branch closed over trouble still shows it. An open row shows ``▾``
+    only when *hint* asks, on the row in focus: no chevrons until you look at a row.
     """
     count = view.get("hidden_count")
-    if count:
-        status = view.get("hidden_status")
-        if not status:
-            return [(f"  ▸{count}", "$text-muted")]
-        glyph, style = _status_glyph({"status": status}, frame)
-        return [(f"  ▸{count}", style), (f" {glyph}", style)]
-    if hint and view.get("children"):
-        return [("  ▾", "$text-muted")]
+    if not count:
+        return [[("  ▾", "$text-muted")]] if hint and view.get("children") else []
+    total = (f"  ▸{count}", "$text-muted")
+    glyphs = {
+        state: _status_glyph({"status": state}, frame)
+        for state in (view.get("hidden_states") or {})
+    }
+    full = [total] + [
+        (f" {glyphs[state][0]}{n}", glyphs[state][1])
+        for state, n in (view.get("hidden_states") or {}).items()
+    ]
+    variants = [full]
+    if glyphs:
+        worst = next(iter(glyphs.values()))
+        variants.append([total, (f" {worst[0]}", worst[1])])
+        variants.append([total])
+    return [v for i, v in enumerate(variants) if v not in variants[:i]]
+
+
+def _mark_parts(view: RawRenderNode) -> list:
+    mark = _mark(view)
+    if mark is not None and not mark.replaces_status:
+        return [(f"  {mark.glyph}", mark.style)]
     return []
 
 
-def _trailing_parts(
-    view: RawRenderNode, awaited: int, *, frame: int = 0, fold_hint: bool = False
+def fold_parts(
+    view: RawRenderNode,
+    prefix: str = "",
+    *,
+    width: int | None = None,
+    show_harness: bool = True,
+    frame: int = 0,
+    hint: bool = False,
 ) -> list:
-    """What follows the name on row two: its fold badge, how many peers wait on it, its mark."""
-    parts: list = fold_parts(view, frame, hint=fold_hint)
-    if awaited:
-        parts.append((f"  ◂{awaited if awaited > 1 else ''}", "$text-muted"))
-    mark = _mark(view)
-    if mark is not None and not mark.replaces_status:
-        parts.append((f"  {mark.glyph}", mark.style))
-    return parts
+    """The fold badge as it fits: the fullest form that still leaves the name its room.
+
+    The name keeps at least ``REGIE_NAME_MIN_CELLS`` (or its whole length when shorter); the
+    badge gives way before that, and never disappears: its arrow is the click target.
+    """
+    variants = _fold_variants(view, frame, hint=hint)
+    if not variants or width is None or len(variants) == 1:
+        return variants[0] if variants else []
+    lead = _parts_width(_row2_lead(view, prefix, show_harness=show_harness))
+    marks = _parts_width(_mark_parts(view))
+    need = min(cell_len(shown_name(view)), NAME_MIN_CELLS)
+    for variant in variants:
+        if width - lead - marks - _parts_width(variant) >= need:
+            return variant
+    return variants[-1]
 
 
 def name_room(
@@ -312,8 +348,8 @@ def name_room(
     *,
     width: int | None,
     show_harness: bool,
-    awaited: int = 0,
     fold_hint: bool = False,
+    frame: int = 0,
 ) -> int | None:
     """Cells row two leaves for the name once the glyph, harness and badges have theirs.
 
@@ -323,8 +359,10 @@ def name_room(
         return None
     view = cast(RawRenderNode, node)
     lead = _parts_width(_row2_lead(view, prefix, show_harness=show_harness))
-    trailing = _parts_width(_trailing_parts(view, awaited, fold_hint=fold_hint))
-    return max(1, width - lead - trailing)
+    fold = fold_parts(
+        view, prefix, width=width, show_harness=show_harness, frame=frame, hint=fold_hint
+    )
+    return max(1, width - lead - _parts_width(fold) - _parts_width(_mark_parts(view)))
 
 
 def fit_name(name: str, room: int) -> str:
@@ -384,10 +422,11 @@ def node_label(
 
     Row 1 is a leading spacer carrying the parent rail (blank for the first root);
     row 3 uses ``cont_prefix`` so it doesn't look like a new node. *waiting* is the colour of
-    the await this agent is blocked in; *awaited* is how many peers are blocked on it. Without
-    *show_harness* the working pulse runs along the name instead of the harness text. A name
-    wider than the room ends in ``…`` so row two never wraps over the directory; *name_text*
-    replaces it with the caller's own window of the name (scrolling, or blanks under an editor).
+    the await this agent is blocked in; *awaited* is how many peers are blocked on it (the row
+    wears ``«`` in its connector whatever the number). Without *show_harness* the working pulse
+    runs along the name instead of the harness text. A name wider than the room ends in ``…`` so
+    row two never wraps over the directory; *name_text* replaces it with the caller's own window
+    of the name (scrolling, or blanks under an editor).
     """
     # Function-level imports avoid layout ↔ glyphs and reveal ↔ glyphs cycles.
     from regie.motions.reveal import clip_parts
@@ -398,7 +437,14 @@ def node_label(
     if name_text is not None:
         sid = name_text
     elif (
-        room := name_room(view, prefix, width=width, show_harness=show_harness, awaited=awaited)
+        room := name_room(
+            view,
+            prefix,
+            width=width,
+            show_harness=show_harness,
+            fold_hint=fold_hint,
+            frame=frame,
+        )
     ) is not None:
         sid = fit_name(sid, room)
     id_style = _id_style(view)
@@ -413,13 +459,18 @@ def node_label(
 
     # Row 2: rails, glyph, harness, short id; the id is split out so dim-italic applies to it only.
     row2_parts: list = _row2_lead(
-        view, prefix, frame=frame, waiting=waiting, show_harness=show_harness
+        view, prefix, frame=frame, waiting=waiting, show_harness=show_harness, awaited=bool(awaited)
     )
     if view.get("status") == "working" and waiting is None and not show_harness:
         _append_pulsing_name(row2_parts, sid, id_style, frame=frame)
     else:
         row2_parts.append((sid, id_style) if id_style else sid)
-    row2_parts.extend(_trailing_parts(view, awaited, frame=frame, fold_hint=fold_hint))
+    row2_parts.extend(
+        fold_parts(
+            view, prefix, width=width, show_harness=show_harness, frame=frame, hint=fold_hint
+        )
+    )
+    row2_parts.extend(_mark_parts(view))
     if width is not None and _parts_width(row2_parts) > width:
         row2_parts = clip_parts(row2_parts, width)  # too deep or too narrow even for "…": crop
     mark = _mark(view)

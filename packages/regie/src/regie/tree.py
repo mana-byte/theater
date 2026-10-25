@@ -120,6 +120,25 @@ _MARK_FOLD_STATUS = {
 }
 
 
+#: The order a fold badge lists what it hides: the worst first.
+_FOLD_DISPLAY = ("dead", "awaiting_input", "working")
+
+
+def _fold_states(agents: list[TreeNode]) -> dict[str, int]:
+    """How many hidden agents are in each state that deserves a glyph, worst first. An agent is
+    counted once, in the state that outranks its others (a failed send beside a working turn
+    counts as the failure)."""
+    counts: dict[str, int] = {}
+    for agent in agents:
+        statuses = {agent.get("status")}
+        mark = agent.get("mark")
+        if isinstance(mark, RowMark) and mark.kind in _MARK_FOLD_STATUS:
+            statuses.add(_MARK_FOLD_STATUS[mark.kind])
+        if state := next((s for s in _FOLD_STATUSES if s in statuses), None):
+            counts[state] = counts.get(state, 0) + 1
+    return {state: counts[state] for state in _FOLD_DISPLAY if state in counts}
+
+
 def _fold_status(agents: list[TreeNode]) -> str | None:
     """Needing a human outranks a dead agent, which outranks working; an all-idle fold is blank."""
     statuses = {agent.get("status") for agent in agents}
@@ -211,6 +230,7 @@ def tree_for_projection(
             node["hidden_count"] = len(hidden)
             node["hidden_ids"] = [agent["id"] for agent in hidden]
             node["hidden_status"] = _fold_status(hidden)
+            node["hidden_states"] = _fold_states(hidden)
             node["hidden_agents"] = hidden
             node["children"] = []
         return node

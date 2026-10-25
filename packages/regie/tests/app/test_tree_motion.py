@@ -138,11 +138,11 @@ async def test_an_await_marks_both_its_ends_until_it_finishes() -> None:
         await wait_until(pilot, lambda: waiter._waiting is not None)
         assert target._awaited == 1
         assert render_text(waiter)[0] in REGIE_WAITING_FRAMES  # the waiting square, not the spinner
-        assert "◂" in render_text(target)
+        assert render_text(target).startswith("«")  # the connector's spacer, pointing in
 
         app._animate_bus_row(_await_row("job.await.end"))
         await wait_until(pilot, lambda: waiter._waiting is None and target._awaited == 0)
-        assert "◂" not in render_text(target)
+        assert "«" not in render_text(target)
 
 
 async def test_a_send_that_lands_sweeps_its_target() -> None:

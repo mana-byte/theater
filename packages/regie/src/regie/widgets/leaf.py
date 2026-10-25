@@ -252,8 +252,8 @@ class AgentLeaf(RenameableRow):
             self._prefix,
             width=self._label_width(),
             show_harness=self._harness_shown(),
-            awaited=self._awaited,
             fold_hint=self._cost_in_focus(),
+            frame=self._frame,
         )
 
     def _name_scrolls(self) -> bool:
@@ -420,7 +420,7 @@ class AgentLeaf(RenameableRow):
         if (
             self._node.get("status") == "working"
             or self._waiting is not None
-            or self._node.get("hidden_status") == "working"
+            or "working" in (self._node.get("hidden_states") or {})
         ):
             self._start_timer()
         else:
@@ -527,7 +527,14 @@ class AgentLeaf(RenameableRow):
 
     def _fold_span(self) -> tuple[int, int] | None:
         """Columns of the fold badge: where a click folds or unfolds the children."""
-        parts = fold_parts(self._node, self._frame, hint=self._cost_in_focus())
+        parts = fold_parts(
+            self._node,
+            self._prefix,
+            width=self._label_width(),
+            show_harness=self._harness_shown(),
+            frame=self._frame,
+            hint=self._cost_in_focus(),
+        )
         span = self._name_span()
         if not parts or span is None or self.renaming:
             return None

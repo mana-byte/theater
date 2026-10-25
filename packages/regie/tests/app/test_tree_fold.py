@@ -124,7 +124,7 @@ async def test_a_folded_row_shows_trouble_below_it_and_the_cursor_can_jump_to_it
         projection = _family({"participant-3": "awaiting_input"})  # a hidden grandchild needs you
         app._state.projection = projection
         app._show_projection(projection)
-        await wait_until(pilot, lambda: "▸3 !" in _row(boss))
+        await wait_until(pilot, lambda: "▸3 !1" in _row(boss))
         assert boss._wipe is not None or tree._wipes.has(("p", "participant-1"))  # it sweeps
 
         tree.select("participant-5")

@@ -36,6 +36,7 @@ class ParticipantNode(TypedDict):
     hidden_count: NotRequired[int]
     hidden_ids: NotRequired[list[str]]
     hidden_status: NotRequired[str | None]
+    hidden_states: NotRequired[dict[str, int]]
     hidden_agents: NotRequired[list[TreeNode]]
 
 
@@ -83,6 +84,7 @@ class RawRenderNode(TypedDict, total=False):
     hidden_count: int
     hidden_ids: list[str]
     hidden_status: str | None
+    hidden_states: dict[str, int]
     collapsed: bool
     count: int
     folded: list[str]

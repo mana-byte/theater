@@ -41,19 +41,21 @@ The tree is the whole interface; every signal is a state of something it already
   red when a kill begins or an agent dies, yellow when an agent needs you or an operation is
   blocked or in doubt. A row the daemon has already dropped stays until its sweep ends, then
   leaves with the reverse reveal if it was killed, roots included.
-- **Sends and waits.** A send travels the rails as a comet in its sender's colour. Waits show
-  `◂` on the agent being waited on (`◂2` for two); only a new wait and the selected row's waits
-  draw their route.
+- **Sends and waits.** A send travels the rails as a comet in its sender's colour. An agent
+  peers are waiting on wears `«` in its connector (`├──«⠹`), pointing into its glyph where the
+  route arrives; only a new wait and the selected row's waits draw their route.
 - **Marks.** After the name: `⋯` queued, `✓` delivered (fades), `⊘` blocked (not now: human
   present, busy), `✗` failed, `?` unconfirmed. Failures say why on the third line and stop
   asking once the cursor has rested on the row.
 - **`]` / `[`** jump to the next or previous row that needs you, wrapping round. A folded
   section shows the worst state it hides.
 - **Folding.** `Space` folds the selected agent's children (any depth) into its row, which then
-  reads `▸3 !`: how many it hides and the worst thing happening to them, so a closed branch
-  cannot hide trouble. `]` stops on it, and a hidden agent that starts needing you sweeps the
-  row. The row in focus shows `▾` when it has children; a click on the badge folds or unfolds.
-  Folds are remembered across restarts.
+  reads `▸5 !1 ⠹2`: how many it hides, then how many are dead (`✗`), waiting for you (`!`) or
+  working (spinner), worst first, so a closed branch cannot hide trouble. Where the row is
+  short of room the badge shrinks before the name does (`▸5 ✗`, then `▸5`). `]` stops on a
+  fold hiding trouble, and a hidden agent that starts needing you sweeps the row. The row in
+  focus shows `▾` when it has children; a click on the badge folds or unfolds. Folds are
+  remembered across restarts.
 
 `reduce_motion = true` in `config.toml` keeps every signal and drops the motion: no sweeps,
 breathing, comets or reveal and retire animations, and waits draw their route without a

@@ -596,23 +596,29 @@ def test_a_name_that_fits_is_left_alone_and_one_that_does_not_ends_in_an_ellipsi
     assert cell_len(fit_name("構築構築構築", 5)) <= 5  # wide characters count by cells
 
 
-def test_the_room_for_a_name_shrinks_with_the_harness_and_the_badges():
+def test_the_room_for_a_name_shrinks_with_the_harness_the_fold_badge_and_the_mark():
     from regie.marks import MarkKind, RowMark
     from regie.render.glyphs import name_room
 
     named = {**CHILD, "name": "builder", "harness": "claude"}
     plain = name_room(named, "├── ", width=40, show_harness=False)
     with_harness = name_room(named, "├── ", width=40, show_harness=True)
-    with_badges = name_room(
+    with_mark = name_room(
         {**named, "mark": RowMark(MarkKind.SENT, "op", "✓", "$success")},
         "├── ",
         width=40,
         show_harness=False,
-        awaited=2,
     )
-    assert plain is not None and with_harness is not None and with_badges is not None
+    folded = name_room(
+        {**named, "hidden_count": 3, "hidden_states": {"working": 1}},
+        "├── ",
+        width=40,
+        show_harness=False,
+    )
+    assert plain is not None and with_harness is not None
     assert plain - with_harness == len("claude") + 1
-    assert plain - with_badges == len("  ◂2") + len("  ✓")
+    assert with_mark is not None and plain - with_mark == len("  ✓")
+    assert folded is not None and plain - folded == len("  ▸3 ⠋1")
     assert name_room(named, "├── ", width=None, show_harness=False) is None
 
 
@@ -627,7 +633,8 @@ def test_row_two_never_outgrows_the_width_and_keeps_its_badges(width):
     }
     row = _row2(node_label(node, "├── ", width=width, awaited=1, show_harness=True))
     assert cell_len(row) <= width
-    assert "…" in row and row.endswith("◂  ⊘")  # the name gave way, the badges did not
+    assert "…" in row and row.endswith("  ⊘")  # the name gave way, the mark did not
+    assert row.startswith("├──«")  # the wait is in the connector: it takes no room from the name
 
 
 def test_without_a_width_the_whole_name_is_drawn_and_a_callers_window_wins():
@@ -644,24 +651,49 @@ def test_a_row_too_narrow_even_for_its_badges_is_cropped_not_wrapped():
 # ---- the fold badge -------------------------------------------------------------------------
 
 
-def test_a_folded_row_says_how_many_it_hides_and_the_worst_thing_going_on_there():
-    folded = {**CHILD, "name": "boss", "hidden_count": 3, "hidden_status": "awaiting_input"}
-    assert _row2(node_label(folded, "├── ", show_harness=False)).endswith("boss  ▸3 !")
-
-    working = {**folded, "hidden_status": "working"}
-    assert _row2(node_label(working, "├── ", show_harness=False, frame=0)).endswith(
-        f"boss  ▸3 {REGIE_SPINNER_FRAMES[0]}"
-    )
-    calm = {**folded, "hidden_status": None}
-    assert _row2(node_label(calm, "├── ", show_harness=False)).endswith("boss  ▸3")
+def _folded(count: int, **states: int) -> dict:
+    ordered = {k: states[k] for k in ("dead", "awaiting_input", "working") if k in states}
+    return {**CHILD, "name": "boss", "hidden_count": count, "hidden_states": ordered}
 
 
-def test_the_fold_badge_wears_the_colour_of_what_it_hides():
-    folded = {**CHILD, "name": "boss", "hidden_count": 2, "hidden_status": "dead"}
-    label = node_label(folded, "├── ", show_harness=False)
-    assert "$error" in label_styles(label)
-    calm = node_label({**folded, "hidden_status": None}, "├── ", show_harness=False)
-    assert "$text-muted" in label_styles(calm) and "$error" not in label_styles(calm)
+def test_a_folded_row_says_how_many_it_hides_and_what_is_going_on_there_worst_first():
+    spinner = REGIE_SPINNER_FRAMES[0]
+    cases = [
+        (_folded(3), "boss  ▸3"),
+        (_folded(3, working=1), f"boss  ▸3 {spinner}1"),
+        (_folded(5, awaiting_input=1, working=2), f"boss  ▸5 !1 {spinner}2"),
+        (_folded(4, dead=1), "boss  ▸4 ✗1"),
+        (_folded(9, working=3, dead=2, awaiting_input=1), f"boss  ▸9 ✗2 !1 {spinner}3"),
+    ]
+    for node, tail in cases:
+        assert _row2(node_label(node, "├── ", show_harness=False, frame=0)).endswith(tail)
+
+
+def test_each_state_in_the_fold_badge_wears_its_own_colour():
+    label = node_label(_folded(6, dead=1, awaiting_input=2, working=3), "├── ", show_harness=False)
+    styles = label_styles(label)
+    assert {"$error", "$warning", "$primary", "$text-muted"} <= set(styles)
+    calm = label_styles(node_label(_folded(2), "├── ", show_harness=False))
+    assert "$text-muted" in calm and not {"$error", "$warning", "$primary"} & set(calm)
+
+
+def test_the_fold_badge_shortens_before_the_name_loses_its_room():
+    # The row is a 4-cell connector, the glyph and its 2-cell gap (7), the name, then the badge.
+    # The name keeps 10 cells (its own length, when shorter); the badge gives way before that.
+    node = {**_folded(12, dead=1, awaiting_input=2, working=9), "name": "orchestrator"}
+    spinner = REGIE_SPINNER_FRAMES[0]
+
+    def tail(width: int) -> str:
+        row = _row2(node_label(node, "├── ", width=width, show_harness=False, frame=0))
+        assert cell_len(row) <= width
+        return row[row.index("  ▸") :]
+
+    assert tail(60) == f"  ▸12 ✗1 !2 {spinner}9"  # all the room it wants
+    assert tail(31) == f"  ▸12 ✗1 !2 {spinner}9"  # exactly leaves the name its 10
+    assert tail(30) == "  ▸12 ✗"  # the counts go first; the worst glyph stays
+    assert tail(24) == "  ▸12 ✗"
+    assert tail(23) == "  ▸12"  # then the glyph; the arrow and the total never go
+    assert tail(18) == "  ▸12"  # even once the name has to be cut for it
 
 
 def test_an_open_row_shows_its_chevron_only_when_asked_and_only_with_children():
@@ -673,6 +705,30 @@ def test_an_open_row_shows_its_chevron_only_when_asked_and_only_with_children():
 
 
 def test_a_long_name_leaves_room_for_the_fold_badge():
-    folded = {**CHILD, "name": LONG, "hidden_count": 12, "hidden_status": "working"}
+    folded = {**CHILD, "name": LONG, "hidden_count": 12, "hidden_states": {"working": 4}}
     row = _row2(node_label(folded, "├── ", width=36, show_harness=False))
-    assert cell_len(row) <= 36 and "…" in row and row.endswith("▸12 " + REGIE_SPINNER_FRAMES[0])
+    assert cell_len(row) <= 36 and "…" in row and "▸12" in row
+
+
+def test_a_short_name_keeps_the_full_badge_where_a_long_one_would_force_it_down():
+    spinner = REGIE_SPINNER_FRAMES[0]
+    states = {"dead": 1, "awaiting_input": 2, "working": 9}
+    short = {**CHILD, "name": "ab", "hidden_count": 12, "hidden_states": states}
+    long = {**short, "name": LONG}
+    assert _row2(node_label(short, "├── ", width=30, show_harness=False)).endswith(
+        f"▸12 ✗1 !2 {spinner}9"
+    )
+    assert not _row2(node_label(long, "├── ", width=30, show_harness=False)).endswith(
+        f"▸12 ✗1 !2 {spinner}9"
+    )
+
+
+def test_an_agent_peers_wait_on_wears_a_double_arrow_in_its_connector_whatever_the_number():
+    row = lambda n: _row2(node_label({**CHILD, "name": "tester"}, "├── ", awaited=n))  # noqa: E731
+    assert row(0).startswith("├── ") and "«" not in row(0)
+    assert row(1).startswith("├──«") and row(1) == row(5)  # one waiter or many: the same glyph
+    assert len(row(1)) == len(row(0))  # the connector keeps its width, so the name does not move
+
+
+def test_the_awaited_marker_leaves_a_rooted_row_without_a_connector_alone():
+    assert "«" not in _row2(node_label({**CHILD, "name": "x"}, "", awaited=2))

@@ -170,6 +170,9 @@ REGIE_ATTENTION_PULSE_INTERVAL = 0.4
 #: reads as work in progress.
 REGIE_WAITING_FRAMES = "▘▝▗▖"
 
+#: A fold badge shortens before the name gets fewer cells than this (or its own length).
+REGIE_NAME_MIN_CELLS = 10
+
 #: Leaf frames (one spinner step each) the quadrant rests on before it moves on.
 REGIE_WAITING_STEP_FRAMES = 4
 
