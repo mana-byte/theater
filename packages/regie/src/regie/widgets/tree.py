@@ -15,14 +15,12 @@ from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Label
 
-from regie.formatting import participant_label, short_identifier
 from regie.marks import MarkKind, RowMark
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
 from regie.motions.routes import AwaitMarks, LeafOverlay
 from regie.motions.wipe import LeafWipeController, status_wipe_color
-from regie.render.card import card_lines
-from regie.render.layout import Key, RenderedLine, is_root_prefix, render_tree, row_count
+from regie.render.layout import Key, RenderedLine, is_root_prefix, render_tree
 from regie.render.routing import RailArms, heavy_overlays, section_arms
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout
@@ -30,22 +28,19 @@ from regie.tree_nodes import RawRenderNode, RenderNode, TreeNode
 from regie.ui_constants import (
     REGIE_ATTENTION_PULSE_INTERVAL,
     REGIE_ATTENTION_PULSE_LIMIT,
-    REGIE_CARD_REFRESH_SECONDS,
     REGIE_EMPTY_TREE_KEY,
     REGIE_MARK_SEEN_SECONDS,
     REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
-    REGIE_TREE_LEAF_ROWS,
     REGIE_WIPE_DEATH_SECONDS,
     REGIE_WIPE_INTERVAL_SECONDS,
 )
 from regie.widgets.chrome import EmptyTreeState
 from regie.widgets.leaf import AgentLeaf
-from regie.widgets.selection_card import SelectionCard
 from regie.widgets.separator import SeparatorRow
 from regie.widgets.spawn_leaf import SpawnLeaf
 from regie.widgets.spawn_row import SpawnRow
 from regie.widgets.usage_breakdown import UsageBreakdownPanel
-from theater.frontend import Participant, StateProjection
+from theater.frontend import StateProjection
 
 
 def _is_participant_key(key: Key) -> bool:
@@ -162,14 +157,6 @@ class ParticipantTree(VerticalScroll):
         #: and width kept, until the sweep still running on them ends: ``key -> (animate, width)``.
         self._kills: set[Key] = set()
         self._held: dict[Key, tuple[bool, int]] = {}
-        self._participants: Mapping[str, Participant] = {}
-        self._card = SelectionCard()
-
-    def compose(self):
-        yield self._card
-
-    def on_mount(self) -> None:
-        self.set_interval(REGIE_CARD_REFRESH_SECONDS, self._sync_card)  # ages tick on their own
 
     @property
     def selected_id(self) -> str | None:
@@ -209,12 +196,6 @@ class ParticipantTree(VerticalScroll):
         return None if owner is None else owner[1]
 
     @property
-    def card_rows(self) -> int:
-        """Rows the card under the last row takes right now, its spacer included."""
-        card = self._card
-        return card.size.height + card.styles.margin.height if card.display else 0
-
-    @property
     def revision(self) -> int:
         return self._revision
 
@@ -241,7 +222,6 @@ class ParticipantTree(VerticalScroll):
         pending_spawn: Mapping[str, object] | None = None,
         marks: Mapping[str, RowMark] | None = None,
     ) -> str | None:
-        self._participants = projection.participants
         old_keys = self.selectable_keys
         try:
             old_index = old_keys.index(self._selected_key) if self._selected_key is not None else 0
@@ -294,12 +274,10 @@ class ParticipantTree(VerticalScroll):
         self._sync_attention()
         self._apply_await_marks()
         self._sync_mark_seen()
-        self._sync_card()
         return self.selected_participant_id
 
     def set_usage_costs(self, costs: Mapping[str, int]) -> None:
         self._participant_costs = dict(costs)
-        self._sync_card()
         for _, node, key, _, _ in self._lines_data:
             if not _is_managed_key(key):
                 continue
@@ -386,7 +364,6 @@ class ParticipantTree(VerticalScroll):
         for index, widget in enumerate(ordered):
             if index:
                 self.move_child(widget, after=ordered[index - 1])
-        self.move_child(self._card, after=ordered[-1])  # new rows mount after it, so put it last
 
     def _reconcile_row(
         self,
@@ -446,7 +423,6 @@ class ParticipantTree(VerticalScroll):
         return widget
 
     def _reconcile_empty(self) -> None:
-        self._card.hide()
         for key in list(self._key_widgets):
             if key != self._EMPTY_KEY:
                 self._remove_widget(self._key_widgets.pop(key))
@@ -508,7 +484,6 @@ class ParticipantTree(VerticalScroll):
         self._apply_branch_highlight()
         self.scroll_to_selection()
         self._sync_mark_seen()
-        self._sync_card()
 
     def on_separator_row_hovered(self, message: SeparatorRow.Hovered) -> None:
         message.stop()
@@ -857,7 +832,6 @@ class ParticipantTree(VerticalScroll):
         if marks != self._await_marks:
             self._await_marks = marks
             self._apply_await_marks()
-            self._sync_card()
 
     def _apply_await_marks(self) -> None:
         marks = self._await_marks
@@ -908,39 +882,6 @@ class ParticipantTree(VerticalScroll):
 
     def _remove_widget(self, widget: Widget) -> None:
         widget.remove()
-        self.call_after_refresh(self._sync_card)  # a row left: there may be room now
-
-    def on_resize(self, _event: events.Resize) -> None:
-        self._sync_card()
-
-    def _sync_card(self) -> None:
-        """Show the focused agent's card in the rows the tree leaves free, and nowhere else."""
-        key = self._selected_key
-        participant = self._participants.get(key[1]) if key and _is_managed_key(key) else None
-        if participant is None or not self.size.height:
-            self._card.hide()
-            return
-        marks = self._await_marks
-        lines = card_lines(
-            participant,
-            label_of=self._label_of,
-            cost_microcents=self._participant_costs.get(participant.participant_id),
-            waiting_on=marks.waiting_on.get(participant.participant_id, ()),
-            waited_by=marks.waited_by.get(participant.participant_id, ()),
-            now=time.time(),
-            width=max(1, self.size.width - 4),  # the card's own padding
-        )
-        # Rows are measured from the lines, not the widgets: a row mounted this frame has no size.
-        used = sum(row_count(row_key) for _, _, row_key, _, _ in self._lines_data)
-        used += REGIE_TREE_LEAF_ROWS * (len(self._retiring) + len(self._held))
-        if self.size.height - used >= len(lines) + SelectionCard.SPACER_ROWS:
-            self._card.show_lines(lines)
-        else:
-            self._card.hide()
-
-    def _label_of(self, participant_id: str) -> str:
-        participant = self._participants.get(participant_id)
-        return participant_label(participant) if participant else short_identifier(participant_id)
 
     def on_unmount(self) -> None:
         self._stop_reveal()

@@ -50,9 +50,6 @@ REGIE_AWAITED_MARK = "▏"
 REGIE_SPAWN_ROW_TEXT = "+ spawn"
 REGIE_SPAWN_ROW_KEY = "o"
 
-#: How often the card under the tree re-reads its ages ("up 2h 13m") when nothing else changes.
-REGIE_CARD_REFRESH_SECONDS = 30.0
-
 #: How often a travelling tree trace moves (seconds). Slower than the spinners.
 REGIE_TRACE_ANIM_INTERVAL = 0.10
 
