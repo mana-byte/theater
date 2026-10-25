@@ -77,7 +77,10 @@ async def expect_runs(live: LiveRig, participant: str, effect: Effect) -> None:
     async def not_gated() -> None:
         _check_fit(live, prompt, effect)
         if not effect.happened() and (await live.reading(participant)).kind is ScreenKind.APPROVAL:
-            violation("the tool is waiting for approval although the approval policy allows it")
+            shown = "\n".join((await live.screen(participant)).splitlines()[-8:])
+            violation(
+                f"the tool is waiting for approval although the approval policy allows it:\n{shown}"
+            )
 
     job = await live.send(participant, prompt, guard=not_gated)
 
