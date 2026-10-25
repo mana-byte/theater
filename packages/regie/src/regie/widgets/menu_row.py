@@ -9,10 +9,13 @@ from textual import events
 from textual.content import Content
 from textual.message import Message
 
+from regie.motions.marquee import overflows_cells
 from regie.render.glyphs import separator_prefix
 from regie.render.layout import Key, row_count
-from regie.render.menu import menu_label
+from regie.render.menu import help_room, menu_label
 from regie.tree_nodes import RawRenderNode, RenderNode
+from regie.ui_constants import REGIE_LEAF_MARQUEE_INTERVAL
+from regie.widgets.animation_clock import AnimationSubscription, animation_clock
 from regie.widgets.name_editor import FilterEditor, InlineEditor
 from regie.widgets.renameable import RenameableRow
 
@@ -51,6 +54,9 @@ class MenuRow(RenameableRow):
         self._node: RawRenderNode = cast(RawRenderNode, node)
         self._prefix, self._cont_prefix = prefix, cont_prefix
         self._is_first_root = is_first_root
+        self._cursor = self._hovered = False  # either one scrolls a long help
+        self._marquee_sub: AnimationSubscription | None = None
+        self._marquee_offset = 0
         super().__init__()
         self.key = key
         self._sync()
@@ -58,12 +64,18 @@ class MenuRow(RenameableRow):
     def update_node(
         self, node: RenderNode | dict, prefix: str, *, cont_prefix: str, is_first_root: bool
     ) -> None:
+        if node.get("help") != self._node.get("help"):
+            self._stop_marquee()
         self._node, self._prefix, self._cont_prefix = cast(RawRenderNode, node), prefix, cont_prefix
         self._is_first_root = is_first_root
         self._sync()
+        self._sync_marquee()
 
     def set_cursor(self, on: bool) -> None:
-        self.set_class(on, "tree-cursor")
+        if on != self._cursor:
+            self._cursor = on
+            self.set_class(on, "tree-cursor")
+            self._restart_marquee()
 
     def _sync(self) -> None:
         self.styles.height = row_count(self.key, self._node)
@@ -78,7 +90,61 @@ class MenuRow(RenameableRow):
             width=self.content_size.width or None,
             is_first_root=self._is_first_root,
             editing=self.renaming,
+            help_offset=self._marquee_offset if self._help_scrolls() else None,
         )
+
+    # ---- a long help scrolls while the row is in focus, as a participant's description does ---
+
+    def _help_scrolls(self) -> bool:
+        width = self.content_size.width
+        help_text = self._node.get("help") or ""
+        return (
+            self._node.get("kind") == "menu"
+            and (self._cursor or self._hovered)
+            and bool(width)
+            and overflows_cells(help_text, help_room(self._cont_prefix, width))
+        )
+
+    def _tick_marquee(self) -> None:
+        if self._help_scrolls():
+            self._marquee_offset += 1
+        else:
+            self._stop_marquee()
+        self.update(self._label(), layout=False)
+
+    def _stop_marquee(self) -> None:
+        if self._marquee_sub is not None:
+            self._marquee_sub.stop()
+            self._marquee_sub = None
+        self._marquee_offset = 0
+
+    def _sync_marquee(self) -> None:
+        if not self._help_scrolls():
+            self._stop_marquee()
+        elif self._marquee_sub is None:
+            self._marquee_sub = animation_clock(self.app).subscribe(
+                REGIE_LEAF_MARQUEE_INTERVAL, self._tick_marquee
+            )
+
+    def _restart_marquee(self) -> None:
+        """Start the window over: the row gained or lost focus, or changed size."""
+        self._stop_marquee()
+        self.update(self._label(), layout=False)
+        self._sync_marquee()
+
+    def on_mount(self) -> None:
+        self._sync_marquee()
+
+    def on_unmount(self) -> None:
+        self._stop_marquee()
+
+    def on_enter(self, _event: events.Enter) -> None:
+        self._hovered = True
+        self._restart_marquee()
+
+    def on_leave(self, _event: events.Leave) -> None:
+        self._hovered = False
+        self._restart_marquee()
 
     # ---- the filter, on the root's third row -----------------------------------------------
 
@@ -115,7 +181,7 @@ class MenuRow(RenameableRow):
             closed(kept=False)
 
     def on_resize(self, _event: events.Resize) -> None:
-        self.update(self._label(), layout=False)
+        self._restart_marquee()
 
     def on_click(self, event: events.Click) -> None:
         event.stop()

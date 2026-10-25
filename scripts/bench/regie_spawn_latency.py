@@ -263,8 +263,8 @@ class Stack:
         offset = self.ui_log.stat().st_size
         self.tmux("send-keys", "-l", "-t", self.ui_pane, "o")  # the options menu, on Spawn
         self.wait_for(
-            lambda: "choose a directory" in self.capture().casefold(),
-            "harness choices in the options menu",
+            lambda: "x closes" in self.capture().casefold(),  # the open menu's hint
+            "the options menu",
         )
         self.tmux("send-keys", "-l", "-t", self.ui_pane, "/")
         self.wait_for(  # the filter editor replaces the hint; only then are letters its own

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from textual.content import Content
 
+from regie.motions.marquee import marquee_cells
 from regie.render.glyphs import _rail_above, fit_name, separator_prefix
 from regie.tree_nodes import RawRenderNode
 
@@ -18,11 +19,13 @@ def menu_label(
     width: int | None = None,
     is_first_root: bool = False,
     editing: bool = False,
+    help_offset: int | None = None,
 ) -> Content:
     """One menu row: ``+ options`` (a line folded, three open), an option or choice (three), info.
 
     An option or choice is a rail, then its glyph and title, then its help in dim text under the
-    title. *width* cuts what would not fit, so a long title ends in ``…`` instead of wrapping.
+    title. *width* cuts what would not fit, so a long title ends in ``…`` instead of wrapping; a
+    long help scrolls instead while *help_offset* says how far (the row is in focus).
     """
     kind = node.get("kind")
     if kind == "menu_root":
@@ -38,7 +41,14 @@ def menu_label(
         else (node.get("glyph") or " ", node.get("style") or "$text")
     )
     title = _fit(node.get("title", ""), prefix, width, 2)
-    help_text = _fit(node.get("help") or "", cont_prefix, width, 2)
+    help_text = node.get("help") or ""
+    if width is not None:
+        room = help_room(cont_prefix, width)
+        help_text = (
+            fit_name(help_text, room)
+            if help_offset is None
+            else marquee_cells(help_text, room, help_offset)
+        )
     return Content.assemble(
         (_rail_above(prefix), _RAIL),
         "\n",
@@ -50,6 +60,11 @@ def menu_label(
         ("  ", ""),
         (help_text, "$text-muted dim"),
     )
+
+
+def help_room(cont_prefix: str, width: int) -> int:
+    """Cells an option's help has on its third row, after the rails and the glyph's column."""
+    return max(1, width - len(cont_prefix) - 2)
 
 
 def _root_label(node: RawRenderNode, prefix: str, *, is_first_root: bool, editing: bool) -> Content:
@@ -82,4 +97,4 @@ def _fit(text: str, prefix: str, width: int | None, lead: int) -> str:
     return text if width is None else fit_name(text, max(1, width - len(prefix) - lead))
 
 
-__all__ = ["menu_label"]
+__all__ = ["help_room", "menu_label"]

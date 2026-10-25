@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from regie.menu import MenuItem
 from regie.widgets import ParticipantTree
 from regie.widgets.name_editor import DirectoryEditor, FilterEditor
 
@@ -314,3 +315,43 @@ async def test_ctrl_p_opens_the_menu_at_its_root_and_no_palette_exists() -> None
         await wait_until(pilot, lambda: tree.selected_key == ROOT and tree.in_menu)
         assert app.screen is app.screen_stack[0]  # nothing was pushed over the tree
         assert not app.use_command_palette
+
+
+@pytest.mark.asyncio
+async def test_a_harness_has_no_description_unless_it_cannot_launch() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        await pilot.press("o")
+        await wait_until(pilot, lambda: tree.selected_key == CODEX)
+
+        assert _row(tree, CODEX)[2].strip("│ ") == ""  # nothing under the harness's name
+
+
+@pytest.mark.asyncio
+async def test_a_long_help_scrolls_on_the_row_in_focus_and_settles_when_it_leaves() -> None:
+    app, _client, _presentation = build_app()
+    long_help = "a description far too long to fit on one line of the narrow tree " * 2
+    items = (MenuItem("bus", "Show bus panel", long_help), MenuItem("quit", "Quit", "short"))
+
+    async with app.run_test(size=(40, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.menu_source = lambda: items
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "bus") in tree._key_widgets)
+        row = tree._key_widgets[("m", "bus")]
+        await wait_until(pilot, lambda: row.size.height == 3)
+        tree.select_key(("m", "quit"))
+        await wait_until(pilot, lambda: row._marquee_sub is None)
+        resting = _row(tree, ("m", "bus"))[2]
+        assert resting.endswith("…")  # cut, not moving
+
+        tree.select_key(("m", "bus"))
+        await wait_until(pilot, lambda: row._marquee_sub is not None)
+        seen = {_row(tree, ("m", "bus"))[2]}
+        await wait_until(pilot, lambda: seen.add(_row(tree, ("m", "bus"))[2]) or len(seen) >= 3, 10)
+
+        tree.select_key(("m", "quit"))
+        await wait_until(pilot, lambda: row._marquee_sub is None)
+        assert _row(tree, ("m", "bus"))[2] == resting and row._marquee_offset == 0

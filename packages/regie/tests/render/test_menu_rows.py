@@ -104,3 +104,13 @@ def test_the_roots_third_row_shows_the_filter_or_leaves_its_place_to_the_editor(
     assert label_rows(lines[1][0])[2] == "    / bus"
     editing = menu_label(lines[1][1], "└── ", "    ", editing=True)
     assert label_rows(editing)[2] == "    /"
+
+
+def test_a_long_help_is_cut_with_an_ellipsis_until_it_scrolls_in_a_window():
+    node = {**menu_nodes((MenuItem("a", "A", "word " * 20),), MenuView(), open=True)["children"][0]}
+    cut = menu_label(node, "└── ", "    ", width=40)
+    moving = [menu_label(node, "└── ", "    ", width=40, help_offset=n) for n in (0, 12, 13)]
+
+    assert label_rows(cut)[2].endswith("…") and len(label_rows(cut)[2]) <= 40
+    third = [label_rows(label)[2] for label in moving]
+    assert third[0] != third[2] and all("…" not in row for row in third)  # a window, not a cut

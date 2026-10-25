@@ -211,7 +211,7 @@ class MenuActions(_AppBase):
         return MenuItem(
             choice.harness,
             choice.harness,
-            "choose a directory" if choice.enabled else choice.reason or "launch is unavailable",
+            None if choice.enabled else choice.reason or "launch is unavailable",
             glyph=icon,
             enabled=choice.enabled,
             run=partial(self.spawn_harness, choice.harness),
