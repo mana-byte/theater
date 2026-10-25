@@ -22,8 +22,10 @@ logger = logging.getLogger("theater.harness.claude")
 
 class ClaudeParser:
     _seal: FinalAnswerSeal
-    #: Whether the last parsed record emitted a seal boundary, so its text is not re-projected.
-    _last_seal_emitted: bool = False
+    #: The seal boundaries the last parsed record synthesized: their text is already projected.
+    _last_sealed: tuple[Event, ...] = ()
+    #: What the last parsed record would have emitted, when it was copied history held back.
+    _withheld: tuple[Event, ...] = ()
 
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         record = self._decode(line)
@@ -51,30 +53,46 @@ class ClaudeParser:
         return ParsedRecord(
             events=events,
             trajectory=tuple(self._trajectory_facts(record, index)),  # type: ignore[attr-defined]
-            # Suppress only the synthesized seal boundary (its text is already projected); the
-            # records that trigger it are attachment-like and carry no baseline events of their own.
-            trajectory_events=() if self._last_seal_emitted else None,
+            # Suppress only the synthesized seal boundary (its text is already projected); a record
+            # that triggers it keeps its own events. Held-back history stays in the trajectory.
+            trajectory_events=(
+                self._withheld
+                if self._withheld
+                else tuple(e for e in events if all(e is not s for s in self._last_sealed))
+                if self._last_sealed
+                else None
+            ),
         )
 
     def _parse_decoded(self, record: dict, index: int, *, clip_text: bool = True) -> list[Event]:
+        events = self._record_events(record, index, clip_text=clip_text)
+        self._withheld = ()
+        if self._seal.skipped_history:
+            # History copied in while a fork's first turn is held: its prompts and answers belong
+            # to turns no job here waits for, so the reducer must not hear them as this session's.
+            self._withheld, events = tuple(events), []
+        return events
+
+    def _record_events(self, record: dict, index: int, *, clip_text: bool = True) -> list[Event]:
         ts = _epoch(record.get("timestamp"))
         kind = record.get("type")
         message = record.get("message")
         message = message if isinstance(message, dict) else {}
-        self._last_seal_emitted = False
-        if (expired := self._seal.observe(record)) is not None and clip_text:
+        self._last_sealed = ()
+        if (expired := self._seal.observe(record, ts)) is not None and clip_text:
             _report_seal("unavailable", expired)
-        deferred = self._emit_deferred(record, index, clip_text=clip_text)
-        self._last_seal_emitted = bool(deferred)
+        deferred = self._emit_deferred(record, index, ts, clip_text=clip_text)
+        self._last_sealed = tuple(deferred)
 
         if _is_turn_marker(record):
             boundary = self._seal_boundary(record, ts, index, clip_text=clip_text)
-            self._last_seal_emitted = self._last_seal_emitted or bool(boundary)
+            self._last_sealed += tuple(boundary)
             return deferred + boundary
         if kind == "assistant":
             return deferred + self._assistant(record, message, ts, index, clip_text=clip_text)
         if kind == "user":
-            return deferred + self._user(message, ts, index, clip_text=clip_text)
+            # A prompt written late completes the marker of the turn it began: it is heard first.
+            return self._user(message, ts, index, clip_text=clip_text) + deferred
         if kind == "system" and record.get("level") == "error":
             err = record.get("error")
             text = err if isinstance(err, str) else json.dumps(err, default=str)
@@ -91,15 +109,14 @@ class ClaudeParser:
             ]
         return deferred
 
-    def _emit_deferred(self, record: dict, index: int, *, clip_text: bool) -> list[Event]:
-        """Seal a held marker when a later record completes it; a marker or user turn is left
-        to the caller's supersede/drop. retry_deferred owns the discontinuity guards."""
+    def _emit_deferred(
+        self, record: dict, index: int, ts: float | None, *, clip_text: bool
+    ) -> list[Event]:
+        """Seal a held marker when a later record completes it; a marker is left to the caller's
+        supersede/drop. retry_deferred owns the discontinuity guards."""
         if _is_turn_marker(record):
             return []
-        if record.get("type") == "user":
-            self._seal.drop_deferred()
-            return []
-        outcome = self._seal.retry_deferred(record, index)
+        outcome = self._seal.retry_deferred(record, index, ts)
         if outcome is None:
             return []
         sealed, ts, resolved_index = outcome
@@ -184,7 +201,7 @@ class ClaudeParser:
         outcome = self._seal.resolve_or_defer(record, ts, index)
         if isinstance(outcome, Sealed):
             return self._boundary_event(outcome, ts, index, clip_text=clip_text)
-        if clip_text and outcome.reason != "deferred":
+        if clip_text and outcome.reason not in ("deferred", "history"):
             _report_seal("unavailable", outcome.reason)
         return []
 

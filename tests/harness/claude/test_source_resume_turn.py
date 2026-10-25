@@ -22,6 +22,8 @@ SESSION = "22222222-2222-4222-8222-222222222222"
 BEFORE = "2026-01-01T00:00:00Z"
 LAUNCH = "2026-01-01T00:00:01Z"
 AFTER = "2026-01-01T00:00:02Z"
+#: Between the launch and the answer: a prompt is typed before it is answered.
+PROMPTED = "2026-01-01T00:00:01.500Z"
 
 
 def _write(path, lines, *, append=False):
@@ -101,6 +103,64 @@ async def test_fork_turn_is_live_but_restored_history_stays_suppressed(tmp_path,
         await _assert_offline_turn_after_restart(
             reader, observer, registry, jobs, participant, path, tmp_path
         )
+    finally:
+        await reader.aclose()
+
+
+async def test_fork_turn_written_before_the_history_it_continues_still_ends_its_job(
+    tmp_path, registry
+):
+    """Claude writes a fork's answer and end marker before it copies the history they follow."""
+    root = tmp_path / "projects"
+    path = root / "project" / f"{SESSION}.jsonl"
+    path.parent.mkdir(parents=True)
+    observer = ClaudeCodeObserver(root=root)
+    old_user = (claude_record("old_user", None, "user", message={"content": "old"}), BEFORE)
+    old_answer = (
+        claude_fragment("old_answer", "old_user", {"type": "text", "text": "OLD"}, "msg_old"),
+        BEFORE,
+    )
+    new_answer = (
+        claude_fragment("new_answer", "new_user", {"type": "text", "text": "NEW"}, "msg_new"),
+        AFTER,
+    )
+    # The new user turn is the last record written: its parent is the copied history's marker.
+    _write(
+        path,
+        [
+            old_user,
+            new_answer,
+            (claude_marker("new_marker", "new_answer"), AFTER),
+            old_answer,
+            (claude_marker("old_marker", "old_answer"), BEFORE),
+            (claude_record("new_user", "old_marker", "user", message={"content": "new"}), PROMPTED),
+        ],
+    )
+    reader = observer.open_source_for(
+        participant_id="claude",
+        cwd=str(tmp_path),
+        session_id=SESSION,
+        session_provenance=TranscriptProvenance.EXACT,
+        after=iso_epoch(LAUNCH),
+    )
+    reader.admit_exact_location(location=str(path), session_id=SESSION)
+    participant = registry.create_spawned(harness="claude", cwd=str(tmp_path))
+    jobs = JobManager(registry.store)
+    jobs.create(
+        handle="resume", caller_id="caller", target_id=participant.id, kind="send", prompt="new"
+    )
+    daemon = Observer(registry, harnesses={}, jobs=jobs)
+    try:
+        attached = await reader.read()
+        assert daemon._accept_attachment(participant.id, reader, attached)
+        batch = await reader.read()
+        apply_batch(daemon, participant.id, batch, QuietClock(), TurnAccumulator(), source=reader)
+        assert (jobs.get("resume").state, jobs.get("resume").result) == (JobState.DONE, "NEW")
+        # The prompt is heard first, then its answer ends the turn; the history ended long ago.
+        assert [(e.kind, e.raw_text, e.turn_end) for e in batch.events] == [
+            (EventKind.USER, "new", False),
+            (EventKind.ASSISTANT, "NEW", True),
+        ]
     finally:
         await reader.aclose()
 
