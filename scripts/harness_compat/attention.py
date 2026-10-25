@@ -181,7 +181,12 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
             continue
         harness, publication_required = _RECOVERY_JOBS[job["name"]]
         try:
-            log = gh("api", f"repos/{{owner}}/{{repo}}/actions/jobs/{job['id']}/logs")
+            # Job logs carry the runner's ANSI colour codes, which gh refuses to print otherwise.
+            log = gh(
+                "api",
+                f"repos/{{owner}}/{{repo}}/actions/jobs/{job['id']}/logs",
+                "--allow-escape-sequences",
+            )
             results = recover_failures(
                 log,
                 harness,

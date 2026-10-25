@@ -128,6 +128,7 @@ def _report(
         assert_gh_flags(args)
         if "--paginate" in args:
             return json.dumps([{"jobs": []}, {"jobs": jobs}])
+        assert "--allow-escape-sequences" in args, "gh refuses job logs with colour codes"
         log_reads.append(args[1])
         return logs[args[1]]
 
