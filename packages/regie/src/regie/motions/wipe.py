@@ -35,7 +35,7 @@ def status_wipe_color(previous: str, status: str) -> str | None:
 
 
 def apply_wipe(content: Content, wipe: Wipe, *, width: int | None = None) -> Content:
-    """Mark *content* with a reversed block that runs left to right, a bold wake behind it.
+    """Mark *content* with a reversed block that runs left to right, a fading trail behind it.
 
     Short rows are padded first: a sweep that stops where the text does reads as a glitch.
     """
@@ -50,12 +50,19 @@ def apply_wipe(content: Content, wipe: Wipe, *, width: int | None = None) -> Con
     )
 
 
+#: The trail behind the block, nearest cells first: a colour cannot blend on an ANSI theme, so it
+#: fades by weight instead.
+_TRAIL_STYLES = ("bold {}", "{}", "dim {}")
+
+
 def _mark_row(row: Content, span: int, band_start: int, edge: int, color: str) -> Content:
     row += " " * (span - cell_len(row.plain))
     end = len(row)
-    wake_start = max(0, band_start - REGIE_WIPE_WAKE_CELLS)
-    if wake_start < min(band_start, end):
-        row = row.stylize(f"bold {color}", wake_start, min(band_start, end))
+    step = REGIE_WIPE_WAKE_CELLS // len(_TRAIL_STYLES)
+    for index, style in enumerate(_TRAIL_STYLES):
+        stop = band_start - index * step
+        if (start := max(0, stop - step)) < min(stop, end):
+            row = row.stylize(style.format(color), start, min(stop, end))
     if (start := max(0, band_start)) < min(edge, end):
         row = row.stylize(f"reverse {color}", start, min(edge, end))
     return row

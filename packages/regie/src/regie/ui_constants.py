@@ -158,14 +158,14 @@ REGIE_STARTUP_REVEAL_MAX_SECONDS = 4.0
 REGIE_STARTUP_REVEAL_MAX_LEAVES = 100
 
 #: A row-wide sweep announces a status change: its length, frame period, and the widths of the
-#: reversed leading block and the bold wake behind it. Foreground styles only: an ANSI theme
+#: reversed leading block and the fading trail behind it. Foreground styles only: an ANSI theme
 #: cannot blend a background tint, it would paint the whole row solid.
 REGIE_WIPE_SECONDS = 0.5
 #: Death is abrupt: a kill's sweep, and an agent dying, run at half the pace of the rest.
 REGIE_WIPE_DEATH_SECONDS = 0.25
 REGIE_WIPE_INTERVAL_SECONDS = 0.035
 REGIE_WIPE_BAND_CELLS = 3
-REGIE_WIPE_WAKE_CELLS = 6
+REGIE_WIPE_WAKE_CELLS = 9
 
 #: A row that needs the human gets a bar in its gutter; only the newest few breathe, so a crowd
 #: of waiting rows is steady instead of a flicker.

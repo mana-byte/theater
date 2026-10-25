@@ -50,6 +50,14 @@ def test_a_reversed_block_leads_and_a_bold_wake_follows():
     assert late_wake and late_wake[0][1] == late_block[0][0]
 
 
+def test_the_trail_fades_from_bold_to_plain_to_dim_away_from_the_block():
+    swept = apply_wipe(Content("├── abc"), (0.6, "$warning"), width=20)
+
+    (block,), (bold,) = _marks(swept, "reverse $warning"), _marks(swept, "bold $warning")
+    (plain,), (dim,) = _marks(swept, "$warning"), _marks(swept, "dim $warning")
+    assert bold[1] == block[0] and plain[1] == bold[0] and dim[1] == plain[0]  # one run, no gaps
+
+
 def test_the_sweep_only_uses_foreground_styles_an_ansi_theme_can_draw():
     swept = apply_wipe(Content("├── abc"), (0.5, "$error"), width=20)
     assert all("on " not in str(span.style) for span in swept.spans)
