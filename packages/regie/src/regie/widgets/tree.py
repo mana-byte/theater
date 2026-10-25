@@ -38,6 +38,7 @@ from regie.widgets.chrome import EmptyTreeState
 from regie.widgets.leaf import AgentLeaf
 from regie.widgets.separator import SeparatorRow
 from regie.widgets.spawn_leaf import SpawnLeaf
+from regie.widgets.spawn_row import SpawnRow
 from regie.widgets.usage_breakdown import UsageBreakdownPanel
 from theater.frontend import StateProjection
 
@@ -237,7 +238,9 @@ class ParticipantTree(VerticalScroll):
         self._hidden_owner = _hidden_owners(tree)
         reasons = stage_reasons or {}
         self._add_stage_reasons(tree, reasons)
-        lines = render_tree(tree, unmanaged=unmanaged, cwd_segments=cwd_segments)
+        lines = render_tree(
+            tree, unmanaged=unmanaged, cwd_segments=cwd_segments, spawn_row=pending_spawn is None
+        )
         self._observe_statuses(projection)
         self._observe_marks(marks or {})
         self._sync_retirement(projection)
@@ -388,10 +391,15 @@ class ParticipantTree(VerticalScroll):
         if isinstance(widget, SpawnLeaf):
             widget.update_node(node, prefix, cont_prefix=cont_prefix)
             return widget
+        if isinstance(widget, SpawnRow):
+            widget.set_label(label)
+            return widget
         if isinstance(widget, Label):
             widget.update(label)
             return widget
-        if key[0] == "s":
+        if key[0] == "g":
+            widget = SpawnRow(label)
+        elif key[0] == "s":
             widget = SeparatorRow(node, prefix, key=key, is_first_root=first_root)
         elif key[0] == "n":
             widget = SpawnLeaf(node, prefix, cont_prefix=cont_prefix, key=key)

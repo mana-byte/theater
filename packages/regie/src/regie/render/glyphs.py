@@ -15,6 +15,8 @@ from textual.content import Content
 
 from regie.ui_constants import (
     REGIE_AWAITED_MARK as AWAITED_MARK,
+    REGIE_SPAWN_ROW_KEY as SPAWN_ROW_KEY,
+    REGIE_SPAWN_ROW_TEXT as SPAWN_ROW_TEXT,
     REGIE_NAME_MIN_CELLS as NAME_MIN_CELLS,
     REGIE_TREE_COST_MIN_CELLS as COST_MIN_CELLS,
     REGIE_SEND_TRACE_STYLE as SEND_STYLE,
@@ -102,6 +104,13 @@ def separator_label(
         for index, parts in enumerate((row1, row2, row3))
     ]
     return Content.assemble(*rows[0], "\n", *rows[1], "\n", *rows[2])
+
+
+def spawn_row_label(prefix: str) -> Content:
+    """The tree's last row, one row tall: ``└── + spawn  o``, with the key that does the same."""
+    return Content.assemble(
+        (prefix, "$text dim"), (SPAWN_ROW_TEXT, "$text-muted"), (f"  {SPAWN_ROW_KEY}", "$text dim")
+    )
 
 
 def _append_working_harness_text(

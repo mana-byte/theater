@@ -132,7 +132,7 @@ async def test_a_long_name_is_cut_with_an_ellipsis_and_never_hides_the_directory
         await wait_until(pilot, lambda: "…" in _rows(long)[1])
 
         first, second, third = _rows(long)
-        assert first.strip() == "│" and second.endswith("…")  # one line, ending in an ellipsis
+        assert first.strip() == "│   │" and second.endswith("…")  # one line, ending in an ellipsis
         assert third.strip().endswith("…/proj/api")  # and the directory is where it belongs
         assert long._marquee_sub is None  # nothing scrolls on a row that is not in focus
 

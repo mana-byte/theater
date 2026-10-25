@@ -341,7 +341,8 @@ def heavy_rail(glyph: str, arms: frozenset[Direction]) -> str:
 def section_arms(lines: list[RenderedLine], separator: Key) -> RailArms:
     """The rail arms from a separator's own branch down to every agent it can fold.
 
-    Its section is its later siblings and their descendants, up to its next sibling separator.
+    Its section is its later siblings and their descendants, up to its next sibling separator or
+    the spawn row, which folds into nothing.
     An arm is included only where it leads on to one of them; levels above it never are.
     """
     keys = [key for _, _, key, _, _ in lines]
@@ -354,7 +355,7 @@ def section_arms(lines: list[RenderedLine], separator: Key) -> RailArms:
         (
             row
             for row in range(start + 1, len(lines))
-            if levels[row] < top or (levels[row] == top and keys[row][0] == "s")
+            if levels[row] < top or (levels[row] == top and keys[row][0] in {"s", "g"})
         ),
         len(lines),
     )

@@ -46,6 +46,10 @@ REGIE_TREE_GAP = "    "
 #: await's route ends on it.
 REGIE_AWAITED_MARK = "▏"
 
+#: The tree's last row, an invitation to spawn: the key that does the same is shown beside it.
+REGIE_SPAWN_ROW_TEXT = "+ spawn"
+REGIE_SPAWN_ROW_KEY = "o"
+
 #: How often a travelling tree trace moves (seconds). Slower than the spinners.
 REGIE_TRACE_ANIM_INTERVAL = 0.10
 

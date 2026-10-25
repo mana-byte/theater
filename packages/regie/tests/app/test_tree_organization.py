@@ -330,13 +330,14 @@ async def test_a_hovered_or_selected_separator_draws_heavy_rails_to_what_it_can_
             return tuple(w.render_line(1).text.strip()[:4] for w in (above, heading, below))  # type: ignore[return-value]
 
         tree.select_key(("p", "participant-1"))
-        await wait_until(pilot, lambda: rails() == ("├── ", "├── ", "└── "))
+        await wait_until(pilot, lambda: rails() == ("├── ", "├── ", "├── "))
         await pilot.hover(heading)
-        await wait_until(pilot, lambda: rails() == ("├── ", "┢━━ ", "┗━━ "))  # not above it
+        # The spawn row after it is no part of the section: its rail stays light.
+        await wait_until(pilot, lambda: rails() == ("├── ", "┢━━ ", "┡━━ "))  # not above it
         await pilot.hover(above)
-        await wait_until(pilot, lambda: rails() == ("├── ", "├── ", "└── "))
+        await wait_until(pilot, lambda: rails() == ("├── ", "├── ", "├── "))
         tree.select_key(key)
-        await wait_until(pilot, lambda: rails() == ("├── ", "┢━━ ", "┗━━ "))
+        await wait_until(pilot, lambda: rails() == ("├── ", "┢━━ ", "┡━━ "))
 
         # An await route pulsing along its branch takes over from the highlight.
         below.set_overlay({(1, 0): (">", "$warning")})
