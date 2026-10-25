@@ -90,11 +90,6 @@ class SpawnLeaf(RenameableRow):
             self.app.notify(error, severity="warning")
             self._value, self._reopen = name, True
 
-    def _edit_opened(self) -> None:
-        opened = getattr(self.app, "spawn_menu_opened", None)
-        if callable(opened):
-            opened()
-
     def _edit_closed(self, *, committed: bool) -> None:
         if self._reopen:
             self._reopen = False

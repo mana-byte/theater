@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from pathlib import Path
-from time import monotonic
 from typing import ClassVar
 
 from rich.cells import cell_len
@@ -14,8 +12,6 @@ from textual.binding import Binding, BindingType
 from textual.widgets import Input
 
 from regie.widgets.directory_input import DirectoryInput
-
-logger = logging.getLogger("regie.latency")
 
 
 class InlineEditor(Input):
@@ -52,7 +48,6 @@ class InlineEditor(Input):
         self._submit = submit
         self._cancel = cancel
         self._settled = False
-        self._opened_at = monotonic()
 
     def _finish(self) -> None:
         if self._settled:
@@ -76,14 +71,9 @@ class InlineEditor(Input):
         self._finish()
         self._submit(value)
 
-    def action_cancel(self, reason: str = "escape") -> None:
+    def action_cancel(self) -> None:
         if self._settled:
             return
-        logger.info(
-            "interaction.editor.cancelled by=%s after=%.0fms",
-            reason,
-            (monotonic() - self._opened_at) * 1000,
-        )
         self._finish()
         self._cancel()
 
@@ -94,12 +84,8 @@ class InlineEditor(Input):
         if not self.app.app_focus:
             # The terminal lost focus, not the editor: a half-typed directory must survive a glance
             # away. Textual hands focus back to it when the terminal returns.
-            logger.info(
-                "interaction.editor.kept the terminal lost focus after %.0fms",
-                (monotonic() - self._opened_at) * 1000,
-            )
             return
-        self.action_cancel("blur")
+        self.action_cancel()
 
     def on_click(self, event: events.Click) -> None:
         # The editor overlays the row: a click inside it must not act on the row.

@@ -4,13 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from time import monotonic
 
-from textual import events
 from textual.command import CommandPalette
 
 from regie.app_parts._shared import _AppBase
-from regie.latency import interaction_milestone, interaction_note
 from regie.palette import (
     ResumeSessionCommands,
     SpawnChoice,
@@ -25,10 +22,6 @@ from regie.widgets.spawn_leaf import SpawnLeaf
 
 
 class SpawnResume(_AppBase):
-    #: When the human picked a harness, until the directory prompt is up and focused; a class
-    #: default because the app's constructor is at its statement limit.
-    _spawn_menu_started: float | None = None
-
     def action_resume_palette(self) -> None:
         self.push_screen(
             CommandPalette(
@@ -74,7 +67,6 @@ class SpawnResume(_AppBase):
         if self._state.projection is None:
             self.notify("orchestration state has not loaded yet", severity="warning")
             return
-        self._spawn_menu_started = monotonic()
         self._pending_spawn = {
             "harness": harness,
             "icon": self.icon_for_harness(harness),
@@ -85,21 +77,7 @@ class SpawnResume(_AppBase):
         self._show_projection(self._state.projection)
         self.call_after_refresh(self._begin_spawn_directory)
 
-    def on_app_focus(self, _event: events.AppFocus) -> None:
-        interaction_note("terminal gained focus")
-
-    def on_app_blur(self, _event: events.AppBlur) -> None:
-        interaction_note("terminal lost focus")
-
-    def spawn_menu_opened(self) -> None:
-        """The directory prompt is up and focused."""
-        if self._spawn_menu_started is not None:
-            interaction_milestone("spawn_menu.prompt", self._spawn_menu_started)
-            self._spawn_menu_started = None
-
     def _begin_spawn_directory(self) -> None:
-        if self._spawn_menu_started is not None:
-            interaction_milestone("spawn_menu.row", self._spawn_menu_started)
         row = self.query_one(ParticipantTree)._key_widgets.get(("n", "new"))
         if isinstance(row, SpawnLeaf):
             self.run_worker(row.begin_rename(), exclusive=False)
@@ -111,7 +89,6 @@ class SpawnResume(_AppBase):
         pending = self._pending_spawn
         if pending is None:
             return None
-        self._actions.spawn_trace.entered(monotonic())
         try:
             cwd = normalize_directory(value, base_dir=Path.cwd())
         except ValueError as exc:

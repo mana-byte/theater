@@ -74,28 +74,6 @@ async def startup_stage[T](phase: str, work: Callable[[], Awaitable[T]]) -> T:
         return await work()
 
 
-#: An interaction slower than this is logged as a warning: the human felt it.
-_SLOW_INTERACTION_SECONDS = 0.25
-
-
-def interaction_milestone(name: str, started_at: float) -> None:
-    """Report how long after a user's request one visible step arrived.
-
-    Python-side only: a slow milestone here means Régie was late, a fast one that the delay a
-    human saw was in the terminal or tmux, not in the app.
-    """
-    with contextlib.suppress(Exception):
-        elapsed = monotonic() - started_at
-        level = logging.WARNING if elapsed >= _SLOW_INTERACTION_SECONDS else logging.INFO
-        logger.log(level, "interaction.%s %.1fms", name, elapsed * 1000)
-
-
-def interaction_note(what: str) -> None:
-    """Record that something outside Régie changed what the human is looking at."""
-    with contextlib.suppress(Exception):
-        logger.info("interaction.%s", what.replace(" ", "_"))
-
-
 def startup_milestone(phase: str, started_at: float) -> None:
     """Report elapsed launch time; direct app users fall back to construction time."""
     with contextlib.suppress(Exception):

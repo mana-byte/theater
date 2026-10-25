@@ -34,9 +34,6 @@ class RenameableRow(Static):
     def _make_editor(self, value: str) -> InlineEditor:
         return NameEditor(value, submit=self._rename_submitted, cancel=self._rename_cancelled)
 
-    def _edit_opened(self) -> None:
-        """Called once the editor is mounted and holds focus."""
-
     def _edit_closed(self, *, committed: bool) -> None:
         """Called once the editor leaves, whether by Enter, Esc, a click away, or a refresh."""
 
@@ -71,7 +68,6 @@ class RenameableRow(Static):
         editor.focus()
         if not self._commit_unchanged:
             editor.select_all()
-        self._edit_opened()
 
     def _sync_rename_geometry(self) -> None:
         """Keep a live editor over its field as the row's layout changes."""

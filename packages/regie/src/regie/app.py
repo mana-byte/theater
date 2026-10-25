@@ -14,7 +14,6 @@ from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical
 from textual.css.query import NoMatches
-from textual.driver import Driver
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import RichLog
@@ -70,7 +69,6 @@ from regie.palette import (
     ViewCommands,
 )
 from regie.state import StateController
-from regie.terminal_timing import timed
 from regie.trajectory.adapter import TrajectoryFollowAdapter, TrajectoryQueryAdapter
 from regie.trajectory.rich import (
     TrajectoryController,
@@ -267,10 +265,6 @@ class RegieApp(
         self._catalog_ready = asyncio.Event()
         self._projection_ready = asyncio.Event()
         self._closed = False
-
-    def get_driver_class(self) -> type[Driver]:
-        """Textual's driver, reporting a terminal that blocks or falls behind."""
-        return timed(super().get_driver_class())  # type: ignore[return-value]
 
     @property
     def projection(self) -> StateProjection | None:
