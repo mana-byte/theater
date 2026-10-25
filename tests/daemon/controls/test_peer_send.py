@@ -243,10 +243,13 @@ async def test_presence_arriving_during_the_modal_check_leaves_one_queued_job(
 
 
 async def _retry_provider_presence(daemon, presence, monkeypatch, callbacks, refusals, target_id):
-    real_clock = daemon.controls._clock
     for index in range(refusals):
         presence.set_state(PresenceState.ABSENT, "human left")
-        monkeypatch.setattr(daemon.controls, "_clock", real_clock)
+        waiting = json.loads(daemon.store.queued_control_operations(target_id)[0].payload)
+        # Pinned inside the retry window: a loaded runner's real clock can outrun it first.
+        monkeypatch.setattr(
+            daemon.controls, "_clock", lambda inside=waiting["presence_retry_after"] - 0.1: inside
+        )
         assert (await daemon.controls.dispatch_queue(target_id)).deferred is True
         assert len(callbacks) == index + 1
         queued = daemon.store.queued_control_operations(target_id)[0]
