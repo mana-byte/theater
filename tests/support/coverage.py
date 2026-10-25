@@ -124,6 +124,9 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "CompatManifest.mcp_call",
         "McpCall.name",
         "McpCall.payload",
+        "CompatManifest.mcp_discovery",
+        "McpDiscovery.name",
+        "McpDiscovery.payload",
         "ChannelCapability.signal=TOOL",
     ),
     # --- edit: the CLI's own file-write tool is gated or runs

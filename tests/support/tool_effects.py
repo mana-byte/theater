@@ -72,6 +72,7 @@ async def expect_runs(live: LiveRig, participant: str, effect: Effect) -> None:
     prompt = f"Use the tool, then reply with {final}"
     live.queue(effect.reply)
     live.queue(MockReply(final))
+    mark = _mark(live)
 
     async def not_gated() -> None:
         _check_fit(live, prompt, effect)
@@ -84,15 +85,14 @@ async def expect_runs(live: LiveRig, participant: str, effect: Effect) -> None:
     assert job.state == "done", job.error
     assert final in str(job.result)
     assert effect.happened(), "the tool call finished without leaving its effect"
-    assert any(request.last_tool_result for request in live.mock.requests), (
-        "the model never received the tool result"
-    )
+    assert _received(live, mark), "the model never received the tool result"
 
 
 async def expect_gated(live: LiveRig, participant: str, effect: Effect) -> None:
     prompt = "Use the tool"
     live.queue(effect.reply)
     live.queue(MockReply("the gated call must not reach this reply"))
+    mark = _mark(live)
     accepted = (
         await live.client.controls.send(participant, prompt, idempotency_key=uuid.uuid4().hex)
     ).value
@@ -110,8 +110,22 @@ async def expect_gated(live: LiveRig, participant: str, effect: Effect) -> None:
     _check_fit(live, prompt, effect)
     await asyncio.sleep(GATE_SETTLE_SECONDS)
     assert not effect.happened(), "the tool ran while its approval prompt was open"
-    assert not any(request.last_tool_result for request in live.mock.requests), (
+    assert not _received(live, mark), (
         "a result reached the model while the tool was awaiting approval"
+    )
+
+
+def _mark(live: LiveRig) -> tuple[int, set[str | None]]:
+    """Where a turn starts, and the tool results the model already holds from earlier turns."""
+    held = live.mock.requests
+    return len(held), {request.last_tool_result for request in held}
+
+
+def _received(live: LiveRig, mark: tuple[int, set[str | None]]) -> bool:
+    """Whether a tool result new since ``mark`` reached the model; a request repeats its history."""
+    seen, known = mark
+    return bool(
+        {request.last_tool_result for request in live.mock.requests[seen:]} - known - {None}
     )
 
 
@@ -153,7 +167,7 @@ async def _mcp_call(
     live: LiveRig, participant: str, server: str, tool: str, arguments: Mapping[str, object]
 ) -> MockToolCall:
     """The call that makes this CLI's model invoke an MCP tool, by its own name or the runner."""
-    offered, name = await _offered(live, participant, tool)
+    offered, name = await _offered(live, participant, server, tool)
     if name is None:
         violation(f"the model was never offered exactly one tool for {server}.{tool}: {offered}")
     declared = live.harness.compat.mcp_call
@@ -163,15 +177,29 @@ async def _mcp_call(
 
 
 async def _offered(
-    live: LiveRig, participant: str, tool: str
+    live: LiveRig, participant: str, server: str, tool: str
 ) -> tuple[tuple[str, ...], str | None]:
-    """The offered tools and the name reaching ``tool``, retried as MCP servers may connect late."""
+    """The offered tools and the name reaching ``tool``, retried as MCP servers may connect late.
+
+    A CLI that offers MCP tools only after a search is made to run it first; the request that
+    follows the search is the one that offers what it loaded.
+    """
+    discovery = live.harness.compat.mcp_discovery
     for attempt in range(_OFFER_ATTEMPTS):
         prompt = f"Warm up {attempt}"
+        if discovery is not None:
+            # A CLI discards a call whose id an earlier one used, and every reply numbers from 0.
+            search = MockToolCall(
+                discovery.name,
+                discovery.render(server=server, tool=tool),
+                call_id=f"toolu_search_{uuid.uuid4().hex[:8]}",
+            )
+            live.queue(MockReply("loading", tool_calls=(search,)))
         live.queue(MockReply("warm"))
+        seen = len(live.mock.requests)
         job = await live.send(participant, prompt)
         assert job.state == "done", job.error
-        (request,) = live.turns(prompt)
+        request = [r for r in live.mock.requests[seen:] if r.tools][-1]
         name = _reaching(live, request.tools, tool)
         if name is not None:
             return request.tools, name

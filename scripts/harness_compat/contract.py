@@ -141,6 +141,8 @@ class MockToolCall:
     name: str
     #: JSON object arguments, or the raw input of a freeform (grammar) tool (Responses only).
     arguments: Mapping[str, Any] | str
+    #: Replaces the id the mock numbers by position, which every reply restarts from zero.
+    call_id: str | None = None
 
 
 class Hold(Protocol):

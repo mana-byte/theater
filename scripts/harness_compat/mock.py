@@ -74,7 +74,7 @@ def _anthropic_content(reply: MockReply) -> list[dict[str, Any]]:
     content.extend(
         {
             "type": "tool_use",
-            "id": f"toolu_mock_{index}",
+            "id": call.call_id or f"toolu_mock_{index}",
             "name": call.name,
             "input": _object_arguments(call),
         }
@@ -103,7 +103,7 @@ def _anthropic_tool_events(index: int, call: MockToolCall) -> list[dict[str, Any
             "index": index,
             "content_block": {
                 "type": "tool_use",
-                "id": f"toolu_mock_{index - 1}",
+                "id": call.call_id or f"toolu_mock_{index - 1}",
                 "name": call.name,
                 "input": {},
             },
@@ -155,7 +155,7 @@ def _anthropic_stream(reply: MockReply, model: str) -> tuple[str, str]:
 
 def _openai_tool_call(index: int, call: MockToolCall) -> dict[str, Any]:
     return {
-        "id": f"call_mock_{index}",
+        "id": call.call_id or f"call_mock_{index}",
         "type": "function",
         "function": {
             "name": call.name,
@@ -260,7 +260,7 @@ def _responses_stream(reply: MockReply) -> tuple[str, str]:
             ]
         )
     for index, call in enumerate(reply.tool_calls):
-        item: dict[str, Any] = {"call_id": f"call_mock_{index}"}
+        item: dict[str, Any] = {"call_id": call.call_id or f"call_mock_{index}"}
         if isinstance(call.arguments, str):
             item |= {"type": "custom_tool_call", "name": call.name, "input": call.arguments}
         else:

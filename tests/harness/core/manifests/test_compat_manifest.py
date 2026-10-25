@@ -16,6 +16,7 @@ from theater.harness.contracts.compat import (
     COMPAT_PROTOCOLS,
     CompatManifest,
     McpCall,
+    McpDiscovery,
     NativeEdit,
     ProvisionContext,
     Provisioned,
@@ -215,6 +216,22 @@ _EDIT = NativeEdit("write_file", {"path": "{path}", "content": "{nonce}"})
             "{arguments} placeholder",
             id="call-foreign-token-is-literal",
         ),
+        pytest.param(
+            CompatManifest(provision=provision, mcp_discovery=McpCall("run", "{tool}{arguments}")),
+            _APPROVALS,
+            "compat.mcp_discovery",
+            "expected McpDiscovery",
+            id="discovery-wrong-type",
+        ),
+        pytest.param(
+            CompatManifest(
+                provision=provision, mcp_discovery=McpDiscovery("search", {"query": "{server}"})
+            ),
+            _APPROVALS,
+            "compat.mcp_discovery.payload",
+            "{tool} placeholder",
+            id="discovery-without-tool-placeholder",
+        ),
     ],
 )
 def test_validation_rejects_a_malformed_compat_declaration(
@@ -284,6 +301,20 @@ def test_mcp_call_substitutes_its_tokens_once_and_encodes_arguments_as_json() ->
 def test_each_template_recognises_only_its_own_tokens() -> None:
     assert NativeEdit("w", "{path}{tool}").placeholders == {"path"}
     assert McpCall("c", "{tool}{path}{arguments}").placeholders == {"tool", "arguments"}
+    assert McpDiscovery("s", "{server}{tool}{arguments}").placeholders == {"server", "tool"}
+
+
+def test_a_well_formed_mcp_discovery_validates_and_renders_its_two_tokens() -> None:
+    search = McpDiscovery("search", {"query": "select:mcp__{server}__{tool}"})
+    declared = CompatManifest(provision=provision, mcp_discovery=search)
+
+    harness = compile_manifest(
+        "acme",
+        manifest(launch=LaunchManifest(planner=plan, approvals=("manual",)), compat=declared),
+    )
+
+    assert harness.compat is declared
+    assert search.render(server="probe", tool="mark") == {"query": "select:mcp__probe__mark"}
 
 
 def test_native_edit_freeform_payload_renders_as_text() -> None:

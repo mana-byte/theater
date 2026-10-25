@@ -111,8 +111,8 @@ class NativeEdit(ToolTemplate):
 class McpCall(ToolTemplate):
     """How the CLI's model calls an MCP tool when the tool is not offered under its own name.
 
-    Needed only where MCP tools sit behind another tool (a script runner or a tool search);
-    otherwise the suite finds the tool among the names the model was offered.
+    Needed only where MCP tools sit behind another tool (a script runner); otherwise the suite
+    finds the tool among the names the model was offered.
     """
 
     TOKENS: ClassVar[tuple[str, ...]] = ("server", "tool", "arguments")
@@ -122,6 +122,19 @@ class McpCall(ToolTemplate):
     ) -> str | Mapping[str, object]:
         """``arguments`` is substituted as its JSON text."""
         return self._render({"server": server, "tool": tool, "arguments": json.dumps(arguments)})
+
+
+@dataclass(frozen=True, slots=True)
+class McpDiscovery(ToolTemplate):
+    """How the CLI's model loads an MCP tool that is only offered after a search for it.
+
+    The call only loads the tool; the suite then calls the tool itself, by the name the CLI offers.
+    """
+
+    TOKENS: ClassVar[tuple[str, ...]] = ("server", "tool")
+
+    def render(self, *, server: str, tool: str) -> str | Mapping[str, object]:
+        return self._render({"server": server, "tool": tool})
 
 
 @functools.cache
@@ -169,6 +182,8 @@ class CompatManifest:
     native_edit: NativeEdit | None = None
     #: Only when the model cannot call an MCP tool under its own name.
     mcp_call: McpCall | None = None
+    #: Only when the CLI offers an MCP tool after a search for it.
+    mcp_discovery: McpDiscovery | None = None
     #: Extra generic mutations whose effects this plugin's provisioning cannot mask.
     canaries: tuple[str, ...] = ()
     #: Non-model HTTP routes the mock acknowledges with 204, without consuming a reply.
@@ -180,6 +195,7 @@ __all__ = [
     "CompatManifest",
     "CompatProtocol",
     "McpCall",
+    "McpDiscovery",
     "NativeEdit",
     "ProvisionContext",
     "Provisioned",

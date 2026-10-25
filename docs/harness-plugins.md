@@ -575,11 +575,17 @@ that name an argument differently, so declare the line the suite can prove.
 
 `CompatManifest.mcp_call` is optional and needed only when the model cannot call
 an MCP tool under its own name, for example when MCP tools sit behind a script
-runner or a tool search. `McpCall(name, payload)` names the tool the model calls
+runner. `McpCall(name, payload)` names the tool the model calls
 and a payload that invokes one MCP tool; it must contain `{tool}` and
 `{arguments}` and may contain `{server}`, substituted in one pass (`{arguments}`
 as its JSON text). Without it the suite finds the MCP tool among the tool names
 the model was offered by suffix match.
+
+`CompatManifest.mcp_discovery` is optional and needed only when the CLI offers an MCP
+tool after a search for it (a tool search). `McpDiscovery(name, payload)` names the
+search tool and a payload that loads one MCP tool; it must contain `{tool}` and may
+contain `{server}`. The suite runs it before the tool's own call, which it then makes by the
+name the CLI offers afterwards (or through `mcp_call`).
 
 `CompatManifest.canaries` names extra generic mutations that this plugin's provisioning cannot
 mask. The mutation implementations and assertions stay in the shared suite. These tooling checks

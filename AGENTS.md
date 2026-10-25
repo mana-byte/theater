@@ -264,7 +264,7 @@ Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) 
   upstream releases cannot fail it. Workflow failures need issues, including setup and timeouts.
   Check the implementation with `uv run pytest tests/compat tests/conformance tests/harness/<h>`.
 
-A plugin may also export an optional `compat=CompatManifest(provision, native_edit, mcp_call, canaries)` (see
+A plugin may also export an optional `compat=CompatManifest(provision, native_edit, mcp_call, mcp_discovery, canaries)` (see
 `docs/harness-plugins.md`, "Qualification"). It is read only by the live conformance suite, never at
 runtime; `provision` must stay endpoint, credential, catalog and onboarding setup. Scenarios are derived
 from the rest of the manifest, so a new manifest capability needs a mapping in

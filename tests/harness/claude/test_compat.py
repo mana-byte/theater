@@ -91,3 +91,12 @@ def test_native_edit_uses_the_offered_write_schema(tmp_path: Path) -> None:
         "content": "EDIT-proof\n",
     }
     assert compat.mcp_call is None
+
+
+def test_discovery_loads_an_mcp_tool_by_its_qualified_name() -> None:
+    discovery = ClaudeCodeHarness().compat.mcp_discovery
+    assert discovery is not None
+    assert discovery.name == "ToolSearch"
+    assert discovery.render(server="compat_probe", tool="compat_probe_mark") == {
+        "query": "select:mcp__compat_probe__compat_probe_mark"
+    }

@@ -42,7 +42,13 @@ from theater.harness.contracts.channels import (
     SignalKind,
     SignalOwnership,
 )
-from theater.harness.contracts.compat import CompatManifest, McpCall, NativeEdit, ToolTemplate
+from theater.harness.contracts.compat import (
+    CompatManifest,
+    McpCall,
+    McpDiscovery,
+    NativeEdit,
+    ToolTemplate,
+)
 from theater.harness.contracts.manifest import (
     ControlManifest,
     HarnessManifest,
@@ -859,6 +865,10 @@ def _validate_compat(name: str, manifest: HarnessManifest) -> None:
     if compat.mcp_call is not None:
         _validate_tool_template(
             name, "compat.mcp_call", compat.mcp_call, McpCall, "tool", "arguments"
+        )
+    if compat.mcp_discovery is not None:
+        _validate_tool_template(
+            name, "compat.mcp_discovery", compat.mcp_discovery, McpDiscovery, "tool"
         )
 
 
