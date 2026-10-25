@@ -8,14 +8,9 @@ from pathlib import Path
 from textual.command import CommandPalette
 
 from regie.app_parts._shared import _AppBase
-from regie.palette import (
-    ResumeSessionCommands,
-    SpawnChoice,
-    SpawnHarnessCommands,
-    spawn_approval,
-    spawn_choices,
-)
+from regie.palette import ResumeSessionCommands, SpawnHarnessCommands
 from regie.resume import ResumeCandidate, ResumeDiscovery, discover_resume_sessions
+from regie.spawn import SpawnChoice, spawn_approval, spawn_choices
 from regie.widgets import ParticipantTree
 from regie.widgets.directory_input import normalize_directory
 from regie.widgets.spawn_leaf import SpawnLeaf
