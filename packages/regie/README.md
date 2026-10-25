@@ -90,6 +90,11 @@ timed separately by `interaction.spawn_menu.row` and `.prompt`. `late` large mea
 reached Régie slowly; `daemon_at` large means the daemon was slow; both small with a slow screen
 means the delay was in the terminal.
 
+`terminal.write blocked` and `terminal.flush blocked` (a write to the terminal that took over
+100ms) and `terminal.queue N frames waiting` (frames piling up behind a slow terminal) name a
+screen that is late while Régie itself is on time: every timer and animation inside Régie keeps
+running, but the human sees the result later.
+
 Local `startup.*` logs separate presentation, catalog, snapshot, unmanaged-pane,
 projection, usage, and event-read time. `first_frame`, `participants_ready`, and
 `ready` mark after-refresh milestones measured from app construction, excluding
