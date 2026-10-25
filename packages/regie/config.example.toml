@@ -23,7 +23,7 @@ bus_visible = false
 # The usage footer starts hidden; `$` or the palette toggles it for the session.
 usage_visible = false
 startup_reveal = true
-# Draw status changes, sends and waits without motion: instant states and steady tints.
+# Draw status changes, sends, waits, spawns and kills without motion: instant states.
 reduce_motion = false
 
 # The ambience: an animation in the empty space under the agent tree. Pick one:

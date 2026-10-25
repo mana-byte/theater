@@ -117,16 +117,23 @@ def test_retirement_controller_drops_candidate_without_a_mounted_width():
     assert controller.observe({}).retire == set()
 
 
-def test_retirement_controller_skips_user_requested_removal():
+def test_a_kill_lets_even_a_root_retire_with_the_animation():
     root = ("p", "root")
-    child = ("p", "child")
     controller = LeafRetirementController()
 
-    controller.observe({root: False, child: True})
-    controller.remove_without_animation(child)
+    controller.observe({root: False})
+    assert controller.observe({}).retire == set()  # a root leaving on its own is not announced
 
-    assert controller.observe({root: False}).retire == set()
-    assert not controller.active
+    controller.observe({root: False})
+    controller.allow(root)
+    assert controller.observe({}).retire == {root}
+
+
+def test_allowing_a_leaf_the_controller_has_not_seen_does_nothing():
+    controller = LeafRetirementController()
+    controller.allow(("p", "stranger"))
+    assert controller.observe({("p", "stranger"): False}).retire == set()
+    assert controller.observe({}).retire == set()
 
 
 def test_controller_skips_unusually_large_trees():

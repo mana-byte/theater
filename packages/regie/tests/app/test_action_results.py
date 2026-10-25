@@ -106,26 +106,41 @@ async def test_successful_durable_action_automatically_reconciles_the_tree(monke
 
 
 @pytest.mark.asyncio
-async def test_explicit_kill_removes_an_already_retiring_child() -> None:
+async def test_a_kill_retires_even_a_root_with_the_reverse_reveal() -> None:
     app, _client, _presentation = build_app()
-    child = make_participant("participant-3", name="child", parent_id="participant-1")
     state = cast(FakeState, app._state)
-    state.projection = replace(
-        state.projection, participants=MappingProxyType({child.participant_id: child})
-    )
     async with app.run_test() as pilot:
         await pilot.pause()
         tree = app.query_one(ParticipantTree)
         tree._leaf_retirement._enabled = True
-        state.projection = replace(state.projection, participants=MappingProxyType({}))
+        root = ("p", "participant-1")
+        others = {
+            key: item for key, item in state.projection.participants.items() if key != root[1]
+        }
+
+        await app.submit_termination(root[1])
+        state.projection = replace(state.projection, participants=MappingProxyType(others))
         app._show_projection(state.projection)
-        key = ("p", child.participant_id)
-        assert key in tree._retiring
-        tree.remove_without_animation(child.participant_id)
-        assert key not in tree._retiring
-        assert not tree._leaf_retirement.active
+        assert root in tree._retiring  # the row leaves with the animation, not instantly
+        assert tree._leaf_retirement.active
+
+
+@pytest.mark.asyncio
+async def test_a_root_that_leaves_without_a_kill_is_not_announced() -> None:
+    app, _client, _presentation = build_app()
+    state = cast(FakeState, app._state)
+    async with app.run_test() as pilot:
         await pilot.pause()
-        assert not tree.query(AgentLeaf)
+        tree = app.query_one(ParticipantTree)
+        tree._leaf_retirement._enabled = True
+        others = {
+            key: item
+            for key, item in state.projection.participants.items()
+            if key != "participant-1"
+        }
+        state.projection = replace(state.projection, participants=MappingProxyType(others))
+        app._show_projection(state.projection)
+        assert ("p", "participant-1") not in tree._retiring
 
 
 @pytest.mark.asyncio

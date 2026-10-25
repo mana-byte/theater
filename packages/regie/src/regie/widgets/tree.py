@@ -56,6 +56,8 @@ def _is_selectable_key(key: Key) -> bool:
 
 #: The sweep that announces a mark arriving on a row.
 _MARK_WIPE_COLORS = {
+    MarkKind.LAUNCHING: "$secondary",
+    MarkKind.TERMINATING: "$error",
     MarkKind.SENT: "$success",
     MarkKind.BLOCKED: "$warning",
     MarkKind.UNCERTAIN: "$warning",
@@ -121,8 +123,8 @@ class ParticipantTree(VerticalScroll):
         self._cursor_visible = True
         self._revision = 0
         self._animate_new: set[Key] = set()
-        self._leaf_reveal = LeafRevealController(enabled=startup_reveal)
-        self._leaf_retirement = LeafRetirementController(enabled=startup_reveal)
+        self._leaf_reveal = LeafRevealController(enabled=startup_reveal and motion)
+        self._leaf_retirement = LeafRetirementController(enabled=startup_reveal and motion)
         self._leaf_reveal_timer: Timer | None = None
         self._leaf_retirement_timer: Timer | None = None
         self._motion = motion
@@ -174,8 +176,8 @@ class ParticipantTree(VerticalScroll):
     def configure(self, *, startup_reveal: bool) -> None:
         if self._leaf_reveal.started:
             return
-        self._leaf_reveal = LeafRevealController(enabled=startup_reveal)
-        self._leaf_retirement = LeafRetirementController(enabled=startup_reveal)
+        self._leaf_reveal = LeafRevealController(enabled=startup_reveal and self._motion)
+        self._leaf_retirement = LeafRetirementController(enabled=startup_reveal and self._motion)
 
     def show_projection(
         self,
@@ -616,16 +618,9 @@ class ParticipantTree(VerticalScroll):
                 widget.set_reveal(None)
                 self._key_widgets[key] = widget
 
-    def remove_without_animation(self, participant_id: str) -> None:
-        """Suppress reverse reveal for a user-requested termination."""
-        key = ("p", participant_id)
-        self._leaf_retirement.remove_without_animation(key)
-        widget = self._retiring.pop(key, None)
-        if widget is not None:
-            self._retiring_predecessors.pop(key, None)
-            self._remove_widget(widget)
-        if not self._leaf_retirement.active:
-            self._stop_retirement()
+    def allow_retirement(self, participant_id: str) -> None:
+        """Let a participant leave with the reverse reveal, as a kill does for any row."""
+        self._leaf_retirement.allow(("p", participant_id))
 
     def _apply_retirement(self, frame: LeafRetirementFrame) -> None:
         for key, reveal in frame.widths.items():
@@ -677,13 +672,28 @@ class ParticipantTree(VerticalScroll):
         self._ensure_wipe_timer()
 
     def _observe_marks(self, marks: Mapping[str, RowMark]) -> None:
-        """Sweep a row whose operation just produced something worth announcing."""
-        for participant_id, mark in marks.items():
-            # What the first projection already carries happened before the human looked.
-            if self._mark_kinds is None or self._mark_kinds.get(participant_id) is mark.kind:
-                continue
-            if (color := _MARK_WIPE_COLORS.get(mark.kind)) is not None:
-                self._wipes.start(("p", participant_id), color)
+        """Sweep a row whose operation just produced something worth announcing.
+
+        A spawn starts cyan and ends green; a kill is red; a delivery green; a refusal yellow.
+        """
+        previous = self._mark_kinds
+        # What the first projection already carries happened before the human looked.
+        if previous is not None:
+            for participant_id, mark in marks.items():
+                if mark.kind is MarkKind.TERMINATING:
+                    self._leaf_retirement.allow(("p", participant_id))
+                if previous.get(participant_id) is not mark.kind and (
+                    color := _MARK_WIPE_COLORS.get(mark.kind)
+                ):
+                    self._wipes.start(("p", participant_id), color)
+            for participant_id, kind in previous.items():
+                # Up: a rolled-back spawn has no row left to sweep.
+                if (
+                    kind is MarkKind.LAUNCHING
+                    and participant_id not in marks
+                    and ("p", participant_id) in self._statuses
+                ):
+                    self._wipes.start(("p", participant_id), "$success")
         self._mark_kinds = {participant_id: mark.kind for participant_id, mark in marks.items()}
         self._ensure_wipe_timer()
 

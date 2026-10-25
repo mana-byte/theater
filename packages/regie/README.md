@@ -27,12 +27,14 @@ on the next start, stopping a bridge still running from it first.
 The tree is the whole interface; every signal is a state of something it already draws.
 
 - **Status glyph.** A spinner is an agent computing; `!` needs you (awaiting input); `✗` is
-  dead. A slow square quadrant `▘▝▗▖` is an agent blocked on a peer, in the colour of that wait; a ring
-  filling `○◔◑◕●` is a spawn starting, with the daemon's phase on the row's third line.
+  dead. A slow square quadrant `▘▝▗▖` is an agent blocked on a peer, in the colour of that
+  wait; a ring filling `○◔◑◕●` is a spawn starting, with the daemon's phase on the row's
+  third line; `✕` is a kill in flight.
 - **Bar.** A `▌` in the gutter marks a row that needs you; the newest three breathe.
-- **Sweep.** A block runs across a row when the agent starts needing you, dies or finishes a
-  turn, when a send lands on it, or when an operation aimed at it is delivered, blocked or
-  fails.
+- **Sweep.** A block runs across a row, in a colour that says what happened: cyan when a
+  spawn begins and green when it is up (or a turn finishes, or a send is delivered), red when
+  a kill begins or an agent dies, yellow when an agent needs you or an operation is blocked or
+  in doubt. A killed row then leaves with the reverse reveal, roots included.
 - **Sends and waits.** A send travels the rails as a comet in its sender's colour. Waits show
   `◂` on the agent being waited on (`◂2` for two); only a new wait and the selected row's waits
   draw their route.
@@ -43,7 +45,8 @@ The tree is the whole interface; every signal is a state of something it already
   section shows the worst state it hides.
 
 `reduce_motion = true` in `config.toml` keeps every signal and drops the motion: no sweeps,
-breathing or comets, and waits draw their route without a travelling head.
+breathing, comets or reveal and retire animations, and waits draw their route without a
+travelling head.
 
 ## Ambience plugins
 

@@ -23,7 +23,7 @@ from regie.ui_constants import (
     REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE,
 )
 from regie.formatting import harness_icon, short_id, tilde
-from regie.marks import MarkKind, RowMark
+from regie.marks import RowMark
 from regie.motions.pulse import working_harness_style
 from regie.motions.spinner import spinner_frame
 from regie.tree_nodes import RawRenderNode, RenderNode
@@ -126,7 +126,7 @@ def _status_glyph(
     quadrant in its await's colour instead: it is not computing, so it must not look like it is.
     """
     status = node.get("status", "?")
-    if (mark := _mark(node)) is not None and mark.kind is MarkKind.LAUNCHING:
+    if (mark := _mark(node)) is not None and mark.replaces_status:
         return mark.glyph, mark.style
     if waiting is not None and status in ("working", "idle"):
         return WAITING_FRAMES[frame // WAITING_STEP_FRAMES % len(WAITING_FRAMES)], waiting
@@ -318,7 +318,7 @@ def node_label(
     if awaited:
         row2_parts.append((f"  ◂{awaited if awaited > 1 else ''}", "$text-muted"))
     mark = _mark(view)
-    if mark is not None and mark.kind is not MarkKind.LAUNCHING:
+    if mark is not None and not mark.replaces_status:
         row2_parts.append((f"  {mark.glyph}", mark.style))
     if cost is not None and width is not None:
         gap = width - _parts_width(row2_parts) - _parts_width(cost)

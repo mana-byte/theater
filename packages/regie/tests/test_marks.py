@@ -136,7 +136,7 @@ def test_operations_are_attached_only_to_participants_on_screen():
 
 
 def test_other_operations_make_no_mark():
-    assert marks(operation("participants.terminate", "running", "accepted")) == {}
+    assert marks(operation("controls.settings_update", "running", "control_preparing")) == {}
 
 
 def test_old_operations_stop_marking_the_row():
@@ -153,3 +153,44 @@ def test_old_operations_stop_marking_the_row():
         )
         == {}
     )
+
+
+# ---- a kill ----------------------------------------------------------------
+
+
+def test_a_kill_in_flight_takes_the_status_glyph_and_asks_nothing_of_the_human():
+    mark = marks(operation("participants.terminate", "running", "termination_preparing"))["a"]
+    assert (mark.kind, mark.glyph, mark.detail) == (MarkKind.TERMINATING, "✕", "terminating")
+    assert mark.replaces_status and not mark.attention and not mark.needs_seen
+
+
+def test_a_verified_exit_leaves_no_mark_because_the_row_leaves():
+    assert marks(operation("participants.terminate", "succeeded", "exit_verified")) == {}
+
+
+def test_an_unverified_exit_is_in_doubt_not_failed():
+    mark = marks(operation("participants.terminate", "uncertain", "exit_unverified"))["a"]
+    assert (mark.kind, mark.glyph) == (MarkKind.UNCERTAIN, "?")
+    assert mark.detail == "uncertain · termination unconfirmed"
+
+
+@pytest.mark.parametrize(
+    ("code", "kind", "detail"),
+    [
+        ("not_your_child", MarkKind.FAILED, "failed · termination not_your_child"),
+        ("human_present", MarkKind.BLOCKED, "blocked · human present"),
+    ],
+)
+def test_a_refused_kill_says_why(code, kind, detail):
+    mark = marks(
+        operation("participants.terminate", "failed", "termination_refused", error_code=code)
+    )["a"]
+    assert (mark.kind, mark.detail) == (kind, detail)
+
+
+def test_a_kill_outranks_a_spawn_still_starting():
+    result = marks(
+        operation("spawn", "running", "launch_preparing", operation_id="spawn", age=20),
+        operation("participants.terminate", "running", "accepted", operation_id="kill", age=1),
+    )
+    assert result["a"].kind is MarkKind.TERMINATING

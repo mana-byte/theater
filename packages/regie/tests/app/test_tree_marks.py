@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from types import MappingProxyType
+
 import pytest
 from regie.widgets import ParticipantTree
 from regie.widgets.leaf import AgentLeaf
@@ -164,3 +167,73 @@ async def test_a_folded_heading_shows_a_hidden_agents_failed_operation(
         await wait_until(pilot, lambda: ("s", separator_id) in tree._key_widgets)
         heading = tree._key_widgets[("s", separator_id)]
         await wait_until(pilot, lambda: glyph in heading.render_line(1).text)
+
+
+async def test_a_spawn_sweeps_cyan_when_it_begins_and_green_when_it_is_up() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        leaf = _leaf(tree, "participant-2")
+
+        await _publish(
+            app,
+            pilot,
+            make_operation("spawn", "running", "launch_preparing", target="participant-2"),
+        )
+        await wait_until(pilot, lambda: leaf._wipe is not None)
+        assert leaf._wipe[1] == "$secondary"
+
+        await _publish(
+            app,
+            pilot,
+            make_operation("spawn", "succeeded", "terminal_bound", target="participant-2"),
+        )
+        await wait_until(pilot, lambda: leaf._wipe is not None and leaf._wipe[1] == "$success")
+
+
+async def test_a_kill_in_flight_sweeps_red_and_shows_that_it_is_terminating() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        leaf = _leaf(tree, "participant-2")
+
+        await _publish(
+            app,
+            pilot,
+            make_operation(
+                "participants.terminate", "running", "termination_preparing", target="participant-2"
+            ),
+        )
+        await wait_until(pilot, lambda: "✕" in _rows(leaf)[1])
+        assert _rows(leaf)[2].endswith("terminating")
+        await wait_until(pilot, lambda: leaf._wipe is not None)
+        assert leaf._wipe[1] == "$error"
+
+
+async def test_a_kill_seen_in_the_projection_lets_its_row_retire_with_the_animation() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        tree._leaf_retirement._enabled = True
+        await _publish(
+            app,
+            pilot,
+            make_operation("participants.terminate", "running", "accepted", target="participant-2"),
+        )
+        # An agent that killed it, not Régie: the projection is the only witness.
+        remaining = {
+            key: item
+            for key, item in app._state.projection.participants.items()
+            if key != "participant-2"
+        }
+        app._state.projection = replace(
+            app._state.projection, participants=MappingProxyType(remaining)
+        )
+        app._show_projection(app._state.projection)
+        assert ("p", "participant-2") in tree._retiring

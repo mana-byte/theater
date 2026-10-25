@@ -21,6 +21,7 @@ from theater.frontend.dto import OperationState
 
 class MarkKind(StrEnum):
     LAUNCHING = "launching"
+    TERMINATING = "terminating"
     QUEUED = "queued"
     SENT = "sent"
     BLOCKED = "blocked"
@@ -34,7 +35,8 @@ class _Rank(IntEnum):
     SENT = 0
     QUEUED = 1
     LAUNCHING = 2
-    OUTCOME = 3  # blocked, failed, uncertain: the human has to look
+    TERMINATING = 3
+    OUTCOME = 4  # blocked, failed, uncertain: the human has to look
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,9 +51,14 @@ class RowMark:
     expires_at: float | None = None
 
     @property
+    def replaces_status(self) -> bool:
+        """Whether the mark stands in for the row's status glyph, not after its name."""
+        return self.kind in {MarkKind.LAUNCHING, MarkKind.TERMINATING}
+
+    @property
     def needs_seen(self) -> bool:
         """Whether this mark stays until the human has looked at the row."""
-        return self.expires_at is None and self.kind not in {MarkKind.LAUNCHING, MarkKind.QUEUED}
+        return self.attention
 
     @property
     def attention(self) -> bool:
@@ -109,6 +116,15 @@ def _launch_mark(operation: Operation, now: float) -> RowMark | None:
     return _outcome_mark(operation, now, subject="launch")
 
 
+def _terminate_mark(operation: Operation, now: float) -> RowMark | None:
+    """A kill in flight, then its failure or doubt; a verified exit takes the row with it."""
+    if operation.state in _IN_FLIGHT:
+        if now - _stamp(operation) > REGIE_MARK_ACTIVE_MAX_SECONDS:
+            return None
+        return RowMark(MarkKind.TERMINATING, operation.operation_id, "✕", "$error", "terminating")
+    return _outcome_mark(operation, now, subject="termination")
+
+
 def _send_mark(operation: Operation, now: float) -> RowMark | None:
     state = operation.state
     if state in _IN_FLIGHT:
@@ -160,6 +176,7 @@ def _rank(mark: RowMark) -> _Rank:
         return _Rank.OUTCOME
     return {
         MarkKind.LAUNCHING: _Rank.LAUNCHING,
+        MarkKind.TERMINATING: _Rank.TERMINATING,
         MarkKind.QUEUED: _Rank.QUEUED,
         MarkKind.SENT: _Rank.SENT,
     }[mark.kind]
@@ -180,6 +197,8 @@ def row_marks(
     for operation in operations:
         if operation.kind == "spawn":
             mark = _launch_mark(operation, now)
+        elif operation.kind == "participants.terminate":
+            mark = _terminate_mark(operation, now)
         elif operation.kind in _SEND_KINDS:
             mark = _send_mark(operation, now)
         else:

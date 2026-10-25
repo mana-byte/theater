@@ -55,7 +55,6 @@ class ActionTracking(_AppBase):
                 return
             participant_id = record.participant_id
             if record.action == "terminate" and participant_id is not None:
-                self.query_one(ParticipantTree).remove_without_animation(participant_id)
                 projection = self._state.projection
                 if (
                     projection is not None
