@@ -128,6 +128,18 @@ def test_a_canary_the_suite_missed_is_a_failure(
     assert check.status == "fail" and "manual-as-yolo" in check.detail
 
 
+def test_a_missed_canary_reports_which_obligations_were_not_as_expected(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    line = "tests/conformance/canaries/test_canaries.py:93: AssertionError: {'mcp:call': 'fail'}"
+    seen = _pytest(monkeypatch, 1, f"{'.' * 800}\n{line}\nFAILED x::test\n1 failed")
+
+    check = canaries.run_canaries(repo, _Adapter())  # type: ignore[arg-type]
+
+    assert "{'mcp:call': 'fail'}" in check.detail
+    assert "--tb=line" in seen[0]["argv"]
+
+
 @pytest.mark.parametrize(
     ("returncode", "stdout", "needle"),
     [(0, "6 skipped in 2s", "no canary applied"), (4, "usage: pytest", "pytest exit 4")],

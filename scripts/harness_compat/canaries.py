@@ -79,6 +79,7 @@ def run_canaries(
                 "no:cacheprovider",
                 "-n",
                 _PARALLEL_WORKERS,
+                "--tb=line",
                 CANARIES_TARGET,
             ]
             run = run_group(argv, cwd=tree, env=env, timeout=timeout)
@@ -87,7 +88,8 @@ def run_canaries(
     if run.returncode == 0 and tally.get("passed", 0) > 0:
         return Check("canaries", "pass", shown)
     if run.returncode == 1:
-        return Check("canaries", "fail", f"{shown}; {_tail(run.stdout)}")
+        # One line per failure (its assertion message names what the suite did not notice).
+        return Check("canaries", "fail", f"{shown}; {clip_diagnostic(run.stdout, 1500, tail=True)}")
     if run.returncode == 0:
         return Check("canaries", "error", f"{shown}; no canary applied to this harness")
     return Check(
