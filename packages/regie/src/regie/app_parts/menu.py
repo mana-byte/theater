@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import replace
 from functools import partial
 
+from textual.binding import Binding
+
 from regie.app_parts._shared import _AppBase
 from regie.formatting import harness_icon, short_identifier, tilde
 from regie.menu import ROOT_ID, Loaded, MenuItem, find_item
@@ -17,6 +19,9 @@ from regie.spawn import SpawnChoice
 from regie.ui_constants import REGIE_MENU_MORE_ID, REGIE_MENU_PREVIEW_ROWS
 from regie.widgets import ParticipantTree
 from theater.frontend import TranscriptCandidate
+
+#: Textual's names for the keys the menu shows as the characters they type.
+_KEY_NAMES = {"minus": "-", "dollar_sign": "$", "slash": "/"}
 
 
 class MenuActions(_AppBase):
@@ -44,6 +49,14 @@ class MenuActions(_AppBase):
 
     # ---- what the menu holds -------------------------------------------------------------
 
+    def _menu_shortcut(self, action: str) -> str | None:
+        """The key bound to *action*, as the menu shows it: read from the bindings, not restated."""
+        for binding in self.BINDINGS:
+            if isinstance(binding, Binding) and binding.action == action:
+                key = binding.key.split(",")[0]
+                return _KEY_NAMES.get(key, key)
+        return None
+
     def _menu_items(self) -> tuple[MenuItem, ...]:
         """The options, built fresh from the app's own state each time the menu is drawn."""
         origin = self._menu_tree().menu_return
@@ -64,12 +77,14 @@ class MenuActions(_AppBase):
                 "Hide bus panel" if self.bus_visible else "Show bus panel",
                 "coordination traffic between agents",
                 run=self.action_toggle_bus,
+                shortcut=self._menu_shortcut("toggle_bus"),
             ),
             MenuItem(
                 "usage",
                 "Hide usage footer" if self.usage_visible else "Show usage footer",
                 "tokens and cost",
                 run=self.action_toggle_usage,
+                shortcut=self._menu_shortcut("toggle_usage"),
             ),
         ]
         if retry is not None:
@@ -83,7 +98,13 @@ class MenuActions(_AppBase):
             )
         items += [
             self._menu_theme(),
-            MenuItem("quit", "Quit", "restore the terminals and leave", run=self.action_quit),
+            MenuItem(
+                "quit",
+                "Quit",
+                "restore the terminals and leave",
+                run=self.action_quit,
+                shortcut=self._menu_shortcut("quit"),
+            ),
         ]
         return tuple(items)
 
@@ -204,7 +225,13 @@ class MenuActions(_AppBase):
                 tuple(self._menu_harness(choice) for choice in self._spawn_choices()),
                 note="no harness is installed",
             )
-        return MenuItem("spawn", "Spawn", "start a fresh session", choices=choices)
+        return MenuItem(
+            "spawn",
+            "Spawn",
+            "start a fresh session",
+            choices=choices,
+            shortcut=self._menu_shortcut("spawn"),
+        )
 
     def _menu_harness(self, choice: SpawnChoice) -> MenuItem:
         icon = self.icon_for_harness(choice.harness) or harness_icon(choice.harness)
@@ -225,6 +252,7 @@ class MenuActions(_AppBase):
             "a named divider above the row you came from" if fits else "needs an agent or heading",
             enabled=fits,
             run=self.action_add_separator,
+            shortcut=self._menu_shortcut("add_separator"),
         )
 
     # ---- keys and clicks ------------------------------------------------------------------

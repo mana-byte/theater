@@ -114,3 +114,15 @@ def test_a_long_help_is_cut_with_an_ellipsis_until_it_scrolls_in_a_window():
     assert label_rows(cut)[2].endswith("…") and len(label_rows(cut)[2]) <= 40
     third = [label_rows(label)[2] for label in moving]
     assert third[0] != third[2] and all("…" not in row for row in third)  # a window, not a cut
+
+
+def test_an_option_wears_its_shortcut_after_the_title_and_cuts_the_title_to_keep_it():
+    item = MenuItem("bus", "Show the bus panel", "traffic", shortcut="v")
+    node = menu_nodes((item,), MenuView(), open=True)["children"][0]
+
+    assert (
+        label_rows(menu_label(node, "    └── ", "        "))[1]
+        == "    └── · Show the bus panel · v"
+    )
+    narrow = label_rows(menu_label(node, "    └── ", "        ", width=24))[1]
+    assert narrow.endswith("… · v") and len(narrow) <= 24

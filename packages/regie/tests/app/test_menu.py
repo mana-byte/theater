@@ -355,3 +355,28 @@ async def test_a_long_help_scrolls_on_the_row_in_focus_and_settles_when_it_leave
         tree.select_key(("m", "quit"))
         await wait_until(pilot, lambda: row._marquee_sub is None)
         assert _row(tree, ("m", "bus"))[2] == resting and row._marquee_offset == 0
+
+
+@pytest.mark.asyncio
+async def test_an_option_shows_the_key_that_does_the_same_read_from_the_bindings() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.select("participant-1")
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "bus") in tree._key_widgets)
+
+        shortcuts = {item.id: item.shortcut for item in app._menu_items()}
+        assert shortcuts == {
+            "spawn": "o",
+            "resume": None,
+            "transcript": None,
+            "separator": "-",
+            "bus": "v",
+            "usage": "$",
+            "theme": None,
+            "quit": "q",
+        }
+        await wait_until(pilot, lambda: tree._key_widgets[("m", "bus")].size.height == 3)
+        assert "Show bus panel · v" in _row(tree, ("m", "bus"))[1]

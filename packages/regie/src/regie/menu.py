@@ -41,6 +41,8 @@ class MenuItem:
     choices: Loaded | None = None
     #: A pick that leaves the menu open (a theme, to be compared with the next).
     keeps_menu: bool = False
+    #: The key that does the same from anywhere, shown beside the title.
+    shortcut: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +85,8 @@ def _row(item: MenuItem, path: str, chevron: str | None) -> RawRenderNode:
     }
     if chevron:
         row["chevron"] = chevron
+    if item.shortcut:
+        row["shortcut"] = item.shortcut
     return row
 
 

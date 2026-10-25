@@ -40,7 +40,9 @@ def menu_label(
         if chevron
         else (node.get("glyph") or " ", node.get("style") or "$text")
     )
-    title = _fit(node.get("title", ""), prefix, width, 2)
+    shortcut = node.get("shortcut")
+    key = [(" · ", _RAIL), (shortcut, "$text dim")] if shortcut else []
+    title = _fit(node.get("title", ""), prefix, width, 2 + sum(len(text) for text, _ in key))
     help_text = node.get("help") or ""
     if width is not None:
         room = help_room(cont_prefix, width)
@@ -55,6 +57,7 @@ def menu_label(
         (prefix, _RAIL),
         (f"{glyph} ", glyph_style + dim),
         (title, f"$text{dim}"),
+        *key,
         "\n",
         (cont_prefix, _RAIL),
         ("  ", ""),
