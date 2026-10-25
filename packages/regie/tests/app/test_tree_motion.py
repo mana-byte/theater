@@ -170,3 +170,20 @@ async def test_reduced_motion_sends_no_comet_and_flashes_nothing() -> None:
         await pilot.pause(0.3)
         assert not app._animation.has_active()
         assert _leaf(tree, "participant-2")._wipe is None
+
+
+async def test_death_sweeps_at_twice_the_pace_of_the_other_announcements() -> None:
+    from regie.ui_constants import REGIE_WIPE_DEATH_SECONDS, REGIE_WIPE_SECONDS
+
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+
+        await _change(app, pilot, "participant-1", "awaiting_input")
+        await _change(app, pilot, "participant-2", "dead")
+        needs_you = tree._wipes._sweeps[("p", "participant-1")]
+        died = tree._wipes._sweeps[("p", "participant-2")]
+        assert (needs_you.seconds, died.seconds) == (REGIE_WIPE_SECONDS, REGIE_WIPE_DEATH_SECONDS)
+        assert REGIE_WIPE_DEATH_SECONDS <= REGIE_WIPE_SECONDS / 2

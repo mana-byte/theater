@@ -31,6 +31,7 @@ from regie.ui_constants import (
     REGIE_EMPTY_TREE_KEY,
     REGIE_MARK_SEEN_SECONDS,
     REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
+    REGIE_WIPE_DEATH_SECONDS,
     REGIE_WIPE_INTERVAL_SECONDS,
 )
 from regie.widgets.chrome import EmptyTreeState
@@ -55,12 +56,12 @@ def _is_selectable_key(key: Key) -> bool:
 
 
 #: The sweep that announces a mark arriving on a row.
-_MARK_WIPE_COLORS = {
-    MarkKind.TERMINATING: "$error",
-    MarkKind.SENT: "$success",
-    MarkKind.BLOCKED: "$warning",
-    MarkKind.UNCERTAIN: "$warning",
-    MarkKind.FAILED: "$error",
+_MARK_WIPES: dict[MarkKind, tuple[str, float | None]] = {
+    MarkKind.TERMINATING: ("$error", REGIE_WIPE_DEATH_SECONDS),
+    MarkKind.SENT: ("$success", None),
+    MarkKind.BLOCKED: ("$warning", None),
+    MarkKind.UNCERTAIN: ("$warning", None),
+    MarkKind.FAILED: ("$error", None),
 }
 
 
@@ -584,7 +585,8 @@ class ParticipantTree(VerticalScroll):
         departed = {key for key in self._key_widgets if key[0] == "p" and key not in current}
         for key in departed & self._kills:
             if not self._wipes.has(key):
-                self._wipes.start(key, "$error")  # a kill too quick for its mark to be seen
+                # A kill too quick for its mark to be seen.
+                self._wipes.start(key, "$error", seconds=REGIE_WIPE_DEATH_SECONDS)
         self._kills -= departed
         held = {key for key in departed if self._wipes.has(key)}
         self._wipes.cancel(departed - held)
@@ -700,7 +702,9 @@ class ParticipantTree(VerticalScroll):
             if previous is None or previous == status:
                 continue
             if (color := status_wipe_color(previous, status)) is not None:
-                self._wipes.start(key, color)
+                self._wipes.start(
+                    key, color, seconds=REGIE_WIPE_DEATH_SECONDS if status == "dead" else None
+                )
         now = time.monotonic()
         self._attention_since = {
             key: self._attention_since.get(key, now)
@@ -723,9 +727,9 @@ class ParticipantTree(VerticalScroll):
                 if mark.kind is MarkKind.TERMINATING:
                     self._leaf_retirement.allow(("p", participant_id))
                 if previous.get(participant_id) is not mark.kind and (
-                    color := _MARK_WIPE_COLORS.get(mark.kind)
+                    wipe := _MARK_WIPES.get(mark.kind)
                 ):
-                    self._wipes.start(("p", participant_id), color)
+                    self._wipes.start(("p", participant_id), wipe[0], seconds=wipe[1])
             for participant_id, kind in previous.items():
                 # Up: a rolled-back spawn has no row left to sweep.
                 if (

@@ -74,6 +74,7 @@ class WipeFrame:
 class _Sweep:
     color: str
     started: float
+    seconds: float
 
 
 class LeafWipeController:
@@ -81,7 +82,7 @@ class LeafWipeController:
 
     def __init__(self, *, enabled: bool = True, seconds: float = REGIE_WIPE_SECONDS) -> None:
         self._enabled = enabled
-        self._seconds = seconds
+        self._seconds = seconds  # a sweep's length unless its start names one
         self._sweeps: dict[Key, _Sweep] = {}
 
     @property
@@ -92,9 +93,15 @@ class LeafWipeController:
         """Whether a sweep is still running on *key*."""
         return key in self._sweeps
 
-    def start(self, key: Key, color: str, *, now: float | None = None) -> None:
+    def start(
+        self, key: Key, color: str, *, seconds: float | None = None, now: float | None = None
+    ) -> None:
         if self._enabled:
-            self._sweeps[key] = _Sweep(color, time.monotonic() if now is None else now)
+            self._sweeps[key] = _Sweep(
+                color,
+                time.monotonic() if now is None else now,
+                self._seconds if seconds is None else seconds,
+            )
 
     def cancel(self, keys: Collection[Key]) -> None:
         for key in keys:
@@ -105,7 +112,7 @@ class LeafWipeController:
         running: dict[Key, Wipe] = {}
         finished: set[Key] = set()
         for key, sweep in list(self._sweeps.items()):
-            progress = (current - sweep.started) / self._seconds
+            progress = (current - sweep.started) / sweep.seconds
             if progress >= 1:
                 del self._sweeps[key]
                 finished.add(key)

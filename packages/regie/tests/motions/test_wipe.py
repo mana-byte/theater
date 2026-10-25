@@ -104,3 +104,13 @@ def test_disabled_controller_never_sweeps():
     controller = LeafWipeController(enabled=False)
     controller.start(KEY, "$warning", now=0.0)
     assert not controller.active
+
+
+def test_a_sweep_can_name_its_own_length_and_a_replacement_takes_the_new_one():
+    controller = LeafWipeController()
+    controller.start(KEY, "$error", seconds=0.2, now=0.0)
+    assert controller.tick(now=0.1).running == {KEY: (0.5, "$error")}
+    assert controller.tick(now=0.2).finished == {KEY}
+
+    controller.start(KEY, "$error", now=0.0)  # no length named: the default one
+    assert controller.tick(now=0.2).running[KEY][0] == 0.2 / REGIE_WIPE_SECONDS

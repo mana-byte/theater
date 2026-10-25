@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
+from regie.ui_constants import REGIE_WIPE_DEATH_SECONDS
 from regie.widgets import ParticipantTree
 from regie.widgets.leaf import AgentLeaf
 
@@ -228,6 +229,7 @@ async def test_a_kill_in_flight_sweeps_red_and_shows_that_it_is_terminating() ->
         assert _rows(leaf)[2].endswith("terminating")
         await wait_until(pilot, lambda: leaf._wipe is not None)
         assert leaf._wipe[1] == "$error"
+        assert tree._wipes._sweeps[("p", "participant-2")].seconds == REGIE_WIPE_DEATH_SECONDS
 
 
 def _without(app, participant_id: str) -> None:
@@ -284,6 +286,7 @@ async def test_a_kill_too_quick_for_its_mark_still_sweeps_red_before_the_row_goe
         assert key in tree._held
         await wait_until(pilot, lambda: leaf._wipe is not None)
         assert leaf._wipe[1] == "$error"
+        assert tree._wipes._sweeps[key].seconds == REGIE_WIPE_DEATH_SECONDS
         await wait_until(pilot, lambda: key not in tree._retiring)
 
 

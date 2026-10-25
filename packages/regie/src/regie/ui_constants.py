@@ -154,6 +154,8 @@ REGIE_STARTUP_REVEAL_MAX_LEAVES = 100
 #: reversed leading block and the bold wake behind it. Foreground styles only: an ANSI theme
 #: cannot blend a background tint, it would paint the whole row solid.
 REGIE_WIPE_SECONDS = 0.5
+#: Death is abrupt: a kill's sweep, and an agent dying, run at half the pace of the rest.
+REGIE_WIPE_DEATH_SECONDS = 0.25
 REGIE_WIPE_INTERVAL_SECONDS = 0.035
 REGIE_WIPE_BAND_CELLS = 3
 REGIE_WIPE_WAKE_CELLS = 6
