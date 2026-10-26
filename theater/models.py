@@ -285,6 +285,18 @@ class TerminalBindingRecord:
     updated_at: float
     process_facts: Mapping[str, object] | None = None
 
+    @property
+    def route_key(self) -> tuple[object, ...]:
+        """The physical identity; revision, health and timestamps churn on every report."""
+        return (
+            self.provider_id,
+            self.provider_generation,
+            self.terminal_id,
+            self.terminal_incarnation,
+            dict(self.occupant_evidence),
+            None if self.process_facts is None else dict(self.process_facts),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PublicOperationRecord:

@@ -137,7 +137,7 @@ class ProviderPresenceSource:
             return False
         return (
             binding is not None
-            and observation.binding_key == self._binding_key(binding)
+            and observation.binding_key == binding.route_key
             and self._clock() - observation.observed_mono <= max_age
         )
 
@@ -184,7 +184,7 @@ class ProviderPresenceSource:
         observation = self._observations.get(participant_id)
         if (
             observation is not None
-            and observation.binding_key == self._binding_key(binding)
+            and observation.binding_key == binding.route_key
             and observation.reason == "terminal-exited"
         ):
             return PresenceSnapshot(
@@ -209,7 +209,7 @@ class ProviderPresenceSource:
             )
         if observation is None:
             return PresenceSnapshot(PresenceState.UNKNOWN, "provider-not-observed", revision, None)
-        if observation.binding_key != self._binding_key(binding):
+        if observation.binding_key != binding.route_key:
             return PresenceSnapshot(
                 PresenceState.UNKNOWN, "terminal-binding-changed", revision, None
             )
@@ -241,7 +241,7 @@ class ProviderPresenceSource:
             or service.connections.health(binding.provider_id) != "online"
             or binding.health != "healthy"
             or observation is None
-            or observation.binding_key != self._binding_key(binding)
+            or observation.binding_key != binding.route_key
             or self._clock() - observation.observed_mono > stale_after
         ):
             return None
@@ -363,7 +363,7 @@ class ProviderPresenceSource:
         return (
             type(stale_revision) is int
             and observation is not None
-            and observation.binding_key == self._binding_key(binding)
+            and observation.binding_key == binding.route_key
             and observation.report_revision is not None
             and observation.report_revision > stale_revision
         )
@@ -389,7 +389,7 @@ class ProviderPresenceSource:
         if (
             current is None
             or service is None
-            or not self._same_route(expected, current)
+            or expected.route_key != current.route_key
             or not service.connections.is_current(current.provider_id, current.provider_generation)
             or service.connections.health(current.provider_id) != "online"
             or current.health != "healthy"
@@ -408,7 +408,7 @@ class ProviderPresenceSource:
         prior = self._observations.get(participant_id)
         if (
             prior is not None
-            and prior.binding_key == self._binding_key(current)
+            and prior.binding_key == current.route_key
             and (
                 revision < prior.presence_revision
                 or (revision == prior.presence_revision and state_value != prior.state.value)
@@ -443,7 +443,7 @@ class ProviderPresenceSource:
             )
             if self._exit_handler is None or not await self._handle_exit(evidence):
                 self._observations[participant_id] = _Observation(
-                    self._binding_key(current),
+                    current.route_key,
                     PresenceState.UNKNOWN,
                     "terminal-exit-unsettled",
                     report_revision,
@@ -456,7 +456,7 @@ class ProviderPresenceSource:
             state_value = PresenceState.ABSENT.value
             reason = "terminal-exited"
         self._observations[participant_id] = _Observation(
-            self._binding_key(current),
+            current.route_key,
             PresenceState(state_value),
             reason,
             report_revision,
@@ -483,11 +483,11 @@ class ProviderPresenceSource:
         prior = self._observations.get(participant_id)
         presence_revision = (
             prior.presence_revision
-            if prior is not None and prior.binding_key == self._binding_key(binding)
+            if prior is not None and prior.binding_key == binding.route_key
             else 0
         )
         self._observations[participant_id] = _Observation(
-            self._binding_key(binding),
+            binding.route_key,
             PresenceState.UNKNOWN,
             reason,
             None,
@@ -495,23 +495,6 @@ class ProviderPresenceSource:
             self._wall_clock(),
             self._clock(),
             None,
-        )
-
-    @staticmethod
-    def _binding_key(binding: TerminalBindingRecord) -> tuple[object, ...]:
-        return (
-            binding.provider_id,
-            binding.provider_generation,
-            binding.terminal_id,
-            binding.terminal_incarnation,
-            dict(binding.occupant_evidence),
-            None if binding.process_facts is None else dict(binding.process_facts),
-        )
-
-    @staticmethod
-    def _same_route(left: TerminalBindingRecord, right: TerminalBindingRecord) -> bool:
-        return ProviderPresenceSource._binding_key(left) == ProviderPresenceSource._binding_key(
-            right
         )
 
     @staticmethod

@@ -367,6 +367,73 @@ async def test_inspect_snapshot_does_not_stale_a_delayed_heartbeat(
         store.close()
 
 
+async def test_inspect_ignores_a_report_that_only_reconfirms_its_binding(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = _Store(tmp_path / "inspect-reconfirm.db")
+    service = _service(store, _Clock(10.0))
+    try:
+        _register(service)
+        generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+        _bind_terminal(store, generation=generation)
+
+        async def request(_provider_id, current_generation, _method, _params):
+            # An inventory report lands while the inspect is in flight: same terminal, new revision.
+            service.report(
+                "provider-a",
+                current_generation,
+                4,
+                {"terminals": [_identity(current_generation)], "complete": True},
+            )
+            return {
+                "provider_generation": current_generation,
+                "report_revision": 5,
+                "terminal": _identity(current_generation),
+                "presence": {"state": "absent", "revision": 1},
+            }
+
+        monkeypatch.setattr(service.connections, "request", request)
+        await service.inspect("provider-a", generation, "terminal-a", "incarnation-a")
+        assert store.terminal_bindings.get("participant-a").report_revision == 5
+    finally:
+        store.close()
+
+
+async def test_inspect_refuses_a_binding_that_moved_while_in_flight(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = _Store(tmp_path / "inspect-moved.db")
+    service = _service(store, _Clock(10.0))
+    try:
+        _register(service)
+        generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+        _bind_terminal(store, generation=generation)
+
+        async def request(_provider_id, current_generation, _method, _params):
+            with store.write_unit() as unit:
+                store.terminal_bindings.restore_generation(
+                    "participant-a",
+                    previous_generation=generation,
+                    provider_generation=generation + 1,
+                    report_revision=4,
+                    health="healthy",
+                    updated_at=11.0,
+                    connection=unit.connection,
+                )
+            return {
+                "provider_generation": current_generation,
+                "report_revision": 5,
+                "terminal": _identity(current_generation),
+                "presence": {"state": "absent", "revision": 1},
+            }
+
+        monkeypatch.setattr(service.connections, "request", request)
+        with pytest.raises(TerminalIdentityMismatch, match="binding_changed"):
+            await service.inspect("provider-a", generation, "terminal-a", "incarnation-a")
+    finally:
+        store.close()
+
+
 def test_report_restores_only_an_exact_terminal_identity(tmp_path: Path) -> None:
     store = _Store(tmp_path / "bindings.db")
     clock = _Clock(10.0)
