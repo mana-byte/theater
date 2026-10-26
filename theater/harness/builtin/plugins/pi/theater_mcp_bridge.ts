@@ -31,10 +31,6 @@ const OWNER = Symbol.for("theater.pi.mcp-bridge.owner");
 const STARTUP_TIMEOUT_MS = 10_000;
 const MAX_FRAME_CHARS = 1024 * 1024;
 const CORE_MCP_SERVERS = new Set(["theater", "theater_wait"]);
-const IDLE_STATUS_KEY = "theater.pi.idle";
-const IDLE_STATUS_TEXT = "Theater: idle";
-const AWAITING_STATUS_KEY = "theater.pi.awaiting";
-const AWAITING_STATUS_TEXT = "Theater: awaiting input";
 const SWITCH_MARKER = ".theater-pi-switch.json";
 const SWITCHES_DIR = ".theater-pi-switches";
 const SWITCH_MARKER_VERSION = 1;
@@ -233,18 +229,7 @@ function releaseBridge(lease: symbol): void {
 	if (owners[OWNER] === lease) delete owners[OWNER];
 }
 
-function clearIdleStatus(ctx: ExtensionContext): void {
-	ctx.ui.setStatus(IDLE_STATUS_KEY, undefined);
-}
-
-function showIdleStatus(ctx: ExtensionContext): void {
-	if (ctx.isIdle()) ctx.ui.setStatus(IDLE_STATUS_KEY, IDLE_STATUS_TEXT);
-}
-
-// Tools whose execution parks Pi on a human decision mid-turn: the
-// question UI is up, the turn is open, and no spinner runs.  Permission
-// prompts Pi renders itself have no extension event, so only tools count
-// here; add tool names to this set when Theater layers on more.
+// User-input tools can park a running turn on a human decision.
 const AWAITING_INPUT_TOOLS = new Set(["ask_user_question"]);
 const awaitingToolCalls = new Map<string, string>();
 
@@ -271,70 +256,29 @@ function pendingInteractionDescription(): {
 	};
 }
 
-function clearAwaitingStatus(ctx: ExtensionContext): void {
-	ctx.ui.setStatus(AWAITING_STATUS_KEY, undefined);
-}
+function registerPendingInteractions(pi: ExtensionAPI): void {
+	// Turn boundaries discard questions abandoned without a matching tool result.
+	const clearPendingInteractions = (): void => awaitingToolCalls.clear();
+	pi.on("session_start", clearPendingInteractions);
+	pi.on("before_agent_start", clearPendingInteractions);
+	pi.on("agent_start", clearPendingInteractions);
+	pi.on("agent_settled", clearPendingInteractions);
 
-function showAwaitingStatus(ctx: ExtensionContext): void {
-	ctx.ui.setStatus(AWAITING_STATUS_KEY, AWAITING_STATUS_TEXT);
-}
-
-function registerIdleStatus(pi: ExtensionAPI): void {
-	// Pi's status lifecycle, rather than its static screen chrome, is the
-	// authority for an idle reading.  `agent_settled` includes retries,
-	// compaction/retry, and queued continuations.
-	const clearStatuses = (ctx: ExtensionContext): void => {
-		awaitingToolCalls.clear();
-		clearIdleStatus(ctx);
-		clearAwaitingStatus(ctx);
-	};
-	pi.on("session_start", (_event, ctx) => {
-		awaitingToolCalls.clear();
-		clearAwaitingStatus(ctx);
-		showIdleStatus(ctx);
-	});
-	pi.on("before_agent_start", (_event, ctx) => clearStatuses(ctx));
-	pi.on("agent_start", (_event, ctx) => clearStatuses(ctx));
-	pi.on("agent_settled", (_event, ctx) => {
-		awaitingToolCalls.clear();
-		clearAwaitingStatus(ctx);
-		showIdleStatus(ctx);
-	});
-
-	// A user-input tool call parks Pi on a human decision mid-turn.  The footer
-	// is the display contract the screen classifier reads, and the frontend
-	// bridge reports the same fact as a pending interaction so the daemon's
-	// live channel can carry it.  Both clear on the matching tool_result (the
-	// human answered, or cancelled) and on every turn boundary above, so a
-	// question abandoned any other way cannot leave a stale marker behind.
-	pi.on("tool_call", (event, ctx) => {
+	pi.on("tool_call", (event) => {
 		if (!AWAITING_INPUT_TOOLS.has(event.toolName)) return;
 		awaitingToolCalls.set(event.toolCallId, event.toolName);
-		showAwaitingStatus(ctx);
 		notifyInteractionChanged();
 	});
-	pi.on("tool_result", (event, ctx) => {
+	pi.on("tool_result", (event) => {
 		if (!awaitingToolCalls.delete(event.toolCallId)) return;
-		if (awaitingToolCalls.size === 0) clearAwaitingStatus(ctx);
 		notifyInteractionChanged();
 	});
 
-	// These operations can run without an agent lifecycle event.  Clear first
-	// so a custom or hidden working indicator cannot leave an old idle marker
-	// on the screen, then restore only when Pi itself reports it is idle.
-	pi.on("session_before_compact", (_event, ctx) => clearStatuses(ctx));
-	pi.on("session_compact", (_event, ctx) => {
-		awaitingToolCalls.clear();
-		clearAwaitingStatus(ctx);
-		showIdleStatus(ctx);
-	});
-	pi.on("session_before_tree", (_event, ctx) => clearStatuses(ctx));
-	pi.on("session_tree", (_event, ctx) => {
-		awaitingToolCalls.clear();
-		clearAwaitingStatus(ctx);
-		showIdleStatus(ctx);
-	});
-	pi.on("session_shutdown", (_event, ctx) => clearStatuses(ctx));
+	pi.on("session_before_compact", clearPendingInteractions);
+	pi.on("session_compact", clearPendingInteractions);
+	pi.on("session_before_tree", clearPendingInteractions);
+	pi.on("session_tree", clearPendingInteractions);
+	pi.on("session_shutdown", clearPendingInteractions);
 }
 
 function removeSwitchMarker(ctx: ExtensionContext): void {
@@ -2458,7 +2402,7 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 	registerFrontendBridge(pi);
 	const launchConfigPath = configFlag(process.argv);
 	if (launchConfigPath?.trim()) {
-		registerIdleStatus(pi);
+		registerPendingInteractions(pi);
 		registerTranscriptSwitches(pi);
 		registerLifecycleMarkers(pi);
 	}
@@ -2482,7 +2426,7 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 		throw new Error("--theater-mcp-config requires a configuration path");
 	}
 	if (!launchConfigPath) {
-		registerIdleStatus(pi);
+		registerPendingInteractions(pi);
 		registerTranscriptSwitches(pi);
 		registerLifecycleMarkers(pi);
 	}

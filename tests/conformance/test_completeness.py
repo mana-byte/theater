@@ -71,6 +71,8 @@ def test_a_shipped_harness_derives_obligations_only_from_what_it_declares(name: 
     )
     assert "turn:prompt" in derived
     assert ("runtime:survival" in derived) is (harness.runtime is not None)
+    if harness.runtime is not None:
+        assert ("runtime:legacy" in derived) is harness.observer.has_screen
 
 
 @pytest.mark.parametrize("name", SHIPPED)
@@ -214,7 +216,7 @@ def test_a_declared_unavailable_capability_becomes_one_refusal_obligation() -> N
     } <= opencode
     assert "steer:refused" in opencode
     assert "runtime:unavailable-steer" not in opencode | pi, "steer is proven by its own family"
-    assert {"runtime:native", "runtime:survival", "runtime:legacy", "steer:refused"} <= pi
+    assert {"runtime:native", "runtime:survival", "steer:refused"} <= pi
     assert not any(
         item.startswith("runtime:") for item in {i.id for i in required(HARNESSES["vibe"])}
     )

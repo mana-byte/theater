@@ -115,6 +115,7 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
 
     assert isinstance(harness, Harness)
     assert isinstance(harness.observer, HarnessObserver)
+    assert harness.observer.has_screen is True
     assert supports_model(harness)
     assert supports_reasoning(harness)
     assert supports_resume(harness)
@@ -163,6 +164,18 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
     assert seen_resume == [
         ResumeContext(predecessor=predecessor, trusted_session_owners=(predecessor, owner))
     ]
+
+
+def test_a_manifest_without_a_screen_compiles_to_unknown_readings() -> None:
+    built = manifest()
+    built = replace(built, observation=replace(built.observation, screen=None))
+    harness = compile_manifest("acme", built)
+
+    assert harness.observer.has_screen is False
+    assert harness.observer.screen_reading("ready> ") == ScreenReading(
+        ScreenKind.UNKNOWN, ScreenConfidence.LOW
+    )
+    assert harness.observer.is_idle_screen("❯") is False
 
 
 @pytest.mark.parametrize(

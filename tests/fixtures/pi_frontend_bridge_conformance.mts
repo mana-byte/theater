@@ -103,10 +103,6 @@ class FakeContext {
 	hasPendingMessages(): boolean {
 		return this.api.pending;
 	}
-
-	get ui(): { setStatus(key: string, text: string | undefined): void } {
-		return { setStatus: (key, text) => this.api.statuses.set(key, text) };
-	}
 }
 
 interface FakeModel {
@@ -125,7 +121,6 @@ class FakeExtensionApi {
 	sendCalls = 0;
 	deferSendSettle = false;
 	readonly authGate = new Deferred<void>();
-	readonly statuses = new Map<string, string | undefined>();
 	private settingsAdmission: Deferred<void> | undefined;
 	sessionId = "pi-session-a";
 	idle = true;
@@ -871,26 +866,18 @@ async function main(): Promise<void> {
 			assert.equal(event.native_session_id, "pi-session-b");
 			assert.equal(event.bridge_epoch, sessionBSnapshot.bridge_epoch);
 		}
-		// --- the awaiting-input footer contract ---------------------------------
-		// A launch-style factory call registers the idle and awaiting footers.
-		// A user-input tool call parks Pi on a human decision mid-turn, and the
-		// marker is the exact display contract Theater's screen classifier
-		// reads; every turn boundary clears it.
+		// Native pending interactions clear on tool results and turn boundaries.
 		process.argv.push(`--theater-mcp-config=${mcpConfigPath}`);
-		const statusApi = new FakeExtensionApi();
-		statusApi.idle = false;
-		await theaterMcpBridge(statusApi as never);
+		const interactionApi = new FakeExtensionApi();
+		interactionApi.idle = false;
+		await theaterMcpBridge(interactionApi as never);
 		process.argv.pop();
-		const statusOf = (key: string): string | undefined =>
-			statusApi.statuses.get(key);
-		await statusApi.emit("before_agent_start");
-		await statusApi.emit("tool_call", { toolName: "bash", toolCallId: "b1" });
-		assert.equal(statusOf("theater.pi.awaiting"), undefined);
-		await statusApi.emit("tool_call", {
+		await interactionApi.emit("before_agent_start");
+		await interactionApi.emit("tool_call", { toolName: "bash", toolCallId: "b1" });
+		await interactionApi.emit("tool_call", {
 			toolName: "ask_user_question",
 			toolCallId: "q1",
 		});
-		assert.equal(statusOf("theater.pi.awaiting"), "Theater: awaiting input");
 		// The frontend bridge pushes a snapshot the moment the interaction
 		// changes, carrying the pending interaction for the daemon's live
 		// channel.  Only the question tool call produces a non-null entry.
@@ -907,10 +894,8 @@ async function main(): Promise<void> {
 		assert.equal(pending.kind, "clarification");
 		assert.equal(pending.details, "ask_user_question");
 		assert.equal(pending.native_turn_id, null);
-		await statusApi.emit("tool_result", { toolCallId: "b1" });
-		assert.equal(statusOf("theater.pi.awaiting"), "Theater: awaiting input");
-		await statusApi.emit("tool_result", { toolCallId: "q1" });
-		assert.equal(statusOf("theater.pi.awaiting"), undefined);
+		await interactionApi.emit("tool_result", { toolCallId: "b1" });
+		await interactionApi.emit("tool_result", { toolCallId: "q1" });
 		const clearedSnapshot = snapshotFrom(
 			await host.take(
 				(frame) =>
@@ -922,18 +907,15 @@ async function main(): Promise<void> {
 			),
 		);
 		assert.equal(clearedSnapshot.pending_interaction, null);
-		statusApi.idle = true;
-		await statusApi.emit("agent_settled");
-		assert.equal(statusOf("theater.pi.idle"), "Theater: idle");
-		statusApi.idle = false;
-		await statusApi.emit("agent_start");
-		await statusApi.emit("tool_call", {
+		interactionApi.idle = true;
+		await interactionApi.emit("agent_settled");
+		interactionApi.idle = false;
+		await interactionApi.emit("agent_start");
+		await interactionApi.emit("tool_call", {
 			toolName: "ask_user_question",
 			toolCallId: "q2",
 		});
-		assert.equal(statusOf("theater.pi.awaiting"), "Theater: awaiting input");
-		await statusApi.emit("agent_settled");
-		assert.equal(statusOf("theater.pi.awaiting"), undefined);
+		await interactionApi.emit("agent_settled");
 
 		await api.emit("session_shutdown", { reason: "exit" });
 	} finally {

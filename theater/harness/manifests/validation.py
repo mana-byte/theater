@@ -373,6 +373,8 @@ def _validate_observation(name: str, observation: object) -> None:
 
 
 def _validate_screen(name: str, screen: object) -> None:
+    if screen is None:
+        return
     if not isinstance(screen, ScreenManifest):
         _fail(name, "observation.screen", f"expected ScreenManifest, got {type(screen).__name__}")
     if not callable(screen.classifier):

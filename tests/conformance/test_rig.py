@@ -281,6 +281,59 @@ async def _no_wait(_seconds: float) -> None:
     await _real_sleep(0)
 
 
+async def test_without_a_screen_only_a_reported_send_refusal_proves_working(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig, _ = _rig(tmp_path, _Client(), mock_serving=False)
+    rig.harness = cast(Any, SimpleNamespace(observer=SimpleNamespace(has_screen=False)))
+    sends = iter([None, SimpleNamespace(admissible=True), SimpleNamespace(admissible=False)])
+    polled = []
+    ready = []
+
+    async def controls(participant_id: str) -> Any:
+        polled.append(participant_id)
+        send = next(sends)
+        return SimpleNamespace(actions={} if send is None else {"send": send})
+
+    async def expect_screen(*args) -> None:
+        raise AssertionError("a harness without a screen must not read the pane")
+
+    async def expect_ready(participant_id: str) -> None:
+        ready.append(participant_id)
+
+    rig.controls = controls  # type: ignore[method-assign]
+    rig.expect_screen = expect_screen  # type: ignore[method-assign]
+    rig.ready = expect_ready  # type: ignore[method-assign]
+    monkeypatch.setattr(live_rig.asyncio, "sleep", _no_wait)
+
+    await rig.expect_working("p1")
+    await rig.expect_prompt("p1")
+    assert polled == ["p1"] * 3
+    assert ready == ["p1"]
+
+
+async def test_offering_a_send_throughout_a_held_turn_is_a_violation_without_a_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig, _ = _rig(tmp_path, _Client(), mock_serving=False)
+    rig.harness = cast(Any, SimpleNamespace(observer=SimpleNamespace(has_screen=False)))
+    now = 0.0
+
+    async def controls(_participant_id: str) -> Any:
+        return SimpleNamespace(actions={"send": SimpleNamespace(admissible=True)})
+
+    async def advance(_seconds: float) -> None:
+        nonlocal now
+        now = 21.0
+
+    rig.controls = controls  # type: ignore[method-assign]
+    monkeypatch.setattr(live_rig.time, "monotonic", lambda: now)
+    monkeypatch.setattr(live_rig.asyncio, "sleep", advance)
+
+    with pytest.raises(pytest.fail.Exception, match="kept offering a send while the held turn ran"):
+        await rig.expect_working("p1")
+
+
 class _Sends:
     """Answers each send with the next scripted operation, as the daemon's public API would."""
 

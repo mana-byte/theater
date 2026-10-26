@@ -213,7 +213,8 @@ class ObservationManifest:
     """The primary durable source, screen reader, and declared enrichments."""
 
     primary: SourceManifest | None
-    screen: ScreenManifest
+    #: None means the plugin is never read from its pane.
+    screen: ScreenManifest | None
     identity: IdentityManifest = field(default_factory=IdentityManifest)
     lineage: LineageManifest = field(default_factory=LineageManifest)
     trajectory_capabilities: TrajectoryCapabilities = field(default_factory=TrajectoryCapabilities)

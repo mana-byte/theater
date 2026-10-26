@@ -59,6 +59,7 @@ class ManifestHarnessObserver(HarnessObserver):
         self._enrichments = observation.enrichments
         self._harness_name = harness_name
         self.has_transcript = self._primary is not None
+        self.has_screen = self._screen is not None
         self.trajectory_capabilities = observation.trajectory_capabilities
 
     def enrichment_manifests(self) -> tuple[EnrichmentManifest, ...]:
@@ -125,9 +126,11 @@ class ManifestHarnessObserver(HarnessObserver):
         return source
 
     def is_idle_screen(self, capture: str) -> bool:
-        return self.screen_reading(capture).kind is ScreenKind.PROMPT
+        return self.has_screen and self.screen_reading(capture).kind is ScreenKind.PROMPT
 
     def screen_reading(self, capture: str) -> ScreenReading:
+        if self._screen is None:
+            return ScreenReading(kind=ScreenKind.UNKNOWN)
         reading = self._screen.classifier(ScreenContext(capture=capture))
         if not isinstance(reading, ScreenReading):
             raise TypeError(

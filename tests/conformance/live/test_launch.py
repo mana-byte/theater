@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from theater.harness.contracts.observation import ScreenKind
-
 pytestmark = [pytest.mark.integration, pytest.mark.family("launch")]
 
 
@@ -14,5 +12,5 @@ async def test_the_stock_cli_launches_and_reaches_a_ready_prompt(live, obligatio
 
     await live.ready(participant)
 
-    await live.expect_screen(participant, ScreenKind.PROMPT)
+    await live.expect_prompt(participant)
     assert (await live.participant(participant)).status != "dead"

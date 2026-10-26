@@ -425,7 +425,7 @@ return contract owns and never reach Theater's SQLite connection.
 | `launch.resume_preflight` | `ResumePreflightContext → None` | Reject an unsafe resume before reservation. |
 | `launch.resume_planner` | `ResumeContext → ResumeLaunchOverlay` | Safe native resume overlay. |
 | `observation.primary.factory` | `ParticipantObservationContext → Source` | Participant-scoped durable input. |
-| `observation.screen.classifier` | `ScreenContext → ScreenReading` | Conservative terminal classification. |
+| `observation.screen` | `ScreenManifest(classifier: ScreenContext → ScreenReading)` or `None` | Conservative terminal classification, or no pane reading. |
 | `observation.identity.*` | typed context → `StreamPoint`/`TranscriptCandidate` | Exact identity and recovery. |
 | `observation.lineage.native_children` | `NativeChildrenContext → Sequence[NativeChild]` | Native sub-agent display facts. |
 | `models.discoverer` | `ModelDiscoveryContext → Sequence[str]` | Optional model-list suggestion. |
@@ -521,8 +521,10 @@ harness can actually list. It is a suggestion for `theater models`, not a
 spawn authorization policy; Theater's `[models]` allowlist remains the gate.
 Do not advertise guessed model names.
 
-`ObservationManifest` requires a `ScreenManifest` and classifier. Its reading
-is conservative evidence: `PROMPT`, `WORKING`, `APPROVAL`, `TRUST`, and
+`ObservationManifest.screen` must explicitly be a `ScreenManifest` with a classifier or `None`.
+`None` means native-only: never read from its pane, pane/provider text submission is refused,
+and no `runtime:legacy` obligation is owed. Pi declares `None` because users can overhaul its UI.
+A classifier's reading is conservative evidence: `PROMPT`, `WORKING`, `APPROVAL`, `TRUST`, and
 `UNKNOWN` each carry `LOW` or `HIGH` confidence. A text scrape is normally low
 confidence; unknown is the safe answer when it cannot distinguish a prompt from
 a sensitive modal.

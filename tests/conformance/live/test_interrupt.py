@@ -9,7 +9,6 @@ import uuid
 import pytest
 
 from scripts.harness_compat.contract import MockReply
-from theater.harness.contracts.observation import ScreenKind
 
 pytestmark = [pytest.mark.integration, pytest.mark.family("interrupt")]
 
@@ -21,7 +20,7 @@ async def test_interrupt_ends_a_held_turn_and_the_next_turn_still_works(live, ob
 
     await live.interrupt(participant)
 
-    await live.expect_screen(participant, ScreenKind.PROMPT)
+    await live.expect_prompt(participant)
     assert await asyncio.to_thread(_wait, lambda: held.hold.cancelled, 30), (
         "the CLI kept its request"
     )
