@@ -14,6 +14,8 @@ from tests.support.paths import REPO_ROOT
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
+VERIFY_CALLS = ("verify-claude", "verify-codex", "verify-opencode", "verify-pi", "verify-vibe")
+
 
 def _load(name: str) -> dict[str, Any]:
     document = yaml.safe_load((WORKFLOWS / name).read_text())
@@ -22,7 +24,13 @@ def _load(name: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    "name", ["harness-compat.yml", "harness-compat-canaries.yml", "harness-compat-attention.yml"]
+    "name",
+    [
+        "harness-compat.yml",
+        "harness-compat-verify.yml",
+        "harness-compat-canaries.yml",
+        "harness-compat-attention.yml",
+    ],
 )
 def test_no_workflow_retains_test_data_or_a_history_cache(name: str) -> None:
     text = (WORKFLOWS / name).read_text()
@@ -31,7 +39,8 @@ def test_no_workflow_retains_test_data_or_a_history_cache(name: str) -> None:
         "upload-artifact",
         "download-artifact",
         "STEP_SUMMARY",
-        "enable-cache: true",
+        # setup-uv's venv cache keys on uv.lock by default; a custom glob could key on anything.
+        "cache-dependency-glob",
     ):
         assert forbidden not in text
 
@@ -48,9 +57,14 @@ def test_pr_jobs_are_read_only_and_have_no_automation_secret() -> None:
     compat = _load("harness-compat.yml")
     assert compat["permissions"] == {"contents": "read"}
     assert compat["on"]["pull_request"] is None
-    for name in ("static-checks", "plan", "verify-gate"):
+    for name in ("static-checks", "plan", *VERIFY_CALLS):
         job = compat["jobs"][name]
         assert job.get("permissions", compat["permissions"]) == {"contents": "read"}
+        assert "secrets.HARNESS_COMPAT" not in yaml.safe_dump(job)
+    reusable = _load("harness-compat-verify.yml")
+    assert reusable["permissions"] == {"contents": "read"}
+    for job in reusable["jobs"].values():
+        assert job.get("permissions", reusable["permissions"]) == {"contents": "read"}
         assert "secrets.HARNESS_COMPAT" not in yaml.safe_dump(job)
 
 
@@ -84,14 +98,32 @@ def test_scripts_own_all_issue_and_pr_operations() -> None:
 
 def test_routine_pr_checks_use_the_base_and_stop_at_the_proposed_policy() -> None:
     compat = _load("harness-compat.yml")
-    verify = compat["jobs"]["verify-gate"]["steps"][-1]["run"]
-    assert 'args=(verify "$HARNESS" --base "$(git rev-parse HEAD^1)")' in verify
-    assert "--routine" in verify and "chore/compat-" in verify
+    reusable = _load("harness-compat-verify.yml")
+    # The plan step computes the merge base and the routine decision once and hands both
+    # to every per-harness verify call.
+    plan = compat["jobs"]["plan"]
+    assert plan["outputs"]["base"] == "${{ steps.plan.outputs.base }}"
+    assert plan["outputs"]["routine"] == "${{ steps.plan.outputs.routine }}"
+    plan_run = plan["steps"][-1]["run"]
+    assert 'base="$(git rev-parse HEAD^1)"' in plan_run
+    assert "routine=false" in plan_run and "routine=true" in plan_run
+    assert 'echo "routine=$routine" >> "$GITHUB_OUTPUT"' in plan_run
+    for name in VERIFY_CALLS:
+        call = compat["jobs"][name]
+        assert call["uses"] == "./.github/workflows/harness-compat-verify.yml"
+        assert call["with"]["base"] == "${{ needs.plan.outputs.base }}"
+        assert call["with"]["routine"] == "${{ needs.plan.outputs.routine == 'true' }}"
+    verify = reusable["jobs"]["verify"]["steps"][-1]["run"]
+    assert 'args=(verify "$HARNESS" --base "$BASE" --releases "$VERSIONS")' in verify
+    assert "--routine" in verify and "$ROUTINE" in verify
     assert " --check" not in verify
     assert "pull_request_target" not in str(compat)
+    assert "pull_request_target" not in str(reusable)
 
 
-@pytest.mark.parametrize("name", ["harness-compat.yml", "harness-compat-canaries.yml"])
+@pytest.mark.parametrize(
+    "name", ["harness-compat.yml", "harness-compat-verify.yml", "harness-compat-canaries.yml"]
+)
 def test_the_live_suite_runners_can_sandbox_codex(name: str) -> None:
     # Without bubblewrap, and the user namespace Ubuntu 24.04 denies it, codex's workspace-write
     # sandbox is unavailable on Linux and every edit asks for an approval, so the suite would fail
@@ -107,7 +139,19 @@ def test_pr_checks_diff_against_the_base_the_pr_is_merged_into_not_the_one_it_op
     # that landed meanwhile looks like part of a policy PR.
     text = (WORKFLOWS / "harness-compat.yml").read_text()
     assert "pull_request.base.sha" not in text
-    assert text.count('"$(git rev-parse HEAD^1)"') == 2
+    assert text.count('"$(git rev-parse HEAD^1)"') == 1
+    # The verify shards receive that base as an input instead of recomputing it per job.
+    reusable = (WORKFLOWS / "harness-compat-verify.yml").read_text()
+    assert "git rev-parse HEAD^1" not in reusable
+
+
+def test_sweeps_interrupt_with_time_left_to_clean_up_and_publish() -> None:
+    qualify = _load("harness-compat.yml")["jobs"]["qualify"]
+    assert qualify["timeout-minutes"] > 325
+    assert "timeout --signal=INT --kill-after=5m 320m" in qualify["steps"][-1]["run"]
+    verify = _load("harness-compat-verify.yml")["jobs"]["verify"]
+    assert verify["timeout-minutes"] > 325
+    assert "timeout --signal=INT --kill-after=5m 320m" in verify["steps"][-1]["run"]
 
 
 def test_failure_reporter_runs_from_trusted_main_without_project_setup() -> None:
@@ -133,10 +177,15 @@ def test_attention_job_dispatch_allows_only_failed_main_release_sweeps() -> None
 
 
 def test_untrusted_values_are_passed_as_environment_data() -> None:
-    for name in ("harness-compat.yml", "harness-compat-attention.yml"):
+    for name in (
+        "harness-compat.yml",
+        "harness-compat-verify.yml",
+        "harness-compat-attention.yml",
+    ):
         workflow = _load(name)
         for job in workflow["jobs"].values():
-            for step in job["steps"]:
+            # Reusable-workflow call jobs have no steps; their inputs are data, not script.
+            for step in job.get("steps", []):
                 assert "${{ github.head_ref }}" not in step.get("run", "")
                 assert "${{ github.event" not in step.get("run", "")
 

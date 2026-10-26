@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from scripts.harness_compat import run as run_module
 from scripts.harness_compat.cleanup import CleanupFailed
-from scripts.harness_compat.contract import Adapter, Result
+from scripts.harness_compat.contract import Adapter, Check, Result
 from scripts.harness_compat.run import (
     DiscoveryError,
     IncompleteRun,
     Run,
     discover_releases,
     run_harness,
+    split_shards,
 )
 from theater.harness.contracts.version_policy import VersionPolicy
 
@@ -236,3 +239,141 @@ def test_run_accepts_a_completed_prefix_without_claiming_the_rest_was_tested() -
 def test_invalid_runs_fail_closed(releases: tuple, results: tuple) -> None:
     with pytest.raises(IncompleteRun):
         Run("claude", POLICY, releases, results)
+
+
+def test_shards_split_the_window_into_bounded_explicit_lists() -> None:
+    assert split_shards([]) == []
+    assert split_shards(["1.3.0"]) == [["1.3.0"]]
+    window = [f"1.{minor}.0" for minor in range(3, 22)]
+    shards = split_shards(window)
+    assert [len(shard) for shard in shards] == [4, 4, 4, 4, 3]
+    assert [version for shard in shards for version in shard] == window
+    wide = split_shards([f"1.{minor}.0" for minor in range(3, 43)])
+    assert len(wide) == 8 and all(len(shard) <= 5 for shard in wide)
+
+
+def test_an_exhausted_time_budget_records_and_publishes_every_remaining_release(
+    repo: Path,
+) -> None:
+    published: list[Result] = []
+    run, asked = _run(
+        repo,
+        ["1.0.0", "1.2.0", "1.3.0", "1.4.0"],
+        {},
+        publish=lambda run: published.append(run.results[-1]),
+        budget_seconds=0,
+    )
+    assert asked == []
+    assert [result.verdict for result in run.results] == ["inconclusive", "inconclusive"]
+    skip = run.results[0].checks[0]
+    assert skip.name == "skipped" and "sweep time budget exhausted" in skip.detail
+    assert [result.version for result in published] == ["1.3.0", "1.4.0"]
+
+
+def test_a_generous_time_budget_qualifies_every_release(repo: Path) -> None:
+    run, asked = _run(repo, ["1.0.0", "1.2.0", "1.3.0", "1.4.0"], {}, budget_seconds=10_000)
+    assert asked == ["1.3.0", "1.4.0"]
+    assert all(result.verdict == "green" for result in run.results)
+
+
+def test_a_budget_that_runs_out_partway_skips_only_the_trailing_releases(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(run_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    asked: list[str] = []
+
+    def qualify(root: Path, adapter: Adapter, version: str) -> Result:
+        asked.append(version)
+        clock[0] += 3000.0
+        return Result(adapter.name, version, "green")
+
+    run = run_harness(
+        repo,
+        _Adapter(["1.0.0", "1.2.0", *(f"1.{minor}.0" for minor in range(3, 10))]),
+        qualify=qualify,
+        say=lambda _: None,
+        budget_seconds=10_000,
+    )
+    assert asked == ["1.3.0", "1.4.0", "1.5.0", "1.6.0"]
+    verdicts = [result.verdict for result in run.results]
+    assert verdicts[:4] == ["green"] * 4
+    # Skips form a trailing suffix: a skipped release is never followed by a tested one,
+    # so every skipped release stays above the highest green, hence above max.
+    assert verdicts[4:] == ["inconclusive"] * 3
+    assert "sweep time budget exhausted" in run.results[4].checks[0].detail
+
+
+def test_three_identical_tooling_errors_skip_and_publish_the_rest(repo: Path) -> None:
+    published: list[Result] = []
+    window = ["1.0.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0"]
+
+    def qualify(root: Path, adapter: Adapter, version: str) -> Result:
+        return Result(
+            adapter.name,
+            version,
+            "tooling",
+            (Check("collect_bundle", "error", f"timed out after 240s on {version}"),),
+        )
+
+    run = run_harness(
+        repo,
+        _Adapter(window),
+        qualify=qualify,
+        publish=lambda run: published.append(run.results[-1]),
+        say=lambda _: None,
+    )
+    assert [result.verdict for result in run.results] == [
+        "tooling",
+        "tooling",
+        "tooling",
+        "inconclusive",
+        "inconclusive",
+    ]
+    skip = run.results[3].checks[0]
+    assert skip.name == "skipped"
+    assert "skipped after 3 identical collect_bundle tooling errors" in skip.detail
+    assert [result.version for result in published] == window[2:]
+
+
+def test_distinct_tooling_errors_do_not_short_circuit(repo: Path) -> None:
+    details = iter(["first failure", "second failure", "third failure", "fourth failure"])
+
+    def qualify(root: Path, adapter: Adapter, version: str) -> Result:
+        return Result(
+            adapter.name, version, "tooling", (Check("qualification", "error", next(details)),)
+        )
+
+    run = run_harness(
+        repo,
+        _Adapter(["1.0.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"]),
+        qualify=qualify,
+        say=lambda _: None,
+    )
+    assert [result.verdict for result in run.results] == ["tooling"] * 4
+
+
+def test_a_non_tooling_verdict_resets_the_tooling_streak(repo: Path) -> None:
+    def qualify(root: Path, adapter: Adapter, version: str) -> Result:
+        if version == "1.5.0":
+            return Result(
+                adapter.name, version, "red", (Check("conformance:launch", "fail", "red"),)
+            )
+        return Result(
+            adapter.name, version, "tooling", (Check("qualification", "error", "same failure"),)
+        )
+
+    run = run_harness(
+        repo,
+        _Adapter(["1.0.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0"]),
+        qualify=qualify,
+        say=lambda _: None,
+    )
+    assert [result.verdict for result in run.results] == [
+        "tooling",
+        "tooling",
+        "red",
+        "tooling",
+        "tooling",
+        "tooling",
+    ]

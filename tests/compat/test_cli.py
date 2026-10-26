@@ -360,3 +360,54 @@ def test_report_entry_point_uses_the_supplied_workflow_run(
     )
     assert _main(monkeypatch, repo, "report", "42") == 0
     assert seen == [(repo, 42)]
+
+
+def test_shards_emit_the_verify_matrix_with_explicit_version_lists(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    write_policy(repo, "claude", VersionPolicy("1.0.0", "1.6.0"))
+    _scripted(monkeypatch, [f"1.{minor}.0" for minor in range(7)], {})
+    assert _main(monkeypatch, repo, "shards", "claude", "--base", "main") == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "include": [
+            {"shard": "1", "versions": "1.0.0,1.1.0,1.2.0,1.3.0"},
+            {"shard": "2", "versions": "1.4.0,1.5.0,1.6.0"},
+        ]
+    }
+
+
+def test_verify_accepts_the_fanout_shard_version_list(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _scripted(monkeypatch, ["1.0.0", "1.1.0", "1.2.0", "1.3.0"], {})
+    code = _main(
+        monkeypatch, repo, "verify", "claude", "--base", "main", "--releases", "1.1.0,1.2.0"
+    )
+    assert code == 0
+    assert asked == ["1.1.0", "1.2.0"]
+
+
+def test_verify_refuses_a_shard_list_outside_the_pr_window(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    asked = _scripted(monkeypatch, ["1.0.0", "1.1.0", "1.2.0", "1.3.0"], {})
+    code = _main(
+        monkeypatch, repo, "verify", "claude", "--base", "main", "--releases", "1.1.0,1.9.0"
+    )
+    assert code == 2
+    assert asked == []
+    assert "the shard releases 1.9.0 are outside the PR window" in capsys.readouterr().err
+
+
+def test_run_passes_the_sweep_time_budget_to_the_runner(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake(root, adapter, **kwargs):
+        seen.update(kwargs)
+        return _run(Result("claude", "1.3.0", "green"))
+
+    monkeypatch.setattr(cli, "run_harness", fake)
+    assert _main(monkeypatch, repo, "run", "claude", "--budget-minutes", "310") == 0
+    assert seen["budget_seconds"] == 310 * 60

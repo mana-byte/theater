@@ -8,6 +8,8 @@ import os
 import sys
 from pathlib import Path
 
+from theater.version_policy import VersionPolicy, version_key
+
 from . import git
 from .adapters import ADAPTER_NAMES, load_adapter
 from .attention import publication_failure_run, report_workflow_failure
@@ -20,7 +22,7 @@ from .policy import (
     policy_relative,
 )
 from .publish import SWEEP_EVENTS, check_publication_context, file_attention_issue, publish
-from .run import Run, discover_releases, run_harness
+from .run import Run, discover_releases, run_harness, split_shards
 from .summary import error_annotation, render_run
 
 
@@ -31,10 +33,16 @@ def _parser() -> argparse.ArgumentParser:
         "run", help="qualify every newer release; main runs publish issues/PRs"
     )
     run.add_argument("harness", choices=ADAPTER_NAMES)
+    run.add_argument("--budget-minutes", type=float, help="stop starting releases after this long")
     verify = commands.add_parser("verify", help="check proposed admissions, bounded by the PR")
     verify.add_argument("harness", choices=ADAPTER_NAMES)
     verify.add_argument("--base", required=True)
     verify.add_argument("--routine", action="store_true")
+    verify.add_argument("--releases", help="comma-separated releases, from the fan-out shards")
+    shards = commands.add_parser("shards", help="emit the PR verify shard matrix for one harness")
+    shards.add_argument("harness", choices=ADAPTER_NAMES)
+    shards.add_argument("--base", required=True)
+    shards.add_argument("--routine", action="store_true")
     plan = commands.add_parser("plan", help="select workflow matrix harnesses")
     plan.add_argument("harness", nargs="?", default="all", choices=("all", *ADAPTER_NAMES))
     plan.add_argument("--base")
@@ -69,7 +77,12 @@ def _run(args: argparse.Namespace, root: Path) -> int:
         published = publish(root, run, run_url=_run_url(os.environ["GITHUB_RUN_ID"]))
         print(f"{args.harness}: shared policy PR {published.pr}", flush=True)
 
-    run = run_harness(root, load_adapter(args.harness), publish=completed if publishing else None)
+    run = run_harness(
+        root,
+        load_adapter(args.harness),
+        publish=completed if publishing else None,
+        budget_seconds=args.budget_minutes * 60 if args.budget_minutes is not None else None,
+    )
     print(render_run(run))
     if run.errors:
         print(error_annotation("Harness compatibility", "; ".join(run.errors)))
@@ -81,20 +94,32 @@ def _run(args: argparse.Namespace, root: Path) -> int:
     return int(any(result.verdict == "red" for result in run.results))
 
 
-def _verify(args: argparse.Namespace, root: Path) -> int:
-    from theater.version_policy import VersionPolicy
-
-    policy = load_policy(root, args.harness)
-    relative = policy_relative(args.harness).as_posix()
-    added = git.git(
-        root, "diff", "--name-only", "--diff-filter=A", args.base, "HEAD", "--", relative
-    )
-    base = policy if added else VersionPolicy.from_text(git.show(root, args.base, relative))
-    if args.routine and check_routine_change(root, args.base) != args.harness:
+def _pr_window(
+    root: Path, harness: str, base: str, routine: bool
+) -> tuple[VersionPolicy, list[str]]:
+    """The policy a PR check runs against, and the releases its window covers."""
+    policy = load_policy(root, harness)
+    relative = policy_relative(harness).as_posix()
+    added = git.git(root, "diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", relative)
+    base_policy = policy if added else VersionPolicy.from_text(git.show(root, base, relative))
+    if routine and check_routine_change(root, base) != harness:
         raise ValueError("the routine PR selected a different harness")
-    adapter = load_adapter(args.harness)
-    releases = discover_releases(adapter, policy, base=base, routine=args.routine)
-    run = run_harness(root, adapter, releases=releases)
+    return policy, discover_releases(
+        load_adapter(harness), policy, base=base_policy, routine=routine
+    )
+
+
+def _verify(args: argparse.Namespace, root: Path) -> int:
+    policy, discovered = _pr_window(root, args.harness, args.base, args.routine)
+    releases = (
+        [version for version in args.releases.split(",") if version]
+        if args.releases
+        else discovered
+    )
+    outside = sorted(set(releases) - set(discovered), key=version_key)
+    if outside:
+        raise ValueError(f"the shard releases {', '.join(outside)} are outside the PR window")
+    run = run_harness(root, load_adapter(args.harness), releases=releases)
     print(render_run(run))
     if run.errors or len(run.results) != len(releases):
         return 2
@@ -104,6 +129,16 @@ def _verify(args: argparse.Namespace, root: Path) -> int:
     return int(
         any(policy.admits(result.version) and result.verdict != "green" for result in run.results)
     )
+
+
+def _shards(args: argparse.Namespace, root: Path) -> int:
+    _, releases = _pr_window(root, args.harness, args.base, args.routine)
+    include = [
+        {"shard": str(number), "versions": ",".join(shard)}
+        for number, shard in enumerate(split_shards(releases), start=1)
+    ]
+    print(json.dumps({"include": include}, separators=(",", ":")))
+    return 0
 
 
 def _plan(args: argparse.Namespace, root: Path) -> int:
@@ -142,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "run": _run,
         "verify": _verify,
+        "shards": _shards,
         "plan": _plan,
         "canaries": _canaries,
         "report": _report,

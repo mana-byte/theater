@@ -44,7 +44,12 @@ A moving main rebases the proposed JSON; fresh PR checks prove admissions on the
 
 Routine PR checks cover the proposed extension and every changed exclusion, including removals;
 unrelated newer upstream releases cannot make them fail. Wiring/code PRs recheck the current policy
-window. Excluded contract failures do not admit that release; inconclusive checks still fail CI.
+window: a per-harness fan-out splits the window into shards of about four releases (at most eight
+per harness) that verify in parallel, each shard receiving its explicit release list, and a shard
+list outside the window is refused. PR verification shares the sweep runner's guards, including
+the tooling short-circuit: three identical tooling errors in a row record the rest of a shard
+inconclusive, which fails the check. Excluded contract failures do not admit that release;
+inconclusive checks still fail CI.
 Every `pull_request` run is read-only, including its `workflow_run` reporter: failures remain that
 PR's failed checks. Setup failures, timeouts, cancellations and reporting/API errors never create,
 edit or comment on issues, policy branches or PRs for a PR-origin run.
@@ -89,6 +94,11 @@ Native child stimulation, timing/usage accounting and foreground MCP timeouts re
 exemptions in `tests/support/coverage.py`; ordinary regressions cover their current behavior.
 
 Hosted sweeps interrupt after 320 minutes, leaving five minutes for cleanup and publication.
-Finished outcomes are retained in the shared PR/issues; an unfinished known version is excluded.
+The sweep also carries a 310-minute time budget: a release that cannot start with at least ten
+minutes of sweep time left is recorded inconclusive and published instead of left untested, and
+the rest of the sweep is skipped the same way. Three identical tooling errors in a row record
+the remaining releases the same way. Skipped releases stay above max and are retested by the
+next sweep. Finished outcomes are retained in the shared
+PR/issues; an unfinished known version is excluded.
 OpenCode's 2.0.18–2.0.20 renderer recovery remains independent of policy because baseline 2.0.18
 needs it.
