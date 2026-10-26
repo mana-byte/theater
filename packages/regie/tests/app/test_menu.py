@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
+from regie.controllers.actions import ActionRecord, ActionState
 from regie.menu import MenuItem
 from regie.widgets import ParticipantTree
 from regie.widgets.name_editor import DirectoryEditor, FilterEditor
@@ -11,6 +15,7 @@ from packages.regie.tests.support.app_fakes import build_app
 from packages.regie.tests.support.waiting import wait_until
 from theater.frontend import ResumeCandidate as PublicResumeCandidate
 from theater.frontend import TranscriptCandidate
+from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
 ROOT = ("g", "options")
 CODEX = ("m", "spawn/codex")
@@ -141,6 +146,32 @@ async def test_add_separator_is_disabled_when_the_menu_was_entered_from_nowhere(
         assert not item.enabled  # no origin row yet: the cursor has not been to the menu
 
 
+@pytest.mark.asyncio
+async def test_retry_uncertain_action_appears_only_when_one_is_uncertain_and_runs_on_a_pick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        assert next((item for item in app._menu_items() if item.id == "retry"), None) is None
+
+        app._actions._records[("send", "participant-1")] = ActionRecord(
+            "send", "participant-1", "key-1", state=ActionState.UNCERTAIN
+        )
+        item = next(item for item in app._menu_items() if item.id == "retry")
+        assert item.title == "Retry uncertain send"
+
+        retried: list[str] = []
+        monkeypatch.setattr(app, "retry_latest_action", lambda: retried.append("retry"))
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "retry") in tree._key_widgets)
+        tree.select_key(("m", "retry"))
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: retried == ["retry"])
+        assert not tree.in_menu
+
+
 def _dead(n: int, *, state: str = "resumable") -> PublicResumeCandidate:
     session = f"session-{n}"
     return PublicResumeCandidate.from_wire(
@@ -257,6 +288,86 @@ async def test_recover_transcript_binds_a_candidate_to_the_row_the_cursor_came_f
 
 
 @pytest.mark.asyncio
+async def test_transcript_choices_are_scoped_to_the_participant_who_opened_the_menu() -> None:
+    app, client, _presentation = build_app()
+    client.transcripts.candidate_rows = (
+        TranscriptCandidate("/tmp/accepted.jsonl", session_id="accepted", provenance="exact"),
+    )
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.select("participant-1")
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "transcript") in tree._key_widgets)
+        tree.select_key(("m", "transcript"))
+        await pilot.press("enter")  # unfold: read the candidates for participant-1
+        await wait_until(pilot, lambda: ("m", "transcript/0") in tree._key_widgets)
+
+        await pilot.press("x")  # close: the loaded list must not outlive the visit
+        await wait_until(pilot, lambda: not tree.in_menu)
+        tree.select("participant-2")
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "transcript") in tree._key_widgets)
+
+        # Filter to the stale candidate's location: its row must not come back to bind A.
+        await pilot.press("slash")
+        await wait_until(pilot, lambda: bool(app.query(FilterEditor)))
+        await pilot.press("a", "c", "c", "e", "p", "t", "e", "d")
+        await wait_until(pilot, lambda: tree.menu_view.query == "accepted")
+        assert ("m", "transcript/0") not in tree._key_widgets
+        await pilot.press("escape")
+
+        # Unfolding now reads for participant-2, and a pick binds participant-2.
+        tree.select_key(("m", "transcript"))
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: ("m", "transcript/0") in tree._key_widgets)
+        tree.select_key(("m", "transcript/0"))
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: bool(client.transcripts.bind_calls))
+        assert client.transcripts.bind_calls[0]["participant_id"] == "participant-2"
+        assert client.transcripts.candidate_calls == ["participant-1", "participant-2"]
+
+
+@pytest.mark.asyncio
+async def test_reopening_the_menu_while_a_transcript_read_is_pending_still_loads_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, _presentation = build_app()
+    client.transcripts.candidate_rows = (
+        TranscriptCandidate("/tmp/accepted.jsonl", session_id="accepted", provenance="exact"),
+    )
+    gate = asyncio.Event()
+    calls: list[str] = []
+    candidates = client.transcripts.candidates
+
+    async def gated(participant_id: str) -> object:
+        calls.append(participant_id)
+        await gate.wait()
+        return await candidates(participant_id)
+
+    monkeypatch.setattr(client.transcripts, "candidates", gated)
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.select("participant-1")
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "transcript") in tree._key_widgets)
+        tree.select_key(("m", "transcript"))
+        await pilot.press("enter")  # the read starts and stays pending
+        await wait_until(pilot, lambda: calls == ["participant-1"])
+
+        await pilot.press("x")  # close and reopen while the read is pending
+        await wait_until(pilot, lambda: not tree.in_menu)
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "transcript") in tree._key_widgets)
+        tree.select_key(("m", "transcript"))
+        await pilot.press("enter")  # the replacement read
+        await wait_until(pilot, lambda: calls == ["participant-1", "participant-1"])
+        gate.set()
+        await wait_until(pilot, lambda: ("m", "transcript/0") in tree._key_widgets)
+
+
+@pytest.mark.asyncio
 async def test_slash_filters_the_menu_enter_keeps_it_and_x_clears_it_with_the_menu() -> None:
     app, _client, _presentation = build_app()
 
@@ -280,6 +391,51 @@ async def test_slash_filters_the_menu_enter_keeps_it_and_x_clears_it_with_the_me
         await pilot.press("x")  # closes the menu, and the filter goes with it
         await wait_until(pilot, lambda: not tree.in_menu)
         assert tree.menu_view.query == ""
+
+
+@pytest.mark.asyncio
+async def test_filtering_to_a_harness_keeps_the_filter_on_the_harness_row_and_picks_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, _presentation = build_app()
+    entry = HarnessCatalogEntry.from_wire(
+        {
+            "name": "synth",
+            "binary": "synth",
+            "icon": "◆",
+            "installed": True,
+            "compatible": True,
+            "supported_wiring": ["tmux"],
+            "requires_terminal": True,
+            "provider_ready": True,
+            "launch_available": True,
+            "approvals": ["manual"],
+            "reason": None,
+            "detail": None,
+        }
+    )
+
+    async def catalog() -> object:
+        return SimpleNamespace(value=SimpleNamespace(items=(entry,)))
+
+    monkeypatch.setattr(client.catalogs, "harnesses", catalog)
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.select("participant-1")
+        await pilot.press("o")  # the menu on Spawn, the cursor on the harness
+        await wait_until(pilot, lambda: tree.selected_key == ("m", "spawn/synth"))
+
+        await pilot.press("slash")
+        await wait_until(pilot, lambda: bool(app.query(FilterEditor)))
+        await pilot.press("s", "y", "n", "t", "h")
+        await wait_until(pilot, lambda: ("m", "spawn") in tree._key_widgets)
+        assert ("m", "bus") not in tree._key_widgets
+
+        await pilot.press("enter")  # keep the filter: the cursor walks to the harness row
+        await wait_until(pilot, lambda: tree.selected_key == ("m", "spawn/synth"))
+        await pilot.press("enter")  # pick it: the directory editor is on screen
+        await wait_until(pilot, lambda: bool(app.query(DirectoryEditor)))
 
 
 @pytest.mark.asyncio

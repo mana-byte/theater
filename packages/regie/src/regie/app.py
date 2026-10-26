@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Iterable
 from functools import partial
 from pathlib import Path
 from time import monotonic
@@ -239,14 +238,13 @@ class RegieApp(
             on_error=self._handle_exception,
         )
         # Every fixed-purpose SDK client still has one interactive lane.  Keep
-        # repeated reads for that purpose ordered when a timer, palette, or
-        # keybinding fires again before the preceding request has returned.
+        # repeated reads for that purpose ordered when a timer or a keybinding
+        # fires again before the preceding request has returned.
         self._catalog_lock = asyncio.Lock()
         self._controls_inspection_lock = asyncio.Lock()
         self._resume_discovery_lock = asyncio.Lock()
         self._transcript_candidates_lock = asyncio.Lock()
         self._harnesses: tuple[HarnessCatalogEntry, ...] = ()
-        self._transcript_recovery_target: str | None = None
         self._unmanaged: tuple[UnmanagedPane, ...] | None = None
         self._unmanaged_polled_at: float | None = None
         self._bus_visible = settings.bus_visible
@@ -407,9 +405,4 @@ class RegieApp(
         super()._handle_exception(error)
 
 
-def catalog_names(harnesses: Iterable[HarnessCatalogEntry]) -> tuple[str, ...]:
-    """Expose public catalog names for palette adapters without local discovery."""
-    return tuple(entry.name for entry in harnesses if entry.launch_available)
-
-
-__all__ = ["RegieApp", "catalog_names"]
+__all__ = ["RegieApp"]

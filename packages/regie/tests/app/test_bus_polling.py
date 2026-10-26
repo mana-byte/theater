@@ -1,4 +1,4 @@
-"""The bus pollers and the serialisation of palette and inspection reads per SDK lane."""
+"""The bus pollers and the serialisation of menu and inspection reads per SDK lane."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ async def test_hidden_bus_has_an_independent_route_and_await_animation_cursor() 
 
 
 @pytest.mark.asyncio
-async def test_repeated_palette_and_inspection_reads_serialize_each_sdk_lane(
+async def test_repeated_menu_and_inspection_reads_serialize_each_sdk_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, client, _presentation = build_app()
@@ -144,7 +144,6 @@ async def test_repeated_palette_and_inspection_reads_serialize_each_sdk_lane(
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        app._transcript_recovery_target = "participant-1"
         await asyncio.gather(
             app._load_catalog(),
             app._load_catalog(),
@@ -152,8 +151,8 @@ async def test_repeated_palette_and_inspection_reads_serialize_each_sdk_lane(
             app._show_controls("participant-2"),
             app.load_resume_sessions(),
             app.load_resume_sessions(),
-            app.load_transcript_candidates(),
-            app.load_transcript_candidates(),
+            app.load_transcript_candidates("participant-1"),
+            app.load_transcript_candidates("participant-1"),
         )
 
     assert maximum == dict.fromkeys(maximum, 1)

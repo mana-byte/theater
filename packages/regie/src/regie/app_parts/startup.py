@@ -101,10 +101,6 @@ class StartupLoading(_AppBase):
         finally:
             self._catalog_ready.set()
 
-    async def wait_for_catalog(self) -> None:
-        """Wait for startup's catalog read without owning or cancelling it."""
-        await self._catalog_ready.wait()
-
     async def _load_catalog(self) -> bool:
         async with self._catalog_lock:
             try:

@@ -20,10 +20,9 @@ class TranscriptRecovery(_AppBase):
         identity = None if participant is None else participant.transcript_identity
         return participant is not None and (identity is None or identity.state != "trusted")
 
-    async def load_transcript_candidates(self) -> tuple[TranscriptCandidate, ...]:
-        participant_id = self._transcript_recovery_target
-        if participant_id is None:
-            return ()
+    async def load_transcript_candidates(
+        self, participant_id: str
+    ) -> tuple[TranscriptCandidate, ...]:
         async with self._transcript_candidates_lock:
             try:
                 page = await self._clients.transcripts.transcripts.candidates(participant_id)
@@ -46,15 +45,10 @@ class TranscriptRecovery(_AppBase):
         self,
         candidate: TranscriptCandidate,
         *,
-        participant_id: str | None = None,
+        participant_id: str,
     ) -> None:
-        participant_id = participant_id or self._transcript_recovery_target
         projection = self._state.projection
-        if (
-            participant_id is None
-            or projection is None
-            or participant_id not in projection.participants
-        ):
+        if projection is None or participant_id not in projection.participants:
             self.notify("the transcript recovery target is no longer available", severity="warning")
             return
         if candidate.rejection_reason:
@@ -72,7 +66,6 @@ class TranscriptRecovery(_AppBase):
             self.notify("candidate has conflicting ownership metadata", severity="error")
             return
         prior_owner_id = next(iter(owners), None)
-        self._transcript_recovery_target = None
         if prior_owner_id is not None:
             # Taking a transcript from another participant is rare and destructive: CLI only.
             self.notify(

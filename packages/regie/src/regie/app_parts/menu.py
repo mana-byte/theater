@@ -20,9 +20,6 @@ from regie.ui_constants import REGIE_MENU_MORE_ID, REGIE_MENU_PREVIEW_ROWS
 from regie.widgets import ParticipantTree
 from theater.frontend import TranscriptCandidate
 
-#: Textual's names for the keys the menu shows as the characters they type.
-_KEY_NAMES = {"minus": "-", "dollar_sign": "$", "slash": "/"}
-
 
 class MenuActions(_AppBase):
     #: The lists an option fetches each time it unfolds; frozen, so a class default is safe.
@@ -30,6 +27,9 @@ class MenuActions(_AppBase):
     _menu_transcripts: Loaded = Loaded(state="loading")
     #: An option unfolded from the keyboard while its list loads: the cursor walks in on arrival.
     _menu_walk_in: str | None = None
+    #: Identifies the menu visit; a read that outlives its visit must never overwrite a newer list.
+    _menu_visit: int = 0
+    _menu_visit_origin: Key | None = None
 
     def _initialize_menu(self) -> None:
         self.query_one(ParticipantTree).menu_source = self._menu_items
@@ -53,13 +53,19 @@ class MenuActions(_AppBase):
         """The key bound to *action*, as the menu shows it: read from the bindings, not restated."""
         for binding in self.BINDINGS:
             if isinstance(binding, Binding) and binding.action == action:
-                key = binding.key.split(",")[0]
-                return _KEY_NAMES.get(key, key)
+                # A binding may list several keys; the menu shows the first, as Textual does.
+                return self.get_key_display(replace(binding, key=binding.key.split(",")[0]))
         return None
 
     def _menu_items(self) -> tuple[MenuItem, ...]:
         """The options, built fresh from the app's own state each time the menu is drawn."""
-        origin = self._menu_tree().menu_return
+        tree = self._menu_tree()
+        if tree.menu_return != self._menu_visit_origin:
+            self._menu_visit_origin = tree.menu_return
+            self._menu_visit += 1
+            self._menu_resume = Loaded(state="loading")
+            self._menu_transcripts = Loaded(state="loading")
+        origin = tree.menu_return
         retry = self.latest_uncertain_action()
         recover = self._menu_transcript(origin)
         items = [
@@ -177,10 +183,11 @@ class MenuActions(_AppBase):
             origin = self._menu_tree().menu_return
             if origin is None:
                 return
-            self._transcript_recovery_target = origin[1]
             self._menu_transcripts = Loaded(state="loading")
             self.run_worker(
-                self._menu_fetch_transcripts(origin[1]), group="menu-transcript", exclusive=True
+                self._menu_fetch_transcripts(origin[1], self._menu_visit),
+                group="menu-transcript",
+                exclusive=True,
             )
 
     async def _menu_fetch_resume(self) -> None:
@@ -195,11 +202,10 @@ class MenuActions(_AppBase):
             )
         self._menu_loaded("resume")
 
-    async def _menu_fetch_transcripts(self, participant_id: str) -> None:
-        try:
-            candidates = await self.load_transcript_candidates()
-        finally:
-            self._transcript_recovery_target = None  # it only steers this one read
+    async def _menu_fetch_transcripts(self, participant_id: str, visit: int) -> None:
+        candidates = await self.load_transcript_candidates(participant_id)
+        if visit != self._menu_visit:
+            return  # a newer visit owns the list now
         self._menu_transcripts = Loaded(
             tuple(self._menu_candidate(i, c, participant_id) for i, c in enumerate(candidates)),
             note="no transcript can be bound",
@@ -288,12 +294,22 @@ class MenuActions(_AppBase):
         tree.set_menu_view(replace(tree.menu_view, query=value))
 
     def menu_filter_closed(self, *, kept: bool) -> None:
-        """The filter editor left: Enter keeps it and walks to the first match, Esc drops it."""
+        """The filter editor left: Enter keeps it and walks to the first pickable match."""
         tree = self._menu_tree()
         if kept:
-            first = next((k for k in tree.selectable_keys if k[0] == "m"), None)
-            if first is not None:
-                tree.select_key(first)
+            items = self._menu_items()
+            # An option row only unfolds on a pick; walk to the first leaf a pick can run.
+            matches = [
+                key
+                for key in tree.selectable_keys
+                if key[0] == "m"
+                and (item := find_item(items, key[1])) is not None
+                and item.choices is None
+            ]
+            if not matches:
+                matches = [key for key in tree.selectable_keys if key[0] == "m"]
+            if matches:
+                tree.select_key(matches[0])
         else:
             tree.set_menu_view(replace(tree.menu_view, query=""))
             tree.select_key(("g", ROOT_ID))
@@ -356,7 +372,7 @@ class MenuActions(_AppBase):
             tree.set_menu_view(replace(view, expanded=view.expanded - {option}))
             tree.select_key(("m", option))
         else:
-            tree.select_key(("g", "options"))
+            tree.select_key(("g", ROOT_ID))
 
     def _menu_show_all(self, tree: ParticipantTree, option: str) -> None:
         item = find_item(self._menu_items(), option)
