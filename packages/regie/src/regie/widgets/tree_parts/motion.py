@@ -10,13 +10,12 @@ from textual.widget import Widget
 from regie.marks import MarkKind, RowMark
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
-from regie.motions.wipe import status_wipe_color
+from regie.motions.wipe import SWEEPS, status_sweep
 from regie.render.layout import Key
 from regie.ui_constants import (
     REGIE_ATTENTION_PULSE_INTERVAL,
     REGIE_ATTENTION_PULSE_LIMIT,
     REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
-    REGIE_WIPE_DEATH_SECONDS,
     REGIE_WIPE_INTERVAL_SECONDS,
 )
 from regie.widgets.chrome import EmptyTreeState
@@ -24,15 +23,6 @@ from regie.widgets.leaf import AgentLeaf
 from regie.widgets.spawn_leaf import SpawnLeaf
 from regie.widgets.tree_parts._host import _TreeBase
 from theater.frontend import StateProjection
-
-#: The sweep that announces a mark arriving on a row.
-_MARK_WIPES: dict[MarkKind, tuple[str, float | None]] = {
-    MarkKind.TERMINATING: ("$error", REGIE_WIPE_DEATH_SECONDS),
-    MarkKind.SENT: ("$success", None),
-    MarkKind.BLOCKED: ("$warning", None),
-    MarkKind.UNCERTAIN: ("$warning", None),
-    MarkKind.FAILED: ("$error", None),
-}
 
 
 class TreeMotion(_TreeBase):
@@ -106,7 +96,7 @@ class TreeMotion(_TreeBase):
         for key in departed & self._kills:
             if not self._wipes.has(key):
                 # A kill too quick for its mark to be seen.
-                self._wipes.start(key, "$error", seconds=REGIE_WIPE_DEATH_SECONDS)
+                self._sweep(key, "killed_unseen")
         self._kills -= departed
         held = {key for key in departed if self._wipes.has(key)}
         self._wipes.cancel(departed - held)
@@ -221,16 +211,12 @@ class TreeMotion(_TreeBase):
             previous = self._statuses.get(key)
             if previous is None or previous == status:
                 continue
-            if (color := status_wipe_color(previous, status)) is not None:
+            if (sweep := status_sweep(previous, status)) is not None:
                 # A row folded out of sight cannot sweep: the one standing for it does, but only
                 # for what needs the human.
                 target = self._hidden_owner.get(key, key)
                 if target == key or status in {"awaiting_input", "dead"}:
-                    self._wipes.start(
-                        target,
-                        color,
-                        seconds=REGIE_WIPE_DEATH_SECONDS if status == "dead" else None,
-                    )
+                    self._wipes.start(target, sweep[0], seconds=sweep[1])
         now = time.monotonic()
         self._attention_since = {
             key: self._attention_since.get(key, now)
@@ -252,10 +238,8 @@ class TreeMotion(_TreeBase):
             for participant_id, mark in marks.items():
                 if mark.kind is MarkKind.TERMINATING:
                     self._leaf_retirement.allow(("p", participant_id))
-                if previous.get(participant_id) is not mark.kind and (
-                    wipe := _MARK_WIPES.get(mark.kind)
-                ):
-                    self._wipes.start(("p", participant_id), wipe[0], seconds=wipe[1])
+                if previous.get(participant_id) is not mark.kind and mark.kind in SWEEPS:
+                    self._sweep(("p", participant_id), mark.kind)
             for participant_id, kind in previous.items():
                 # Up: a rolled-back spawn has no row left to sweep.
                 if (
@@ -263,9 +247,13 @@ class TreeMotion(_TreeBase):
                     and participant_id not in marks
                     and ("p", participant_id) in self._statuses
                 ):
-                    self._wipes.start(("p", participant_id), "$success")
+                    self._sweep(("p", participant_id), "launched")
         self._mark_kinds = {participant_id: mark.kind for participant_id, mark in marks.items()}
         self._ensure_wipe_timer()
+
+    def _sweep(self, key: Key, event: str) -> None:
+        color, seconds = SWEEPS[event]
+        self._wipes.start(key, color, seconds=seconds)
 
     def _ensure_wipe_timer(self) -> None:
         if self._wipes.active and self._wipe_timer is None:

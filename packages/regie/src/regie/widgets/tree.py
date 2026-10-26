@@ -511,7 +511,7 @@ class ParticipantTree(TreeMotion, VerticalScroll):
             widget = SeparatorRow(node, prefix, key=key, is_first_root=first_root)
         elif key[0] == "n":
             widget = SpawnLeaf(node, prefix, cont_prefix=cont_prefix, key=key)
-            self._wipes.start(key, "$secondary")  # the row that asks for the directory opens
+            self._sweep(key, "spawn_opening")
             self._ensure_wipe_timer()
         elif _is_participant_key(key):
             widget = AgentLeaf(

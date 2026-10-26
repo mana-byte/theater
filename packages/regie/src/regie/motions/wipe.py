@@ -12,9 +12,11 @@ from dataclasses import dataclass
 from rich.cells import cell_len
 from textual.content import Content
 
+from regie.marks import MarkKind
 from regie.render.layout import Key
 from regie.ui_constants import (
     REGIE_WIPE_BAND_CELLS,
+    REGIE_WIPE_DEATH_SECONDS,
     REGIE_WIPE_SECONDS,
     REGIE_WIPE_TRAIL_ALPHA,
     REGIE_WIPE_WAKE_CELLS,
@@ -24,14 +26,29 @@ from regie.ui_constants import (
 type Wipe = tuple[float, str]
 
 
-def status_wipe_color(previous: str, status: str) -> str | None:
-    """The colour announcing a status change, or None when the change is not worth a sweep."""
-    if status == "awaiting_input":
-        return "$warning"
-    if status == "dead":
-        return "$error"
+#: What each event sweeps its row with: the theme colour, and seconds (None: the default length).
+#: Marks arriving are keyed by their kind; colour alone does not decide the length.
+SWEEPS: dict[str, tuple[str, float | None]] = {
+    "spawn_opening": ("$secondary", None),  # the row that asks for the directory opens
+    "launched": ("$success", None),  # a spawn's launching mark cleared and its agent is up
+    "killed_unseen": ("$error", REGIE_WIPE_DEATH_SECONDS),  # a kill too quick for its mark
+    "awaiting_input": ("$warning", None),
+    "dead": ("$error", REGIE_WIPE_DEATH_SECONDS),
+    "finished": ("$success", None),  # a working turn went idle
+    MarkKind.TERMINATING: ("$error", REGIE_WIPE_DEATH_SECONDS),
+    MarkKind.SENT: ("$success", None),
+    MarkKind.BLOCKED: ("$warning", None),
+    MarkKind.UNCERTAIN: ("$warning", None),
+    MarkKind.FAILED: ("$error", None),
+}
+
+
+def status_sweep(previous: str, status: str) -> tuple[str, float | None] | None:
+    """The sweep announcing a status change, or None when the change is not worth one."""
+    if status in {"awaiting_input", "dead"}:
+        return SWEEPS[status]
     if previous == "working" and status == "idle":
-        return "$success"
+        return SWEEPS["finished"]
     return None
 
 
