@@ -26,13 +26,12 @@ from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_INTERVAL,
     REGIE_LEAF_FRAME_CYCLE,
-    REGIE_LEAF_MARQUEE_INTERVAL,
     REGIE_LEAF_SPINNER_INTERVAL,
     REGIE_TREE_COST_MIN_CELLS,
     REGIE_TREE_USAGE_COST_STYLE,
 )
 from regie.widgets.animation_clock import AnimationSubscription, animation_clock
-from regie.widgets.renameable import RenameableRow
+from regie.widgets.marquee import MarqueeMixin
 
 type StageMarker = Literal["tmux", "trajectory"]
 
@@ -54,7 +53,7 @@ def _content_changed(previous: Content, current: Content) -> bool:
     return previous.plain != current.plain or previous.spans != current.spans
 
 
-class AgentLeaf(RenameableRow):
+class AgentLeaf(MarqueeMixin):
     """One participant, preserving animation state across projection refreshes."""
 
     ALLOW_SELECT: ClassVar[bool] = False
@@ -430,32 +429,6 @@ class AgentLeaf(RenameableRow):
         if self._spinner_sub is not None:
             self._spinner_sub.stop()
             self._spinner_sub = None
-
-    def _tick_marquee(self) -> None:
-        if not self._should_marquee():
-            self._stop_marquee()
-            self.update(self._render_label(), layout=False)
-            return
-        self._marquee_offset += 1
-        self.update(self._render_label(), layout=False)
-
-    def _start_marquee(self) -> None:
-        if self._marquee_sub is None:
-            self._marquee_sub = animation_clock(self.app).subscribe(
-                REGIE_LEAF_MARQUEE_INTERVAL, self._tick_marquee
-            )
-
-    def _stop_marquee(self) -> None:
-        if self._marquee_sub is not None:
-            self._marquee_sub.stop()
-            self._marquee_sub = None
-        self._marquee_offset = 0
-
-    def _sync_marquee(self) -> None:
-        if self._should_marquee():
-            self._start_marquee()
-        else:
-            self._stop_marquee()
 
     def set_cursor(self, selected: bool) -> None:
         if selected == self._cursor_selected:
