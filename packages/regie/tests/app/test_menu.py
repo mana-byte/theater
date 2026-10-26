@@ -172,13 +172,11 @@ async def test_retry_uncertain_action_appears_only_when_one_is_uncertain_and_run
         assert not tree.in_menu
 
 
-def _dead(
-    n: int, *, state: str = "resumable", participant_id: str | None = None
-) -> PublicResumeCandidate:
+def _dead(n: int, *, state: str = "resumable") -> PublicResumeCandidate:
     session = f"session-{n}"
     return PublicResumeCandidate.from_wire(
         {
-            "participant_id": participant_id or f"dead-{n}",
+            "participant_id": f"dead-{n}",
             "harness": "codex",
             "name": f"old {n}",
             "cwd": f"/workspace/{n}",
@@ -245,29 +243,6 @@ async def test_a_long_list_shows_five_and_enter_on_the_rest_shows_them_all() -> 
         await wait_until(pilot, lambda: ("m", "resume/dead-11") in tree._key_widgets)
         assert ("m", "resume/…") not in tree._key_widgets
         assert tree.selected_key == ("m", "resume/dead-5")  # the first row that was hidden
-
-
-@pytest.mark.asyncio
-async def test_a_dead_session_is_findable_by_its_stable_participant_id() -> None:
-    app, client, _presentation = build_app()
-    client.participants.dead_rows = (_dead(1, participant_id="corpse-77"),)
-
-    async with app.run_test(size=(70, 50)) as pilot:
-        tree = await _ready(app, pilot)
-        tree.open_menu()
-        await wait_until(pilot, lambda: ("m", "resume") in tree._key_widgets)
-        tree.select_key(("m", "resume"))
-        await pilot.press("l")  # unfold: the dead sessions load
-        await wait_until(pilot, lambda: ("m", "resume/corpse-77") in tree._key_widgets)
-
-        await pilot.press("slash")
-        await wait_until(pilot, lambda: bool(app.query(FilterEditor)))
-        await pilot.press("c", "o", "r", "p", "s", "e")
-        await wait_until(pilot, lambda: ("m", "resume/corpse-77") in tree._key_widgets)
-        assert "corpse-77" in _row(tree, ("m", "resume/corpse-77"))[2]
-
-        await pilot.press("escape")  # drop the filter before the editor goes at teardown
-        await wait_until(pilot, lambda: not app.query(FilterEditor))
 
 
 @pytest.mark.asyncio

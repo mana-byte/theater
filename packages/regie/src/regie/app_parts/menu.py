@@ -27,8 +27,7 @@ class MenuActions(_AppBase):
     _menu_transcripts: Loaded = Loaded(state="loading")
     #: An option unfolded from the keyboard while its list loads: the cursor walks in on arrival.
     _menu_walk_in: str | None = None
-    #: The menu visit the loaded lists belong to; a new visit (the row the cursor came from
-    #: changed) starts with empty ones, and a stale read never overwrites them.
+    #: Identifies the menu visit; a read that outlives its visit must never overwrite a newer list.
     _menu_visit: int = 0
     _menu_visit_origin: Key | None = None
 
@@ -62,8 +61,6 @@ class MenuActions(_AppBase):
         """The options, built fresh from the app's own state each time the menu is drawn."""
         tree = self._menu_tree()
         if tree.menu_return != self._menu_visit_origin:
-            # A new visit (the menu closed and opened, perhaps from another row): the lists
-            # the previous one loaded no longer belong here.
             self._menu_visit_origin = tree.menu_return
             self._menu_visit += 1
             self._menu_resume = Loaded(state="loading")
@@ -125,12 +122,7 @@ class MenuActions(_AppBase):
         return MenuItem(
             candidate.participant_id,
             f"{candidate.harness}  {who}",
-            # the stable id rides in the help so the menu's filter finds the row
-            " · ".join(
-                part
-                for part in (candidate.participant_id, candidate.reason, where, context)
-                if part
-            ),
+            candidate.reason or " · ".join(part for part in (where, context) if part),
             glyph="✗",
             style="$error",
             enabled=candidate.available,
