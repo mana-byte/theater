@@ -6,7 +6,9 @@ import os
 import stat
 import tempfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +17,7 @@ from scripts.harness_compat.cleanup import CleanupFailed
 from scripts.harness_compat.codecopy import UnsafeCopy, code_copy
 from scripts.harness_compat.contract import Check, InstallFailed, Sandbox
 from scripts.harness_compat.policy import load_policy
+from scripts.harness_compat.run import run_harness
 from scripts.harness_compat.sandbox import make_sandbox
 from scripts.harness_compat.suite_runner import SuiteReport, run_suite, verdict
 from theater.harness.contracts.version_policy import VersionPolicy
@@ -536,3 +539,62 @@ def test_an_unsafe_symlink_is_tooling_and_leaves_no_copy_behind(
 
     assert result.verdict == "tooling" and "UnsafeCopy" in result.checks[0].detail
     assert not suite.calls
+
+
+@pytest.mark.parametrize("status", ["pass", "fail"])
+@pytest.mark.parametrize("stage", ["copy", "sandbox", "both"])
+def test_cleanup_failure_preserves_completed_checks_and_stops_the_run(
+    repo, monkeypatch, stage, status
+):
+    report = SuiteReport(
+        (
+            Check("tests/conformance/live", "pass", "2 passed"),
+            Check("conformance:interrupt", status, "behavioral evidence"),
+        )
+    )
+    monkeypatch.setattr(qualify, "run_suite", _Suite(report))
+    asked = []
+
+    def install(adapter, sb, version):
+        asked.append(version)
+        return Path("/nowhere/cli")
+
+    monkeypatch.setattr(qualify, "install_verified", install)
+
+    def failing_exit(real, message):
+        @contextmanager
+        def context(*args, **kwargs):
+            with real(*args, **kwargs) as item:
+                try:
+                    yield item
+                finally:
+                    raise CleanupFailed(message)
+
+        return context
+
+    if stage in {"copy", "both"}:
+        monkeypatch.setattr(
+            qualify, "code_copy", failing_exit(qualify.code_copy, "copy deletion failed")
+        )
+    if stage in {"sandbox", "both"}:
+        monkeypatch.setattr(
+            qualify, "make_sandbox", failing_exit(qualify.make_sandbox, "sandbox deletion failed")
+        )
+    lines = []
+    run = run_harness(
+        repo,
+        SimpleNamespace(name="claude"),
+        releases=["1.1.0", "1.2.0"],
+        qualify=qualify.qualify_release,
+        say=lines.append,
+    )
+    assert asked == ["1.1.0"]
+    assert run.results[0].verdict == "tooling" and run.errors
+    assert run.results[0].checks[:-1] == report.checks
+    assert run.results[0].checks[-1].name == "cleanup"
+    assert run.results[0].checks[-1].status == "error"
+    assert "behavioral evidence" in "\n".join(lines)
+    if stage in {"copy", "both"}:
+        assert "copy deletion failed" in run.errors[0]
+    if stage in {"sandbox", "both"}:
+        assert "sandbox deletion failed" in run.errors[0]

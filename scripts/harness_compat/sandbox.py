@@ -82,14 +82,16 @@ def make_sandbox(harness: str, *, root: Path | None = None) -> Iterator[Sandbox]
     base = _new_temp_dir() if root is None else root.resolve()
     socket_root: Path | None = None
     tmux_socket = base / "tmux.sock"
+    token = new_token()
     try:
         if root is not None and len(os.fsencode(tmux_socket)) >= 100:
             socket_root = _new_temp_dir()
             tmux_socket = socket_root / "tmux.sock"
         if len(os.fsencode(tmux_socket)) >= 100:
             raise RuntimeError(f"{harness} tmux AF_UNIX socket path is too long: {tmux_socket}")
-        yield from _sandbox(base, tmux_socket)
+        yield from _sandbox(base, tmux_socket, token)
     finally:
+        stop_sandbox_processes(base, token, tmux_socket)
         try:
             if socket_root is not None:
                 remove_tree(socket_root)
@@ -98,7 +100,7 @@ def make_sandbox(harness: str, *, root: Path | None = None) -> Iterator[Sandbox]
                 remove_tree(base)
 
 
-def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
+def _sandbox(base: Path, tmux_socket: Path, token: str) -> Iterator[Sandbox]:
     home, config_dir = base / "h", base / "c"
     bin_dir, evidence_dir = base / "b", base / "e"
     cache_dir, data_dir, state_dir, temp_dir = (
@@ -118,7 +120,6 @@ def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
         temp_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    token = new_token()
 
     def environment(*, offline: bool) -> dict[str, str]:
         return sandbox_environment(
@@ -134,16 +135,13 @@ def _sandbox(base: Path, tmux_socket: Path) -> Iterator[Sandbox]:
         )
 
     env, offline_env = environment(offline=False), environment(offline=True)
-    try:
-        yield Sandbox(
-            root=base,
-            home=home,
-            config_dir=config_dir,
-            bin_dir=bin_dir,
-            evidence_dir=evidence_dir,
-            tmux_socket=tmux_socket,
-            env=env,
-            offline_env=offline_env,
-        )
-    finally:
-        stop_sandbox_processes(base, token, tmux_socket)
+    yield Sandbox(
+        root=base,
+        home=home,
+        config_dir=config_dir,
+        bin_dir=bin_dir,
+        evidence_dir=evidence_dir,
+        tmux_socket=tmux_socket,
+        env=env,
+        offline_env=offline_env,
+    )

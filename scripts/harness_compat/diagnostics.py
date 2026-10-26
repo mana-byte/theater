@@ -17,9 +17,19 @@ def clean_diagnostic(value: str) -> str:
 
 def exception_detail(error: BaseException) -> str:
     """Keep publication causes visible even when several operations failed."""
-    if isinstance(error, BaseExceptionGroup):
-        return "; ".join(exception_detail(cause) for cause in error.exceptions)
-    return f"{type(error).__name__}: {error}"
+    details: list[str] = []
+    seen: set[int] = set()
+    while id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, BaseExceptionGroup):
+            details.append("; ".join(exception_detail(cause) for cause in error.exceptions))
+        else:
+            details.append(f"{type(error).__name__}: {error}")
+        cause = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+        if cause is None:
+            break
+        error = cause
+    return "; preceded by ".join(details)
 
 
 def clip_diagnostic(value: str, limit: int, *, tail: bool = False) -> str:

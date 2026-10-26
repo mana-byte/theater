@@ -599,3 +599,22 @@ async def test_the_rig_undoes_what_came_up_in_reverse_however_far_it_got(
                 pytest.fail("the scenario must not start")
 
     assert parts.steps == expected
+
+
+@pytest.mark.parametrize("run_token", [None, "command-owner"])
+def test_rig_environment_preserves_command_ownership_only_when_present(
+    tmp_path, monkeypatch, run_token
+):
+    from scripts.harness_compat.process import RUN_ENV, SANDBOX_ENV
+
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+    if run_token is None:
+        monkeypatch.delenv(RUN_ENV, raising=False)
+    else:
+        monkeypatch.setenv(RUN_ENV, run_token)
+    env = live_rig.hermetic_environment(
+        tmp_path, token="sandbox-owner", binary_dir=tmp_path, extra={}
+    )
+    assert env[SANDBOX_ENV] == "sandbox-owner"
+    assert env.get(RUN_ENV) == run_token
+    assert "OPENAI_API_KEY" not in env
