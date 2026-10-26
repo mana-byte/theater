@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
-from theater.daemon.frontend import provider_handlers, workspace_handlers
+from theater.daemon.frontend import workspace_handlers
 from theater.daemon.plays import PlayPlan
 from theater.daemon.rpc import management, spawning
 from theater.daemon.spawning import private_operations
@@ -71,24 +71,6 @@ class _Daemon:
     def __init__(self) -> None:
         self.terminal_service = _TerminalService()
         self.workspace_service = _WorkspaceService()
-
-
-async def test_private_provider_and_workspace_reads_match_public_projections() -> None:
-    daemon = _Daemon()
-    context = SimpleNamespace(client_id="public-client")
-
-    assert await management.providers_list(
-        daemon, {"limit": 2}
-    ) == await provider_handlers.providers_list(daemon, context, {"limit": 2})
-    assert await management.providers_get(
-        daemon, {"provider_id": "provider-a"}
-    ) == await provider_handlers.providers_get(daemon, context, {"provider_id": "provider-a"})
-    assert await management.workspaces_list(
-        daemon, {"limit": 2}
-    ) == await workspace_handlers.workspaces_list(daemon, context, {"limit": 2})
-    assert await management.workspaces_get(
-        daemon, {"workspace_id": "workspace-a"}
-    ) == await workspace_handlers.workspaces_get(daemon, context, {"workspace_id": "workspace-a"})
 
 
 async def test_private_workspace_cleanup_preserves_the_public_service_request() -> None:

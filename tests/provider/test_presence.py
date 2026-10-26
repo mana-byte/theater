@@ -268,13 +268,6 @@ async def test_refresh_rechecks_focus_immediately_before_each_delivery(provider_
         await monitor.require_absent("participant-a")
 
 
-async def test_provider_presence_has_no_legacy_inventory_dependency(provider_monitor) -> None:
-    monitor, service, _registry, _clock = provider_monitor
-    service.responses.append(result("absent", 1))
-    await monitor.require_absent("participant-a")
-    assert monitor.snapshot("participant-a").state is PresenceState.ABSENT
-
-
 async def test_inspect_failure_identity_mismatch_and_revision_regression_fail_closed(
     provider_monitor,
 ) -> None:

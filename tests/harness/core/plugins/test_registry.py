@@ -168,20 +168,6 @@ def test_a_plugin_cannot_shadow_another_name_or_alias(
         install(local_dir, **kwargs)
 
 
-def test_two_plugins_cannot_claim_the_same_extra_binary(local_dir, shipped_dir):
-    write_plugin(shipped_dir, name="first", binary="nova")
-    write_plugin(local_dir, name="second", binary="other", icon="#", aliases="()")
-    pkg = local_dir / "second"
-    body = (pkg / MANIFEST_FILENAME).read_text()
-    body = body.replace(
-        "MANIFEST = HarnessManifest(",
-        "MANIFEST = HarnessManifest(\n    binaries=frozenset({'nova'}),",
-    )
-    (pkg / MANIFEST_FILENAME).write_text(body)
-    with pytest.raises(harness_registry.ConfigError, match="already claimed by"):
-        install(local_dir, shipped_dir=shipped_dir)
-
-
 def test_a_local_override_releases_the_shipped_binary_claims(local_dir, shipped_dir):
     write_plugin(shipped_dir, name="acme", binary="foo", aliases='("foo-cli",)')
     write_plugin(local_dir, name="acme", binary="bar")

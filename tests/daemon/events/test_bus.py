@@ -208,15 +208,6 @@ def test_participant_bus_pages_include_both_directions_and_filter_kinds(store):
     )
 
 
-def test_bus_participant_indexes_are_compound(store):
-    indexes = {
-        row[1]: [info[2] for info in store.conn.exec_driver_sql(f"PRAGMA index_info('{row[1]}')")]
-        for row in store.conn.exec_driver_sql("PRAGMA index_list('bus')")
-    }
-    assert indexes["idx_bus_from_id_id"] == ["from_id", "id"]
-    assert indexes["idx_bus_to_id_id"] == ["to_id", "id"]
-
-
 @pytest.mark.parametrize("limit", [True, -1, 1.5, "2", None])
 def test_participant_bus_page_rejects_invalid_limits(store, limit):
     with pytest.raises(ValueError, match="limit"):

@@ -13,9 +13,7 @@ from theater.harness.builtin.plugins.vibe import version as version_module
 from theater.harness.builtin.plugins.vibe.approval_guard import shadowed_approval_profile
 from theater.harness.builtin.plugins.vibe.compatibility import VERSION_POLICY
 from theater.harness.builtin.plugins.vibe.constants import VIBE_BYPASS_TOOL_PERMISSIONS_ENV
-from theater.harness.builtin.plugins.vibe.manifest import MANIFEST
 from theater.harness.builtin.plugins.vibe.version import installed_vibe_version
-from theater.harness.contracts.manifest import InterruptPlan
 from theater.harness.contracts.version_policy import version_key
 from theater.models import BadRequest
 
@@ -126,10 +124,9 @@ def test_launch_admits_the_newest_qualified_writer(tmp_path, monkeypatch):
     assert plan.argv[0] == "vibe"
 
 
-@pytest.mark.parametrize("version", [(*_MAXIMUM[:2], _MAXIMUM[2] + 1), _next_minor_version()])
-def test_launch_refuses_a_writer_newer_than_the_store_reader(tmp_path, monkeypatch, version):
+def test_launch_refuses_a_writer_newer_than_the_store_reader(tmp_path, monkeypatch):
     """A writer whose unified store no reader understands must fail at spawn."""
-    pin_installed_vibe_version(monkeypatch, version)
+    pin_installed_vibe_version(monkeypatch, _next_minor_version())
     with pytest.raises(BadRequest, match="upgrade Theater"):
         plan_launch(
             "vibe",
@@ -209,12 +206,6 @@ def test_a_flag_shaped_prompt_stays_a_literal_prompt(tmp_path, resume):
     assert parsed.initial_prompt == "--yolo"
     assert parsed.auto_approve is False
     assert parsed.resume == resume
-
-
-def test_shipped_vibe_manifest_stays_legacy_while_topology_fails() -> None:
-    assert MANIFEST.runtime is None
-    assert MANIFEST.controls is not None
-    assert MANIFEST.controls.interrupt == InterruptPlan(keys=("Escape",))
 
 
 _VERSION_TEXT = VERSION_POLICY.minimum

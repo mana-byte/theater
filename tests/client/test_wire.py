@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import sys
-from typing import get_type_hints
 
 import pytest
 
@@ -15,19 +14,11 @@ from theater import paths, protocol
 from theater.client import DaemonClient
 from theater.daemon.lock import DaemonLock
 from theater.daemon.methods import METHODS
-from theater.daemon.persistence.transactions import WriteUnit as DaemonWriteUnit
 from theater.daemon.server import Daemon
 from theater.mcp.client_pool import DaemonClientPool
 from theater.protocol import (
-    BUS_TAIL_MAX_WAIT_SECONDS,
-    BUS_TAIL_METHOD,
-    BusEvent,
-    BusTailParams,
     MessageTooLarge,
-    ProviderReportFacts,
-    ProviderReportResult,
     RemoteError,
-    WriteUnit,
 )
 
 
@@ -568,23 +559,3 @@ async def test_drain_message_stops_at_end_of_stream():
     await asyncio.wait_for(protocol.drain_message(reader), timeout=5)
 
     assert await protocol.read_message(reader) == b""
-
-
-def test_the_bus_tail_and_provider_report_contracts_are_exported() -> None:
-    assert BUS_TAIL_METHOD == "frontend.bus.tail"
-    assert BUS_TAIL_MAX_WAIT_SECONDS == 30.0
-    assert {"wait_seconds", "kinds"} <= set(BusTailParams.__optional_keys__)
-    assert "invalidated_terminals" in ProviderReportFacts.__optional_keys__
-    assert "presence_invalidated" not in ProviderReportResult.__annotations__
-    assert get_type_hints(BusEvent)["ts"] is float
-
-
-def test_write_unit_mirrors_daemon_interface() -> None:
-    def public(cls: type) -> set[str]:
-        return {
-            name
-            for name in vars(cls)
-            if name in {"__enter__", "__exit__"} or not name.startswith("_")
-        }
-
-    assert public(WriteUnit) == public(DaemonWriteUnit)

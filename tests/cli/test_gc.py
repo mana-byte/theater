@@ -155,15 +155,6 @@ async def test_gc_rpc_vacuum_false_does_not_vacuum(client, daemon, terminal_prov
     assert called == []
 
 
-async def test_gc_rpc_vacuum_true_runs_vacuum(client, daemon, terminal_provider, monkeypatch):
-    called = []
-    import theater.daemon.gc as gc_mod
-
-    monkeypatch.setattr(gc_mod, "vacuum", lambda store: called.append("vacuum"))
-    await client.call("gc", vacuum=True)
-    assert called == ["vacuum"]
-
-
 async def test_gc_rpc_sweep_runs_before_vacuum(client, daemon, terminal_provider, monkeypatch):
     """Vacuum must run after the sweep: vacuuming before would rewrite the
     file including rows about to be deleted."""

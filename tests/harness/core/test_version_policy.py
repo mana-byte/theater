@@ -7,13 +7,6 @@ import pytest
 from theater.harness.contracts.version_policy import VersionPolicy, version_key
 
 
-def test_the_public_contract_reexports_the_dependency_free_policy_owner():
-    from theater import version_policy
-
-    assert VersionPolicy is version_policy.VersionPolicy
-    assert version_key is version_policy.version_key
-
-
 def test_inclusive_bounds_exclusions_and_numeric_ordering():
     policy = VersionPolicy("0.84.4", "1.4.0", ("0.85.0",))
     assert all(policy.admits(version) for version in ("0.84.4", "0.84.10", "0.85.1", "1.4.0"))

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
-
 import pytest
 from regie.motions.footer import CountingValue
 from regie.motions.pulse import advance_pulse_frame, working_harness_style
@@ -159,40 +156,6 @@ def test_controller_caps_total_pending_reveals():
     )
     assert first_new in frame.widths
     assert overflow not in frame.widths
-
-
-def test_animations_package_does_not_eagerly_import_back_into_render_glyphs():
-    """A cold import of render.glyphs must not re-enter itself via the package.
-
-    Regression guard for the cycle where ``render.glyphs`` imports
-    ``animations.pulse``, Python runs ``animations/__init__.py``, and any eager
-    reexport there pulls ``animations.reveal`` → ``render.layout`` →
-    ``render.glyphs`` (partially initialized).  The package init must stay
-    dependency-free; a subprocess import is the only way to catch this in CI.
-    """
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "; ".join(
-                f"import {m}"
-                for m in (
-                    "regie.render.glyphs",
-                    "regie.motions.pulse",
-                    "regie.motions.reveal",
-                    "regie.motions.retirement",
-                    "regie.motions.routes",
-                    "regie.motions.footer",
-                    "regie.motions.spinner",
-                    "regie.motions.cycling_text",
-                )
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(

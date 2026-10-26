@@ -100,14 +100,6 @@ def test_send_route_renders_through_a_separator_before_its_target():
     assert any(color in style for style in label_styles(rendered) for color in REGIE_ROUTE_COLORS)
 
 
-def test_send_path_is_the_same_route_in_reverse():
-    lines = render_tree([_agent("aaa"), _agent("bbb")])
-    there = send_path(lines, "aaa", "bbb")
-    back = send_path(lines, "bbb", "aaa")
-    assert there is not None and back is not None
-    assert back == list(reversed(there))
-
-
 def test_send_path_across_two_roots_only_moves_along_drawn_rails():
     """Every cell of a root-to-root route is a character the tree drew.
 

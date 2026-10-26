@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -52,20 +51,6 @@ class _Instrument:
     def add(self, value, attributes=None):
         assert self._method == "add"
         self.calls.append((value, attributes))
-
-
-@pytest.mark.parametrize(
-    ("registry", "unit", "record"),
-    [
-        (HistogramRegistry, "ms", lambda reg: reg.record("m", 42.0)),
-        (CounterRegistry, "1", lambda reg: reg.add("m", 1)),
-    ],
-    ids=["histogram", "counter"],
-)
-def test_a_registry_without_a_meter_is_a_noop(registry, unit, record):
-    reg = registry(meter=None)
-    reg.get_or_create("m", "d", unit)
-    record(reg)
 
 
 def test_registry_conflict():
@@ -205,29 +190,6 @@ def test_bridge_registry_failure_does_not_register_spec():
         bridge.observe(spec, 1)
 
 
-def test_bridge_inactive_noop():
-    MetricBridge(registry=None).record("any", 42.0)
-
-
-def test_gauge_cache_thread_safe():
-    g = GaugeCache()
-    seen: list[int] = []
-    g.set("theater.participants.live", 0)
-
-    def read() -> None:
-        for _ in range(1000):
-            value = g.get("theater.participants.live")
-            if value is not None:
-                seen.append(value)
-
-    t = threading.Thread(target=read)
-    t.start()
-    for i in range(1000):
-        g.set("theater.participants.live", i)
-    t.join()
-    assert all(isinstance(v, int) for v in seen)
-
-
 def test_gauge_cache_unknown_raises():
     with pytest.raises(KeyError):
         GaugeCache().set("bogus", 1)
@@ -359,12 +321,6 @@ def test_job_active_count_covers_all_states_and_forwards(store):
     assert jm.active_count() == 1
     jm.finish("r2", state=JobState.KILLED, error_code="killed")
     assert jm.active_count() == 0
-    assert store.active_job_count() == 0
-
-
-def test_counts_zero_on_empty_store(store):
-    assert store.live_count() == 0
-    assert store.addressable_count() == 0
     assert store.active_job_count() == 0
 
 

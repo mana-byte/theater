@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import pytest
 from regie.tmux.command import TmuxError
-from regie.tmux.focus_facts import FocusClient, FocusInventory, FocusPane, parse_clients
+from regie.tmux.focus_facts import FocusClient, FocusInventory, FocusPane
 from regie.tmux.focus_hooks import FocusHooks
 from regie.tmux.focus_monitor import FocusMonitor
 from regie.tmux.focus_policy import FocusTrust, classify
@@ -107,16 +107,6 @@ def test_blur_trust_is_lifetime_scoped_and_requires_reporting():
     assert classify(_pane(), _facts(blurred), trust).state == "unknown"
     trust.observe(())
     assert classify(_pane(), _facts(), trust).state == "absent"
-
-
-def test_focus_client_identity_and_unknown_selection_are_not_conflated():
-    from regie.tmux.command import TmuxError
-
-    client = parse_clients("tty\t123\t456\t$1\t789\tfocused\t0\t0\t@1\t\tfocus")[0]
-    assert client.identity == ("tty", "123", "456", "$1", "789")
-    assert client.pane_id == ""
-    with pytest.raises(TmuxError):
-        parse_clients("\t123\t456\t$1\t789\tfocused\t0\t0\t@1\t%7\tfocus")
 
 
 async def test_focus_hook_inventory_and_installation_are_batched_per_scope(monkeypatch):

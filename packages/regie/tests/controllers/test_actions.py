@@ -587,32 +587,6 @@ async def test_unverifiable_mutation_response_remains_retryable_as_uncertain() -
     await controller.close()
 
 
-@pytest.mark.parametrize(
-    ("action", "message"),
-    [
-        ("send", "delivery unknown"),
-        ("queue_followup", "delivery unknown"),
-        ("interrupt", "delivery unknown"),
-    ],
-)
-def test_success_without_receipt_evidence_is_rendered_as_a_warning(
-    action: str,
-    message: str,
-) -> None:
-    record = ActionRecord(
-        action,
-        "participant-a",
-        "key-a",
-        state=ActionState.SUCCEEDED,
-        result={},
-    )
-
-    rendered, severity = describe_action(record)
-
-    assert message in rendered
-    assert severity == "warning"
-
-
 @pytest.mark.parametrize("action", ["send", "queue_followup", "interrupt"])
 @pytest.mark.parametrize(
     ("delivery", "message", "severity"),

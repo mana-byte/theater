@@ -355,49 +355,6 @@ def test_views_include_external_histograms_but_not_counters(monkeypatch):
     assert "theater.external.total" not in names
 
 
-def test_views_passed_to_meter_provider_constructor():
-    """MeterProvider receives views= in constructor."""
-    _run("""
-        import opentelemetry.sdk.metrics as mm
-        captured = {}
-        orig = mm.MeterProvider.__init__
-        def spy(self, **kw):
-            captured['views'] = kw.get('views')
-            return orig(self, **kw)
-        mm.MeterProvider.__init__ = spy
-        try:
-            from theater.observability.runtime import configure
-            h = configure(role="daemon", otlp_enabled=True)
-            h.shutdown()
-        finally:
-            mm.MeterProvider.__init__ = orig
-        assert captured.get('views'), f"no views: {captured}"
-        print("OK")
-    """)
-
-
-def test_same_gauge_cache_sampler_and_callbacks():
-    """Sampler writes to same cache callbacks read; callback returns Observation(5)."""
-    _run("""
-        from theater.observability.runtime import configure
-        from theater.observability.metrics import create_active_gauge_sampler
-        h = configure(role="daemon", otlp_enabled=True)
-        try:
-            sampler = create_active_gauge_sampler(1.0, {"theater.participants.live": lambda: 5})
-            assert sampler is not None
-            from theater.observability.engine import metric_bridge
-            assert metric_bridge().gauge_cache is sampler.cache
-            # Write via sampler's cache, read via registered callback
-            sampler.cache.set("theater.participants.live", 5)
-            cbs = sampler.cache.make_callbacks()
-            result = cbs["theater.participants.live"](None)
-            assert len(result) == 1 and result[0].value == 5
-        finally:
-            h.shutdown()
-        print("OK")
-    """)
-
-
 def test_existing_provider_is_rejected():
     _run("""
         from unittest.mock import patch

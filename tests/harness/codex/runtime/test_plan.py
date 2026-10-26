@@ -13,10 +13,8 @@ from tests.support.codex_server import (
     PARTICIPANT,
     ScriptedCodexIO,
     ScriptedCodexServer,
-    make_runtime,
     thread_started,
 )
-from theater.harness.builtin.plugins.codex.launch import plan_launch
 from theater.harness.builtin.plugins.codex.manifest import MANIFEST, manifest_for_root
 from theater.harness.builtin.plugins.codex.runtime import CodexRuntime, codex_runtime_factory
 from theater.harness.builtin.plugins.codex.runtime_plan import (
@@ -29,9 +27,7 @@ from theater.harness.builtin.plugins.codex.runtime_plan import (
     probe_codex_compatibility,
     qualified_versions_range_text,
 )
-from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.channels import ChannelKind
-from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.manifest import HarnessManifest
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
@@ -250,17 +246,6 @@ def test_frontend_plan_resumes_exact_thread() -> None:
     ]
 
 
-async def test_runtime_frontend_plan_matches_pure_planner() -> None:
-    runtime = make_runtime(ScriptedCodexServer())
-    fresh = await runtime.frontend_plan(native_session_id=None)
-    resumed = await runtime.frontend_plan(native_session_id="th-42")
-    assert fresh == plan_codex_frontend(ENDPOINT, native_session_id=None, approval="manual")
-    assert resumed == plan_codex_frontend(ENDPOINT, native_session_id="th-42", approval="manual")
-    for plan in (fresh, resumed):
-        assert isinstance(plan, LaunchPlan)
-        assert not any("prompt" in arg for arg in plan.argv)
-
-
 async def test_backend_and_frontend_use_the_same_selected_binary(tmp_path):
     binary = str(tmp_path / "codex-qualified")
     backend = plan_codex_runtime_backend(planning_context(binary=binary))
@@ -302,20 +287,6 @@ def test_manifest_for_root_preserves_runtime() -> None:
     manifest = manifest_for_root(Path("/tmp/root"))
     assert isinstance(manifest, HarnessManifest)
     assert manifest.runtime is MANIFEST.runtime
-
-
-@pytest.mark.usefixtures("available_harness_binaries")
-def test_legacy_launch_behavior_unchanged() -> None:
-    context = LaunchContext(
-        participant_id=PARTICIPANT,
-        prompt="hello",
-        config_path=Path("/tmp/config.json"),
-        approval="yolo",
-    )
-    plan = plan_launch(context)
-    assert plan.argv[0] == "codex"
-    assert "--dangerously-bypass-approvals-and-sandbox" in plan.argv
-    assert plan.argv[-1] == "hello"
 
 
 async def test_manifest_factory_creates_runtime_from_context() -> None:

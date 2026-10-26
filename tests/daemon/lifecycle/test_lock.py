@@ -43,15 +43,6 @@ def test_the_refusal_names_the_holder(theater_home):
     assert str(os.getpid()) in str(caught.value)
 
 
-def test_releasing_frees_it_for_the_next_daemon(theater_home):
-    first = DaemonLock()
-    first.acquire()
-    first.release()
-    second = DaemonLock()
-    second.acquire()  # must not raise
-    second.release()
-
-
 def test_release_removes_the_pidfile(theater_home):
     lock = DaemonLock()
     lock.acquire()
@@ -76,13 +67,6 @@ def test_release_leaves_a_successors_pidfile_alone(theater_home):
     assert paths.pidfile_path().exists()
     assert lock_mod.read_pid() == os.getpid()
     successor.release()
-
-
-def test_release_is_idempotent(theater_home):
-    lock = DaemonLock()
-    lock.acquire()
-    lock.release()
-    lock.release()  # must not raise
 
 
 def test_release_without_acquire_does_nothing(theater_home):

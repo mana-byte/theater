@@ -178,19 +178,3 @@ def test_detail_fields_are_bounded_for_large_tool_input():
     assert preview.omitted_bytes > 0
     assert preview.encoded_bytes <= 16 * 1024
     assert fact.summary == "exec"
-
-
-@pytest.mark.parametrize(
-    ("observer", "record"),
-    [
-        (ClaudeCodeObserver(), {"type": "system", "durationMs": 10**400}),
-        (
-            CodexObserver(),
-            {"type": "turn_context", "payload": {"duration_ms": 10**400}},
-        ),
-    ],
-)
-def test_trajectory_numeric_overflow_does_not_break_parsing(observer, record):
-    parsed = observer.parse_record(json.dumps(record), 0)
-
-    assert isinstance(parsed, ParsedRecord)

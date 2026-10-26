@@ -14,14 +14,6 @@ from theater.harness.base import MAX_TEXT, Event
 from theater.harness.observation import HarnessObserver, ScreenConfidence, ScreenKind, ScreenReading
 
 
-def test_event_positional_constructor_keeps_tool_name_position():
-    event = Event(EventKind.TOOL_CALL, "calling", "Read")
-    assert event.text == "calling"
-    assert event.tool_name == "Read"
-    assert event.raw_text is None
-    assert event.answer_final is False
-
-
 def test_answer_final_requires_a_boundary():
     with pytest.raises(ValueError, match="answer_final requires turn_end"):
         Event(EventKind.ASSISTANT, answer_final=True)

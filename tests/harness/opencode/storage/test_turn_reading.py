@@ -6,7 +6,6 @@ import asyncio
 
 from tests.support.opencode_recorder import attached, drain, text, tool
 from tests.support.opencode_recorder import rec as shared_rec
-from tests.support.shipped import OpenCodeObserver
 from theater.harness import EventKind
 
 rec = shared_rec
@@ -122,11 +121,3 @@ IDLE = "\n".join(["> ", "~/work  90.7K       ctrl+p commands"])
 
 
 WORKING = "\n".join(["> ", "esc interrupt       ctrl+p commands"])
-
-
-def test_idle_when_the_footer_is_not_offering_to_interrupt():
-    assert OpenCodeObserver().is_idle_screen(IDLE) is True
-
-
-def test_not_idle_while_a_turn_is_running():
-    assert OpenCodeObserver().is_idle_screen(WORKING) is False

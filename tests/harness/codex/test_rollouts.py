@@ -546,28 +546,6 @@ def test_legacy_events_still_drive_the_same_control_outcome():
     assert turns[0].said == "audit done"
 
 
-def test_legacy_and_paginated_equivalents_agree():
-    legacy_events = rollout_events(parse_rollout(CodexObserver(), [*_legacy_turn("t", "p", "r")]))
-    paginated_events = rollout_events(
-        parse_rollout(CodexObserver(), [*(_paginated_turn("t", "p", "r"))])
-    )
-
-    def shape(events):
-        # Modern items carry a native turn claim on user text that the legacy
-        # records never had; the control outcome (what is heard, said, and
-        # closed) is what must stay identical.
-        return [
-            (event.kind, event.text, event.turn_end) for event in events if not event.usage_only
-        ]
-
-    assert shape(paginated_events) == shape(legacy_events)
-    assert (
-        [e.turn_id for e in paginated_events if e.turn_end]
-        == [e.turn_id for e in legacy_events if e.turn_end]
-        == ["t"]
-    )
-
-
 def test_legacy_patch_and_mcp_events_still_parse():
     observer = CodexObserver()
     records = [

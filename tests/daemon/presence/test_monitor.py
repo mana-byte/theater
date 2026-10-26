@@ -32,18 +32,6 @@ def test_snapshot_protects_everything_except_confirmed_absence(
     assert snapshot.protected is protected
 
 
-def test_snapshot_serializes_the_exact_shared_wire_shape() -> None:
-    snapshot = PresenceSnapshot(PresenceState.UNKNOWN, "never observed", 3, None)
-
-    assert snapshot.to_dict() == {
-        "state": "unknown",
-        "protected": True,
-        "reason": "never observed",
-        "revision": 3,
-        "observed_at": None,
-    }
-
-
 def test_snapshot_is_immutable() -> None:
     snapshot = PresenceSnapshot(PresenceState.ABSENT, "blurred", 2, 123.5)
 

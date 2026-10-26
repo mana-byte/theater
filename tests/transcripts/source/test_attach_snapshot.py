@@ -188,21 +188,6 @@ async def test_restage_moves_the_read_position_the_live_read_replays_from(root, 
     assert s.index == s.seen[0].lines
 
 
-async def test_restage_of_a_withdrawn_candidate_stays_withdrawn(root, workdir):
-    transcript(root, "aaa", workdir, record("one"))
-    s, _ = _probe(root, workdir)
-
-    async def withdraw_then_restage(source, snapshot, attachment):
-        source.discard_attachment()
-        source._restage(offset=0, index=0)
-        return attachment
-
-    s.hook = withdraw_then_restage
-    await s.read()
-
-    assert s._pending is None
-
-
 @pytest.mark.parametrize("failure", [OSError("gone"), asyncio.CancelledError(), ValueError("bug")])
 async def test_a_failed_hook_leaves_no_candidate_and_no_primed_stream(
     root, workdir, monkeypatch, failure

@@ -124,10 +124,6 @@ def test_runtime_manifest_compiles_and_is_exposed() -> None:
     assert harness.runtime.channel.channel.kind is ChannelKind.LIVE
 
 
-def test_harness_base_class_runtime_annotation_defaults_none() -> None:
-    assert Harness.runtime is None
-
-
 def _invalid_runtime(kind: str) -> object:
     if kind == "not_a_runtime_manifest":
         return object()

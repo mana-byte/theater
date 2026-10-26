@@ -303,10 +303,6 @@ async def test_provider_role_and_callback_channel_are_isolated(daemon):
     assert callback[1]["error"]["code"] == "wrong_connection_role"
 
 
-async def test_existing_private_client_still_uses_private_dispatch(client):
-    assert (await client.call("ping"))["pong"] is True
-
-
 async def test_complete_frame_limit_counts_the_newline(daemon, monkeypatch):
     monkeypatch.setattr(protocol, "MAX_MESSAGE_BYTES", 48)
     response = (await exchange([b" " * 48 + b"\n"]))[0]

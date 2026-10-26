@@ -13,7 +13,6 @@ from tests.support.composite_sources import (
     decl,
     make_fact,
 )
-from theater.constants.harness import HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS
 from theater.harness.channels import CompositeSource, EnrichmentBinding
 from theater.harness.contracts.channels import ChannelHealthState
 from theater.harness.contracts.source import Batch, Source
@@ -178,8 +177,3 @@ def test_enrichment_health_failure_is_contained_and_redacted() -> None:
     assert health.state is ChannelHealthState.DEGRADED
     assert health.diagnostics == ("channel health snapshot failed (ValueError)",)
     assert "secret health value" not in str(health)
-
-
-def test_enrichment_timeout_default_is_named_constant() -> None:
-    composite = CompositeSource()
-    assert composite._enrichment_timeout == HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS

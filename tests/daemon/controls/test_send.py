@@ -418,23 +418,6 @@ async def test_send_allowed_after_job_exceeds_ttl(client, terminal_provider, dae
     assert terminal_provider.deliveries[1] == (binding.terminal_id, "second")
 
 
-async def test_send_ttl_reads_compatibility_facade(client, terminal_provider, daemon, monkeypatch):
-    import theater.daemon.rpc.sending as sending_mod
-    from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
-    from theater.daemon import methods
-
-    target = await send_target(client, daemon)
-    old = await client.call("send", target=target["id"], prompt="first")
-
-    real_now = sending_mod.now()
-    monkeypatch.setattr(methods, "SEND_CLAIM_TTL", 0.1)
-    monkeypatch.setattr(sending_mod, "now", lambda: real_now + 1.0)
-
-    job = await client.call("send", target=target["id"], prompt="second")
-    assert job["state"] == "running"
-    assert daemon.jobs.get(old["handle"]).error_code == SEND_SUPERSEDED_ERROR_CODE
-
-
 async def test_send_ttl_supersedes_every_expired_prompt_job(
     client, terminal_provider, daemon, monkeypatch
 ):

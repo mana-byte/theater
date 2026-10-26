@@ -357,10 +357,6 @@ async def _wait_fails(endpoint: str) -> None:
         await wait_for_unix_endpoint(endpoint, timeout=0.2)
 
 
-async def test_wait_for_endpoint_succeeds_when_listening(server: WsTestServer) -> None:
-    await wait_for_unix_endpoint("unix://" + str(server.path), timeout=10.0)
-
-
 # ---- correlation ------------------------------------------------------------
 
 

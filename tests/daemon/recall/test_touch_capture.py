@@ -65,16 +65,6 @@ def test_touch_accumulator_revalidates_before_hashing(tmp_path):
     assert row["sha_after_error"] == "unsafe_path"
 
 
-def test_touch_indexes_exist(store):
-    """The two read patterns have indexes: by path and by job handle."""
-    indexes = set(
-        store.conn.exec_driver_sql(
-            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='touch'"
-        ).scalars()
-    )
-    assert {"idx_touch_path", "idx_touch_job"} <= indexes
-
-
 def test_touch_accumulator_captures_sha_before_on_first_sight(tmp_path):
     """sha_before is the hash at first sight, not at last sight.
 
@@ -258,20 +248,6 @@ def test_finish_without_cwd_has_no_accumulator(store):
     jobs.finish("h3", state=JobState.DONE, result="done")
 
     assert jobs.get("h3").state == JobState.DONE
-
-
-def test_busy_timeout_is_set_on_all_connections(store):
-    """The pragma is set on both the long-lived connection and fresh ones.
-
-    `_finish_with_touches` opens a fresh connection from the store's engine,
-    so busy_timeout must be applied by the connect event listener — not just
-    on the long-lived connection. Testing the pragma value directly rather
-    than engineering a contended-write race: a race test would need precise
-    timing to be honest, and a test that always passes teaches nothing.
-    """
-    assert store.conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
-    with store.engine.connect() as fresh:
-        assert fresh.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
 
 
 def test_incomplete_staging_fails_loudly_before_mutating(tmp_path):

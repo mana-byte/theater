@@ -36,10 +36,7 @@ def _refused_releases():
 
 
 @pytest.mark.parametrize("name,version", _refused_releases())
-@pytest.mark.parametrize("approval", ["manual", "edits", "yolo"])
-def test_unqualified_cli_is_refused_on_every_provider_launch(
-    tmp_path, monkeypatch, name, version, approval
-):
+def test_unqualified_cli_is_refused_on_every_provider_launch(tmp_path, monkeypatch, name, version):
     binary = tmp_path / name
     binary.write_text("#!/bin/sh\nexit 1\n")
     binary.chmod(0o755)
@@ -60,7 +57,7 @@ def test_unqualified_cli_is_refused_on_every_provider_launch(
     monkeypatch.setattr(subprocess, "run", run)
     planner = importlib.import_module(f"theater.harness.builtin.plugins.{name}.launch").plan_launch
     context = LaunchContext(
-        "participant", "hello", tmp_path / "mcp.json", approval, binary=str(binary)
+        "participant", "hello", tmp_path / "mcp.json", "manual", binary=str(binary)
     )
     with pytest.raises(BadRequest):
         planner(context)

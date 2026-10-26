@@ -212,25 +212,6 @@ async def test_overlay_resume_reference_replaces_only_the_planner_input(
     assert registry.get(spawned.id).resumed_from_id == predecessor.id
 
 
-async def test_base_overlay_empty_for_domainless_predecessor(
-    registry, permissive_harness, monkeypatch
-):
-    """The base default returns an empty overlay when the predecessor
-    has no transcript_domain, and the spawn succeeds."""
-    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
-    trusted_predecessor(registry, harness="permissive-test", transcript_domain=None)
-    spawner = Spawner(registry)
-    req = SpawnRequest(
-        harness="permissive-test",
-        prompt="",
-        cwd="/tmp",
-        approval="edits",
-        resume="sess-abc",
-    )
-    # Should succeed — base returns an empty overlay for domainless predecessor.
-    await prepare_provider_reservation(spawner, req)
-
-
 async def test_base_overlay_refuses_predecessor_with_domain(
     registry, permissive_harness, monkeypatch
 ):

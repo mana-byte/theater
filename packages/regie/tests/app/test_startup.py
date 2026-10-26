@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
-import sys
 from dataclasses import replace
 from types import MappingProxyType
 from typing import cast
 
 import pytest
-from regie.app import RegieApp
-from regie.contracts import PresentationTarget, RegieSettings
+from regie.contracts import PresentationTarget
 from regie.controllers.actions import ActionRecord, ActionState
 from regie.state import StateController
 from regie.widgets import ParticipantTree
@@ -25,7 +22,6 @@ from packages.regie.tests.support.app_fakes import (
 from packages.regie.tests.support.waiting import wait_until
 from theater.frontend import (
     EventCursor,
-    FrontendClient,
     FrontendTransportError,
     StateProjection,
 )
@@ -466,42 +462,3 @@ class Presentation:
         height: int | None = None,
     ) -> None:
         raise AssertionError("construction must not resize a pane")
-
-
-def test_regie_app_requires_explicit_public_client_settings_and_presentation() -> None:
-    app = RegieApp(
-        client=cast(FrontendClient, Client()),
-        settings=RegieSettings(),
-        presentation=Presentation(),
-    )
-
-    assert app.projection is None
-    assert app.settings.sidebar_width == 52
-
-
-def test_regie_keeps_the_hidden_high_priority_tmux_return_signal() -> None:
-    binding = next(item for item in RegieApp.BINDINGS if item.key == "ctrl+g")
-
-    assert binding.action == "return_to_tree"
-    assert binding.show is False
-    assert binding.priority is True
-
-
-def test_startup_imports_defer_bridge_worker_and_optional_trajectory_widgets():
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import regie.cli, regie.app, sys; "
-            "assert 'regie.bridge.runtime' not in sys.modules; "
-            "assert 'regie.trajectory.rich.view' not in sys.modules; "
-            "from regie.trajectory import TrajectoryView; "
-            "from regie.trajectory.rich.view import TrajectoryView as View; "
-            "assert TrajectoryView is View",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr

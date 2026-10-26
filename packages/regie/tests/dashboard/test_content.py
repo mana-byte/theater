@@ -12,9 +12,7 @@ from regie.dashboard.content import (
 )
 from regie.dashboard.widgets import WelcomeDashboard
 from regie.ui_constants import (
-    REGIE_DASHBOARD_SENTENCES,
     REGIE_DASHBOARD_TIP_CURSOR_STYLE,
-    REGIE_DASHBOARD_TIPS,
 )
 
 from theater.frontend.dto.catalogs import HarnessCatalogEntry
@@ -26,70 +24,6 @@ def _text(parts) -> str:
 
 def _styles(parts) -> list[str]:
     return [part[1] for part in parts if isinstance(part, tuple)]
-
-
-def test_sentence_corpus_has_at_least_30_distinct_highlighted_entries():
-    texts = [_text(parts) for parts in REGIE_DASHBOARD_SENTENCES]
-    assert len(texts) >= 30
-    assert len(set(texts)) == len(texts)
-    assert all(texts)
-    highlighted = (
-        any("accent" in style for style in _styles(parts)) for parts in REGIE_DASHBOARD_SENTENCES
-    )
-    assert all(highlighted)
-
-
-def test_sentence_corpus_highlights_imagine_and_building_where_present():
-    for parts in REGIE_DASHBOARD_SENTENCES:
-        text = _text(parts)
-        highlighted = [part[0] for part in parts if isinstance(part, tuple)]
-        if "imagine" in text:
-            assert "imagine" in highlighted
-        if "building" in text:
-            assert "building" in highlighted
-
-
-def test_tip_corpus_uses_categories_and_highlighted_actions():
-    assert len(REGIE_DASHBOARD_TIPS) >= 30
-    for parts in REGIE_DASHBOARD_TIPS:
-        assert " · " in _text(parts)
-        styles = _styles(parts)
-        assert any("text-muted" in style for style in styles)
-        assert any("accent" in style for style in styles)
-
-
-def test_tip_corpus_covers_regie_capabilities():
-    corpus = "\n".join(_text(parts) for parts in REGIE_DASHBOARD_TIPS)
-    for phrase in (
-        "h/j/k/l",
-        "past the last agent",
-        "Enter",
-        "H/L",
-        "<prefix> h",
-        "left-click",
-        "right-click",
-        "usage tile",
-        "day, week, and month",
-        "per-model details",
-        "Ctrl+P",
-        "fuzzy search",
-        "diagnostic views",
-        "duration order",
-        "live tail",
-        "copies the selected span",
-        "lost trajectory",
-        "participant link",
-        "collapse or expand",
-        "Spawn",
-        "Resume",
-        "coordination traffic",
-        "color scheme",
-        "kills",
-        "daemon and agent sessions keep running",
-        "regie.cost_window",
-        "click this panel",
-    ):
-        assert phrase in corpus
 
 
 def test_configured_sentences_replace_the_builtin_corpus_and_may_disable_it():

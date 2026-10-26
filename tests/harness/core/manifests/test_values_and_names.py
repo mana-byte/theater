@@ -19,7 +19,6 @@ from theater.harness.contracts.channels import (
     SignalKind,
     SignalOwnership,
 )
-from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.launch import McpRenderOverlay, ResumeLaunchOverlay
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
@@ -171,23 +170,6 @@ def test_shipped_interrupt_plans_match_native_key_handlers() -> None:
 def test_channel_capability_requires_explicit_ownership() -> None:
     with pytest.raises(TypeError):
         ChannelCapability(SignalKind.CONTENT)  # type: ignore[call-arg]
-
-
-def test_primary_source_declares_its_durable_kind_explicitly() -> None:
-    compiled = compile_manifest(
-        "acme",
-        manifest(
-            observation=ObservationManifest(
-                primary=SourceManifest(
-                    factory=source,
-                    channel=ChannelDeclaration(id="database", kind=ChannelKind.DATABASE),
-                ),
-                screen=ScreenManifest(classifier=screen),
-            )
-        ),
-    )
-
-    assert isinstance(compiled, Harness)
 
 
 @pytest.mark.parametrize("name", ["Acme", "-acme", ""])

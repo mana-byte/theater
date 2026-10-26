@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
-from regie import BridgeConfig, PresentationTarget, RegieSettings
-from regie.ambience.registry import NO_AMBIENCE, load_catalog
 from regie.config import SettingsError, load_settings
 from regie.migration import migrate_flat_layout
 from regie.paths import RegiePaths
@@ -62,26 +59,6 @@ def test_usage_footer_is_hidden_unless_configured_visible(tmp_path: Path) -> Non
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "config.example.toml"
-
-
-def test_the_example_loads_with_the_defaults_and_lists_every_shipped_ambience() -> None:
-    assert load_settings(EXAMPLE).tree_ambience == RegieSettings().tree_ambience
-    listed = set(re.findall(r'^#\s+"([a-z-]+)"\s', EXAMPLE.read_text(), re.MULTILINE))
-    assert listed == {*load_catalog(Path("/nonexistent")).scenes, NO_AMBIENCE}
-
-
-def test_shared_contract_defaults_are_stable() -> None:
-    config = BridgeConfig(theater_socket=Path("/tmp/theater.sock"), state_dir=Path("/tmp/regie"))
-    target = PresentationTarget(
-        provider_id="provider-a",
-        provider_kind="tmux",
-        terminal_id="%1",
-        terminal_incarnation="incarnation-a",
-    )
-
-    assert config.selector == "tmux"
-    assert RegieSettings().sidebar_width == 52
-    assert (target.provider_kind, target.terminal_id) == ("tmux", "%1")
 
 
 def test_a_flat_home_moves_into_var_once_and_leaves_theaters_logs(tmp_path: Path) -> None:

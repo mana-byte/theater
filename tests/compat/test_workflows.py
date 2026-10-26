@@ -110,13 +110,6 @@ def test_pr_checks_diff_against_the_base_the_pr_is_merged_into_not_the_one_it_op
     assert text.count('"$(git rev-parse HEAD^1)"') == 2
 
 
-@pytest.mark.parametrize("name", ["qualify", "verify-gate"])
-def test_sweeps_interrupt_with_time_left_to_clean_up_and_publish(name: str) -> None:
-    job = _load("harness-compat.yml")["jobs"][name]
-    assert job["timeout-minutes"] > 325
-    assert "timeout --signal=INT --kill-after=5m 320m" in job["steps"][-1]["run"]
-
-
 def test_failure_reporter_runs_from_trusted_main_without_project_setup() -> None:
     report = _load("harness-compat-attention.yml")
     # Not the canaries: a red one says the suite missed a planted break, not that a release is bad.

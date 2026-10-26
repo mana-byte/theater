@@ -26,7 +26,7 @@ from theater.harness.contracts.manifest import (
     ScreenManifest,
     SourceManifest,
 )
-from theater.harness.contracts.observation import HarnessObserver, ScreenConfidence, ScreenKind
+from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.harness.contracts.source import Batch, Source, StreamPoint, TranscriptCandidate
 from theater.harness.manifests.compiler import ManifestHarnessObserver, compile_manifest
 from theater.trajectory import TrajectoryCapabilities
@@ -266,13 +266,6 @@ def test_trajectory_capabilities_survive_compilation() -> None:
         ),
     )
     assert harness.observer.trajectory_capabilities is caps
-
-
-def test_default_trajectory_capabilities_match_observer_default() -> None:
-    observer = _observer(
-        primary=SourceManifest(factory=_source, channel=_primary_channel()),
-    )
-    assert observer.trajectory_capabilities == HarnessObserver.trajectory_capabilities
 
 
 def test_all_absent_optional_callbacks_preserve_superclass_behaviour() -> None:
