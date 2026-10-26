@@ -30,6 +30,10 @@ class MenuActions(_AppBase):
     _menu_transcripts: Loaded = Loaded(state="loading")
     #: An option unfolded from the keyboard while its list loads: the cursor walks in on arrival.
     _menu_walk_in: str | None = None
+    #: The menu visit the loaded lists belong to; a new visit (the row the cursor came from
+    #: changed) starts with empty ones, and a stale read never overwrites them.
+    _menu_visit: int = 0
+    _menu_visit_origin: Key | None = None
 
     def _initialize_menu(self) -> None:
         self.query_one(ParticipantTree).menu_source = self._menu_items
@@ -59,7 +63,15 @@ class MenuActions(_AppBase):
 
     def _menu_items(self) -> tuple[MenuItem, ...]:
         """The options, built fresh from the app's own state each time the menu is drawn."""
-        origin = self._menu_tree().menu_return
+        tree = self._menu_tree()
+        if tree.menu_return != self._menu_visit_origin:
+            # A new visit (the menu closed and opened, perhaps from another row): the lists
+            # the previous one loaded no longer belong here.
+            self._menu_visit_origin = tree.menu_return
+            self._menu_visit += 1
+            self._menu_resume = Loaded(state="loading")
+            self._menu_transcripts = Loaded(state="loading")
+        origin = tree.menu_return
         retry = self.latest_uncertain_action()
         recover = self._menu_transcript(origin)
         items = [
@@ -177,10 +189,11 @@ class MenuActions(_AppBase):
             origin = self._menu_tree().menu_return
             if origin is None:
                 return
-            self._transcript_recovery_target = origin[1]
             self._menu_transcripts = Loaded(state="loading")
             self.run_worker(
-                self._menu_fetch_transcripts(origin[1]), group="menu-transcript", exclusive=True
+                self._menu_fetch_transcripts(origin[1], self._menu_visit),
+                group="menu-transcript",
+                exclusive=True,
             )
 
     async def _menu_fetch_resume(self) -> None:
@@ -195,11 +208,10 @@ class MenuActions(_AppBase):
             )
         self._menu_loaded("resume")
 
-    async def _menu_fetch_transcripts(self, participant_id: str) -> None:
-        try:
-            candidates = await self.load_transcript_candidates()
-        finally:
-            self._transcript_recovery_target = None  # it only steers this one read
+    async def _menu_fetch_transcripts(self, participant_id: str, visit: int) -> None:
+        candidates = await self.load_transcript_candidates(participant_id)
+        if visit != self._menu_visit:
+            return  # a newer visit owns the list now
         self._menu_transcripts = Loaded(
             tuple(self._menu_candidate(i, c, participant_id) for i, c in enumerate(candidates)),
             note="no transcript can be bound",

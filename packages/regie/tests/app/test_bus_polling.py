@@ -144,7 +144,6 @@ async def test_repeated_palette_and_inspection_reads_serialize_each_sdk_lane(
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        app._transcript_recovery_target = "participant-1"
         await asyncio.gather(
             app._load_catalog(),
             app._load_catalog(),
@@ -152,8 +151,8 @@ async def test_repeated_palette_and_inspection_reads_serialize_each_sdk_lane(
             app._show_controls("participant-2"),
             app.load_resume_sessions(),
             app.load_resume_sessions(),
-            app.load_transcript_candidates(),
-            app.load_transcript_candidates(),
+            app.load_transcript_candidates("participant-1"),
+            app.load_transcript_candidates("participant-1"),
         )
 
     assert maximum == dict.fromkeys(maximum, 1)

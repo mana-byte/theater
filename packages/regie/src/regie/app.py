@@ -246,7 +246,6 @@ class RegieApp(
         self._resume_discovery_lock = asyncio.Lock()
         self._transcript_candidates_lock = asyncio.Lock()
         self._harnesses: tuple[HarnessCatalogEntry, ...] = ()
-        self._transcript_recovery_target: str | None = None
         self._unmanaged: tuple[UnmanagedPane, ...] | None = None
         self._unmanaged_polled_at: float | None = None
         self._bus_visible = settings.bus_visible

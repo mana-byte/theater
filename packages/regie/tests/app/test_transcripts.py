@@ -38,8 +38,7 @@ async def test_rejected_transcript_candidate_is_never_bound() -> None:
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        app._transcript_recovery_target = "participant-1"
-        app.select_transcript_candidate(candidate)
+        app.select_transcript_candidate(candidate, participant_id="participant-1")
         await pilot.pause()
 
     assert client.transcripts.bind_calls == []
@@ -88,8 +87,7 @@ async def test_transcript_recovery_hides_for_trusted_identity_and_filters_reject
         await pilot.pause()
         assert not app.transcript_recovery_available("participant-1")
         assert app.transcript_recovery_available("participant-2")
-        app._transcript_recovery_target = "participant-2"
-        assert await app.load_transcript_candidates() == (accepted,)
+        assert await app.load_transcript_candidates("participant-2") == (accepted,)
 
 
 @pytest.mark.asyncio
@@ -103,8 +101,7 @@ async def test_an_owned_transcript_is_never_transferred_from_the_ui(owner_field:
     async with app.run_test() as pilot:
         await pilot.pause()
         app.notify = lambda message, **_kwargs: notes.append(str(message))  # type: ignore[method-assign]
-        app._transcript_recovery_target = "participant-1"
-        app.select_transcript_candidate(candidate)
+        app.select_transcript_candidate(candidate, participant_id="participant-1")
         await pilot.pause()
         assert app.screen is app.screen_stack[0]
     assert client.transcripts.bind_calls == []
