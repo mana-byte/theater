@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import git
 from .adapters import ADAPTER_NAMES, load_adapter
-from .attention import report_workflow_failure
+from .attention import publication_failure_run, report_workflow_failure
 from .canaries import canary_version, run_canaries
 from .diagnostics import exception_detail
 from .policy import (
@@ -154,12 +154,14 @@ def main(argv: list[str] | None = None) -> int:
         print(error_annotation("Harness compatibility", message))
         if args.command == "report":
             try:
-                file_attention_issue(
-                    f"Harness compatibility workflow: {args.run_id}",
-                    f"Failure reporting needs human attention for run {args.run_id}.\n\n"
-                    f"Run: {_run_url(args.run_id)}\n"
-                    f"Reporter: {_run_url(os.environ['GITHUB_RUN_ID'])}\n\n{message}\n",
-                )
+                check_publication_context(Path.cwd(), os.environ)
+                if publication_failure_run(args.run_id) is not None:
+                    file_attention_issue(
+                        f"Harness compatibility workflow: {args.run_id}",
+                        f"Failure reporting needs human attention for run {args.run_id}.\n\n"
+                        f"Run: {_run_url(args.run_id)}\n"
+                        f"Reporter: {_run_url(os.environ['GITHUB_RUN_ID'])}\n\n{message}\n",
+                    )
             except Exception as reporting:
                 print(
                     error_annotation("Failure issue publication", str(reporting)), file=sys.stderr

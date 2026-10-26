@@ -45,15 +45,19 @@ A moving main rebases the proposed JSON; fresh PR checks prove admissions on the
 Routine PR checks cover the proposed extension and every changed exclusion, including removals;
 unrelated newer upstream releases cannot make them fail. Wiring/code PRs recheck the current policy
 window. Excluded contract failures do not admit that release; inconclusive checks still fail CI.
+Every `pull_request` run is read-only, including its `workflow_run` reporter: failures remain that
+PR's failed checks. Setup failures, timeouts, cancellations and reporting/API errors never create,
+edit or comment on issues, policy branches or PRs for a PR-origin run.
 
 A separate `workflow_run` reporter uses trusted main code and system Python, independent of uv
-setup. It files issues for discovery, setup/static-check, timeout, cleanup and publication failures.
-It recovers unfinished or failed known versions from qualification and PR verification logs, then
-proposes exclusions through the same shared PR. Only identities from this repository's expected
-workflow file can propose exclusions; foreign/fork source failures get a workflow issue without
-trusting their claimed versions. Reporting never executes PR code or authorizes a pass from
-logs. Superseded cancelled jobs do not fail unfinished versions; completed failures and genuinely
-failed jobs are still reported. Ordinary cancellations require attention. Canary runs are not
+setup. Only scheduled/manual release sweeps on main can publish: the workflow job guard and Python
+reporter both enforce this before job-log recovery or publication. The CLI's exception fallback
+also requires a confirmed main sweep; an unidentified source stays a visible reporter failure.
+For these sweeps it files issues for discovery, setup/static-check, timeout, cleanup and publication
+failures, including cancellations. It recovers unfinished or failed known versions from qualification
+logs, then proposes exclusions through the same shared PR. Only identities from this repository's
+expected workflow file can propose exclusions; foreign/unidentified source logs get a workflow issue
+without trusting their claimed versions. Reporting never authorizes a pass from logs. Canary runs are not
 reported: a red one says the suite missed a planted break, not that a release is bad, so it stays
 a red check or run instead of an issue and an exclusion.
 
