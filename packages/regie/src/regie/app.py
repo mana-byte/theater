@@ -136,7 +136,7 @@ class RegieApp(
         Binding("l,L,shift+l,right", "menu('expand')", show=False),
         Binding("space", "menu('toggle')", show=False),
         Binding("h,left", "menu('fold')", show=False),
-        Binding("x", "menu('close')", show=False),
+        Binding("x,escape", "menu('close')", show=False),
         Binding("slash", "menu_filter", show=False),
         Binding("j", "cursor_down", "down", show=False),
         Binding("down", "cursor_down", "down", show=False),
