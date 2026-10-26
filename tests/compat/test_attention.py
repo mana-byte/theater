@@ -1,4 +1,4 @@
-"""Failures before or after the suite still reach a human, without retained test reports."""
+"""Main sweep failures reach a human; PR failures never publish or recover logs."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import pytest
 from scripts.harness_compat import attention
 from scripts.harness_compat.codecopy import code_copy
 from scripts.harness_compat.git import git
-from scripts.harness_compat.policy import policy_relative
 from scripts.harness_compat.run import Run
 from tests.support.compat_github import assert_gh_flags
 from tests.support.paths import REPO_ROOT
@@ -60,7 +59,6 @@ def _report(
     head_branch: str = "main",
     head_repository: str | None = "o/r",
     path: str | None = None,
-    superseded: bool = False,
     additional_jobs: tuple[tuple[str, str, str], ...] = (),
 ):
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
@@ -103,14 +101,11 @@ def _report(
     }
 
     def api(gh, endpoint):
-        if endpoint.startswith("pulls/"):
-            return {
-                "state": "open",
-                "head": {"sha": "new-head" if superseded else "tested-head"},
-            }
+        assert endpoint == "actions/runs/42", "only source-run metadata may be read"
         return workflow
 
     def gh(*args):
+        assert event != "pull_request", "PR runs must stop before job reads or GitHub mutations"
         assert_gh_flags(args)
         if "--paginate" in args:
             return json.dumps([{"jobs": []}, {"jobs": jobs}])
@@ -127,10 +122,11 @@ def _report(
     return issues, proposals, log_reads
 
 
-def test_setup_failure_has_a_workflow_issue_and_no_version_proposal(
-    repo: Path, monkeypatch
+@pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
+def test_main_setup_failure_has_a_workflow_issue_and_no_version_proposal(
+    repo: Path, monkeypatch, event: str
 ) -> None:
-    issues, proposals, _ = _report(monkeypatch, repo, log="dependency setup failed")
+    issues, proposals, _ = _report(monkeypatch, repo, event=event, log="dependency setup failed")
     assert len(issues) == 1 and "Human attention" in issues[0][1] and URL in issues[0][1]
     assert proposals == []
 
@@ -154,66 +150,56 @@ def test_completed_failure_is_recovered_if_publication_crashed(repo: Path, monke
     assert proposals[0].results[0].verdict == "tooling"
 
 
-@pytest.mark.parametrize("verdict", ["red", "inconclusive", "tooling"])
-def test_pr_failures_get_issues_and_exclusion_proposals_from_trusted_code(
-    repo: Path, monkeypatch, verdict: str
+@pytest.mark.parametrize(
+    "stage,log",
+    [
+        ("failure", "dependency setup failed"),
+        ("failure", "compat:start claude 1.3.0\ncompat:result claude 1.3.0 red"),
+        ("failure", "compat:start claude 1.3.0\ncompat:result claude 1.3.0 inconclusive"),
+        ("failure", "compat:start claude 1.3.0\ncompat:result claude 1.3.0 tooling"),
+        ("timed_out", "compat:start claude 1.3.0"),
+        ("cancelled", "compat:start claude 1.3.0"),
+        ("cancelled", "compat:start claude 1.3.0\ncompat:result claude 1.3.0 red"),
+        ("action_required", "setup needs approval"),
+        ("startup_failure", "runner unavailable"),
+    ],
+)
+def test_pr_failures_never_read_jobs_or_mutate_github(
+    repo: Path, monkeypatch, stage: str, log: str
 ) -> None:
     issues, proposals, log_reads = _report(
         monkeypatch,
         repo,
         event="pull_request",
-        log=f"compat:start claude 1.3.0\ncompat:result claude 1.3.0 {verdict}",
+        stage=stage,
+        log=log,
     )
-    assert issues and log_reads and len(proposals) == 1
-    assert [(r.version, r.verdict) for r in proposals[0].results] == [("1.3.0", verdict)]
+    assert (issues, proposals, log_reads) == ([], [], [])
 
 
-def test_verification_greens_need_no_publication_and_unfinished_versions_are_inconclusive() -> None:
-    log = "compat:start claude 1.3.0\ncompat:result claude 1.3.0 green\ncompat:start claude 1.4.0"
-    results = attention.recover_failures(log, "claude", run_url=URL, publication_required=False)
-    assert [(r.version, r.verdict) for r in results] == [("1.4.0", "inconclusive")]
-
-
-def test_dispatch_from_a_feature_branch_reports_failures_without_authorizing_greens(
-    repo: Path, monkeypatch
+@pytest.mark.parametrize("event,branch", [("workflow_dispatch", "feature"), ("push", "main")])
+def test_runs_outside_main_sweeps_never_publish(
+    repo: Path, monkeypatch, event: str, branch: str
 ) -> None:
-    issues, proposals, _ = _report(
+    issues, proposals, log_reads = _report(
         monkeypatch,
         repo,
-        event="workflow_dispatch",
-        head_branch="feature",
+        event=event,
+        head_branch=branch,
         log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 green\n"
         "compat:start claude 1.4.0\ncompat:result claude 1.4.0 tooling",
     )
-    assert issues and [(r.version, r.verdict) for r in proposals[0].results] == [
-        ("1.4.0", "tooling")
-    ]
+    assert (issues, proposals, log_reads) == ([], [], [])
 
 
-def test_supersession_never_manufactures_an_unfinished_version_failure(
+def test_pr_mixed_failed_and_cancelled_jobs_never_publish_or_check_supersession(
     repo: Path, monkeypatch
 ) -> None:
-    log = "compat:start claude 1.3.0\ncompat:result claude 1.3.0 green\ncompat:start claude 1.4.0"
-    issues, proposals, _ = _report(
-        monkeypatch, repo, event="pull_request", stage="cancelled", superseded=True, log=log
-    )
-    assert not issues and not proposals
-
-
-def test_mixed_failed_and_superseded_matrix_jobs_only_exclude_genuine_unfinished_failures(
-    repo: Path, monkeypatch, git
-) -> None:
-    codex = repo / policy_relative("codex")
-    codex.parent.mkdir(parents=True)
-    codex.write_text((repo / policy_relative("claude")).read_text())
-    git(repo, "add", "-A")
-    git(repo, "commit", "-qm", "codex policy")
-    issues, proposals, _ = _report(
+    issues, proposals, log_reads = _report(
         monkeypatch,
         repo,
         event="pull_request",
         stage="failure",
-        superseded=True,
         log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 red\ncompat:start claude 1.4.0",
         additional_jobs=(
             (
@@ -222,52 +208,19 @@ def test_mixed_failed_and_superseded_matrix_jobs_only_exclude_genuine_unfinished
                 "compat:start codex 1.3.0\ncompat:result codex 1.3.0 tooling\n"
                 "compat:start codex 1.4.0",
             ),
+            ("Unexpected job", "failure", "malformed recovery log"),
         ),
     )
-    outcomes = [(run.harness, [(r.version, r.verdict) for r in run.results]) for run in proposals]
-    assert issues and outcomes == [
-        ("claude", [("1.3.0", "red"), ("1.4.0", "inconclusive")]),
-        ("codex", [("1.3.0", "tooling")]),
-    ]
+    assert (issues, proposals, log_reads) == ([], [], [])
 
 
-def test_a_completed_failure_survives_supersession_without_excluding_unfinished_versions(
-    repo: Path, monkeypatch
-) -> None:
+@pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
+def test_main_sweep_cancellation_remains_a_failure(repo: Path, monkeypatch, event: str) -> None:
     issues, proposals, _ = _report(
         monkeypatch,
         repo,
-        event="pull_request",
+        event=event,
         stage="cancelled",
-        superseded=True,
-        log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 red\ncompat:start claude 1.4.0",
-    )
-    assert not issues and [(r.version, r.verdict) for r in proposals[0].results] == [
-        ("1.3.0", "red")
-    ]
-
-
-def test_an_ordinary_cancellation_still_needs_attention_and_a_known_version_exclusion(
-    repo: Path, monkeypatch
-) -> None:
-    issues, proposals, _ = _report(
-        monkeypatch,
-        repo,
-        event="pull_request",
-        stage="cancelled",
-        log="compat:start claude 1.3.0",
-    )
-    assert issues and proposals[0].results[0].verdict == "inconclusive"
-
-
-def test_main_sweep_cancellation_is_a_failure_even_when_a_newer_run_exists(
-    repo: Path, monkeypatch
-) -> None:
-    issues, proposals, _ = _report(
-        monkeypatch,
-        repo,
-        stage="cancelled",
-        superseded=True,
         log="compat:start claude 1.3.0",
     )
     assert issues and proposals[0].results[0].verdict == "inconclusive"
@@ -277,7 +230,7 @@ def test_main_sweep_cancellation_is_a_failure_even_when_a_newer_run_exists(
     "path",
     [
         ".github/workflows/harness-compat.yml",
-        ".github/workflows/harness-compat.yml@refs/pull/7/head",
+        ".github/workflows/harness-compat.yml@refs/heads/main",
     ],
 )
 def test_known_workflow_paths_accept_the_optional_api_ref_suffix(
@@ -286,7 +239,6 @@ def test_known_workflow_paths_accept_the_optional_api_ref_suffix(
     issues, proposals, log_reads = _report(
         monkeypatch,
         repo,
-        event="pull_request",
         path=path,
         log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 red",
     )
@@ -301,19 +253,23 @@ def test_known_workflow_paths_accept_the_optional_api_ref_suffix(
         ("o/r", ".github/workflows/foreign.yml"),
     ],
 )
-def test_foreign_or_unidentified_source_logs_cannot_propose_version_exclusions(
-    repo: Path, monkeypatch, head_repository: str | None, path: str
+@pytest.mark.parametrize("event", ["schedule", "pull_request"])
+def test_foreign_or_unidentified_source_logs_never_authorize_version_exclusions(
+    repo: Path, monkeypatch, head_repository: str | None, path: str, event: str
 ) -> None:
     issues, proposals, log_reads = _report(
         monkeypatch,
         repo,
-        event="pull_request",
+        event=event,
         head_repository=head_repository,
         path=path,
         log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 red",
     )
-    assert issues and not proposals and not log_reads
-    assert "1.3.0" not in issues[0][1]
+    assert not proposals and not log_reads
+    if event == "pull_request":
+        assert not issues
+    else:
+        assert issues and "1.3.0" not in issues[0][1]
 
 
 def test_reporting_imports_without_project_dependencies_or_site_packages() -> None:

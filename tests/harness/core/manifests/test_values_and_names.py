@@ -278,6 +278,17 @@ def test_missing_or_wrong_callback_diagnostics(changed, path: str) -> None:
     assert (raised.value.path, raised.value.message) == (path, "must be callable")
 
 
+def test_a_wrong_type_screen_is_still_rejected() -> None:
+    built = manifest()
+    built = replace(built, observation=replace(built.observation, screen="not-a-screen"))
+    with pytest.raises(ManifestValidationError) as raised:
+        compile_manifest("acme", built)
+    assert (raised.value.path, raised.value.message) == (
+        "observation.screen",
+        "expected ScreenManifest, got str",
+    )
+
+
 @pytest.mark.parametrize(
     ("launch", "path"),
     [

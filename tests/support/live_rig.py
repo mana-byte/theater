@@ -423,6 +423,25 @@ class LiveRig:
                 )
             await asyncio.sleep(0.3)
 
+    async def expect_working(self, participant_id: str) -> None:
+        if self.harness.observer.has_screen:
+            await self.expect_screen(participant_id, ScreenKind.WORKING)
+            return
+        deadline = time.monotonic() + 20.0
+        while True:
+            send = (await self.controls(participant_id)).actions.get("send")
+            if send is not None and not send.admissible:
+                return
+            if time.monotonic() > deadline:
+                violation("the daemon kept offering a send while the held turn ran for 20s")
+            await asyncio.sleep(0.3)
+
+    async def expect_prompt(self, participant_id: str) -> None:
+        if self.harness.observer.has_screen:
+            await self.expect_screen(participant_id, ScreenKind.PROMPT)
+        else:
+            await self.ready(participant_id)
+
     async def _classify_exit(self, participant_id: str) -> None:
         if (broken := await self.broken_component()) is not None:
             inconclusive(f"{broken} stopped before the CLI reached readiness")
@@ -504,7 +523,7 @@ class LiveRig:
         handle = await self.submit(participant_id, prompt)
         if not await asyncio.to_thread(hold.wait_reached, 60):
             violation("the held request never reached the model")
-        await self.expect_screen(participant_id, ScreenKind.WORKING)
+        await self.expect_working(participant_id)
         return HeldTurn(hold, handle)
 
     async def steer(self, participant_id: str, prompt: str) -> None:

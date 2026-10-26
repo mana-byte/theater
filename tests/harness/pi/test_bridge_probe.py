@@ -13,6 +13,7 @@ from tests.support.paths import REPO_ROOT
 from tests.support.pi_bridge import (
     PARTICIPANT,
 )
+from theater.harness import HARNESSES
 from theater.harness.builtin.plugins.pi import runtime as pi_runtime_module
 from theater.harness.builtin.plugins.pi.frontend import (
     PI_FRONTEND_PROTOCOL,
@@ -149,11 +150,11 @@ def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None
     assert 'pi.on("agent_settled"' in bridge
     assert 'pi.on("agent_end"' in bridge
     assert "model_update_proof_gated" in bridge
-    # The awaiting-input display contract: a user-input tool call sets the
-    # footer, the matching tool_result and every turn boundary clear it.
+    # Pending interactions stay native; pane status markers must not return.
     assert 'pi.on("tool_call"' in bridge
     assert 'pi.on("tool_result"' in bridge
-    assert "theater.pi.awaiting" in bridge
+    assert "setStatus" not in bridge
+    assert HARNESSES["pi"].observer.has_screen is False
     assert "ask_user_question" in bridge
     assert "await this.pi.setModel(" not in bridge
     assert "this.pi.getThinkingLevel()" in bridge

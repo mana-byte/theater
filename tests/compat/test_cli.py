@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat import cli
+from scripts.harness_compat import attention, cli
 from scripts.harness_compat.contract import Check, Result
 from scripts.harness_compat.git import git
 from scripts.harness_compat.policy import derive, write_policy
@@ -37,6 +37,24 @@ def _publishing(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
     monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
     monkeypatch.setenv("GITHUB_SHA", git(repo, "rev-parse", "HEAD").strip())
+
+
+def _reporting(monkeypatch: pytest.MonkeyPatch, repo: Path, **source) -> None:
+    _publishing(monkeypatch, repo)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_run")
+    run = {
+        "name": f"Harness compatibility ({source.get('event', 'schedule')})",
+        "event": "schedule",
+        "head_branch": "main",
+        "conclusion": "failure",
+        **source,
+    }
+
+    def api(gh, endpoint):
+        assert endpoint == "actions/runs/42"
+        return run
+
+    monkeypatch.setattr(attention, "api", api)
 
 
 def _run(*results: Result) -> Run:
@@ -177,7 +195,7 @@ def test_discovery_failure_exits_with_context_for_the_independent_reporter(
 def test_issue_publication_failure_is_explicitly_visible(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    _publishing(monkeypatch, repo)
+    _reporting(monkeypatch, repo)
     monkeypatch.setattr(
         cli, "report_workflow_failure", lambda *a, **k: (_ for _ in ()).throw(OSError("logs"))
     )
@@ -190,11 +208,11 @@ def test_issue_publication_failure_is_explicitly_visible(
     assert "Failure issue publication" in capsys.readouterr().err
 
 
-def test_reporter_failure_comments_on_the_original_workflow_issue(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
+def test_main_sweep_reporter_failure_comments_on_the_original_workflow_issue(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, event: str
 ) -> None:
-    _publishing(monkeypatch, repo)
-    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_run")
+    _reporting(monkeypatch, repo, event=event)
     monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
     gh = CompatGithub(git(repo, "rev-parse", "HEAD").strip(), POLICY)
     title = "Harness compatibility workflow: 42"
@@ -216,6 +234,68 @@ def test_reporter_failure_comments_on_the_original_workflow_issue(
     assert "Run: https://github.com/o/r/actions/runs/42" in comment
     assert "Reporter: https://github.com/o/r/actions/runs/7" in comment
     assert all(not path.exists() for path in gh.temporary_paths)
+
+
+@pytest.mark.parametrize(
+    "source,error",
+    [
+        ({"event": "pull_request", "conclusion": "startup_failure"}, OSError("setup failed")),
+        ({"event": "pull_request", "conclusion": "timed_out"}, OSError("job logs unavailable")),
+        ({"event": "pull_request", "conclusion": "cancelled"}, KeyboardInterrupt()),
+        ({"event": "pull_request"}, RuntimeError("GitHub publication unavailable")),
+        ({"event": "pull_request", "name": None}, ValueError("unexpected metadata")),
+        ({"event": "workflow_dispatch", "head_branch": "feature"}, OSError("logs")),
+        ({"event": "push"}, OSError("logs")),
+        ({"event": "workflow_run"}, OSError("logs")),
+        ({"name": "Unrelated workflow"}, OSError("logs")),
+        ({"event": "schedule", "conclusion": "success"}, OSError("logs")),
+    ],
+)
+def test_reporter_exception_fallback_never_mutates_github_without_a_failed_main_sweep(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys, source: dict, error: BaseException
+) -> None:
+    _reporting(monkeypatch, repo, **source)
+    gh = CompatGithub(git(repo, "rev-parse", "HEAD").strip(), POLICY)
+
+    def broken_report(*args):
+        raise error
+
+    monkeypatch.setattr(cli, "report_workflow_failure", broken_report)
+    monkeypatch.setattr(
+        cli, "file_attention_issue", lambda *args: file_attention_issue(*args, gh=gh)
+    )
+    assert _main(monkeypatch, repo, "report", "42") == 2
+    assert "::error title=Harness compatibility" in capsys.readouterr().out
+    assert not gh.calls and not gh.issues and gh.pr is None
+    assert set(gh.refs) == {"main"}
+
+
+def test_source_run_api_failure_is_visible_and_never_authorizes_a_fallback_issue(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _reporting(monkeypatch, repo, event="pull_request")
+    requests = []
+    issues = []
+
+    def unavailable(gh, endpoint):
+        requests.append(endpoint)
+        raise OSError("source run API unavailable")
+
+    monkeypatch.setattr(attention, "api", unavailable)
+    monkeypatch.setattr(cli, "file_attention_issue", lambda *args: issues.append(args))
+    assert _main(monkeypatch, repo, "report", "42") == 2
+    assert requests == ["actions/runs/42", "actions/runs/42"]
+    assert not issues and "source run API unavailable" in capsys.readouterr().err
+
+
+def test_pr_source_stops_the_real_reporter_before_job_api_or_publication(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reporting(monkeypatch, repo, event="pull_request", conclusion="failure")
+    issues = []
+    monkeypatch.setattr(cli, "file_attention_issue", lambda *args: issues.append(args))
+    assert _main(monkeypatch, repo, "report", "42") == 0
+    assert not issues
 
 
 def test_routine_check_does_not_depend_on_newer_upstream_heads(

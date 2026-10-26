@@ -571,7 +571,7 @@ async def test_refresh_forgets_evidence_of_participants_no_longer_live(provider_
     [(name, "approval") for name in ("claude", "codex", "opencode", "pi", "vibe")]
     + [("opencode", "question"), ("vibe", "question")],
 )
-async def test_provider_input_request_reaches_frontend_and_clears(
+async def test_provider_screen_input_requests_follow_the_harness_classifier(
     daemon, terminal_provider, harness, dialog
 ):
     participant = daemon.registry.register(harness=harness, pane=None, cwd=None)
@@ -583,13 +583,14 @@ async def test_provider_input_request_reaches_frontend_and_clears(
     try:
         follow = StateSynchronizer(client)
         await follow.refresh()
-        for expected in (Status.AWAITING_INPUT, Status.IDLE):
-            if harness == "pi":
-                state = "awaiting input" if expected is Status.AWAITING_INPUT else "idle"
-                screen = f"theater: {state}"
-            else:
-                kind = dialog if expected is Status.AWAITING_INPUT else "idle"
+        for phase in (Status.AWAITING_INPUT, Status.IDLE):
+            expected = phase if observer.has_screen else Status.IDLE
+            if observer.has_screen:
+                kind = dialog if phase is Status.AWAITING_INPUT else "idle"
                 screen = (screens / f"{harness}_{kind}.txt").read_text()
+            else:
+                state = "awaiting input" if phase is Status.AWAITING_INPUT else "idle"
+                screen = f"theater: {state}"
             terminal_provider.screens[terminal] = screen
             await daemon.observer._screen_status_due(
                 participant.id, observer, QuietClock(screen_quiet_since=0.0)

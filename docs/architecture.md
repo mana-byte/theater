@@ -1097,6 +1097,9 @@ the `harness/base.py` facade) defines `Harness`, which knows how to *start* a
 CLI; `theater/harness/contracts/observation.py` (re-exported by
 `harness/observation.py`) defines `HarnessObserver`, which knows how to *watch*
 one. A harness constructs its observer and carries it as `harness.observer`.
+`ObservationManifest.screen=None` declares no pane classifier (`observer.has_screen=False`).
+Pi uses native signals because its UI is user-overhaulable; pane/provider text sends fail closed,
+and qualification owes no `runtime:legacy` proof for a harness without a screen.
 
 | Method | On | Answers |
 |---|---|---|

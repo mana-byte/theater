@@ -128,6 +128,17 @@ def test_failure_reporter_runs_from_trusted_main_without_project_setup() -> None
     assert "uv sync" not in yaml.safe_dump(job)
 
 
+def test_attention_job_dispatch_allows_only_failed_main_release_sweeps() -> None:
+    guard = _load("harness-compat-attention.yml")["jobs"]["report"]["if"]
+    assert guard == (
+        'contains(fromJSON(\'["schedule","workflow_dispatch"]\'), '
+        "github.event.workflow_run.event) && "
+        "github.event.workflow_run.head_branch == 'main' && "
+        'contains(fromJSON(\'["failure","timed_out","cancelled","action_required",'
+        '"startup_failure"]\'), github.event.workflow_run.conclusion)'
+    )
+
+
 def test_untrusted_values_are_passed_as_environment_data() -> None:
     for name in ("harness-compat.yml", "harness-compat-attention.yml"):
         workflow = _load(name)

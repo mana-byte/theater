@@ -25,7 +25,6 @@ from theater.harness.contracts.manifest import (
     NativeCompatibilityManifest,
     ObservationManifest,
     OtelChannelManifest,
-    ScreenManifest,
     SourceManifest,
     SteerPlan,
 )
@@ -53,7 +52,6 @@ from .runtime import (
     probe_pi_frontend_compatibility,
 )
 from .runtime_constants import PI_FRONTEND_QUALIFIED_RANGE
-from .screen import classify_screen
 
 _TRANSCRIPT_CHANNEL = ChannelDeclaration(
     id="transcript",
@@ -108,7 +106,7 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
                 factory=partial(source_factory, root=root),
                 channel=_TRANSCRIPT_CHANNEL,
             ),
-            screen=ScreenManifest(classifier=classify_screen),
+            screen=None,
             identity=IdentityManifest(
                 stream_floor=file_stream_floor,
                 transcript_candidates=partial(transcript_candidates, root=root),

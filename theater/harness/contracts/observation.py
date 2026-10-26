@@ -64,6 +64,8 @@ class HarnessObserver(ABC):
 
     #: True selects the transcript watch loop; False falls back to capture-pane.
     has_transcript: bool = True
+    #: False means the observer has no pane classifier.
+    has_screen: bool = True
     trajectory_capabilities: TrajectoryCapabilities = TrajectoryCapabilities()
 
     def enrichment_manifests(self) -> tuple[EnrichmentManifest, ...]:

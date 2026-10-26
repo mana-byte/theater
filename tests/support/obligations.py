@@ -118,7 +118,7 @@ def _runtime(harness: Harness) -> tuple[str, ...]:
     return (
         "native",
         "survival",
-        "legacy",
+        *(("legacy",) if harness.observer.has_screen else ()),
         *supported,
         *(f"unavailable-{name}" for name in refused),
     )

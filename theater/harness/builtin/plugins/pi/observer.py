@@ -10,13 +10,12 @@ from pathlib import Path
 
 from theater.harness.contracts.callbacks import (
     OperatorCandidateContext,
-    ScreenContext,
     TranscriptCandidatesContext,
 )
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.source import Source, TranscriptCandidate
 from theater.harness.normalization.timing import iso_epoch
-from theater.harness.observation import ScreenKind, ScreenReading, TranscriptObserver
+from theater.harness.observation import TranscriptObserver
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 
@@ -31,7 +30,6 @@ from .constants import (
 from .isolation import canonical, validate_domain
 from .launch import participant_root
 from .parser import PiParserMixin
-from .screen import classify_screen
 from .source import PiTranscriptSource
 
 
@@ -184,6 +182,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
     """Observe Pi JSONL sessions, including deliberate `/new` rotations."""
 
     relocate_by_cwd = True
+    has_screen = False
     trajectory_capabilities = TrajectoryCapabilities(
         supported=frozenset(
             {
@@ -207,11 +206,9 @@ class PiObserver(PiParserMixin, TranscriptObserver):
     def _source_root(self, cwd: str | None) -> Path:
         return canonical(self.root) if self.root is not None else _default_sessions_root(cwd)
 
-    def screen_reading(self, capture: str) -> ScreenReading:
-        return classify_screen(ScreenContext(capture=capture))
-
     def is_idle_screen(self, capture: str) -> bool:
-        return self.screen_reading(capture).kind is ScreenKind.PROMPT
+        # Pi's pane is user-overhaulable, so it cannot establish idle state.
+        return False
 
     def open_source(
         self,

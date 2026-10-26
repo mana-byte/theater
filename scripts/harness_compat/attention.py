@@ -27,14 +27,7 @@ from .run import Run
 _WORKFLOW = "Harness compatibility"
 _WORKFLOW_PATH = ".github/workflows/harness-compat.yml"
 _FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
-_RECOVERY_JOBS = {
-    label: (name, publication_required)
-    for name in ADAPTER_NAMES
-    for label, publication_required in (
-        (f"Qualify {name}", True),
-        (f"Verify {name} plugin and policy", False),
-    )
-}
+_RECOVERY_JOBS = {f"Qualify {name}": name for name in ADAPTER_NAMES}
 _RECOVERED: dict[str, Verdict] = {
     "red": "red",
     "inconclusive": "inconclusive",
@@ -52,8 +45,6 @@ def recover_failures(
     harness: str,
     *,
     run_url: str,
-    publication_required: bool = True,
-    include_unfinished: bool = True,
 ) -> tuple[Result, ...]:
     """Recover failures and unfinished publication; logs never authorize a pass."""
     started: set[str] = set()
@@ -71,13 +62,7 @@ def recover_failures(
             finished[version] = verdict
         elif event == "published" and version in finished:
             published.add(version)
-    pending = (
-        started - published
-        if publication_required
-        else started - {version for version, verdict in finished.items() if verdict == "green"}
-    )
-    if not include_unfinished:
-        pending.intersection_update(finished)
+    pending = started - published
     return tuple(
         Result(
             harness,
@@ -101,25 +86,25 @@ def _workflow(run: dict[str, Any]) -> str:
     return run["name"].removesuffix(f" ({run['event']})")
 
 
-def _superseded(run: dict[str, Any], gh: Gh) -> bool:
-    """Whether concurrency replaced this PR run with a newer candidate; sweeps queue instead."""
-    if run["event"] != "pull_request":
-        return False
-    for reference in run["pull_requests"]:
-        current = api(gh, f"pulls/{reference['number']}")
-        if current["state"] == "closed" or current["head"]["sha"] != run["head_sha"]:
-            return True
-    return False
+def publication_failure_run(run_id: int, *, gh: Gh = run_gh) -> dict[str, Any] | None:
+    """Authorize failure reporting only for a confirmed main release sweep."""
+    run = api(gh, f"actions/runs/{run_id}")
+    if _workflow(run) != _WORKFLOW or run["event"] == "workflow_run":
+        raise ValueError("not a compatibility qualification run")
+    if (
+        run["event"] not in SWEEP_EVENTS
+        or run["head_branch"] != "main"
+        or run["conclusion"] not in _FAILED
+    ):
+        return None
+    return run
 
 
 def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None:
     """Run from trusted main via workflow_run, including when qualification never started."""
     check_publication_context(root, os.environ)
-    failed_run = api(gh, f"actions/runs/{run_id}")
-    workflow = _workflow(failed_run)
-    if workflow != _WORKFLOW or failed_run["event"] == "workflow_run":
-        raise ValueError("not a compatibility qualification run")
-    if failed_run["conclusion"] not in _FAILED:
+    failed_run = publication_failure_run(run_id, gh=gh)
+    if failed_run is None:
         return
     pages = json.loads(
         gh(
@@ -138,33 +123,21 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
         and (failed_run["head_repository"] or {}).get("full_name")
         == os.environ["GITHUB_REPOSITORY"]
     )
-    superseded = False
-    if trusted_logs and any(job["conclusion"] == "cancelled" for job in bad):
-        try:
-            superseded = _superseded(failed_run, gh)
-        except Exception as exc:
-            failures.append(exc)
-    if not superseded or any(job["conclusion"] != "cancelled" for job in bad):
-        try:
-            file_attention_issue(
-                f"Harness compatibility workflow: {run_id}",
-                f"Workflow ended **{failed_run['conclusion']}**. Human attention is required.\n\n"
-                f"Run: {run_url}\n\n"
-                + "\n".join(f"- {job['name']}: {job['conclusion']}" for job in bad)
-                + "\n\nInspect the failing step for setup, cleanup or publication errors.\n",
-                gh=gh,
-            )
-        except Exception as exc:
-            failures.append(exc)
-    trusted_sweep = failed_run["event"] in SWEEP_EVENTS and failed_run["head_branch"] == "main"
+    try:
+        file_attention_issue(
+            f"Harness compatibility workflow: {run_id}",
+            f"Workflow ended **{failed_run['conclusion']}**. Human attention is required.\n\n"
+            f"Run: {run_url}\n\n"
+            + "\n".join(f"- {job['name']}: {job['conclusion']}" for job in bad)
+            + "\n\nInspect the failing step for setup, cleanup or publication errors.\n",
+            gh=gh,
+        )
+    except Exception as exc:
+        failures.append(exc)
     for job in bad:
-        if (
-            not trusted_logs
-            or job["name"] not in _RECOVERY_JOBS
-            or failed_run["event"] not in SWEEP_EVENTS | {"pull_request"}
-        ):
+        if not trusted_logs or job["name"] not in _RECOVERY_JOBS:
             continue
-        harness, publication_required = _RECOVERY_JOBS[job["name"]]
+        harness = _RECOVERY_JOBS[job["name"]]
         try:
             # Job logs carry the runner's ANSI colour codes, which gh refuses to print otherwise.
             log = gh(
@@ -176,8 +149,6 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
                 log,
                 harness,
                 run_url=run_url,
-                publication_required=publication_required and trusted_sweep,
-                include_unfinished=not (superseded and job["conclusion"] == "cancelled"),
             )
             if not results:
                 continue
