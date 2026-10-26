@@ -46,5 +46,7 @@ SEAL_MIN_VERSION: Final = (2, 1, 220)
 #: Records and messages remembered to resolve a marker's parent chain across transcript reads.
 SEAL_NODE_LIMIT: Final = 2048
 SEAL_MESSAGE_LIMIT: Final = 32
+#: Retained raw answer text; exceeding the budget fails instead of truncating a final answer.
+SEAL_TEXT_BYTES_LIMIT: Final = 1 << 20
 #: Non-assistant records (an attachment) allowed between a marker and its final assistant record.
 SEAL_MAX_HOPS: Final = 4

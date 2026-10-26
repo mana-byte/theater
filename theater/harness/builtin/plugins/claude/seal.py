@@ -7,7 +7,13 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from .constants import SEAL_MAX_HOPS, SEAL_MESSAGE_LIMIT, SEAL_MIN_VERSION, SEAL_NODE_LIMIT
+from .constants import (
+    SEAL_MAX_HOPS,
+    SEAL_MESSAGE_LIMIT,
+    SEAL_MIN_VERSION,
+    SEAL_NODE_LIMIT,
+    SEAL_TEXT_BYTES_LIMIT,
+)
 
 _VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
@@ -65,7 +71,7 @@ class _Deferred:
     prompt: str | None = None
 
 
-def _is_prompt(record: dict) -> bool:
+def is_prompt(record: dict) -> bool:
     """A main-thread user turn with text of its own: not a tool result, injected or summary text."""
     if (
         record.get("type") != "user"
@@ -110,54 +116,192 @@ class FinalAnswerSeal:
         #: parser keeps such a record out of live accounting, which it would only confuse.
         self.skipped_history = False
         self._nodes: OrderedDict[str, _Node] = OrderedDict()
+        #: Proven copied ancestry survives root eviction without retaining copied messages.
+        self._history: OrderedDict[str, _Node] = OrderedDict()
+        self._guard_history = False
+        self.failure: str | None = None
         #: message id -> {record uuid -> text}; a key means every fragment seen was recorded.
         self._texts: OrderedDict[str, dict[str, str]] = OrderedDict()
+        self._text_bytes = 0
         self._awaiting: str | None = None
         #: At most one marker awaits its late parent records; superseded or dropped, never grown.
         #: It lives in this observer, so history paging (a fresh observer per page) fails closed.
         self._deferred: _Deferred | None = None
 
-    def reset(self) -> None:
+    def reset(self, *, history_guard: bool = False) -> None:
         self._nodes.clear()
+        self._history.clear()
         self._texts.clear()
+        self._text_bytes = 0
+        self._guard_history = history_guard
+        self.failure = None
         self._awaiting = None
         self._deferred = None
         self.skipped_history = False
 
-    def observe(self, record: dict, ts: float | None = None) -> str | None:
+    def observe(
+        self, record: dict, ts: float | None = None, *, index: int | None = None
+    ) -> str | None:
         """Remember one record; returns a reason when a sealed-mode final never got its marker."""
         self.skipped_history = False
+        if self.failure is not None:
+            return None
+        pending = self._deferred
+        if (
+            pending is not None
+            and index is not None
+            and not self._continues(pending, record.get("sessionId"), index)
+        ):
+            self._deferred = None
+            if pending.skipped:
+                self._fail("fork_discontinuity")
+                return None
         uuid = record.get("uuid")
         if not isinstance(uuid, str) or not uuid:
+            pending = self._deferred
+            if not _completes_safely(record) and (
+                self._guard_history
+                or (pending is not None and self._is_local(pending.ts) and not self._is_local(ts))
+            ):
+                self._fail("fork_record_identity_unavailable")
             return None
         parent = record.get("parentUuid")
         message_id = self._message_id(record)
-        self._nodes.pop(uuid, None)
-        self._nodes[uuid] = _Node(
+        node = _Node(
             parent if isinstance(parent, str) else None,
             message_id,
             record.get("isSidechain") is True,
             ts,
             _completes_safely(record),
         )
-
-        while len(self._nodes) > SEAL_NODE_LIMIT:
-            self._nodes.popitem(last=False)
+        previous = self._nodes.get(uuid) or self._history.get(uuid)
+        if previous is not None and previous != node:
+            self._fail("conflicting_record")
+            return None
+        if self._skip_history(record, uuid, node):
+            return None
+        self._nodes.pop(uuid, None)
+        self._nodes[uuid] = node
         if message_id is not None:
-            fragments = self._texts.setdefault(message_id, {})
-            self._texts.move_to_end(message_id)
-            text = self._text_of(record)
-            if text:
-                fragments[uuid] = text
-            while len(self._texts) > SEAL_MESSAGE_LIMIT:
-                self._texts.popitem(last=False)
+            self._remember_text(record, uuid, message_id)
+            if self.failure is not None:
+                return None
+        self._prune_nodes()
+        if self.failure is not None:
+            return None
         if record.get("type") == "user" and self._awaiting is not None:
             self._awaiting = None
             return "marker_missing"
         return None
 
+    def _remember_text(self, record: dict, uuid: str, message_id: str) -> None:
+        fragments = self._texts.setdefault(message_id, {})
+        self._texts.move_to_end(message_id)
+        text = self._text_of(record)
+        if uuid in fragments and fragments[uuid] != text:
+            self._fail("conflicting_fragment")
+            return
+        self._text_bytes += len(text.encode("utf-8")) - len(fragments.get(uuid, "").encode("utf-8"))
+        fragments[uuid] = text
+        protected = {message_id}
+        found = self._final_assistant(self._deferred.parent) if self._deferred is not None else None
+        if isinstance(found, tuple):
+            protected.add(found[1])
+        while len(self._texts) > SEAL_MESSAGE_LIMIT or self._text_bytes > SEAL_TEXT_BYTES_LIMIT:
+            oldest = next((key for key in self._texts if key not in protected), None)
+            if oldest is None:
+                self._fail("seal_text_limit")
+                return
+            self._drop_text(oldest)
+
+    def _prune_nodes(self) -> None:
+        """Evict cache outside the held message's fragments and causal links."""
+        if len(self._nodes) <= SEAL_NODE_LIMIT:
+            return
+        pending = self._deferred
+        found = self._final_assistant(pending.parent) if pending is not None else None
+        message_id = found[1] if isinstance(found, tuple) else None
+        current = pending.parent if pending is not None else None
+        protected: set[str] = set()
+        for _ in range(SEAL_NODE_LIMIT + 1):
+            if current is None or current in protected:
+                break
+            protected.add(current)
+            node = self._nodes.get(current)
+            if node is None or (
+                not node.bare and not (message_id is not None and node.message_id == message_id)
+            ):
+                break
+            current = node.parent
+        if message_id is not None:
+            protected.update(self._texts.get(message_id, {}))
+        while len(self._nodes) > SEAL_NODE_LIMIT:
+            oldest = next((key for key in self._nodes if key not in protected), None)
+            if oldest is None:
+                self._fail("seal_node_limit")
+                return
+            evicted = self._nodes.pop(oldest)
+            if evicted.message_id is not None:
+                self._drop_text(evicted.message_id)
+
+    def _skip_history(self, record: dict, uuid: str, node: _Node) -> bool:
+        """Classify copies before they can evict or contaminate a live causal chain."""
+        pending = self._deferred
+        if self._is_history(record, node.ts):
+            self._history[uuid] = node
+            self._history.move_to_end(uuid)
+            while len(self._history) > SEAL_NODE_LIMIT:
+                self._history.popitem(last=False)
+            found = self._final_assistant(pending.parent) if pending is not None else None
+            if (
+                pending is not None
+                and isinstance(found, tuple)
+                and self._is_local(pending.ts)
+                and self._is_local(found[2].ts)
+            ):
+                self._guard_history = True
+            if self._guard_history:
+                self.skipped_history = True
+                if (
+                    pending is not None
+                    and isinstance(found, tuple)
+                    and (node.message_id == found[1] or self._chain_reaches(pending.parent, uuid))
+                ):
+                    self._fail("copied_answer_fragment")
+                elif self._deferred is not None:
+                    self._deferred = replace(self._deferred, skipped=True)
+                return True
+        elif (
+            self._guard_history
+            and not self._is_local(node.ts)
+            and self._history_ancestry(node.parent) is None
+        ):
+            self._fail("fork_ancestry_unavailable")
+            return True
+        return False
+
+    def _drop_text(self, message_id: str) -> None:
+        self._text_bytes -= sum(
+            len(text.encode("utf-8")) for text in self._texts.pop(message_id, {}).values()
+        )
+
+    def _fail(self, reason: str) -> None:
+        """A lost proof cannot be downgraded to live replay or quiet-time rescue."""
+        self.failure = reason
+        self._deferred = None
+        self._awaiting = None
+        self._nodes.clear()
+        self._history.clear()
+        self._texts.clear()
+        self._text_bytes = 0
+
+    @property
+    def pending(self) -> bool:
+        return self._deferred is not None
+
     def expect_marker(self, message_id: str | None) -> None:
-        self._awaiting = message_id or self._awaiting
+        if not self.skipped_history and self.failure is None:
+            self._awaiting = message_id or self._awaiting
 
     def _final_assistant(self, parent: object) -> tuple[str, str, _Node] | Unsealed:
         """The assistant record, its message and node, that a marker's parent chain ends at."""
@@ -175,6 +319,8 @@ class FinalAnswerSeal:
 
     def resolve(self, marker: dict) -> Sealed | Unsealed:
         """Walk the marker's parent chain to its assistant record and prove the message is whole."""
+        if self.failure is not None:
+            return Unsealed(self.failure)
         found = self._final_assistant(marker.get("parentUuid"))
         if isinstance(found, Unsealed):
             return found
@@ -184,7 +330,9 @@ class FinalAnswerSeal:
         if not self._message_is_whole(current, message_id):
             return Unsealed("incomplete_message")
         self._awaiting = None
-        return Sealed(message_id, "\n\n".join(self._texts[message_id].values()))
+        return Sealed(
+            message_id, "\n\n".join(text for text in self._texts[message_id].values() if text)
+        )
 
     def resolve_or_defer(self, marker: dict, ts: float | None, index: int) -> Sealed | Unsealed:
         """Seal now, or hold the marker when its chain needs records not read yet.
@@ -192,16 +340,12 @@ class FinalAnswerSeal:
         A supported main-thread marker always supersedes any older held one, resolved or not,
         except copied history: it ended a turn no job here waits for.
         """
-        held = self._deferred
-        if (
-            held is not None
-            and self._continues(held, marker.get("sessionId"), index)
-            and self._skips_history(held, marker, ts)
-        ):
-            self._deferred = replace(held, skipped=True)
-            self.skipped_history = True
+        if self.skipped_history:
             return Unsealed("history")
+        if self.failure is not None:
+            return Unsealed(self.failure)
         self._deferred = None
+        self._awaiting = None
         outcome = self.resolve(marker)
         if isinstance(outcome, Unsealed) and outcome.reason in _RETRYABLE:
             parent = marker.get("parentUuid")
@@ -226,14 +370,7 @@ class FinalAnswerSeal:
         that could itself be a fragment of the answer.
         """
         pending = self._deferred
-        if pending is None:
-            return None
-        if not self._continues(pending, record.get("sessionId"), index):
-            self._deferred = None
-            return None
-        if self._skips_history(pending, record, ts):
-            self._deferred = replace(pending, skipped=True)
-            self.skipped_history = True
+        if pending is None or self.skipped_history or self.failure is not None:
             return None
         if pending.prompt is not None:
             # One prompt is awaited: only attachments that may link it count, anything else drops.
@@ -243,6 +380,8 @@ class FinalAnswerSeal:
             return self._follow_prompt(pending, record["uuid"])
         if not _completes_safely(record):
             self._deferred = None
+            if pending.skipped:
+                self._fail("fork_chain_broken")
             return None
         if pending.skipped or not isinstance(record.get("uuid"), str):
             return None  # Only its prompt releases a hold that skipped history; no uuid: no link.
@@ -279,36 +418,24 @@ class FinalAnswerSeal:
         return self._descends_from_history(record.get("parentUuid"))
 
     def _descends_from_history(self, parent: object) -> bool:
+        return self._history_ancestry(parent) is True
+
+    def _history_ancestry(self, parent: object) -> bool | None:
         """Whether ``parent`` and every record above it, back to a root, was written before the
         launch. An ancestry not read yet proves nothing."""
         current = parent
         for _ in range(SEAL_NODE_LIMIT):
             if current is None:
                 return True
+            if isinstance(current, str) and current in self._history:
+                return True
             node = self._nodes.get(current) if isinstance(current, str) else None
             if node is None or node.ts is None or self._launched_at is None:
-                return False
+                return None
             if node.ts >= self._launched_at:
                 return False
             current = node.parent
-        return False
-
-    def _skips_history(self, held: _Deferred, record: dict, ts: float | None) -> bool:
-        """Whether ``record`` is copied history that leaves the held marker as it is.
-
-        Claude's fork writes its first turn before the history it continues, so that history
-        arrives after the marker. It may not be part of the held message or fill a link of its
-        chain; the held message itself must be one this session wrote.
-        """
-        if not self._is_history(record, ts):
-            return False
-        found = self._final_assistant(held.parent)
-        if isinstance(found, Unsealed):
-            return False
-        _, message_id, node = found
-        if not self._is_local(node.ts) or self._message_id(record) == message_id:
-            return False
-        return not self._chain_reaches(held.parent, record.get("uuid"))
+        return None
 
     def _is_first_prompt(self, record: dict, ts: float | None) -> bool:
         """Whether ``record`` is a fork's first prompt: typed, written by this session, and the one
@@ -319,7 +446,7 @@ class FinalAnswerSeal:
         qualifies.
         """
         return (
-            _is_prompt(record)
+            is_prompt(record)
             and isinstance(record.get("uuid"), str)
             and self._is_local(ts)
             and record.get("parentUuid") is not None
@@ -330,24 +457,39 @@ class FinalAnswerSeal:
         self, held: _Deferred, prompt: str
     ) -> tuple[Sealed, float | None, int] | None:
         """Release the message once its ancestry reaches ``prompt``; wait while that is unread."""
-        chain = self._chain_to_prompt(held, prompt)
+        chain = self._chain_to_prompt(held.parent, held.ts, prompt)
         if chain is _Chain.UNREAD:
             self._deferred = replace(held, prompt=prompt)
             return None
         self._deferred = None
         if chain is _Chain.BROKEN:
+            if held.skipped:
+                self._fail("fork_chain_broken")
             return None
         outcome = self.resolve({"parentUuid": held.parent})
         return (outcome, held.ts, held.index) if isinstance(outcome, Sealed) else None
 
-    def _chain_to_prompt(self, held: _Deferred, prompt: str) -> _Chain:
+    def local_turn_known(self, parent: object, prompt: object) -> bool:
+        """Whether a retained message has a proved launch-local chain to this typed prompt."""
+        found = self._final_assistant(parent)
+        prompt_node = self._nodes.get(prompt) if isinstance(prompt, str) else None
+        return (
+            isinstance(prompt, str)
+            and prompt_node is not None
+            and self._is_local(prompt_node.ts)
+            and not prompt_node.sidechain
+            and isinstance(found, tuple)
+            and self._chain_to_prompt(parent, found[2].ts, prompt) is _Chain.REACHED
+        )
+
+    def _chain_to_prompt(self, parent: object, ts: float | None, prompt: str) -> _Chain:
         """Whether the held message, written by this session alone, descends from ``prompt``
         through attachment-like records of this session and its own earlier fragments."""
-        found = self._final_assistant(held.parent)
+        found = self._final_assistant(parent)
         if isinstance(found, Unsealed):
             return _Chain.BROKEN
         _, message_id, node = found
-        if not (self._is_local(held.ts) and self._is_local(node.ts)):
+        if not (self._is_local(ts) and self._is_local(node.ts)):
             return _Chain.BROKEN
         if not self._fragments_are_local(message_id):
             return _Chain.BROKEN

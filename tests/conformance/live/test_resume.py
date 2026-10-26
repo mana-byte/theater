@@ -24,9 +24,12 @@ async def _transcript_evidence(live, participant_id: str) -> str:
 async def test_a_resumed_participant_continues_its_conversation(live, obligation):
     first = await live.spawn(live.approval)
     await live.ready(first)
-    earlier = f"Remember {uuid.uuid4().hex[:8]}"
-    live.queue(MockReply("noted"))
-    assert (await live.send(first, earlier)).state == "done"
+    # One scenario per obligation; this history exceeds the seal's former 32-message limit.
+    prompts = [f"Remember {uuid.uuid4().hex[:8]}" for _ in range(33)]
+    for history_prompt in prompts:
+        live.queue(MockReply("noted"))
+        history_job = await live.send(first, history_prompt)
+        assert history_job.state == "done", history_job.error
     await live.until(first, lambda p: p.transcript_identity is not None, what="bound a transcript")
     await live.retire(first)
     resumable = await live.until(
@@ -49,7 +52,9 @@ async def test_a_resumed_participant_continues_its_conversation(live, obligation
     code = job.error.code if job.error is not None else None
     assert answered, f"the resumed send answered {job.result!r}; error {code}{seen}"
     (resumed,) = live.turns(prompt)
-    assert earlier in resumed.user_texts, "the resumed conversation lost its history"
+    assert all(previous in resumed.user_texts for previous in prompts), (
+        "the resumed conversation lost its history"
+    )
     successor = await live.participant(second)
     assert successor.transcript_identity is not None
     assert successor.transcript_identity.state == "trusted", successor.transcript_identity
@@ -57,4 +62,6 @@ async def test_a_resumed_participant_continues_its_conversation(live, obligation
         first, lambda p: p.resume_state == "owned_by_live", what="been continued by its successor"
     )
     assert lineage.resume_state == "owned_by_live"
-    assert len(live.turns(earlier)) == 1, "the earlier prompt was submitted again"
+    assert all(len(live.turns(previous)) == 1 for previous in prompts), (
+        "an earlier prompt was submitted again"
+    )

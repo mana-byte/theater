@@ -22,8 +22,10 @@ from theater.harness.source import (
 )
 from theater.harness.transcript.history import HistoryParseContext
 from theater.provenance import TranscriptProvenance
+from theater.transcript_identity import TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
 
 from .constants import SEAL_NODE_LIMIT
+from .seal import is_prompt
 
 if TYPE_CHECKING:
     from .observer import ClaudeCodeObserver
@@ -69,8 +71,7 @@ def _live_turn_start(
         if (
             previous is not None
             and record is not None
-            and record.get("type") == "user"
-            and record.get("isSidechain") is not True
+            and is_prompt(record)
             and record.get("sessionId") == session_id
             and (timestamp := iso_epoch(record.get("timestamp"))) is not None
             and timestamp > after
@@ -89,7 +90,7 @@ class _ClaudeSource(TranscriptSource):
     if TYPE_CHECKING:
         _observer: ClaudeCodeObserver
 
-    #: The seal's own node bound: all the causal context a live read could need.
+    #: A suffix may omit a fork's held head; it must prove a local turn before answering.
     _attach_tail = SEAL_NODE_LIMIT
 
     def __init__(self, observer: ClaudeCodeObserver, **kwargs) -> None:
@@ -106,29 +107,66 @@ class _ClaudeSource(TranscriptSource):
         """Prime the causal seal from the scanned tail; a launch-local turn stays for live reads."""
         if snapshot.trailing_bytes:
             raise OSError(errno.ESTALE, "transcript attachment ends in an incomplete record")
+        truncated = bool(snapshot.tail and snapshot.tail[0].raw_index > 0)
+        local_start = _live_turn_start(snapshot.tail, self._after, attachment.session_id)
+        if truncated and local_start is None:
+            raise OSError(errno.ESTALE, "truncated transcript has no launch-local prompt")
         point = attachment.point
         assert point is not None
         # The base attach parsed the last record alone; restart so the seal sees the tail in order.
-        self._observer.reset_stream()
+        self._observer.reset_stream(history_guard=truncated)
         live_start = _live_turn_start(snapshot.tail, self._live_after, attachment.session_id)
         ends = {record.raw_index: record.end for record in snapshot.tail}
         last_event = None
+        prompt_uuid = last_uuid = None
         for index, _, line in snapshot.tail:
-            if live_start is not None and index == live_start[0]:
+            if truncated and local_start is not None and index < local_start[0]:
+                continue
+            if not truncated and live_start is not None and index == live_start[0]:
                 break
+            record = decode_json_record(line) or {}
             for event in self._observer.parse(line, index, clip_text=False):
                 if not event.usage_only:
+                    last_uuid = record.get("uuid")
+                    prompt_uuid = last_uuid if is_prompt(record) else prompt_uuid
                     last_event = replace(event, text=clip(event.text))
                     point = replace(point, records=event.raw_index + 1, size=ends[event.raw_index])
             if index % 32 == 0:
                 await asyncio.sleep(0)
+        if self._observer.stream_error is not None:
+            raise OSError(errno.ESTALE, self._observer.stream_error)
+        if truncated and not (
+            last_event is not None
+            and (last_event.turn_end or self._observer.local_turn_known(last_uuid, prompt_uuid))
+        ):
+            raise OSError(errno.ESTALE, "truncated transcript has no proved launch-local turn")
         if live_start is not None:
             # Copied history primes the seal; the current turn settles only through live reads.
             self._restage(index=live_start[0], offset=live_start[1])
+            if truncated:
+                self._observer.reset_stream(history_guard=True)
             attachment = replace(attachment, status=None)
             last_event = None
         # Metadata after a boundary must not advance that boundary past a resume floor.
         return replace(attachment, last_event=last_event, point=point)
+
+    def _reset_stream(self) -> None:
+        self._observer.reset_stream(history_guard=self.path is not None and self._after is not None)
+
+    async def _read_once(self) -> Batch:
+        batch = await super()._read_once()
+        if failure := self._observer.stream_error:
+            return replace(
+                batch,
+                events=(),
+                status=None,
+                waiting=True,
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error=f"Claude transcript causal context is unavailable: {failure}",
+            )
+        if batch.attached is None and not batch.events and self._observer.waiting_for_seal:
+            return replace(batch, waiting=True)
+        return batch
 
     def commit_attachment(self) -> None:
         super().commit_attachment()
