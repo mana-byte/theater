@@ -75,6 +75,20 @@ class TmuxSocket:
         if Path(path).resolve() != self.path:
             raise TmuxError("tmux command tried to leave its pinned server socket")
 
+    def restore_default_permissions(self) -> None:
+        """Explicit -S creates mode 0600; ordinary default sockets use 0660."""
+        if not self.default_directory or self.private_roots:
+            return
+        self.validate()
+        try:
+            mode = self.path.lstat()
+        except FileNotFoundError:
+            return
+        if not stat.S_ISSOCK(mode.st_mode) or mode.st_uid != os.getuid():
+            raise TmuxError(f"refusing to change an unowned tmux socket: {self.path}")
+        if stat.S_IMODE(mode.st_mode) == 0o600:
+            self.path.chmod(0o660, follow_symlinks=False)
+
 
 _SOCKET: contextvars.ContextVar[TmuxSocket | None] = contextvars.ContextVar(
     "regie_tmux_socket", default=None
@@ -186,8 +200,11 @@ async def run(
     """Run tmux without a shell and return decoded standard output."""
     if not available():
         raise TmuxMissing("tmux is not on PATH")
+    argv = command_argv(*args)
+    socket = _SOCKET.get()
+    socket_missing = socket is not None and not socket.path.exists()
     process = await asyncio.create_subprocess_exec(
-        *command_argv(*args),
+        *argv,
         stdin=asyncio.subprocess.PIPE if input_bytes is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -207,6 +224,8 @@ async def run(
     if check and process.returncode != 0:
         detail = (error or output).decode("utf-8", "backslashreplace").strip()
         raise TmuxError(f"tmux {args[0] if args else ''} failed: {detail}")
+    if socket is not None and socket_missing and process.returncode == 0:
+        socket.restore_default_permissions()
     return output.decode("utf-8", "backslashreplace").rstrip("\n")
 
 

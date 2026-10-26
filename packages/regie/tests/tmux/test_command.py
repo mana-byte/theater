@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket as socket_module
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -110,6 +111,45 @@ async def test_child_tasks_keep_the_socket_when_environment_and_parent_context_c
     )
     with pytest.raises(TmuxError, match="pinned"):
         command_argv("kill-server")
+
+
+@pytest.mark.parametrize("case", ["default", "sandbox", "explicit", "existing", "version"])
+async def test_only_new_ordinary_default_sockets_gain_group_permissions(
+    tmp_path: Path, monkeypatch, case: str
+) -> None:
+    env = {"TMUX_TMPDIR": str(tmp_path)}
+    if case == "sandbox":
+        env.update({SANDBOX_ENV: "test-token", "HOME": str(tmp_path)})
+    socket = resolve_socket(
+        environment=env, socket_path=tmp_path / "custom.sock" if case == "explicit" else None
+    )
+    socket.prepare()
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+
+    async def communicate(_input):
+        return b"ok\n", b""
+
+    async def create(*_args, **_kwargs):
+        if case not in {"existing", "version"}:
+            server.bind(str(socket.path))
+            socket.path.chmod(0o600)
+        return SimpleNamespace(returncode=0, communicate=communicate)
+
+    monkeypatch.setattr(command, "available", lambda: True)
+    monkeypatch.setattr(command.asyncio, "create_subprocess_exec", create)
+    try:
+        if case == "existing":
+            server.bind(str(socket.path))
+            socket.path.chmod(0o620)
+        with bind_socket(socket):
+            assert await command.run("-V" if case == "version" else "new-session") == "ok"
+        if case == "version":
+            assert not socket.path.exists()
+        else:
+            expected = 0o660 if case == "default" else 0o620 if case == "existing" else 0o600
+            assert socket.path.stat().st_mode & 0o777 == expected
+    finally:
+        server.close()
 
 
 @pytest.mark.parametrize("change", ["permissions", "owner", "symlink"])

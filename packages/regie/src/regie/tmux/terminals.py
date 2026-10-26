@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 
 from regie.tmux.bootstrap import (
@@ -387,7 +388,9 @@ async def deliver_text(
             ) from exc
         raise
     finally:
-        await run("delete-buffer", "-b", buffer, check=False)
+        # Cleanup must preserve the delivery result and its uncertainty fence.
+        with suppress(TmuxError):
+            await run("delete-buffer", "-b", buffer, check=False)
 
 
 async def deliver_action(
