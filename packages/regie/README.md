@@ -49,7 +49,8 @@ The tree is the whole interface; every signal is a state of something it already
   Only a new wait and the selected row's waits draw their route.
 - **Marks.** After the name: `⋯` queued, `✓` delivered (fades), `⊘` blocked (not now: human
   present, busy), `✗` failed, `?` unconfirmed. Failures say why on the third line and stop
-  asking once the cursor has rested on the row.
+  asking once the cursor has rested on the row in view (a cursor in the usage footer does not
+  count).
 - **`]` / `[`** jump to the next or previous row that needs you, wrapping round. A folded
   section shows the worst state it hides.
 - **Folding.** `Space` folds the selected agent's children (any depth) into its row, which then
@@ -68,7 +69,8 @@ The tree is the whole interface; every signal is a state of something it already
   into their choices: the harnesses, the dead sessions you can bring back (drawn as dead agents,
   with why one cannot return), the transcripts the daemon found, the themes. `h` or `←` folds back.
   Long lists show five rows and a `… N more` leaf that opens the rest. `o` opens the menu with the
-  cursor on the first harness. `/` filters everything the menu lists; `Enter` keeps the filter,
+  cursor on the first harness. `/` filters everything the menu lists; `Enter` keeps the filter and
+  moves the cursor to the first match you can pick, a harness rather than its Spawn option;
   `Esc` drops it. An option wears the key that does the same (`Spawn · o`, `Quit · q`). A description too long for its row scrolls while the row is in focus, as an
   agent's does. A pick closes the menu and puts the cursor back where it was (a theme applies at
   once and the menu stays open, for this session only); `x` closes the menu the same way. The menu
