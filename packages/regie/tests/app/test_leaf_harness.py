@@ -49,7 +49,9 @@ async def test_a_row_without_a_name_always_shows_its_harness() -> None:
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
         await wait_until(pilot, lambda: len(tree.participant_ids) == 3)
-        assert "codex" in _row(_leaf(tree, "participant-3"))  # not selected, not hovered
+        leaf = _leaf(tree, "participant-3")
+        # The ids are model state; the row renders once the new leaf has been laid out.
+        await wait_until(pilot, lambda: "codex" in _row(leaf))  # not selected, not hovered
 
 
 async def test_a_click_on_the_name_is_measured_before_selecting_moves_it(monkeypatch) -> None:
