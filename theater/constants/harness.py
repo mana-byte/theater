@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from theater.constants.plugins import PLUGIN_API_VERSION
 
+#: Shared isolation token for compatibility subprocesses and terminal providers.
+HARNESS_COMPAT_SANDBOX_ENV = "HARNESS_COMPAT_SANDBOX"
+
 #: Independent private RPC sockets per MCP process; never used for frontend channels.
 MCP_RPC_CONNECTIONS = 4
 

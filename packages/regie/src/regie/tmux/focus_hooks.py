@@ -7,7 +7,7 @@ import contextlib
 import hashlib
 import re
 
-from regie.tmux.command import TmuxError, run, sequence_argv
+from regie.tmux.command import TmuxError, command_argv, run, sequence_argv
 from regie.tmux.identity import ServerIdentity
 
 _EVENTS = frozenset(
@@ -134,11 +134,7 @@ class FocusHooks:
 
     async def wait(self) -> None:
         process = await asyncio.create_subprocess_exec(
-            "tmux",
-            "-S",
-            self.identity.socket_path,
-            "wait-for",
-            self.channel,
+            *command_argv("-S", self.identity.socket_path, "wait-for", self.channel),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )

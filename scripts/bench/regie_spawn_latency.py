@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from regie.tmux.command import bind_socket, command_argv, resolve_socket
+
 POLL_SECONDS = 0.05
 WAIT_SECONDS = 90
 METRICS = (
@@ -80,6 +82,8 @@ class Stack:
             PATH=f"{self.bin_dir}{os.pathsep}{self.env.get('PATH', '')}",
         )
         self.tmux_binary = shutil.which("tmux")
+        self.tmux_socket = resolve_socket(environment=self.env)
+        self.tmux_socket.prepare()
         self.ui_pane: str | None = None
         self.ui_log: Path | None = None
         self.spawned: set[str] = set()
@@ -109,8 +113,10 @@ class Stack:
 
     def tmux(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         assert self.tmux_binary is not None
+        with bind_socket(self.tmux_socket):
+            argv = command_argv(*args)
         result = subprocess.run(
-            [self.tmux_binary, "-f", "/dev/null", *args],
+            [self.tmux_binary, "-f", "/dev/null", *argv[1:]],
             cwd=self.tree,
             env=self.env,
             capture_output=True,

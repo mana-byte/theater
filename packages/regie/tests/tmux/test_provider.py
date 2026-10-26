@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -16,8 +17,17 @@ from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig, PresentationTarget
 from regie.tmux import bootstrap
 from regie.tmux.bootstrap import REGIE_DEFAULT_SESSION
-from regie.tmux.command import TmuxError, TmuxOutcomeUnknown, available, run, sequence_argv
-from regie.tmux.identity import pane_snapshot
+from regie.tmux.command import (
+    TmuxError,
+    TmuxOutcomeUnknown,
+    available,
+    bind_socket,
+    resolve_socket,
+    run,
+    sequence_argv,
+)
+from regie.tmux.focus_monitor import FocusMonitor
+from regie.tmux.identity import ServerIdentity, pane_snapshot
 from regie.tmux.presentation import TmuxPresentation
 from regie.tmux.terminals import (
     create_terminal,
@@ -28,6 +38,8 @@ from regie.tmux.terminals import (
     recover_terminal_launch,
     terminate_terminal,
 )
+
+from theater.frontend import SANDBOX_ENV
 
 pytestmark = [pytest.mark.tmux, pytest.mark.integration]
 
@@ -41,11 +53,97 @@ async def isolated_tmux(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TERM", "xterm-256color")
     for name in ("TMUX", "TMUX_PANE", "THEATER_ID"):
         monkeypatch.delenv(name, raising=False)
+    socket = resolve_socket()
+    socket.prepare()
     try:
-        yield tmp_path
+        with bind_socket(socket):
+            yield tmp_path
     finally:
-        await run("kill-server", check=False)
-        shutil.rmtree(socket_root)
+        with contextlib.suppress(TmuxError):
+            await run("-S", str(socket.path), "kill-server", check=False)
+        shutil.rmtree(socket_root, ignore_errors=True)
+
+
+@pytest.fixture(
+    params=[
+        "private",
+        pytest.param(
+            "default",
+            marks=pytest.mark.skipif(
+                os.environ.get("REGIE_DISPOSABLE_DOCKER") != "1"
+                or sys.platform != "linux"
+                or not Path("/.dockerenv").is_file(),
+                reason="default-server proof requires an explicitly disposable Docker container",
+            ),
+        ),
+    ]
+)
+async def sentinel_socket(request):
+    root = Path(tempfile.mkdtemp(prefix="regie-sentinel-", dir="/tmp"))
+    try:
+        socket = resolve_socket(
+            environment={} if request.param == "default" else {"TMUX_TMPDIR": str(root)}
+        )
+        if socket.path.exists():
+            pytest.fail("the sentinel proof refuses to use an existing tmux server")
+        socket.prepare()
+        try:
+            with bind_socket(socket):
+                await run("new-session", "-d", "-s", "socket-sentinel")
+            assert socket.path.stat().st_mode & 0o777 == 0o660
+            yield socket
+        finally:
+            with bind_socket(socket):
+                await run("kill-server", check=False)
+    finally:
+        shutil.rmtree(root)
+
+
+async def test_deleted_sandbox_refuses_commands_and_preserves_other_server(
+    isolated_tmux, sentinel_socket
+):
+    with bind_socket(sentinel_socket):
+        before = await run("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}")
+    server_pid = None
+    presence = FocusMonitor()
+    try:
+        identity = ServerIdentity.parse(await ensure_server(cwd=str(isolated_tmux)))
+        server_pid = int(identity.pid)
+        pane_id = await run("display-message", "-p", "#{pane_id}")
+        snapshot = await pane_snapshot(pane_id)
+        assert snapshot is not None
+        await presence.start(identity.value)
+        with pytest.raises(TmuxError):
+            await terminate_terminal(
+                snapshot,
+                before_effect=lambda: shutil.rmtree(Path(os.environ["TMUX_TMPDIR"])),
+            )
+        # A fresh selection, a retry and even cleanup cannot reach the other server.
+        with pytest.raises(TmuxError):
+            resolve_socket()
+        with pytest.raises(TmuxError):
+            await ensure_server(cwd=str(isolated_tmux))
+        with pytest.raises(TmuxError):
+            await run("kill-server", check=False)
+        assert (await presence.observe(snapshot)).state == "unknown"
+        with bind_socket(sentinel_socket):
+            assert await run("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}") == before
+    finally:
+        await presence.aclose()
+        if server_pid is not None:
+            # Removing a live socket leaves its server unreachable; this PID is ours.
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(server_pid, signal.SIGTERM)
+
+
+async def test_sandbox_server_socket_stays_private(isolated_tmux):
+    root = Path(os.environ["TMUX_TMPDIR"])
+    socket = resolve_socket(
+        environment={"HOME": str(root), "TMUX_TMPDIR": str(root), SANDBOX_ENV: "test-token"}
+    )
+    with bind_socket(socket):
+        await ensure_server(cwd=str(isolated_tmux))
+    assert socket.path.stat().st_mode & 0o777 == 0o600
 
 
 async def test_command_sequence_preserves_literals_and_stops_at_first_error(isolated_tmux):

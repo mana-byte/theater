@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -14,7 +15,13 @@ from regie.bridge.callbacks import TmuxProviderCallbacks
 from regie.bridge.runtime import TmuxBridge
 from regie.bridge.state import BridgeStateStore
 from regie.contracts import BridgeConfig
-from regie.tmux.command import TmuxError, TmuxOutcomeUnknown
+from regie.tmux.command import (
+    TmuxError,
+    TmuxOutcomeUnknown,
+    bind_socket,
+    command_argv,
+    resolve_socket,
+)
 from regie.tmux.identity import PaneSnapshot
 from regie.tmux.presence import PresenceChanged, PresenceEvidence
 from regie.tmux.terminals import managed_inventory
@@ -449,6 +456,52 @@ async def test_focus_change_before_effect_blocks_input_and_partial_submit_is_not
             assert result["delivery"] == "unknown"
             assert await callbacks.deliver(request) == result
             assert effects == ["paste-buffer"]
+    finally:
+        state.release()
+
+
+async def test_deleted_socket_after_paste_keeps_unknown_receipt_without_replay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "tmux"
+    root.mkdir()
+    socket = resolve_socket(environment={"TMUX_TMPDIR": str(root)})
+    socket.prepare()
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    callbacks = TmuxProviderCallbacks(state, generation_usable=lambda generation: generation == 3)
+    effects = []
+
+    async def snapshot(_pane_id):
+        return _pane()
+
+    async def inspect(**_kwargs):
+        return _identity(), PresenceEvidence("absent", "test", None, epoch=1), None, True
+
+    async def raw_paste():
+        return True
+
+    async def run(*args, **_kwargs):
+        command_argv(*args)
+        if args[0] in {"paste-buffer", "send-keys"}:
+            effects.append(args[0])
+        if args[0] == "paste-buffer":
+            shutil.rmtree(root)
+        return ""
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+    monkeypatch.setattr("regie.tmux.terminals._raw_paste_supported", raw_paste)
+    monkeypatch.setattr("regie.tmux.terminals.run", run)
+    try:
+        with bind_socket(socket):
+            request = _request("terminal.deliver")
+            result = await callbacks.deliver(request)
+            assert result["delivery"] == "unknown"
+            assert result["error"]["code"] == "delivery_unknown"
+            assert await callbacks.deliver(request) == result
+        assert effects == ["paste-buffer"]
     finally:
         state.release()
 

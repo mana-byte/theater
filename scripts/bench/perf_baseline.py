@@ -30,6 +30,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from regie.tmux.command import TmuxError, bind_socket, command_argv, resolve_socket
+
 try:
     import psutil
 except ImportError:  # pragma: no cover - dev script
@@ -160,6 +162,7 @@ class Stack:
         self.env = dict(os.environ)
         self.tmux_log: Path | None = None
         self.real_tmux = shutil.which("tmux")
+        self.tmux_socket = None
         self.spawned: list[str] = []
         if not self.attach:
             self.tmp = Path(tempfile.mkdtemp(prefix="theater-perf-"))
@@ -183,6 +186,8 @@ class Stack:
                 TMUX_TMPDIR=str(tmux_dir),
                 PATH=f"{shim_dir}{os.pathsep}{self.env.get('PATH', '')}",
             )
+            self.tmux_socket = resolve_socket(environment=self.env)
+            self.tmux_socket.prepare()
         self.home = Path(self.env.get("THEATER_HOME", Path.home() / ".theater"))
         # Agents need a directory their CLI already trusts, or they sit at a trust prompt.
         self.workdir = args.cwd
@@ -211,10 +216,28 @@ class Stack:
         subprocess.run(
             [
                 self.real_tmux,
-                *("-f", "/dev/null", "start-server", ";"),
-                *("set-option", "-g", "remain-on-exit", "on", ";"),
-                *("new-session", "-d", "-s", "perf", "-x", "200", "-y", "50"),
-                *("-c", str(self.workdir), regie),
+                "-f",
+                "/dev/null",
+                *self._tmux_argv(
+                    "start-server",
+                    ";",
+                    "set-option",
+                    "-g",
+                    "remain-on-exit",
+                    "on",
+                    ";",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "perf",
+                    "-x",
+                    "200",
+                    "-y",
+                    "50",
+                    "-c",
+                    str(self.workdir),
+                    regie,
+                )[1:],
             ],
             env=self.env,
             check=True,
@@ -224,7 +247,7 @@ class Stack:
         except SystemExit:
             missing = [role for role in ROLES if self.find(role) is None]
             pane = subprocess.run(
-                [self.real_tmux, "capture-pane", "-p", "-t", "perf"],
+                self._tmux_argv("capture-pane", "-p", "-t", "perf"),
                 env=self.env,
                 capture_output=True,
                 text=True,
@@ -278,6 +301,11 @@ class Stack:
             return []
         return self.tmux_log.read_text().splitlines()
 
+    def _tmux_argv(self, *args: str) -> tuple[str, ...]:
+        assert self.real_tmux is not None and self.tmux_socket is not None
+        with bind_socket(self.tmux_socket):
+            return (self.real_tmux, *command_argv(*args)[1:])
+
     def stop(self) -> None:
         if self.attach or self.tmp is None:
             return
@@ -292,9 +320,13 @@ class Stack:
         )
         self.theater("stop", check=False)
         if self.real_tmux:
-            subprocess.run(
-                [self.real_tmux, "kill-server"], env=self.env, capture_output=True, check=False
-            )
+            with contextlib.suppress(TmuxError):
+                subprocess.run(
+                    self._tmux_argv("kill-server"),
+                    env=self.env,
+                    capture_output=True,
+                    check=False,
+                )
         # The bridge and agents are detached; anything still naming our temp dir is ours.
         for proc in psutil.process_iter(["cmdline"]):
             with contextlib.suppress(psutil.Error):

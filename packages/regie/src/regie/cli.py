@@ -27,7 +27,8 @@ from regie.process import (
     run_bridge_worker,
 )
 from regie.tmux import bootstrap as tmux_bootstrap
-from regie.tmux.command import TmuxError
+from regie.tmux.command import TmuxError, bind_socket, resolve_socket
+from regie.tmux.identity import ServerIdentity
 from theater.frontend import FrontendClient
 
 
@@ -57,6 +58,7 @@ def main(argv: Sequence[str] | None = None, *, startup: StartupTrace | None = No
             log_handle = configure_logging(paths.ui_log_path)
             return _bridge_command(args, paths, socket_path, manager)
         _require_tmux_available()
+        invoking_socket = resolve_socket(state_dir=paths.state_dir)
         with startup.phase("config"):
             settings = load_settings(paths.config_path)
         with startup.phase("daemon_preflight"):
@@ -64,32 +66,38 @@ def main(argv: Sequence[str] | None = None, *, startup: StartupTrace | None = No
         with startup.phase("bridge_preflight"):
             bridge = manager.start()
         server_identity = _bridge_server_identity(bridge)
+        bridge_socket = resolve_socket(
+            state_dir=paths.state_dir,
+            socket_path=ServerIdentity.parse(server_identity).socket_path,
+        )
         if tmux_bootstrap.current_pane_id() is None:
             with startup.phase("logging"):
                 log_handle = configure_logging(paths.ui_log_path)
             startup.activate()
-            tmux_bootstrap.launch_regie_session(
-                str(Path.cwd()),
-                command=_regie_command(socket_path, args.client_id, startup.started_at),
-                expected_server_identity=server_identity,
-                startup=startup,
-            )
+            with bind_socket(bridge_socket):
+                tmux_bootstrap.launch_regie_session(
+                    str(Path.cwd()),
+                    command=_regie_command(socket_path, args.client_id, startup.started_at),
+                    expected_server_identity=server_identity,
+                    startup=startup,
+                )
             return 0
         with startup.phase("logging"):
             log_handle = _configure_ui_logging(paths, server_identity)
         startup.activate()
-        with startup.phase("terminal_preflight"):
+        with startup.phase("terminal_preflight"), bind_socket(invoking_socket):
             asyncio.run(tmux_bootstrap.require_current_pane(server_identity))
+        with bind_socket(bridge_socket):
             asyncio.run(tmux_bootstrap.sync_color_environment(server_identity))
-        _run_app(
-            socket_path,
-            args.client_id,
-            settings,
-            server_identity,
-            startup=startup,
-            tree_layout_path=paths.tree_layout_path,
-        )
-        tmux_bootstrap.detach_current_client()
+            _run_app(
+                socket_path,
+                args.client_id,
+                settings,
+                server_identity,
+                startup=startup,
+                tree_layout_path=paths.tree_layout_path,
+            )
+            tmux_bootstrap.detach_current_client()
     except (
         RegiePathError,
         RegieStartupError,

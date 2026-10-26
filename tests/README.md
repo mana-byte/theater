@@ -61,6 +61,11 @@ Régie tests live in `packages/regie/tests`, grouped like `packages/regie/src/re
 (`ambience/`, `app/`, `bridge/`, `controllers/`, `dashboard/`, `motions/`, `render/`, `tmux/`,
 `trajectory/`), with helpers in `packages/regie/tests/support`.
 
+The default-server case in Régie's `tmux/test_provider.py` requires an explicitly disposable
+Linux Docker container (`/.dockerenv` and `REGIE_DISPOSABLE_DOCKER=1`), and refuses an existing
+default socket. Ordinary runs use a private sentinel socket. Set that flag only inside a
+fresh container; the default-server proof creates and destroys that container's default server.
+
 ## Rules
 
 - File name = subject. No history, wave or release names (`rc10_*`, `stack_d`) and no

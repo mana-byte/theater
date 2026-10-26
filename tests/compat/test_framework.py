@@ -132,6 +132,7 @@ def test_sandbox_keeps_unix_socket_paths_short(
         assert len(os.fsencode(socket)) < 100
         assert len(os.fsencode(sb.tmux_socket)) < 100
         for env in (sb.env, sb.offline_env):
+            assert env["TMUX_TMPDIR"] == str(sb.home)
             assert "ANTHROPIC_API_KEY" not in env
             assert "OPENAI_API_KEY" not in env
 
