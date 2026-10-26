@@ -137,10 +137,20 @@ async def test_a_failure_on_a_row_hidden_behind_the_usage_footer_is_not_seen(mon
             error_code="internal",
         )
         await _publish(app, pilot, failed)
-        dwelt: list[bool] = []
-        app.set_timer(0.2, lambda: dwelt.append(True))  # well past the shortened dwell
-        await wait_until(pilot, lambda: bool(dwelt))
-        assert failed.operation_id not in app._seen_operations  # its row is not in view
+        await wait_until(pilot, lambda: "✗" in _rows(_leaf(tree, "participant-2"))[1])
+        # No dwell starts while the cursor is out of view.
+        assert tree._seen_pending is None and tree._seen_timer is None
+
+        posted: list[object] = []
+        post_message = tree.post_message
+
+        def spy(message):
+            posted.append(message)
+            return post_message(message)
+
+        monkeypatch.setattr(tree, "post_message", spy)
+        tree._report_seen(failed.operation_id)  # a dwell that outlived the cursor's visibility
+        assert not posted and failed.operation_id not in app._seen_operations
 
         await press_until(pilot, "k", lambda: not app._usage_panel.in_footer)
         await wait_until(pilot, lambda: failed.operation_id in app._seen_operations)
