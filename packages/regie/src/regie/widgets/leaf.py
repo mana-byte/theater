@@ -12,7 +12,7 @@ from regie.formatting import format_cost, tilde
 from regie.motions.footer import CountingValue
 from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.motions.routes import LeafOverlay
-from regie.motions.wipe import Wipe, apply_wipe
+from regie.motions.wipe import Wipe
 from regie.render.glyphs import (
     harness_shown,
     node_label,
@@ -32,6 +32,7 @@ from regie.ui_constants import (
 )
 from regie.widgets.animation_clock import AnimationSubscription, animation_clock
 from regie.widgets.marquee import MarqueeMixin
+from regie.widgets.wipe import WipeMixin
 
 type StageMarker = Literal["tmux", "trajectory"]
 
@@ -53,7 +54,7 @@ def _content_changed(previous: Content, current: Content) -> bool:
     return previous.plain != current.plain or previous.spans != current.spans
 
 
-class AgentLeaf(MarqueeMixin):
+class AgentLeaf(MarqueeMixin, WipeMixin):
     """One participant, preserving animation state across projection refreshes."""
 
     ALLOW_SELECT: ClassVar[bool] = False
@@ -164,13 +165,7 @@ class AgentLeaf(MarqueeMixin):
             cost=self._shown_cost(),
             layout=self._row2,
         )
-        if self._wipe is not None:
-            content = apply_wipe(
-                content,
-                self._wipe,
-                width=self._label_width(),
-                blend=not self.app.native_ansi_color,
-            )
+        content = self._apply_wipe(content, width=self._label_width())
         if self._stage_marker is None and self.needs_attention:
             return with_gutter_bar(content, _ATTENTION_BAR[self._attention_level])
         return with_stage_marker(content, self._stage_marker)
@@ -181,12 +176,6 @@ class AgentLeaf(MarqueeMixin):
             self._waiting, self._awaited = waiting, awaited
             if self._mounted:
                 self._sync_timer()
-            self.update(self._render_label(), layout=False)
-
-    def set_wipe(self, wipe: Wipe | None) -> None:
-        """Draw one frame of the sweep that announces a change on this row, or end it."""
-        if wipe != self._wipe:
-            self._wipe = wipe
             self.update(self._render_label(), layout=False)
 
     @property
