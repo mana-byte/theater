@@ -538,16 +538,142 @@ def test_a_fresh_sessions_late_attachment_still_seals_the_first_turn():
     assert _ended([user, answer, attachment, marker, metadata, late]) == ["done"]
 
 
-def test_a_forks_first_turn_with_a_late_attachment_is_left_to_the_rescue():
-    # The same shape inside a fork: history was copied meanwhile, and a hold that skipped history
-    # is released by its prompt alone, which here is not the answer's parent.
+def test_a_forks_first_turn_whose_linking_attachment_was_written_before_its_prompt_is_released():
+    # The same shape inside a fork: history was copied meanwhile, and the answer's parent is an
+    # attachment of the prompt that is read before the prompt itself.
     answer = _answer("answer", "late", "NEW", "msg_new", 5)
     attachment = _stamped(claude_record("att", "answer", "attachment"), 5)
     marker = _stamped(claude_marker("mark", "att"), 6)
     late = _stamped(claude_record("late", "new_user", "attachment"), 6)
     lines = [_OLD_USER, answer, attachment, marker, *_history(), late, _NEW_PROMPT]
 
+    assert _ended(lines) == ["NEW"]
+    assert not _ended(lines[:-1])
+
+
+# The new turn's answer descends from two attachments Claude wrote after the prompt, which itself
+# lands after the answer: a resumed session whose tool servers connected late.
+_LATE_ANSWER = _answer("new_answer", "att2", "NEW", "msg_new", 5)
+_LATE_SNAPSHOT = _stamped(claude_record("snap", "new_answer", "attachment"), 5)
+_LATE_MARKER = _stamped(claude_marker("new_marker", "snap"), 6)
+_ATT1 = _stamped(claude_record("att1", "new_user", "attachment"), 6)
+_ATT2 = _stamped(claude_record("att2", "att1", "attachment"), 6)
+
+
+def _late(*after_prompt: str) -> list[str]:
+    head = [_OLD_USER, _LATE_ANSWER, _LATE_SNAPSHOT, _LATE_MARKER, *_history(), _NEW_PROMPT]
+    return [*head, *after_prompt]
+
+
+def test_a_forks_first_turn_is_released_when_the_attachments_after_its_prompt_complete_the_chain():
+    steps = _steps(_late(_ATT1, _ATT2))
+
+    assert [e.turn_end for e in steps[-3]] == [False]  # the prompt is heard, its answer waits
+    assert steps[-3][0].text == "new" and steps[-2] == []
+    assert [(e.text, e.turn_end) for e in steps[-1]] == [("NEW", True)]
+
+
+def test_an_unrelated_attachment_does_not_stop_a_turn_waiting_for_its_chain():
+    stray = _stamped(claude_record("stray", "old_user", "attachment"), 6)
+
+    assert _ended(_late(_ATT1, stray, _ATT2)) == ["NEW"]
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        pytest.param(lambda: _stamped(claude_record("att1", "new_user", "system"), 6), id="system"),
+        pytest.param(lambda: _prompt("att1", "new_user", "typed", 6), id="prompt"),
+        pytest.param(  # a reply is a fragment of an answer, never a link to one
+            lambda: _answer("att1", "new_user", "MORE", "msg_more", 6), id="reply"
+        ),
+        pytest.param(
+            lambda: _stamped(claude_record("att1", "new_user", isSidechain=True), 6), id="sidechain"
+        ),
+        pytest.param(  # nothing says this session wrote it
+            lambda: _stamped(claude_record("att1", "new_user", "attachment"), 1), id="before-launch"
+        ),
+        pytest.param(  # nothing leads it to the prompt
+            lambda: _stamped(claude_record("att1", "old_marker", "attachment"), 6), id="elsewhere"
+        ),
+    ],
+)
+def test_nothing_but_this_sessions_own_attachments_may_link_an_answer_to_its_prompt(link):
+    assert not _answered(_late(link(), _ATT2))
+
+
+def test_a_tool_round_between_the_prompt_and_the_answer_is_not_an_attachment_chain():
+    # Only attachments may link them: a tool call and its result read before the marker stay out of
+    # what a prompt may release, as they always did.
+    call = _answer("call", "new_user", "CALL", "msg_call", 5)
+    result = _stamped(
+        claude_record(
+            "result",
+            "call",
+            "user",
+            message={"content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]},
+        ),
+        5,
+    )
+    att2 = _stamped(claude_record("att2", "result", "attachment"), 6)
+    head = [_OLD_USER, call, result, _LATE_ANSWER, _LATE_SNAPSHOT, _LATE_MARKER, *_history()]
+
+    assert not _answered([*head, _NEW_PROMPT, att2])
+
+
+@pytest.mark.parametrize("through_attachments", [False, True], ids=["prompt", "attachments"])
+def test_an_answer_written_as_several_fragments_is_released_through_its_first_one(
+    through_attachments,
+):
+    # A thinking record then a text record of one message: the text's parent is its own fragment.
+    first_parent = "att2" if through_attachments else "new_user"
+    thinking = _stamped(
+        claude_fragment("think", first_parent, {"type": "thinking", "thinking": "hm"}, "msg_new"), 5
+    )
+    answer = _answer("new_answer", "think", "NEW", "msg_new", 5)
+    head = [_OLD_USER, thinking, answer, _LATE_SNAPSHOT, _LATE_MARKER, *_history(), _NEW_PROMPT]
+
+    assert _ended([*head, *([_ATT1, _ATT2] if through_attachments else [])]) == ["NEW"]
+
+
+@pytest.mark.parametrize("identity", [None, "absent"], ids=["null", "absent"])
+def test_a_prompt_without_an_identity_releases_nothing_and_breaks_nothing(identity):
+    # A root attachment ends the answer's chain at no uuid: that must not equal a missing prompt id.
+    answer = _answer("new_answer", "root", "NEW", "msg_new", 5)
+    root = _stamped(claude_record("root", None, "attachment"), 5)
+    record = json.loads(_prompt("new_user", "old_marker", "new", 4))
+    record.pop("uuid") if identity == "absent" else record.update(uuid=None)
+    lines = [_OLD_USER, answer, _LATE_SNAPSHOT, _LATE_MARKER, *_history(), root, json.dumps(record)]
+
     assert not _answered(lines)
+
+
+def test_a_second_prompt_while_the_chain_is_unread_drops_the_turn():
+    follower = _prompt("next", "new_marker", "next", 7)
+
+    assert not _answered(_late(follower, _ATT1, _ATT2))
+
+
+def test_a_chain_that_is_never_completed_releases_nothing():
+    assert not _answered(_late(_ATT1))
+    assert not _answered(_late())
+
+
+def test_a_session_without_a_launch_time_never_releases_through_attachments():
+    assert not _answered(_late(_ATT1, _ATT2), launched_at=None)
+
+
+def test_a_chain_of_many_attachments_is_still_followed():
+    parents = ["new_user", *(f"x{i}" for i in range(11))]
+    chain = [
+        _stamped(claude_record(f"x{i}", parent, "attachment"), 6)
+        for i, parent in enumerate(parents)
+    ]
+    answer = _answer("new_answer", "x10", "NEW", "msg_new", 5)
+
+    assert _answered(
+        [_OLD_USER, answer, _LATE_SNAPSHOT, _LATE_MARKER, *_history(), _NEW_PROMPT, *chain]
+    )
 
 
 def test_a_prompt_stamped_before_the_launch_never_releases_even_without_copied_history():

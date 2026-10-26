@@ -107,10 +107,17 @@ async def test_fork_turn_is_live_but_restored_history_stays_suppressed(tmp_path,
         await reader.aclose()
 
 
+@pytest.mark.parametrize(
+    "late_attachments", [False, True], ids=["prompt-last", "attachments-after-the-prompt"]
+)
 async def test_fork_turn_written_before_the_history_it_continues_still_ends_its_job(
-    tmp_path, registry
+    tmp_path, registry, late_attachments
 ):
-    """Claude writes a fork's answer and end marker before it copies the history they follow."""
+    """Claude writes a fork's answer and end marker before it copies the history they follow.
+
+    When its tool servers connect late, the answer descends from attachments written after the
+    prompt, which is the last of the history-order records.
+    """
     root = tmp_path / "projects"
     path = root / "project" / f"{SESSION}.jsonl"
     path.parent.mkdir(parents=True)
@@ -120,20 +127,32 @@ async def test_fork_turn_written_before_the_history_it_continues_still_ends_its_
         claude_fragment("old_answer", "old_user", {"type": "text", "text": "OLD"}, "msg_old"),
         BEFORE,
     )
+    answer_parent = "att2" if late_attachments else "new_user"
     new_answer = (
-        claude_fragment("new_answer", "new_user", {"type": "text", "text": "NEW"}, "msg_new"),
+        claude_fragment("new_answer", answer_parent, {"type": "text", "text": "NEW"}, "msg_new"),
         AFTER,
     )
-    # The new user turn is the last record written: its parent is the copied history's marker.
+    # The new user turn follows the history: its parent is the copied history's marker.
+    new_prompt = (
+        claude_record("new_user", "old_marker", "user", message={"content": "new"}),
+        PROMPTED,
+    )
+    snapshot = (claude_record("snapshot", "new_answer", "attachment"), AFTER)
+    chain = [
+        (claude_record("att1", "new_user", "attachment"), AFTER),
+        (claude_record("att2", "att1", "attachment"), AFTER),
+    ]
     _write(
         path,
         [
             old_user,
             new_answer,
-            (claude_marker("new_marker", "new_answer"), AFTER),
+            *([snapshot] if late_attachments else []),
+            (claude_marker("new_marker", "snapshot" if late_attachments else "new_answer"), AFTER),
             old_answer,
             (claude_marker("old_marker", "old_answer"), BEFORE),
-            (claude_record("new_user", "old_marker", "user", message={"content": "new"}), PROMPTED),
+            new_prompt,
+            *(chain if late_attachments else []),
         ],
     )
     reader = observer.open_source_for(

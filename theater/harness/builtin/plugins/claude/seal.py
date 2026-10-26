@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, replace
+from enum import Enum
 
 from .constants import SEAL_MAX_HOPS, SEAL_MESSAGE_LIMIT, SEAL_MIN_VERSION, SEAL_NODE_LIMIT
 
@@ -38,6 +39,16 @@ class _Node:
     message_id: str | None
     sidechain: bool = False
     ts: float | None = None
+    #: Attachment-like: nothing of an answer, so it may sit between a prompt and its answer.
+    bare: bool = False
+
+
+class _Chain(Enum):
+    """Whether a held message's ancestry leads to a prompt through attachment-like records only."""
+
+    REACHED = "reached"
+    UNREAD = "unread"
+    BROKEN = "broken"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +61,8 @@ class _Deferred:
     index: int
     #: Copied history was read while holding: only the prompt the message answers may release it.
     skipped: bool = False
+    #: That prompt was read, but the attachments between it and the message were not all yet.
+    prompt: str | None = None
 
 
 def _is_prompt(record: dict) -> bool:
@@ -125,6 +138,7 @@ class FinalAnswerSeal:
             message_id,
             record.get("isSidechain") is True,
             ts,
+            _completes_safely(record),
         )
 
         while len(self._nodes) > SEAL_NODE_LIMIT:
@@ -206,9 +220,10 @@ class FinalAnswerSeal:
     ) -> tuple[Sealed, float | None, int] | None:
         """Seal a held marker when a later record completes its chain.
 
-        Only an attachment-like record, or a fork's first prompt that the held message answers,
-        may; fail closed on any discontinuity: a non-increasing index (rewrite/rewind), a changed
-        session, or a record that could itself be a fragment of the answer.
+        Only an attachment-like record, or a fork's first prompt that the held message answers
+        (and the attachments that link them, whichever of these is read last), may; fail closed on
+        any discontinuity: a non-increasing index (rewrite/rewind), a changed session, or a record
+        that could itself be a fragment of the answer.
         """
         pending = self._deferred
         if pending is None:
@@ -220,10 +235,12 @@ class FinalAnswerSeal:
             self._deferred = replace(pending, skipped=True)
             self.skipped_history = True
             return None
-        if self._is_prompt_of(pending, record, ts):
-            outcome = self.resolve({"parentUuid": pending.parent})
-            self._deferred = None
-            return (outcome, pending.ts, pending.index) if isinstance(outcome, Sealed) else None
+        if pending.prompt is not None:
+            # One prompt is awaited: only attachments that may link it count, anything else drops.
+            if _completes_safely(record):
+                return self._follow_prompt(pending, pending.prompt)
+        elif self._is_first_prompt(record, ts):
+            return self._follow_prompt(pending, record["uuid"])
         if not _completes_safely(record):
             self._deferred = None
             return None
@@ -293,31 +310,60 @@ class FinalAnswerSeal:
             return False
         return not self._chain_reaches(held.parent, record.get("uuid"))
 
-    def _is_prompt_of(self, held: _Deferred, record: dict, ts: float | None) -> bool:
-        """Whether ``record`` is a fork's first prompt, and the held message is the answer to it.
+    def _is_first_prompt(self, record: dict, ts: float | None) -> bool:
+        """Whether ``record`` is a fork's first prompt: typed, written by this session, and the one
+        record that follows the copied history and nothing else.
 
-        A fork writes its first turn before that turn's own prompt. That prompt follows the copied
-        history and nothing else, so it is the one prompt whose parent is provably copied: it
-        began the turn the marker ended, and is heard before it. A later turn's prompt follows
-        this session's own records, so it never qualifies.
+        A fork writes its first turn before that turn's own prompt, which therefore began the turn
+        a held marker ended. A later turn's prompt follows this session's own records, so it never
+        qualifies.
         """
-        if not (
+        return (
             _is_prompt(record)
+            and isinstance(record.get("uuid"), str)
             and self._is_local(ts)
-            and self._is_local(held.ts)
-            and self._descends_from_history(record.get("parentUuid"))
             and record.get("parentUuid") is not None
-        ):
-            return False
+            and self._descends_from_history(record.get("parentUuid"))
+        )
+
+    def _follow_prompt(
+        self, held: _Deferred, prompt: str
+    ) -> tuple[Sealed, float | None, int] | None:
+        """Release the message once its ancestry reaches ``prompt``; wait while that is unread."""
+        chain = self._chain_to_prompt(held, prompt)
+        if chain is _Chain.UNREAD:
+            self._deferred = replace(held, prompt=prompt)
+            return None
+        self._deferred = None
+        if chain is _Chain.BROKEN:
+            return None
+        outcome = self.resolve({"parentUuid": held.parent})
+        return (outcome, held.ts, held.index) if isinstance(outcome, Sealed) else None
+
+    def _chain_to_prompt(self, held: _Deferred, prompt: str) -> _Chain:
+        """Whether the held message, written by this session alone, descends from ``prompt``
+        through attachment-like records of this session and its own earlier fragments."""
         found = self._final_assistant(held.parent)
         if isinstance(found, Unsealed):
-            return False
+            return _Chain.BROKEN
         _, message_id, node = found
-        return (
-            self._is_local(node.ts)
-            and node.parent == record.get("uuid")
-            and self._fragments_are_local(message_id)
-        )
+        if not (self._is_local(held.ts) and self._is_local(node.ts)):
+            return _Chain.BROKEN
+        if not self._fragments_are_local(message_id):
+            return _Chain.BROKEN
+        current = node.parent
+        for _ in range(SEAL_NODE_LIMIT):
+            if current == prompt:
+                return _Chain.REACHED
+            link = self._nodes.get(current) if isinstance(current, str) else None
+            if link is None:
+                return _Chain.UNREAD if isinstance(current, str) else _Chain.BROKEN
+            if link.sidechain or not self._is_local(link.ts):
+                return _Chain.BROKEN
+            if link.message_id != message_id and not link.bare:
+                return _Chain.BROKEN  # an earlier fragment of the message itself is no break
+            current = link.parent
+        return _Chain.BROKEN
 
     def _fragments_are_local(self, message_id: str) -> bool:
         """Whether every fragment seen of a message was written by this session."""
