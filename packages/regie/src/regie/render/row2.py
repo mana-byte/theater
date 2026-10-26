@@ -284,23 +284,6 @@ def row2_layout(
     )
 
 
-def fold_parts(
-    view: RawRenderNode,
-    prefix: str = "",
-    *,
-    width: int | None = None,
-    show_harness: bool = True,
-    frame: int = 0,
-    hint: bool = False,
-) -> list:
-    """The fold badge as selected by the row-two layout."""
-    return list(
-        row2_layout(
-            view, prefix, width=width, show_harness=show_harness, frame=frame, fold_hint=hint
-        ).fold_parts
-    )
-
-
 def name_room(
     node: RenderNode | dict,
     prefix: str,
