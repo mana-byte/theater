@@ -306,7 +306,8 @@ async def test_live_pane_ids_uses_the_verified_bridge_server_and_ignores_dead_pa
     assert calls[-1] == ("list-panes", "-a", "-F", "#{pane_id}\t#{pane_dead}")
 
 
-def test_launch_selects_window_then_attaches_exact_socket(monkeypatch) -> None:
+def test_launch_selects_window_then_attaches_exact_socket(tmp_path, monkeypatch) -> None:
+    monkeypatch.setitem(globals(), "_SOCKET", str(tmp_path / "tmux.sock"))
     calls: list[tuple[object, ...]] = []
 
     async def ensure(*_args, **_kwargs) -> tuple[str, str, str]:

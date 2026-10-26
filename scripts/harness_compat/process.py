@@ -17,8 +17,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import IO, Literal, overload
 
+from theater.constants.harness import HARNESS_COMPAT_SANDBOX_ENV as SANDBOX_ENV  # noqa: F401
+
 RUN_ENV = "HARNESS_COMPAT_RUN"
-SANDBOX_ENV = "HARNESS_COMPAT_SANDBOX"
 _GRACE_SECONDS = 5.0
 _INTERRUPT_SECONDS = 3.0
 _POLL_SECONDS = 0.1

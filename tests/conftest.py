@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import shutil
 import subprocess
 import sys
@@ -70,9 +71,9 @@ def _tmux_available() -> bool:
     return shutil.which("tmux") is not None
 
 
-def _tmux_run_sync(*args: str, check: bool = True) -> str:
+def _tmux_run_sync(socket: Path, *args: str, check: bool = True) -> str:
     result = subprocess.run(
-        ("tmux", *args),
+        ("tmux", "-S", str(socket), *args),
         check=False,
         capture_output=True,
         text=True,
@@ -114,6 +115,7 @@ def opencode_release(monkeypatch, theater_home):
 def private_tmux_socket():
     """Contain any real tmux reached by tests on a disposable private socket."""
     root = Path(tempfile.mkdtemp(prefix="tmuxsock", dir="/tmp"))
+    socket = root / f"tmux-{os.getuid()}" / "default"
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("TMUX_TMPDIR", str(root))
         mp.delenv("TMUX", raising=False)
@@ -121,7 +123,11 @@ def private_tmux_socket():
         try:
             yield root
         finally:
-            found = reap_private_server(root, available=_tmux_available, run=_tmux_run_sync)
+            found = reap_private_server(
+                root,
+                available=_tmux_available,
+                run=lambda *args, **kwargs: _tmux_run_sync(socket, *args, **kwargs),
+            )
     if found.server_found:
         # On `server_found`, not on the panes. A socket under this root can only
         # exist because a test started a real server here, and a server can

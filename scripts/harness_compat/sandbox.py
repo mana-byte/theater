@@ -45,7 +45,7 @@ def sandbox_environment(
         "XDG_DATA_HOME": str(data),
         "XDG_STATE_HOME": str(state),
         "TMPDIR": str(temp),
-        "TMUX_TMPDIR": str(temp),
+        "TMUX_TMPDIR": str(home),
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_SYSTEM": os.devnull,
         "GIT_OPTIONAL_LOCKS": "0",

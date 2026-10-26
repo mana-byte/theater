@@ -4,6 +4,7 @@ The package is intentionally connect-only.  Importing it must never start a
 daemon, terminal provider, or user interface.
 """
 
+from theater.constants.harness import HARNESS_COMPAT_SANDBOX_ENV as SANDBOX_ENV
 from theater.frontend._results import (
     AcceptedOperation,
     FrontendResult,
@@ -78,6 +79,7 @@ from theater.frontend.transport import (
 )
 
 __all__ = [
+    "SANDBOX_ENV",
     "AcceptedOperation",
     "CallbackHandler",
     "CallbackRequest",

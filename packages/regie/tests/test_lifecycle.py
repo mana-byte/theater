@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import signal
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,13 @@ from regie.process import (
 from theater.frontend import NegotiationError
 
 _SERVER_IDENTITY = '["/tmp/tmux/default","10","20"]'
+
+
+@pytest.fixture(autouse=True)
+def tmux_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(
+        globals(), "_SERVER_IDENTITY", json.dumps([str(tmp_path / "tmux.sock"), "10", "20"])
+    )
 
 
 class _Client:
@@ -413,6 +421,7 @@ def test_bridge_stop_refuses_an_unverified_pid(tmp_path: Path, monkeypatch) -> N
 def test_bridge_status_and_stop_never_probe_or_start_theater(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "deleted-sandbox"))
     paths = RegiePaths(tmp_path)
 
     def unexpected_probe(*_args: object, **_kwargs: object) -> None:
@@ -425,6 +434,25 @@ def test_bridge_status_and_stop_never_probe_or_start_theater(
     assert cli.main(["bridge", "stop"]) == 0
     assert capsys.readouterr().out.count('"running": false') == 2
     assert not paths.root.exists()
+
+
+async def test_worker_releases_its_lock_when_socket_validation_fails(tmp_path, monkeypatch) -> None:
+    paths = RegiePaths(tmp_path)
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "missing"))
+    assert (
+        await process.run_bridge_worker(
+            paths=paths,
+            socket_path=paths.daemon_socket,
+            selector="tmux",
+            client_id="regie-test",
+            token="test-token",
+        )
+        == 1
+    )
+    assert not paths.bridge_pid_path.exists()
+    lease = process._FileLock(paths.bridge_process_lock)
+    lease.acquire()
+    lease.release()
 
 
 def test_regie_inside_tmux_starts_services_then_tui_and_detaches(

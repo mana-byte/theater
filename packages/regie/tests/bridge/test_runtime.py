@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import pytest
 from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig
-from regie.tmux.command import TmuxError
+from regie.tmux.command import TmuxError, command_argv
+from regie.tmux.identity import ServerIdentity
 
 from theater.frontend import CallbackRequest
 
@@ -121,14 +122,14 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
             self.closed.set()
 
     async def pin(*, cwd: str) -> str:
-        assert cwd == str(tmp_path / "state")
-        return "server-a"
+        assert command_argv("list-sessions")[2] == str(bridge._tmux_socket.path)
+        return ServerIdentity(str(bridge._tmux_socket.path), "10", "20").value
 
     async def inventory(**_kwargs):
         return ()
 
     async def current_server():
-        return "server-a"
+        return ServerIdentity(str(bridge._tmux_socket.path), "10", "20").value
 
     monkeypatch.setattr("regie.bridge.runtime.FrontendClient", FakeFrontendClient)
     monkeypatch.setattr("regie.bridge.runtime.ProviderClient", FakeProviderClient)
@@ -190,7 +191,10 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     await task
     assert bridge.status.connection_state == "stopped"
     assert bridge.status.running is False
-    assert bridge._presence.starts == ["server-a", "server-a"]
+    assert (
+        bridge._presence.starts
+        == [ServerIdentity(str(bridge._tmux_socket.path), "10", "20").value] * 2
+    )
     assert bridge._presence.closed
 
 
@@ -241,14 +245,38 @@ async def test_accepted_create_receipt_heartbeat_includes_complete_inventory(
         bridge._state.release()
 
 
+async def test_bridge_refuses_to_pin_an_identity_from_another_socket(tmp_path, monkeypatch) -> None:
+    bridge = TmuxBridge(
+        BridgeConfig(theater_socket=tmp_path / "frontend.sock", state_dir=tmp_path / "state")
+    )
+    original = ServerIdentity(str(bridge._tmux_socket.path), "10", "20").value
+    other = ServerIdentity(str(tmp_path / "other.sock"), "11", "21").value
+
+    async def ensure(**_kwargs):
+        return other
+
+    monkeypatch.setattr("regie.bridge.runtime.ensure_server", ensure)
+    bridge._state.acquire()
+    bridge._state.update(provider_id="provider-a", tmux_server_identity=original)
+    try:
+        with pytest.raises(TmuxError, match="pinned"):
+            await bridge._pin_server()
+        assert bridge._state.state.tmux_server_identity == original
+        assert bridge._presence.starts == []
+    finally:
+        bridge._state.release()
+
+
 async def test_bridge_replaces_server_without_replaying_old_pending_effects(
     tmp_path: Path, monkeypatch
 ) -> None:
     bridge = TmuxBridge(
         BridgeConfig(theater_socket=tmp_path / "frontend.sock", state_dir=tmp_path / "state")
     )
+    original_identity = ServerIdentity(str(bridge._tmux_socket.path), "10", "20").value
+    replacement_identity = ServerIdentity(str(bridge._tmux_socket.path), "11", "21").value
     bridge._state.acquire()
-    bridge._state.update(provider_id="provider-a", tmux_server_identity="server-original")
+    bridge._state.update(provider_id="provider-a", tmux_server_identity=original_identity)
     old_intent = bridge._state.prepare_launch(
         "launch-old",
         "digest-old",
@@ -257,7 +285,7 @@ async def test_bridge_replaces_server_without_replaying_old_pending_effects(
         provider_generation=3,
         participant_id="participant-old",
         executable="/bin/old-agent",
-        tmux_server_identity="server-original",
+        tmux_server_identity=original_identity,
     )
     old_intent = bridge._state.mark_launch_dispatched(old_intent)
     reports: list[object] = []
@@ -266,10 +294,10 @@ async def test_bridge_replaces_server_without_replaying_old_pending_effects(
 
     async def replacement(*, cwd: str) -> str:
         assert cwd == str(tmp_path / "state")
-        return "server-replacement"
+        return replacement_identity
 
     async def inventory(**kwargs):
-        assert kwargs["expected_server_identity"] == "server-replacement"
+        assert kwargs["expected_server_identity"] == replacement_identity
         return ()
 
     async def recover(**_kwargs):
@@ -287,7 +315,7 @@ async def test_bridge_replaces_server_without_replaying_old_pending_effects(
             "occupant": {
                 "occupant_id": "participant-new",
                 "provider_kind": "tmux",
-                "tmux_server_identity": "server-replacement",
+                "tmux_server_identity": replacement_identity,
                 "terminal_incarnation": kwargs["terminal_incarnation"],
                 "pane_pid": 99,
             },
@@ -319,7 +347,7 @@ async def test_bridge_replaces_server_without_replaying_old_pending_effects(
     bridge._generation = 4
     try:
         await bridge._pin_server()
-        assert bridge._state.state.tmux_server_identity == "server-replacement"
+        assert bridge._state.state.tmux_server_identity == replacement_identity
         await bridge._report_inventory(ReportClient(), provider, 4)
         assert reports == [
             (
@@ -329,7 +357,7 @@ async def test_bridge_replaces_server_without_replaying_old_pending_effects(
                     "terminals": [],
                     "complete": True,
                     "receipts": [],
-                    "tmux_server_identity": "server-replacement",
+                    "tmux_server_identity": replacement_identity,
                 },
             )
         ]
@@ -356,7 +384,7 @@ async def test_bridge_replaces_server_without_replaying_old_pending_effects(
         result = await bridge._callbacks.create(request)
         assert result["outcome"] == "accepted"
         assert len(creates) == 1
-        assert creates[0]["expected_server_identity"] == "server-replacement"
+        assert creates[0]["expected_server_identity"] == replacement_identity
         assert bridge._state.launch_intents() == (old_intent,)
     finally:
         bridge._state.release()

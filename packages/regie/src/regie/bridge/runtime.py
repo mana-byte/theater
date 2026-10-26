@@ -15,9 +15,9 @@ from regie.bridge.presence_scope import reportable_terminals
 from regie.bridge.receipts import accepted_create_receipt
 from regie.bridge.state import BridgeStateStore
 from regie.contracts import BridgeConfig, BridgeStatus
-from regie.tmux.command import TmuxError
+from regie.tmux.command import TmuxError, bind_socket, resolve_socket
 from regie.tmux.focus_monitor import FocusMonitor
-from regie.tmux.identity import current_server_identity
+from regie.tmux.identity import ServerIdentity, current_server_identity
 from regie.tmux.terminals import (
     ensure_server,
     managed_inventory,
@@ -43,6 +43,7 @@ class TmuxBridge:
     def __init__(self, config: BridgeConfig) -> None:
         _validate_config(config)
         self._config = config
+        self._tmux_socket = resolve_socket(state_dir=config.state_dir)
         self._state = BridgeStateStore(config.state_dir)
         self._persistence = BridgePersistence()
         self._presence = FocusMonitor()
@@ -74,8 +75,13 @@ class TmuxBridge:
 
     async def run(self) -> None:
         """Acquire the process lock and reconnect until explicitly closed."""
+        with bind_socket(self._tmux_socket):
+            await self._run()
+
+    async def _run(self) -> None:
         try:
             await self._persistence.run(self._state.acquire)
+            self._tmux_socket.prepare()
             self._close_event.clear()
             self._set_status("starting")
             delay = self._config.reconnect_initial_seconds
@@ -136,6 +142,7 @@ class TmuxBridge:
 
     async def _pin_server(self) -> None:
         identity = await ensure_server(cwd=str(self._config.state_dir))
+        self._tmux_socket.require_address(ServerIdentity.parse(identity).socket_path)
         pinned = self._state.state.tmux_server_identity
         if pinned != identity:
             await self._persistence.run(self._state.update, tmux_server_identity=identity)

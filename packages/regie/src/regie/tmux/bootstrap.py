@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from typing import NoReturn
 
 from regie.latency import StartupTrace, startup_milestone
-from regie.tmux.command import TmuxError, available, run, sequence_argv
+from regie.tmux.command import TmuxError, available, command_argv, run, sequence_argv
 from regie.tmux.identity import ServerIdentity, pane_snapshot
 
 REGIE_WINDOW_NAME = "régie"
@@ -140,7 +140,7 @@ def launch_regie_session(
     environment.pop("TMUX_PANE", None)
     os.execvpe(
         "tmux",
-        ["tmux", "-S", socket_path, "attach-session", "-t", session],
+        list(command_argv("-S", socket_path, "attach-session", "-t", session)),
         environment,
     )
     raise RuntimeError("tmux attach unexpectedly returned")

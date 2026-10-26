@@ -471,24 +471,29 @@ async def _serve_bridge(
     for signal_value in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError, RuntimeError):
             loop.add_signal_handler(signal_value, stop.set)
-    bridge = TmuxBridge(
-        BridgeConfig(
-            theater_socket=socket_path,
-            state_dir=paths.bridge_state_dir,
-            selector=selector,
-            client_id=client_id,
-        )
-    )
-    _write_pid(paths.bridge_pid_path, os.getpid(), token)
-    _write_status(
-        paths.bridge_status_path,
-        BridgeProcessStatus(
-            running=True, connection_state="starting", pid=os.getpid(), token=token, build=_BUILD
-        ),
-    )
-    task = asyncio.create_task(bridge.run())
+    task: asyncio.Task[None] | None = None
     exit_code = 0
     try:
+        bridge = TmuxBridge(
+            BridgeConfig(
+                theater_socket=socket_path,
+                state_dir=paths.bridge_state_dir,
+                selector=selector,
+                client_id=client_id,
+            )
+        )
+        _write_pid(paths.bridge_pid_path, os.getpid(), token)
+        _write_status(
+            paths.bridge_status_path,
+            BridgeProcessStatus(
+                running=True,
+                connection_state="starting",
+                pid=os.getpid(),
+                token=token,
+                build=_BUILD,
+            ),
+        )
+        task = asyncio.create_task(bridge.run())
         written = None
         while not task.done() and not stop.is_set():
             bridge.status_changed.clear()
@@ -520,7 +525,7 @@ async def _serve_bridge(
             ),
         )
     finally:
-        if not task.done():
+        if task is not None and not task.done():
             await bridge.close()
             await task
         _write_status(paths.bridge_status_path, BridgeProcessStatus.stopped())
