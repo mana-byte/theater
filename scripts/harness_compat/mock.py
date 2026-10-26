@@ -50,7 +50,7 @@ _PROTOCOLS: dict[str, MockProtocol] = {
     "/v1/responses": "openai-responses",
 }
 _USER_TEXT_CHARS = 300
-_MAX_USER_TEXTS = 20
+_MAX_USER_TEXTS = 64  # was 20; resume test needs 34+ prompts recorded
 _MAX_USER_PARTS = 12
 _MAX_TOOL_NAMES = 200
 _MAX_TOOL_PROPERTIES = 24
