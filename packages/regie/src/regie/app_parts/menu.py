@@ -300,12 +300,22 @@ class MenuActions(_AppBase):
         tree.set_menu_view(replace(tree.menu_view, query=value))
 
     def menu_filter_closed(self, *, kept: bool) -> None:
-        """The filter editor left: Enter keeps it and walks to the first match, Esc drops it."""
+        """The filter editor left: Enter keeps it and walks to the first pickable match."""
         tree = self._menu_tree()
         if kept:
-            first = next((k for k in tree.selectable_keys if k[0] == "m"), None)
-            if first is not None:
-                tree.select_key(first)
+            items = self._menu_items()
+            # An option row only unfolds on a pick; walk to the first leaf a pick can run.
+            matches = [
+                key
+                for key in tree.selectable_keys
+                if key[0] == "m"
+                and (item := find_item(items, key[1])) is not None
+                and item.choices is None
+            ]
+            if not matches:
+                matches = [key for key in tree.selectable_keys if key[0] == "m"]
+            if matches:
+                tree.select_key(matches[0])
         else:
             tree.set_menu_view(replace(tree.menu_view, query=""))
             tree.select_key(("g", ROOT_ID))

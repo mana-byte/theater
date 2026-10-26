@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from regie.menu import MenuItem
@@ -13,6 +14,7 @@ from packages.regie.tests.support.app_fakes import build_app
 from packages.regie.tests.support.waiting import wait_until
 from theater.frontend import ResumeCandidate as PublicResumeCandidate
 from theater.frontend import TranscriptCandidate
+from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
 ROOT = ("g", "options")
 CODEX = ("m", "spawn/codex")
@@ -362,6 +364,51 @@ async def test_slash_filters_the_menu_enter_keeps_it_and_x_clears_it_with_the_me
         await pilot.press("x")  # closes the menu, and the filter goes with it
         await wait_until(pilot, lambda: not tree.in_menu)
         assert tree.menu_view.query == ""
+
+
+@pytest.mark.asyncio
+async def test_filtering_to_a_harness_keeps_the_filter_on_the_harness_row_and_picks_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, _presentation = build_app()
+    entry = HarnessCatalogEntry.from_wire(
+        {
+            "name": "synth",
+            "binary": "synth",
+            "icon": "◆",
+            "installed": True,
+            "compatible": True,
+            "supported_wiring": ["tmux"],
+            "requires_terminal": True,
+            "provider_ready": True,
+            "launch_available": True,
+            "approvals": ["manual"],
+            "reason": None,
+            "detail": None,
+        }
+    )
+
+    async def catalog() -> object:
+        return SimpleNamespace(value=SimpleNamespace(items=(entry,)))
+
+    monkeypatch.setattr(client.catalogs, "harnesses", catalog)
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.select("participant-1")
+        await pilot.press("o")  # the menu on Spawn, the cursor on the harness
+        await wait_until(pilot, lambda: tree.selected_key == ("m", "spawn/synth"))
+
+        await pilot.press("slash")
+        await wait_until(pilot, lambda: bool(app.query(FilterEditor)))
+        await pilot.press("s", "y", "n", "t", "h")
+        await wait_until(pilot, lambda: ("m", "spawn") in tree._key_widgets)
+        assert ("m", "bus") not in tree._key_widgets
+
+        await pilot.press("enter")  # keep the filter: the cursor walks to the harness row
+        await wait_until(pilot, lambda: tree.selected_key == ("m", "spawn/synth"))
+        await pilot.press("enter")  # pick it: the directory editor is on screen
+        await wait_until(pilot, lambda: bool(app.query(DirectoryEditor)))
 
 
 @pytest.mark.asyncio
