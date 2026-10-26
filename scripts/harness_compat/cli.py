@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from theater.version_policy import VersionPolicy
+from theater.version_policy import VersionPolicy, version_key
 
 from . import git
 from .adapters import ADAPTER_NAMES, load_adapter
@@ -116,6 +116,9 @@ def _verify(args: argparse.Namespace, root: Path) -> int:
         if args.releases
         else discovered
     )
+    outside = sorted(set(releases) - set(discovered), key=version_key)
+    if outside:
+        raise ValueError(f"the shard releases {', '.join(outside)} are outside the PR window")
     run = run_harness(root, load_adapter(args.harness), releases=releases)
     print(render_run(run))
     if run.errors or len(run.results) != len(releases):

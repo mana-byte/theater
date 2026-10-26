@@ -17,7 +17,7 @@ from .qualify import qualify_release
 
 Qualifier = Callable[[Path, Adapter, str], Result]
 _VERDICTS = {"green", "red", "inconclusive", "tooling"}
-#: A release only starts with at least this much sweep time left per remaining release.
+#: A release only starts with at least this much sweep time left.
 _MIN_RELEASE_SECONDS = 600
 #: This many identical tooling errors in a row end the batch: the rest cannot succeed either.
 _TOOLING_STREAK = 3
@@ -113,12 +113,16 @@ def _tooling_key(result: Result) -> tuple[str, str] | None:
 
 
 def _budget_skip(deadline: float | None, index: int, total: int) -> str | None:
-    """A release starts only with a fair share of the remaining sweep time left."""
+    """A release starts only with one release's minimum time left.
+
+    Remaining time never grows, so once this trips the whole tail is skipped and
+    skipped releases always sit above the highest green, hence above max.
+    """
     if deadline is None:
         return None
     remaining = deadline - time.monotonic()
     left = total - index
-    if remaining / left < _MIN_RELEASE_SECONDS:
+    if remaining < _MIN_RELEASE_SECONDS:
         return f"skipped: sweep time budget exhausted, {remaining:.0f}s left for {left} releases"
     return None
 

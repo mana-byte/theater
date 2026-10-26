@@ -398,6 +398,18 @@ def test_verify_accepts_the_fanout_shard_version_list(
     assert asked == ["1.1.0", "1.2.0"]
 
 
+def test_verify_refuses_a_shard_list_outside_the_pr_window(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    asked = _scripted(monkeypatch, ["1.0.0", "1.1.0", "1.2.0", "1.3.0"], {})
+    code = _main(
+        monkeypatch, repo, "verify", "claude", "--base", "main", "--releases", "1.1.0,1.9.0"
+    )
+    assert code == 2
+    assert asked == []
+    assert "the shard releases 1.9.0 are outside the PR window" in capsys.readouterr().err
+
+
 def test_run_passes_the_sweep_time_budget_to_the_runner(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

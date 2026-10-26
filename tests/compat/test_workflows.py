@@ -99,15 +99,20 @@ def test_scripts_own_all_issue_and_pr_operations() -> None:
 def test_routine_pr_checks_use_the_base_and_stop_at_the_proposed_policy() -> None:
     compat = _load("harness-compat.yml")
     reusable = _load("harness-compat-verify.yml")
-    # The plan step computes the merge base once and hands it to every per-harness verify call.
+    # The plan step computes the merge base and the routine decision once and hands both
+    # to every per-harness verify call.
     plan = compat["jobs"]["plan"]
     assert plan["outputs"]["base"] == "${{ steps.plan.outputs.base }}"
-    assert 'base="$(git rev-parse HEAD^1)"' in plan["steps"][-1]["run"]
+    assert plan["outputs"]["routine"] == "${{ steps.plan.outputs.routine }}"
+    plan_run = plan["steps"][-1]["run"]
+    assert 'base="$(git rev-parse HEAD^1)"' in plan_run
+    assert "routine=false" in plan_run and "routine=true" in plan_run
+    assert 'echo "routine=$routine" >> "$GITHUB_OUTPUT"' in plan_run
     for name in VERIFY_CALLS:
         call = compat["jobs"][name]
         assert call["uses"] == "./.github/workflows/harness-compat-verify.yml"
         assert call["with"]["base"] == "${{ needs.plan.outputs.base }}"
-        assert call["with"]["routine"] == "${{ startsWith(github.head_ref, 'chore/compat-') }}"
+        assert call["with"]["routine"] == "${{ needs.plan.outputs.routine == 'true' }}"
     verify = reusable["jobs"]["verify"]["steps"][-1]["run"]
     assert 'args=(verify "$HARNESS" --base "$BASE" --releases "$VERSIONS")' in verify
     assert "--routine" in verify and "$ROUTINE" in verify

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from scripts.harness_compat import run as run_module
 from scripts.harness_compat.cleanup import CleanupFailed
 from scripts.harness_compat.contract import Adapter, Check, Result
 from scripts.harness_compat.run import (
@@ -272,6 +274,34 @@ def test_a_generous_time_budget_qualifies_every_release(repo: Path) -> None:
     run, asked = _run(repo, ["1.0.0", "1.2.0", "1.3.0", "1.4.0"], {}, budget_seconds=10_000)
     assert asked == ["1.3.0", "1.4.0"]
     assert all(result.verdict == "green" for result in run.results)
+
+
+def test_a_budget_that_runs_out_partway_skips_only_the_trailing_releases(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(run_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    asked: list[str] = []
+
+    def qualify(root: Path, adapter: Adapter, version: str) -> Result:
+        asked.append(version)
+        clock[0] += 3000.0
+        return Result(adapter.name, version, "green")
+
+    run = run_harness(
+        repo,
+        _Adapter(["1.0.0", "1.2.0", *(f"1.{minor}.0" for minor in range(3, 10))]),
+        qualify=qualify,
+        say=lambda _: None,
+        budget_seconds=10_000,
+    )
+    assert asked == ["1.3.0", "1.4.0", "1.5.0", "1.6.0"]
+    verdicts = [result.verdict for result in run.results]
+    assert verdicts[:4] == ["green"] * 4
+    # Skips form a trailing suffix: a skipped release is never followed by a tested one,
+    # so every skipped release stays above the highest green, hence above max.
+    assert verdicts[4:] == ["inconclusive"] * 3
+    assert "sweep time budget exhausted" in run.results[4].checks[0].detail
 
 
 def test_three_identical_tooling_errors_skip_and_publish_the_rest(repo: Path) -> None:

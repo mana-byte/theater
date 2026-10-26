@@ -48,6 +48,7 @@ jobs:
     outputs:
       harnesses: ${{ steps.plan.outputs.harnesses }}
       base: ${{ steps.plan.outputs.base }}
+      routine: ${{ steps.plan.outputs.routine }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,8 +66,10 @@ jobs:
             # opened, is what it changes, however far the base branch has moved since.
             base="$(git rev-parse HEAD^1)"
             args=(plan --base "$base")
-            if [[ "$HEAD_REF" == chore/compat-* ]]; then args+=(--routine); fi
+            routine=false
+            if [[ "$HEAD_REF" == chore/compat-* ]]; then args+=(--routine); routine=true; fi
             echo "base=$base" >> "$GITHUB_OUTPUT"
+            echo "routine=$routine" >> "$GITHUB_OUTPUT"
           fi
           harnesses="$(python3 -m scripts.harness_compat "${args[@]}")"
           echo "harnesses=$harnesses" >> "$GITHUB_OUTPUT"
@@ -122,7 +125,7 @@ jobs:
     with:
       harness: claude
       base: ${{ needs.plan.outputs.base }}
-      routine: ${{ startsWith(github.head_ref, 'chore/compat-') }}
+      routine: ${{ needs.plan.outputs.routine == 'true' }}
 
   verify-codex:
     name: Verify codex plugin and policy
@@ -132,7 +135,7 @@ jobs:
     with:
       harness: codex
       base: ${{ needs.plan.outputs.base }}
-      routine: ${{ startsWith(github.head_ref, 'chore/compat-') }}
+      routine: ${{ needs.plan.outputs.routine == 'true' }}
 
   verify-opencode:
     name: Verify opencode plugin and policy
@@ -142,7 +145,7 @@ jobs:
     with:
       harness: opencode
       base: ${{ needs.plan.outputs.base }}
-      routine: ${{ startsWith(github.head_ref, 'chore/compat-') }}
+      routine: ${{ needs.plan.outputs.routine == 'true' }}
 
   verify-pi:
     name: Verify pi plugin and policy
@@ -152,7 +155,7 @@ jobs:
     with:
       harness: pi
       base: ${{ needs.plan.outputs.base }}
-      routine: ${{ startsWith(github.head_ref, 'chore/compat-') }}
+      routine: ${{ needs.plan.outputs.routine == 'true' }}
 
   verify-vibe:
     name: Verify vibe plugin and policy
@@ -162,4 +165,4 @@ jobs:
     with:
       harness: vibe
       base: ${{ needs.plan.outputs.base }}
-      routine: ${{ startsWith(github.head_ref, 'chore/compat-') }}
+      routine: ${{ needs.plan.outputs.routine == 'true' }}
