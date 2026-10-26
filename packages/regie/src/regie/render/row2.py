@@ -225,13 +225,18 @@ def row2_layout(
             awaited=awaited,
         )
     )
+    glyph = lead[1 if prefix else 0]
+    drawn_glyph = glyph[0] if isinstance(glyph, tuple) else glyph
+    base_glyph = status_glyph(view)[0]
+    # The old room and click span used the base icon even while an await clock replaced it.
+    sizing_lead = parts_width(lead) + cell_len(base_glyph) - cell_len(drawn_glyph)
     marks = tuple(mark_parts(view))
     variants = _fold_variants(view, frame, hint=fold_hint)
     fold = variants[0] if variants else []
     if width is not None and len(variants) > 1:
         need = min(cell_len(shown_name(view)), NAME_MIN_CELLS)
         for variant in variants:
-            if width - parts_width(lead) - parts_width(marks) - parts_width(variant) >= need:
+            if width - sizing_lead - parts_width(marks) - parts_width(variant) >= need:
                 fold = variant
                 break
         else:
@@ -239,7 +244,7 @@ def row2_layout(
     room = (
         None
         if width is None
-        else max(1, width - parts_width(lead) - parts_width(fold) - parts_width(marks))
+        else max(1, width - sizing_lead - parts_width(fold) - parts_width(marks))
     )
     raw_name = shown_name(view)
     scrolls = focused and room is not None and overflows_cells(raw_name, room)
@@ -254,7 +259,8 @@ def row2_layout(
     else:
         name = fit_name(raw_name, room)
     lead_points = sum(len(part if isinstance(part, str) else part[0]) for part in lead)
-    start = parts_width(lead)
+    lead_points += len(base_glyph) - len(drawn_glyph)
+    start = sizing_lead
     shown = [name] if reveal is None else clip_parts([name], reveal - lead_points)
     name_span = (start, start + parts_width(shown)) if shown else None
     fold_span = (

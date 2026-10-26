@@ -34,3 +34,21 @@ def test_reveal_counts_codepoints_but_the_name_span_counts_wide_cells():
     assert row.endswith("界")
     assert layout.name_span == (cell_len(row[:-1]), cell_len(row)) == (7, 9)
     assert layout.fold_span is None
+
+
+def test_await_clock_keeps_legacy_room_for_a_zero_width_base_icon():
+    node = {**CHILD, "name": "medium", "status": "idle", "icon": "\u0301", "children": [{}]}
+    layout = row2_layout(
+        node,
+        "├── ",
+        width=12,
+        waiting="$accent",
+        show_harness=False,
+        fold_hint=True,
+        focused=True,
+        marquee_offset=3,
+    )
+
+    assert layout.name_room == 3
+    assert layout.name_span == (6, 9) and layout.fold_span == (9, 12)
+    assert node_label(node, "├── ", layout=layout).plain.splitlines()[1] == "├── ◴  med  "
