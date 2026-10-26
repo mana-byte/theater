@@ -8,8 +8,17 @@ import pytest
 
 from scripts.harness_compat.contract import MockReply
 from tests.support.live_rig import violation
+from tests.support.transcript_tail import transcript_tail
 
 pytestmark = [pytest.mark.integration, pytest.mark.family("resume")]
+
+
+async def _transcript_evidence(live, participant_id: str) -> str:
+    """Where the resumed turn's records sit relative to the launch: CI keeps nothing else."""
+    participant = await live.participant(participant_id)
+    identity = participant.transcript_identity
+    location = identity.location if identity is not None else None
+    return f"; transcript: {transcript_tail(location, launched_at=participant.created_at)}"
 
 
 async def test_a_resumed_participant_continues_its_conversation(live, obligation):
@@ -34,7 +43,11 @@ async def test_a_resumed_participant_continues_its_conversation(live, obligation
     job = await live.send(second, prompt)
 
     assert job.state == "done", job.error
-    assert nonce in str(job.result)
+    answered = nonce in str(job.result)
+    seen = "" if answered else await _transcript_evidence(live, second)
+    # The error's code, not its prose: a CI report clips this message, and the records must fit.
+    code = job.error.code if job.error is not None else None
+    assert answered, f"the resumed send answered {job.result!r}; error {code}{seen}"
     (resumed,) = live.turns(prompt)
     assert earlier in resumed.user_texts, "the resumed conversation lost its history"
     successor = await live.participant(second)

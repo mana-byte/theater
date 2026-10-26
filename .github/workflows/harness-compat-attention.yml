@@ -1,7 +1,8 @@
 name: Harness compatibility attention
 on:
   workflow_run:
-    workflows: [Harness compatibility, Harness compatibility canaries]
+    # Not the canaries: a red one says the suite missed a planted break, not that a release is bad.
+    workflows: [Harness compatibility]
     types: [completed]
 
 permissions:
@@ -28,5 +29,5 @@ jobs:
         env:
           FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
           GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.HARNESS_COMPAT || github.token }}
         run: python3 -m scripts.harness_compat report "$FAILED_RUN_ID"

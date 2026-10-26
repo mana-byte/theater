@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from scripts.harness_compat.contract import MockToolCall, RecordedRequest, ToolShape
-from tests.support.tool_effects import Effect, _misfit, expect_gated, expect_runs
+from tests.support.tool_effects import (
+    Effect,
+    _mark,
+    _misfit,
+    _offered,
+    _received,
+    expect_gated,
+    expect_runs,
+)
+from theater.harness.contracts.compat import McpDiscovery
 from theater.harness.contracts.observation import ScreenKind
 
 
@@ -76,9 +86,7 @@ class _Live:
         self._requests = requests
         self._job = job
         self.mock = SimpleNamespace(requests=tuple(requests))
-        self.client = SimpleNamespace(
-            controls=SimpleNamespace(send=self._accept), jobs=SimpleNamespace(get=self._get)
-        )
+        self.client = SimpleNamespace(jobs=SimpleNamespace(get=self._get))
 
     def queue(self, reply: object) -> None:
         """The scripted reply goes nowhere: the job below has already ended."""
@@ -97,8 +105,8 @@ class _Live:
         await guard()
         pytest.fail("the screen never reached an approval")
 
-    async def _accept(self, participant: str, prompt: str, *, idempotency_key: str) -> Any:
-        return SimpleNamespace(value=SimpleNamespace(job_handle="j1"))
+    async def submit(self, participant: str, prompt: str) -> str:
+        return "j1"
 
     async def _get(self, handle: str) -> Any:
         return SimpleNamespace(value=self._job)
@@ -139,3 +147,46 @@ async def test_a_turn_the_cli_never_took_reports_its_own_failure_not_a_recipe_pr
 
     with pytest.raises(AssertionError, match="the CLI refused the call"):
         await expect_runs(live, "p1", _effect(path="x"))
+
+
+def test_only_a_tool_result_new_since_the_mark_counts_as_received() -> None:
+    searched = replace(_request(), last_tool_result="tool loaded")  # an earlier turn's search
+    live = SimpleNamespace(mock=SimpleNamespace(requests=(searched,)))
+    mark = _mark(live)
+
+    live.mock.requests = (searched, searched)  # the next turn's first request repeats that history
+    assert not _received(live, mark)
+
+    live.mock.requests = (*live.mock.requests, replace(searched, last_tool_result="MARK-1"))
+    assert _received(live, mark)
+
+
+async def test_a_declared_search_runs_first_and_the_request_after_it_is_the_offer() -> None:
+    class Searching:
+        """A CLI that offers the MCP tool only in the request that follows its search."""
+
+        def __init__(self) -> None:
+            self.queued: list[Any] = []
+            self.mock = SimpleNamespace(requests=())
+            discovery = McpDiscovery("ToolSearch", {"query": "select:mcp__{server}__{tool}"})
+            self.harness = SimpleNamespace(
+                compat=SimpleNamespace(mcp_discovery=discovery, mcp_call=None)
+            )
+
+        def queue(self, reply: Any) -> None:
+            self.queued.append(reply)
+
+        async def send(self, participant: str, prompt: str) -> Any:
+            before = _request()
+            after = replace(before, tools=(*before.tools, "mcp__probe__mark"))
+            self.mock = SimpleNamespace(requests=(*self.mock.requests, before, after))
+            return SimpleNamespace(state="done", error=None)
+
+    live = Searching()
+
+    offered, name = await _offered(live, "p1", "probe", "mark")
+
+    assert name == "mcp__probe__mark" and "mcp__probe__mark" in offered
+    search = live.queued[0].tool_calls[0]
+    assert (search.name, search.arguments) == ("ToolSearch", {"query": "select:mcp__probe__mark"})
+    assert search.call_id and search.call_id != "toolu_mock_0"

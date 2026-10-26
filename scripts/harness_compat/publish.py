@@ -262,12 +262,19 @@ def propose_policy(run: Run, *, run_url: str, gh: Gh) -> Published:
         compared = api(gh, f"compare/{main}...{head}")
         merge_base = compared["merge_base_commit"]["sha"]
         files = compared["files"]
+        policy_file = policy_relative(run.harness).as_posix()
         if files and not (
             len(files) == 1
-            and files[0]["filename"] == policy_relative(run.harness).as_posix()
+            and files[0]["filename"] == policy_file
             and files[0]["additions"] == files[0]["deletions"] == 1
         ):
-            raise PolicyChangeError("the pending branch changes more than one policy line")
+            changed = ", ".join(
+                f"{f['filename']} (+{f['additions']}/-{f['deletions']})" for f in files
+            )
+            raise PolicyChangeError(
+                f"the pending branch must change exactly one line of {policy_file}; "
+                f"it changes {changed}"
+            )
         if files:
             original = _policy_at(gh, run.harness, merge_base)
             candidate = _policy_at(gh, run.harness, head)

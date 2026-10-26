@@ -42,7 +42,7 @@ def _open_claude_source(
     from .observer import ClaudeCodeObserver
 
     return _ClaudeSource(
-        ClaudeCodeObserver(root=root),
+        ClaudeCodeObserver(root=root, launched_at=after),
         cwd=cwd,
         session_id=session_id,
         after=after,

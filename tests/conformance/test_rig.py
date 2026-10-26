@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -187,6 +188,42 @@ def test_capturing_evidence_copies_logs_and_every_pane_and_survives_a_missing_tm
     stack.capture(tmp_path / "other")  # must not raise: a stack that never started has no tmux
 
 
+def _recorded_runs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    runs: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: Any) -> SimpleNamespace:
+        runs.append(argv)
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(live_stack.subprocess, "run", run)
+    return runs
+
+
+def test_the_stack_reaches_its_private_tmux_server_by_socket_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _recorded_runs(monkeypatch)
+    temp = tmp_path / "t"
+
+    Stack(tmp_path, {"TMUX_TMPDIR": str(temp)}).tmux("kill-server")
+
+    assert runs == [["tmux", "-S", str(temp / f"tmux-{os.getuid()}" / "default"), "kill-server"]]
+
+
+@pytest.mark.parametrize("env", [{}, {"TMUX_TMPDIR": "/tmp"}], ids=["unset", "outside"])
+def test_a_stack_without_a_private_tmux_directory_never_falls_back_to_the_default_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    # With TMUX_TMPDIR unusable tmux uses /tmp/tmux-UID/default: the user's own server.
+    runs = _recorded_runs(monkeypatch)
+    stack = Stack(tmp_path, env)
+
+    with pytest.raises(RuntimeError, match="outside the stack"):
+        stack.tmux("kill-server")
+    assert stack.tmux_running() is False
+    assert runs == []
+
+
 def _scripted_boot(monkeypatch: pytest.MonkeyPatch, *outcomes: str | None) -> list[str]:
     """Boot attempts that end as scripted; what the stack was asked to do between them."""
     attempts = iter(outcomes)
@@ -233,6 +270,76 @@ async def test_a_presence_refusal_on_an_unattended_rig_is_inconclusive_not_a_cli
             await rig.job("j1")
         client.jobs.job = SimpleNamespace(state="crashed", error=SimpleNamespace(code="busy"))
         assert (await rig.job("j1")).error.code == "busy"
+    finally:
+        mock.stop()
+
+
+_real_sleep = asyncio.sleep
+
+
+async def _no_wait(_seconds: float) -> None:
+    await _real_sleep(0)
+
+
+class _Sends:
+    """Answers each send with the next scripted operation, as the daemon's public API would."""
+
+    def __init__(self, *outcomes: tuple[str, str | None]) -> None:
+        self._outcomes = iter(outcomes)
+        self.controls = self
+        self.operations = self
+        self.sent = 0
+
+    async def send(self, participant_id: str, prompt: str, *, idempotency_key: str) -> Any:
+        self.sent += 1
+        accepted = SimpleNamespace(job_handle=f"p1#{self.sent}", operation_id=f"op{self.sent}")
+        return SimpleNamespace(value=accepted)
+
+    async def wait(self, operation_id: str, *, wait_seconds: float) -> Any:
+        state, code = next(self._outcomes)
+        error = None if code is None else SimpleNamespace(code=code, message=f"refused: {code}")
+        return SimpleNamespace(
+            value=SimpleNamespace(operation=SimpleNamespace(state=state, error=error))
+        )
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "handle"),
+    [
+        pytest.param([("succeeded", None)], "p1#1", id="delivered"),
+        pytest.param(
+            [("failed", "busy"), ("failed", "busy"), ("succeeded", None)], "p1#3", id="busy-retried"
+        ),
+        pytest.param(
+            [("failed", "stale_target")], "p1#1", id="another-refusal-is-the-jobs-to-report"
+        ),
+    ],
+)
+async def test_a_send_is_repeated_only_while_the_daemon_refuses_it_as_busy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[tuple[str, str | None]],
+    handle: str,
+) -> None:
+    monkeypatch.setattr(live_rig.asyncio, "sleep", _no_wait)
+    rig, mock = _rig(tmp_path, cast(Any, _Sends(*outcomes)))
+    try:
+        assert await rig.submit("p1", "hello") == handle
+    finally:
+        mock.stop()
+
+
+async def test_a_terminal_that_stays_busy_is_a_failure_that_names_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(live_rig.asyncio, "sleep", _no_wait)
+    monkeypatch.setattr(live_rig, "_SUBMIT_RETRY_SECONDS", 0.0)
+    rig, mock = _rig(tmp_path, cast(Any, _Sends(*[("failed", "busy")] * 3)))
+    try:
+        with pytest.raises(
+            pytest.fail.Exception, match="kept refusing the send as busy: refused: busy"
+        ):
+            await rig.submit("p1", "hello")
     finally:
         mock.stop()
 

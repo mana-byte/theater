@@ -56,12 +56,13 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           REQUESTED_HARNESS: ${{ inputs.harness || 'all' }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_REF: ${{ github.head_ref }}
         run: |
           args=(plan "$REQUESTED_HARNESS")
           if [[ "$EVENT" == "pull_request" ]]; then
-            args=(plan --base "$BASE_SHA")
+            # The checkout merges the PR into its base: that base, not the one recorded when the PR
+            # opened, is what it changes, however far the base branch has moved since.
+            args=(plan --base "$(git rev-parse HEAD^1)")
             if [[ "$HEAD_REF" == chore/compat-* ]]; then args+=(--routine); fi
           fi
           harnesses="$(python3 -m scripts.harness_compat "${args[@]}")"
@@ -87,7 +88,7 @@ jobs:
     env:
       HARNESS: ${{ matrix.harness }}
       GH_REPO: ${{ github.repository }}
-      GH_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PR_AUTOMATION_TOKEN || github.token }}
+      GH_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.HARNESS_COMPAT || github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,7 +100,11 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - run: sudo apt-get update && sudo apt-get install -y tmux
+      # Codex's Linux sandbox needs bubblewrap, and Ubuntu 24.04 denies it the user namespace it
+      # needs: without both a workspace patch asks for an approval.
+      - run: |
+          sudo apt-get update && sudo apt-get install -y tmux bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: uv sync --locked --all-packages --group dev
       - name: Test every newer release and publish each completed outcome
         run: timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat run "$HARNESS"
@@ -116,7 +121,6 @@ jobs:
         harness: ${{ fromJSON(needs.plan.outputs.harnesses) }}
     env:
       HARNESS: ${{ matrix.harness }}
-      BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_REF: ${{ github.head_ref }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -130,10 +134,14 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - run: sudo apt-get update && sudo apt-get install -y tmux
+      # Codex's Linux sandbox needs bubblewrap, and Ubuntu 24.04 denies it the user namespace it
+      # needs: without both a workspace patch asks for an approval.
+      - run: |
+          sudo apt-get update && sudo apt-get install -y tmux bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: uv sync --locked --all-packages --group dev
       - name: Verify the proposed range without qualifying unrelated newer releases
         run: |
-          args=(verify "$HARNESS" --base "$BASE_SHA")
+          args=(verify "$HARNESS" --base "$(git rev-parse HEAD^1)")
           if [[ "$HEAD_REF" == chore/compat-* ]]; then args+=(--routine); fi
           timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat "${args[@]}"

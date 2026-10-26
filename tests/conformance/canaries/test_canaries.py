@@ -78,11 +78,12 @@ def test_the_suite_notices_a_deliberately_broken_plugin(name: str, mutation: Mut
     if mutation.effect and not any(re.search(mutation.effect, log) for log in logs):
         pytest.skip(f"{mutation.name} found nothing to break in the {name} launch plan")
     assert not report.problems
-    ran = {
-        check.name.removeprefix("conformance:"): check.status
+    checks = {
+        check.name.removeprefix("conformance:"): check
         for check in report.checks
         if check.name.startswith("conformance:") and check.status != "skip"
     }
+    ran = {name: check.status for name, check in checks.items()}
     if ANY in expected:
         assert any(status in ("fail", "error") for status in ran.values()), ran
         return
@@ -90,4 +91,6 @@ def test_the_suite_notices_a_deliberately_broken_plugin(name: str, mutation: Mut
         allowed = {"fail"} if how == "fail" else {"fail", "error"}
         assert ran.get(obligation) in allowed, f"{obligation} was {ran.get(obligation)}: {ran}"
     untouched = {key: value for key, value in ran.items() if key not in expected}
-    assert all(value == "pass" for value in untouched.values()), untouched
+    assert all(value == "pass" for value in untouched.values()), {
+        key: (value, checks[key].detail) for key, value in untouched.items() if value != "pass"
+    }

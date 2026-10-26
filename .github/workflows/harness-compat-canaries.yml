@@ -15,6 +15,8 @@ on:
       - "tests/support/**"
       - "tests/conftest.py"
       - "theater/**"
+      # A policy file gates one release, so a gate PR (it edits only that file) must not run these.
+      - "!theater/harness/builtin/plugins/*/compatibility.json"
       - "packages/regie/src/**"
       - "Makefile"
       - "pyproject.toml"
@@ -49,8 +51,12 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+      # Codex's Linux sandbox needs bubblewrap, and Ubuntu 24.04 denies it the user namespace it
+      # needs: without both a workspace patch asks for an approval.
+      - name: Install tmux and let bubblewrap sandbox
+        run: |
+          sudo apt-get update && sudo apt-get install -y tmux bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: uv sync --locked --all-packages --group dev
       - name: Break each plugin on purpose and require the suite to notice
         env:

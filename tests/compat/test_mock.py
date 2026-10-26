@@ -55,6 +55,19 @@ def _sse_data(payload: str) -> list[dict[str, object]]:
     ]
 
 
+def test_a_call_can_carry_its_own_id_instead_of_the_positional_one(tmp_path: Path) -> None:
+    reply = MockReply("x", (MockToolCall("search", {"q": 1}, call_id="own-id"),))
+
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        server.queue("anthropic", reply)
+        server.queue("anthropic", reply)
+        root = server.base_urls["anthropic"]
+        _, payload = _request(f"{root}/v1/messages", {"stream": False})
+        assert json.loads(payload)["content"][1]["id"] == "own-id"
+        _, payload = _request(f"{root}/v1/messages", {"stream": True})
+        assert _sse_data(payload)[4]["content_block"]["id"] == "own-id"  # type: ignore[index]
+
+
 def test_queued_tool_calls_cover_protocol_shapes_and_unknown_accounting(tmp_path: Path) -> None:
     requests_path = tmp_path / "requests.jsonl"
     reply = MockReply(

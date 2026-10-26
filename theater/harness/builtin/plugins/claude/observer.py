@@ -43,13 +43,13 @@ class ClaudeCodeObserver(
         unsupported=frozenset({TrajectoryFeature.RETRIES}),
     )
 
-    def __init__(self, root: Path | None = None):
+    def __init__(self, root: Path | None = None, launched_at: float | None = None):
         self.root = root or claude_projects_root()
         self._mcp_calls: dict[str, tuple[str, str]] = {}
         self._causal_records: dict[str, _ClaudeCausalRecord] = {}
         self._request_clocks: dict[str, _ClaudeRequestClock] = {}
         self._main_turn_id: str | None = None
-        self._seal = FinalAnswerSeal()
+        self._seal = FinalAnswerSeal(launched_at)
 
     def reset_stream(self) -> None:
         """Drop cross-record seal state when the source signals the line stream restarted."""

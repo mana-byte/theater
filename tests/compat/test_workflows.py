@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import PurePath
 from typing import Any
 
 import pytest
 import yaml
 
 from scripts.harness_compat.adapters import ADAPTER_NAMES
+from scripts.harness_compat.policy import policy_relative
 from tests.support.paths import REPO_ROOT
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
@@ -49,7 +51,14 @@ def test_pr_jobs_are_read_only_and_have_no_automation_secret() -> None:
     for name in ("static-checks", "plan", "verify-gate"):
         job = compat["jobs"][name]
         assert job.get("permissions", compat["permissions"]) == {"contents": "read"}
-        assert "PR_AUTOMATION_TOKEN" not in yaml.safe_dump(job)
+        assert "secrets.HARNESS_COMPAT" not in yaml.safe_dump(job)
+
+
+@pytest.mark.parametrize("name", ["harness-compat.yml", "harness-compat-attention.yml"])
+def test_publication_and_reporting_use_the_compat_token_not_the_pricing_one(name: str) -> None:
+    # PR_AUTOMATION_TOKEN belongs to the pricing workflow; compat has its own broader token.
+    text = (WORKFLOWS / name).read_text()
+    assert "secrets.HARNESS_COMPAT" in text and "PR_AUTOMATION_TOKEN" not in text
 
 
 def test_scripts_own_all_issue_and_pr_operations() -> None:
@@ -76,10 +85,29 @@ def test_scripts_own_all_issue_and_pr_operations() -> None:
 def test_routine_pr_checks_use_the_base_and_stop_at_the_proposed_policy() -> None:
     compat = _load("harness-compat.yml")
     verify = compat["jobs"]["verify-gate"]["steps"][-1]["run"]
-    assert 'args=(verify "$HARNESS" --base "$BASE_SHA")' in verify
+    assert 'args=(verify "$HARNESS" --base "$(git rev-parse HEAD^1)")' in verify
     assert "--routine" in verify and "chore/compat-" in verify
     assert " --check" not in verify
     assert "pull_request_target" not in str(compat)
+
+
+@pytest.mark.parametrize("name", ["harness-compat.yml", "harness-compat-canaries.yml"])
+def test_the_live_suite_runners_can_sandbox_codex(name: str) -> None:
+    # Without bubblewrap, and the user namespace Ubuntu 24.04 denies it, codex's workspace-write
+    # sandbox is unavailable on Linux and every edit asks for an approval, so the suite would fail
+    # codex on a release that is fine.
+    text = (WORKFLOWS / name).read_text()
+    installs = [line for line in text.splitlines() if "apt-get install" in line]
+    assert installs and all("bubblewrap" in line for line in installs)
+    assert text.count("apparmor_restrict_unprivileged_userns=0") == len(installs)
+
+
+def test_pr_checks_diff_against_the_base_the_pr_is_merged_into_not_the_one_it_opened_on() -> None:
+    # The event's base SHA is frozen when the PR opens: once the base branch moves, every commit
+    # that landed meanwhile looks like part of a policy PR.
+    text = (WORKFLOWS / "harness-compat.yml").read_text()
+    assert "pull_request.base.sha" not in text
+    assert text.count('"$(git rev-parse HEAD^1)"') == 2
 
 
 @pytest.mark.parametrize("name", ["qualify", "verify-gate"])
@@ -91,10 +119,8 @@ def test_sweeps_interrupt_with_time_left_to_clean_up_and_publish(name: str) -> N
 
 def test_failure_reporter_runs_from_trusted_main_without_project_setup() -> None:
     report = _load("harness-compat-attention.yml")
-    assert report["on"]["workflow_run"]["workflows"] == [
-        "Harness compatibility",
-        "Harness compatibility canaries",
-    ]
+    # Not the canaries: a red one says the suite missed a planted break, not that a release is bad.
+    assert report["on"]["workflow_run"]["workflows"] == ["Harness compatibility"]
     job = report["jobs"]["report"]
     assert "timed_out" in job["if"] and "failure" in job["if"]
     assert job["steps"][0]["with"]["ref"] == "${{ github.sha }}"
@@ -120,3 +146,12 @@ def test_canaries_are_workflow_self_checks_for_each_plugin() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text()
     for removed in ("compat:", "suite:", "canaries:"):
         assert removed not in makefile
+
+
+def test_a_policy_gate_pr_does_not_run_the_canaries() -> None:
+    # They test the suite, never a release: a gate PR edits only one plugin's policy file.
+    paths = _load("harness-compat-canaries.yml")["on"]["pull_request"]["paths"]
+    exclusion = "!theater/harness/builtin/plugins/*/compatibility.json"
+    assert paths.index(exclusion) > paths.index("theater/**"), "the later pattern wins"
+    for name in ADAPTER_NAMES:
+        assert PurePath(policy_relative(name)).match(exclusion.removeprefix("!"))

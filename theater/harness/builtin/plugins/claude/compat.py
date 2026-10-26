@@ -6,6 +6,7 @@ import json
 
 from theater.harness.contracts.compat import (
     CompatManifest,
+    McpDiscovery,
     NativeEdit,
     ProvisionContext,
     Provisioned,
@@ -62,5 +63,7 @@ def provision(context: ProvisionContext) -> Provisioned:
 COMPAT = CompatManifest(
     provision=provision,
     native_edit=NativeEdit("Write", {"file_path": "{path}", "content": "{nonce}\n"}),
+    # Behind ANTHROPIC_BASE_URL (the mock) Claude defers MCP tools until a search loads one.
+    mcp_discovery=McpDiscovery("ToolSearch", {"query": "select:mcp__{server}__{tool}"}),
     canaries=("launch-files-dropped",),
 )

@@ -1365,7 +1365,7 @@ Régie bridge and a stock CLI against a mock model server, driven only through `
 `compatibility.json`, installs one supplied release and runs the suite in a disposable code copy,
 home and pytest subprocess. Results stay in memory; required/inventory documents and CLI state
 are deleted with the sandbox. A plugin contributes the
-optional `HarnessManifest.compat` (`provision`, `native_edit`, `mcp_call`, `canaries`): it is read by the suite and
+optional `HarnessManifest.compat` (`provision`, `native_edit`, `mcp_call`, `mcp_discovery`, `canaries`): it is read by the suite and
 never at runtime, and every scenario is derived from the rest of the manifest. See
 [`harness-compat.md`](harness-compat.md).
 
