@@ -7,16 +7,13 @@ import os
 import shutil
 import stat
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from .contract import CleanupFailed
 from .process import SANDBOX_ENV, stop_owned
 
 _SKIPPED_DIRS = frozenset({"node_modules", ".git", "uv-cache", "uv-tools", "npm"})
-
-
-class CleanupFailed(RuntimeError):
-    """Temporary data remains, so this qualification must never authorize a pass."""
 
 
 def _unlock(directory: Path) -> None:
@@ -35,10 +32,21 @@ def remove_tree(path: Path) -> None:
     if not path.exists():
         return
     _unlock(path)
-    stuck: list[str] = []
-    shutil.rmtree(path, onexc=lambda _function, target, _error: stuck.append(str(target)))
-    if stuck or path.exists():
-        raise CleanupFailed(f"temporary data cleanup left {path} ({len(stuck)} paths)")
+    errors: list[str] = []
+
+    def failed(function: Callable[..., object], target: str, error: BaseException) -> None:
+        # Python 3.12 reports children that another process already removed.
+        if isinstance(error, FileNotFoundError) and Path(target) != path:
+            return
+        errors.append(f"{function.__name__} {target}: {type(error).__name__}: {error}")
+
+    shutil.rmtree(path, onexc=failed)
+    remaining = path.exists() or path.is_symlink()
+    if errors or remaining:
+        detail = "; ".join(errors) or "root still exists"
+        raise CleanupFailed(
+            f"temporary data cleanup failed for {path} (remaining={remaining}): {detail}"
+        )
 
 
 def _sockets(root: Path) -> Iterator[Path]:

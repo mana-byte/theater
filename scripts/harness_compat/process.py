@@ -19,6 +19,8 @@ from typing import IO, Literal, overload
 
 from theater.constants.harness import HARNESS_COMPAT_SANDBOX_ENV as SANDBOX_ENV  # noqa: F401
 
+from .contract import CleanupFailed
+
 RUN_ENV = "HARNESS_COMPAT_RUN"
 _GRACE_SECONDS = 5.0
 _INTERRUPT_SECONDS = 3.0
@@ -135,26 +137,49 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _live_pids(pids: Iterable[int]) -> set[int]:
+    # Zombies cannot write files and must be reaped by their own parent.
+    states: dict[int, str] = {}
+    for line in _ps("pid=,stat=").splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0].isdigit():
+            states[int(fields[0])] = fields[1]
+    return {pid for pid in pids if _alive(pid) and not states.get(pid, "").startswith("Z")}
+
+
+def _wait_exit(pids: set[int], seconds: float) -> set[int]:
+    deadline = time.monotonic() + seconds
+    while live := _live_pids(pids):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return live
+        time.sleep(min(_POLL_SECONDS, remaining))
+    return set()
+
+
 def kill_all(pids: Iterable[int], *, grace: float = _GRACE_SECONDS) -> None:
-    """SIGTERM every live pid, wait ``grace`` seconds, then SIGKILL the survivors."""
-    live = {pid for pid in pids if pid != os.getpid() and _alive(pid)}
+    """SIGTERM then SIGKILL survivors; return only once they cannot mutate files."""
+    live = _live_pids(pid for pid in pids if pid != os.getpid())
     for pid in live:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    while live and time.monotonic() < deadline:
-        time.sleep(_POLL_SECONDS)
-        live = {pid for pid in live if _alive(pid)}
+    live = _wait_exit(live, grace)
     for pid in live:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGKILL)
+    if remaining := _wait_exit(live, _GRACE_SECONDS):
+        raise CleanupFailed(f"process cleanup failed: PIDs {sorted(remaining)} survived SIGKILL")
 
 
 def stop_owned(name: str, token: str) -> None:
-    """Kill every process started under ``name=token``; this process and its parents are exempt."""
-    victims = owned_pids(name, token)
-    if victims:
-        kill_all(victims - ancestry(os.getpid(), process_table()))
+    """Stop owned processes, including late children; never signal this process or its parents."""
+    protected = ancestry(os.getpid(), process_table())
+    deadline = time.monotonic() + 2 * _GRACE_SECONDS
+    while victims := _live_pids(owned_pids(name, token) - protected):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CleanupFailed(f"process cleanup failed: owned PIDs {sorted(victims)} remain")
+        kill_all(victims, grace=min(_GRACE_SECONDS, remaining))
 
 
 @overload
@@ -252,8 +277,14 @@ def terminate_group(process: subprocess.Popen[str], tree: Iterable[int] = ()) ->
         process.wait(timeout=_GRACE_SECONDS)
     with contextlib.suppress(PermissionError):
         _signal_group(process.pid, signal.SIGKILL)
-    process.wait()
-    kill_all(victims)
+    try:
+        process.wait(timeout=_GRACE_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise CleanupFailed(
+            f"process cleanup failed: leader PID {process.pid} survived SIGKILL"
+        ) from exc
+    finally:
+        kill_all(victims)
 
 
 def _signal_group(pid: int, signum: signal.Signals) -> None:

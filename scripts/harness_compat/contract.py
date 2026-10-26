@@ -126,6 +126,12 @@ class Check:
     detail: str = ""
 
 
+class CleanupFailed(RuntimeError):
+    """Temporary data or live processes remain; completed checks cannot authorize a pass."""
+
+    checks: tuple[Check, ...] = ()
+
+
 @dataclass(frozen=True, slots=True)
 class Result:
     """One release's qualification/publication outcome, held only in memory."""

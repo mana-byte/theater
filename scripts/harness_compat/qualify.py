@@ -11,7 +11,7 @@ from theater.version_policy import version_key
 from .cleanup import CleanupFailed
 from .codecopy import code_copy
 from .contract import Adapter, Check, InstallFailed, Result, Sandbox
-from .diagnostics import clip_diagnostic
+from .diagnostics import clip_diagnostic, exception_detail
 from .policy import admit_only, load_policy
 from .sandbox import make_sandbox
 from .suite_runner import installed_version, run_suite, verdict
@@ -34,6 +34,7 @@ def qualify_binary(
     """
     version_key(version)
     binary = binary.resolve()
+    checks: tuple[Check, ...] = ()
     try:
         with code_copy(root) as tree:
             if not load_policy(tree, name).admits(version):
@@ -46,10 +47,12 @@ def qualify_binary(
                 version=version,
                 pytest_args=pytest_args,
             )
-    except CleanupFailed:
+            checks = report.checks
+    except CleanupFailed as exc:
+        exc.checks = checks or exc.checks
         raise
     except Exception as exc:
-        detail = clip_diagnostic(f"{type(exc).__name__}: {exc}", 400, tail=True)
+        detail = clip_diagnostic(exception_detail(exc), 400, tail=True)
         return Result(name, version, "tooling", (Check("qualification", "error", detail),))
     return Result(name, version, verdict(report), report.checks)
 
@@ -71,12 +74,25 @@ def qualify_release(
 ) -> Result:
     """Install exactly ``version``, check what the binary reports, and run the live suite on it."""
     version_key(version)
-    with make_sandbox(adapter.name) as sb:
-        try:
-            binary = install_verified(adapter, sb, version)
-        except (InstallFailed, OSError, subprocess.SubprocessError) as exc:
-            detail = clip_diagnostic(str(exc), 500, tail=True)
-            return Result(
-                adapter.name, version, "inconclusive", (Check("install", "error", detail),)
-            )
-        return qualify_binary(root, sb, adapter.name, binary, version, pytest_args=pytest_args)
+    result: Result | None = None
+    try:
+        with make_sandbox(adapter.name) as sb:
+            try:
+                binary = install_verified(adapter, sb, version)
+            except (InstallFailed, OSError, subprocess.SubprocessError) as exc:
+                detail = clip_diagnostic(exception_detail(exc), 500, tail=True)
+                result = Result(
+                    adapter.name, version, "inconclusive", (Check("install", "error", detail),)
+                )
+            else:
+                result = qualify_binary(
+                    root, sb, adapter.name, binary, version, pytest_args=pytest_args
+                )
+    except CleanupFailed as exc:
+        if result is not None:
+            exc.checks = result.checks
+        elif isinstance(exc.__context__, CleanupFailed):
+            exc.checks = exc.__context__.checks
+        raise
+    assert result is not None
+    return result

@@ -74,6 +74,8 @@ checkout or real home writes, saved results, fixture updates, artifacts or succe
 
 Only a complete passing suite can advance max. Missing scenarios, skips, invalid inventories,
 timeouts, non-clean subprocess exits and cleanup failures cannot authorize a pass.
+Cleanup waits for owned processes before deleting data; already-missing child files are harmless.
+A cleanup failure retains completed checks and the actual error, stops the sweep, and cannot pass.
 Distinct parser, safety/recovery and SDK regressions remain supplementary.
 
 ## Remaining suite limits

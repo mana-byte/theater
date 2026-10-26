@@ -38,7 +38,7 @@ from scripts.harness_compat.contract import (
 )
 from scripts.harness_compat.framework import python_path
 from scripts.harness_compat.mock import MockServer
-from scripts.harness_compat.process import SANDBOX_ENV
+from scripts.harness_compat.process import RUN_ENV, SANDBOX_ENV
 from scripts.harness_compat.sandbox import sandbox_environment
 from tests.support import mutations
 from tests.support.live_stack import BOOT_SECONDS, Stack
@@ -164,6 +164,7 @@ def hermetic_environment(
         **extra,
         "PYTHONPATH": python_path(REPO_ROOT),
         "PYTHONDONTWRITEBYTECODE": "1",
+        **({RUN_ENV: os.environ[RUN_ENV]} if RUN_ENV in os.environ else {}),
     }
 
 

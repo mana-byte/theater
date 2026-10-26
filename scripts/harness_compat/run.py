@@ -115,7 +115,9 @@ def run_harness(
                 adapter.name,
                 version,
                 "inconclusive" if interrupted else "tooling",
-                (Check("qualification", "error", detail),),
+                (*exc.checks, Check("cleanup", "error", detail))
+                if isinstance(exc, CleanupFailed)
+                else (Check("qualification", "error", detail),),
             )
             stop = isinstance(exc, (KeyboardInterrupt, CleanupFailed, IncompleteRun))
             if stop:
