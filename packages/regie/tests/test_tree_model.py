@@ -312,3 +312,32 @@ def test_a_fold_counts_hidden_agents_by_state_worst_first_each_agent_once() -> N
 
     calm = tree_for_projection(_family(), layout=TreeLayout(folded={"root"}))
     assert calm[0]["hidden_states"] == {}
+
+
+def test_a_collapsed_section_counts_and_shows_through_a_folded_parent_inside_it() -> None:
+    def section(folded: set[str]) -> dict:
+        layout = TreeLayout(
+            orders={"root": ["sep:1234abcd", "a", "b"]},
+            separators={"sep:1234abcd": {"name": "Later", "collapsed": True}},
+            folded=folded,
+        )
+        return tree_for_projection(_family({"a1": "awaiting_input"}), layout=layout)[0]["children"][
+            0
+        ]
+
+    open_parent, folded_parent = section(set()), section({"a"})
+    for heading in (open_parent, folded_parent):
+        assert heading["count"] == 3
+        assert sorted(heading["folded"]) == ["a", "a1", "b"]  # the hidden child is still killed
+        assert heading["folded_status"] == "awaiting_input"
+
+
+def test_a_folded_parent_shows_through_a_collapsed_section_whose_child_is_folded() -> None:
+    layout = TreeLayout(
+        orders={"root": ["sep:1234abcd", "a", "b"]},
+        separators={"sep:1234abcd": {"name": "Later", "collapsed": True}},
+        folded={"a", "root"},
+    )
+    root = tree_for_projection(_family({"a1": "awaiting_input"}), layout=layout)[0]
+    assert root["hidden_count"] == 3 and sorted(root["hidden_ids"]) == ["a", "a1", "b"]
+    assert root["hidden_status"] == "awaiting_input"

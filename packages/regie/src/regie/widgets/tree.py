@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-import time
-from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
 from typing import Literal, cast
 
 from textual import events
@@ -17,30 +15,27 @@ from textual.widget import Widget
 from textual.widgets import Label
 
 from regie.marks import MarkKind, RowMark
-from regie.menu import ROOT_ID, MenuItem, MenuView, menu_nodes
-from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
+from regie.menu import MenuItem, MenuView, menu_nodes
+from regie.motions.retirement import LeafRetirementController
 from regie.motions.reveal import LeafRevealController
 from regie.motions.routes import AwaitMarks, LeafOverlay
-from regie.motions.wipe import LeafWipeController, status_wipe_color
+from regie.motions.wipe import LeafWipeController
 from regie.render.layout import Key, RenderedLine, TreeLines, is_root_prefix, render_tree
 from regie.render.routing import RailArms, heavy_overlays, section_arms
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout
 from regie.tree_nodes import RawRenderNode, RenderNode, TreeNode
 from regie.ui_constants import (
-    REGIE_ATTENTION_PULSE_INTERVAL,
-    REGIE_ATTENTION_PULSE_LIMIT,
     REGIE_EMPTY_TREE_KEY,
     REGIE_MARK_SEEN_SECONDS,
-    REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
-    REGIE_WIPE_DEATH_SECONDS,
-    REGIE_WIPE_INTERVAL_SECONDS,
 )
 from regie.widgets.chrome import EmptyTreeState
 from regie.widgets.leaf import AgentLeaf
 from regie.widgets.menu_row import MenuRow
 from regie.widgets.separator import SeparatorRow
 from regie.widgets.spawn_leaf import SpawnLeaf
+from regie.widgets.tree_parts.menu import TreeMenu, selectable_keys
+from regie.widgets.tree_parts.motion import TreeMotion
 from regie.widgets.usage_breakdown import UsageBreakdownPanel
 from theater.frontend import StateProjection
 
@@ -52,25 +47,6 @@ def _is_participant_key(key: Key) -> bool:
 
 def _is_managed_key(key: Key) -> bool:
     return key[0] == "p"
-
-
-def _is_selectable_key(key: Key) -> bool:
-    return key[0] in {"p", "s", "u", "g", "m"}
-
-
-def _is_menu_key(key: Key | None) -> bool:
-    """Whether a row belongs to the options menu closing the tree."""
-    return key is not None and key[0] in {"g", "m"}
-
-
-#: The sweep that announces a mark arriving on a row.
-_MARK_WIPES: dict[MarkKind, tuple[str, float | None]] = {
-    MarkKind.TERMINATING: ("$error", REGIE_WIPE_DEATH_SECONDS),
-    MarkKind.SENT: ("$success", None),
-    MarkKind.BLOCKED: ("$warning", None),
-    MarkKind.UNCERTAIN: ("$warning", None),
-    MarkKind.FAILED: ("$error", None),
-}
 
 
 def _hidden_owners(nodes: list[TreeNode]) -> dict[Key, Key]:
@@ -85,7 +61,7 @@ def _hidden_owners(nodes: list[TreeNode]) -> dict[Key, Key]:
     return owners
 
 
-class ParticipantTree(VerticalScroll):
+class ParticipantTree(TreeMotion, TreeMenu, VerticalScroll):
     """Keep one interactive leaf per stable public participant ID."""
 
     class MenuClicked(Message):
@@ -126,9 +102,6 @@ class ParticipantTree(VerticalScroll):
         text-style: bold;
     }
     """
-
-    #: Breathing steps of the attention bar (dim, steady, bold), in order.
-    _ATTENTION_BREATH = (-1, 0, 1, 0)
 
     def __init__(self, *args, startup_reveal: bool = True, motion: bool = True, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -177,7 +150,6 @@ class ParticipantTree(VerticalScroll):
         self._menu_view = MenuView()
         self._menu_return: Key | None = None
         self._menu_hidden = False
-        self._menu_built_open = False
         self._tree_nodes: list[TreeNode] = []
         self._unmanaged: list[dict] | None = None
 
@@ -205,7 +177,7 @@ class ParticipantTree(VerticalScroll):
 
     @property
     def selectable_keys(self) -> tuple[Key, ...]:
-        return tuple(key for _, _, key, _, _ in self._lines_data if _is_selectable_key(key))
+        return selectable_keys(self._lines_data)
 
     @property
     def tree_lines(self) -> list[RenderedLine]:
@@ -221,12 +193,6 @@ class ParticipantTree(VerticalScroll):
     @property
     def revision(self) -> int:
         return self._revision
-
-    def configure(self, *, startup_reveal: bool) -> None:
-        if self._leaf_reveal.started:
-            return
-        self._leaf_reveal = LeafRevealController(enabled=startup_reveal and self._motion)
-        self._leaf_retirement = LeafRetirementController(enabled=startup_reveal and self._motion)
 
     def show_projection(
         self,
@@ -265,17 +231,14 @@ class ParticipantTree(VerticalScroll):
         self._menu_hidden = pending_spawn is not None  # the new agent's row is where to look
         self._participant_detail = "description" if participant_detail == "description" else "cwd"
         self._cwd_segments = cwd_segments
-        lines = self._render_lines()
+        opened = self._in_menu() and not self._menu_hidden
+        preferred = ("p", selected_id) if selected_id is not None else None
+        lines = self._settle_lines(self._render_lines(opened), opened, preferred, old_index)
         self._observe_statuses(projection)
         self._observe_marks(marks or {})
-        self._sync_retirement(projection)
-        self._lines_data = lines
-        self._revision += 1
+        self._sync_retirement(projection)  # on the rows still shown, before the new ones
         self._stale = projection.stale
-        self._reconcile(lines)
-        self._settle_selection(selected_id, old_index)
-        if self._in_menu() != self._menu_built_open:  # the settled cursor entered or left the menu
-            self._rerender()
+        self._show_lines(lines)
         self._staged_id = staged_id
         self._staged_unmanaged_id = staged_unmanaged_id
         self._trajectory_id = trajectory_id
@@ -355,27 +318,8 @@ class ParticipantTree(VerticalScroll):
         self._cursor_visible = visible
         self._apply_selection()
 
-    def _in_menu(self) -> bool:
-        return _is_menu_key(self._selected_key)
-
-    @property
-    def in_menu(self) -> bool:
-        """Whether the cursor is on the options menu (the root, an option or a choice)."""
-        return self._in_menu()
-
-    @property
-    def menu_return(self) -> Key | None:
-        """The row the cursor was on before it entered the menu."""
-        return self._menu_return
-
-    @property
-    def menu_view(self) -> MenuView:
-        return self._menu_view
-
-    def _render_lines(self) -> TreeLines:
+    def _render_lines(self, opened: bool) -> TreeLines:
         """The agents as rows, then the menu as one more root, open while the cursor is in it."""
-        opened = self._in_menu()
-        self._menu_built_open = opened
         menu = None
         if not self._menu_hidden and (self._tree_nodes or opened):
             menu = menu_nodes(self.menu_source(), self._menu_view, open=opened)
@@ -388,82 +332,14 @@ class ParticipantTree(VerticalScroll):
 
     def _rerender(self) -> None:
         """Draw the rows again from what the tree knows: the menu opened, closed or changed."""
-        lines = self._render_lines()
+        opened = self._in_menu() and not self._menu_hidden
+        self._show_lines(self._settle_lines(self._render_lines(opened), opened))
+        self._apply_selection()
+
+    def _show_lines(self, lines: TreeLines) -> None:
         self._lines_data = lines
         self._revision += 1
         self._reconcile(lines)
-        self._settle_selection(None, 0)  # a choice may have gone with the list that held it
-        self._apply_selection()
-
-    def _set_selected(self, key: Key | None) -> None:
-        """Move the cursor, opening the menu as it enters and closing it as it leaves."""
-        entered, left = (
-            not self._in_menu() and _is_menu_key(key),
-            self._in_menu() and not _is_menu_key(key),
-        )
-        if entered:
-            self._menu_return = self._selected_key
-        if left:
-            self._menu_view, self._menu_return = MenuView(), None
-        self._selected_key = key
-        if entered or left:
-            self._rerender()
-
-    def _settle_selection(self, selected_id: str | None, old_index: int) -> None:
-        """Keep the cursor on a row that exists; never fall into the menu when an agent remains."""
-        keys = self.selectable_keys
-        if self._selected_key in keys:
-            return
-        preferred = ("p", selected_id) if selected_id is not None else None
-        rows = [key for key in keys if not _is_menu_key(key)] or list(keys)
-        if preferred in keys:
-            self._selected_key = preferred
-        elif _is_menu_key(self._selected_key) and any(_is_menu_key(key) for key in keys):
-            self._selected_key = ("g", ROOT_ID)  # an option went away: back to the menu's root
-        else:
-            self._selected_key = rows[min(old_index, len(rows) - 1)] if rows else None
-
-    def open_menu(self, option: str | None = None) -> None:
-        """Put the cursor in the menu: on its root, or on the first choice of *option*, unfolded."""
-        if self._menu_hidden:  # a new agent is asking for its directory
-            return
-        if option is not None:
-            self._menu_view = replace(self._menu_view, expanded=self._menu_view.expanded | {option})
-        self._set_selected(("g", ROOT_ID))
-        if option is not None:
-            self._rerender()
-            first = next(
-                (key for key in self.selectable_keys if key[1].startswith(f"{option}/")), None
-            )
-            self._set_selected(first or ("m", option))
-        self._apply_selection()
-
-    def close_menu(self) -> Key | None:
-        """Take the cursor back to the row it left, or the nearest agent if that row is gone."""
-        back = self._menu_return
-        rows = [key for key in self.selectable_keys if not _is_menu_key(key)]
-        if back not in rows:
-            back = rows[-1] if rows else None
-        self._set_selected(back)
-        self._apply_selection()
-        return back
-
-    def menu_root(self) -> MenuRow | None:
-        """The ``+ options`` row, where the filter is typed."""
-        root = self._key_widgets.get(("g", ROOT_ID))
-        return root if isinstance(root, MenuRow) else None
-
-    def set_menu_view(self, view: MenuView) -> None:
-        """Change what is opened in the menu (an option unfolded, a list shown whole, a filter)."""
-        if view != self._menu_view:
-            self._menu_view = view
-            if self._in_menu():
-                self._rerender()
-
-    def refresh_menu(self) -> None:
-        """Redraw the menu after what it holds changed (a list finished loading, a theme picked)."""
-        if self._in_menu():
-            self._rerender()
 
     def on_menu_row_clicked(self, message: MenuRow.Clicked) -> None:
         message.stop()
@@ -535,7 +411,7 @@ class ParticipantTree(VerticalScroll):
             widget = SeparatorRow(node, prefix, key=key, is_first_root=first_root)
         elif key[0] == "n":
             widget = SpawnLeaf(node, prefix, cont_prefix=cont_prefix, key=key)
-            self._wipes.start(key, "$secondary")  # the row that asks for the directory opens
+            self._sweep(key, "spawn_opening")
             self._ensure_wipe_timer()
         elif _is_participant_key(key):
             widget = AgentLeaf(
@@ -699,238 +575,9 @@ class ParticipantTree(VerticalScroll):
         self.select_key(order[target])
         return self.selected_id
 
-    def leaf_keys(self) -> tuple[Key, ...]:
-        return tuple(
-            key
-            for key, widget in self._key_widgets.items()
-            if isinstance(widget, AgentLeaf | EmptyTreeState)
-        )
-
-    def reveal_widths(self, keys: Collection[Key]) -> dict[Key, int]:
-        selected = set(keys)
-        return {
-            key: widget.required_reveal_width
-            for key, widget in self._key_widgets.items()
-            if key in selected and isinstance(widget, AgentLeaf | EmptyTreeState)
-        }
-
-    def set_reveals(self, reveals: dict[Key, int]) -> None:
-        self._reveals = dict(reveals)
-        for key, widget in self._key_widgets.items():
-            if isinstance(widget, AgentLeaf | EmptyTreeState):
-                widget.set_reveal(self._reveals.get(key))
-
-    def _sync_reveal(self) -> None:
-        keys = self.leaf_keys()
-        if not self._leaf_reveal.needs_sync(keys):
-            return
-        requested = self._leaf_reveal.sync_keys(keys)
-        frame = self._leaf_reveal.observe(
-            self.reveal_widths(requested),
-            animate_new=self._animate_new,
-        )
-        self.set_reveals(frame.widths)
-        if frame.active and self._leaf_reveal_timer is None:
-            self._leaf_reveal_timer = self.set_interval(
-                REGIE_STARTUP_REVEAL_INTERVAL_SECONDS, self._tick_reveal
-            )
-
-    def _tick_reveal(self) -> None:
-        keys = self.leaf_keys()
-        frame = self._leaf_reveal.tick(self.reveal_widths(self._leaf_reveal.sync_keys(keys)))
-        self.set_reveals(frame.widths)
-        if not frame.active:
-            self._stop_reveal()
-
-    def _stop_reveal(self) -> None:
-        if self._leaf_reveal_timer is not None:
-            self._leaf_reveal_timer.stop()
-            self._leaf_reveal_timer = None
-
-    def _sync_retirement(self, projection: StateProjection) -> None:
-        current = {
-            ("p", participant.participant_id): bool(participant.parent_id)
-            for participant in projection.participants.values()
-        }
-        # A row gone from the projection stays until its sweep has ended, even if it is already
-        # dead: the sweep is what tells the human what happened.
-        departed = {key for key in self._key_widgets if key[0] == "p" and key not in current}
-        for key in departed & self._kills:
-            if not self._wipes.has(key):
-                # A kill too quick for its mark to be seen.
-                self._wipes.start(key, "$error", seconds=REGIE_WIPE_DEATH_SECONDS)
-        self._kills -= departed
-        held = {key for key in departed if self._wipes.has(key)}
-        self._wipes.cancel(departed - held)
-        self._ensure_wipe_timer()
-        returned = {key for key in self._held if key in current}
-        change = self._leaf_retirement.observe(current)
-        self._leaf_reveal.cancel(change.retire)
-        if not self._leaf_reveal.active:
-            self._stop_reveal()
-        self.restore_retiring(change.restore | returned)
-        if (change.restore or returned) and not self._leaf_retirement.active:
-            self._stop_retirement()
-        if held:
-            for key, width in self.retire(held).items():
-                self._held[key] = (key in change.retire, width)
-        if change.retire - held:
-            frame = self._leaf_retirement.begin(
-                self.retire(change.retire - held), candidates=change.retire - held
-            )
-            self._apply_retirement(frame)
-
-    def _release_held(self, key: Key) -> None:
-        """Its sweep is over: the row now retires, with the reverse reveal if it may, or goes."""
-        if key not in self._held:  # a row retiring on its own is not ours to cut short
-            return
-        animate, width = self._held.pop(key)
-        widget = self._retiring.get(key)
-        if widget is None:
-            return
-        if animate:
-            self._apply_retirement(self._leaf_retirement.begin({key: width}, candidates={key}))
-            return
-        self._retiring.pop(key)
-        self._retiring_predecessors.pop(key, None)
-        self._remove_widget(widget)
-        if not self._lines_data and not self._retiring:
-            self._reconcile_empty()
-
-    def retire(self, keys: Collection[Key]) -> dict[Key, int]:
-        candidates = set(keys)
-        retiring: list[tuple[Key, Key | None]] = []
-        previous: Key | None = None
-        for _, _, key, _, _ in self._lines_data:
-            if key in candidates:
-                retiring.append((key, previous))
-            previous = key
-        seen = {key for key, _ in retiring}
-        retiring.extend((key, None) for key in candidates - seen)
-        widths: dict[Key, int] = {}
-        for key, predecessor in retiring:
-            widget = self._key_widgets.pop(key, None)
-            if not isinstance(widget, AgentLeaf):
-                continue
-            self._reveals.pop(key, None)
-            self._overlaid.discard(key)
-            widget.retire()
-            self._retiring[key] = widget
-            self._retiring_predecessors[key] = predecessor
-            widths[key] = widget.visible_reveal_width
-        return widths
-
-    def restore_retiring(self, keys: Collection[Key]) -> None:
-        for key in keys:
-            self._held.pop(key, None)
-            widget = self._retiring.pop(key, None)
-            if widget is not None:
-                self._retiring_predecessors.pop(key, None)
-                widget.set_reveal(None)
-                self._key_widgets[key] = widget
-
-    def announce_kill(self, participant_id: str) -> None:
-        """A kill was asked for: the row will leave with the reverse reveal, roots included, and
-        a red sweep first if its termination mark is never seen."""
-        key = ("p", participant_id)
-        self._leaf_retirement.allow(key)
-        self._kills.add(key)
-
-    def _apply_retirement(self, frame: LeafRetirementFrame) -> None:
-        for key, reveal in frame.widths.items():
-            widget = self._retiring.get(key)
-            if widget is not None:
-                widget.set_reveal(reveal)
-        for key in frame.completed:
-            widget = self._retiring.pop(key, None)
-            if widget is not None:
-                self._retiring_predecessors.pop(key, None)
-                self._remove_widget(widget)
-        if frame.active and self._leaf_retirement_timer is None:
-            self._leaf_retirement_timer = self.set_interval(
-                REGIE_STARTUP_REVEAL_INTERVAL_SECONDS, self._tick_retirement
-            )
-        elif not frame.active:
-            self._stop_retirement()
-            if not self._lines_data:
-                self._reconcile_empty()
-
-    def _tick_retirement(self) -> None:
-        self._apply_retirement(self._leaf_retirement.tick())
-
-    def _stop_retirement(self) -> None:
-        if self._leaf_retirement_timer is not None:
-            self._leaf_retirement_timer.stop()
-            self._leaf_retirement_timer = None
-
-    def _observe_statuses(self, projection: StateProjection) -> None:
-        """Sweep a row whose status changed; a row seen for the first time is the reveal's."""
-        current = {
-            ("p", participant.participant_id): participant.status
-            for participant in projection.participants.values()
-        }
-        for key, status in current.items():
-            previous = self._statuses.get(key)
-            if previous is None or previous == status:
-                continue
-            if (color := status_wipe_color(previous, status)) is not None:
-                # A row folded out of sight cannot sweep: the one standing for it does, but only
-                # for what needs the human.
-                target = self._hidden_owner.get(key, key)
-                if target == key or status in {"awaiting_input", "dead"}:
-                    self._wipes.start(
-                        target,
-                        color,
-                        seconds=REGIE_WIPE_DEATH_SECONDS if status == "dead" else None,
-                    )
-        now = time.monotonic()
-        self._attention_since = {
-            key: self._attention_since.get(key, now)
-            for key, status in current.items()
-            if status == "awaiting_input"
-        }
-        self._statuses = current
-        self._ensure_wipe_timer()
-
-    def _observe_marks(self, marks: Mapping[str, RowMark]) -> None:
-        """Sweep a row whose operation just produced something worth announcing.
-
-        A spawn ends green; a kill is red; a delivery green; a refusal yellow. (A spawn begins
-        cyan, but that is the spawn row opening, not a mark.)
-        """
-        previous = self._mark_kinds
-        # What the first projection already carries happened before the human looked.
-        if previous is not None:
-            for participant_id, mark in marks.items():
-                if mark.kind is MarkKind.TERMINATING:
-                    self._leaf_retirement.allow(("p", participant_id))
-                if previous.get(participant_id) is not mark.kind and (
-                    wipe := _MARK_WIPES.get(mark.kind)
-                ):
-                    self._wipes.start(("p", participant_id), wipe[0], seconds=wipe[1])
-            for participant_id, kind in previous.items():
-                # Up: a rolled-back spawn has no row left to sweep.
-                if (
-                    kind is MarkKind.LAUNCHING
-                    and participant_id not in marks
-                    and ("p", participant_id) in self._statuses
-                ):
-                    self._wipes.start(("p", participant_id), "$success")
-        self._mark_kinds = {participant_id: mark.kind for participant_id, mark in marks.items()}
-        self._ensure_wipe_timer()
-
     def _sync_mark_seen(self) -> None:
         """Once the cursor has rested on a failure for a moment, report it seen."""
-        key = self._selected_key
-        mark = next(
-            (
-                node.get("mark")
-                for _, node, line_key, _, _ in self._lines_data
-                if line_key == key and _is_managed_key(line_key)
-            ),
-            None,
-        )
-        wanted = mark.operation_id if isinstance(mark, RowMark) and mark.needs_seen else None
+        wanted = self._seen_wanted()
         if wanted == self._seen_pending:
             return
         self._stop_mark_seen()
@@ -940,27 +587,32 @@ class ParticipantTree(VerticalScroll):
                 REGIE_MARK_SEEN_SECONDS, lambda: self._report_seen(wanted)
             )
 
+    def _seen_wanted(self) -> str | None:
+        """The operation the visible cursor rests on that still wants the human, if any."""
+        if not self._cursor_visible:  # the usage footer hides the row's cursor
+            return None
+        key = self._selected_key
+        mark = next(
+            (
+                node.get("mark")
+                for _, node, line_key, _, _ in self._lines_data
+                if line_key == key and _is_managed_key(line_key)
+            ),
+            None,
+        )
+        return mark.operation_id if isinstance(mark, RowMark) and mark.attention else None
+
     def _report_seen(self, operation_id: str) -> None:
         self._seen_timer = None
         self._seen_pending = None
-        self.post_message(self.MarkSeen(operation_id))
+        if self._seen_wanted() == operation_id:
+            self.post_message(self.MarkSeen(operation_id))
 
     def _stop_mark_seen(self) -> None:
         if self._seen_timer is not None:
             self._seen_timer.stop()
             self._seen_timer = None
         self._seen_pending = None
-
-    def _ensure_wipe_timer(self) -> None:
-        if self._wipes.active and self._wipe_timer is None:
-            self._wipe_timer = self.set_interval(REGIE_WIPE_INTERVAL_SECONDS, self._tick_wipe)
-
-    def flash(self, participant_id: str, color: str) -> None:
-        """Sweep one row in *color* to show something just landed on it."""
-        key = ("p", participant_id)
-        if key in self._key_widgets:
-            self._wipes.start(key, color)
-            self._ensure_wipe_timer()
 
     def set_await_marks(self, marks: AwaitMarks) -> None:
         """Show who is blocked on a peer and who is being waited on."""
@@ -974,60 +626,12 @@ class ParticipantTree(VerticalScroll):
             if isinstance(widget, AgentLeaf) and _is_managed_key(key):
                 widget.set_await_marks(marks.waiting.get(key[1]), marks.awaited.get(key[1], 0))
 
-    def _tick_wipe(self) -> None:
-        frame = self._wipes.tick()
-        for key, wipe in frame.running.items():
-            if isinstance(widget := self._sweepable(key), AgentLeaf | SpawnLeaf):
-                widget.set_wipe(wipe)
-        for key in frame.finished:
-            if isinstance(widget := self._sweepable(key), AgentLeaf | SpawnLeaf):
-                widget.set_wipe(None)
-            self._release_held(key)
-        if not frame.active and self._wipe_timer is not None:
-            self._wipe_timer.stop()
-            self._wipe_timer = None
-
-    def _sweepable(self, key: Key) -> Widget | None:
-        """The row a sweep draws on: a held row is no longer in the tree but is still drawn."""
-        return self._key_widgets.get(key) or self._retiring.get(key)
-
-    def _sync_attention(self) -> None:
-        """Breathe the newest few waiting rows; the rest hold the steady tint."""
-        if not self._attention_since or not self._motion:
-            self._stop_attention()
-            return
-        if self._attention_timer is None:
-            self._attention_timer = self.set_interval(
-                REGIE_ATTENTION_PULSE_INTERVAL, self._tick_attention
-            )
-
-    def _tick_attention(self) -> None:
-        self._attention_phase = (self._attention_phase + 1) % len(self._ATTENTION_BREATH)
-        newest = sorted(self._attention_since, key=self._attention_since.__getitem__, reverse=True)
-        breathing = set(newest[:REGIE_ATTENTION_PULSE_LIMIT])
-        level = self._ATTENTION_BREATH[self._attention_phase]
-        for key in self._attention_since:
-            if isinstance(widget := self._key_widgets.get(key), AgentLeaf):
-                widget.set_attention_level(level if key in breathing else 0)
-
-    def _stop_attention(self) -> None:
-        if self._attention_timer is not None:
-            self._attention_timer.stop()
-            self._attention_timer = None
-
     def _remove_widget(self, widget: Widget) -> None:
         widget.remove()
 
     def on_unmount(self) -> None:
-        self._stop_reveal()
-        self._stop_retirement()
-        self._stop_attention()
+        self._stop_motion()
         self._stop_mark_seen()
-        self._held.clear()
-        if self._wipe_timer is not None:
-            self._wipe_timer.stop()
-            self._wipe_timer = None
-        self._leaf_retirement.clear()
 
 
 class TreeStack(Vertical):

@@ -3,27 +3,27 @@
 from __future__ import annotations
 
 import pytest
-from regie.motions.wipe import LeafWipeController, apply_wipe, status_wipe_color
-from regie.ui_constants import REGIE_WIPE_SECONDS
+from regie.motions.wipe import LeafWipeController, apply_wipe, status_sweep
+from regie.ui_constants import REGIE_WIPE_DEATH_SECONDS, REGIE_WIPE_SECONDS
 from textual.content import Content
 
 KEY = ("p", "first")
 
 
 @pytest.mark.parametrize(
-    ("previous", "status", "color"),
+    ("previous", "status", "sweep"),
     [
-        ("working", "awaiting_input", "$warning"),
-        ("idle", "awaiting_input", "$warning"),
-        ("working", "dead", "$error"),
-        ("working", "idle", "$success"),
+        ("working", "awaiting_input", ("$warning", None)),
+        ("idle", "awaiting_input", ("$warning", None)),
+        ("working", "dead", ("$error", REGIE_WIPE_DEATH_SECONDS)),
+        ("working", "idle", ("$success", None)),
         ("idle", "working", None),  # the spinner starting is announcement enough
         ("awaiting_input", "idle", None),
         ("dead", "idle", None),
     ],
 )
-def test_only_changes_that_matter_earn_a_sweep(previous, status, color):
-    assert status_wipe_color(previous, status) == color
+def test_only_changes_that_matter_earn_a_sweep(previous, status, sweep):
+    assert status_sweep(previous, status) == sweep
 
 
 def _marks(content: Content, style: str) -> list[tuple[int, int]]:

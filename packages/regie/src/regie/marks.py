@@ -56,11 +56,6 @@ class RowMark:
         return self.kind in {MarkKind.LAUNCHING, MarkKind.TERMINATING}
 
     @property
-    def needs_seen(self) -> bool:
-        """Whether this mark stays until the human has looked at the row."""
-        return self.attention
-
-    @property
     def attention(self) -> bool:
         """Whether the human is wanted: something blocked, broke or may not have arrived."""
         return self.kind in {MarkKind.BLOCKED, MarkKind.FAILED, MarkKind.UNCERTAIN}
@@ -203,7 +198,7 @@ def row_marks(
             mark = _send_mark(operation, now)
         else:
             continue
-        if mark is None or (mark.needs_seen and operation.operation_id in seen):
+        if mark is None or (mark.attention and operation.operation_id in seen):
             continue
         order = (_rank(mark), _stamp(operation))
         for target in operation.target_ids:
