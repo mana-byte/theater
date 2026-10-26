@@ -85,7 +85,7 @@ def separator_label(
 
     *status* is what a folded section's hidden agents are doing; it takes the chevron's place.
     """
-    row1: list = [] if is_first_root else [(_rail_above(prefix), "$text dim")]
+    row1: list = [] if is_first_root else [(rail_above(prefix), "$text dim")]
     row2: list = [
         (prefix, "$text dim"),
         *(
@@ -170,7 +170,7 @@ def _id_style(node: RawRenderNode) -> str:
     return "$text dim italic" if not node.get("addressable", True) else ""
 
 
-def _rail_above(prefix: str) -> str:
+def rail_above(prefix: str) -> str:
     """The rail for row 1: the line that leads down into this node's branch.
 
     A last child gets a rail too (``└`` closes a line from above); only row 3 depends
@@ -488,7 +488,7 @@ def node_label(
     # Row 1: the rail leading into this branch; suppressed for the first root (nothing above it).
     row1_parts: list = []
     if not is_first_root:
-        lead = _rail_above(prefix)
+        lead = rail_above(prefix)
         if lead:
             row1_parts.append((lead, "$text dim"))
 

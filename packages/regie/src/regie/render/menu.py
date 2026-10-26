@@ -5,7 +5,7 @@ from __future__ import annotations
 from textual.content import Content
 
 from regie.motions.marquee import marquee_cells
-from regie.render.glyphs import _rail_above, fit_name, separator_prefix
+from regie.render.glyphs import fit_name, rail_above, separator_prefix
 from regie.tree_nodes import RawRenderNode
 
 _RAIL = "$text dim"
@@ -52,7 +52,7 @@ def menu_label(
             else marquee_cells(help_text, room, help_offset)
         )
     return Content.assemble(
-        (_rail_above(prefix), _RAIL),
+        (rail_above(prefix), _RAIL),
         "\n",
         (prefix, _RAIL),
         (f"{glyph} ", glyph_style + dim),
@@ -76,7 +76,7 @@ def _root_label(node: RawRenderNode, prefix: str, *, is_first_root: bool, editin
     if not node.get("open"):
         return Content.assemble((prefix, _RAIL), (title, "$text-muted"), *key)
     return Content.assemble(
-        *([] if is_first_root else [(_rail_above(prefix), _RAIL)]),
+        *([] if is_first_root else [(rail_above(prefix), _RAIL)]),
         "\n",
         (prefix, _RAIL),
         (title, "bold $secondary"),
