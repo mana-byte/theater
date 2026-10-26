@@ -34,7 +34,7 @@ from regie.widgets.leaf import AgentLeaf
 from regie.widgets.menu_row import MenuRow
 from regie.widgets.separator import SeparatorRow
 from regie.widgets.spawn_leaf import SpawnLeaf
-from regie.widgets.tree_parts.menu import TreeMenu
+from regie.widgets.tree_parts.menu import TreeMenu, selectable_keys
 from regie.widgets.tree_parts.motion import TreeMotion
 from regie.widgets.usage_breakdown import UsageBreakdownPanel
 from theater.frontend import StateProjection
@@ -47,10 +47,6 @@ def _is_participant_key(key: Key) -> bool:
 
 def _is_managed_key(key: Key) -> bool:
     return key[0] == "p"
-
-
-def _is_selectable_key(key: Key) -> bool:
-    return key[0] in {"p", "s", "u", "g", "m"}
 
 
 def _hidden_owners(nodes: list[TreeNode]) -> dict[Key, Key]:
@@ -154,7 +150,6 @@ class ParticipantTree(TreeMotion, TreeMenu, VerticalScroll):
         self._menu_view = MenuView()
         self._menu_return: Key | None = None
         self._menu_hidden = False
-        self._menu_built_open = False
         self._tree_nodes: list[TreeNode] = []
         self._unmanaged: list[dict] | None = None
 
@@ -182,7 +177,7 @@ class ParticipantTree(TreeMotion, TreeMenu, VerticalScroll):
 
     @property
     def selectable_keys(self) -> tuple[Key, ...]:
-        return tuple(key for _, _, key, _, _ in self._lines_data if _is_selectable_key(key))
+        return selectable_keys(self._lines_data)
 
     @property
     def tree_lines(self) -> list[RenderedLine]:
@@ -236,17 +231,14 @@ class ParticipantTree(TreeMotion, TreeMenu, VerticalScroll):
         self._menu_hidden = pending_spawn is not None  # the new agent's row is where to look
         self._participant_detail = "description" if participant_detail == "description" else "cwd"
         self._cwd_segments = cwd_segments
-        lines = self._render_lines()
+        opened = self._in_menu() and not self._menu_hidden
+        preferred = ("p", selected_id) if selected_id is not None else None
+        lines = self._settle_lines(self._render_lines(opened), opened, preferred, old_index)
         self._observe_statuses(projection)
         self._observe_marks(marks or {})
-        self._sync_retirement(projection)
-        self._lines_data = lines
-        self._revision += 1
+        self._sync_retirement(projection)  # on the rows still shown, before the new ones
         self._stale = projection.stale
-        self._reconcile(lines)
-        self._settle_selection(selected_id, old_index)
-        if self._in_menu() != self._menu_built_open:  # the settled cursor entered or left the menu
-            self._rerender()
+        self._show_lines(lines)
         self._staged_id = staged_id
         self._staged_unmanaged_id = staged_unmanaged_id
         self._trajectory_id = trajectory_id
@@ -326,10 +318,8 @@ class ParticipantTree(TreeMotion, TreeMenu, VerticalScroll):
         self._cursor_visible = visible
         self._apply_selection()
 
-    def _render_lines(self) -> TreeLines:
+    def _render_lines(self, opened: bool) -> TreeLines:
         """The agents as rows, then the menu as one more root, open while the cursor is in it."""
-        opened = self._in_menu()
-        self._menu_built_open = opened
         menu = None
         if not self._menu_hidden and (self._tree_nodes or opened):
             menu = menu_nodes(self.menu_source(), self._menu_view, open=opened)
@@ -342,12 +332,14 @@ class ParticipantTree(TreeMotion, TreeMenu, VerticalScroll):
 
     def _rerender(self) -> None:
         """Draw the rows again from what the tree knows: the menu opened, closed or changed."""
-        lines = self._render_lines()
+        opened = self._in_menu() and not self._menu_hidden
+        self._show_lines(self._settle_lines(self._render_lines(opened), opened))
+        self._apply_selection()
+
+    def _show_lines(self, lines: TreeLines) -> None:
         self._lines_data = lines
         self._revision += 1
         self._reconcile(lines)
-        self._settle_selection(None, 0)  # a choice may have gone with the list that held it
-        self._apply_selection()
 
     def on_menu_row_clicked(self, message: MenuRow.Clicked) -> None:
         message.stop()

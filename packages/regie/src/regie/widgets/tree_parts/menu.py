@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 
 from regie.menu import ROOT_ID, MenuView
-from regie.render.layout import Key
+from regie.render.layout import Key, RenderedLine, TreeLines
 from regie.widgets.menu_row import MenuRow
 from regie.widgets.tree_parts._host import _TreeBase
 
@@ -13,6 +14,28 @@ from regie.widgets.tree_parts._host import _TreeBase
 def _is_menu_key(key: Key | None) -> bool:
     """Whether a row belongs to the options menu closing the tree."""
     return key is not None and key[0] in {"g", "m"}
+
+
+def _is_selectable_key(key: Key) -> bool:
+    return key[0] in {"p", "s", "u", "g", "m"}
+
+
+def selectable_keys(lines: Sequence[RenderedLine]) -> tuple[Key, ...]:
+    return tuple(key for _, _, key, _, _ in lines if _is_selectable_key(key))
+
+
+def settle(
+    keys: Sequence[Key], current: Key | None, preferred: Key | None, old_index: int
+) -> Key | None:
+    """Keep the cursor on a row that exists; never fall into the menu when an agent remains."""
+    if current in keys:
+        return current
+    if preferred in keys:
+        return preferred
+    if _is_menu_key(current) and any(_is_menu_key(key) for key in keys):
+        return ("g", ROOT_ID)  # an option went away: back to the menu's root
+    rows = [key for key in keys if not _is_menu_key(key)] or list(keys)
+    return rows[min(old_index, len(rows) - 1)] if rows else None
 
 
 class TreeMenu(_TreeBase):
@@ -49,33 +72,33 @@ class TreeMenu(_TreeBase):
         if entered or left:
             self._rerender()
 
-    def _settle_selection(self, selected_id: str | None, old_index: int) -> None:
-        """Keep the cursor on a row that exists; never fall into the menu when an agent remains."""
-        keys = self.selectable_keys
-        if self._selected_key in keys:
-            return
-        preferred = ("p", selected_id) if selected_id is not None else None
-        rows = [key for key in keys if not _is_menu_key(key)] or list(keys)
-        if preferred in keys:
-            self._selected_key = preferred
-        elif _is_menu_key(self._selected_key) and any(_is_menu_key(key) for key in keys):
-            self._selected_key = ("g", ROOT_ID)  # an option went away: back to the menu's root
-        else:
-            self._selected_key = rows[min(old_index, len(rows) - 1)] if rows else None
+    def _settle_lines(
+        self, lines: TreeLines, opened: bool, preferred: Key | None = None, old_index: int = 0
+    ) -> TreeLines:
+        """Settle the cursor on *lines*, drawn with the menu *opened*; redraw them once if the
+        settled cursor entered or left the menu. The cursor moves; what the menu had open stays."""
+        self._selected_key = settle(
+            selectable_keys(lines), self._selected_key, preferred, old_index
+        )
+        return lines if self._in_menu() == opened else self._render_lines(not opened)
 
     def open_menu(self, option: str | None = None) -> None:
         """Put the cursor in the menu: on its root, or on the first choice of *option*, unfolded."""
         if self._menu_hidden:  # a new agent is asking for its directory
             return
-        if option is not None:
-            self._menu_view = replace(self._menu_view, expanded=self._menu_view.expanded | {option})
-        self._set_selected(("g", ROOT_ID))
-        if option is not None:
-            self._rerender()
-            first = next(
-                (key for key in self.selectable_keys if key[1].startswith(f"{option}/")), None
-            )
-            self._set_selected(first or ("m", option))
+        if option is None:
+            self._set_selected(("g", ROOT_ID))
+            self._apply_selection()
+            return
+        self._menu_view = replace(self._menu_view, expanded=self._menu_view.expanded | {option})
+        if not self._in_menu():
+            self._menu_return = self._selected_key
+        lines = self._render_lines(True)  # the menu's rows read what it was entered from
+        first = next(
+            (key for key in selectable_keys(lines) if key[1].startswith(f"{option}/")), None
+        )
+        self._selected_key = first or ("m", option)
+        self._show_lines(self._settle_lines(lines, True))
         self._apply_selection()
 
     def close_menu(self) -> Key | None:
