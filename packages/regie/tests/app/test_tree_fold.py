@@ -71,10 +71,10 @@ async def test_space_on_an_agent_with_nothing_below_it_does_nothing(tmp_path: Pa
         tree = app.query_one(ParticipantTree)
         await wait_until(pilot, lambda: len(tree.participant_ids) == 5)
         tree.select("participant-5")
+        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-5")
+        revision = tree.revision
         await pilot.press("space")
-        ticks: list[bool] = []
-        app.set_timer(0.05, lambda: ticks.append(True))
-        await wait_until(pilot, lambda: bool(ticks))
+        assert tree.revision == revision
         assert len(tree.participant_ids) == 5 and not path.exists()
 
 
@@ -199,7 +199,9 @@ async def test_an_await_on_a_folded_agent_still_changes_the_waiters_glyph(tmp_pa
 
         app._animate_bus_row(event("job.await.start"))
         await wait_until(pilot, lambda: waiter._waiting is not None)
-        await wait_until(pilot, lambda: _row(waiter).lstrip("└├│─ ")[:1] in REGIE_WAITING_FRAMES)
+        await wait_until(
+            pilot, lambda: _row(waiter).lstrip("└├│─ ")[:1] in set(REGIE_WAITING_FRAMES)
+        )
         assert _row(waiter).lstrip("└├│─ ")[0] in REGIE_WAITING_FRAMES  # the waiting glyph
         assert boss._awaited  # the fold that hides the target says it is being waited on
 
@@ -238,7 +240,7 @@ async def test_a_parent_awaiting_its_folded_child_shows_the_waiting_glyph_and_ke
         app._animate_bus_row(event("job.await.start"))
         await wait_until(pilot, lambda: parent._waiting is not None)
         await wait_until(
-            pilot, lambda: _row(parent).lstrip("└├│─┢┡┠━┃┗┏ ")[:1] in REGIE_WAITING_FRAMES
+            pilot, lambda: _row(parent).lstrip("└├│─┢┡┠━┃┗┏ ")[:1] in set(REGIE_WAITING_FRAMES)
         )
         assert _row(parent).lstrip("└├│─┢┡┠━┃┗┏ ")[0] in REGIE_WAITING_FRAMES
 

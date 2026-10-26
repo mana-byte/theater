@@ -139,7 +139,7 @@ async def test_an_await_marks_both_its_ends_until_it_finishes() -> None:
         await wait_until(
             pilot,
             lambda: (
-                render_text(waiter)[:1] in REGIE_WAITING_FRAMES
+                render_text(waiter)[:1] in set(REGIE_WAITING_FRAMES)
                 and render_text(target).startswith("▏")
             ),
         )
@@ -174,10 +174,9 @@ async def test_reduced_motion_sends_no_comet_and_flashes_nothing() -> None:
         await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
 
         app._animate_bus_row(_await_row("agent.send"))
-        ticks: list[bool] = []
-        app.set_timer(0.3, lambda: ticks.append(True))
-        await wait_until(pilot, lambda: bool(ticks))
+        app._tick_route_animations()
         assert not app._animation.has_active()
+        assert app._animation_timer is None
         assert _leaf(tree, "participant-2")._wipe is None
 
 

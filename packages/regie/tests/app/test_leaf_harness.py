@@ -152,10 +152,12 @@ async def test_a_name_that_fits_never_starts_a_scroll() -> None:
         tree = app.query_one(ParticipantTree)
         await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
         tree.select("participant-2")
-        ticks: list[bool] = []
-        app.set_timer(0.3, lambda: ticks.append(True))
-        await wait_until(pilot, lambda: bool(ticks))
-        assert _leaf(tree, "participant-2")._marquee_sub is None
+        leaf = _leaf(tree, "participant-2")
+        await wait_until(
+            pilot,
+            lambda: tree.selected_participant_id == "participant-2" and "codex" in _row(leaf),
+        )
+        assert leaf._marquee_sub is None
 
 
 async def test_renaming_a_long_name_keeps_one_line_and_the_editor_inside_the_row() -> None:

@@ -109,9 +109,7 @@ async def test_a_failure_stops_asking_once_the_cursor_has_rested_on_it(monkeypat
         await wait_until(pilot, lambda: "✗" in _rows(leaf)[1])
 
         tree.select("participant-1")
-        ticks: list[bool] = []
-        app.set_timer(0.2, lambda: ticks.append(True))
-        await wait_until(pilot, lambda: bool(ticks))
+        assert tree._seen_pending is None and tree._seen_timer is None
         assert "✗" in _rows(leaf)[1]  # not looked at yet: it stays
 
         tree.select("participant-2")
