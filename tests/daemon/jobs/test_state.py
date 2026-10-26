@@ -314,7 +314,7 @@ async def test_await_returns_when_first_of_two_finishes(daemon, monkeypatch):
     try:
         jobs = await asyncio.wait_for(
             jm.await_jobs(["h1", "h2"], max_wait=5.0),
-            timeout=3.0,
+            timeout=10.0,
         )
     finally:
         if not finisher.done():

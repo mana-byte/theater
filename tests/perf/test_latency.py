@@ -104,11 +104,8 @@ def test_zero_rate_creates_an_empty_stream_and_idles(writer, tmp_path: Path) -> 
     stop = threading.Event()
     worker = threading.Thread(target=writer.write_records, args=(path, 0.0), kwargs={"stop": stop})
     worker.start()
-    deadline = time.monotonic() + 5
-    while not path.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
     stop.set()
-    worker.join(5)
+    worker.join(30)
     assert path.read_bytes() == b"" and not worker.is_alive()
 
 

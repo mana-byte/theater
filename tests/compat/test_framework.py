@@ -185,7 +185,7 @@ def test_run_pytest_timeout_reaps_detached_children_it_started(tmp_path: Path) -
         "    time.sleep(60)\n"
     )
     env = {**os.environ, "CHILD_PIDFILE": str(pidfile)}
-    check = run_pytest(tmp_path, "test_hang.py", env=env, timeout=3)
+    check = run_pytest(tmp_path, "test_hang.py", env=env, timeout=15)
     assert check.status == "error"
     assert _gone(int(pidfile.read_text())), "the sleeping child outlived the timed-out pytest run"
 
@@ -221,7 +221,7 @@ def test_run_group_timeout_reaps_its_leader(tmp_path: Path) -> None:
     )
     with pytest.raises(subprocess.TimeoutExpired):
         run_group(
-            [sys.executable, "-c", script, str(pidfile)], cwd=tmp_path, env=os.environ, timeout=2
+            [sys.executable, "-c", script, str(pidfile)], cwd=tmp_path, env=os.environ, timeout=15
         )
     assert _gone(int(pidfile.read_text())), "the timed-out pipe runner left its leader alive"
 

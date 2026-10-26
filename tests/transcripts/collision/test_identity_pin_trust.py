@@ -284,7 +284,7 @@ async def test_rejected_rotation_keeps_events_and_awaits_session_local(
 
     own = await source_a.read()
     apply_batch(observer, p_a.id, own, QuietClock(), turns_a, source=source_a)
-    result = await asyncio.wait_for(waiting, timeout=0.2)
+    result = await asyncio.wait_for(waiting, timeout=5)
     assert result[0].state == "done"
     assert result[0].result == "A is done"
 

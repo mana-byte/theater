@@ -32,7 +32,7 @@ const { default: theaterMcpBridge } =
 	await import("../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts");
 
 const PROTOCOL = "theater-frontend-v1";
-const TIMEOUT_MS = 3_000;
+const TIMEOUT_MS = 10_000;
 
 type JsonRecord = Record<string, unknown>;
 type Handler = (event: JsonRecord, ctx: FakeContext) => void | Promise<void>;

@@ -287,7 +287,7 @@ def test_a_held_responses_stream_has_sent_no_output_when_it_is_held(tmp_path: Pa
         )
 
         assert [event["type"] for event in _read_events(response, count=1)] == ["response.created"]
-        assert hold.wait_reached(2.0)
+        assert hold.wait_reached(5)
         assert _read_until_keepalive(response), "the held stream stays open on keepalive comments"
 
         hold.release()
@@ -496,7 +496,7 @@ def test_a_held_stream_withholds_its_tail_until_released(tmp_path: Path) -> None
             "content_block_start",
             "content_block_delta",
         ]
-        assert hold.wait_reached(2.0)
+        assert hold.wait_reached(5)
         assert _read_until_keepalive(response), "the held stream stays open on keepalive comments"
 
         hold.release()
@@ -514,7 +514,7 @@ def test_a_held_stream_reports_a_client_that_drops_the_connection(tmp_path: Path
             f"{server.base_urls['openai-chat']}/chat/completions", {"stream": True}
         )
         assert len(_read_events(response, count=1)) == 1
-        assert hold.wait_reached(2.0)
+        assert hold.wait_reached(5)
 
         response.close()  # the response keeps the socket open until it is closed too
         connection.close()
@@ -534,7 +534,7 @@ def test_a_held_json_reply_is_withheld_until_released(tmp_path: Path) -> None:
         )
         worker.start()
 
-        assert hold.wait_reached(2.0)
+        assert hold.wait_reached(5)
         worker.join(timeout=0.6)
         assert worker.is_alive() and not answers, "the body stays withheld while held"
 

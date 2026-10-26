@@ -13,6 +13,7 @@ import pytest
 from tests.support.opencode_recorder import SCHEMA
 from tests.support.opencode_recorder import rec as shared_rec
 from tests.support.shipped import OpenCodeHarness, OpenCodeObserver
+from tests.support.waiting import wait_until
 from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient
@@ -49,17 +50,15 @@ def _attach(source):
 
 
 async def _wait_for_exact_attachment(daemon: Daemon, participant_id: str, session_id: str) -> None:
-    deadline = asyncio.get_running_loop().time() + 3.0
-    while asyncio.get_running_loop().time() < deadline:
+    def attached() -> bool:
         participant = daemon.store.get_participant(participant_id)
-        if (
+        return (
             participant is not None
             and participant.session_id == session_id
             and participant.transcript_location == f"opencode://{session_id}"
-        ):
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"{participant_id} did not attach opencode://{session_id}")
+        )
+
+    await wait_until(attached, what=f"{participant_id} attaching opencode://{session_id}")
 
 
 def test_launch_uses_a_core_owned_generic_receipt_token(

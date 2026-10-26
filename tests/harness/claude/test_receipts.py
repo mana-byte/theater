@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from pathlib import Path
@@ -21,6 +20,7 @@ from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.source import Batch, TranscriptSource
 from theater.protocol import RemoteError
 from theater.provenance import TranscriptProvenance
+from theater.transcript_identity import TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
 
 
 def _transcript(root: Path, session_id: str, cwd: Path, *, project: str = "project") -> Path:
@@ -129,7 +129,16 @@ async def test_claude_initial_receipt_waits_for_first_message(
 
     assert result["admission"] == "staged"
     assert await until(lambda: participant.id in daemon.observer._sources)
-    await asyncio.sleep(0.1)
+    # Wait until the observer has read the attached source and seen it waiting for
+    # the first message, so the negatives below cover a real observation cycle.
+    assert await until(
+        lambda: (
+            participant.id in daemon.observer._pending_transcripts
+            or daemon.observer._failures.has_source_error(
+                participant.id, TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
+            )
+        )
+    )
     assert not daemon.observer.transcript_identity_lost(participant.id)
     assert daemon.store.get_participant(participant.id).transcript_location is None
 

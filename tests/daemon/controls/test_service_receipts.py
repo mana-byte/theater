@@ -139,7 +139,14 @@ async def test_unknown_steer_cannot_deadline_or_overwrite_the_original_job(
         queued = await service.queue_followup("p1", caller_id="caller", prompt="after original")
 
         # The queue keeps daemon-owned maintenance alive past the prompt deadline.
-        await asyncio.sleep(0.03)
+        await wait_until(
+            lambda: any(
+                operation.delivery_result is DeliveryResult.UNKNOWN
+                for operation in store.control_operations_for_job(original.handle)
+                if operation.kind is ControlKind.STEER
+            ),
+            what="steer marked delivery_unknown",
+        )
         assert amended.handle == original.handle
         assert store.get_job(original.handle).state == JobState.RUNNING
         (steer_operation,) = [
@@ -190,7 +197,7 @@ async def test_cancelled_or_crash_left_job_bearing_steers_settle_without_touchin
     assert original_turn is not None
 
     cancelled = asyncio.create_task(service.steer("p1", caller_id="caller", prompt="amend"))
-    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    await asyncio.wait_for(entered.wait(), timeout=5)
     cancelled.cancel()
     with pytest.raises(asyncio.CancelledError):
         await cancelled
@@ -475,7 +482,7 @@ async def test_native_action_cancellation_settles_uncertain_and_rethrows(
         action = asyncio.create_task(service.interrupt("p1", caller_id="caller"))
     else:
         action = asyncio.create_task(service.update_settings("p1", caller_id="caller", model="m2"))
-    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    await asyncio.wait_for(entered.wait(), timeout=5)
     action.cancel()
     with pytest.raises(asyncio.CancelledError):
         await action

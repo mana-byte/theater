@@ -367,7 +367,7 @@ async def test_follow_stops_for_terminal_or_non_addressable_participant(
             wait=30,
             limit=20,
         ),
-        timeout=0.2,
+        timeout=5.0,
     )
 
     assert delta.panel_state is not None

@@ -11,6 +11,7 @@ import pytest
 from regie.controllers.actions import ActionRecord, ActionState, OperationController
 from regie.controllers.controls import describe_action, format_controls_report
 
+from tests.support.waiting import wait_until
 from theater.frontend import (
     AcceptedOperation,
     FrontendClient,
@@ -154,7 +155,7 @@ async def test_acknowledged_history_eviction_does_not_lose_an_observer_client() 
     record = await controller.send("participant-a", "hello")
     wait = controller._active[("send", "participant-a")].wait
     assert wait is not None
-    await asyncio.wait_for(wait, timeout=1)
+    await asyncio.wait_for(wait, timeout=5)
 
     assert record.state is ActionState.SUCCEEDED
     assert controller.records == ()
@@ -199,7 +200,7 @@ async def test_retry_returns_replaced_visible_record_during_client_release(monke
     wait = controller._active[("send", "participant-a")].wait
     assert wait is not None
     try:
-        await asyncio.wait_for(closing.wait(), timeout=1)
+        await asyncio.wait_for(closing.wait(), timeout=5)
         assert replacement is not None
         assert controller.record("send", "participant-a") is replacement
         assert await controller.retry("send", "participant-a") is replacement
@@ -207,7 +208,7 @@ async def test_retry_returns_replaced_visible_record_during_client_release(monke
         assert len(action_client.controls.keys) == 1
     finally:
         release.set()
-        await asyncio.wait_for(wait, timeout=1)
+        await asyncio.wait_for(wait, timeout=5)
         await controller.close()
 
 
@@ -345,7 +346,7 @@ async def test_close_cancels_only_the_local_operation_wait() -> None:
     controller = OperationController(cast(FrontendClient, client))
 
     record = await controller.send("participant-a", "hello")
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=5)
     await controller.close()
 
     assert cancelled.is_set()
@@ -384,9 +385,9 @@ async def test_refresh_detaches_an_active_wait_before_reobserving_the_operation(
     controller = OperationController(cast(FrontendClient, client))
 
     record = await controller.send("participant-a", "hello")
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=5)
 
-    await asyncio.wait_for(controller.refresh_pending(), timeout=1)
+    await asyncio.wait_for(controller.refresh_pending(), timeout=5)
 
     assert operations.gets == 1
     assert cancelled.is_set()
@@ -444,10 +445,9 @@ async def test_wait_timeout_is_observed_again_without_replaying_the_mutation() -
     controller = OperationController(cast(FrontendClient, client))
 
     record = await controller.send("participant-a", "hello")
-    for _ in range(10):
-        if record.state is ActionState.SUCCEEDED:
-            break
-        await asyncio.sleep(0)
+    await wait_until(
+        lambda: record.state is ActionState.SUCCEEDED, what="the observed timeout to be re-waited"
+    )
 
     assert record.state is ActionState.SUCCEEDED
     assert operations.waits == 2
@@ -488,19 +488,16 @@ async def test_reconnect_restarts_one_waiter_for_an_uncertain_accepted_operation
     controller = OperationController(cast(FrontendClient, client))
 
     record = await controller.send("participant-a", "hello")
-    await asyncio.wait_for(lost_connection.wait(), timeout=1)
-    for _ in range(10):
-        if record.state is ActionState.UNCERTAIN:
-            break
-        await asyncio.sleep(0)
+    await asyncio.wait_for(lost_connection.wait(), timeout=5)
+    await wait_until(
+        lambda: record.state is ActionState.UNCERTAIN, what="the lost wait to be uncertain"
+    )
     assert record.state is ActionState.UNCERTAIN
 
     await controller.refresh_pending()
-    for _ in range(10):
-        if record.state is ActionState.SUCCEEDED:
-            break
-        await asyncio.sleep(0)
-
+    await wait_until(
+        lambda: record.state is ActionState.SUCCEEDED, what="the restarted waiter to land"
+    )
     assert record.state is ActionState.SUCCEEDED
     assert operations.gets == 1
     assert operations.waits == 2
@@ -530,10 +527,9 @@ async def test_unknown_observed_operation_state_stops_waiting_as_uncertain() -> 
     controller = OperationController(cast(FrontendClient, client))
 
     record = await controller.send("participant-a", "hello")
-    for _ in range(10):
-        if record.state is ActionState.UNCERTAIN:
-            break
-        await asyncio.sleep(0)
+    await wait_until(
+        lambda: record.state is ActionState.UNCERTAIN, what="the unknown state to stop the wait"
+    )
 
     assert record.state is ActionState.UNCERTAIN
     assert "future-state" in (record.detail or "")

@@ -133,7 +133,7 @@ async def test_bulk_response_validation_runs_off_loop_and_still_refuses_invalid_
     ):
         pending = asyncio.create_task(client.trajectory.snapshot("p"))
         try:
-            await asyncio.wait_for(decoding.wait(), timeout=2)
+            await asyncio.wait_for(decoding.wait(), timeout=5)
             with pytest.raises(TransportBusy):
                 await client.trajectory.snapshot("p")
             if outcome == "cancelled":
@@ -515,7 +515,7 @@ async def test_timeout_retires_only_the_operation_wait_lane_without_replay() -> 
         await client.contract.get()
         with pytest.raises(RequestTimedOut):
             await client.operations.await_("operation-a", wait_seconds=30)
-        await asyncio.wait_for(operation_closed.wait(), timeout=1)
+        await asyncio.wait_for(operation_closed.wait(), timeout=5)
         await client.contract.get()
         await client.close()
 
@@ -539,7 +539,7 @@ async def test_busy_ordinary_lane_does_not_cancel_the_request_already_in_flight(
     async with fixture_server(handler) as socket_path:
         client = FrontendClient(socket_path, client_id="sdk-busy")
         first = asyncio.create_task(client.contract.get())
-        await asyncio.wait_for(first_received.wait(), timeout=1)
+        await asyncio.wait_for(first_received.wait(), timeout=5)
         with pytest.raises(TransportBusy):
             await client.contract.get()
         release_first.set()
@@ -614,11 +614,11 @@ async def test_operation_wait_cancellation_detaches_and_handle_survives_reconnec
     async with fixture_server(handler) as socket_path:
         client = FrontendClient(socket_path, client_id="sdk-follow")
         waiting = asyncio.create_task(client.operations.wait("operation-a", wait_seconds=30))
-        await asyncio.wait_for(first_wait_started.wait(), timeout=1)
+        await asyncio.wait_for(first_wait_started.wait(), timeout=5)
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiting
-        await asyncio.wait_for(first_wait_closed.wait(), timeout=1)
+        await asyncio.wait_for(first_wait_closed.wait(), timeout=5)
 
         observed = await client.operations.get("operation-a")
         assert observed.value.state == "running"

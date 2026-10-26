@@ -10,6 +10,7 @@ from tests.support.codex_server import (
     open_new,
     thread_started,
 )
+from tests.support.waiting import wait_until
 from theater.harness.contracts.channels import ChannelHealthState
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -76,7 +77,7 @@ async def test_settings_are_idle_only() -> None:
             params={"threadId": "ui-thread-1", "turn": {"id": "turn-5", "status": "inProgress"}},
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: runtime._active_turn_id == "turn-5", what="turn 5 to start")
     receipt = await runtime.update_settings(operation_id="op-12", model="gpt-5.2")
     assert receipt.result is DeliveryResult.REJECTED
     assert receipt.error_code == "session_busy"
@@ -119,7 +120,10 @@ async def test_settings_are_confirmed_by_the_applied_broadcast_when_readback_car
         task = asyncio.create_task(
             runtime.update_settings(operation_id=operation_id, reasoning_effort="medium")
         )
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: server.requested("thread/settings/update"),
+            what="settings update request in flight",
+        )
         server.push(
             RuntimeNotification(
                 method="thread/settings/updated",
@@ -144,7 +148,10 @@ async def test_settings_are_confirmed_by_the_applied_broadcast_when_readback_car
     task = asyncio.create_task(
         runtime.update_settings(operation_id="op-mixed", model="m", reasoning_effort="medium")
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: server.requested("thread/settings/update"),
+        what="settings update request in flight",
+    )
     server.push(
         RuntimeNotification(
             method="thread/settings/updated",
@@ -203,7 +210,13 @@ async def test_external_own_thread_settings_update_adopts_into_snapshot() -> Non
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: (
+            runtime._settings.model == "gpt-5.6-sol"
+            and runtime._settings.reasoning_effort == "high"
+        ),
+        what="own-thread settings adopted",
+    )
     snapshot = await runtime.snapshot()
     assert snapshot.settings.model == "gpt-5.6-sol"
     assert snapshot.settings.reasoning_effort == "high"
@@ -218,7 +231,7 @@ async def test_external_own_thread_settings_update_adopts_into_snapshot() -> Non
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="foreign settings update consumed")
     snapshot = await runtime.snapshot()
     assert snapshot.settings.model == "gpt-5.6-sol"
     assert snapshot.settings.reasoning_effort == "high"

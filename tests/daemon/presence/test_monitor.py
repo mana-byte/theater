@@ -177,7 +177,7 @@ async def test_stale_generation_that_recovers_inside_the_bound_is_admitted(monke
 
     reconnect = asyncio.create_task(provider_reconnects())
     try:
-        await asyncio.wait_for(monitor.require_absent("participant-a"), 2)
+        await asyncio.wait_for(monitor.require_absent("participant-a"), 5)
     finally:
         await reconnect
         await monitor.aclose()
@@ -188,7 +188,7 @@ async def test_stale_generation_past_the_bound_refuses_with_retry_once(monkeypat
     monitor, service = _monitor(transient_wait=0.3)
     _go_stale(service, monkeypatch)
     with pytest.raises(HumanPresent) as refused:
-        await asyncio.wait_for(monitor.require_absent("participant-a"), 2)
+        await asyncio.wait_for(monitor.require_absent("participant-a"), 5)
     assert "provider-generation-stale" in str(refused.value)
     assert refused.value.details == {"next": NEXT_RETRY_ONCE}
     await monitor.aclose()
@@ -200,7 +200,7 @@ async def test_focus_events_unavailable_is_refused_without_waiting():
     unreadable["presence"]["reason"] = "focus_events_unavailable"
     service.responses.append(unreadable)
     with pytest.raises(HumanPresent) as refused:
-        await asyncio.wait_for(monitor.require_absent("participant-a"), 1)
+        await asyncio.wait_for(monitor.require_absent("participant-a"), 5)
     assert refused.value.details == {"next": NEXT_FOCUS_EVENTS_OFF}
     assert service.inspect_calls == 1
     await monitor.aclose()

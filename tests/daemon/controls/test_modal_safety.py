@@ -1,6 +1,5 @@
 """Provider prompt submission refuses dialogs and unproven screens."""
 
-import asyncio
 from dataclasses import replace
 
 import pytest
@@ -8,6 +7,7 @@ from sqlalchemy import text
 
 from tests.support.control_harness import Harness, make_runtime, state_of
 from tests.support.paths import fixture
+from tests.support.waiting import wait_until
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import SessionOpenMode
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
@@ -214,10 +214,10 @@ async def test_queued_followup_defers_then_recovers(daemon, terminal_provider, s
     terminal_provider.screens[terminal] = (SCREENS / "codex_idle.txt").read_text()
     # The daemon's own maintenance may win the recovery race; either way the
     # queued prompt is delivered exactly once and the queue drains.
-    for _ in range(200):
-        if terminal_provider.deliveries:
-            break
-        await asyncio.sleep(0.005)
+    await wait_until(
+        lambda: terminal_provider.deliveries == [(terminal, "Then do this")],
+        what="queued followup delivered",
+    )
 
     assert terminal_provider.deliveries == [(terminal, "Then do this")]
     assert daemon.store.queued_control_operations(participant.id) == []

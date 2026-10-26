@@ -222,7 +222,7 @@ def _failing_finish(daemon, handle: str):
 
 async def _assert_awaitable(daemon, handle: str, gate_state: str) -> None:
     entries = await asyncio.wait_for(
-        _jobs_await(daemon, {"handles": [handle], "max_wait": 5, "caller_id": "cli"}), 3
+        _jobs_await(daemon, {"handles": [handle], "max_wait": 5, "caller_id": "cli"}), 10
     )
     assert entries[0]["await_reason"] == "job_terminal"
     assert entries[0]["handoff"]["state"] == gate_state

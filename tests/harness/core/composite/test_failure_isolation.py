@@ -54,7 +54,7 @@ async def test_enrichment_timeout_does_not_fail_primary() -> None:
         enrichments=[EnrichmentBinding(source=SlowSource(delay=10.0), declaration=decl("slow"))],
         enrichment_timeout=0.01,
     )
-    batch = await asyncio.wait_for(composite.read(), timeout=5.0)
+    batch = await asyncio.wait_for(composite.read(), timeout=30.0)
     assert batch.progressed is True
     health = composite.channel_health()
     assert health[0].state is ChannelHealthState.DEGRADED

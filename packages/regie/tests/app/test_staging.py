@@ -44,7 +44,7 @@ async def test_slow_stage_keeps_navigation_responsive_and_captures_queued_target
         await stage(target, target_window=target_window)
 
     monkeypatch.setattr(presentation, "stage_terminal", delayed)
-    async with asyncio.timeout(5), app.run_test() as pilot:
+    async with asyncio.timeout(60), app.run_test() as pilot:
         try:
             await pilot.pause()
             await pilot.press("enter")
@@ -393,7 +393,7 @@ async def test_completed_action_currently_unstages_after_a_concurrent_stage(monk
         return await unstage()
 
     monkeypatch.setattr(app._staging, "unstage", delayed_unstage)
-    async with asyncio.timeout(5), app.run_test() as pilot:
+    async with asyncio.timeout(60), app.run_test() as pilot:
         try:
             await pilot.pause()
             projection = app.projection

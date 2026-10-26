@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from tests.support.codex_native_items import completed_item
 from tests.support.codex_server import (
     ScriptedCodexServer,
@@ -11,6 +9,7 @@ from tests.support.codex_server import (
     open_new,
     summary_turn_completed,
 )
+from tests.support.waiting import wait_until
 from theater.harness.builtin.plugins.codex import runtime_constants as codex_runtime_constants
 from theater.harness.builtin.plugins.codex.runtime_messages import _item_summary
 from theater.harness.contracts.runtime import (
@@ -50,7 +49,9 @@ async def test_result_at_contract_bound_stays_complete() -> None:
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 1, what="terminal outcome to land"
+    )
     outcome = (await source.read()).terminal_evidence[0]
     assert len(outcome.result) == HARNESS_RUNTIME_RESULT_MAX_CHARS
     assert outcome.completeness.value == "complete"
@@ -78,7 +79,9 @@ async def test_result_over_contract_bound_is_bounded_and_partial() -> None:
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 1, what="terminal outcome to land"
+    )
     outcome = (await source.read()).terminal_evidence[0]
     # The stored result is bounded at the contract limit and its
     # completeness is downgraded — never COMPLETE for a truncated result.
@@ -108,7 +111,9 @@ async def test_oversized_native_turn_error_is_bounded_not_fatal() -> None:
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 1, what="failed turn outcome to land"
+    )
     snapshot = await runtime.snapshot()
     assert snapshot.health is ConnectionHealth.CONNECTED
     batch = await source.read()
@@ -140,7 +145,9 @@ async def test_interrupted_turn_error_text_is_kept_without_a_failure_code() -> N
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 1, what="interrupted outcome to land"
+    )
     outcome = (await source.read()).terminal_evidence[0]
     assert outcome.terminal.value == "interrupted"
     assert outcome.error == "stopped by the user"
@@ -158,7 +165,9 @@ async def test_summary_view_final_agent_message_is_exact_complete_evidence() -> 
             items=[{"id": "i-final", "type": "agentMessage", "text": "exact final answer"}],
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 1, what="summary outcome to land"
+    )
     (outcome,) = (await source.read()).terminal_evidence
     assert outcome.native_turn_id == "turn-sum"
     assert outcome.terminal.value == "completed"
@@ -184,7 +193,9 @@ async def test_summary_view_without_agent_message_invents_no_result() -> None:
             ],
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 2, what="both summary outcomes to land"
+    )
     outcomes = (await source.read()).terminal_evidence
     assert [outcome.result for outcome in outcomes] == [None, None]
     assert [outcome.completeness.value for outcome in outcomes] == [
@@ -218,7 +229,9 @@ async def test_not_loaded_view_is_never_promoted() -> None:
             items=[{"id": "i-agent", "type": "agentMessage", "text": "untrusted text"}],
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 2, what="both outcomes to land"
+    )
     outcomes = (await source.read()).terminal_evidence
     assert [outcome.native_turn_id for outcome in outcomes] == [
         "turn-failed",
@@ -251,7 +264,9 @@ async def test_unknown_and_malformed_item_views_are_never_promoted() -> None:
             items=[{"id": "i-agent", "type": "agentMessage", "text": "more text"}],
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 2, what="both outcomes to land"
+    )
     outcomes = (await source.read()).terminal_evidence
     # Unknown and malformed views are not the verified summary shape: no
     # promotion, the text stays partial live-stream evidence.
@@ -281,7 +296,9 @@ async def test_summary_view_failed_and_interrupted_semantics_stay_partial() -> N
             items=[{"id": "i-agent", "type": "agentMessage", "text": "cut short"}],
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 2, what="both outcomes to land"
+    )
     outcomes = (await source.read()).terminal_evidence
     assert [outcome.terminal.value for outcome in outcomes] == ["failed", "interrupted"]
     assert all(outcome.completeness.value == "partial" for outcome in outcomes)
@@ -301,7 +318,9 @@ async def test_oversized_summary_result_stays_bounded_and_partial() -> None:
             items=[{"id": "i-final", "type": "agentMessage", "text": oversized}],
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 1, what="summary outcome to land"
+    )
     (outcome,) = (await source.read()).terminal_evidence
     # The narrow promotion holds for the exact message, but the stored result is bounded at the
     # contract limit and downgraded — never COMPLETE for a truncated result.
@@ -361,7 +380,7 @@ async def test_reconcile_summary_result_is_partial_evidence_once() -> None:
             items=[{"id": "i-agent", "type": "agentMessage", "text": "recovered final answer"}],
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="replayed completion consumed")
     replay = await source.read()
     assert replay.terminal_evidence == ()
     await runtime.aclose()
@@ -405,7 +424,7 @@ async def test_reconcile_summary_without_result_invents_nothing() -> None:
             items=[{"id": "i-agent", "type": "agentMessage", "text": "late arrival"}],
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="late completion consumed")
     replay = await source.read()
     assert replay.terminal_evidence == ()
     await runtime.aclose()
@@ -429,7 +448,9 @@ async def test_source_terminal_evidence_exact_and_once() -> None:
         },
     )
     server.push(turn_completed)
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 1, what="terminal outcome to land"
+    )
     batch = await source.read()
     assert len(batch.terminal_evidence) == 1
     outcome = batch.terminal_evidence[0]
@@ -441,7 +462,7 @@ async def test_source_terminal_evidence_exact_and_once() -> None:
     assert outcome.provenance.value == "native_evidence"
     # Replayed turn/completed never repeats terminal evidence.
     server.push(turn_completed)
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="replayed completion consumed")
     replay = await source.read()
     assert replay.terminal_evidence == ()
     await runtime.aclose()
@@ -463,7 +484,7 @@ async def test_status_broadcasts_never_create_terminal_evidence() -> None:
             params={"threadId": "ui-thread-1", "status": {"type": "idle"}},
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: runtime._status_hint is Status.IDLE, what="idle status broadcast")
     batch = await source.read()
     assert batch.terminal_evidence == ()
     assert batch.status is Status.IDLE
@@ -498,7 +519,9 @@ async def test_delta_previews_are_coalesced_and_bounded() -> None:
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: bool(runtime._preview_buffer._items), what="delta previews to accumulate"
+    )
     batch = await source.read()
     previews = [fact for fact in batch.trajectory if fact.kind is TrajectoryKind.ASSISTANT]
     assert len(previews) == 1
@@ -572,7 +595,7 @@ async def test_native_cumulative_usage_never_becomes_response_usage() -> None:
         )
     )
     server.push(completed_item("i-agent", item_type="agentMessage"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: len(runtime._events) == 1, what="completed item to land")
     batch = await source.read()
     assert all(event.usage is None for event in batch.events)
     assert batch.terminal_evidence == ()
@@ -598,7 +621,7 @@ async def test_tool_shaped_items_become_bounded_trajectory_facts() -> None:
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: len(runtime._facts) == 1, what="tool fact to land")
     batch = await source.read()
     tool_facts = [fact for fact in batch.trajectory if fact.kind is TrajectoryKind.TOOL_CALL]
     assert len(tool_facts) == 1
@@ -613,7 +636,10 @@ async def test_event_buffer_overflow_degrades_health_visibly() -> None:
     source = runtime.live_source()
     for index in range(codex_runtime_constants.CODEX_RUNTIME_EVENTS_BUFFER + 10):
         server.push(completed_item(f"i-{index}", item_type="agentMessage", text=f"m{index}"))
-    await asyncio.sleep(0.2)
+    await wait_until(
+        lambda: source.health_snapshot()[0].dropped > 0,
+        what="event buffer overflow to drop events",
+    )
     await source.read()
     health = source.health_snapshot()[0]
     assert health.dropped > 0

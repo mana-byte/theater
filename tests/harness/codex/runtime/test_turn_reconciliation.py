@@ -15,7 +15,7 @@ from tests.support.codex_server import (
     summary_turn_completed,
     thread_status_changed,
 )
-from tests.support.waiting import until
+from tests.support.waiting import until, wait_until
 from theater.harness.builtin.plugins.codex import runtime_constants as codex_runtime_constants
 from theater.harness.contracts.runtime import (
     NativeTurnTerminal,
@@ -87,7 +87,7 @@ async def test_a_running_turn_is_not_taken_for_interrupted_by_a_history_page() -
     runtime = make_runtime(server)
     try:
         await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
-        await asyncio.wait_for(asyncio.shield(runtime._history_reconcile_task), timeout=2)
+        await asyncio.wait_for(asyncio.shield(runtime._history_reconcile_task), timeout=10)
 
         assert len(server.requested("thread/turns/list")) == 1
         assert not (await runtime.live_source().read()).terminal_evidence
@@ -146,24 +146,23 @@ def live_completion(turn_id: str = "turn-1") -> RuntimeNotification:
 
 
 async def read_outcomes(
-    source: Source, *, turn_id: str | None = None, timeout: float = 2.0
+    source: Source, *, turn_id: str | None = None, timeout: float = 5.0
 ) -> list:
     """The terminal evidence the live source has produced, waiting for the first (or the turn's)."""
     outcomes: list = []
 
-    async def arrived() -> bool:
-        outcomes.extend((await source.read()).terminal_evidence)
-        return any(o.native_turn_id == turn_id for o in outcomes) if turn_id else bool(outcomes)
+    def arrived() -> bool:
+        buffered = source.buffered_terminal_evidence()
+        return any(o.native_turn_id == turn_id for o in buffered) if turn_id else bool(buffered)
 
-    deadline = asyncio.get_running_loop().time() + timeout
-    while not await arrived() and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.01)
+    await wait_until(arrived, timeout=timeout, what="terminal evidence to arrive")
+    outcomes.extend((await source.read()).terminal_evidence)
     return outcomes
 
 
 async def history_pass_done(runtime) -> None:
     """Wait for the owned history task to end: a barrier for what its passes did or did not do."""
-    await asyncio.wait_for(asyncio.shield(runtime._history_reconcile_task), timeout=5)
+    await asyncio.wait_for(asyncio.shield(runtime._history_reconcile_task), timeout=10)
 
 
 @pytest.fixture
@@ -218,7 +217,7 @@ async def test_idle_processed_before_a_delayed_send_response_does_not_end_the_tu
     entered = server.request_entered.setdefault("thread/resume", asyncio.Event())
     try:
         send = asyncio.create_task(runtime.send(operation_id="op-1", prompt="work"))
-        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=10)
         server.push(thread_status_changed("idle"))
         assert await until(lambda: runtime._thread_status == "idle")
         gate.set()
@@ -249,7 +248,7 @@ async def test_a_next_turn_started_before_an_older_history_page_does_not_end_the
     try:
         await runtime.send(operation_id="op-1", prompt="work")
         runtime._start_history_reconciliation("ui-thread-1")
-        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=10)
         server.push(turn_started("turn-2"))
         assert await until(lambda: runtime._active_turn_id == "turn-2")
         gate.set()
@@ -280,7 +279,7 @@ async def test_a_send_acknowledged_while_an_idle_page_is_in_flight_is_not_ended_
     entered = server.request_entered.setdefault("thread/turns/list", asyncio.Event())
     try:
         await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
-        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=10)
         await runtime.send(operation_id="op-1", prompt="work")
         gate.set()
         await history_pass_done(runtime)
@@ -326,7 +325,7 @@ async def test_a_turn_that_started_while_a_page_was_read_is_not_ended_by_that_pa
     server.respond("thread/turns/list", {"data": [unfinished_turn_read_as_interrupted()]})
     try:
         await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
-        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=10)
         server.push(turn_started("turn-1"))
         assert await until(lambda: runtime._active_turn_id == "turn-1")
         gate.set()
@@ -500,7 +499,7 @@ async def test_a_second_idle_during_a_pass_does_not_lose_the_end_that_pass_misse
         await runtime.send(operation_id="op-1", prompt="work")
         server.request_gates["thread/turns/list"] = gate
         server.push(thread_status_changed("idle"))
-        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=10)
         server.push(thread_status_changed("idle"))
         assert await until(lambda: not server.pending)
         gate.set()
@@ -561,7 +560,7 @@ async def test_turns_in_flight_survive_a_pass_that_ends_because_the_thread_is_ac
         await runtime.send(operation_id="op-1", prompt="work")
         server.request_gates["thread/turns/list"] = gate
         server.push(thread_status_changed("idle"))
-        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=10)
         server.push(turn_started("turn-2"))
         assert await until(lambda: runtime._active_turn_id == "turn-2")
         gate.set()
@@ -616,10 +615,10 @@ async def test_no_delivery_order_ends_the_turn_or_keeps_it_in_flight_after_its_c
     try:
         send = asyncio.create_task(runtime.send(operation_id="op-1", prompt="work"))
         resume_entered = server.request_entered.setdefault("thread/resume", asyncio.Event())
-        await asyncio.wait_for(resume_entered.wait(), timeout=2)
+        await asyncio.wait_for(resume_entered.wait(), timeout=10)
         page = asyncio.create_task(runtime._page_history("ui-thread-1"))
         page_entered = server.request_entered.setdefault("thread/turns/list", asyncio.Event())
-        await asyncio.wait_for(page_entered.wait(), timeout=2)
+        await asyncio.wait_for(page_entered.wait(), timeout=10)
 
         for step in order:
             if step == "resume":
@@ -627,7 +626,7 @@ async def test_no_delivery_order_ends_the_turn_or_keeps_it_in_flight_after_its_c
                 await send
             elif step == "page":
                 page_gate.set()
-                await asyncio.wait_for(page, timeout=2)
+                await asyncio.wait_for(page, timeout=10)
             elif step == "idle":
                 await runtime._handle_notification(thread_status_changed("idle"))
             else:

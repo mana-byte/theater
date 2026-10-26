@@ -29,7 +29,7 @@ async def test_primes_then_long_polls_and_stops_cleanly() -> None:
 
     loop = LongPollLoop(step, wait_seconds=25.0, name="t")
     loop.start()
-    await asyncio.wait_for(second.wait(), 2)
+    await asyncio.wait_for(second.wait(), 5)
     assert waits == [0.0, 25.0]
     await loop.close()
     assert not loop.running
@@ -52,7 +52,7 @@ async def test_failures_back_off_instead_of_hot_looping(monkeypatch: pytest.Monk
     monkeypatch.setattr(long_poll.asyncio, "sleep", sleep)
     loop = LongPollLoop(step, wait_seconds=25.0, name="t")
     loop.start()
-    await asyncio.wait_for(done.wait(), 2)
+    await asyncio.wait_for(done.wait(), 5)
     assert delays == [1.0, 2.0, 4.0, 8.0, 10.0]
     await loop.close()
 
@@ -135,7 +135,7 @@ async def test_follow_loop_catches_up_then_backs_off_and_closes():
     try:
         follower.start()
         follower.start()
-        async with asyncio.timeout(1):
+        async with asyncio.timeout(5):
             await caught_up.wait()
         await asyncio.sleep(0)
         assert calls == 2

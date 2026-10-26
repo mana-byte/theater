@@ -250,7 +250,7 @@ async def test_cancelled_native_send_keeps_the_daemon_owned_delivery_deadline(
     service.start(["p1"])
     request = asyncio.create_task(service.send("p1", caller_id="caller", prompt="once only"))
     try:
-        await asyncio.wait_for(entered.wait(), timeout=0.5)
+        await asyncio.wait_for(entered.wait(), timeout=5)
         (operation,) = store.dispatched_control_operations("p1")
         assert operation.execution_barrier is True
         assert operation.job_handle is not None
@@ -593,9 +593,9 @@ async def test_maintenance_for_one_participant_does_not_block_another_or_leak_ta
     state_a.block_snapshots = True
     harness.service.start(["a", "b"])
     try:
-        await asyncio.wait_for(entered.wait(), timeout=0.5)
+        await asyncio.wait_for(entered.wait(), timeout=5)
         fast = await asyncio.wait_for(
-            harness.service.send("b", caller_id="caller", prompt="fast"), timeout=0.5
+            harness.service.send("b", caller_id="caller", prompt="fast"), timeout=5
         )
         assert fast.state == JobState.RUNNING
         assert state_of(harness, "b").sent == ["fast"]

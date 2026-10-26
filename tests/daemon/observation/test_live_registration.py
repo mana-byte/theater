@@ -17,7 +17,7 @@ from tests.support.observation import (
     make_watch_context,
     minimal_gates,
 )
-from tests.support.waiting import until
+from tests.support.waiting import until, wait_until
 from theater.daemon.controls import ControlService
 from theater.daemon.observation.live import LiveObservationHub, LiveRegistration
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind
@@ -49,7 +49,7 @@ async def test_live_data_reaches_the_bus_only_through_registration(rig: Rig):
 
 async def test_wake_interrupts_sleep_long_before_the_poll_interval(store, registry, monkeypatch):
     """A wake makes the watch read promptly; the poll interval is only a fallback."""
-    rig = Rig(store, registry, monkeypatch, poll=1.0)
+    rig = Rig(store, registry, monkeypatch, poll=30.0)
     registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
     await rig.open()
     try:
@@ -59,12 +59,12 @@ async def test_wake_interrupts_sleep_long_before_the_poll_interval(store, regist
         rig.observer.live.wake("p1")
 
         assert await until(lambda: "agent.assistant" in bus_kinds(store))
-        assert time.monotonic() - started < 0.8  # far below the 1.0s poll interval
+        assert time.monotonic() - started < 5.0  # far below the 30.0s poll interval
 
         # The polling fallback still applies: no wake, the batch still lands
         # within roughly one poll interval.
         rig.state.batches.append(Batch(events=(Event(kind=EventKind.USER, text="polled"),)))
-        assert await until(lambda: "agent.user" in bus_kinds(store))
+        assert await until(lambda: "agent.user" in bus_kinds(store), timeout=35.0)
     finally:
         await rig.aclose()
 
@@ -378,7 +378,7 @@ async def test_rested_status_restatement_does_not_walk_over_the_screen_verdict(r
     # The live channel restates its unchanged working reading: nothing
     # new happened, so the awaiting verdict must survive it.
     rig.state.batches.append(Batch(status=Status.WORKING, progressed=False))
-    await asyncio.sleep(0.2)
+    await wait_until(lambda: not rig.state.batches, what="the restated batch to be consumed")
     assert rig.registry.get("p1").status is Status.AWAITING_INPUT
 
     rig.state.batches.append(Batch(status=Status.WORKING, progressed=True))
@@ -410,7 +410,12 @@ async def test_native_awaiting_input_survives_the_screen_fallback(
         rig.state.batches.append(Batch(status=Status.AWAITING_INPUT, progressed=True))
         assert await until(lambda: registry.get("p1").status is Status.AWAITING_INPUT)
 
-        await asyncio.sleep(0.15)
+        # Wait out the screen arm's quiet window (due at 0.03s) so the assert
+        # proves the fallback read was suppressed, not merely unhurried.
+        await wait_until(
+            lambda: (rig.observer.quiet_seconds("p1") or 0.0) > 0.12,
+            what="the screen arm's quiet window to elapse",
+        )
         assert registry.get("p1").status is Status.AWAITING_INPUT
 
         rig.state.batches.append(Batch(status=Status.WORKING, progressed=True))
@@ -428,7 +433,10 @@ async def test_registration_without_sink_routes_evidence_to_a_warning(rig: Rig, 
         Batch(progressed=True, terminal_evidence=(outcome(turn, rig.session),))
     )
 
-    await asyncio.sleep(0.2)
+    await wait_until(
+        lambda: "no registered evidence sink" in caplog.text,
+        what="the missing-sink warning",
+    )
     assert rig.job(job.handle).state == JobState.RUNNING
     assert "no registered evidence sink" in caplog.text
 
@@ -489,7 +497,7 @@ async def test_live_arrival_wakes_observation_before_the_poll_interval(
     store, registry, monkeypatch
 ):
     """Real arrival-driven wakeups: initial delivery beats the poll interval."""
-    rig = Rig(store, registry, monkeypatch, poll=1.0)
+    rig = Rig(store, registry, monkeypatch, poll=30.0)
     registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
     await rig.open()
     try:
@@ -505,9 +513,12 @@ async def test_live_arrival_wakes_observation_before_the_poll_interval(
                 active_job_for_turn=rig.service.active_job_for_native_turn,
             )
         )
-        # Let the recomposed watch settle so the wake measured below is the
-        # arrival callback's, not registration's own.
-        await asyncio.sleep(0.2)
+        # Let the recomposed watch consume the registration's own wake and
+        # settle, so the wake measured below is the arrival callback's.
+        await wait_until(
+            lambda: not rig.observer.live.wake_signal("p1").is_set(),
+            what="the recomposed watch to consume the registration wake",
+        )
         assert arriving._activity is not None
 
         started = time.monotonic()
@@ -518,8 +529,8 @@ async def test_live_arrival_wakes_observation_before_the_poll_interval(
             )
         )
 
-        assert await until(lambda: "agent.user" in bus_kinds(store), timeout=0.8)
-        assert time.monotonic() - started < 0.8  # far below the 1.0s poll interval
+        assert await until(lambda: "agent.user" in bus_kinds(store), timeout=5.0)
+        assert time.monotonic() - started < 5.0  # far below the 30.0s poll interval
 
         rig.observer.live.unregister("p1")
         assert await until(lambda: arriving._activity is None)

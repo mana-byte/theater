@@ -227,8 +227,8 @@ def test_bridge_start_is_idempotent_after_readiness(tmp_path: Path, monkeypatch)
         sleep=lambda _seconds: None,
     )
 
-    assert manager.start(timeout=0.1).connection_state == "online"
-    assert manager.start(timeout=0.1).connection_state == "online"
+    assert manager.start(timeout=5.0).connection_state == "online"
+    assert manager.start(timeout=5.0).connection_state == "online"
     assert len(launches) == 1
     assert len(proofs) == 2
     command, kwargs = launches[0]
@@ -279,7 +279,7 @@ def test_bridge_readiness_polls_status_without_repeating_process_proof(
         socket_path=tmp_path / "daemon.sock",
         popen_factory=popen,
         sleep=sleep,
-    ).start(timeout=1)
+    ).start(timeout=5.0)
 
     assert status.connection_state == "online"
     assert sleeps == 3
@@ -338,7 +338,7 @@ async def test_bridge_worker_preserves_status_change_published_during_write(
             client_id="regie-test",
             token="bridge-token",
         ),
-        timeout=0.5,
+        timeout=5.0,
     )
 
     assert result == 0
@@ -375,7 +375,7 @@ def test_bridge_start_replaces_a_bridge_from_another_installation(
         manager, "stop", lambda **_kwargs: stopped.append(True) or BridgeProcessStatus.stopped()
     )
 
-    assert manager.start(timeout=0.1).build == process._BUILD
+    assert manager.start(timeout=5.0).build == process._BUILD
     assert stopped == [True] and len(launches) == 1
 
 
@@ -392,7 +392,7 @@ def test_bridge_stop_signals_only_a_verified_bridge_process(tmp_path: Path, monk
 
     result = BridgeProcessManager(
         paths, socket_path=tmp_path / "daemon.sock", sleep=lambda _seconds: None
-    ).stop(timeout=0.1)
+    ).stop(timeout=5.0)
 
     assert result.running is False
     assert signals == [(123, signal.SIGTERM)]

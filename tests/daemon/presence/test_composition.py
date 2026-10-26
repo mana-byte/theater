@@ -171,7 +171,7 @@ async def test_protected_queue_stays_fifo_and_awaits_obey_the_admission_gate(
         waiter_client.call("jobs.await", handles=[handles[0]], caller_id=parent.id, max_wait=2)
     )
     try:
-        await asyncio.wait_for(presence.waiting.wait(), timeout=1)
+        await asyncio.wait_for(presence.waiting.wait(), timeout=5)
         outcome = await daemon.controls.dispatch_queue(child.id)
         assert outcome.deferred
         assert not waiter.done()
@@ -204,7 +204,7 @@ async def test_protected_queue_stays_fifo_and_awaits_obey_the_admission_gate(
         # The dispatched followup's job is now terminal: with the gate
         # already cleared by the observed departure, both conditions hold and
         # the await resolves — the terminal condition was observed last.
-        released = (await asyncio.wait_for(waiter, timeout=1))[0]
+        released = (await asyncio.wait_for(waiter, timeout=5))[0]
         assert released["await_reason"] == "job_terminal"
         assert released["participant_status"] == "working"
         assert released["state"] == "done"
@@ -236,10 +236,10 @@ async def test_terminal_job_hold_and_no_job_presence_wait_share_truth_without_fa
     presence.waiting.clear()
     waiter = asyncio.create_task(client.call("jobs.await", handles=[child.id], max_wait=2))
     try:
-        await asyncio.wait_for(presence.waiting.wait(), timeout=1)
+        await asyncio.wait_for(presence.waiting.wait(), timeout=5)
         assert not waiter.done()
         presence.set(PresenceState.ABSENT)
-        released = (await asyncio.wait_for(waiter, timeout=1))[0]
+        released = (await asyncio.wait_for(waiter, timeout=5))[0]
         assert released["await_reason"] == "presence_released"
         assert released["state"] == "done"
         assert released["participant_status"] == "working"

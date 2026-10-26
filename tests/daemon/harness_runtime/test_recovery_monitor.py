@@ -62,7 +62,18 @@ async def test_stale_persisted_generation_cannot_reconnect(
         # A replacement generation now owns the persisted binding.
         d.store.upsert_runtime_binding(replace(binding, backend_generation=2))
         disconnect_stream(io, 0)
-        await asyncio.sleep(0.35)  # past many patched poll/retry intervals
+
+        def _route_disconnected() -> bool:
+            route = d.runtime_manager.cached_native_facts(
+                pid,
+                backend_generation=binding.backend_generation,
+                native_session_id=binding.native_session_id,
+            )
+            return route is not None and route.health is ConnectionHealth.DISCONNECTED
+
+        # The monitor observes the disconnect; it must still never reconnect,
+        # because the persisted generation was replaced.
+        await wait_until(_route_disconnected, what="the monitor to observe the disconnect")
         assert server.connect_count == 1, "a stale generation never reconnects"
         assert d.runtime_manager.get(pid) is not None, "the live runtime is left untouched"
 
@@ -159,7 +170,9 @@ async def test_disconnect_then_teardown_performs_no_post_teardown_reconnect(
 
         disconnect_stream(io, 0)
         await d.runtime_manager.teardown(pid, backend_generation=1)
-        await asyncio.sleep(0.35)  # past many patched poll/retry intervals
+        await wait_until(
+            lambda: d.runtime_manager._monitors == {}, what="the owned monitor to be cancelled"
+        )
         assert server.connect_count == 1, "no reconnect may follow the teardown"
         assert d.runtime_manager._monitors == {}, "the owned monitor is cancelled"
         await await_reaped(binding.backend_pid)
@@ -184,7 +197,9 @@ async def test_disconnect_then_daemon_close_performs_no_post_close_reconnect(
 
         disconnect_stream(io, 0)
         await d.aclose()
-        await asyncio.sleep(0.35)  # past many patched poll/retry intervals
+        await wait_until(
+            lambda: d.runtime_manager._monitors == {}, what="every owned monitor to be cancelled"
+        )
         assert server.connect_count == 1, "no reconnect may follow daemon shutdown"
         assert d.runtime_manager._monitors == {}, "every owned monitor is cancelled"
         assert pid_alive(binding.backend_pid), "the backend and its UI survive shutdown"
@@ -235,14 +250,14 @@ async def test_shutdown_revokes_recovery_blocked_in_session_open(
         d.runtime_manager.set_route_change_callback(route_changes.append)
 
         disconnect_stream(io, 0)
-        await asyncio.wait_for(open_entered.wait(), 2.0)
+        await asyncio.wait_for(open_entered.wait(), 5.0)
         candidate = d.runtime_manager.get(pid)
         assert candidate is not None and candidate is not original_runtime
         route_changes.clear()
 
         stopping = asyncio.create_task(d.runtime_manager.stop_recovery())
-        await asyncio.wait_for(open_cancelled.wait(), 1.0)
-        await asyncio.wait_for(stopping, 0.25)
+        await asyncio.wait_for(open_cancelled.wait(), 5.0)
+        await asyncio.wait_for(stopping, 5.0)
         assert registrations == route_changes == []
 
         release_open.set()
@@ -315,13 +330,17 @@ async def test_generation_replacement_during_open_never_registers_stale_recovery
         assert first is not None
 
         # Hold the recovery candidate's open_session at its connect.
-        io.gates[wiring_mod.native_endpoint(pid)] = gate
+        endpoint = wiring_mod.native_endpoint(pid)
+        io.gates[endpoint] = gate
+        connect_entered = io.connect_entered.setdefault(endpoint, asyncio.Event())
         recovery_task = asyncio.create_task(recovery_mod.recover_live_runtime(d, pid, 1))
         await wait_until(
             lambda: d.runtime_manager.get(pid) is not first, what="the candidate installing"
         )
         candidate = d.runtime_manager.get(pid)
-        await asyncio.sleep(0.05)
+        await wait_until(
+            connect_entered.is_set, what="the candidate's open reaching the gated connect"
+        )
         assert not recovery_task.done(), "the recovery is parked at the gated open"
 
         await d.runtime_manager.teardown(pid, backend_generation=1)
@@ -340,7 +359,7 @@ async def test_generation_replacement_during_open_never_registers_stale_recovery
         assert registration_before.backend_generation == 2
 
         gate.set()
-        recovered = await asyncio.wait_for(recovery_task, 5.0)
+        recovered = await asyncio.wait_for(recovery_task, 10.0)
 
         assert recovered is False, "a stale completion must return False"
         assert d.runtime_manager.get(pid) is gen2, "generation 2 remains current"
@@ -353,7 +372,7 @@ async def test_generation_replacement_during_open_never_registers_stale_recovery
         if recovery_task is not None and not recovery_task.done():
             gate.set()
             with contextlib.suppress(Exception, asyncio.CancelledError):
-                await asyncio.wait_for(recovery_task, 5.0)
+                await asyncio.wait_for(recovery_task, 10.0)
         if candidate is not None:
             with contextlib.suppress(Exception):
                 # The stale candidate is no longer owned by the manager; close

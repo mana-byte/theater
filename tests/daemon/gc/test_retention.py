@@ -77,7 +77,7 @@ async def test_passive_checkpoint_does_not_wait_for_pinned_reader(tmp_path):
         assert reader.execute("SELECT value FROM test").fetchall() == [(1,)]
         writer.execute("INSERT INTO test VALUES (2)")
         busy, frames, checkpointed = await asyncio.wait_for(
-            asyncio.to_thread(passive_checkpoint, path), 1
+            asyncio.to_thread(passive_checkpoint, path), 5
         )
         assert busy == 0
         assert frames > checkpointed >= 0

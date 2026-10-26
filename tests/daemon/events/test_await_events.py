@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from tests.support.presence import FakePresence
+from tests.support.waiting import wait_until
 from theater.daemon import methods
 from theater.daemon.rpc import jobs as jobs_rpc
 from theater.protocol import RemoteError
@@ -360,10 +361,10 @@ async def test_await_end_records_completed_and_elapsed(daemon, terminal_provider
                 },
             )
         )
-        for _ in range(100):
-            if any(row["kind"] == "job.await.start" for row in daemon.store.bus_tail()):
-                break
-            await asyncio.sleep(0.001)
+        await wait_until(
+            lambda: any(row["kind"] == "job.await.start" for row in daemon.store.bus_tail()),
+            what="job.await.start row",
+        )
         daemon.jobs.finish(child["handle"], state="done", result="ok")
         await waiting
         end = next(row for row in daemon.store.bus_tail() if row["kind"] == "job.await.end")
@@ -402,11 +403,14 @@ async def test_await_end_outcome_is_per_handle(daemon, terminal_provider, monkey
                 },
             )
         )
-        for _ in range(100):
-            starts = [row for row in daemon.store.bus_tail() if row["kind"] == "job.await.start"]
-            if len(starts) == 2:
-                break
-            await asyncio.sleep(0.001)
+        await wait_until(
+            lambda: (
+                len([row for row in daemon.store.bus_tail() if row["kind"] == "job.await.start"])
+                == 2
+            ),
+            what="two job.await.start rows",
+        )
+        starts = [row for row in daemon.store.bus_tail() if row["kind"] == "job.await.start"]
         assert len(starts) == 2
 
         daemon.jobs.finish(children[0]["handle"], state="done", result="ok")
@@ -457,10 +461,10 @@ async def test_await_end_records_terminal_failures_as_errors(
                 },
             )
         )
-        for _ in range(100):
-            if any(row["kind"] == "job.await.start" for row in daemon.store.bus_tail()):
-                break
-            await asyncio.sleep(0.001)
+        await wait_until(
+            lambda: any(row["kind"] == "job.await.start" for row in daemon.store.bus_tail()),
+            what="job.await.start row",
+        )
         daemon.jobs.finish(child["handle"], state=job_state, result="failed")
         await waiting
         end = next(row for row in daemon.store.bus_tail() if row["kind"] == "job.await.end")
@@ -512,10 +516,10 @@ async def test_await_elapsed_starts_at_announcement_and_is_nonnegative(
                 },
             )
         )
-        for _ in range(100):
-            if any(row["kind"] == "job.await.start" for row in daemon.store.bus_tail()):
-                break
-            await asyncio.sleep(0.001)
+        await wait_until(
+            lambda: any(row["kind"] == "job.await.start" for row in daemon.store.bus_tail()),
+            what="job.await.start row",
+        )
         clock[0] += 1.0
         daemon.jobs.finish(child["handle"], state="done", result="ok")
         await waiting
@@ -541,15 +545,13 @@ async def test_await_elapsed_starts_at_announcement_and_is_nonnegative(
                 },
             )
         )
-        for _ in range(100):
-            starts = [
-                row
+        await wait_until(
+            lambda: any(
+                row["kind"] == "job.await.start" and row["payload"]["handle"] == child["handle"]
                 for row in daemon.store.bus_tail()
-                if row["kind"] == "job.await.start" and row["payload"]["handle"] == child["handle"]
-            ]
-            if starts:
-                break
-            await asyncio.sleep(0.001)
+            ),
+            what="job.await.start row for the child",
+        )
         clock[0] -= 2.0
         daemon.jobs.finish(child["handle"], state="done", result="ok")
         await waiting
@@ -589,10 +591,10 @@ async def test_cancelled_await_records_cancelled(daemon, terminal_provider, monk
                 },
             )
         )
-        for _ in range(100):
-            if any(row["kind"] == "job.await.start" for row in daemon.store.bus_tail()):
-                break
-            await asyncio.sleep(0.001)
+        await wait_until(
+            lambda: any(row["kind"] == "job.await.start" for row in daemon.store.bus_tail()),
+            what="job.await.start row",
+        )
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiting

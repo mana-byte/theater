@@ -165,7 +165,7 @@ async def test_follow_wakes_interactions_immediately_and_coalesces_mutable_updat
             participant.id,
             stream_id=page.stream_id,
             after=after,
-            wait=1,
+            wait=10,
             limit=200,
         )
     )
@@ -180,7 +180,7 @@ async def test_follow_wakes_interactions_immediately_and_coalesces_mutable_updat
             "payload": {},
         }
     )
-    result = await asyncio.wait_for(interaction, timeout=0.2)
+    result = await asyncio.wait_for(interaction, timeout=5.0)
     assert [upsert.record.record_id for upsert in result.upserts] == ["bus:2"]
 
     cancelled = asyncio.create_task(

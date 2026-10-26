@@ -177,7 +177,9 @@ async def test_after_you_leave_it_the_band_rests_before_it_plays_again(
         await _set_app_focus(pilot, True)  # you come back: it leaves
         await wait_until(pilot, lambda: not band.display)
         await _set_app_focus(pilot, False)  # away again straight away: it rests first
-        await pilot.pause(0.5)
+        # The rest is engaged once the app has seen the re-away and scheduled its wake;
+        # waiting for that, not a guessed pause, is what keeps the check deterministic.
+        await wait_until(pilot, lambda: app._ambience_wake is not None)
         assert not band.display
         await wait_until(pilot, lambda: bool(band.display))  # then plays once the rest is over
 

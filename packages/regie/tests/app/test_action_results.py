@@ -165,19 +165,15 @@ async def test_completed_action_retries_reconciliation_after_a_refresh_failure()
         state.initialize = initialize  # type: ignore[method-assign]
         record = await app.submit_spawn("codex", "", "manual", cwd="/workspace")
         app._show_action(record)
-        for _ in range(20):
-            await pilot.pause()
-            if not app._action_presentation.reconciling(record):
-                break
+        await wait_until(pilot, lambda: not app._action_presentation.reconciling(record))
 
         assert attempts == 1
         assert record.idempotency_key not in app._action_presentation.reconciled
 
         app._render_pending_actions()
-        for _ in range(20):
-            await pilot.pause()
-            if record.idempotency_key in app._action_presentation.reconciled:
-                break
+        await wait_until(
+            pilot, lambda: record.idempotency_key in app._action_presentation.reconciled
+        )
 
         assert attempts == 2
         assert record.idempotency_key in app._action_presentation.reconciled

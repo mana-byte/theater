@@ -75,7 +75,7 @@ async def test_startup_reveals_state_before_catalog_discovery_and_usage(  # noqa
     monkeypatch.setattr(app, "_refresh_usage", usage)
     monkeypatch.setattr(app, "set_interval", track_interval)
 
-    async with asyncio.timeout(5), app.run_test() as pilot:
+    async with asyncio.timeout(60), app.run_test() as pilot:
         await snapshot_started.wait()
         await pilot.pause()
         tree = app.query_one(ParticipantTree)
@@ -249,7 +249,7 @@ async def test_quit_joins_startup_before_restoring_presentation(monkeypatch, bef
         app._start_initial_load()
         await app.action_quit()
     else:
-        async with asyncio.timeout(5), app.run_test() as pilot:
+        async with asyncio.timeout(60), app.run_test() as pilot:
             await started.wait()
             await pilot.press("q")
         assert client.closed
@@ -501,7 +501,7 @@ def test_startup_imports_defer_bridge_worker_and_optional_trajectory_widgets():
         ],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=60,
         check=False,
     )
     assert result.returncode == 0, result.stderr

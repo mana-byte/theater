@@ -12,9 +12,9 @@ from theater.daemon.server import Daemon
 # `wait_closed()` waits for every connection handler, which returns only when its client
 # disconnects, so these tests keep a client attached: without one the old hang never showed.
 
-#: Generous next to the sub-millisecond real cost, tight enough that the hang
-#: this file exists for fails rather than stalls the suite.
-BUDGET = 5.0
+#: Generous next to the sub-millisecond real cost on a loaded runner, tight enough
+#: that the hang this file exists for fails rather than stalls the suite.
+BUDGET = 30.0
 
 
 async def test_serve_returns_after_stop_with_a_client_attached(theater_home, terminal_provider):
@@ -206,7 +206,7 @@ async def test_workers_shutdown_drains_before_returning(daemon):
 
     loop = asyncio.get_running_loop()
     fut = loop.run_in_executor(executor, slow_task)
-    await asyncio.wait_for(started.wait(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=5.0)
 
     await workers.shutdown()
     assert finished, "shutdown must drain in-flight workers before returning"

@@ -9,6 +9,7 @@ import pytest
 from tests.support.handoff_rig import CANCELLED_BEFORE_DELIVERY, handoff_source, pump
 from tests.support.native_rpc import native_pair
 from tests.support.presence import PresentPresence
+from tests.support.waiting import wait_until
 from theater.daemon.awaiting import never_transmitted
 from theater.daemon.rpc.cancellation import _cancel
 from theater.daemon.rpc.jobs import _job_to_dict
@@ -159,11 +160,11 @@ async def test_await_releases_a_protected_cancelled_send_whose_gate_had_opened(c
         waiter = asyncio.create_task(
             client.call("jobs.await", handles=[reply["handle"]], max_wait=2, caller_id=parent.id)
         )
-        await asyncio.sleep(0.1)
+        await wait_until(lambda: daemon.jobs.wait_graph != {}, what="await admission")
         assert not waiter.done()
         cancelled = await _cancel(daemon, {"handle": reply["handle"], "caller_id": parent.id})
         assert cancelled == {"handle": reply["handle"], "cancelled": True}
-        (job,) = await asyncio.wait_for(waiter, 1.0)
+        (job,) = await asyncio.wait_for(waiter, 5.0)
 
     assert state.sent == []
     assert daemon.store.get_handoff_gate(reply["handle"]).state == "opened"
@@ -177,7 +178,7 @@ async def _queued_plain_send_await(client, daemon, parent, child):
     waiter = asyncio.create_task(
         client.call("jobs.await", handles=[reply["handle"]], max_wait=2, caller_id=parent.id)
     )
-    await asyncio.sleep(0.1)
+    await wait_until(lambda: daemon.jobs.wait_graph != {}, what="await admission")
     assert not waiter.done()
     return reply, waiter
 
@@ -188,7 +189,7 @@ async def test_await_releases_a_plain_send_cancelled_while_queued(client, daemon
         patch.setattr(daemon, "presence", PresentPresence(), raising=False)
         reply, waiter = await _queued_plain_send_await(client, daemon, parent, child)
         await _cancel(daemon, {"handle": reply["handle"], "caller_id": parent.id})
-        (job,) = await asyncio.wait_for(waiter, 1.0)
+        (job,) = await asyncio.wait_for(waiter, 5.0)
 
     assert state.sent == [] and job["await_reason"] == "job_terminal"
     assert job["error"] == CANCELLED_BEFORE_DELIVERY
@@ -201,7 +202,7 @@ async def test_await_releases_a_queued_send_cancelled_by_interrupt(client, daemo
         patch.setattr(daemon, "presence", PresentPresence(), raising=False)
         reply, waiter = await _queued_plain_send_await(client, daemon, parent, child)
         await daemon.controls.cancel_queued_followups(child.id)
-        (job,) = await asyncio.wait_for(waiter, 1.0)
+        (job,) = await asyncio.wait_for(waiter, 5.0)
 
     assert daemon.store.get_job(reply["handle"]).error_code == "interrupted"
     assert state.sent == [] and job["await_reason"] == "job_terminal"
@@ -213,7 +214,7 @@ async def test_await_releases_a_queued_send_failed_by_restart_recovery(client, d
         patch.setattr(daemon, "presence", PresentPresence(), raising=False)
         reply, waiter = await _queued_plain_send_await(client, daemon, parent, child)
         daemon.controls.fail_undelivered_followups([child.id])
-        (job,) = await asyncio.wait_for(waiter, 1.0)
+        (job,) = await asyncio.wait_for(waiter, 5.0)
 
     stored = daemon.store.get_job(reply["handle"])
     assert stored.state == JobState.CRASHED and stored.error_code == "daemon_restarted"

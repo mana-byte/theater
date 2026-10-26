@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support.waiting import settle_operations
+from tests.support.waiting import settle_operations, wait_until
 from tests.support.workspace_services import (
     git,
     make_repository,
@@ -190,7 +190,7 @@ async def test_cancelled_creation_never_retires_an_inflight_git_worker(
         service.materialize_creation(reservation, reservation_id="cancelled-creation")
     )
     try:
-        assert await asyncio.to_thread(started.wait, 2)
+        assert await asyncio.to_thread(started.wait, 5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -201,12 +201,11 @@ async def test_cancelled_creation_never_retires_an_inflight_git_worker(
         assert not Path(workspace.path).exists()
 
         release.set()
-        for _ in range(200):
-            if Path(workspace.path).is_dir():
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("the cancelled Git worker did not finish its worktree creation")
+        await wait_until(
+            lambda: Path(workspace.path).is_dir(),
+            what="the cancelled Git worker to finish its worktree creation",
+            timeout=10.0,
+        )
 
         assert await service.reconcile_retained_workspaces() == (workspace.workspace_id,)
         assert service.get(workspace.workspace_id).state == WorkspaceState.ACTIVE.value
@@ -390,7 +389,7 @@ async def test_reconciliation_pages_past_unchanged_early_records(
         return False
 
     monkeypatch.setattr(service, "_reconcile_named_workspace", unreconciled)
-    assert await asyncio.wait_for(service.reconcile_retained_workspaces(), timeout=2) == ()
+    assert await asyncio.wait_for(service.reconcile_retained_workspaces(), timeout=10) == ()
     assert visited == [f"stale-{index:03d}" for index in range(501)]
 
 

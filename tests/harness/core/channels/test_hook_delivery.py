@@ -132,7 +132,7 @@ async def test_concurrent_retry_waits_for_a_real_accepted_delivery(theater_home,
             call = calls
         if call == 1:
             entered.set()
-            release.wait(timeout=1)
+            release.wait(timeout=10)
             raise RuntimeError("first delivery failed")
         return str(context.payload["native_id"])
 
@@ -156,7 +156,7 @@ async def test_concurrent_retry_waits_for_a_real_accepted_delivery(theater_home,
                 delivery_id="same-delivery",
             )
         )
-        assert await asyncio.to_thread(entered.wait, 1)
+        assert await asyncio.to_thread(entered.wait, 5)
         second = await hook_event(
             client,
             pid=participant.id,

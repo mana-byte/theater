@@ -16,7 +16,7 @@ from tests.support.native_rpc import (
     native_pair,
     pair,
 )
-from tests.support.waiting import until
+from tests.support.waiting import until, wait_until
 from theater.daemon.controls import redirect
 from theater.daemon.rails import ModelNotAllowed
 from theater.harness.contracts.runtime import (
@@ -613,8 +613,7 @@ async def test_replace_interrupts_waits_for_idle_and_tells_the_child(client, dae
     active = await active_send(client, parent, child)
 
     async def observer_finishes_the_interrupted_job():
-        while not state.interrupted:
-            await asyncio.sleep(0.01)
+        await wait_until(lambda: state.interrupted, what="interrupt observed")
         daemon.jobs.finish(active["handle"], state="killed", error_code="interrupted")
 
     finisher = asyncio.create_task(observer_finishes_the_interrupted_job())

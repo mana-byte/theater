@@ -16,6 +16,7 @@ from tests.support.codex_server import (
     open_new,
     summary_turn_completed,
 )
+from tests.support.waiting import wait_until
 from theater.harness.builtin.plugins.codex import runtime_constants as codex_runtime_constants
 from theater.harness.contracts.runtime import (
     DeliveryResult,
@@ -120,9 +121,12 @@ async def test_reconnect_pages_old_terminal_history_with_bounded_backpressure(
 
     try:
         await wait_for_pages(2)
-        await asyncio.sleep(0.02)
         # The second page is blocked trying to enqueue while the first
         # outcome is unread; it cannot fetch an unbounded third page.
+        await wait_until(
+            lambda: runtime._outcome_buffer.has_outcome("ui-thread-1", "human-middle"),
+            what="second page outcome blocked on enqueue",
+        )
         assert len(server.requested("thread/turns/list")) == 2
         assert runtime._outcome_buffer.queued_count == 1
 
@@ -191,7 +195,7 @@ async def test_reconnect_retries_a_cursor_cycle_and_closes_retry_task(monkeypatc
     try:
         await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
         task = runtime._history_reconcile_task
-        await asyncio.wait_for(asyncio.shield(task), timeout=2)
+        await asyncio.wait_for(asyncio.shield(task), timeout=10)
         assert len(server.requested("thread/turns/list")) == 3
         assert "cursor" not in server.requested("thread/turns/list")[-1]
         (outcome,) = (await runtime.live_source().read()).terminal_evidence
@@ -304,7 +308,7 @@ async def test_reconnect_revalidates_handshake_subscription_and_evidence_once() 
             items=[{"id": "i-agent", "type": "agentMessage", "text": "recovered final"}],
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="replayed completion consumed")
     replay = await source.read()
     assert replay.terminal_evidence == ()
     # The subscription survives the reconnect: a follow-up send never

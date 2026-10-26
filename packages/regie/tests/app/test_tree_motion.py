@@ -161,7 +161,7 @@ async def test_a_send_that_lands_sweeps_its_target() -> None:
         target = _leaf(tree, "participant-2")
 
         app._animate_bus_row(_await_row("agent.send"))
-        await wait_until(pilot, lambda: target._wipe is not None, timeout=5)
+        await wait_until(pilot, lambda: target._wipe is not None)
         assert target._wipe[1] in REGIE_ROUTE_COLORS
         assert _leaf(tree, "participant-1")._wipe is None
 

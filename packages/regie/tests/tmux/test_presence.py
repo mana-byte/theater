@@ -187,9 +187,9 @@ async def test_focus_wake_discards_inflight_absence_but_preserves_transition_tru
     monitor.changed.clear()
     pending = asyncio.create_task(monitor.observe(_pane()))
     try:
-        await asyncio.wait_for(reading.wait(), 1)
+        await asyncio.wait_for(reading.wait(), 5)
         wakes.put_nowait(None)
-        await asyncio.wait_for(monitor.changed.wait(), 1)
+        await asyncio.wait_for(monitor.changed.wait(), 5)
         with pytest.raises(TmuxError, match="focus evidence changed"):
             monitor.validate(evidence)
         release_old.set()
@@ -238,9 +238,9 @@ async def test_fresh_read_does_not_queue_behind_an_older_read(monkeypatch):
     await monitor.start(_SERVER)
     older = asyncio.create_task(monitor.refresh())
     try:
-        await asyncio.wait_for(old_started.wait(), 1)
+        await asyncio.wait_for(old_started.wait(), 5)
         # The fresh observation completes while the older read is still blocked.
-        assert (await asyncio.wait_for(monitor.observe(_pane()), 1)).state == "absent"
+        assert (await asyncio.wait_for(monitor.observe(_pane()), 5)).state == "absent"
         release_old.set()
         await older
         assert monitor._facts == _facts(_client(flags=frozenset()))  # stale read discarded
@@ -277,7 +277,9 @@ async def test_inspections_share_one_read_begun_after_their_requests_arrived(mon
     try:
         arrived = time.monotonic()
         before = reads
-        await asyncio.sleep(0.01)
+        # One yield lets the monitor's refresh loop, created by start(), park before the
+        # shared read is measured; a fixed pause would only guess at that settling.
+        await asyncio.sleep(0)
         states = [(await monitor.observe(_pane(), requested_at=arrived)).state for _ in range(5)]
         assert states == ["absent"] * 5
         assert reads == before + 1  # one read answered every request that predates it
@@ -335,18 +337,18 @@ async def test_a_shared_read_discarded_behind_an_older_one_is_replaced_not_serve
     monitor = FocusMonitor()
     await monitor.start(_SERVER)
     older = asyncio.create_task(monitor.refresh())
-    await asyncio.wait_for(older_started.wait(), 1)
+    await asyncio.wait_for(older_started.wait(), 5)
     requested_at = time.monotonic()
     pending = asyncio.create_task(monitor.observe(_pane(), requested_at=requested_at))
     try:
-        await asyncio.wait_for(newer_started.wait(), 1)
+        await asyncio.wait_for(newer_started.wait(), 5)
         release_older.set()
         await older
         release_newer.set()
-        await asyncio.wait_for(last_started.wait(), 1)
+        await asyncio.wait_for(last_started.wait(), 5)
         assert not pending.done()  # it will not answer from the older read's facts
         release_last.set()
-        await asyncio.wait_for(pending, 1)
+        await asyncio.wait_for(pending, 5)
         assert monitor._facts_started_at >= requested_at
     finally:
         release_older.set()

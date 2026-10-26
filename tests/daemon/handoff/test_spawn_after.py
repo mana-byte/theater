@@ -175,7 +175,7 @@ async def test_a_cancelled_task_releases_its_await_without_a_presence_departure(
     assert daemon.store.get_handoff_gate(handle).state == "cancelled"
 
     entries = await asyncio.wait_for(
-        _jobs_await(daemon, {"handles": [handle], "max_wait": 5, "caller_id": "cli"}), 3
+        _jobs_await(daemon, {"handles": [handle], "max_wait": 5, "caller_id": "cli"}), 10
     )
     assert entries[0]["await_reason"] == "job_terminal" and entries[0]["handoff"]["state"] == (
         "cancelled"

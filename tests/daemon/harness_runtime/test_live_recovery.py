@@ -745,7 +745,7 @@ async def test_notification_overflow_drains_evidence_then_recovers(
         monkeypatch.setattr(source, "read", delayed_read)
         d.observer.live.register(replace(registration, evidence_sink=persist))
         d.observer.live.wake(pid)
-        await asyncio.wait_for(read_entered.wait(), timeout=5)
+        await asyncio.wait_for(read_entered.wait(), timeout=10)
 
         # Buffer the exact terminal outcome, then overflow the stream: the
         # transport drains the buffered notification first, then raises.

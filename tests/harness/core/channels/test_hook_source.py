@@ -426,8 +426,15 @@ async def test_hook_source_cancellation_requeues_unrelated_deliveries() -> None:
         read.cancel()
         with pytest.raises(asyncio.CancelledError):
             await read
-        await asyncio.sleep(0.06)
-        assert [fact.native_id for fact in (await source.read()).trajectory] == ["first", "second"]
+        # The cancelled decode keeps its worker slot until the thread finishes, so
+        # poll reads on a deadline: a busy read requeues both deliveries.
+        batch = await source.read()
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while batch.error_code is not None:
+            assert asyncio.get_running_loop().time() < deadline, batch.error_code
+            await asyncio.sleep(0.005)
+            batch = await source.read()
+        assert [fact.native_id for fact in batch.trajectory] == ["first", "second"]
         await source.aclose()
     finally:
         await runtime.aclose()
