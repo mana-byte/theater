@@ -20,9 +20,6 @@ from regie.ui_constants import REGIE_MENU_MORE_ID, REGIE_MENU_PREVIEW_ROWS
 from regie.widgets import ParticipantTree
 from theater.frontend import TranscriptCandidate
 
-#: Textual's names for the keys the menu shows as the characters they type.
-_KEY_NAMES = {"minus": "-", "dollar_sign": "$", "slash": "/"}
-
 
 class MenuActions(_AppBase):
     #: The lists an option fetches each time it unfolds; frozen, so a class default is safe.
@@ -57,8 +54,8 @@ class MenuActions(_AppBase):
         """The key bound to *action*, as the menu shows it: read from the bindings, not restated."""
         for binding in self.BINDINGS:
             if isinstance(binding, Binding) and binding.action == action:
-                key = binding.key.split(",")[0]
-                return _KEY_NAMES.get(key, key)
+                # A binding may list several keys; the menu shows the first, as Textual does.
+                return self.get_key_display(replace(binding, key=binding.key.split(",")[0]))
         return None
 
     def _menu_items(self) -> tuple[MenuItem, ...]:
@@ -383,7 +380,7 @@ class MenuActions(_AppBase):
             tree.set_menu_view(replace(view, expanded=view.expanded - {option}))
             tree.select_key(("m", option))
         else:
-            tree.select_key(("g", "options"))
+            tree.select_key(("g", ROOT_ID))
 
     def _menu_show_all(self, tree: ParticipantTree, option: str) -> None:
         item = find_item(self._menu_items(), option)
