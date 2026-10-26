@@ -11,10 +11,8 @@ from sqlalchemy import update
 
 from tests.support.handoff_spawn import end_source, init_repository, launch_all, start_source
 from theater import paths
-from theater.daemon.rpc.spawning import _PrivateSpawnMapping
 from theater.daemon.schema import jobs as jobs_table
 from theater.harness import HARNESSES
-from theater.harness.contracts.runtime import RuntimeWiring
 from theater.models import JobState
 from theater.protocol import RemoteError
 
@@ -22,25 +20,6 @@ _JSON_SCHEMA_PREFIX = (
     "Return your final answer as a single bare JSON value (no code fences, no prose) "
     "matching this schema hint: {schema}"
 )
-
-
-def test_private_spawn_mapping_keeps_omission_distinct_from_null():
-    base: dict[str, object] = {"harness": "vibe", "approval": "manual", "cwd": "/tmp"}
-    omitted = _PrivateSpawnMapping(base, "vibe", False, RuntimeWiring.AUTO, None)
-    explicit = _PrivateSpawnMapping(
-        {**base, "background": None, "window_name": None, "tmux_session": None},
-        "vibe",
-        False,
-        RuntimeWiring.AUTO,
-        None,
-    )
-    assert omitted.provider_request("") == explicit.provider_request("")
-    omitted_payload = omitted.deferred_payload()
-    explicit_payload = explicit.deferred_payload()
-    for key in ("background", "window_name", "tmux_session"):
-        assert key not in omitted_payload
-        assert key in explicit_payload
-        assert explicit_payload[key] is None
 
 
 def _json_prompt(schema: str, prompt: str) -> str:

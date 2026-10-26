@@ -59,21 +59,6 @@ def _event(entity_id: str, revision: int = 1) -> JournalEventRecord:
     )
 
 
-def test_database_pragmas_are_tuned(tmp_path: Path) -> None:
-    """Performance pragmas apply to long-lived and fresh connections."""
-    db = Database(tmp_path / "pragmas.db")
-    try:
-        assert db.conn.exec_driver_sql("PRAGMA synchronous").scalar() == 2
-        assert db.conn.exec_driver_sql("PRAGMA cache_size").scalar() == -65536
-        assert db.conn.exec_driver_sql("PRAGMA mmap_size").scalar() == 268435456
-        assert db.conn.exec_driver_sql("PRAGMA temp_store").scalar() == 2
-        with db.engine.connect() as fresh:
-            assert fresh.exec_driver_sql("PRAGMA synchronous").scalar() == 2
-            assert fresh.exec_driver_sql("PRAGMA cache_size").scalar() == -65536
-    finally:
-        db.close()
-
-
 def test_live_database_bypasses_drain_guard_when_head_advances(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -382,7 +382,7 @@ async def test_a_slow_idle_stamp_read_does_not_extend_the_admission_grace(
 
     try:
         # The server is idle and the grace is 0.2 s: a stamp that never arrives must not outlast it.
-        await asyncio.wait_for(_settles(runtime, RuntimeExecutionState.IDLE), 3)
+        await asyncio.wait_for(_settles(runtime, RuntimeExecutionState.IDLE), 10)
     finally:
         poll.cancel()
     await runtime.aclose()
@@ -540,7 +540,7 @@ async def test_cancelled_refresh_does_not_satisfy_a_waiting_send(
 
     monkeypatch.setattr(runtime._client, "active", delayed)
     poll = asyncio.create_task(runtime._poll_once())
-    await asyncio.wait_for(captured.wait(), 1)
+    await asyncio.wait_for(captured.wait(), 5)
     server.active.add(binding.native_session_id)
     snapshot = asyncio.create_task(runtime.snapshot())
     sender = asyncio.create_task(runtime.send(operation_id="C", prompt="C"))
@@ -553,7 +553,7 @@ async def test_cancelled_refresh_does_not_satisfy_a_waiting_send(
     with pytest.raises(asyncio.CancelledError):
         await snapshot
     try:
-        receipt = await asyncio.wait_for(sender, 1)
+        receipt = await asyncio.wait_for(sender, 5)
         assert (receipt.result, receipt.error_code) == (DeliveryResult.REJECTED, "busy")
         assert len(server.bodies("/prompt")) == 1
     finally:

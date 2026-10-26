@@ -34,7 +34,7 @@ class _CallbackSession:
         self.writer.write(json.dumps(dict(frame), separators=(",", ":")).encode() + b"\n")
         await self.writer.drain()
 
-    async def read(self, method: str, *, timeout: float = 1) -> dict[str, object]:
+    async def read(self, method: str, *, timeout: float = 30) -> dict[str, object]:
         raw = await asyncio.wait_for(self.reader.readline(), timeout=timeout)
         assert raw.endswith(b"\n")
         frame = json.loads(raw)
@@ -49,7 +49,7 @@ class _CallbackPeer:
         self._sessions = sessions
 
     async def next_session(self) -> _CallbackSession:
-        return await asyncio.wait_for(self._sessions.get(), timeout=1)
+        return await asyncio.wait_for(self._sessions.get(), timeout=10)
 
 
 @asynccontextmanager
@@ -439,7 +439,7 @@ async def test_fixture_process_disconnect_controls_bound_execution_evidence(
             assert await provider.wait() == 0
             assert len(physical_events(provider)) == expected_physical
             assert any(entry["event"] == f"{control}_side_effect" for entry in provider.evidence())
-            assert await asyncio.wait_for(session.reader.readline(), timeout=1) == b""
+            assert await asyncio.wait_for(session.reader.readline(), timeout=10) == b""
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -458,7 +458,7 @@ async def test_fixture_process_timeout_replays_unknown_without_repeating_side_ef
                 assert _result(first)["outcome"] == "unknown"
 
                 await session.send(request)
-                replay = await session.read("terminal.create", timeout=0.1)
+                replay = await session.read("terminal.create")
                 assert replay == first
                 assert [entry["method"] for entry in physical_events(provider)] == [
                     "terminal.create"

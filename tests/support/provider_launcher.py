@@ -37,18 +37,18 @@ class _ProviderProcess:
         assert isinstance(value, str)
         return Path(value)
 
-    async def wait(self, *, timeout: float = 1) -> int:
+    async def wait(self, *, timeout: float = 10) -> int:
         return await asyncio.wait_for(self.process.wait(), timeout=timeout)
 
     async def stop(self) -> None:
         if self.process.returncode is None:
             self.process.send_signal(signal.SIGTERM)
-        returncode = await self.wait(timeout=2)
+        returncode = await self.wait(timeout=10)
         stdout, stderr = await self.process.communicate()
         assert returncode == 0, (stdout.decode(), stderr.decode())
 
     async def wait_for_effects(self, *operation_ids: str) -> None:
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(10):
             while not set(operation_ids).issubset(
                 event["operation_id"] for event in physical_events(self)
             ):
@@ -134,7 +134,7 @@ async def provider_process(
 
 
 async def _read_ready(process: asyncio.subprocess.Process, ready_file: Path) -> dict[str, object]:
-    async with asyncio.timeout(2):
+    async with asyncio.timeout(30):
         while not ready_file.exists():
             if process.returncode is not None:
                 stdout, stderr = await process.communicate()

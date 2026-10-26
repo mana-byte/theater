@@ -426,7 +426,10 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
             return sum(1 for event in harness.events if event[0] == "open_failed")
 
         first_failures = _failed_opens()
-        await asyncio.sleep(0.25)
+        await wait_until(
+            lambda: _failed_opens() > first_failures,
+            what="the monitor retrying the failed open",
+        )
         assert _failed_opens() > first_failures, "the monitor retries on its bounded cadence"
         assert d2.observer.live.registration_for(p.id) is None
         current = d2.runtime_manager.get(p.id)
@@ -632,7 +635,7 @@ async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
     """
     async with _startup_parked_behind_a_successor(terminal_provider, monkeypatch) as race:
         race.harness.resume_gate.set()
-        await asyncio.wait_for(race.start_task, 5.0)
+        await asyncio.wait_for(race.start_task, 10.0)
 
         # The stale startup completion failed closed and touched nothing the
         # successor owns.
@@ -662,7 +665,7 @@ async def test_startup_success_race_never_registers_over_a_successor(
         # The parked generation-1 open now SUCCEEDS — after the replacement.
         race.harness.resume_fails = False
         race.harness.resume_gate.set()
-        await asyncio.wait_for(race.start_task, 5.0)
+        await asyncio.wait_for(race.start_task, 10.0)
         assert any(
             event[0] == "open_session" and event[1] is SessionOpenMode.RECONNECT
             for event in race.harness.events

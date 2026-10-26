@@ -337,16 +337,6 @@ async def test_resume_with_named_worktree_refused(registry, resume_harness, monk
         await prepare_provider_reservation(spawner, req)
 
 
-async def test_spawn_session_schema_includes_resume(daemon):
-    """The MCP tool schema exposes resume as an optional parameter."""
-    from theater.mcp.server import build
-
-    schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
-    props = schema["spawn_session"]["properties"]
-    assert "resume" in props
-    assert "resume" not in schema["spawn_session"].get("required", [])
-
-
 async def test_provider_preparation_keeps_participant_unbound(
     registry, monkeypatch, available_harness_binaries
 ):

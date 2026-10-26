@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.fake_runtime import FakeRuntime
+from tests.support.waiting import wait_until
 from theater import paths
 from theater.daemon.harness_runtime.constants import FRONTEND_QUEUE_MAX
 from theater.daemon.harness_runtime.errors import RuntimePayloadTooLarge
@@ -144,7 +145,7 @@ async def test_frontend_close_aborts_a_peer_that_never_drains(monkeypatch):
 
     writer = BlockedWriter()
     connection = UnixFrontendConnection(writer)
-    await asyncio.wait_for(connection.aclose(), timeout=0.5)
+    await asyncio.wait_for(connection.aclose(), timeout=5.0)
     assert connection.closed
     assert writer.aborted
 
@@ -181,11 +182,7 @@ async def _close(writer) -> None:
 
 
 async def _wait_for_count(items: list[object], count: int) -> None:
-    for _ in range(20):
-        if len(items) >= count:
-            return
-        await asyncio.sleep(0)
-    assert len(items) >= count
+    await wait_until(lambda: len(items) >= count, what=f"{count} list entries")
 
 
 async def test_listener_authenticates_and_forwards_bounded_notifications(
@@ -346,7 +343,7 @@ async def test_closed_connection_drains_a_full_queue_then_terminates() -> None:
     async def drain() -> list[RuntimeNotification]:
         return [notification async for notification in connection.notifications()]
 
-    drained = await asyncio.wait_for(drain(), timeout=0.5)
+    drained = await asyncio.wait_for(drain(), timeout=5.0)
     assert len(drained) == FRONTEND_QUEUE_MAX
 
 
@@ -374,7 +371,7 @@ async def test_initial_attachment_can_request_a_snapshot(monkeypatch, tmp_path) 
     )
     try:
         reader, writer = await _connect(endpoint, "secret")
-        request = json.loads(await asyncio.wait_for(reader.readline(), timeout=1))
+        request = json.loads(await asyncio.wait_for(reader.readline(), timeout=10.0))
         assert request["method"] == "pi.snapshot"
         writer.write(
             json.dumps(
@@ -387,7 +384,7 @@ async def test_initial_attachment_can_request_a_snapshot(monkeypatch, tmp_path) 
             + b"\n"
         )
         await writer.drain()
-        await asyncio.wait_for(ready.wait(), timeout=1)
+        await asyncio.wait_for(ready.wait(), timeout=5.0)
         assert received == [{"session": "a"}]
         await _close(writer)
     finally:
@@ -420,8 +417,8 @@ async def test_listener_shutdown_cancels_incomplete_activation(monkeypatch, tmp_
         on_disconnect=disconnect,
     )
     reader, writer = await _connect(endpoint, "secret")
-    await asyncio.wait_for(started.wait(), timeout=1)
-    await asyncio.wait_for(host.aclose(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=5.0)
+    await asyncio.wait_for(host.aclose(), timeout=10.0)
     assert stopped.is_set()
     # The only written request was never replayed during shutdown.
     frames = (await reader.read()).splitlines()
@@ -621,10 +618,10 @@ async def test_frontend_connection_keeps_an_active_stock_launch_active(terminal_
             ).encode()
         )
         await writer.drain()
-        for _ in range(20):
-            if daemon.runtime_manager.get(participant.id) is not None:
-                break
-            await asyncio.sleep(0)
+        await wait_until(
+            lambda: daemon.runtime_manager.get(participant.id) is not None,
+            what="the frontend runtime to be installed",
+        )
         assert daemon.runtime_manager.get(participant.id) is not None
         binding = daemon.store.get_runtime_binding(participant.id)
         assert binding is not None
@@ -662,12 +659,13 @@ async def test_frontend_connection_persists_and_caches_its_exact_session(
             ).encode()
         )
         await writer.drain()
-        for _ in range(20):
-            binding = daemon.store.get_runtime_binding(participant.id)
-            if binding is not None and binding.native_session_id == "frontend-session-a":
-                break
-            await asyncio.sleep(0)
 
+        def _session_persisted() -> bool:
+            persisted = daemon.store.get_runtime_binding(participant.id)
+            return persisted is not None and persisted.native_session_id == "frontend-session-a"
+
+        await wait_until(_session_persisted, what="the exact frontend session to persist")
+        binding = daemon.store.get_runtime_binding(participant.id)
         assert binding is not None and binding.native_session_id == "frontend-session-a"
         current = daemon.registry.get(participant.id)
         assert (current.session_id, current.session_correlation) == (

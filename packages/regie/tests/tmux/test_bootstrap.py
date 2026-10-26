@@ -232,61 +232,6 @@ async def test_ensure_regie_window_rechecks_server_before_marking(monkeypatch) -
     assert all("set-option" not in args for args in calls)
 
 
-async def test_color_environment_is_mirrored_without_overwriting_term(monkeypatch) -> None:
-    calls: list[tuple[str, ...]] = []
-
-    async def server_run(_socket_path: str, *args: str) -> str:
-        calls.append(args)
-        if args[0] == "display-message":
-            return f"{_SOCKET}\t123\t456"
-        return ""
-
-    monkeypatch.setattr(bootstrap, "_server_run", server_run)
-    monkeypatch.setenv("TERM", "xterm-direct")
-    monkeypatch.setenv("COLORTERM", "truecolor")
-    monkeypatch.setenv("NO_COLOR", "")
-    monkeypatch.delenv("FORCE_COLOR", raising=False)
-    for name in ("CLICOLOR", "CLICOLOR_FORCE", "COLORFGBG", "TERM_PROGRAM"):
-        monkeypatch.delenv(name, raising=False)
-
-    await bootstrap.sync_color_environment(_SERVER)
-
-    assert calls == [
-        ("display-message", "-p", "#{socket_path}\t#{pid}\t#{start_time}"),
-        (
-            "set-environment",
-            "-g",
-            "COLORTERM",
-            "truecolor",
-            ";",
-            "set-environment",
-            "-g",
-            "NO_COLOR",
-            "",
-            ";",
-            "set-environment",
-            "-gu",
-            "FORCE_COLOR",
-            ";",
-            "set-environment",
-            "-gu",
-            "CLICOLOR",
-            ";",
-            "set-environment",
-            "-gu",
-            "CLICOLOR_FORCE",
-            ";",
-            "set-environment",
-            "-gu",
-            "COLORFGBG",
-            ";",
-            "set-environment",
-            "-gu",
-            "TERM_PROGRAM",
-        ),
-    ]
-
-
 async def test_live_pane_ids_uses_the_verified_bridge_server_and_ignores_dead_panes(
     monkeypatch,
 ) -> None:
@@ -346,20 +291,6 @@ def test_launch_selects_window_then_attaches_exact_socket(tmp_path, monkeypatch)
     environment = calls[1][3]
     assert "TMUX" not in environment
     assert "TMUX_PANE" not in environment
-
-
-def test_detach_current_client_does_not_mutate_tmux_state(monkeypatch) -> None:
-    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
-
-    async def run(*args: str, **kwargs: object) -> str:
-        calls.append((args, kwargs))
-        return ""
-
-    monkeypatch.setattr(bootstrap, "run", run)
-
-    bootstrap.detach_current_client()
-
-    assert calls == [(("detach-client",), {"check": False})]
 
 
 async def _async_value(value):

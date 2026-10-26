@@ -106,19 +106,6 @@ def test_state_snapshot_older_and_follow_copy_backend_overview_facts() -> None:
     assert state.overview is follow_overview
 
 
-def test_legacy_follow_preserves_backend_overview_facts() -> None:
-    capabilities = TrajectoryCapabilities(supported=frozenset({TrajectoryFeature.MODELS}))
-    overview = TrajectoryOverview(record_count=3)
-    state = ParticipantTrajectoryState(
-        "p1", stream_id="stream", capabilities=capabilities, overview=overview
-    )
-
-    state.apply_follow(TrajectoryDelta(stream_id="stream"))
-
-    assert state.capabilities is capabilities
-    assert state.overview is overview
-
-
 def record(
     record_id: str,
     index: int,

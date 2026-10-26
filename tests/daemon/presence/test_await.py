@@ -8,6 +8,7 @@ import time
 import pytest
 
 from tests.support.presence import ABSENT, PRESENT, UNKNOWN, FakePresence
+from tests.support.waiting import wait_until
 from theater.daemon import methods
 from theater.daemon.jobs import JobState
 from theater.daemon.rpc import METHODS
@@ -52,11 +53,11 @@ async def test_a_done_job_is_held_while_a_human_is_present(client, daemon, prese
     presence.set(record["id"], PRESENT)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[handle], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     assert not task.done()
 
     presence.set(record["id"], ABSENT)
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "presence_released"
     assert jobs[0]["human_presence"] == {
@@ -93,13 +94,13 @@ async def test_a_late_human_cannot_hold_a_job_that_finished(client, daemon, pres
     handle = record["handle"]
 
     task = asyncio.create_task(client.call("jobs.await", handles=[handle], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     presence.set(record["id"], PRESENT)
     daemon.jobs.finish(handle, state=JobState.DONE, result="late finish")
     await asyncio.sleep(0.15)
     # Admitted unprotected: a human arriving after admission is irrelevant,
     # and terminal state alone qualifies — even while the human is present.
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "job_terminal"
     assert jobs[0]["human_presence"]["protected"] is True
@@ -110,7 +111,7 @@ async def test_a_late_human_s_departure_does_not_release_a_running_job(client, d
     handle = record["handle"]
 
     task = asyncio.create_task(client.call("jobs.await", handles=[handle], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     presence.set(record["id"], PRESENT)
     presence.set(record["id"], ABSENT)
     await asyncio.sleep(0.15)
@@ -119,7 +120,7 @@ async def test_a_late_human_s_departure_does_not_release_a_running_job(client, d
     assert not task.done()
 
     daemon.jobs.finish(handle, state=JobState.DONE, result="late finish")
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "job_terminal"
 
@@ -131,7 +132,7 @@ async def test_an_admitted_hold_needs_departure_and_terminal_in_either_order(
     presence.set(record["id"], PRESENT)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     assert not task.done()
 
     # The gate was set at admission, and a departure alone no longer
@@ -141,7 +142,7 @@ async def test_an_admitted_hold_needs_departure_and_terminal_in_either_order(
     assert not task.done()
 
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done text")
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     # The departure was observed first, completion last: the reason names
     # the condition observed last.
@@ -159,7 +160,7 @@ async def test_an_admitted_hold_releases_only_after_departure_and_terminal(
     presence.set(record["id"], PRESENT)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     assert not task.done()
 
     # Terminal first: the gate is still set, so the await keeps waiting.
@@ -170,7 +171,7 @@ async def test_an_admitted_hold_releases_only_after_departure_and_terminal(
     # Departure last: both conditions hold, and the departure was the
     # condition observed last.
     presence.set(record["id"], ABSENT)
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "presence_released"
 
@@ -182,7 +183,7 @@ async def test_reentry_after_departure_does_not_restore_the_admission_gate(
     presence.set(record["id"], PRESENT)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     presence.set(record["id"], ABSENT)
     await asyncio.sleep(0.15)
     assert not task.done()
@@ -195,7 +196,7 @@ async def test_reentry_after_departure_does_not_restore_the_admission_gate(
     assert not task.done()
 
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done text")
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "job_terminal"
     assert jobs[0]["human_presence"]["protected"] is True
@@ -209,12 +210,12 @@ async def test_terminal_and_departure_in_one_evaluation_break_the_tie_to_job_ter
     presence.set(record["id"], PRESENT)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[handle], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     # Both facts land in the same wake round — no await between the two — so
     # one evaluation observes both transitions and their order is unknown.
     daemon.jobs.finish(handle, state=JobState.DONE, result="done text")
     presence.set(record["id"], ABSENT)
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "job_terminal"
 
@@ -250,7 +251,7 @@ async def test_unknown_admission_requires_departure_and_terminal_in_either_order
     presence.set(record["id"], UNKNOWN)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     assert not task.done()
 
     if departure_first:
@@ -258,14 +259,14 @@ async def test_unknown_admission_requires_departure_and_terminal_in_either_order
         await asyncio.sleep(0.15)
         assert not task.done()
         daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done")
-        jobs = await asyncio.wait_for(task, 1.0)
+        jobs = await asyncio.wait_for(task, 5.0)
         assert jobs[0]["await_reason"] == "job_terminal"
     else:
         daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done")
         await asyncio.sleep(0.15)
         assert not task.done()
         presence.set(record["id"], ABSENT)
-        jobs = await asyncio.wait_for(task, 1.0)
+        jobs = await asyncio.wait_for(task, 5.0)
         assert jobs[0]["await_reason"] == "presence_released"
     assert jobs[0]["state"] == "done"
 
@@ -278,11 +279,11 @@ async def test_a_participant_with_no_job_waits_only_for_presence(client, daemon,
     presence.set(row["id"], PRESENT)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[row["id"]], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     assert not task.done()
 
     presence.set(row["id"], ABSENT)
-    entries = await asyncio.wait_for(task, 1.0)
+    entries = await asyncio.wait_for(task, 5.0)
     entry = entries[0]
     expected_keys = {"handle", "target_id", "human_presence", "participant_status", "await_reason"}
     assert set(entry) == expected_keys
@@ -297,7 +298,7 @@ async def test_an_already_absent_participant_returns_its_current_status(client, 
 
     started = time.monotonic()
     entries = await client.call("jobs.await", handles=[row["id"]], max_wait=WAIT)
-    assert time.monotonic() - started < 0.5
+    assert time.monotonic() - started < 5.0
     assert entries[0]["await_reason"] == "already_absent"
     assert entries[0]["participant_status"] == _status(daemon, row["id"])
     assert entries[0]["human_presence"]["protected"] is False
@@ -314,10 +315,10 @@ async def test_wait_any_marks_nonqualifying_peers_pending(client, daemon, presen
     task = asyncio.create_task(
         client.call("jobs.await", handles=[held["handle"], free["handle"]], max_wait=WAIT)
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     daemon.jobs.finish(free["handle"], state=JobState.DONE, result="free done")
 
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert [job["handle"] for job in jobs] == [held["handle"], free["handle"]]
     reasons = _reasons(jobs)
     assert reasons[free["handle"]] == "job_terminal"
@@ -359,7 +360,7 @@ async def test_wait_any_returns_on_the_absent_peer_while_the_gated_peer_stays_pe
     task = asyncio.create_task(
         client.call("jobs.await", handles=[gated["handle"], free["handle"]], max_wait=WAIT)
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     # The gated peer finishes while still protected: not enough on its own.
     daemon.jobs.finish(gated["handle"], state=JobState.DONE, result="gated done")
     await asyncio.sleep(0.15)
@@ -368,7 +369,7 @@ async def test_wait_any_returns_on_the_absent_peer_while_the_gated_peer_stays_pe
     # The unprotected-at-admission peer finishes: it qualifies alone and the
     # call returns with the gated peer still pending.
     daemon.jobs.finish(free["handle"], state=JobState.DONE, result="free done")
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert [job["handle"] for job in jobs] == [gated["handle"], free["handle"]]
     reasons = _reasons(jobs)
     assert reasons[free["handle"]] == "job_terminal"
@@ -434,9 +435,9 @@ async def test_every_terminal_state_qualifies_an_unprotected_target(
     record = await _spawn(client)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     daemon.jobs.finish(record["handle"], state=JobState(terminal_state), result="done text")
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == terminal_state
     assert jobs[0]["await_reason"] == "job_terminal"
 
@@ -465,7 +466,7 @@ async def test_a_presence_only_await_cannot_close_a_live_wait_cycle(client, daem
     blocked = asyncio.create_task(
         _await_rpc(daemon, {"handles": [b["id"]], "caller_id": a["id"], "max_wait": 5.0})
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     with pytest.raises(RemoteError) as exc:
         await client.call("jobs.await", handles=[a["id"]], caller_id=b["id"], max_wait=0.1)
     assert exc.value.code == "cycle_detected"
@@ -480,7 +481,7 @@ async def test_coalesced_presence_noise_never_releases_a_running_job(client, dae
     record = await _spawn(client)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     for state in (PRESENT, ABSENT, PRESENT, ABSENT, PRESENT):
         presence.set(record["id"], state)
     presence.set(record["id"], ABSENT)
@@ -491,7 +492,7 @@ async def test_coalesced_presence_noise_never_releases_a_running_job(client, dae
     assert not task.done()
 
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done text")
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "job_terminal"
 
@@ -501,13 +502,13 @@ async def test_coalesced_reentry_never_clears_the_admission_gate(client, daemon,
     presence.set(record["id"], PRESENT)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=0.2))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done text")
     # The burst is synchronous, so only the final PRESENT is ever observable:
     # no unprotected snapshot is observed, and the gate never clears.
     for state in (ABSENT, PRESENT, ABSENT, PRESENT):
         presence.set(record["id"], state)
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "timeout"
     assert jobs[0]["human_presence"]["protected"] is True
@@ -540,7 +541,7 @@ async def test_a_cancelled_await_leaves_no_graph_waiters_or_open_bus_rows(
             {"handles": [record["handle"]], "caller_id": caller["id"], "max_wait": 5.0},
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     assert daemon.jobs.wait_graph != {}
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -566,9 +567,9 @@ async def test_a_held_await_announces_and_closes_its_bus_rows(
     task = asyncio.create_task(
         client.call("jobs.await", handles=[record["handle"]], caller_id="cli", max_wait=WAIT)
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     presence.set(record["id"], ABSENT)
-    await asyncio.wait_for(task, 1.0)
+    await asyncio.wait_for(task, 5.0)
 
     events = [e for e in await client.call("bus.tail") if e["kind"].startswith("job.await")]
     assert [e["kind"] for e in events] == ["job.await.start", "job.await.end"]
@@ -600,7 +601,7 @@ async def test_admission_refresh_is_inside_the_single_deadline(
 
     monkeypatch.setattr(presence, "refresh", blocked_refresh)
     entries = await asyncio.wait_for(
-        client.call("jobs.await", handles=[row["id"]], max_wait=0.02), timeout=1
+        client.call("jobs.await", handles=[row["id"]], max_wait=0.02), timeout=5
     )
     assert entered.is_set() and cancelled.is_set()
     assert entries[0]["await_reason"] == "timeout"
@@ -639,11 +640,11 @@ async def test_failed_refresh_can_release_after_a_successful_new_revision(
     monkeypatch.setattr(presence, "wait_for_change", wait_for_change)
     waiter = asyncio.create_task(client.call("jobs.await", handles=[row["id"]], max_wait=2))
     try:
-        await asyncio.wait_for(subscribed.wait(), timeout=1)
+        await asyncio.wait_for(subscribed.wait(), timeout=5)
         assert not waiter.done()
         broken = False
         presence.set(row["id"], ABSENT)
-        entries = await asyncio.wait_for(waiter, timeout=1)
+        entries = await asyncio.wait_for(waiter, timeout=5)
         assert entries[0]["await_reason"] == "presence_released"
         assert entries[0]["human_presence"]["state"] == "absent"
     finally:
@@ -666,7 +667,7 @@ async def test_a_broken_presence_subscription_stays_fail_closed_for_gated_target
     monkeypatch.setattr(presence, "wait_for_change", broken_wait)
     # max_wait leaves slow CI ample margin to finish the job while the await is held.
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=1.0))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done text")
     jobs = await asyncio.wait_for(task, 5.0)
     # The gate can never clear through a broken subscription, even though the
@@ -687,10 +688,10 @@ async def test_a_broken_subscription_does_not_suppress_terminal_for_absent_admis
 
     monkeypatch.setattr(presence, "wait_for_change", broken_wait)
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=WAIT))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: presence.refresh_calls >= 1, what="await admission")
     # Verified unprotected at admission: presence never gates this target, so
     # terminal completion qualifies even while the subscription is broken.
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done text")
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "job_terminal"

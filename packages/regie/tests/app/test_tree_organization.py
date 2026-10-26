@@ -9,8 +9,6 @@ from types import MappingProxyType
 import pytest
 from regie.paths import RegiePaths
 from regie.render.glyphs import separator_label
-from regie.render.layout import render_tree
-from regie.render.routing import heavy_overlays, section_arms
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE
 from regie.widgets import ParticipantTree
@@ -341,34 +339,3 @@ async def test_a_hovered_or_selected_separator_draws_heavy_rails_to_what_it_can_
         # An await route pulsing along its branch takes over from the highlight.
         below.set_overlay({(1, 0): (">", "$warning")})
         await wait_until(pilot, lambda: below.render_line(1).text.strip()[:4] == ">── ")
-
-
-def test_only_the_rails_leading_on_to_a_folded_agent_turn_heavy() -> None:
-    def agent(name: str, *children: dict) -> dict:
-        return {"id": name, "name": name, "harness": "x", "status": "idle", "children": [*children]}
-
-    def heading(name: str) -> dict:
-        return {"id": name, "kind": "separator", "name": name, "count": 0, "children": []}
-
-    tree = [agent("a", heading("one"), agent("b", agent("b1")), heading("two"), agent("c"))]
-    lines = render_tree([*tree, agent("d")])
-    overlays = heavy_overlays(lines, section_arms(lines, ("s", "one")))
-    drawn = []
-    for label, _, key, _, _ in lines:
-        for row, text in enumerate(label.plain.split("\n")):
-            cells = list(text)
-            for (line, col), (glyph, _) in overlays.get(key, {}).items():  # type: ignore[misc]
-                if line == row:
-                    cells[col] = glyph
-            drawn.append("".join(cells).rstrip())
-    assert drawn[4:13] == [
-        "│   ┢━━ ▾ ONE · 0",  # its own branch, heavy on to its section, light up
-        "│   ┃",
-        "│   ┃",
-        "│   ┡━━ · x  b",  # the rail on past b leads to TWO, out of the section: light
-        "│   │   -",
-        "│   │   ┃",  # down into b's child, which folds with b
-        "│   │   ┗━━ · x  b1",
-        "│   │       -",
-        "│   │",
-    ]

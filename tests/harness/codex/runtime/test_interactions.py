@@ -12,6 +12,7 @@ from tests.support.codex_server import (
     make_runtime,
     open_new,
 )
+from tests.support.waiting import wait_until
 from theater.daemon.controls.activity import ActivityControls
 from theater.daemon.controls.busy import BusyOperation
 from theater.harness.builtin.plugins.codex import runtime_constants as codex_runtime_constants
@@ -42,7 +43,7 @@ async def test_approval_server_request_recorded_never_answered() -> None:
             request_id=0,
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: 0 in runtime._pending_interactions, what="approval request recorded")
     snapshot = await runtime.snapshot()
     interaction = snapshot.pending_interaction
     assert interaction is not None
@@ -63,7 +64,9 @@ async def test_approval_server_request_recorded_never_answered() -> None:
             params={"threadId": "ui-thread-1", "requestId": 0},
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: 0 not in runtime._pending_interactions, what="resolution to clear the request"
+    )
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is None
     await runtime.aclose()
@@ -93,7 +96,7 @@ async def test_blocking_request_user_input_sets_and_clears_awaiting_input() -> N
             request_id=7,
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: 7 in runtime._pending_interactions, what="blocking question recorded")
 
     snapshot = await runtime.snapshot()
     interaction = snapshot.pending_interaction
@@ -111,7 +114,9 @@ async def test_blocking_request_user_input_sets_and_clears_awaiting_input() -> N
             params={"threadId": "ui-thread-1", "requestId": 7},
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: 7 not in runtime._pending_interactions, what="resolution to clear the question"
+    )
     assert (await runtime.snapshot()).pending_interaction is None
     assert (await source.read()).status is not Status.AWAITING_INPUT
     await runtime.aclose()
@@ -147,7 +152,9 @@ async def test_nonblocking_request_user_input_keeps_working() -> None:
             request_id=8,
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: not server.pending, what="turn start and non-blocking question consumed"
+    )
 
     assert (await runtime.snapshot()).pending_interaction is None
     assert (await source.read()).status is Status.WORKING
@@ -173,7 +180,7 @@ async def test_async_agent_message_questions_do_not_set_awaiting_input() -> None
             },
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: len(runtime._events) == 1, what="agent message event to land")
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is None
     assert (await runtime.live_source().read()).events[-1].text == "Which option?"
@@ -218,7 +225,9 @@ async def test_concurrent_interactions_resolve_independently() -> None:
     source = runtime.live_source()
     server.push(approval_request(0, reason="Allow creating file?"))
     server.push(approval_request(7, turn_id="turn-2", reason="Allow deleting file?"))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: set(runtime._pending_interactions) == {0, 7}, what="both approvals recorded"
+    )
 
     # The earliest unresolved request stays visible; a newer one never hides it.
     snapshot = await runtime.snapshot()
@@ -229,7 +238,7 @@ async def test_concurrent_interactions_resolve_independently() -> None:
 
     # Resolving B leaves A pending: the live source still reports waiting.
     server.push(request_resolved(7))
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: 7 not in runtime._pending_interactions, what="resolution of 7")
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.native_request_id == 0
@@ -237,11 +246,13 @@ async def test_concurrent_interactions_resolve_independently() -> None:
 
     # A foreign thread's resolution never touches this runtime's requests.
     server.push(request_resolved(0, thread_id="other-thread"))
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: not server.pending, what="foreign resolution consumed")
     assert (await runtime.snapshot()).pending_interaction is not None
 
     server.push(request_resolved(0))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: not runtime._pending_interactions, what="resolution to clear every request"
+    )
     assert (await runtime.snapshot()).pending_interaction is None
     assert (await source.read()).status is not Status.AWAITING_INPUT
     await runtime.aclose()
@@ -252,7 +263,13 @@ async def test_replayed_unresolved_request_and_resolution_are_idempotent() -> No
     runtime, _binding = await open_new(server)
     server.push(approval_request(0, reason="first reason"))
     server.push(approval_request(0, reason="replayed reason"))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: (
+            len(runtime._pending_interactions) == 1
+            and "replayed reason" in runtime._pending_interactions[0].details
+        ),
+        what="replayed request deduped with refreshed details",
+    )
 
     # The exact id deduplicates the replay; only the details refresh.
     assert len(runtime._pending_interactions) == 1
@@ -265,7 +282,9 @@ async def test_replayed_unresolved_request_and_resolution_are_idempotent() -> No
     server.push(request_resolved(0))
     server.push(request_resolved(0))
     server.push(request_resolved(99))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: not runtime._pending_interactions, what="resolutions to clear the request"
+    )
     assert (await runtime.snapshot()).pending_interaction is None
     await runtime.aclose()
 
@@ -278,7 +297,9 @@ async def test_waiting_flags_show_waiting_without_fabricating_a_request() -> Non
 
     # Zero-rollout subscription gap: only the broadcast names the wait.
     server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: runtime._waiting_approval_flag is True, what="waiting approval flag adopted"
+    )
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.kind.value == "approval"
@@ -290,24 +311,27 @@ async def test_waiting_flags_show_waiting_without_fabricating_a_request() -> Non
 
     # Malformed flags entries never manufacture absence: the wait stays.
     server.push(status_changed({"type": "active", "activeFlags": [None]}))
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: not server.pending, what="malformed flags consumed")
     assert (await runtime.snapshot()).pending_interaction is not None
     assert (await source.read()).status is Status.AWAITING_INPUT
 
     # An active variant without any flags field is silence, not absence.
     server.push(status_changed({"type": "active"}))
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: not server.pending, what="flagless active status consumed")
     assert (await source.read()).status is Status.AWAITING_INPUT
 
     # The idle variant carries no activeFlags; a valid idle clears the wait.
     server.push(status_changed({"type": "idle"}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: runtime._pending_interaction_view() is None and runtime._status_hint is Status.IDLE,
+        what="idle to clear the wait",
+    )
     assert (await runtime.snapshot()).pending_interaction is None
     assert (await source.read()).status is Status.IDLE
 
     # The user-input flag waits the same way, as a clarification summary.
     server.push(status_changed({"type": "active", "activeFlags": ["waitingOnUserInput"]}))
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: runtime._waiting_input_flag is True, what="waiting input flag adopted")
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.kind.value == "clarification"
@@ -316,7 +340,12 @@ async def test_waiting_flags_show_waiting_without_fabricating_a_request() -> Non
 
     # A well-formed no-waiting flags list is authoritative absence.
     server.push(status_changed({"type": "active", "activeFlags": []}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: (
+            runtime._pending_interaction_view() is None and runtime._status_hint is Status.WORKING
+        ),
+        what="empty flags to clear the wait",
+    )
     assert (await runtime.snapshot()).pending_interaction is None
     assert (await source.read()).status is Status.WORKING
     await runtime.aclose()
@@ -327,7 +356,9 @@ async def test_flag_only_waiting_blocks_daemon_admission() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
     server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: runtime._waiting_approval_flag is True, what="waiting approval flag adopted"
+    )
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.native_request_id is None
@@ -368,7 +399,7 @@ async def test_late_resume_does_not_erase_newer_native_waiting() -> None:
     server.request_entered["thread/resume"] = entered
     subscribe = asyncio.create_task(runtime._subscribe_after_rollout())
     try:
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        await asyncio.wait_for(entered.wait(), timeout=5)
         await runtime._handle_notification(
             status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]})
         )
@@ -405,10 +436,12 @@ async def test_unknown_or_malformed_status_never_asserts_absence(
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
     server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: runtime._waiting_approval_flag is True, what="waiting approval flag adopted"
+    )
     assert (await runtime.snapshot()).pending_interaction is not None
     server.push(status_changed(status))
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: not server.pending, what="status broadcast consumed")
     pending = (await runtime.snapshot()).pending_interaction
     if clears:
         assert pending is None
@@ -424,9 +457,15 @@ async def test_status_evidence_never_clears_tracked_exact_requests() -> None:
     runtime, _binding = await open_new(server)
     server.push(approval_request(0, turn_id="turn-1"))
     server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: 0 in runtime._pending_interactions and runtime._waiting_approval_flag is True,
+        what="approval request and waiting flag recorded",
+    )
     server.push(status_changed({"type": "idle"}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: 0 in runtime._pending_interactions and not runtime._waiting_approval_flag,
+        what="idle to clear the flag but keep the exact request",
+    )
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.native_request_id == 0
@@ -440,12 +479,15 @@ async def test_overflow_summary_reports_the_observed_kind() -> None:
     bound = codex_runtime_constants.CODEX_RUNTIME_PENDING_INTERACTIONS_MAX
     for request_id in range(bound + 1):
         server.push(blocking_input_request(request_id))
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: runtime._overflow_kinds == frozenset({NativeInteractionKind.CLARIFICATION}),
+        what="overflow latch to report the clarification kind",
+    )
     assert runtime._overflow_kinds == frozenset({NativeInteractionKind.CLARIFICATION})
 
     for request_id in range(bound):
         server.push(request_resolved(request_id))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not runtime._pending_interactions, what="tracked requests resolved")
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.kind.value == "clarification"
@@ -472,7 +514,10 @@ async def test_nonblocking_question_never_hides_a_blocking_approval() -> None:
             request_id=8,
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: 0 in runtime._pending_interactions and not server.pending,
+        what="approval recorded and non-blocking question consumed",
+    )
 
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
@@ -512,7 +557,7 @@ async def test_new_turn_alone_never_clears_pending_clarification() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
     server.push(blocking_input_request(2, turn_id="turn-2"))
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: 2 in runtime._pending_interactions, what="blocking question recorded")
 
     server.push(
         RuntimeNotification(
@@ -520,19 +565,22 @@ async def test_new_turn_alone_never_clears_pending_clarification() -> None:
             params={"threadId": "ui-thread-1", "turn": {"id": "turn-3"}},
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: runtime._active_turn_id == "turn-3", what="new turn to start")
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.native_request_id == 2
 
     # Another turn's terminal evidence never touches this clarification.
     server.push(completed_turn("turn-9"))
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: not server.pending, what="foreign terminal turn consumed")
     assert (await runtime.snapshot()).pending_interaction is not None
 
     # The asking turn's terminal evidence clears exactly its own request.
     server.push(completed_turn("turn-2"))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: 2 not in runtime._pending_interactions,
+        what="own terminal turn to clear the question",
+    )
     assert (await runtime.snapshot()).pending_interaction is None
     await runtime.aclose()
 
@@ -543,7 +591,9 @@ async def test_history_terminal_turn_clears_only_its_own_interactions() -> None:
     runtime, _binding = await open_new(server)
     server.push(approval_request(1, turn_id="turn-1"))
     server.push(approval_request(2, turn_id="turn-2"))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: set(runtime._pending_interactions) == {1, 2}, what="both approvals recorded"
+    )
 
     await runtime._reconcile_thread(
         {"id": "ui-thread-1", "status": {"type": "idle"}},
@@ -561,7 +611,10 @@ async def test_approval_outranks_clarification_and_summaries_in_the_view() -> No
     runtime, _binding = await open_new(server)
     server.push(blocking_input_request(3))
     server.push(approval_request(4))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: set(runtime._pending_interactions) == {3, 4},
+        what="clarification and approval recorded",
+    )
 
     # An exact approval outranks an earlier clarification.
     snapshot = await runtime.snapshot()
@@ -571,14 +624,16 @@ async def test_approval_outranks_clarification_and_summaries_in_the_view() -> No
 
     # An equivalent flag summary never displaces the exact request.
     server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: runtime._waiting_approval_flag is True, what="waiting approval flag adopted"
+    )
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction.native_request_id == 4
 
     # With the approval resolved, the flag still evidences an unknown approval
     # waiting, which outranks the exact clarification.
     server.push(request_resolved(4))
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: 4 not in runtime._pending_interactions, what="approval resolved")
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.native_request_id is None
@@ -586,7 +641,10 @@ async def test_approval_outranks_clarification_and_summaries_in_the_view() -> No
 
     # Only once the flag clears does the exact clarification surface.
     server.push(status_changed({"type": "active", "activeFlags": []}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: not (runtime._waiting_approval_flag or runtime._waiting_input_flag),
+        what="waiting flags cleared",
+    )
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.native_request_id == 3
@@ -599,18 +657,25 @@ async def test_terminal_turn_clears_only_its_own_interactions() -> None:
     runtime, _binding = await open_new(server)
     server.push(approval_request(0, turn_id="turn-1"))
     server.push(approval_request(1, turn_id="turn-2"))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: set(runtime._pending_interactions) == {0, 1}, what="both approvals recorded"
+    )
     assert (await runtime.snapshot()).pending_interaction is not None
 
     # Turn 2's terminal ends only turn 2's request; turn 1's survives.
     server.push(completed_turn("turn-2"))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: 1 not in runtime._pending_interactions and 0 in runtime._pending_interactions,
+        what="turn 2 terminal to clear only its request",
+    )
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.native_request_id == 0
 
     server.push(completed_turn("turn-1"))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: not runtime._pending_interactions, what="turn 1 terminal to clear its request"
+    )
     assert (await runtime.snapshot()).pending_interaction is None
     await runtime.aclose()
 
@@ -622,7 +687,13 @@ async def test_pending_interaction_bound_never_evicts_into_a_safe_snapshot() -> 
     bound = codex_runtime_constants.CODEX_RUNTIME_PENDING_INTERACTIONS_MAX
     for request_id in range(bound + 1):
         server.push(approval_request(request_id))
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: (
+            len(runtime._pending_interactions) == bound
+            and runtime._overflow_kinds == frozenset({NativeInteractionKind.APPROVAL})
+        ),
+        what="bounded requests tracked with the overflow latch",
+    )
 
     # The bound holds; the tracked exact request stays visible.
     assert len(runtime._pending_interactions) == bound
@@ -637,7 +708,7 @@ async def test_pending_interaction_bound_never_evicts_into_a_safe_snapshot() -> 
     # one, without ever claiming a fake exact id.
     for request_id in range(bound):
         server.push(request_resolved(request_id))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not runtime._pending_interactions, what="tracked requests resolved")
     assert runtime._pending_interactions == {}
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
@@ -647,12 +718,18 @@ async def test_pending_interaction_bound_never_evicts_into_a_safe_snapshot() -> 
 
     # Only authoritative no-waiting evidence ends the latched wait.
     server.push(status_changed({"type": "idle"}))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: runtime._overflow_kinds == frozenset() and runtime._status_hint is Status.IDLE,
+        what="idle to clear the overflow latch",
+    )
     assert (await source.read()).status is Status.IDLE
     assert runtime._overflow_kinds == frozenset()
 
     # With the latch cleared, tracking works normally again.
     server.push(approval_request(bound + 1))
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: len(runtime._pending_interactions) == 1,
+        what="new request tracked after the latch cleared",
+    )
     assert len(runtime._pending_interactions) == 1
     await runtime.aclose()

@@ -7,8 +7,12 @@ from collections.abc import Callable
 from textual.pilot import Pilot
 
 
-async def wait_until(pilot: Pilot, condition: Callable[[], bool], timeout: float = 5.0) -> None:
-    """Let the app run until condition holds; fail with a clear message after timeout."""
+async def wait_until(pilot: Pilot, condition: Callable[[], bool], timeout: float = 30.0) -> None:
+    """Let the app run until condition holds; fail with a clear message after timeout.
+
+    The timeout is a hang backstop sized for slow CI runners: it returns as soon as the
+    condition holds, so it only ever fires on a real hang, never on a merely loaded runner.
+    """
     steps = int(timeout / 0.02)
     for _ in range(steps):
         if condition():

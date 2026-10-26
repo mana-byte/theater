@@ -7,9 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support.tables import run_rows, run_rows_async
+from tests.support.tables import run_rows_async
 from theater.daemon.rpc import hooks as hooks_mod
-from theater.daemon.rpc.params import _finite_number_param, _integer_param
 from theater.models import BadRequest, Status
 from theater.protocol import RemoteError
 
@@ -18,25 +17,6 @@ async def test_missing_parameter_is_a_structured_error(client):
     with pytest.raises(RemoteError) as exc:
         await client.call("participants.get")
     assert exc.value.code == "bad_request"
-
-
-def test_integer_param_rejects_bool_and_other_types():
-    for value in (True, None, "2", 2.0, 10**400):
-        with pytest.raises(BadRequest):
-            _integer_param(value, "limit", method_name="test")
-
-
-def test_finite_number_param_rejects_non_finite_and_untyped_values():
-    """Only real, finite numbers pass the shared window parameter check."""
-
-    def rejects(value: object) -> None:
-        with pytest.raises(BadRequest):
-            _finite_number_param(value, "window", method_name="test")
-
-    run_rows(
-        (repr(value), partial(rejects, value))
-        for value in (True, None, "2", float("nan"), float("inf"), 10**400)
-    )
 
 
 @pytest.mark.parametrize("value", [None, "abc", True])

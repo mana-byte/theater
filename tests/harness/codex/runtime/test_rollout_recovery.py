@@ -12,7 +12,7 @@ from tests.support.codex_server import (
     open_new,
 )
 from tests.support.observation import minimal_gates
-from tests.support.waiting import until
+from tests.support.waiting import until, wait_until
 from theater.daemon.awaiting import REASON_JOB_TERMINAL, coordinate_await, parse_targets
 from theater.daemon.controls.service import ControlService
 from theater.daemon.jobs import JobManager
@@ -181,7 +181,10 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store)
         rig.server.request_gates["thread/resume"] = gate
         for _ in range(3):
             rig.server.push(idle_broadcast())
-        await asyncio.sleep(0.1)
+        await wait_until(
+            lambda: len(rig.server.requested("thread/resume")) >= 2 and not rig.server.pending,
+            what="one recovery resume attempt after repeated idle broadcasts",
+        )
         assert len(rig.server.requested("thread/resume")) == 2, (
             "repeated idle broadcasts must not stack concurrent subscription attempts"
         )
@@ -191,7 +194,7 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store)
 
         # Once subscribed, later idle broadcasts schedule nothing further.
         rig.server.push(idle_broadcast())
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: not rig.server.pending, what="later idle broadcast consumed")
         assert len(rig.server.requested("thread/resume")) == 2
 
         # The recovered subscription reconciled the completed turn; routing the source

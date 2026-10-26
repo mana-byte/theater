@@ -8,6 +8,7 @@ from tests.support.codex_server import (
     ScriptedCodexServer,
     open_new,
 )
+from tests.support.waiting import wait_until
 from theater.harness.contracts.runtime import (
     ConnectionHealth,
     DeliveryResult,
@@ -165,7 +166,7 @@ async def test_interrupt_targets_exact_turn_ids() -> None:
             params={"threadId": "ui-thread-1", "turn": {"id": "turn-1", "status": "inProgress"}},
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: runtime._active_turn_id == "turn-1", what="turn 1 to start")
     receipt = await runtime.interrupt(operation_id="op-8")
     assert receipt.result is DeliveryResult.ACCEPTED
     assert receipt.native_turn_id == "turn-1"
@@ -194,12 +195,12 @@ async def test_interrupt_settles_from_turn_completed_before_the_ack_returns() ->
             params={"threadId": "ui-thread-1", "turn": {"id": "turn-1", "status": "inProgress"}},
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: runtime._active_turn_id == "turn-1", what="turn 1 to start")
     gate = asyncio.Event()
     server.request_gates["turn/interrupt"] = gate
     entered = server.request_entered.setdefault("turn/interrupt", asyncio.Event())
     interrupt_task = asyncio.create_task(runtime.interrupt(operation_id="op-fast"))
-    await asyncio.wait_for(entered.wait(), timeout=1.0)
+    await asyncio.wait_for(entered.wait(), timeout=5)
 
     # The backend reports turn/completed (interrupted) while the interrupt
     # request is still outstanding: settlement must not wait for the ack.
@@ -217,13 +218,15 @@ async def test_interrupt_settles_from_turn_completed_before_the_ack_returns() ->
             },
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(
+        lambda: len(source.buffered_terminal_evidence()) == 1, what="interrupted outcome to land"
+    )
     outcomes = (await source.read()).terminal_evidence
     assert [outcome.terminal.value for outcome in outcomes] == ["interrupted"]
     assert [outcome.native_turn_id for outcome in outcomes] == ["turn-1"]
 
     gate.set()
-    receipt = await asyncio.wait_for(interrupt_task, timeout=1.0)
+    receipt = await asyncio.wait_for(interrupt_task, timeout=5)
     assert receipt.result is DeliveryResult.ACCEPTED
     assert receipt.native_turn_id == "turn-1"
     snapshot = await runtime.snapshot()

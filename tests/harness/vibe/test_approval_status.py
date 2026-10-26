@@ -11,6 +11,7 @@ from tests.support.paths import fixture
 from tests.support.shipped import VibeHarness
 from tests.support.vibe_store import SESSION_ID, make_state, public_message
 from tests.support.vibe_store import Store as VibeStore
+from tests.support.waiting import wait_until
 from theater import paths
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.frontend import FrontendClient, StateSynchronizer
@@ -55,18 +56,20 @@ async def test_question_dialog_overrides_quiet_running_store_in_full_watch(
     try:
         await follow.refresh()
         observer.start()
-        async with asyncio.timeout(2):
-            while daemon.registry.get(participant.id).status is not Status.AWAITING_INPUT:
-                await asyncio.sleep(0.01)
+        await wait_until(
+            lambda: daemon.registry.get(participant.id).status is Status.AWAITING_INPUT,
+            what="participant status awaiting_input",
+        )
         assert participant.id in observer._sources
         for _ in range(5):
             await asyncio.sleep(0.02)
             projection = await follow.follow_once(wait_seconds=0)
             assert projection.participants[participant.id].status == "awaiting_input"
         terminal_provider.screens[terminal] = (screens / "vibe_idle.txt").read_text()
-        async with asyncio.timeout(2):
-            while daemon.registry.get(participant.id).status is not Status.IDLE:
-                await asyncio.sleep(0.01)
+        await wait_until(
+            lambda: daemon.registry.get(participant.id).status is Status.IDLE,
+            what="participant status idle",
+        )
         assert not terminal_provider.deliveries
         assert not terminal_provider.interruptions
         assert not terminal_provider.terminations

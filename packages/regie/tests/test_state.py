@@ -169,7 +169,7 @@ async def test_waiting_follow_yields_to_refresh_but_propagates_owner_cancellatio
         try:
             await controller.initialize()
             pending = asyncio.create_task(controller.follow())
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(10):
                 await started.wait()
                 fresh = await controller.initialize()
                 assert await pending is None
@@ -178,7 +178,7 @@ async def test_waiting_follow_yields_to_refresh_but_propagates_owner_cancellatio
 
             started.clear()
             pending = asyncio.create_task(controller.follow())
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(10):
                 await started.wait()
                 pending.cancel()
                 with pytest.raises(asyncio.CancelledError):
@@ -219,14 +219,14 @@ async def test_catch_up_lets_a_poll_in_flight_land_instead_of_cancelling_it() ->
         try:
             await controller.initialize()
             poll = asyncio.create_task(controller.follow())
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(10):
                 await started.wait()
             catching = asyncio.create_task(controller.catch_up())
             done, _pending = await asyncio.wait({catching}, timeout=0.05)
             assert not done  # it waits for the poll rather than racing it
 
             release.set()
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(10):
                 await catching
                 landed = await poll
             assert landed is controller.projection and not landed.stale
@@ -269,7 +269,7 @@ async def test_catch_up_gives_up_on_a_silent_poll_without_cancelling_it(
         try:
             await controller.initialize()
             poll = asyncio.create_task(controller.follow())
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(10):
                 await started.wait()
                 await controller.catch_up()
             assert not poll.done()  # the caller decides: a snapshot refetch cancels it as before

@@ -140,7 +140,7 @@ async def test_refresh_works_through_a_real_single_request_connection() -> None:
     client = FrontendClient(socket_path, client_id="usage-regression")
     try:
         snapshot = await asyncio.wait_for(
-            UsageController(client).refresh(window="day", participant_ids=("p1",)), timeout=5
+            UsageController(client).refresh(window="day", participant_ids=("p1",)), timeout=10
         )
     finally:
         await client.close()

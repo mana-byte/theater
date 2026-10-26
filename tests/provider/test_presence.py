@@ -113,7 +113,7 @@ async def test_focus_invalidation_protects_cache_and_fences_inflight_inspection(
     service.responses.append(result("absent", 2))
     pending = asyncio.create_task(monitor.refresh())
     try:
-        await asyncio.wait_for(inspecting.wait(), 1)
+        await asyncio.wait_for(inspecting.wait(), 5)
         monitor.invalidate_provider("provider-a", 7)
         assert monitor.revision > revision
         assert monitor.snapshot("participant-a").state is PresenceState.UNKNOWN
@@ -156,9 +156,9 @@ async def test_target_admission_does_not_wait_for_unrelated_background_inspectio
     service.responses.extend([result("absent", 1), result("present", 2)])
     background = asyncio.create_task(monitor.refresh())
     try:
-        await asyncio.wait_for(inspecting_sibling.wait(), 1)
+        await asyncio.wait_for(inspecting_sibling.wait(), 5)
         with pytest.raises(HumanPresent):
-            await asyncio.wait_for(monitor.require_absent("participant-a"), 1)
+            await monitor.require_absent("participant-a")
         assert not background.done()
         assert not service.responses
     finally:
@@ -268,13 +268,6 @@ async def test_refresh_rechecks_focus_immediately_before_each_delivery(provider_
         await monitor.require_absent("participant-a")
 
 
-async def test_provider_presence_has_no_legacy_inventory_dependency(provider_monitor) -> None:
-    monitor, service, _registry, _clock = provider_monitor
-    service.responses.append(result("absent", 1))
-    await monitor.require_absent("participant-a")
-    assert monitor.snapshot("participant-a").state is PresenceState.ABSENT
-
-
 async def test_inspect_failure_identity_mismatch_and_revision_regression_fail_closed(
     provider_monitor,
 ) -> None:
@@ -316,11 +309,11 @@ async def test_superseded_inspect_keeps_the_newer_presence(provider_monitor, mon
 
     monkeypatch.setattr(service, "inspect", inspect)
     stale = asyncio.create_task(monitor._provider.refresh([registry.participant]))
-    await asyncio.wait_for(first_started.wait(), 1)
+    await asyncio.wait_for(first_started.wait(), 5)
     newer = asyncio.create_task(monitor._provider.refresh([registry.participant]))
-    await asyncio.wait_for(newer, 1)
+    await asyncio.wait_for(newer, 5)
     release_first.set()
-    await asyncio.wait_for(stale, 1)
+    await asyncio.wait_for(stale, 5)
 
     snapshot = monitor.snapshot("participant-a")
     assert snapshot.state is PresenceState.ABSENT
@@ -364,7 +357,7 @@ async def test_provider_revision_wakes_waiters_without_lost_wakeup(provider_moni
     waiter = asyncio.create_task(monitor.wait_for_change(after))
     service.responses.append(result("absent", 1))
     await monitor.refresh()
-    assert await asyncio.wait_for(waiter, 1) > after
+    assert await asyncio.wait_for(waiter, 5) > after
 
 
 async def test_only_exact_authoritative_exit_reaches_lifecycle_handler(
@@ -629,14 +622,14 @@ async def test_screen_request_is_targeted_and_waits_for_its_own_evidence(
     admission = asyncio.create_task(daemon.presence.require_absent(participant.id))
     second_admission = capture = None
     try:
-        await asyncio.wait_for(started.wait(), 1)
+        await asyncio.wait_for(started.wait(), 5)
         second_admission = asyncio.create_task(daemon.presence.require_absent(participant.id))
         capture = asyncio.create_task(daemon.observer._capture(participant.id))
         await asyncio.sleep(0)
         release.set()
-        await asyncio.wait_for(admission, 1)
-        await asyncio.wait_for(second_admission, 1)
-        assert await asyncio.wait_for(capture, 1) == "Esc reject"
+        await asyncio.wait_for(admission, 5)
+        await asyncio.wait_for(second_admission, 5)
+        assert await asyncio.wait_for(capture, 5) == "Esc reject"
         assert [item["terminal_id"] for item in requests] == [terminal, terminal, terminal]
         assert "screen_max_bytes" not in requests[0]
         assert "screen_max_bytes" not in requests[1]

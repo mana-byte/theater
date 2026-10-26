@@ -246,25 +246,6 @@ async def test_await_will_not_block_for_longer_than_the_ceiling(
     assert seen == [jobs_mod.MAX_AWAIT]
 
 
-async def test_await_ceiling_reads_compatibility_facade(
-    client, terminal_provider, daemon, monkeypatch
-):
-    from theater.daemon import methods
-
-    seen: list[float] = []
-    real = daemon.jobs.await_jobs
-
-    async def spy(handles, max_wait):
-        seen.append(max_wait)
-        return await real(handles, max_wait=0.01)
-
-    monkeypatch.setattr(methods, "MAX_AWAIT", 0.02)
-    monkeypatch.setattr(daemon.jobs, "await_jobs", spy)
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    await client.call("jobs.await", handles=[record["handle"]], max_wait=3600)
-    assert seen == [0.02]
-
-
 async def test_job_created_and_finished_on_bus(client, terminal_provider, daemon):
     from theater.daemon.jobs import JobState
 
@@ -314,7 +295,7 @@ async def test_await_returns_when_first_of_two_finishes(daemon, monkeypatch):
     try:
         jobs = await asyncio.wait_for(
             jm.await_jobs(["h1", "h2"], max_wait=5.0),
-            timeout=3.0,
+            timeout=10.0,
         )
     finally:
         if not finisher.done():

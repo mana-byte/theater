@@ -15,6 +15,7 @@ import pytest
 from tests.support.beads_fakes import FakeClient, fact
 from tests.support.beads_fakes import caller as _caller
 from tests.support.beads_fakes import instance as _instance
+from tests.support.waiting import until
 from theater.config import Config
 from theater.mcp_plugins import McpLaunchContext, PluginCapability, validate_manifest
 from theater.mcp_plugins import registry as mcp_registry
@@ -184,7 +185,8 @@ def test_cancelled_backend_keeps_board_lock_until_worker_finishes(
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert await asyncio.wait_for(contender, 5)
+        assert await until(contender.done)
+        assert await contender
 
     asyncio.run(exercise())
 

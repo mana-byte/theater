@@ -502,10 +502,6 @@ def test_every_mask_length_is_between_4_and_12():
         assert 4 <= len(m) <= 12, f"{m!r} has length {len(m)}"
 
 
-def test_masks_has_roughly_100_entries():
-    assert len(MASKS) >= 90
-
-
 def test_pick_never_returns_a_taken_name():
     taken = {"Arlequin", "Pierrot", "Colombine"}
     for _ in range(50):

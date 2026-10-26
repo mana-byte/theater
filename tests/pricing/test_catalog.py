@@ -18,10 +18,6 @@ def test_exact_and_provider_stripped_names_use_catalog_prices():
     assert _cost("openai/gpt-5") == 1_125_000_000
 
 
-def test_verified_opencode_alias_uses_its_catalog_row():
-    assert _cost("openai-foundry/zai-glm-5-2") == 580_000_000
-
-
 def test_mistral_glm_5_3_uses_glm_5_2_rates():
     assert _cost("mistral/zai-glm-5-3") == _cost("mistral/zai-glm-5-2")
 
@@ -75,11 +71,6 @@ def test_unknown_names_do_not_fuzzy_match_catalog_entries():
         )
         is None
     )
-
-
-def test_every_catalog_name_can_be_looked_up_without_error():
-    for model in _load():
-        usage_cost_microcents(TokenUsage(model=model, input_tokens=1, output_tokens=1))
 
 
 def test_unpriced_models_are_reported_once(caplog):

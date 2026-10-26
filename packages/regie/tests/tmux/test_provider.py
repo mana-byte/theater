@@ -201,7 +201,7 @@ async def test_real_inspection_requests_bounded_screen_and_preserves_approval_fo
         dispatch_previously_started=False,
     )
     terminal_id = str(identity["terminal_id"])
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(30):
         while footer not in await run("capture-pane", "-p", "-t", terminal_id):  # noqa: ASYNC110
             await asyncio.sleep(0.01)
     state = BridgeStateStore(isolated_tmux / "screen-bridge")
@@ -288,7 +288,7 @@ async def test_focus_hooks_preserve_user_hooks_wake_and_close_on_isolated_server
     waiter = asyncio.create_task(hooks.wait())
     try:
         await run("split-window", "-d", "-t", REGIE_DEFAULT_SESSION)
-        await asyncio.wait_for(waiter, 2)
+        await asyncio.wait_for(waiter, 30)
         await run("set-hook", "-R", "-t", REGIE_DEFAULT_SESSION, "after-select-pane")
         assert await run("show-options", "-g", "-v", "@user-hook") == "local"
     finally:
@@ -434,7 +434,7 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation( 
     await deliver_action(terminal_id, {"kind": "submit_text", "text": "literal! ~input"})
     # The child creates the file before json.dump finishes writing it, so exists() is too early.
     result = None
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(30):
         while result is None:
             with contextlib.suppress(FileNotFoundError, json.JSONDecodeError):
                 result = json.loads(result_path.read_text())
@@ -762,11 +762,11 @@ async def test_human_ctrl_c_proves_terminal_exit(isolated_tmux, generation):
             dispatch_previously_started=False,
         )
         terminal_id = identity["terminal_id"]
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while "ready" not in await run("capture-pane", "-p", "-t", terminal_id):  # noqa: ASYNC110
                 await asyncio.sleep(0.01)
         await run("send-keys", "-t", terminal_id, "C-c")
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while await pane_snapshot(terminal_id) is not None:  # noqa: ASYNC110
                 await asyncio.sleep(0.01)
         expected = {**identity, "provider_generation": generation}

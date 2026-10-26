@@ -15,7 +15,7 @@ from tests.support.observation import (
     ScriptedDurable,
     make_watch_context,
 )
-from tests.support.waiting import until
+from tests.support.waiting import until, wait_until
 from theater.daemon.observation.live import LiveObservationHub, LiveRegistration
 from theater.daemon.observation.service import _WatchIteration
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
@@ -300,7 +300,7 @@ async def test_duplicate_evidence_finishes_exactly_once(rig: Rig):
     # A duplicate delivery (replay or a second notification) never finishes
     # twice and never rewrites terminal state.
     rig.state.batches.append(Batch(progressed=True, terminal_evidence=(evidence,)))
-    await asyncio.sleep(0.2)
+    await wait_until(lambda: not rig.state.batches, what="the duplicate batch to be consumed")
 
     assert rig.jobs.finishes == [job.handle]
     assert rig.job(job.handle).result == "the answer"
@@ -461,7 +461,7 @@ async def test_transient_sink_failure_replays_retained_evidence_once(rig: Rig):
     )
 
     assert await until(lambda: rig.job(job.handle).state == JobState.DONE)
-    await asyncio.sleep(0.1)
+    await wait_until(lambda: len(calls) >= 2, what="the retained evidence to replay")
 
     # First delivery failed, the retained evidence replayed, and the job
     # finished exactly once from the single successful routing.
@@ -481,7 +481,10 @@ async def test_no_sink_retains_evidence_and_retries_every_poll(rig: Rig, caplog)
     )
 
     with caplog.at_level(logging.WARNING):
-        await asyncio.sleep(0.12)
+        await wait_until(
+            lambda: caplog.text.count("no registered evidence sink") >= 2,
+            what="the missing-sink warning to repeat across polls",
+        )
 
     assert rig.job(job.handle).state == JobState.RUNNING
     # Retention, not log-and-drop: the held outcome is re-routed on every
@@ -490,7 +493,7 @@ async def test_no_sink_retains_evidence_and_retries_every_poll(rig: Rig, caplog)
     assert caplog.text.count("no registered evidence sink") >= 2
 
 
-async def test_live_only_evidence_survives_a_missing_sink_until_one_registers(live_only):
+async def test_live_only_evidence_survives_a_missing_sink_until_one_registers(live_only, caplog):
     """The generic draining-source path is lossless without source replay."""
     rig = live_only
     job = await rig.service.send("p1", caller_id="caller", prompt="live only")
@@ -504,7 +507,11 @@ async def test_live_only_evidence_survives_a_missing_sink_until_one_registers(li
         Batch(progressed=True, terminal_evidence=(outcome(turn, session),))
     )
     assert await until(lambda: rig.retained_evidence_count() == 1)
-    await asyncio.sleep(0.12)
+    with caplog.at_level(logging.WARNING):
+        await wait_until(
+            lambda: caplog.text.count("no registered evidence sink") >= 2,
+            what="the missing-sink warning to repeat across poll retries",
+        )
     assert rig.store.get_job(job.handle).state == JobState.RUNNING
     # Retention is deduplicated by exact session/turn identity across the
     # poll retries, not appended per retry.
@@ -541,7 +548,7 @@ async def test_live_only_transient_sink_failure_replays_retained_evidence_once(l
     )
 
     assert await until(lambda: rig.store.get_job(job.handle).state == JobState.DONE)
-    await asyncio.sleep(0.1)
+    await wait_until(lambda: len(calls) >= 2, what="the retained outcome to flush through the sink")
 
     # The first delivery failed; the retained outcome flushed on a later
     # poll and finished the job exactly once, deduplicated by identity.
@@ -550,7 +557,9 @@ async def test_live_only_transient_sink_failure_replays_retained_evidence_once(l
     assert rig.retained_evidence_count() == 0
 
 
-async def test_live_only_partial_pending_evidence_stops_before_next_maximum_batch(store, registry):
+async def test_live_only_partial_pending_evidence_stops_before_next_maximum_batch(
+    store, registry, caplog
+):
     """Pending evidence applies backpressure before another source read."""
     from theater.daemon.observer import Observer
 
@@ -581,7 +590,11 @@ async def test_live_only_partial_pending_evidence_stops_before_next_maximum_batc
     observer.start()
     try:
         assert await until(lambda: len(observer._pending_evidence.get("p1", ())) == 511)
-        await asyncio.sleep(0.08)
+        with caplog.at_level(logging.WARNING):
+            await wait_until(
+                lambda: caplog.text.count("no registered evidence sink") >= 2,
+                what="the missing-sink warning to repeat across flush retries",
+            )
         assert source.reads == 1
         assert len(observer._pending_evidence["p1"]) == 511
     finally:

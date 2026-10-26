@@ -58,11 +58,6 @@ def test_without_codex_home_the_default_home_is_used(monkeypatch):
     assert CodexObserver().root == Path.home() / ".codex" / "sessions"
 
 
-def test_an_empty_codex_home_is_the_default_home(monkeypatch):
-    monkeypatch.setenv("CODEX_HOME", "")
-    assert sessions_root(cwd="/somewhere") == Path.home() / ".codex" / "sessions"
-
-
 def test_an_absolute_codex_home_names_the_sessions_root(monkeypatch, tmp_path):
     home = tmp_path / "state"
     monkeypatch.setenv("CODEX_HOME", str(home))

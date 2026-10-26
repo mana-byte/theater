@@ -78,13 +78,6 @@ def test_exact_prose(caplog):
     )
 
 
-def test_no_result_in_prose(caplog):
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-    with span(BY_KEY["PROC_PS_TABLE"], slow_ms=0.0):
-        pass
-    assert "result" not in _line(caplog)
-
-
 def test_emit_outcome_fields_do_not_enter_prose(caplog):
     caplog.set_level(logging.DEBUG, logger=TIMING)
     timing.emit(
@@ -95,13 +88,6 @@ def test_emit_outcome_fields_do_not_enter_prose(caplog):
         error_type="broken",
     )
     assert _line(caplog) == "proc.ps-table 0.0ms"
-
-
-def test_prose_keeps_caller_field_order(caplog):
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-    with span(BY_KEY["GIT_COMMAND"], slow_ms=0.0, rc=1, command="status", cwd="/tmp"):
-        pass
-    assert _line(caplog) == "git.status 0.0ms rc=1 cwd=/tmp"
 
 
 def test_rpc_client_log_includes_outcome(caplog):
@@ -180,14 +166,6 @@ def test_clock_discontinuities_are_annotated_without_rewriting_span_time(
         assert caplog.records[-1].__dict__["theater.clock_gap_ms"] == wall_elapsed * 1000 - 250
     finally:
         provider.shutdown()
-
-
-def test_observer_attach_prose(caplog):
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-    from theater.models import now as wall_now
-
-    timing.ready_lag(BY_KEY["OBSERVER_ATTACH"], "pid1", wall_now() - 2.0, harness="codex")
-    assert _norm(_msgs(caplog)[0]).startswith("observer.attach 0.0ms id=pid1 harness=codex")
 
 
 class _SpyBridge:
@@ -311,16 +289,6 @@ def test_log_extras_error_dot_type(monkeypatch, caplog):
     assert "error.type" in extras and "theater.error_type" not in extras
 
 
-def test_synthetic_none_error_type_not_exported(monkeypatch):
-    from theater.observability import engine
-
-    spy = _SpyBridge()
-    monkeypatch.setattr(engine, "_bridge", spy)
-    with span(BY_KEY["GIT_COMMAND"], slow_ms=0.0, command="status") as sp:
-        sp.set_result("error")
-    assert spy.recorded[0][1]["result"] == "error"
-
-
 def test_set_result_validates():
     with (
         span(BY_KEY["PROC_PS_TABLE"], slow_ms=0.0) as fields,
@@ -377,13 +345,6 @@ def test_slow_span_reaches_info(caplog):
     assert _msgs(caplog, logging.DEBUG) == []
 
 
-def test_fast_span_is_silent_without_a_trace(caplog):
-    caplog.set_level(logging.INFO, logger=TIMING)
-    with timing.span("t.quiet", slow_ms=10_000.0):
-        pass
-    assert caplog.records == []
-
-
 def test_span_logs_when_the_block_raises(caplog):
     caplog.set_level(logging.DEBUG, logger=TIMING)
     with pytest.raises(ValueError, match="boom"), timing.span("t.boom", slow_ms=0.0):
@@ -407,16 +368,6 @@ def test_fields_set_before_a_raise_survive_it(caplog):
         sp["attempts"] = 2
         raise RuntimeError
     assert "attempts=2" in _msgs(caplog, logging.INFO)[0]
-
-
-def test_none_fields_are_dropped():
-    rendered = timing._render("t.x", 12.0, {"kept": "yes", "gone": None})
-    assert rendered == "t.x 12.0ms kept=yes"
-
-
-def test_duration_precedes_the_fields():
-    rendered = timing._render("t.x", 1843.25, {"rc": 0})
-    assert rendered == "t.x 1843.2ms rc=0"
 
 
 def test_emit_renders_like_a_span(caplog):

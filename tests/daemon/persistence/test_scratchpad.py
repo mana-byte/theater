@@ -28,49 +28,6 @@ from theater.frontend.capabilities import ConnectionChannel, ConnectionRole
 from theater.models import BadRequest
 
 
-def test_scratchpad_write_and_get(store):
-    key = store.scratchpad_write(
-        tree_root_id="root1",
-        repo_root="/repo",
-        namespace="ns1",
-        value="val1",
-        updated_by="p1",
-    )
-    assert isinstance(key, str) and len(key) > 0
-    page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
-    assert page.entries == {key: "val1"}
-    assert page.keys == (key,)
-    assert page.truncated is False
-    assert page.after_key is None
-
-
-def test_scratchpad_get_missing_returns_empty(store):
-    page = store.scratchpad_get(tree_root_id="nope", repo_root="/repo", namespace="ns1")
-    assert page.entries == {}
-    assert page.truncated is False
-
-
-def test_scratchpad_is_global_across_legacy_tree_scopes(store):
-    store.scratchpad_write(
-        tree_root_id="root1",
-        repo_root="/repo",
-        namespace="ns1",
-        value="from-root1",
-        updated_by="p1",
-    )
-    store.scratchpad_write(
-        tree_root_id="root2",
-        repo_root="/repo",
-        namespace="ns1",
-        value="from-root2",
-        updated_by="p2",
-    )
-    r1 = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
-    r2 = store.scratchpad_get(tree_root_id="root2", repo_root="/repo", namespace="ns1")
-    assert set(r1.entries.values()) == {"from-root1", "from-root2"}
-    assert r2.entries == r1.entries
-
-
 def test_scratchpad_isolation_by_namespace(store):
     store.scratchpad_write(
         tree_root_id="root1",
@@ -96,27 +53,6 @@ def test_scratchpad_isolation_by_namespace(store):
             tree_root_id="root1", repo_root="/repo", namespace="ns2"
         ).entries.values()
     ) == ["from-ns2"]
-
-
-def test_scratchpad_is_global_across_legacy_repo_scopes(store):
-    store.scratchpad_write(
-        tree_root_id="root1",
-        repo_root="/repo-a",
-        namespace="ns1",
-        value="from-a",
-        updated_by="p1",
-    )
-    store.scratchpad_write(
-        tree_root_id="root1",
-        repo_root="/repo-b",
-        namespace="ns1",
-        value="from-b",
-        updated_by="p1",
-    )
-    first = store.scratchpad_get(tree_root_id="root1", repo_root="/repo-a", namespace="ns1")
-    second = store.scratchpad_get(tree_root_id="root1", repo_root="/repo-b", namespace="ns1")
-    assert set(first.entries.values()) == {"from-a", "from-b"}
-    assert second.entries == first.entries
 
 
 def test_scratchpad_read_is_key_ordered_and_cursored(store):

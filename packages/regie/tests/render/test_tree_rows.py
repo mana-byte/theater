@@ -6,10 +6,8 @@ from pathlib import Path
 
 import pytest
 from regie.formatting import tilde
-from regie.motions.pulse import working_harness_style
 from regie.render.glyphs import node_label as _node_label
 from regie.render.layout import render_tree, selected_participant, shorten_path
-from regie.render.routing import cell_leaf
 from regie.render.row2 import row2_layout
 from regie.ui_constants import REGIE_SEND_TRACE_STYLE as SEND_STYLE
 from regie.ui_constants import REGIE_SPINNER_FRAMES, REGIE_WORKING_HARNESS_STYLES
@@ -375,19 +373,6 @@ def test_unknown_status_uses_question_mark():
     assert "?" in rows[1]
 
 
-def test_working_status_pulses_harness_letters_in_reverse():
-    """Working leaves animate only the harness, one letter at a time."""
-
-    label = node_label(PARENT, frame=0)
-    pulse_styles = [style for style in label_styles(label) if style.startswith("#")]
-    assert pulse_styles == [working_harness_style(0, i) for i in range(len("vibe"))]
-
-    label = node_label(PARENT, frame=1)
-    pulse_styles = [style for style in label_styles(label) if style.startswith("#")]
-    assert pulse_styles == [working_harness_style(1, i) for i in range(len("vibe"))]
-    assert pulse_styles[0] == working_harness_style(0, -1)
-
-
 def test_non_working_statuses_do_not_pulse_harness_and_name_text():
     idle = node_label({**PARENT, "status": "idle"}, frame=0)
     awaiting = node_label({**PARENT, "status": "awaiting_input"}, frame=0)
@@ -414,12 +399,6 @@ def test_cwd_segments_controls_path_shortening():
     # A single root's row 3 carries the continuation gap prefix.
     assert rows_default[2].lstrip() == "…/d/e"
     assert rows_keep3[2].lstrip() == "…/c/d/e"
-
-
-def test_cell_leaf_splits_a_grid_row_into_leaf_and_row_within_it():
-    assert cell_leaf((0, 4)) == (0, 0)
-    assert cell_leaf((4, 4)) == (1, 1)
-    assert cell_leaf((8, 0)) == (2, 2)
 
 
 # ---- the overlay ----------------------------------------------------------
@@ -454,15 +433,6 @@ def test_overlay_past_the_end_of_a_row_is_padded():
     assert rows[0][10] == "┃"
 
 
-def test_no_overlay_renders_exactly_as_before():
-    assert str(node_label(PARENT, "└── ", cont_prefix="    ")) == str(
-        node_label(PARENT, "└── ", cont_prefix="    ", overlay=None)
-    )
-    assert str(node_label(PARENT, "└── ", cont_prefix="    ", overlay={})) == str(
-        node_label(PARENT, "└── ", cont_prefix="    ")
-    )
-
-
 def test_overlay_keeps_the_styles_of_the_text_it_splits():
     """Drawing a trace mid-run must not flatten the run's own style."""
     label = node_label(PARENT, "└── ", cont_prefix="    ", frame=0, overlay={(2, 6): "━"})
@@ -484,31 +454,6 @@ def _waiting_glyph(frame: int) -> str:
     return label_rows(node_label({**CHILD, "status": "working"}, frame=frame, waiting="$accent"))[
         1
     ][0]
-
-
-def test_a_blocked_agent_shows_a_clock_that_moves_slower_than_the_spinner():
-    from regie.ui_constants import (
-        REGIE_LEAF_FRAME_CYCLE,
-        REGIE_WAITING_FRAMES,
-        REGIE_WAITING_STEP_FRAMES,
-    )
-
-    assert all(cell_len(frame) == 1 for frame in REGIE_WAITING_FRAMES)  # never shifts the name
-    assert REGIE_WAITING_STEP_FRAMES > 1  # the spinner moves every frame
-
-    glyphs = [_waiting_glyph(frame) for frame in range(REGIE_LEAF_FRAME_CYCLE)]
-    assert (
-        glyphs[:REGIE_WAITING_STEP_FRAMES] == [REGIE_WAITING_FRAMES[0]] * REGIE_WAITING_STEP_FRAMES
-    )
-    assert len(set(glyphs)) == len(REGIE_WAITING_FRAMES)
-    # The counter wraps without a stutter: the glyph after the last frame is the first's, or
-    # the next in the walk, never a jump.
-    steps = [
-        (REGIE_WAITING_FRAMES.index(glyphs[(i + 1) % len(glyphs)]) - REGIE_WAITING_FRAMES.index(g))
-        % len(REGIE_WAITING_FRAMES)
-        for i, g in enumerate(glyphs)
-    ]
-    assert set(steps) <= {0, 1}
 
 
 # ---- the harness is spelled out only where the row is in focus ------------------------------

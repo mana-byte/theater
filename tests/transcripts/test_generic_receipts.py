@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.waiting import until
 from theater import paths
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
@@ -147,14 +148,11 @@ async def test_fake_harness_receipt_drives_end_to_end(fake_daemon, fake_client, 
         path=str(transcript),
     )
 
-    import asyncio
-
-    deadline = asyncio.get_event_loop().time() + 3.0
-    while asyncio.get_event_loop().time() < deadline:
-        p = daemon.store.get_participant("p-fake")
-        if p.transcript_location == str(transcript.resolve()):
-            break
-        await asyncio.sleep(0.01)
+    assert await until(
+        lambda: (
+            daemon.store.get_participant("p-fake").transcript_location == str(transcript.resolve())
+        )
+    )
 
     got = daemon.store.get_participant("p-fake")
     assert got.session_id == session

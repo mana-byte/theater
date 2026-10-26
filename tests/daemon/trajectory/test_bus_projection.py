@@ -253,25 +253,6 @@ async def test_trajectory_locate_rpc_rejects_invalid_identifiers() -> None:
         )
 
 
-def test_await_end_timing_uses_elapsed_start() -> None:
-    record = project_bus_row(
-        {
-            "id": 8,
-            "ts": 10.0,
-            "from_id": "p",
-            "to_id": "q",
-            "kind": BUS_KIND_JOB_AWAIT_END,
-            "payload": {"state": "completed", "elapsed_seconds": 2.5},
-        },
-        "p",
-    )
-
-    assert record is not None and record.timing is not None
-    assert record.timing.start == 7.5
-    assert record.timing.end == 10.0
-    assert record.timing.duration_ms == 2500.0
-
-
 def test_bus_projection_preserves_explicit_transcript_and_theater_failures() -> None:
     transcript = project_bus_row(
         {

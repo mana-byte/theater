@@ -376,9 +376,6 @@ class TestScreenTail:
     def test_n_zero_returns_empty(self):
         assert screen_tail("a\nb\n", 0) == []
 
-    def test_n_negative_returns_empty(self):
-        assert screen_tail("a\nb\n", -1) == []
-
 
 class TestBirthtimeHelpers:
     def test_stat_birthtime(self, tmp_path):

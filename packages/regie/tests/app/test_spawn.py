@@ -214,10 +214,8 @@ async def test_completed_spawn_is_selected_staged_and_focused(caplog) -> None:
             )
         )
         await app.workers.wait_for_complete()
-        for _ in range(50):  # staging runs on the presentation queue
-            if presentation.focused:
-                break
-            await pilot.pause()
+        # Staging runs on the presentation queue.
+        await wait_until(pilot, lambda: bool(presentation.focused))
 
         assert app.selected_participant_id == spawned.participant_id
         assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
@@ -235,10 +233,8 @@ async def test_completed_spawn_is_selected_staged_and_focused(caplog) -> None:
             "action.spawn.unmanaged",
         ]
         assert all("operation=spawn-operation result=success" in line for line in phases)
-        for _ in range(50):  # rendering is acknowledged after the next refresh
-            if "after_projection_ms=" in caplog.text:
-                break
-            await pilot.pause()
+        # Rendering is acknowledged after the next refresh.
+        await wait_until(pilot, lambda: "after_projection_ms=" in caplog.text)
         assert "after_projection_ms=" in caplog.text
 
 
@@ -288,10 +284,8 @@ async def test_spawn_the_follow_lane_missed_is_caught_up_before_any_snapshot(
             )
         )
         await app.workers.wait_for_complete()
-        for _ in range(50):  # staging runs on the presentation queue
-            if presentation.focused:
-                break
-            await pilot.pause()
+        # Staging runs on the presentation queue.
+        await wait_until(pilot, lambda: bool(presentation.focused))
 
         phases = [
             row.message.split()[0]

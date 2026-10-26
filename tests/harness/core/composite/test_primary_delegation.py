@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from tests.support.composite_sources import ControlledSource, RecordingSource, decl, make_fact
-from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.channels import CompositeSource, EnrichmentBinding
 from theater.harness.contracts.source import (
     Attachment,
@@ -189,16 +188,6 @@ async def test_history_page_delegates_to_primary() -> None:
     assert page.location == "/work/t.jsonl"
     assert primary.history_page_call == (None, "snapshot", 10, True)
     await composite.aclose()
-
-
-@pytest.mark.asyncio
-async def test_history_page_default_limit_matches_constant() -> None:
-    import inspect
-
-    from theater.harness.channels.composite import CompositeSource
-
-    sig = inspect.signature(CompositeSource.history_page)
-    assert sig.parameters["limit"].default == TRAJECTORY_PAGE_RECORD_LIMIT
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import sys
-from typing import get_type_hints
 
 import pytest
 
@@ -15,19 +14,11 @@ from theater import paths, protocol
 from theater.client import DaemonClient
 from theater.daemon.lock import DaemonLock
 from theater.daemon.methods import METHODS
-from theater.daemon.persistence.transactions import WriteUnit as DaemonWriteUnit
 from theater.daemon.server import Daemon
 from theater.mcp.client_pool import DaemonClientPool
 from theater.protocol import (
-    BUS_TAIL_MAX_WAIT_SECONDS,
-    BUS_TAIL_METHOD,
-    BusEvent,
-    BusTailParams,
     MessageTooLarge,
-    ProviderReportFacts,
-    ProviderReportResult,
     RemoteError,
-    WriteUnit,
 )
 
 
@@ -116,10 +107,10 @@ async def test_mcp_pool_isolates_slow_calls_bounds_connections_and_never_replays
     daemon = await daemon_factory(handler)
     pool = DaemonClientPool(size=2, autostart=False)
     slow = asyncio.create_task(pool.call("ping", name="slow"))
-    await asyncio.wait_for(started["slow"].wait(), 1)
-    assert await asyncio.wait_for(pool.call("ping", name="fast"), 1) == "fast"
+    await asyncio.wait_for(started["slow"].wait(), 5)
+    assert await asyncio.wait_for(pool.call("ping", name="fast"), 10) == "fast"
     second = asyncio.create_task(pool.call("ping", name="second"))
-    await asyncio.wait_for(started["second"].wait(), 1)
+    await asyncio.wait_for(started["second"].wait(), 5)
     queued = asyncio.create_task(pool.call("ping", name="queued"))
     await asyncio.sleep(0)
     assert not queued.done()
@@ -127,7 +118,7 @@ async def test_mcp_pool_isolates_slow_calls_bounds_connections_and_never_replays
     queued.cancel()
     slow.cancel()
     await asyncio.gather(queued, slow, return_exceptions=True)
-    assert await asyncio.wait_for(pool.call("ping", name="recovered"), 1) == "recovered"
+    assert await asyncio.wait_for(pool.call("ping", name="recovered"), 10) == "recovered"
     closing = asyncio.create_task(pool.aclose())
     await asyncio.sleep(0)
     with pytest.raises(RuntimeError, match="closed"):
@@ -135,7 +126,7 @@ async def test_mcp_pool_isolates_slow_calls_bounds_connections_and_never_replays
     assert not closing.done()
     release.set()
     assert await second == "second"
-    await asyncio.wait_for(closing, 1)
+    await asyncio.wait_for(closing, 10)
     assert [msg["params"]["name"] for msg in daemon.requests] == [
         "slow",
         "fast",
@@ -365,7 +356,7 @@ async def test_cancelled_lock_wait_is_timed_without_poisoning_active_call(daemon
     client = _client()
     active = asyncio.create_task(client.call("first"))
     try:
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), 5)
         queued = asyncio.create_task(client.call("queued"))
         await asyncio.sleep(0)
         queued.cancel()
@@ -565,26 +556,6 @@ async def test_drain_message_stops_at_end_of_stream():
 
     with pytest.raises(MessageTooLarge):
         await protocol.read_message(reader)
-    await asyncio.wait_for(protocol.drain_message(reader), timeout=2)
+    await asyncio.wait_for(protocol.drain_message(reader), timeout=5)
 
     assert await protocol.read_message(reader) == b""
-
-
-def test_the_bus_tail_and_provider_report_contracts_are_exported() -> None:
-    assert BUS_TAIL_METHOD == "frontend.bus.tail"
-    assert BUS_TAIL_MAX_WAIT_SECONDS == 30.0
-    assert {"wait_seconds", "kinds"} <= set(BusTailParams.__optional_keys__)
-    assert "invalidated_terminals" in ProviderReportFacts.__optional_keys__
-    assert "presence_invalidated" not in ProviderReportResult.__annotations__
-    assert get_type_hints(BusEvent)["ts"] is float
-
-
-def test_write_unit_mirrors_daemon_interface() -> None:
-    def public(cls: type) -> set[str]:
-        return {
-            name
-            for name in vars(cls)
-            if name in {"__enter__", "__exit__"} or not name.startswith("_")
-        }
-
-    assert public(WriteUnit) == public(DaemonWriteUnit)

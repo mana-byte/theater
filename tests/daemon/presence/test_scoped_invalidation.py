@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.support.clock import Clock
+from tests.support.waiting import wait_until
 from theater.daemon.presence import PresenceMonitor, PresenceState
 from theater.models import Participant, TerminalBindingRecord
 
@@ -188,7 +189,7 @@ async def test_scoped_invalidation_fences_only_the_named_terminal(
     monkeypatch.setattr(service, "inspect", inspect)
     pending = asyncio.create_task(monitor.refresh())
     try:
-        await asyncio.wait_for(inspecting.wait(), 1)
+        await asyncio.wait_for(inspecting.wait(), 5)
         service.responses[T1].append(result("absent", 3, T1))
         monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[T1])
         assert monitor.snapshot(P1).state is PresenceState.UNKNOWN
@@ -260,7 +261,10 @@ async def test_invalidation_safety_is_immediate_and_journal_coalesces_per_wave(
         assert monitor.snapshot(P1).state is PresenceState.UNKNOWN
         await _settle(monitor)
         assert changes.count(P1) == revision - 1  # the wave is still coalesced
-        await asyncio.sleep(0.08)
+        await wait_until(
+            lambda revision=revision: changes.count(P1) == revision,
+            what="coalesced publication",
+        )
         assert changes.count(P1) == revision  # one batched publication per wave
         assert changes[-1] == P1  # the fired timer re-arms for the next wave
 
@@ -307,7 +311,7 @@ async def test_scoped_recheck_starts_fresh_when_named_inspection_is_in_flight(
     monkeypatch.setattr(service, "inspect", inspect)
     blocked = asyncio.create_task(monitor.require_absent(P1))
     try:
-        await asyncio.wait_for(inspecting.wait(), 1)
+        await asyncio.wait_for(inspecting.wait(), 5)
         service.responses[T1].extend([result("absent", 3, T1), result("absent", 4, T1)])
         monitor.invalidate_provider("provider-a", 7, invalidated_terminals=[T1])
         assert monitor.snapshot(P1).state is PresenceState.UNKNOWN
@@ -315,7 +319,7 @@ async def test_scoped_recheck_starts_fresh_when_named_inspection_is_in_flight(
         release.set()
         # The fenced pre-invalidation inspection never grants absence; admission waits
         # for a fresh one instead of refusing.
-        await asyncio.wait_for(blocked, 2)
+        await asyncio.wait_for(blocked, 5)
 
         await _settle(monitor)  # the scoped re-check must start a fresh inspection
         assert monitor.snapshot(P1).state is PresenceState.ABSENT

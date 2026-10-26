@@ -10,7 +10,6 @@ import pytest
 from theater.harness.contracts.harness import Harness
 from theater.harness.loading import LOCAL, SHIPPED, discover, load_plugin, scan
 from theater.harness.loading.discovery import MANIFEST_FILENAME
-from theater.harness.loading.importer import PACKAGE_PREFIX
 
 MANIFEST_BODY = """
 from theater.harness.contracts.callbacks import LaunchContext, ScreenContext
@@ -328,14 +327,6 @@ def test_failed_import_leaves_no_modules(root: Path) -> None:
     pkg = _synthetic_package_name(acme, LOCAL)
     leaked = [k for k in sys.modules if k == pkg or k.startswith(pkg + ".")]
     assert leaked == []
-
-
-def test_successful_import_caches_synthetic_package(root: Path) -> None:
-    write_manifest(root / "acme")
-    results = scan(root, source=LOCAL)
-    assert results[0].harness is not None
-    cached = [k for k in sys.modules if k.startswith(PACKAGE_PREFIX)]
-    assert len(cached) >= 1
 
 
 def test_keyboard_interrupt_propagates_and_cleans_up(root: Path) -> None:

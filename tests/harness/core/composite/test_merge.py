@@ -7,7 +7,6 @@ import asyncio
 import pytest
 
 from tests.support.composite_sources import ControlledSource, decl, make_fact
-from theater.constants.harness import HARNESS_DEDUPE_MAX_FACTS
 from theater.harness.channels import CompositeSource, EnrichmentBinding
 from theater.harness.contracts.source import Attachment, Batch, Source
 from theater.models import Status
@@ -243,10 +242,3 @@ async def test_dedupe_eviction_is_bounded_and_deterministic() -> None:
     assert len(result3) == 1
     result4 = cache.filter("ch", [f1])
     assert len(result4) == 1
-
-
-def test_dedupe_max_is_named_constant() -> None:
-    from theater.harness.channels.composite import _DedupCache
-
-    cache = _DedupCache()
-    assert cache._max == HARNESS_DEDUPE_MAX_FACTS

@@ -13,6 +13,7 @@ from regie.contracts import BridgeConfig
 from regie.tmux.command import TmuxError, command_argv
 from regie.tmux.identity import ServerIdentity
 
+from tests.support.waiting import wait_until
 from theater.frontend import CallbackRequest
 
 
@@ -153,11 +154,12 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     )
     bridge._state.release()
     task = asyncio.create_task(bridge.run())
-    async with asyncio.timeout(1):
-        while (  # noqa: ASYNC110
-            bridge.status.provider_generation != 2 or bridge.status.connection_state != "online"
-        ):
-            await asyncio.sleep(0)
+    await wait_until(
+        lambda: (
+            bridge.status.provider_generation == 2 and bridge.status.connection_state == "online"
+        ),
+        what="the bridge to reconnect online at generation 2",
+    )
     assert bridge.status.connection_state == "online"
     assert reports[0][0] == 1 and reports[1][0] == 2
     assert len(providers) == 2
@@ -180,8 +182,8 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     keep_invalidating = True
     bridge._presence.changed.set()
     # A scheduled heartbeat can land before the loop sees the change: wait for the report itself.
-    await asyncio.wait_for(invalidated.wait(), 1)
-    await asyncio.wait_for(heartbeat_seen.wait(), 1)
+    await asyncio.wait_for(invalidated.wait(), 5)
+    await asyncio.wait_for(heartbeat_seen.wait(), 5)
     keep_invalidating = False
     assert [revision for _, revision, _ in reports] == sorted(
         {revision for _, revision, _ in reports}

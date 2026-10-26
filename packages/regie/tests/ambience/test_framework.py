@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import random
 from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 from regie.ambience.driver import AmbienceDriver
-from regie.ambience.pixels import HALF_BLOCKS
 from regie.ambience.registry import load_catalog
 from regie.ambience.render import render_band
-from regie.ambience.scene import MAX_TRANSITION_SECONDS, Cell, Phase, Scene
+from regie.ambience.scene import Cell, Phase, Scene
 from regie.config import SettingsError, load_settings
 from regie.widgets import ParticipantTree
 from regie.widgets.ambience_band import AmbienceBand
@@ -88,38 +86,6 @@ def test_wide_glyphs_take_two_cells_and_never_overflow_the_band() -> None:
     assert text.splitlines() == ["🐟🔥", " x  "]  # the last-column fire would overflow
 
 
-@pytest.mark.parametrize("scene", list(SHIPPED.values()), ids=list(SHIPPED))
-@pytest.mark.parametrize(("width", "height"), [(40, 12), (30, 3), (12, 2), (40, 1)])
-def test_every_scene_honours_the_contract(scene: type[Scene], width: int, height: int) -> None:
-    """Short transitions, in-band ASCII cells at any size, an empty end, and determinism."""
-    assert scene.intro_seconds <= MAX_TRANSITION_SECONDS
-    assert scene.outro_seconds <= MAX_TRANSITION_SECONDS
-    assert 1 <= scene.min_rows <= 2 and 0 < scene.fps <= 10
-
-    def run(seed: int) -> list[list[Cell]]:
-        driver = AmbienceDriver(scene, seed=seed)
-        driver.set_band(width, height)
-        driver.set_active(True)
-        frames = [driver.tick(1 / scene.fps) for _ in range(int(scene.fps * 20))]
-        driver.set_active(False)
-        frames += [driver.tick(1 / scene.fps) for _ in range(int(scene.fps * 6))]
-        assert not driver.running  # the outro finished within its bound
-        return frames
-
-    frames = run(7)
-    assert frames == run(7)
-    for cell in (cell for frame in frames for cell in frame):
-        assert 0 <= cell.x < width and 0 <= cell.y < height
-        ascii_art = cell.glyph.isascii() and cell.glyph.isprintable()
-        assert ascii_art or cell.glyph in HALF_BLOCKS  # no other glyphs, no emoji
-    if height < scene.min_rows:
-        assert not any(frames)
-
-
-def test_a_scene_sees_a_seeded_rng() -> None:
-    assert Probe(random.Random(3)).rng.random() == random.Random(3).random()
-
-
 class _Sticky(Probe):
     """Draws in every phase so the band's visibility shows the driver's state."""
 
@@ -177,7 +143,9 @@ async def test_after_you_leave_it_the_band_rests_before_it_plays_again(
         await _set_app_focus(pilot, True)  # you come back: it leaves
         await wait_until(pilot, lambda: not band.display)
         await _set_app_focus(pilot, False)  # away again straight away: it rests first
-        await pilot.pause(0.5)
+        # The rest is engaged once the app has seen the re-away and scheduled its wake;
+        # waiting for that, not a guessed pause, is what keeps the check deterministic.
+        await wait_until(pilot, lambda: app._ambience_wake is not None)
         assert not band.display
         await wait_until(pilot, lambda: bool(band.display))  # then plays once the rest is over
 

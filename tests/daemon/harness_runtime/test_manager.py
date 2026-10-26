@@ -499,7 +499,7 @@ async def test_disconnected_runtime_recovers_exactly_once_while_callback_runs(
     manager.set_recovery_callback(callback)
     state.health = ConnectionHealth.DISCONNECTED
 
-    await asyncio.wait_for(started.wait(), 2.0)
+    await asyncio.wait_for(started.wait(), 5.0)
     # Several poll intervals pass while the attempt is still in flight: a
     # second concurrent attempt must not start.
     await asyncio.sleep(0.06)
@@ -558,10 +558,11 @@ async def test_replaced_generation_monitor_recovers_nothing(monkeypatch) -> None
     manager.set_recovery_callback(callback)
     stale_state.health = ConnectionHealth.DISCONNECTED
     live_state = FakeRuntimeState(participant_id="p1")
+    stale_monitor = manager._monitors[("p1", 1)]
     # The replacement generation installs before the stale monitor's poll
     # can fire; the stale runtime was already DISCONNECTED.
     await manager.get_or_create("p1", backend_generation=2, create=_factory("p1", live_state))
-    await asyncio.sleep(0.08)
+    await wait_until(stale_monitor.done, what="the stale monitor to be cancelled")
     assert calls == [], "the stale (p1, generation 1) monitor must recover nothing"
 
     live_state.health = ConnectionHealth.DISCONNECTED
@@ -599,12 +600,12 @@ async def test_replaced_generation_retains_cancellation_resistant_monitor(monkey
         return True
 
     manager.set_recovery_callback(recover)
-    await asyncio.wait_for(snapshot_started.wait(), 1.0)
+    await asyncio.wait_for(snapshot_started.wait(), 5.0)
     stale_monitor = manager._monitors[("p1", 1)]
 
     live_state = FakeRuntimeState(participant_id="p1", backend_generation=2)
     await manager.get_or_create("p1", backend_generation=2, create=_factory("p1", live_state))
-    await asyncio.wait_for(snapshot_cancelled.wait(), 1.0)
+    await asyncio.wait_for(snapshot_cancelled.wait(), 5.0)
 
     assert stale_monitor in manager._draining_monitors
     assert not stale_monitor.done()
@@ -636,9 +637,7 @@ async def test_close_teardown_and_aclose_cancel_their_monitors(monkeypatch) -> N
     await manager.close("p1")
     await manager.teardown("p2", backend_generation=1)
     await manager.aclose()
-    # Past several poll/retry intervals: a surviving monitor would have
-    # fired many times by now.
-    await asyncio.sleep(0.15)
+    await wait_until(lambda: manager._monitors == {}, what="every monitor to be cancelled")
     assert calls == [], "no post-close, post-teardown, or post-shutdown recovery"
 
 
@@ -669,8 +668,8 @@ async def test_stop_recovery_cancels_every_monitor_before_awaiting_cleanup() -> 
     await asyncio.sleep(0)
 
     stopping = asyncio.create_task(manager.stop_recovery())
-    await asyncio.wait_for(first_cancelled.wait(), 1.0)
-    await asyncio.wait_for(second_cancelled.wait(), 1.0)
+    await asyncio.wait_for(first_cancelled.wait(), 5.0)
+    await asyncio.wait_for(second_cancelled.wait(), 5.0)
     release_first.set()
     await stopping
 
@@ -714,17 +713,17 @@ async def test_stop_recovery_rejects_snapshot_captured_before_shutdown(
         return True
 
     manager.set_recovery_callback(callback)
-    await asyncio.wait_for(snapshot_started.wait(), 1.0)
+    await asyncio.wait_for(snapshot_started.wait(), 5.0)
     stopping = asyncio.create_task(manager.stop_recovery())
-    await asyncio.wait_for(snapshot_cancelled.wait(), 1.0)
-    await asyncio.wait_for(stopping, 0.25)
+    await asyncio.wait_for(snapshot_cancelled.wait(), 5.0)
+    await asyncio.wait_for(stopping, 5.0)
 
     assert calls == []
     assert route_changes == []
 
     # aclose() calls stop_recovery() again; it must close the runtime instead
     # of re-awaiting a monitor that already exceeded the drain deadline.
-    await asyncio.wait_for(manager.aclose(), 0.25)
+    await asyncio.wait_for(manager.aclose(), 5.0)
     release_snapshot.set()
     await wait_until(lambda: not manager._draining_monitors, what="deferred monitor drain")
 

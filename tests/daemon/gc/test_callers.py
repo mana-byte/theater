@@ -36,7 +36,7 @@ async def test_scheduled_gc_wakes_handoffs_after_marking_a_running_job(daemon):
         handoff=SimpleNamespace(wake=wake),
         _stopping=stopping,
     )
-    await asyncio.wait_for(gc_loop(scheduled), timeout=2)
+    await asyncio.wait_for(gc_loop(scheduled), timeout=5)
 
     assert wakes == ["wake"]
     assert daemon.store.get_job("stale-source").state == JobState.CRASHED

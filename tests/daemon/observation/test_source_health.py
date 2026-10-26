@@ -10,7 +10,7 @@ from sqlalchemy import update
 
 from tests.support.observation import apply_batch, bus_kinds
 from tests.support.observer_rigs import ReadingObserver, said, screen_checked
-from tests.support.waiting import until
+from tests.support.waiting import until, wait_until
 from theater.daemon import methods as methods_mod
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
@@ -187,7 +187,9 @@ async def test_an_incomplete_attachment_source_retires_instead_of_spinning(regis
     observer = Observer(registry, {"scripted": harness})
     p = registry.register(harness="scripted", pane=None, cwd="/tmp")
 
-    await asyncio.wait_for(observer._watch(p.id, "scripted"), timeout=0.2)
+    watch = asyncio.create_task(observer._watch(p.id, "scripted"))
+    await wait_until(lambda: harness.observer.source.closed, what="the broken source to be retired")
+    await asyncio.wait_for(watch, timeout=5.0)
 
     assert harness.observer.source.closed
 
@@ -203,7 +205,9 @@ async def test_source_construction_failure_uses_cannot_observe_diagnostic(regist
     participant = registry.register(harness="scripted", pane=None, cwd="/tmp")
     caplog.set_level("WARNING", logger="theater.observer")
 
-    await asyncio.wait_for(observer._watch(participant.id, "scripted"), timeout=0.2)
+    watch = asyncio.create_task(observer._watch(participant.id, "scripted"))
+    await wait_until(lambda: "cannot observe" in caplog.text, what="the cannot-observe diagnostic")
+    await asyncio.wait_for(watch, timeout=5.0)
 
     assert "cannot observe" in caplog.text
     assert "invalid participant observation context" in caplog.text

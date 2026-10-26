@@ -53,10 +53,10 @@ async def test_status_flip_wakes_running_job_and_preserves_wait_any_order(waitin
     blocked = asyncio.Event()
     task = asyncio.create_task(coordinate_await(daemon, targets, max_wait=30, blocked=blocked))
     try:
-        await asyncio.wait_for(blocked.wait(), 1)
+        await asyncio.wait_for(blocked.wait(), 5)
         assert daemon.store.listeners
         daemon.registry.set_status(second.id, Status.AWAITING_INPUT)
-        assert await asyncio.wait_for(task, 1) == {
+        assert await asyncio.wait_for(task, 5) == {
             first_id: "pending",
             job.handle: "awaiting_input",
         }
@@ -81,13 +81,13 @@ async def test_protected_input_request_needs_an_observed_departure(waiting, depa
         )
     )
     try:
-        await asyncio.wait_for(blocked.wait(), 1)
+        await asyncio.wait_for(blocked.wait(), 5)
         assert daemon.store.listeners
         daemon.registry.set_status(participant_id, Status.AWAITING_INPUT)
         if depart:
             daemon.presence.set(participant_id, ABSENT)
         reason = "awaiting_input" if depart else "timeout"
-        assert await asyncio.wait_for(task, 1) == {participant_id: reason}
+        assert await asyncio.wait_for(task, 5) == {participant_id: reason}
         assert daemon.jobs.get(participant_id).state == JobState.RUNNING
         assert daemon.store.listeners == []
     finally:
@@ -107,11 +107,11 @@ async def test_terminal_job_takes_precedence_over_input_request(waiting, protect
         )
     )
     try:
-        await asyncio.wait_for(blocked.wait(), 1)
+        await asyncio.wait_for(blocked.wait(), 5)
         daemon.registry.set_status(participant_id, Status.AWAITING_INPUT)
         daemon.jobs.finish(participant_id, state=JobState.DONE)
         daemon.presence.set(participant_id, ABSENT)
-        assert await asyncio.wait_for(task, 1) == {participant_id: "job_terminal"}
+        assert await asyncio.wait_for(task, 5) == {participant_id: "job_terminal"}
         assert daemon.registry.get(participant_id).status == Status.AWAITING_INPUT
         assert daemon.store.listeners == []
     finally:
@@ -130,10 +130,10 @@ async def test_resolved_prompt_before_departure_evaluation_does_not_release(wait
         )
     )
     try:
-        await asyncio.wait_for(blocked.wait(), 1)
+        await asyncio.wait_for(blocked.wait(), 5)
         daemon.registry.set_status(participant_id, Status.WORKING)
         daemon.presence.set(participant_id, ABSENT)
-        assert await asyncio.wait_for(task, 1) == {participant_id: "timeout"}
+        assert await asyncio.wait_for(task, 5) == {participant_id: "timeout"}
         assert daemon.store.listeners == []
     finally:
         task.cancel()
@@ -155,10 +155,10 @@ async def test_participant_without_job_still_waits_only_for_presence(waiting, pr
     )
     try:
         if protected:
-            await asyncio.wait_for(blocked.wait(), 1)
+            await asyncio.wait_for(blocked.wait(), 5)
             daemon.presence.set(participant.id, ABSENT)
         reason = "presence_released" if protected else "already_absent"
-        assert await asyncio.wait_for(task, 1) == {participant.id: reason}
+        assert await asyncio.wait_for(task, 5) == {participant.id: reason}
         assert daemon.jobs.get(participant.id) is None
         assert daemon.store.listeners == []
     finally:
@@ -175,7 +175,7 @@ async def test_cancelled_await_removes_subscriptions(waiting):
         )
     )
     try:
-        await asyncio.wait_for(blocked.wait(), 1)
+        await asyncio.wait_for(blocked.wait(), 5)
         assert daemon.store.listeners
     finally:
         task.cancel()
@@ -206,9 +206,9 @@ async def test_qualification_does_not_rearm_after_prompt_resolves_during_teardow
         coordinate_await(daemon, parse_targets(daemon, [participant_id]), max_wait=30)
     )
     try:
-        await asyncio.wait_for(armed.wait(), 1)
+        await asyncio.wait_for(armed.wait(), 5)
         daemon.registry.set_status(participant_id, Status.AWAITING_INPUT)
-        assert await asyncio.wait_for(task, 1) == {participant_id: "awaiting_input"}
+        assert await asyncio.wait_for(task, 5) == {participant_id: "awaiting_input"}
         assert daemon.registry.get(participant_id).status == Status.WORKING
         assert calls == 1
         assert daemon.store.listeners == []
@@ -234,12 +234,12 @@ async def test_status_notification_from_another_thread_wakes_the_await(waiting, 
         )
     )
     try:
-        await asyncio.wait_for(blocked.wait(), 1)
+        await asyncio.wait_for(blocked.wait(), 5)
         store.set_status(participant_id, Status.AWAITING_INPUT)
         row = {"to_id": participant_id, "kind": "participant.status"}
         for listener in tuple(daemon.store.listeners):
             await asyncio.to_thread(listener, row)
-        assert await asyncio.wait_for(task, 1) == {participant_id: "awaiting_input"}
+        assert await asyncio.wait_for(task, 5) == {participant_id: "awaiting_input"}
         assert daemon.store.listeners == []
     finally:
         task.cancel()

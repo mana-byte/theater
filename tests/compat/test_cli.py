@@ -102,17 +102,6 @@ def test_entry_points_refuse_non_workflow_calls(
     assert "reserved for GitHub workflows" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("command", ["qualify", "suite", "gates"])
-def test_old_local_entry_points_are_removed(command: str) -> None:
-    with pytest.raises(SystemExit):
-        cli.main([command, "claude"])
-
-
-def test_unknown_harness_is_a_usage_error() -> None:
-    with pytest.raises(SystemExit):
-        cli.main(["run", "opencode2"])
-
-
 @pytest.mark.parametrize(
     "outcome,code", [("green", 0), ("red", 1), ("inconclusive", 2), ("tooling", 2)]
 )

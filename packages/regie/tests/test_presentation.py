@@ -384,6 +384,6 @@ async def test_work_that_never_awaits_does_not_stall_the_queue_under_eager_tasks
 
     try:
         assert await queue.submit("trajectory", immediate) == "done"
-        assert await asyncio.wait_for(queue.submit("toggle", immediate), 1) == "done"
+        assert await asyncio.wait_for(queue.submit("toggle", immediate), 5) == "done"
     finally:
         asyncio.get_running_loop().set_task_factory(None)

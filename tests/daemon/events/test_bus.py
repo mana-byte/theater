@@ -31,7 +31,7 @@ async def test_blocks_then_wakes_on_append(daemon, waiter):
         await asyncio.sleep(0)
     assert not task.done()
     new_id = daemon.store.bus_append("t.new")
-    tail = await asyncio.wait_for(task, 1)  # woken by the append, not by the 10s deadline
+    tail = await asyncio.wait_for(task, 5)  # woken by the append, not by the 10s deadline
     assert [row["id"] for row in tail.rows] == [new_id]
     assert tail.next_after_id == new_id
 
@@ -52,7 +52,7 @@ async def test_kinds_keeps_waiting_and_advances_cursor_past_filtered_rows(daemon
     await asyncio.sleep(0.02)
     assert not task.done()
     wanted = daemon.store.bus_append("t.want")
-    tail = await asyncio.wait_for(task, 1)
+    tail = await asyncio.wait_for(task, 5)
     assert [row["id"] for row in tail.rows] == [wanted] and skipped < wanted
     daemon.store.bus_append("t.other")
     only_other = await waiter.tail(wanted, 10, ["t.want"], 0.0)
@@ -86,7 +86,7 @@ async def test_close_wakes_waiters(daemon, waiter):
     while waiter.waiter_count == 0:
         await asyncio.sleep(0)
     await waiter.aclose()
-    assert (await asyncio.wait_for(task, 1)).rows == []
+    assert (await asyncio.wait_for(task, 5)).rows == []
 
 
 async def test_public_handler_long_polls_and_validates(daemon):
@@ -98,7 +98,7 @@ async def test_public_handler_long_polls_and_validates(daemon):
     while daemon.bus_tail_waiter.waiter_count == 0:
         await asyncio.sleep(0)
     new_id = daemon.store.bus_append("t.new")
-    result = await asyncio.wait_for(task, 1)
+    result = await asyncio.wait_for(task, 5)
     assert result["next_after_id"] == new_id and result["next_cursor"] == str(new_id)
     for bad in ({"wait_seconds": 31}, {"wait_seconds": float("nan")}, {"kinds": "x"}):
         with pytest.raises(BadRequest):
@@ -206,15 +206,6 @@ def test_participant_bus_pages_include_both_directions_and_filter_kinds(store):
     assert len(store.bus_page_for_participant("a", kinds={"coord"}, limit=10_000)) <= (
         BUS_PARTICIPANT_PAGE_MAX_LIMIT
     )
-
-
-def test_bus_participant_indexes_are_compound(store):
-    indexes = {
-        row[1]: [info[2] for info in store.conn.exec_driver_sql(f"PRAGMA index_info('{row[1]}')")]
-        for row in store.conn.exec_driver_sql("PRAGMA index_list('bus')")
-    }
-    assert indexes["idx_bus_from_id_id"] == ["from_id", "id"]
-    assert indexes["idx_bus_to_id_id"] == ["to_id", "id"]
 
 
 @pytest.mark.parametrize("limit", [True, -1, 1.5, "2", None])

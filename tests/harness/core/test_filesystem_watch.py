@@ -82,7 +82,7 @@ async def test_append_wakes_the_source_without_waiting_for_a_poll(watched):
     with path.open("a") as fh:
         fh.write(record("new") + "\n")
 
-    await asyncio.wait_for(signal.wait(), timeout=2)
+    await asyncio.wait_for(signal.wait(), timeout=10)
     assert [e.text for e in (await s.read()).events] == ["new"]
 
 
@@ -360,4 +360,4 @@ async def test_hybrid_forwards_the_wakeup_to_the_durable_gate(watched):
     with path.open("a") as fh:
         fh.write(record("new") + "\n")
 
-    await asyncio.wait_for(signal.wait(), timeout=2)
+    await asyncio.wait_for(signal.wait(), timeout=10)

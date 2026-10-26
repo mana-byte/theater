@@ -52,7 +52,7 @@ async def fixture_server(handler: Handler, *, prefix: str = "sdk-") -> AsyncIter
         if tasks:
             for task in tuple(tasks):
                 task.cancel()
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
         socket_path.unlink(missing_ok=True)
         shutil.rmtree(root)
         if failures:

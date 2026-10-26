@@ -13,6 +13,7 @@ from tests.support.codex_server import (
     make_runtime,
     open_new,
 )
+from tests.support.waiting import wait_until
 from theater.harness.builtin.plugins.codex import runtime_constants as codex_runtime_constants
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.codex.runtime_messages import _native_revision
@@ -42,7 +43,7 @@ async def test_live_source_is_one_instance_for_the_runtime_lifetime() -> None:
             params={"threadId": "ui-thread-1", "status": {"type": "active"}},
         )
     )
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: runtime._status_hint is Status.WORKING, what="active status broadcast")
     batch = await first.read()
     assert batch.status is Status.WORKING
     # The cached source does not re-emit the same status transition; an
@@ -83,11 +84,14 @@ async def test_cancelled_saturated_enqueue_rolls_back_dedupe_for_replay() -> Non
         await record(f"turn-{index}")
     # An insertion blocked on the full queue holds a pending dedupe key...
     blocked = asyncio.get_running_loop().create_task(record("turn-lost"))
-    await asyncio.sleep(0.01)
+    await wait_until(
+        lambda: runtime._outcome_buffer.has_outcome("th-1", "turn-lost"),
+        what="blocked insertion to hold its dedupe key",
+    )
     # ...so a concurrent insert of the same turn is deduped against it and
     # never double-inserts.
     duplicate = asyncio.get_running_loop().create_task(record("turn-lost"))
-    await asyncio.sleep(0.01)
+    await wait_until(duplicate.done, what="duplicate insert to be deduped")
     assert duplicate.done() is True
     assert not duplicate.exception()
     # Cancelling the blocked insertion must roll the pending key back: the
@@ -117,7 +121,7 @@ async def test_source_normalizes_items_once_by_native_id() -> None:
     source = runtime.live_source()
     server.push(completed_item("i-user", item_type="userMessage", text="do it"))
     server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: len(runtime._events) == 2, what="both completed items to land")
     batch = await source.read()
     assert [event.kind.value for event in batch.events] == ["user", "assistant"]
     assert [event.text for event in batch.events] == ["do it", "done"]
@@ -125,7 +129,7 @@ async def test_source_normalizes_items_once_by_native_id() -> None:
     # The backend replayed the same completed item: identity, not text,
     # decides; nothing is normalized a second time.
     server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="replayed item consumed")
     replay = await source.read()
     assert not replay.events
     await runtime.aclose()
@@ -159,7 +163,7 @@ async def test_item_started_then_deltas_then_completed_emits_exactly_once() -> N
         )
     )
     server.push(completed_item("i-agent", item_type="agentMessage", text="final answer"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: len(runtime._events) == 1, what="completed item to land")
     batch = await source.read()
     # item/started must not mark the completion dedupe ledger: the completed
     # item is normalized exactly once...
@@ -167,7 +171,7 @@ async def test_item_started_then_deltas_then_completed_emits_exactly_once() -> N
     assert [event.text for event in assistant] == ["final answer"]
     # ...and a replayed item/completed emits zero.
     server.push(completed_item("i-agent", item_type="agentMessage", text="final answer"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="replayed completion consumed")
     replay = await source.read()
     assert [event for event in replay.events if event.kind.value == "assistant"] == []
     await runtime.aclose()
@@ -179,7 +183,7 @@ async def test_live_events_carry_native_identity_and_revision() -> None:
     source = runtime.live_source()
     server.push(completed_item("i-user", item_type="userMessage", text="do it"))
     server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: len(runtime._events) == 2, what="both completed items to land")
     batch = await source.read()
     user, assistant = batch.events
     # Native item identity rides every completed-user/assistant event so the
@@ -212,7 +216,7 @@ async def test_live_event_revision_comes_from_the_native_item() -> None:
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: len(runtime._events) == 1, what="completed item to land")
     batch = await source.read()
     assert batch.events[0].native_id == "i-agent"
     assert batch.events[0].revision == 7
@@ -240,7 +244,7 @@ async def test_activity_callback_fires_on_live_arrival_and_detaches() -> None:
     # A completed item arrives: the callback fires once, coalesced — no task
     # per message and no daemon import.
     server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: calls == ["wake"], what="activity callback to fire")
     assert calls == ["wake"]
 
     # A live delta arrival wakes too.
@@ -255,13 +259,13 @@ async def test_activity_callback_fires_on_live_arrival_and_detaches() -> None:
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: calls == ["wake", "wake"], what="delta arrival to wake")
     assert calls == ["wake", "wake"]
 
     # Detach via None: further arrivals never call back.
     source.set_activity_callback(None)
     server.push(completed_item("i-user", item_type="userMessage", text="again"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="post-detach arrival consumed")
     assert calls == ["wake", "wake"]
     await runtime.aclose()
 
@@ -276,7 +280,10 @@ async def test_failed_activity_callback_degrades_health_and_detaches() -> None:
 
     source.set_activity_callback(boom)
     server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: runtime._health is ConnectionHealth.DEGRADED and len(runtime._events) == 1,
+        what="arrival to normalize and degrade health",
+    )
 
     # The arrival still normalized; the broken wake hint degraded the health
     # visibly and detached itself instead of poisoning the receive loop.
@@ -285,7 +292,7 @@ async def test_failed_activity_callback_degrades_health_and_detaches() -> None:
     snapshot = await runtime.snapshot()
     assert snapshot.health is ConnectionHealth.DEGRADED
     server.push(completed_item("i-user", item_type="userMessage", text="later"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: len(runtime._events) == 1, what="later item to land")
     assert len((await source.read()).events) == 1
     await runtime.aclose()
 
@@ -313,7 +320,10 @@ async def test_state_only_arrivals_fire_the_activity_callback() -> None:
             params={"threadId": "ui-thread-1", "status": {"type": "active"}},
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: calls == ["wake"] and runtime._status_hint is Status.WORKING,
+        what="status arrival to wake",
+    )
     assert calls == ["wake"]
     batch = await source.read()
     assert batch.status is Status.WORKING
@@ -325,7 +335,7 @@ async def test_state_only_arrivals_fire_the_activity_callback() -> None:
             params={"threadId": "other-thread", "status": {"type": "idle"}},
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="foreign status consumed")
     assert calls == ["wake"]
 
     # A recorded approval request flips the readable status to
@@ -343,7 +353,7 @@ async def test_state_only_arrivals_fire_the_activity_callback() -> None:
             request_id=0,
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: calls == ["wake", "wake"], what="approval arrival to wake")
     assert calls == ["wake", "wake"]
     batch = await source.read()
     assert batch.status is Status.AWAITING_INPUT
@@ -355,7 +365,7 @@ async def test_state_only_arrivals_fire_the_activity_callback() -> None:
             params={"threadId": "ui-thread-1", "requestId": 0},
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: calls == ["wake", "wake", "wake"], what="resolution to wake")
     assert calls == ["wake", "wake", "wake"]
     batch = await source.read()
     assert batch.status is not Status.AWAITING_INPUT
@@ -370,7 +380,9 @@ async def test_state_only_arrivals_fire_the_activity_callback() -> None:
             },
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: calls == ["wake", "wake", "wake", "wake"], what="adopted settings to wake"
+    )
     assert calls == ["wake", "wake", "wake", "wake"]
 
     # An ignored settings update (nothing adoptable) never wakes.
@@ -380,7 +392,7 @@ async def test_state_only_arrivals_fire_the_activity_callback() -> None:
             params={"threadId": "ui-thread-1", "threadSettings": {}},
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="ignored settings update consumed")
     assert calls == ["wake", "wake", "wake", "wake"]
     await runtime.aclose()
 
@@ -398,7 +410,9 @@ async def test_turn_started_state_wakes_without_events() -> None:
             params={"threadId": "ui-thread-1", "turn": {"id": "turn-9"}},
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(
+        lambda: calls == ["wake"] and runtime._active_turn_id == "turn-9", what="turn start to wake"
+    )
 
     # The active-turn/status mutation is readable with no event or fact.
     assert calls == ["wake"]
@@ -412,7 +426,7 @@ async def test_turn_started_state_wakes_without_events() -> None:
             params={"threadId": "other-thread", "turn": {"id": "turn-x"}},
         )
     )
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="foreign turn consumed")
     assert calls == ["wake"]
     await runtime.aclose()
 
@@ -425,7 +439,7 @@ async def test_live_and_durable_item_events_reconcile_by_native_identity() -> No
 
     # Actual live normalization: one completed agent message item.
     server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: len(runtime._events) == 1, what="live item to land")
 
     # Actual durable parser output for the same native item, from the
     # canonical paginated-rollout shape.
@@ -562,7 +576,7 @@ async def test_foreign_thread_payloads_never_leak_once_bound() -> None:
     ]
     for notification in foreign:
         server.push(notification)
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: not server.pending, what="foreign payloads consumed")
     snapshot = await runtime.snapshot()
     # No foreign status, interaction, item, active turn, settings, or
     # terminal evidence leaked into this runtime.

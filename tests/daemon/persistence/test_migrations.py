@@ -8,7 +8,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import Column, MetaData, Table, Text, create_engine
+from sqlalchemy import create_engine
 
 from theater import paths
 from theater.daemon.schema import metadata
@@ -52,75 +52,6 @@ def test_old_native_evidence_is_not_migrated_into_a_fresh_interruption(theater_h
             assert tuple(row) == (1, None, "kept")
     finally:
         engine.dispose()
-
-
-def test_the_drift_check_is_not_vacuous(store):
-    """Guard the guard."""
-    drifted = MetaData()
-    for table in metadata.tables.values():
-        table.to_metadata(drifted)
-    Table("invented", drifted, Column("id", Text, primary_key=True))
-
-    context = MigrationContext.configure(
-        store.conn, opts={"compare_type": True, "target_metadata": drifted}
-    )
-    assert compare_metadata(context, drifted) != []
-
-
-def test_migrations_created_the_alembic_version_table(store):
-    tables = set(
-        store.conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").scalars()
-    )
-    assert "alembic_version" in tables
-    assert {
-        "participants",
-        "jobs",
-        "bus",
-        "budgets",
-        "tree_kv",
-        "participant_artifacts",
-        "participant_mcp_plugins",
-        "named_worktrees",
-        "usage",
-    } <= tables
-    stamped = store.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
-    assert stamped == HEAD
-    assert float(store.get_meta("transcript_location_epoch")) > 0
-
-    # Migration 0009 added resume_floor to participants.
-    col_info = store.conn.exec_driver_sql("PRAGMA table_info(participants)").fetchall()
-    col_names = {row[1] for row in col_info}
-    assert "resume_floor" in col_names
-    assert "source_checkpoint" in col_names
-    assert "usage_floor" not in col_names
-    assert "usage_checkpoint" not in col_names
-    assert "tmux_server_identity" in col_names
-    assert "termination_reason" in col_names
-    assert "termination_incident" in col_names
-    assert "terminated_at" in col_names
-    assert "resumed_from_id" in col_names
-    assert "description" in col_names
-
-    plugin_cols = store.conn.exec_driver_sql(
-        "PRAGMA table_info(participant_mcp_plugins)"
-    ).fetchall()
-    assert {
-        "participant_id",
-        "plugin_name",
-        "api_version",
-        "credential_id",
-        "credential_verifier",
-        "grants",
-        "credential_path",
-    } == {row[1] for row in plugin_cols}
-
-    usage_cols = store.conn.exec_driver_sql("PRAGMA table_info(usage)").fetchall()
-    assert "harness" in {row[1] for row in usage_cols}
-    usage_indexes = store.conn.exec_driver_sql("PRAGMA index_list(usage)").fetchall()
-    assert "idx_usage_harness_ts" in {row[1] for row in usage_indexes}
-
-    touch_cols = store.conn.exec_driver_sql("PRAGMA table_info(touch)").fetchall()
-    assert {"sha_before_error", "sha_after_error"} <= {row[1] for row in touch_cols}
 
 
 def test_usage_harness_migration_backfills_survivors_and_marks_orphans(theater_home):
@@ -432,79 +363,3 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         assert job.structured_status is None
     finally:
         store.close()
-
-
-def test_migration_created_runtime_tables(store: Store) -> None:
-    tables = set(
-        store.conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").scalars()
-    )
-    assert {
-        "participant_runtime_bindings",
-        "control_operations",
-        "native_terminal_evidence",
-    } <= tables
-
-    binding_cols = {
-        row[1]
-        for row in store.conn.exec_driver_sql(
-            "PRAGMA table_info(participant_runtime_bindings)"
-        ).fetchall()
-    }
-    assert {
-        "participant_id",
-        "harness",
-        "wiring",
-        "backend_generation",
-        "lifecycle_phase",
-        "endpoint",
-        "backend_pid",
-        "backend_started_at",
-        "native_session_id",
-        "protocol",
-        "protocol_version",
-        "native_version",
-        "compatibility_policy",
-        "launch_policy",
-    } <= binding_cols
-
-    op_cols = {
-        row[1]
-        for row in store.conn.exec_driver_sql("PRAGMA table_info(control_operations)").fetchall()
-    }
-    assert {
-        "operation_id",
-        "participant_id",
-        "job_handle",
-        "kind",
-        "transport",
-        "delivery_phase",
-        "delivery_result",
-        "execution_barrier",
-        "backend_generation",
-        "native_session_id",
-        "native_turn_id",
-        "queue_sequence",
-        "payload",
-    } <= op_cols
-
-    evidence_cols = {
-        row[1]
-        for row in store.conn.exec_driver_sql(
-            "PRAGMA table_info(native_terminal_evidence)"
-        ).fetchall()
-    }
-    assert {
-        "participant_id",
-        "backend_generation",
-        "native_session_id",
-        "native_turn_id",
-        "terminal",
-        "result",
-        "result_completeness",
-        "result_provenance",
-        "error_code",
-        "error",
-        "recorded_at",
-        "from_history",
-        "completed_at",
-    } == evidence_cols

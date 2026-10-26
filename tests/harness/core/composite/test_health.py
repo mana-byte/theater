@@ -122,7 +122,7 @@ async def test_health_transitions_to_degraded_on_timeout() -> None:
         enrichments=[EnrichmentBinding(source=SlowSource(), declaration=decl("h"))],
         enrichment_timeout=0.01,
     )
-    await asyncio.wait_for(composite.read(), timeout=5.0)
+    await asyncio.wait_for(composite.read(), timeout=30.0)
     assert composite.channel_health()[0].state is ChannelHealthState.DEGRADED
 
 

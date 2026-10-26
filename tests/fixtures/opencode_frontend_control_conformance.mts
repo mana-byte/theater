@@ -294,7 +294,7 @@ request(
   "opencode.send",
   sendParams("op-8", "ses_A", "slow prompt"),
 );
-await sleep(50);
+await waitFor(() => promptCalls.length === 2, "r8 prompt in flight");
 request(
   host,
   "r9",
@@ -379,7 +379,7 @@ request(
   "opencode.send",
   sendParams("op-13", "ses_A", "doomed prompt"),
 );
-await sleep(50);
+await waitFor(() => promptCalls.length === 3, "r13 prompt in flight");
 assert.equal(promptCalls.length, 3);
 activeSession = "ses_B";
 pendingPrompt.resolve(undefined);

@@ -35,7 +35,7 @@ class CallbackSession:
         await self.writer.drain()
 
     async def read(self) -> dict[str, object]:
-        frame = await asyncio.wait_for(self.reader.readline(), timeout=1)
+        frame = await asyncio.wait_for(self.reader.readline(), timeout=5)
         assert frame.endswith(b"\n")
         value = json.loads(frame)
         assert isinstance(value, dict)
@@ -53,7 +53,7 @@ class FixtureDaemon:
         self._sessions = sessions
 
     async def next_session(self) -> CallbackSession:
-        return await asyncio.wait_for(self._sessions.get(), timeout=1)
+        return await asyncio.wait_for(self._sessions.get(), timeout=5)
 
 
 PROVIDER_HANDSHAKE_LIMITS: dict[str, object] = {
@@ -91,7 +91,7 @@ async def provider_callback_server(
         tasks.add(task)
         writers.add(writer)
         try:
-            request = json.loads(await asyncio.wait_for(reader.readline(), timeout=1))
+            request = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
             if check_request is not None:
                 check_request(request)
             assert request == {
@@ -143,7 +143,7 @@ async def provider_callback_server(
         for writer in tuple(writers):
             writer.close()
         if tasks:
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
         socket_path.unlink(missing_ok=True)
         if failures:
             raise failures[0]
@@ -189,7 +189,7 @@ async def connect_provider(client: ProviderClient, daemon: FixtureDaemon) -> Cal
 
 
 async def eventually(predicate: Callable[[], bool]) -> None:
-    async with asyncio.timeout(1):
+    async with asyncio.timeout(5):
         while not predicate():
             await asyncio.sleep(0.001)
 

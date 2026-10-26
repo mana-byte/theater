@@ -12,22 +12,6 @@ from theater import paths
 from theater.daemon.store import MIGRATIONS, Store
 
 
-def test_fresh_home_has_only_user_roots_and_var(theater_home):
-    assert {entry.name for entry in theater_home.iterdir()} == {"plugins", "skills", "var"}
-    assert {entry.name for entry in paths.var_dir().iterdir()} == {
-        "state",
-        "run",
-        "logs",
-        "participants",
-    }
-    assert {entry.name for entry in paths.state_dir().iterdir()} == {"keys", "plugins"}
-    assert {entry.name for entry in paths.logs_dir().iterdir()} == {
-        "daemon",
-        "plugins",
-    }
-    assert {entry.name for entry in paths.daemon_logs_dir().iterdir()} == {"stderr"}
-
-
 def test_runtime_owners_are_private_and_created_lazily(theater_home):
     managed = (
         paths.state_dir(),

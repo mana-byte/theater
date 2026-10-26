@@ -371,13 +371,13 @@ async def test_revoke_does_not_restore_an_inflight_reader(store: Store, monkeypa
 
     def blocked(path: Path):
         started.set()
-        assert release.wait(2)
+        assert release.wait(10)
         return original(path)
 
     monkeypatch.setattr(old_reader, "load", blocked)
     task = asyncio.create_task(source.read())
-    assert await asyncio.to_thread(started.wait, 2)
-    await asyncio.wait_for(asyncio.to_thread(source.revoke_attachment), 0.5)
+    assert await asyncio.to_thread(started.wait, 5)
+    await asyncio.wait_for(asyncio.to_thread(source.revoke_attachment), 5)
     release.set()
     batch = await task
 
@@ -397,12 +397,12 @@ async def test_revoke_fences_an_inflight_history_recovery(store: Store, monkeypa
 
     def blocked(*args, **kwargs):
         started.set()
-        assert release.wait(2)
+        assert release.wait(10)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(unified_source, "load_unified_store", blocked)
     task = asyncio.create_task(source.history_page(snapshot=newest.snapshot_cursor))
-    assert await asyncio.to_thread(started.wait, 2)
+    assert await asyncio.to_thread(started.wait, 5)
     source.revoke_attachment()
     release.set()
     page = await task

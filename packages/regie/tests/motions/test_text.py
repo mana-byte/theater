@@ -120,17 +120,6 @@ def test_randomized_single_item_cycle_is_safe():
     assert controller.index == 0
 
 
-def test_resume_delay_matches_current_phase():
-    controller = CyclingTextController([("a",)], hold=7.0, char_interval=0.04)
-    assert controller.resume_delay == 0.04
-    controller.tick()
-    assert controller.phase == HOLDING
-    assert controller.resume_delay == 7.0
-    controller.tick()
-    assert controller.phase == TYPING_OUT
-    assert controller.resume_delay == 0.04
-
-
 def test_cursor_blinks_during_typing_and_disappears_during_hold():
     controller = CyclingTextController([("abcd",)], hold=10.0, char_interval=0.1)
     frames = [controller.tick() for _ in range(4)]

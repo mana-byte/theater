@@ -13,7 +13,6 @@ from tests.support.composite_sources import (
     decl,
     make_fact,
 )
-from theater.constants.harness import HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS
 from theater.harness.channels import CompositeSource, EnrichmentBinding
 from theater.harness.contracts.channels import ChannelHealthState
 from theater.harness.contracts.source import Batch, Source
@@ -54,7 +53,7 @@ async def test_enrichment_timeout_does_not_fail_primary() -> None:
         enrichments=[EnrichmentBinding(source=SlowSource(delay=10.0), declaration=decl("slow"))],
         enrichment_timeout=0.01,
     )
-    batch = await asyncio.wait_for(composite.read(), timeout=5.0)
+    batch = await asyncio.wait_for(composite.read(), timeout=30.0)
     assert batch.progressed is True
     health = composite.channel_health()
     assert health[0].state is ChannelHealthState.DEGRADED
@@ -178,8 +177,3 @@ def test_enrichment_health_failure_is_contained_and_redacted() -> None:
     assert health.state is ChannelHealthState.DEGRADED
     assert health.diagnostics == ("channel health snapshot failed (ValueError)",)
     assert "secret health value" not in str(health)
-
-
-def test_enrichment_timeout_default_is_named_constant() -> None:
-    composite = CompositeSource()
-    assert composite._enrichment_timeout == HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS

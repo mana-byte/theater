@@ -477,7 +477,7 @@ async def test_native_otel_parse_capacity_is_bounded(monkeypatch) -> None:
     runtime = NativeOtelRuntime(lambda _participant, otel_channel: None)
 
     def blocked(_body: bytes) -> tuple[()]:
-        gate.wait(timeout=1.0)
+        gate.wait(timeout=10.0)
         return ()
 
     monkeypatch.setattr(otel_runtime, "decode_otlp_json", blocked)

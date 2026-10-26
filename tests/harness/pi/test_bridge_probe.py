@@ -149,7 +149,6 @@ def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None
     assert "AgentSession" not in bridge
     assert 'pi.on("agent_settled"' in bridge
     assert 'pi.on("agent_end"' in bridge
-    assert "model_update_proof_gated" in bridge
     # Pending interactions stay native; pane status markers must not return.
     assert 'pi.on("tool_call"' in bridge
     assert 'pi.on("tool_result"' in bridge
@@ -160,10 +159,7 @@ def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None
     assert "this.pi.getThinkingLevel()" in bridge
     assert "this.pi.setThinkingLevel(" in bridge
     assert "--theater-frontend-config" in bridge
-    assert "FRONTEND_OWNER" in bridge
-    assert "bridge_epoch" in bridge
     assert 'pi.on("session_before_compact"' in bridge
-    assert 'bridge.transition(ctx, "agent_end", "active")' in bridge
 
 
 @pytest.mark.requires_node

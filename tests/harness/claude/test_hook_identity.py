@@ -98,7 +98,7 @@ async def test_earlier_decoded_fact_is_invalidated_while_next_decoder_waits(monk
     monkeypatch.setattr(runtime._callbacks, "decode", delayed_decode)
     task = asyncio.create_task(source.read())
     try:
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), 5)
         current[0] = replace(current[0], session_id="session-b")
         release.set()
         assert (await task).trajectory == ()
@@ -306,7 +306,7 @@ async def test_claude_hook_rpc_rechecks_identity_after_async_correlation(  # noq
                 payload=old_payload,
             )
         )
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        await asyncio.wait_for(entered.wait(), timeout=5)
         [context] = contexts
         assert context.expected_session_id == old_session
         assert context.expected_transcript_location == str(old_transcript)
@@ -461,7 +461,7 @@ async def test_claude_hook_queue_drops_when_identity_rotates_during_decode(
             participant_id=participant.id, channel=OBSERVATION.hook_channels[0]
         )
         read_task = asyncio.create_task(source.read())
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        await asyncio.wait_for(entered.wait(), timeout=5)
 
         new_session = "22222222-2222-4222-8222-222222222222"
         new_transcript = tmp_path / "new" / f"{new_session}.jsonl"

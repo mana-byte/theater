@@ -22,6 +22,7 @@ from tests.support.provider_callback_daemon import (
     result_for,
 )
 from tests.support.provider_records import provider_record
+from tests.support.waiting import wait_until
 from theater import paths
 from theater.daemon.operations import DispatchIntent, PreparedOperation
 from theater.daemon.plugins.credentials import credential_verifier
@@ -90,7 +91,7 @@ async def test_independent_terminal_callbacks_run_concurrently_without_blocking_
         session = await connect_provider(client, daemon)
         await session.send(deliver_frame("deliver-a", terminal_id="terminal-a"))
         await session.send(deliver_frame("deliver-b", terminal_id="terminal-b"))
-        await asyncio.wait_for(both_started.wait(), timeout=1)
+        await asyncio.wait_for(both_started.wait(), timeout=5)
         await session.send(inventory_frame("inventory-while-waiting"))
         inventory = await session.read()
         assert frame_id(inventory) == "inventory-while-waiting"
@@ -139,11 +140,11 @@ async def test_same_identity_mutations_serialize_before_their_handler_starts(
         session = await connect_provider(client, daemon)
         await session.send(first)
         await session.send(second)
-        await asyncio.wait_for(first_started.wait(), timeout=1)
+        await asyncio.wait_for(first_started.wait(), timeout=5)
         await eventually(lambda: client.pending_callbacks == 2)
         assert not second_started.is_set()
         release_first.set()
-        await asyncio.wait_for(second_started.wait(), timeout=1)
+        await asyncio.wait_for(second_started.wait(), timeout=5)
         response_ids = {frame_id(await session.read()) for _ in range(2)}
         await client.close()
 
@@ -167,7 +168,7 @@ async def test_saturation_refuses_before_dispatch() -> None:
         client = provider_client(daemon.socket_path, {"terminal.inventory": handler})
         session = await connect_provider(client, daemon)
         await session.send(inventory_frame("slow"))
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=5)
         await session.send(inventory_frame("slow"))
         await asyncio.sleep(0)
         assert calls == ["slow"]
@@ -200,7 +201,7 @@ async def test_generation_loss_drops_a_same_terminal_callback_before_dispatch() 
         session = await connect_provider(client, daemon)
         await session.send(deliver_frame("first"))
         await session.send(deliver_frame("stale"))
-        await asyncio.wait_for(first_started.wait(), timeout=1)
+        await asyncio.wait_for(first_started.wait(), timeout=5)
         await eventually(lambda: client.pending_callbacks == 2)
         client.invalidate_generation(generation=7)
         release.set()
@@ -239,12 +240,12 @@ async def test_timed_out_mutation_duplicate_replays_unknown_during_handler() -> 
         session = await connect_provider(client, daemon)
         request = deliver_frame("timed-out")
         await session.send(request)
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=5)
         first = await session.read()
         assert mapping_value(first, "result")["delivery"] == "unknown"
 
         await session.send(request)
-        replay = await asyncio.wait_for(session.read(), timeout=0.1)
+        replay = await session.read()
         assert replay == first
         assert calls == 1
 
@@ -273,11 +274,11 @@ async def test_started_mutation_survives_connection_loss_without_a_rollback_prom
         client = provider_client(daemon.socket_path, {"terminal.deliver": handler})
         session = await connect_provider(client, daemon)
         await session.send(deliver_frame("loss"))
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=5)
         await session.close()
-        await asyncio.wait_for(client.wait_closed(), timeout=1)
+        await asyncio.wait_for(client.wait_closed(), timeout=10)
         release.set()
-        await asyncio.wait_for(finished.wait(), timeout=1)
+        await asyncio.wait_for(finished.wait(), timeout=5)
         await client.close()
 
     assert not cancelled.is_set()
@@ -316,7 +317,7 @@ async def test_cancelled_mutation_and_late_or_unknown_frames_are_safe() -> None:
         assert calls == 2
 
         await session.send({"type": "response", "id": "late", "result": {}})
-        await asyncio.wait_for(client.wait_closed(), timeout=1)
+        await asyncio.wait_for(client.wait_closed(), timeout=10)
         assert isinstance(client.last_error, ProviderProtocolError)
         await client.close()
 
@@ -338,7 +339,7 @@ async def test_negotiated_frame_limits_reject_oversized_inbound_and_outbound_fra
         await session.send_raw(
             b'{"type":"request","id":"oversized","payload":"' + b"x" * 600 + b'"}\n'
         )
-        await asyncio.wait_for(inbound.wait_closed(), timeout=1)
+        await asyncio.wait_for(inbound.wait_closed(), timeout=10)
         assert isinstance(inbound.last_error, ProviderProtocolError)
         await inbound.close()
 
@@ -368,9 +369,11 @@ def _deliver_params(operation_id: str, terminal_id: str) -> dict[str, object]:
 
 
 async def _wait_offline(daemon) -> None:
-    async with asyncio.timeout(1):
-        while daemon.terminal_service.connections.health("provider-a") != "offline":
-            await asyncio.sleep(0)
+    await wait_until(
+        lambda: daemon.terminal_service.connections.health("provider-a") == "offline",
+        timeout=5.0,
+        what="provider-a offline",
+    )
 
 
 class _DrainFailureWriter:

@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from tests.support.pi_bridge import bridge_snapshot
+from tests.support.waiting import wait_until
 from theater.daemon.server import Daemon
 from theater.daemon.spawning.models import SpawnRequest
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
@@ -43,9 +44,7 @@ def _install(monkeypatch, *, compatible=True):
 
 
 async def _wait_for(predicate):
-    async with asyncio.timeout(2):
-        while not predicate():
-            await asyncio.sleep(0.001)
+    await wait_until(predicate, timeout=30.0, what="pi frontend condition")
 
 
 async def _spawn(daemon: Daemon, request: SpawnRequest):
@@ -330,7 +329,7 @@ async def test_failed_pi_live_registration_closes_only_the_optional_runtime(
     peer = PiPeer(participant.session_id)
     await peer.connect(descriptor)
     try:
-        await asyncio.wait_for(attempted.wait(), timeout=2)
+        await asyncio.wait_for(attempted.wait(), timeout=30)
         await _wait_for(lambda: daemon.runtime_manager.get(participant.id) is None)
         assert daemon.observer.live.registration_for(participant.id) is None
         assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_native

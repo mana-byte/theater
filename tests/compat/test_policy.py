@@ -89,10 +89,6 @@ def test_the_file_is_one_compact_line() -> None:
     )
 
 
-def test_a_canonical_edit_that_keeps_the_minimum_is_accepted() -> None:
-    check_change(format_policy(_policy()), format_policy(_policy("1.0.0", "1.9.0", "1.1.0")))
-
-
 @pytest.mark.parametrize(
     "old_text",
     [

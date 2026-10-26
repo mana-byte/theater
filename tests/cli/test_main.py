@@ -14,10 +14,7 @@ import pytest
 
 from tests.support.cli_fakes import parse
 from theater import cli
-from theater.cli import commands as commands_mod
-from theater.cli import parser as parser_mod
 from theater.cli.commands import identity
-from theater.cli.commands import launch as launch_mod
 from theater.cli.commands import participants as participants_mod
 from theater.protocol import RemoteError
 
@@ -87,21 +84,6 @@ def test_the_cli_exposes_exactly_these_subcommands():
     assert set(cli.COMMAND_SPECS) == set(cli._COMMANDS) == EXPECTED_COMMANDS
     assert all(cli._COMMANDS[name] is spec.handler for name, spec in cli.COMMAND_SPECS.items())
     assert None not in cli._COMMANDS
-
-
-def test_parser_compatibility_aliases_remain_exported():
-    aliases = (
-        ("_add_controls_parsers", "_add_control_commands"),
-        ("_add_gc_parser", "_add_gc_commands"),
-        ("_add_management_parsers", "_add_management_commands"),
-        ("_add_models_parser", "_add_model_commands"),
-        ("_add_name_parser", "_add_identity_commands"),
-        ("_add_plugin_parser", "_add_plugin_commands"),
-        ("_add_process_parsers", "_add_process_commands"),
-        ("_add_receipt_parser", "_add_receipt_commands"),
-    )
-    for old_name, current_name in aliases:
-        assert getattr(cli, old_name) is getattr(parser_mod, current_name)
 
 
 def test_hidden_hook_commands_are_absent_from_top_level_help(capsys):
@@ -353,12 +335,6 @@ def test_ctrl_c_out_of_a_follow_is_not_a_crash(monkeypatch):
 
     monkeypatch.setattr(participants_mod, "call_sync", interrupt)
     assert cli.main(["kill", "p-abc"]) == 130
-
-
-def test_legacy_launch_helper_only_gives_standalone_guidance(capsys):
-    assert commands_mod.cmd_launch is launch_mod.cmd_launch
-    assert launch_mod.cmd_launch(object()) == 0
-    assert "standalone `regie`" in capsys.readouterr().out
 
 
 def _args(token_file, *, strict: bool = False):

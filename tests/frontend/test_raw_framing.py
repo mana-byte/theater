@@ -84,7 +84,7 @@ def _fixture_server(handler: Callable[[socket.socket], None]) -> Iterator[Path]:
         yield path
     finally:
         listener.close()
-        thread.join(timeout=5)
+        thread.join(timeout=30)
         if thread.is_alive():
             raise AssertionError("fixture Unix-socket server did not stop")
         path.unlink(missing_ok=True)

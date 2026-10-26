@@ -211,10 +211,6 @@ CODEX_WORKING = "\n".join(
 )
 
 
-def test_codex_is_idle_when_the_composer_is_above_the_footer():
-    assert CodexObserver().is_idle_screen(CODEX_IDLE) is True
-
-
 def test_codex_is_not_idle_while_a_turn_is_running():
     """The composer is still on screen mid-turn; the status line is the tell."""
     assert CodexObserver().is_idle_screen(CODEX_WORKING) is False

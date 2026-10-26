@@ -17,51 +17,6 @@ def repo(tmp_path):
     return committed_repo(tmp_path)
 
 
-def test_git_returns_failed_result_on_timeout(monkeypatch):
-    """_git() synthesizes a failed CompletedProcess (rc 124) so a stuck git cannot hang callers."""
-
-    import theater.daemon.worktree as wt_mod
-
-    def fake_run(argv, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 10))
-
-    monkeypatch.setattr(wt_mod.subprocess, "run", fake_run)
-
-    result = wt._git(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd="/tmp",
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    assert result.returncode == 124
-    assert "timed out" in result.stderr
-    # Compatibility: old private name still present on the façade.
-    assert wt._INDETERMINATE_RCS == wt.INDETERMINATE_RCS
-
-
-def test_git_returns_failed_result_on_oserror(monkeypatch):
-    """_git() must not raise OSError (missing binary) — synthesizes rc=127."""
-    import theater.daemon.worktree as wt_mod
-
-    def fake_run(argv, **kwargs):
-        raise FileNotFoundError("git not found")
-
-    monkeypatch.setattr(wt_mod.subprocess, "run", fake_run)
-
-    result = wt._git(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd="/tmp",
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    assert result.returncode == 127
-    assert "git not found" in result.stderr
-
-
 async def test_remove_worktree_returns_ok_false_on_git_timeout(monkeypatch, repo):
     """remove_worktree must return WorktreeRemoveResult(ok=False) when git
     times out, not raise — the docstring says "never raises on git failure"

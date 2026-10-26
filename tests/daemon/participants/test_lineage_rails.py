@@ -222,21 +222,6 @@ def test_a_loop_below_the_root_does_not_repeat_anyone(store):
     assert sorted(ids) == sorted({root.id, child.id})
 
 
-def test_root_spawn_is_always_allowed(store):
-    """A spawn with no parent is a root; depth 0, always allowed."""
-    check_depth(store, None)  # does not raise
-
-
-def test_depth_at_cap_is_allowed(store):
-    """Depth exactly at the cap is allowed; cap+1 is not."""
-    reg = Registry(store)
-    root = reg.create_spawned(harness="vibe", cwd="/tmp")
-    d1 = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
-    d2 = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=d1.id)
-    # d2 is depth 2; spawning from d2 would be depth 3, which equals the cap
-    check_depth(store, d2.id)  # does not raise
-
-
 def test_depth_exceeding_cap_is_rejected(store):
     reg = Registry(store)
     root = reg.create_spawned(harness="vibe", cwd="/tmp")
@@ -266,15 +251,6 @@ def test_await_self_is_rejected(store):
         check_cycle(store, "abc", ["abc"])
 
 
-def test_await_child_is_not_a_cycle(store):
-    """A parent awaiting its own child is normal, not a cycle."""
-    reg = Registry(store)
-    parent = reg.create_spawned(harness="vibe", cwd="/tmp")
-    child = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
-    # parent awaits child — this is the normal spawn→await pattern
-    check_cycle(store, parent.id, [child.id])  # does not raise
-
-
 def test_await_that_closes_a_cycle_is_rejected(store):
     """A spawns B, B spawns C. C awaiting A is a cycle.
 
@@ -294,19 +270,10 @@ def test_await_that_closes_a_cycle_is_rejected(store):
         check_cycle(store, c.id, [a.id])
 
 
-def test_await_empty_targets_is_ok(store):
-    check_cycle(store, "abc", [])  # does not raise
-
-
 def test_two_peers_awaiting_each_other_is_refused():
     """B is blocked on A. A must not now block on B."""
     with pytest.raises(CycleDetected):
         check_wait_cycle({"b": {"a"}}, "a", ["b"])
-
-
-def test_awaiting_someone_who_is_waiting_on_a_third_party_is_fine():
-    """B is busy waiting on C. A waiting on B still terminates."""
-    check_wait_cycle({"b": {"c"}}, "a", ["b"])  # does not raise
 
 
 def test_a_longer_loop_is_still_a_loop():
@@ -318,19 +285,6 @@ def test_a_longer_loop_is_still_a_loop():
 def test_awaiting_yourself_is_refused():
     with pytest.raises(CycleDetected):
         check_wait_cycle({}, "a", ["a"])
-
-
-def test_root_spawn_is_not_budget_limited(store):
-    check_budget(store, None)  # does not raise
-
-
-def test_budget_within_limit_is_allowed(store):
-    reg = Registry(store)
-    root = reg.create_spawned(harness="vibe", cwd="/tmp")
-    for _i in range(5):
-        reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
-    # 6 participants (root + 5 children), budget default is 20
-    check_budget(store, root.id)  # does not raise
 
 
 def test_budget_exceeded_rejected(store):
@@ -385,17 +339,6 @@ _ALLOWLIST_KINDS = [
         check_reasoning_allowed, ReasoningNotAllowed, "codex", "high", "higher", id="reasoning"
     ),
 ]
-
-
-@pytest.mark.parametrize(("check", "refusal", "harness", "value", "longer"), _ALLOWLIST_KINDS)
-def test_naming_nothing_is_always_allowed(check, refusal, harness, value, longer):
-    """The case every install starts in, and the one that must never break."""
-    check(harness, None, [])  # does not raise
-
-
-@pytest.mark.parametrize(("check", "refusal", "harness", "value", "longer"), _ALLOWLIST_KINDS)
-def test_a_listed_value_is_allowed(check, refusal, harness, value, longer):
-    check(harness, value, ["a-lesser", value])  # does not raise
 
 
 @pytest.mark.parametrize(

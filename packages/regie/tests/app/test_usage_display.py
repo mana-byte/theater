@@ -96,17 +96,17 @@ async def test_agent_cost_shows_on_the_selected_row_only_even_with_the_footer_hi
             leaf = tree._key_widgets.get(("p", participant_id))
             return str(leaf.render()) if isinstance(leaf, AgentLeaf) else ""
 
-        await wait_until(pilot, lambda: tree.selected_participant_id is not None, 5.0)
+        await wait_until(pilot, lambda: tree.selected_participant_id is not None)
         if tree.selected_participant_id != "participant-1":
             await pilot.press("k")
-        await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
+        await wait_until(pilot, lambda: "$0.42" in row("participant-1"))
         assert client.usage.by_participant_calls[0]["participant_ids"] == (
             "participant-1",
             "participant-2",
         )
 
         await pilot.press("j")
-        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-2", 5.0)
+        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-2")
         assert "$0.42" not in row("participant-1")
 
 
@@ -126,8 +126,11 @@ class _LateState(FakeState):
 
 @pytest.mark.asyncio
 async def test_startup_usage_waits_for_participants_so_costs_appear_immediately(
-    fast_count_up,
+    fast_count_up, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The poll is stretched so the wait below still proves the cost came from the first
+    # read, which waits for the participants, and not from a later periodic refresh.
+    monkeypatch.setattr("regie.app_parts.startup.REGIE_USAGE_POLL_INTERVAL_SECONDS", 30.0)
     app, client, _presentation = build_app(usage_visible=False)
     app._state = cast(StateController, _LateState(make_projection()))
 
@@ -138,8 +141,8 @@ async def test_startup_usage_waits_for_participants_so_costs_appear_immediately(
             leaf = tree._key_widgets.get(("p", "participant-1"))
             return str(leaf.render()) if isinstance(leaf, AgentLeaf) else ""
 
-        # Well inside the 10 s poll: the first usage read must already carry the agents.
-        await wait_until(pilot, lambda: "$0.42" in row(), 4.0)
+        # Well inside the 30 s poll: the first usage read must already carry the agents.
+        await wait_until(pilot, lambda: "$0.42" in row(), 10.0)
         assert client.usage.by_participant_calls[0]["participant_ids"] == (
             "participant-1",
             "participant-2",
@@ -163,16 +166,16 @@ async def test_hovering_an_unselected_agent_shows_its_cost_until_the_pointer_lea
             widget = leaf(participant_id)
             return str(widget.render()) if widget is not None else ""
 
-        await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
+        await wait_until(pilot, lambda: "$0.42" in row("participant-1"))
         await pilot.press("j")
-        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-2", 5.0)
+        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-2")
         assert "$0.42" not in row("participant-1")
 
         await pilot.hover(leaf("participant-1"))
-        await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
+        await wait_until(pilot, lambda: "$0.42" in row("participant-1"))
 
         await pilot.hover(leaf("participant-2"))
-        await wait_until(pilot, lambda: "$0.42" not in row("participant-1"), 5.0)
+        await wait_until(pilot, lambda: "$0.42" not in row("participant-1"))
 
 
 @pytest.mark.asyncio
@@ -197,17 +200,17 @@ async def test_selected_agent_cost_counts_up_like_the_footer_and_others_just_upd
             leaf = tree._key_widgets.get(("p", participant_id))
             return str(leaf.render()) if isinstance(leaf, AgentLeaf) else ""
 
-        await wait_until(pilot, lambda: tree.selected_participant_id is not None, 5.0)
+        await wait_until(pilot, lambda: tree.selected_participant_id is not None)
         assert tree.selected_participant_id == "participant-1"
         # Startup: the first cost counts up from zero, as the footer does.
-        await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
+        await wait_until(pilot, lambda: "$0.42" in row("participant-1"))
         assert any("$0." in tick and "$0.42" not in tick for tick in ticks)
         ticks.clear()
 
         # Selected: the count passes through intermediate values before settling.
         client.usage.participant_cost_microcents = 142_000_000
         await app._refresh_usage()
-        await wait_until(pilot, lambda: "$1.42" in row("participant-1"), 5.0)
+        await wait_until(pilot, lambda: "$1.42" in row("participant-1"))
         assert any("$0.42" not in tick and "$1.42" not in tick for tick in ticks)
 
         # Unselected: the value is adopted silently and shows as is on selection.
@@ -215,7 +218,7 @@ async def test_selected_agent_cost_counts_up_like_the_footer_and_others_just_upd
         client.usage.participant_cost_microcents = 242_000_000
         await app._refresh_usage()
         await pilot.press("k")
-        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-1", 5.0)
+        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-1")
         assert "$2.42" in row("participant-1")
 
 

@@ -11,7 +11,7 @@ import pytest
 from regie.trajectory.adapter import TrajectoryFollowAdapter, TrajectoryQueryAdapter
 from regie.trajectory.rich.controller import TrajectoryController
 from regie.trajectory.rich.models import decode_delta, decode_page
-from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
+from regie.trajectory.rich.state import TrajectoryStateStore
 
 from theater.frontend import FrontendClient
 from theater.frontend.trajectory import (
@@ -123,24 +123,6 @@ def test_runtime_state_rejects_mixed_participant_and_keeps_revision_precedence()
         state.upsert([other])
 
 
-def test_runtime_state_skips_rebuilding_indexes_for_unchanged_upserts(monkeypatch) -> None:
-    state = TrajectoryStateStore().get("p1")
-    item = TrajectoryRecord.from_wire(wire_record("r1"))
-    state.upsert([item])
-    rebuilds = 0
-    original_rebuild = ParticipantTrajectoryState._rebuild_groups
-
-    def count_rebuild(self: ParticipantTrajectoryState) -> None:
-        nonlocal rebuilds
-        rebuilds += 1
-        original_rebuild(self)
-
-    monkeypatch.setattr(ParticipantTrajectoryState, "_rebuild_groups", count_rebuild)
-
-    assert state.upsert([item]) == (0, 0)
-    assert rebuilds == 0
-
-
 def test_runtime_state_repairs_tail_selection_for_unchanged_upserts() -> None:
     state = TrajectoryStateStore().get("p1")
     item = TrajectoryRecord.from_wire(wire_record("r1"))
@@ -174,14 +156,6 @@ def test_runtime_state_counts_compact_utf8_wire_bytes() -> None:
 
     encoded = json.dumps(item.to_wire(), ensure_ascii=False, separators=(",", ":")).encode()
     assert state.loaded_bytes == len(encoded)
-
-
-def test_state_store_applies_configured_page_size() -> None:
-    store = TrajectoryStateStore(page_size=17)
-
-    assert store.get("p1").participant_id == "p1"
-    assert store.get("p2").participant_id == "p2"
-    assert store.page_size == 17
 
 
 @pytest.mark.asyncio

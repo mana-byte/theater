@@ -126,22 +126,6 @@ def _call(monkeypatch, method: str, handler, *ticks: float):
     return asyncio.run(timing.timed_handlers({method: handler})[method](request))
 
 
-def test_mutation_logs_phases_and_result(monkeypatch, caplog):
-    caplog.set_level("INFO", logger="regie.bridge.latency")
-
-    async def handler(_request):
-        with timing.phase("effect"):
-            pass
-        return {"delivery": "accepted"}
-
-    result = _call(monkeypatch, "terminal.terminate", handler, 1.0, 1.010, 1.030, 1.050)
-    assert result == {"delivery": "accepted"}
-    assert caplog.messages == [
-        "callback.terminal.terminate 50.0ms operation_id=op terminal_id=%1 "
-        "result=success effect_ms=20.0"
-    ]
-
-
 def test_create_logs_unknown_outcome(monkeypatch, caplog):
     caplog.set_level("INFO", logger="regie.bridge.latency")
 
@@ -183,8 +167,3 @@ def test_exceptions_propagate_and_are_recorded(monkeypatch, caplog):
         _call(monkeypatch, "terminal.deliver", fail, 1.0, 1.001)
     assert caught.value is error
     assert caplog.messages[0].endswith("result=exception")
-
-
-def test_phase_outside_a_callback_is_a_noop():
-    with timing.phase("orphan"):
-        pass

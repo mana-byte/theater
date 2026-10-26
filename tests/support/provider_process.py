@@ -491,10 +491,11 @@ class ProviderFixture:
         if terminal.process.poll() is None:
             terminal.process.terminate()
             try:
-                terminal.process.wait(timeout=0.5)
+                terminal.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 terminal.process.kill()
-                terminal.process.wait(timeout=0.5)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    terminal.process.wait(timeout=5)
         terminal.alive = False
         self._evidence.append(
             "stand_in_stopped",

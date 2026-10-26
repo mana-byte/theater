@@ -134,7 +134,7 @@ async def test_pi_cancelled_projection_cannot_advance_live_context(tmp_path, mon
 
     def delayed(*args):
         started.set()
-        assert release.wait(3)
+        assert release.wait(10)
         try:
             return parse(*args)
         finally:
@@ -143,13 +143,13 @@ async def test_pi_cancelled_projection_cannot_advance_live_context(tmp_path, mon
     monkeypatch.setattr(pi_source, "parse_live_records", delayed)
     task = asyncio.create_task(source.read())
     try:
-        assert await asyncio.to_thread(started.wait, 3)
+        assert await asyncio.to_thread(started.wait, 5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
     finally:
         release.set()
-    assert await asyncio.to_thread(finished.wait, 3)
+    assert await asyncio.to_thread(finished.wait, 5)
     assert source._observer._snapshot_turn_context() == initial
     assert source.index == 0
     assert [(event.text, event.raw_index) for event in (await source.read()).events] == [

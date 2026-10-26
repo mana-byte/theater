@@ -154,7 +154,7 @@ async def test_a_working_agent_under_a_fold_keeps_the_badge_turning(tmp_path: Pa
         boss = _leaf(tree, "participant-1")
         await wait_until(pilot, lambda: boss._spinner_sub is not None)
         seen = {_row(boss)}
-        await wait_until(pilot, lambda: seen.add(_row(boss)) or len(seen) > 2, timeout=5)
+        await wait_until(pilot, lambda: seen.add(_row(boss)) or len(seen) > 2)
 
 
 async def test_folds_survive_a_restart(tmp_path: Path) -> None:
