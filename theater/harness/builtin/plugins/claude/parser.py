@@ -27,6 +27,14 @@ class ClaudeParser:
     #: What the last parsed record would have emitted, when it was copied history held back.
     _withheld: tuple[Event, ...] = ()
 
+    @property
+    def stream_error(self) -> str | None:
+        return self._seal.failure
+
+    @property
+    def waiting_for_seal(self) -> bool:
+        return self._seal.pending
+
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         record = self._decode(line)
         if record is None:
@@ -67,7 +75,7 @@ class ClaudeParser:
     def _parse_decoded(self, record: dict, index: int, *, clip_text: bool = True) -> list[Event]:
         events = self._record_events(record, index, clip_text=clip_text)
         self._withheld = ()
-        if self._seal.skipped_history:
+        if self._seal.skipped_history or self.stream_error is not None:
             # History copied in while a fork's first turn is held: its prompts and answers belong
             # to turns no job here waits for, so the reducer must not hear them as this session's.
             self._withheld, events = tuple(events), []
@@ -79,7 +87,7 @@ class ClaudeParser:
         message = record.get("message")
         message = message if isinstance(message, dict) else {}
         self._last_sealed = ()
-        if (expired := self._seal.observe(record, ts)) is not None and clip_text:
+        if (expired := self._seal.observe(record, ts, index=index)) is not None and clip_text:
             _report_seal("unavailable", expired)
         deferred = self._emit_deferred(record, index, ts, clip_text=clip_text)
         self._last_sealed = tuple(deferred)
@@ -113,7 +121,7 @@ class ClaudeParser:
         self, record: dict, index: int, ts: float | None, *, clip_text: bool
     ) -> list[Event]:
         """Seal a held marker when a later record completes it; a marker is left to the caller's
-        supersede/drop. retry_deferred owns the discontinuity guards."""
+        supersede/drop. observe guards discontinuity before caching the record."""
         if _is_turn_marker(record):
             return []
         outcome = self._seal.retry_deferred(record, index, ts)

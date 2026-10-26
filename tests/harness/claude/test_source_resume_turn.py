@@ -251,6 +251,7 @@ def test_copied_future_timestamp_exposes_wall_clock_assumption():
     predecessor = {
         "type": "user",
         "uuid": "old_user",
+        "message": {"content": "copied prompt"},
         "timestamp": AFTER,
         "sessionId": SESSION,
     }

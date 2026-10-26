@@ -15,6 +15,7 @@ from theater.daemon.jobs import JobManager
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
 from theater.harness.builtin.plugins.claude.constants import SEAL_NODE_LIMIT
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
+from theater.harness.normalization.timing import iso_epoch
 from theater.models import JobState
 from theater.provenance import TranscriptProvenance
 from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
@@ -206,9 +207,24 @@ async def test_incomplete_attach_record_is_retried_without_losing_its_prefix(sou
     reader.commit_attachment()
 
 
-async def test_large_transcript_primes_only_a_bounded_suffix(source, monkeypatch):
-    path, reader = source
-    lines = [METADATA] * (SEAL_NODE_LIMIT * 32) + [*INITIAL, *ANSWER, METADATA]
+async def test_large_transcript_primes_only_a_bounded_suffix(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    path = root / "project" / f"{SESSION}.jsonl"
+    path.parent.mkdir(parents=True)
+    local = []
+    for line in (*INITIAL, *ANSWER):
+        record = json.loads(line)
+        record.update(timestamp="2026-01-01T00:00:02Z", sessionId=SESSION)
+        local.append(json.dumps(record))
+    reader = ClaudeCodeObserver(root=root).open_source_for(
+        participant_id="claude",
+        cwd=str(tmp_path),
+        session_id=SESSION,
+        session_provenance=TranscriptProvenance.EXACT,
+        known_location=str(path),
+        after=iso_epoch("2026-01-01T00:00:01Z"),
+    )
+    lines = [METADATA] * (SEAL_NODE_LIMIT * 32) + [*local, METADATA]
     _write(path, *lines)
     parse = reader._observer.parse
     indices = []
@@ -226,3 +242,4 @@ async def test_large_transcript_primes_only_a_bounded_suffix(source, monkeypatch
     assert batch.attached.last_event.raw_index == len(lines) - 2
     reader.commit_attachment()
     assert (await reader.read()).events == ()
+    await reader.aclose()
