@@ -173,8 +173,14 @@ async def test_renaming_a_long_name_keeps_one_line_and_the_editor_inside_the_row
         await long.begin_rename()
         editor = long._name_editor
         assert editor is not None
+        # The row is sized before its label is redrawn at that width; until then the name wraps.
         await wait_until(
-            pilot, lambda: editor.styles.max_width is not None and "…" not in _rows(long)[1]
+            pilot,
+            lambda: (
+                editor.styles.max_width is not None
+                and "…" not in _rows(long)[1]
+                and _rows(long)[2].strip().endswith("…/proj/api")
+            ),
         )
 
         rows = _rows(long)
