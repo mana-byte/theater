@@ -101,15 +101,8 @@ def _separator_node(separator_id: str, name: str, *, collapsed: bool) -> Separat
     }
 
 
-def _agent_count(node: TreeNode) -> int:
-    return 1 + sum(_agent_count(child) for child in node["children"])
-
-
-def _agents(node: TreeNode) -> list[TreeNode]:
-    return [node, *(agent for child in node["children"] for agent in _agents(child))]
-
-
-#: The status a folded heading shows for its hidden agents, strongest first.
+#: The status a folded heading shows for its hidden agents, strongest first: attention goes to
+#: what needs the human, while the badge (`_FOLD_DISPLAY`) lists the worst first.
 _FOLD_STATUSES = ("awaiting_input", "dead", "working")
 
 #: A hidden agent whose operation failed or is in doubt shows through as the status it reads as.
@@ -124,10 +117,10 @@ _MARK_FOLD_STATUS = {
 _FOLD_DISPLAY = ("dead", "awaiting_input", "working")
 
 
-def _fold_states(agents: list[TreeNode]) -> dict[str, int]:
-    """How many hidden agents are in each state that deserves a glyph, worst first. An agent is
-    counted once, in the state that outranks its others (a failed send beside a working turn
-    counts as the failure)."""
+def _fold_summary(agents: list[TreeNode]) -> tuple[str | None, dict[str, int]]:
+    """The strongest hidden status, and how many hidden agents are in each state that deserves a
+    glyph, worst first. An agent is counted once, in the state that outranks its others (a failed
+    send beside a working turn counts as the failure); an all-idle fold has no status."""
     counts: dict[str, int] = {}
     for agent in agents:
         statuses = {agent.get("status")}
@@ -136,17 +129,8 @@ def _fold_states(agents: list[TreeNode]) -> dict[str, int]:
             statuses.add(_MARK_FOLD_STATUS[mark.kind])
         if state := next((s for s in _FOLD_STATUSES if s in statuses), None):
             counts[state] = counts.get(state, 0) + 1
-    return {state: counts[state] for state in _FOLD_DISPLAY if state in counts}
-
-
-def _fold_status(agents: list[TreeNode]) -> str | None:
-    """Needing a human outranks a dead agent, which outranks working; an all-idle fold is blank."""
-    statuses = {agent.get("status") for agent in agents}
-    for agent in agents:
-        mark = agent.get("mark")
-        if isinstance(mark, RowMark) and mark.kind in _MARK_FOLD_STATUS:
-            statuses.add(_MARK_FOLD_STATUS[mark.kind])
-    return next((status for status in _FOLD_STATUSES if status in statuses), None)
+    status = next((state for state in _FOLD_STATUSES if state in counts), None)
+    return status, {state: counts[state] for state in _FOLD_DISPLAY if state in counts}
 
 
 def _is_separator(node: TreeNode) -> TypeGuard[SeparatorNode]:
@@ -177,13 +161,14 @@ def _sections(built: list[TreeNode]) -> list[TreeNode]:
             visible.append(node)
             continue
         if heading is not None:
-            count += _agent_count(node)
+            agents = _descendants([node])
+            count += len(agents)
             heading["count"] = count
             if heading["collapsed"]:
-                hidden = [*heading.get("folded_agents", []), *_agents(node)]
+                hidden = [*heading.get("folded_agents", []), *agents]
                 heading["folded_agents"] = hidden
                 heading["folded"] = [agent["id"] for agent in hidden]
-                heading["folded_status"] = _fold_status(hidden)
+                heading["folded_status"] = _fold_summary(hidden)[0]
                 continue
         visible.append(node)
     return visible
@@ -229,8 +214,7 @@ def tree_for_projection(
             hidden = _descendants(node["children"])
             node["hidden_count"] = len(hidden)
             node["hidden_ids"] = [agent["id"] for agent in hidden]
-            node["hidden_status"] = _fold_status(hidden)
-            node["hidden_states"] = _fold_states(hidden)
+            node["hidden_status"], node["hidden_states"] = _fold_summary(hidden)
             node["hidden_agents"] = hidden
             node["children"] = []
         return node
