@@ -921,16 +921,7 @@ class ParticipantTree(VerticalScroll):
 
     def _sync_mark_seen(self) -> None:
         """Once the cursor has rested on a failure for a moment, report it seen."""
-        key = self._selected_key
-        mark = next(
-            (
-                node.get("mark")
-                for _, node, line_key, _, _ in self._lines_data
-                if line_key == key and _is_managed_key(line_key)
-            ),
-            None,
-        )
-        wanted = mark.operation_id if isinstance(mark, RowMark) and mark.needs_seen else None
+        wanted = self._seen_wanted()
         if wanted == self._seen_pending:
             return
         self._stop_mark_seen()
@@ -940,10 +931,26 @@ class ParticipantTree(VerticalScroll):
                 REGIE_MARK_SEEN_SECONDS, lambda: self._report_seen(wanted)
             )
 
+    def _seen_wanted(self) -> str | None:
+        """The operation the visible cursor rests on that still wants the human, if any."""
+        if not self._cursor_visible:  # the usage footer hides the row's cursor
+            return None
+        key = self._selected_key
+        mark = next(
+            (
+                node.get("mark")
+                for _, node, line_key, _, _ in self._lines_data
+                if line_key == key and _is_managed_key(line_key)
+            ),
+            None,
+        )
+        return mark.operation_id if isinstance(mark, RowMark) and mark.needs_seen else None
+
     def _report_seen(self, operation_id: str) -> None:
         self._seen_timer = None
         self._seen_pending = None
-        self.post_message(self.MarkSeen(operation_id))
+        if self._seen_wanted() == operation_id:
+            self.post_message(self.MarkSeen(operation_id))
 
     def _stop_mark_seen(self) -> None:
         if self._seen_timer is not None:

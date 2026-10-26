@@ -17,7 +17,7 @@ from packages.regie.tests.support.app_fakes import (
     make_projection,
     with_operations,
 )
-from packages.regie.tests.support.waiting import wait_until
+from packages.regie.tests.support.waiting import press_until, wait_until
 
 
 def _leaf(tree: ParticipantTree, participant_id: str) -> AgentLeaf:
@@ -123,6 +123,35 @@ async def test_a_failure_stops_asking_once_the_cursor_has_rested_on_it(monkeypat
         tree.select("participant-2")
         await wait_until(pilot, lambda: "✗" not in _rows(leaf)[1])
         assert "failed" not in _rows(leaf)[2]
+
+
+async def test_a_failure_on_a_row_hidden_behind_the_usage_footer_is_not_seen(monkeypatch) -> None:
+    monkeypatch.setattr("regie.widgets.tree.REGIE_MARK_SEEN_SECONDS", 0.05)
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        tree.select("participant-2")
+        app._select_usage_metric("input")  # the footer hides the cursor; the selection stays
+        await wait_until(pilot, lambda: app._usage_panel.in_footer)
+        assert tree.selected_key == ("p", "participant-2") and not tree._cursor_visible
+
+        failed = make_operation(
+            "controls.send",
+            "failed",
+            "delivery_rejected",
+            target="participant-2",
+            error_code="internal",
+        )
+        await _publish(app, pilot, failed)
+        dwelt: list[bool] = []
+        app.set_timer(0.2, lambda: dwelt.append(True))  # well past the shortened dwell
+        await wait_until(pilot, lambda: bool(dwelt))
+        assert failed.operation_id not in app._seen_operations  # its row is not in view
+
+        await press_until(pilot, "k", lambda: not app._usage_panel.in_footer)
+        await wait_until(pilot, lambda: failed.operation_id in app._seen_operations)
 
 
 async def test_a_delivered_send_shows_a_tick_that_fades_on_its_own(monkeypatch) -> None:
