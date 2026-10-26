@@ -5,11 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
     from textual.containers import VerticalScroll
     from textual.timer import Timer
     from textual.widget import Widget
 
     from regie.marks import MarkKind
+    from regie.menu import MenuItem, MenuView
     from regie.motions.retirement import LeafRetirementController
     from regie.motions.reveal import LeafRevealController
     from regie.motions.wipe import LeafWipeController
@@ -41,9 +44,18 @@ if TYPE_CHECKING:
         _hidden_owner: dict[Key, Key]
         _kills: set[Key]
         _held: dict[Key, tuple[bool, int]]
+        _selected_key: Key | None
+        menu_source: Callable[[], Sequence[MenuItem]]
+        _menu_view: MenuView
+        _menu_return: Key | None
+        _menu_hidden: bool
 
+        @property
+        def selectable_keys(self) -> tuple[Key, ...]: ...
         def _remove_widget(self, widget: Widget) -> None: ...
         def _reconcile_empty(self) -> None: ...
+        def _rerender(self) -> None: ...
+        def _apply_selection(self) -> None: ...
 
     _TreeBase = TreeHost
 else:
