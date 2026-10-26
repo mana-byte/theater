@@ -1,0 +1,89 @@
+name: Harness compatibility verify
+
+on:
+  workflow_call:
+    inputs:
+      harness:
+        description: Plugin whose proposed range the PR checks
+        required: true
+        type: string
+      base:
+        description: The commit the PR is merged into and checked against
+        required: true
+        type: string
+      routine:
+        description: Whether the PR is a routine one-line policy gate change
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  fanout:
+    name: Discover ${{ inputs.harness }} verify shards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
+      count: ${{ steps.shards.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: shards
+        env:
+          HARNESS: ${{ inputs.harness }}
+          BASE: ${{ inputs.base }}
+          ROUTINE: ${{ inputs.routine }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(shards "$HARNESS" --base "$BASE")
+          if [[ "$ROUTINE" == "true" ]]; then args+=(--routine); fi
+          matrix="$(python3 -m scripts.harness_compat "${args[@]}")"
+          echo "shards=$matrix" >> "$GITHUB_OUTPUT"
+          count="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["include"]))' "$matrix")"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify ${{ inputs.harness }} shard ${{ matrix.shard }}
+    needs: fanout
+    if: needs.fanout.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.fanout.outputs.shards) }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      # Codex's Linux sandbox needs bubblewrap, and Ubuntu 24.04 denies it the user namespace it
+      # needs: without both a workspace patch asks for an approval.
+      - run: |
+          sudo apt-get update && sudo apt-get install -y tmux bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: uv sync --locked --all-packages --group dev
+      - name: Verify the shard without qualifying unrelated releases
+        env:
+          HARNESS: ${{ inputs.harness }}
+          BASE: ${{ inputs.base }}
+          ROUTINE: ${{ inputs.routine }}
+          VERSIONS: ${{ matrix.versions }}
+        run: |
+          args=(verify "$HARNESS" --base "$BASE" --releases "$VERSIONS")
+          if [[ "$ROUTINE" == "true" ]]; then args+=(--routine); fi
+          timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat "${args[@]}"
