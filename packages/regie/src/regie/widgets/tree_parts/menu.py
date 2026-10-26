@@ -98,7 +98,7 @@ class TreeMenu(_TreeBase):
             (key for key in selectable_keys(lines) if key[1].startswith(f"{option}/")), None
         )
         self._selected_key = first or ("m", option)
-        self._show_lines(self._settle_lines(lines, True))
+        self._show_lines(lines)  # the explicit choice stands, even on an option now gone
         self._apply_selection()
 
     def close_menu(self) -> Key | None:

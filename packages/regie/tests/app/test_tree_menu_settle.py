@@ -170,3 +170,20 @@ def test_settle_keeps_the_cursor_on_a_row_that_exists(current, preferred, old_in
 def test_settle_falls_into_the_menu_only_when_no_agent_remains():
     assert settle((ROOT,), ("p", "gone"), None, 3) == ROOT
     assert settle((), ("p", "gone"), None, 0) is None
+
+
+async def test_opening_a_removed_option_keeps_the_cursor_on_it_entering_and_reopening() -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(60, 30)) as pilot:
+        tree = app.query_one(ParticipantTree)
+        tree.menu_source = lambda: _items()[1:]  # only Bus: Spawn is gone
+        await wait_until(pilot, lambda: ROOT in tree._key_widgets)
+        tree.select("participant-1")
+        reconciles = _count_reconciles(tree)
+
+        tree.open_menu("spawn")
+        assert tree.selected_key == ("m", "spawn") and len(reconciles) == 1
+
+        tree.open_menu("spawn")
+        assert tree.selected_key == ("m", "spawn") and len(reconciles) == 2
