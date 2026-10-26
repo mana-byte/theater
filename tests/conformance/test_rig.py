@@ -188,6 +188,42 @@ def test_capturing_evidence_copies_logs_and_every_pane_and_survives_a_missing_tm
     stack.capture(tmp_path / "other")  # must not raise: a stack that never started has no tmux
 
 
+def _recorded_runs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    runs: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: Any) -> SimpleNamespace:
+        runs.append(argv)
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(live_stack.subprocess, "run", run)
+    return runs
+
+
+def test_the_stack_reaches_its_private_tmux_server_by_socket_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _recorded_runs(monkeypatch)
+    temp = tmp_path / "t"
+
+    Stack(tmp_path, {"TMUX_TMPDIR": str(temp)}).tmux("kill-server")
+
+    assert runs == [["tmux", "-S", str(temp / f"tmux-{os.getuid()}" / "default"), "kill-server"]]
+
+
+@pytest.mark.parametrize("env", [{}, {"TMUX_TMPDIR": "/tmp"}], ids=["unset", "outside"])
+def test_a_stack_without_a_private_tmux_directory_never_falls_back_to_the_default_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    # With TMUX_TMPDIR unusable tmux uses /tmp/tmux-UID/default: the user's own server.
+    runs = _recorded_runs(monkeypatch)
+    stack = Stack(tmp_path, env)
+
+    with pytest.raises(RuntimeError, match="outside the stack"):
+        stack.tmux("kill-server")
+    assert stack.tmux_running() is False
+    assert runs == []
+
+
 def _scripted_boot(monkeypatch: pytest.MonkeyPatch, *outcomes: str | None) -> list[str]:
     """Boot attempts that end as scripted; what the stack was asked to do between them."""
     attempts = iter(outcomes)

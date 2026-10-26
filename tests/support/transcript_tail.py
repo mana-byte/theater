@@ -7,8 +7,8 @@ from datetime import datetime
 from pathlib import Path
 
 
-def transcript_tail(location: str | None, *, launched_at: float | None, records: int = 8) -> str:
-    """Write order of the last records, each ``type/subtype uuid<parent @seconds-after-launch``.
+def transcript_tail(location: str | None, *, launched_at: float | None, records: int = 6) -> str:
+    """Write order of the last records, each ``type/detail uuid<parent @seconds-after-launch``.
 
     A harness may write a turn's records out of causal order, and which of them predate the launch
     decides what a reader may call history, so a failure CI cannot rerun needs both.
@@ -31,7 +31,9 @@ def _token(line: str, launched_at: float | None) -> str | None:
         return "?"
     if not record.get("uuid"):
         return None
-    kind = "/".join(str(record[key]) for key in ("type", "subtype") if record.get(key))
+    attachment = record.get("attachment")
+    detail = attachment.get("type") if isinstance(attachment, dict) else record.get("subtype")
+    kind = "/".join(str(part) for part in (record.get("type"), detail) if part)
     token = f"{kind or '?'} {_short(record.get('uuid'))}<{_short(record.get('parentUuid'))}"
     written = _epoch(record.get("timestamp"))
     if written is not None and launched_at is not None:

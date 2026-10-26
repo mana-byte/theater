@@ -23,15 +23,22 @@ def test_each_record_shows_its_kind_ids_and_seconds_from_launch(tmp_path: Path) 
         tmp_path / "s.jsonl",
         {"type": "user", "uuid": "aaaa1111", "timestamp": "2026-10-26T00:00:00.000Z"},
         {
+            "type": "attachment",
+            "attachment": {"type": "mcp_instructions_delta"},
+            "uuid": "cccc3333",
+            "parentUuid": "aaaa1111",
+        },
+        {
             "type": "system",
             "subtype": "turn_duration",
             "uuid": "bbbb2222",
-            "parentUuid": "aaaa1111",
+            "parentUuid": "cccc3333",
             "timestamp": "2026-10-26T00:00:03.500Z",
         },
     )
     assert transcript_tail(location, launched_at=LAUNCHED) == (
-        "2 lines, last 2 records: user aaaa<- @-1.0s | system/turn_duration bbbb<aaaa @+2.5s"
+        "3 lines, last 3 records: user aaaa<- @-1.0s | attachment/mcp_instructions_delta cccc<aaaa"
+        " | system/turn_duration bbbb<cccc @+2.5s"
     )
 
 

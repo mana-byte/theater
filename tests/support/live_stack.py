@@ -113,15 +113,24 @@ class Stack:
     def tmux_running(self) -> bool:
         try:
             return self._tmux("list-sessions").returncode == 0
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, RuntimeError, subprocess.SubprocessError):
             return False
 
     def panes(self) -> list[str]:
         return self.tmux("list-panes", "-a", "-F", "#{pane_id}").split()
 
+    @property
+    def tmux_socket(self) -> Path:
+        """The private server's socket, always named: tmux falls back to the user's own default
+        server when TMUX_TMPDIR cannot be used, and a stack must never be able to reach that one."""
+        socket = Path(self.env.get("TMUX_TMPDIR", "")) / f"tmux-{os.getuid()}" / "default"
+        if self.root.resolve() not in socket.resolve().parents:
+            raise RuntimeError(f"refusing to reach a tmux server outside the stack: {socket}")
+        return socket
+
     def _tmux(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["tmux", *args],
+            ["tmux", "-S", str(self.tmux_socket), *args],
             env=dict(self.env),
             capture_output=True,
             text=True,
