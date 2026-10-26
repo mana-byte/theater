@@ -96,23 +96,6 @@ class TreeNavigation(_AppBase):
         if target is not None:
             self._select_usage_metric(target)
 
-    async def action_cursor_left_or_trajectory(self) -> None:
-        if self._usage_panel.in_footer:
-            self.action_cursor_left()
-            return
-        if self._trajectory_has_focus():
-            return
-        if (work := self._trajectory_request("left")) is not None:
-            await self._presentation_queue.run("trajectory", work)
-
-    async def action_cursor_right_or_focus(self) -> None:
-        if self._usage_panel.in_footer:
-            self.action_cursor_right()
-            return
-        if self._trajectory_has_focus():
-            return
-        await self.action_focus_stage()
-
     def _restore_tree_focus(self) -> None:
         if not self.is_running:
             return

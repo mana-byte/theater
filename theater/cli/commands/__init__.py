@@ -29,7 +29,6 @@ from theater.cli.commands.introspection import (
     cmd_plugins,
     cmd_stats,
 )
-from theater.cli.commands.launch import cmd_launch as cmd_launch
 from theater.cli.commands.maintenance import (
     cmd_gc,
     cmd_restart,
@@ -39,9 +38,6 @@ from theater.cli.commands.management import (
     cmd_control_transfer,
     cmd_providers,
     cmd_workspaces,
-)
-from theater.cli.commands.participants import (
-    _spawn_harness as _spawn_harness,
 )
 from theater.cli.commands.participants import (
     cmd_adopt,

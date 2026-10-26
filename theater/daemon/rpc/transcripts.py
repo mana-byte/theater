@@ -58,9 +58,6 @@ from theater.transcript_identity import (
 TRANSCRIPT_RECEIPT_RPC = "transcript.receipt"
 TRANSCRIPT_RECEIPT_BUS_KIND = BUS_KIND_AGENT_TRANSCRIPT_RECEIPT
 
-#: Kinds `read_transcript` reports. ERROR is dropped: not part of the conversation.
-_READABLE = transcript_read.READABLE
-
 
 def _reject_cross_participant_receipt(
     daemon,

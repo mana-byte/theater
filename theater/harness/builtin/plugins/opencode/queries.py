@@ -41,11 +41,6 @@ def row_parts(row: Row) -> list[dict]:
     return translate.message_parts(message_id, kind, session_id, load_json_object(raw))
 
 
-def latest_message(conn: sqlite3.Connection, sid: str) -> tuple[object, ...] | None:
-    row = latest_row(conn, sid)
-    return None if row is None else (json.dumps(row_info(conn, row)),)
-
-
 def latest_row(conn: sqlite3.Connection, sid: str) -> Row | None:
     return conn.execute(
         f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_TURN_VIEW} "

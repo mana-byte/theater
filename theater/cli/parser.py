@@ -445,16 +445,6 @@ def _add_lifecycle_commands(sub) -> None:
     reload.add_argument("--json", action="store_true")
 
 
-_add_controls_parsers = _add_control_commands
-_add_gc_parser = _add_gc_commands
-_add_management_parsers = _add_management_commands
-_add_models_parser = _add_model_commands
-_add_name_parser = _add_identity_commands
-_add_plugin_parser = _add_plugin_commands
-_add_process_parsers = _add_process_commands
-_add_receipt_parser = _add_receipt_commands
-
-
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="theater",

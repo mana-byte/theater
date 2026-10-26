@@ -99,11 +99,6 @@ class RenameableRow(Static):
         self._renaming_changed()
         self._edit_closed(committed=False)
 
-    def cancel_rename(self) -> None:
-        """Leave edit mode as Esc would."""
-        if self._name_editor is not None:
-            self._name_editor.action_cancel()
-
     def close_rename(self) -> None:
         """Detach a live editor quietly, e.g. when this row leaves the projection."""
         editor = self._name_editor

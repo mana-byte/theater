@@ -24,9 +24,6 @@ from .constants import CODEX_BINARY
 VERSION_POLICY = VersionPolicy.load(Path(__file__).with_name("compatibility.json"))
 CODEX_RUNTIME_COMPATIBILITY_POLICY = f"codex-appserver-{VERSION_POLICY.minimum}-compatible"
 
-#: ``codex --version`` prints ``codex-cli <version>`` on the verified release.
-CODEX_RUNTIME_VERSION_PREFIX = "codex-cli"
-
 #: Deadline for the read-only version probe.
 CODEX_RUNTIME_PROBE_TIMEOUT_SECONDS = 10.0
 

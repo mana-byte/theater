@@ -49,12 +49,6 @@ class StagingActions(_AppBase):
             return
         await self._presentation_queue.run("toggle", self._stage_request("toggle"))
 
-    async def action_focus_stage(self) -> None:
-        await self._presentation_queue.run("focus", self._stage_request("focus"))
-
-    async def action_stage_and_focus_tmux(self) -> None:
-        await self._presentation_queue.run("open", self._stage_request("open"))
-
     def _stage_request(self, mode: str) -> Callable[[], Awaitable[None]]:
         return partial(
             self._stage_selected, mode, self._selected_id(), self._selected_unmanaged_pane()

@@ -9,7 +9,7 @@ from typing import NoReturn
 
 from theater.constants.daemon import BUS_KIND_SEND_REFUSED
 from theater.constants.refusals import NEXT_HUMAN_PRESENT
-from theater.daemon.controls import preflight, redirect
+from theater.daemon.controls import redirect
 from theater.daemon.request_values import require
 from theater.daemon.response_contracts import resolve_response_format
 from theater.daemon.skill_attachments import attach_skills
@@ -29,10 +29,6 @@ from theater.models import (
 
 logger = logging.getLogger(__name__)
 
-_transcript_identity_lost = preflight._transcript_identity_lost
-_transcript_send_failure = preflight.transcript_send_failure
-_check_transcript_send_preflight = preflight.check_transcript_send_preflight
-
 
 def _refuse_send(
     daemon, exc: Exception, *, reason: str, caller_id: str, target_id: str
@@ -48,16 +44,6 @@ def _refuse_send(
         payload={"reason": reason, "detail": str(exc)},
     )
     raise exc
-
-
-async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) -> None:
-    """Retained compatibility seam; providers now verify terminal identity."""
-    del daemon, target, refuse
-
-
-async def _check_approval_modal(daemon, target, refuse: Callable[..., NoReturn]) -> None:
-    """Retained compatibility seam; providers perform the terminal recheck."""
-    del daemon, target, refuse
 
 
 def _publish_send_event(

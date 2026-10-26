@@ -8,8 +8,7 @@ from collections.abc import Collection, Mapping
 from textual.widget import Widget
 
 from regie.marks import MarkKind, RowMark
-from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
-from regie.motions.reveal import LeafRevealController
+from regie.motions.retirement import LeafRetirementFrame
 from regie.motions.wipe import SWEEPS, status_sweep
 from regie.render.layout import Key
 from regie.ui_constants import (
@@ -30,12 +29,6 @@ class TreeMotion(_TreeBase):
 
     #: Breathing steps of the attention bar (dim, steady, bold), in order.
     _ATTENTION_BREATH = (-1, 0, 1, 0)
-
-    def configure(self, *, startup_reveal: bool) -> None:
-        if self._leaf_reveal.started:
-            return
-        self._leaf_reveal = LeafRevealController(enabled=startup_reveal and self._motion)
-        self._leaf_retirement = LeafRetirementController(enabled=startup_reveal and self._motion)
 
     def leaf_keys(self) -> tuple[Key, ...]:
         return tuple(

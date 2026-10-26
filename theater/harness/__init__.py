@@ -10,9 +10,6 @@ import logging
 import shutil  # noqa: F401 — tests monkeypatch theater.harness.shutil.which
 
 from theater.config import ConfigError  # noqa: F401 — tests catch harness.ConfigError
-from theater.constants.harness import (  # noqa: F401
-    HARNESS_TMUX_OBSERVATION_NAME_LENGTH as _TMUX_TRUNCATION,
-)
 from theater.harness.base import (
     APPROVALS,
     MAX_TEXT,
@@ -135,9 +132,7 @@ from theater.harness.manifests import (
 )
 from theater.harness.registry import (  # noqa: F401
     _ALIASES,
-    _BINARIES,
     _BROKEN,
-    _OBSERVATION_KEYS,
     _PLUGINS,
     HARNESSES,
 )
@@ -152,34 +147,7 @@ from theater.harness.registry.capabilities import (
     supports_reasoning,
     supports_resume,
 )
-from theater.harness.registry.claims import (  # noqa: F401
-    _observation_keys_for,
-)
-from theater.harness.registry.claims import (  # noqa: F401
-    binary_claim_keys as _binary_claim_keys,
-)
-from theater.harness.registry.claims import (  # noqa: F401
-    claim_alias as _claim_alias,
-)
-from theater.harness.registry.claims import (  # noqa: F401
-    claim_binary as _claim_binary,
-)
-from theater.harness.registry.claims import (  # noqa: F401
-    claim_name as _claim_name,
-)
-from theater.harness.registry.claims import (  # noqa: F401
-    claim_observation_keys as _claim_observation_keys,
-)
-from theater.harness.registry.claims import (  # noqa: F401
-    release_claims as _release_claims,
-)
-from theater.harness.registry.claims import (  # noqa: F401
-    unwrap_binary as _unwrap_binary,
-)
-from theater.harness.registry.install import (  # noqa: F401
-    _reject,
-    install,
-)
+from theater.harness.registry.install import install
 from theater.harness.registry.lookup import (
     UNKNOWN_ICON,
     describe,

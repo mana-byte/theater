@@ -32,9 +32,6 @@ from theater.daemon.worktrees import (
     worktree_path,
 )
 
-# Old private name used by callers that branch on indeterminate return codes.
-_INDETERMINATE_RCS = INDETERMINATE_RCS
-
 __all__ = [
     "BRANCH_PREFIX",
     "GIT_FATAL_RC",
@@ -44,7 +41,6 @@ __all__ = [
     "NAMED_BRANCH_PREFIX",
     "NAMED_WORKTREE_DIR",
     "WORKTREE_DIR",
-    "_INDETERMINATE_RCS",
     "WorktreeRemoveResult",
     "_git",
     "branch_name",

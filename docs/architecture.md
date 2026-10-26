@@ -1127,7 +1127,6 @@ one immutable `MANIFEST`. Local packages use the same shape at
 relative sibling imports are isolated, and a local package overrides a shipped
 one. Disabled names are skipped before import. A legacy top-level local `.py`
 is never executed and is retained only as an actionable migration diagnostic.
-`harness/plugins.py` remains a generic compatibility facade for the loader.
 There is no built-in tier. The only asymmetry is what happens when one will not
 import: a shipped plugin failing is fatal (the install is broken and hiding it
 makes the bug report unreadable), a local one is skipped with a warning and

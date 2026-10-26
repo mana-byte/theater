@@ -75,13 +75,6 @@ class ControlActions(_AppBase):
             return
         self._start_action(self.submit_interrupt(participant_id))
 
-    def action_session_controls(self) -> None:
-        participant_id = self._selected_id()
-        if participant_id is None:
-            self.notify("no participant selected", severity="warning")
-            return
-        self.run_worker(self._show_controls(participant_id), exclusive=False)
-
     async def _show_controls(self, participant_id: str) -> None:
         async with self._controls_inspection_lock:
             try:
@@ -122,9 +115,6 @@ class ControlActions(_AppBase):
             self.notify(message, severity="warning")
             return
         self._start_action(self.submit_termination(participant_id))
-
-    def action_terminate(self) -> None:
-        self.action_kill()
 
     async def submit_send(self, participant_id: str, prompt: str) -> ActionRecord:
         if refusal := self._control_refusal(participant_id, "send"):

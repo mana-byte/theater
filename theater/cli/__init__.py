@@ -70,17 +70,7 @@ from theater.cli.commands.process import cmd_daemon, cmd_mcp, cmd_regie  # noqa:
 from theater.cli.commands.reload import cmd_reload  # noqa: F401
 from theater.cli.commands.skills import cmd_skills  # noqa: F401
 from theater.cli.errors import BadUsage
-from theater.cli.parser import (  # noqa: F401
-    _add_controls_parsers,
-    _add_gc_parser,
-    _add_management_parsers,
-    _add_models_parser,
-    _add_name_parser,
-    _add_plugin_parser,
-    _add_process_parsers,
-    _add_receipt_parser,
-    _parser,
-)
+from theater.cli.parser import _parser
 from theater.cli.render import (  # noqa: F401
     _bus_line,
     _candidate_line,
@@ -90,9 +80,6 @@ from theater.cli.render import (  # noqa: F401
     _matching,
     _row_line,
     _width,
-)
-from theater.cli.render import (
-    _models_block as _render_models_block,
 )
 from theater.client import DaemonClient, call_sync  # noqa: F401
 from theater.constants.cli import (
@@ -112,11 +99,6 @@ from theater.observability.runtime import ObservabilityError
 from theater.protocol import RemoteError
 
 _COMMANDS = COMMANDS
-
-
-def _models_block(harness: str, models: list[str]) -> str:
-    """Render a `[models]` entry, using the config section name."""
-    return _render_models_block(harness, models, config.MODELS_SECTION)
 
 
 def main(argv: list[str] | None = None) -> int:

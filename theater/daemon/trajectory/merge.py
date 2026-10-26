@@ -12,7 +12,6 @@ from theater.trajectory import (
     TrajectoryStatus,
     deterministic_record_order,
     group_records,
-    merge_records,
 )
 
 _INTERACTION_KINDS = frozenset(
@@ -32,13 +31,6 @@ _INTERACTION_KINDS = frozenset(
         TrajectoryKind.OBSERVATION_ERROR,
     }
 )
-
-
-def merge_exact(
-    existing: Iterable[TrajectoryRecord], incoming: Iterable[TrajectoryRecord]
-) -> tuple[TrajectoryRecord, ...]:
-    """Merge by record ID and retain the highest deterministic revision."""
-    return merge_records(existing, incoming)
 
 
 def order_records(records: Iterable[TrajectoryRecord]) -> tuple[TrajectoryRecord, ...]:
@@ -72,6 +64,5 @@ __all__ = [
     "groups_for_records",
     "is_interaction",
     "is_mutable",
-    "merge_exact",
     "order_records",
 ]
