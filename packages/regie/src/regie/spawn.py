@@ -34,7 +34,7 @@ def spawn_choices(
 
 
 def spawn_approval(choice: SpawnChoice) -> str | None:
-    """Choose RC9's safe palette policy from the daemon-advertised set."""
+    """Choose RC9's safe approval policy from the daemon-advertised set."""
     approvals = choice.approvals
     if approvals is None:
         return None

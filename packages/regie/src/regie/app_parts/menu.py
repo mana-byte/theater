@@ -128,7 +128,12 @@ class MenuActions(_AppBase):
         return MenuItem(
             candidate.participant_id,
             f"{candidate.harness}  {who}",
-            candidate.reason or " · ".join(part for part in (where, context) if part),
+            # the stable id rides in the help so the menu's filter finds the row
+            " · ".join(
+                part
+                for part in (candidate.participant_id, candidate.reason, where, context)
+                if part
+            ),
             glyph="✗",
             style="$error",
             enabled=candidate.available,

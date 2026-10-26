@@ -1,4 +1,4 @@
-"""The spawn and resume palettes, the harness catalog and the spawned agent's selection."""
+"""The spawn and resume menus, the harness catalog and the spawned agent's selection."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
 
 @pytest.mark.asyncio
-async def test_spawn_palette_accepts_a_completed_explicit_directory(
+async def test_spawn_menu_accepts_a_completed_explicit_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -365,7 +365,7 @@ async def test_harnesses_without_an_executable_are_not_offered(
     monkeypatch.setattr(client.catalogs, "harnesses", catalog)
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.wait_for_catalog()
+        await wait_until(pilot, app._catalog_ready.is_set)
 
         assert [choice.harness for choice in app._spawn_choices()] == ["codex"]
         assert all(entry.name != "pi" for entry in app._installed_harnesses)

@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from regie.controllers.actions import ActionRecord, ActionState
 from regie.menu import MenuItem
 from regie.widgets import ParticipantTree
 from regie.widgets.name_editor import DirectoryEditor, FilterEditor
@@ -145,11 +146,39 @@ async def test_add_separator_is_disabled_when_the_menu_was_entered_from_nowhere(
         assert not item.enabled  # no origin row yet: the cursor has not been to the menu
 
 
-def _dead(n: int, *, state: str = "resumable") -> PublicResumeCandidate:
+@pytest.mark.asyncio
+async def test_retry_uncertain_action_appears_only_when_one_is_uncertain_and_runs_on_a_pick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _client, _presentation = build_app()
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        assert next((item for item in app._menu_items() if item.id == "retry"), None) is None
+
+        app._actions._records[("send", "participant-1")] = ActionRecord(
+            "send", "participant-1", "key-1", state=ActionState.UNCERTAIN
+        )
+        item = next(item for item in app._menu_items() if item.id == "retry")
+        assert item.title == "Retry uncertain send"
+
+        retried: list[str] = []
+        monkeypatch.setattr(app, "retry_latest_action", lambda: retried.append("retry"))
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "retry") in tree._key_widgets)
+        tree.select_key(("m", "retry"))
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: retried == ["retry"])
+        assert not tree.in_menu
+
+
+def _dead(
+    n: int, *, state: str = "resumable", participant_id: str | None = None
+) -> PublicResumeCandidate:
     session = f"session-{n}"
     return PublicResumeCandidate.from_wire(
         {
-            "participant_id": f"dead-{n}",
+            "participant_id": participant_id or f"dead-{n}",
             "harness": "codex",
             "name": f"old {n}",
             "cwd": f"/workspace/{n}",
@@ -216,6 +245,29 @@ async def test_a_long_list_shows_five_and_enter_on_the_rest_shows_them_all() -> 
         await wait_until(pilot, lambda: ("m", "resume/dead-11") in tree._key_widgets)
         assert ("m", "resume/…") not in tree._key_widgets
         assert tree.selected_key == ("m", "resume/dead-5")  # the first row that was hidden
+
+
+@pytest.mark.asyncio
+async def test_a_dead_session_is_findable_by_its_stable_participant_id() -> None:
+    app, client, _presentation = build_app()
+    client.participants.dead_rows = (_dead(1, participant_id="corpse-77"),)
+
+    async with app.run_test(size=(70, 50)) as pilot:
+        tree = await _ready(app, pilot)
+        tree.open_menu()
+        await wait_until(pilot, lambda: ("m", "resume") in tree._key_widgets)
+        tree.select_key(("m", "resume"))
+        await pilot.press("l")  # unfold: the dead sessions load
+        await wait_until(pilot, lambda: ("m", "resume/corpse-77") in tree._key_widgets)
+
+        await pilot.press("slash")
+        await wait_until(pilot, lambda: bool(app.query(FilterEditor)))
+        await pilot.press("c", "o", "r", "p", "s", "e")
+        await wait_until(pilot, lambda: ("m", "resume/corpse-77") in tree._key_widgets)
+        assert "corpse-77" in _row(tree, ("m", "resume/corpse-77"))[2]
+
+        await pilot.press("escape")  # drop the filter before the editor goes at teardown
+        await wait_until(pilot, lambda: not app.query(FilterEditor))
 
 
 @pytest.mark.asyncio

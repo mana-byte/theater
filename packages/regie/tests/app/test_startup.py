@@ -22,6 +22,7 @@ from packages.regie.tests.support.app_fakes import (
     make_participant,
     make_projection,
 )
+from packages.regie.tests.support.waiting import wait_until
 from theater.frontend import (
     EventCursor,
     FrontendClient,
@@ -93,7 +94,7 @@ async def test_startup_reveals_state_before_catalog_discovery_and_usage(  # noqa
         assert app.selected_participant_id == "participant-2"
 
         catalog_release.set()
-        await app.wait_for_catalog()
+        await wait_until(pilot, app._catalog_ready.is_set)
         await pilot.pause()
 
         assert not tree.loading and not app.query_one("#sidebar").loading
