@@ -12,9 +12,6 @@ from theater import paths
 from theater.cli.render import _format_bytes, _format_floor
 from theater.client import DaemonClient, call_sync
 
-# Definition re-exported by the cli facade; runtime reads the facade for legacy patches.
-from theater.constants.cli import CLI_STOP_TIMEOUT_SECONDS as STOP_TIMEOUT  # noqa: F401
-
 
 def _stop_timeout() -> float:
     from theater import cli as _facade

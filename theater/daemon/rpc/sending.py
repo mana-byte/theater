@@ -3,16 +3,9 @@
 from __future__ import annotations
 
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
-from theater.daemon.controls import preflight, send_request
+from theater.daemon.controls import send_request
 from theater.daemon.rpc.router import method
 from theater.models import now  # noqa: F401 — composed clock compatibility seam
-
-_transcript_identity_lost = preflight._transcript_identity_lost
-_transcript_send_failure = preflight.transcript_send_failure
-_check_transcript_send_preflight = preflight.check_transcript_send_preflight
-_refuse_send = send_request._refuse_send
-_check_pane_identity = send_request._check_pane_identity
-_check_approval_modal = send_request._check_approval_modal
 
 
 def _send_claim_ttl() -> float:

@@ -77,10 +77,6 @@ class CyclingTextController:
         return self._visible
 
     @property
-    def randomized(self) -> bool:
-        return self._randomize
-
-    @property
     def initial_delay(self) -> float:
         """Delay before the first tick; also the per-character typing interval."""
         return self._char_interval

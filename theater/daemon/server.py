@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from theater import harness as harness_registry
-from theater import paths, protocol, timing  # noqa: F401 — compatibility imports
+from theater import paths
 from theater.config import Config
 from theater.config import load as load_config
 from theater.constants.daemon import (

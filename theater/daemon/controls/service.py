@@ -9,7 +9,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable, Iterable
-from typing import Literal, TypeVar
+from typing import Literal
 
 from theater import timing
 from theater.constants.daemon import CONTROL_MAINTENANCE_INTERVAL_SECONDS
@@ -105,8 +105,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger("theater.daemon.controls")
-
-_LegacyInterruptPlan = TypeVar("_LegacyInterruptPlan")
 
 _CONTROL_METRIC_SPECS: tuple[MetricSpec, ...] = (
     MetricSpec(

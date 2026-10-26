@@ -28,8 +28,6 @@ MAX_LINE_BYTES = 65_536
 MAX_HEADER_LINES = 128
 #: The Basic username the stock server authenticates (upstream serve.ts).
 BASIC_USERNAME = "opencode"
-#: The longest client-supplied session id used in a path segment.
-MAX_SESSION_ID_CHARS = 128
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 _SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")

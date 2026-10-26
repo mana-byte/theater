@@ -5,7 +5,6 @@ from __future__ import annotations
 #: One public manifest API shared by harness and MCP-server packages.
 PLUGIN_API_VERSION = 1
 MCP_PLUGIN_API_VERSION = PLUGIN_API_VERSION
-MCP_SERVER_MANIFEST_API_VERSION = PLUGIN_API_VERSION
 
 #: MCP-server manifest metadata and launch-plan bounds.
 MCP_PLUGIN_DESCRIPTION_MAX_CHARS = 240
