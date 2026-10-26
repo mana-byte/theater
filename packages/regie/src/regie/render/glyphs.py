@@ -448,7 +448,7 @@ def node_label(
     hint: Sequence[str | tuple[str, str]] | None = None,
     width: int | None = None,
     waiting: str | None = None,
-    awaited: int = 0,
+    awaited: bool = False,
     show_harness: bool = True,
     name_text: str | None = None,
     fold_hint: bool = False,
@@ -457,7 +457,7 @@ def node_label(
 
     Row 1 is a leading spacer carrying the parent rail (blank for the first root);
     row 3 uses ``cont_prefix`` so it doesn't look like a new node. *waiting* is the colour of
-    the await this agent is blocked in; *awaited* is how many peers are blocked on it (the row
+    the await this agent is blocked in; *awaited* says peers are blocked on it (the row
     wears ``▏`` in its connector whatever the number). Without *show_harness* the working pulse
     runs along the name instead of the harness text. A name wider than the room ends in ``…`` so
     row two never wraps over the directory; *name_text* replaces it with the caller's own window
@@ -494,7 +494,7 @@ def node_label(
 
     # Row 2: rails, glyph, harness, short id; the id is split out so dim-italic applies to it only.
     row2_parts: list = _row2_lead(
-        view, prefix, frame=frame, waiting=waiting, show_harness=show_harness, awaited=bool(awaited)
+        view, prefix, frame=frame, waiting=waiting, show_harness=show_harness, awaited=awaited
     )
     if view.get("status") == "working" and waiting is None and not show_harness:
         _append_pulsing_name(row2_parts, sid, id_style, frame=frame)

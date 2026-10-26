@@ -116,7 +116,7 @@ class AgentLeaf(RenameableRow):
         self._wipe: Wipe | None = None
         self._attention_level = 0
         self._waiting: str | None = None
-        self._awaited = 0
+        self._awaited = False
         self._cost = CountingValue(_format_leaf_cost)
         self._cost.set_target(_microcents(node), animate=False)
         self._cost_sub: AnimationSubscription | None = None
@@ -171,7 +171,7 @@ class AgentLeaf(RenameableRow):
             return with_gutter_bar(content, _ATTENTION_BAR[self._attention_level])
         return with_stage_marker(content, self._stage_marker)
 
-    def set_await_marks(self, waiting: str | None, awaited: int) -> None:
+    def set_await_marks(self, waiting: str | None, awaited: bool) -> None:
         """Mark this agent blocked on a peer (in that await's colour) and/or waited on by peers."""
         if (waiting, awaited) != (self._waiting, self._awaited):
             self._waiting, self._awaited = waiting, awaited

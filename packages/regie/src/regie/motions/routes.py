@@ -148,7 +148,7 @@ class AwaitMarks:
     """Who is blocked on a peer, in the colour of that await, and who is being waited on."""
 
     waiting: Mapping[str, str] = field(default_factory=dict)
-    awaited: Mapping[str, int] = field(default_factory=dict)
+    awaited: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -238,7 +238,7 @@ class RouteAnimationController:
         the row that stands for it.
         """
         waiting: dict[str, str] = {}
-        waiters: dict[str, set[str]] = {}
+        awaited: set[str] = set()
         for anim in self._await_anims.values():
             rows = self._rows(anim.from_id, anim.to_id, resolve)
             if rows is None:
@@ -247,8 +247,8 @@ class RouteAnimationController:
             if from_row == anim.from_id:  # a waiter folded out of sight leaves no mark
                 waiting.setdefault(anim.from_id, self._colors.color(anim.from_id))
             if to_row != from_row:  # one row has nothing to be waited on by itself
-                waiters.setdefault(to_row, set()).add(anim.from_id)
-        return AwaitMarks(waiting, {target: len(who) for target, who in waiters.items()})
+                awaited.add(to_row)
+        return AwaitMarks(waiting, frozenset(awaited))
 
     def _release_colors(self) -> None:
         active = {anim.from_id for anim in self._await_anims.values()}
