@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 from regie.formatting import tilde
 from regie.motions.pulse import working_harness_style
-from regie.render.glyphs import node_label
+from regie.render.glyphs import node_label as _node_label
 from regie.render.layout import render_tree, selected_participant, shorten_path
 from regie.render.routing import cell_leaf
+from regie.render.row2 import row2_layout
 from regie.ui_constants import REGIE_SEND_TRACE_STYLE as SEND_STYLE
 from regie.ui_constants import REGIE_SPINNER_FRAMES, REGIE_WORKING_HARNESS_STYLES
 from rich.cells import cell_len
@@ -22,6 +23,26 @@ from packages.regie.tests.support.tree_nodes import (
     label_styles,
 )
 from tests.support.tables import eq_row, run_rows
+
+
+def node_label(node, prefix="", **kwargs):
+    layout_keys = {
+        "width",
+        "waiting",
+        "awaited",
+        "show_harness",
+        "name_text",
+        "fold_hint",
+        "reveal",
+        "hint",
+    }
+    layout_kwargs = {key: kwargs.pop(key) for key in tuple(kwargs) if key in layout_keys}
+    return _node_label(
+        node,
+        prefix,
+        layout=row2_layout(node, prefix, frame=kwargs.get("frame", 0), **layout_kwargs),
+        **kwargs,
+    )
 
 
 def test_empty_tree_renders_no_participants():

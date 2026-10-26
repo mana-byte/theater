@@ -11,6 +11,7 @@ from textual.content import Content
 from regie.motions.wipe import Wipe, apply_wipe
 from regie.render.glyphs import node_label
 from regie.render.layout import Key
+from regie.render.row2 import row2_layout
 from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.widgets.name_editor import DirectoryEditor, InlineEditor
 from regie.widgets.renameable import RenameableRow
@@ -52,8 +53,9 @@ class SpawnLeaf(RenameableRow):
             self._prefix,
             cont_prefix=self._cont_prefix,
             detail="" if self.renaming else self._value,
-            hint=[(_HINT, "$text-muted")],
-            width=width,
+            layout=row2_layout(
+                self._node, self._prefix, width=width, hint=[(_HINT, "$text-muted")]
+            ),
         )
         return (
             content

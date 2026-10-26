@@ -14,17 +14,14 @@ from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.motions.routes import LeafOverlay
 from regie.motions.wipe import Wipe, apply_wipe
 from regie.render.glyphs import (
-    fit_name,
-    fold_parts,
     harness_shown,
-    name_room,
     node_label,
     shown_name,
-    visible_name_span,
     with_gutter_bar,
     with_stage_marker,
 )
 from regie.render.layout import Key, shorten_path
+from regie.render.row2 import Row2Layout, row2_layout
 from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_INTERVAL,
@@ -142,6 +139,20 @@ class AgentLeaf(RenameableRow):
         return reason if isinstance(reason, str) and reason else None
 
     def _render_label(self) -> Content:
+        self._row2: Row2Layout = row2_layout(
+            self._node,
+            self._prefix,
+            width=self._label_width(),
+            frame=self._frame,
+            waiting=self._waiting,
+            awaited=self._awaited,
+            show_harness=self._harness_shown(),
+            fold_hint=self._cost_in_focus(),
+            focused=self._cost_in_focus(),
+            reveal=self._reveal,
+            marquee_offset=self._marquee_offset,
+            renaming=self.renaming,
+        )
         content = node_label(
             self._node,
             self._prefix,
@@ -150,15 +161,9 @@ class AgentLeaf(RenameableRow):
             frame=self._frame,
             is_first_root=self._is_first_root,
             overlay=self._overlay or self._highlight,  # a live route takes over
-            reveal=self._reveal,
             detail=self._visible_detail(),
             cost=self._shown_cost(),
-            width=self._label_width(),
-            waiting=self._waiting,
-            awaited=self._awaited,
-            show_harness=self._harness_shown(),
-            name_text=self._displayed_name(),
-            fold_hint=self._cost_in_focus(),
+            layout=self._row2,
         )
         if self._wipe is not None:
             content = apply_wipe(
@@ -261,37 +266,9 @@ class AgentLeaf(RenameableRow):
             return None
         return max(0, self.content_size.width - self._gutter())
 
-    def _name_room(self) -> int | None:
-        return name_room(
-            self._node,
-            self._prefix,
-            width=self._label_width(),
-            show_harness=self._harness_shown(),
-            fold_hint=self._cost_in_focus(),
-            frame=self._frame,
-        )
-
     def _name_scrolls(self) -> bool:
         """A name wider than its room reads in full by scrolling, on the row in focus."""
-        room = self._name_room()
-        return (
-            self._cost_in_focus()
-            and room is not None
-            and overflows_cells(shown_name(self._node), room)
-        )
-
-    def _displayed_name(self) -> str | None:
-        """The name as drawn: a window of it while it scrolls, blanks under the editor, else the
-        name cut to its room with an ellipsis. None before the row has a width."""
-        room = self._name_room()
-        if room is None:
-            return None
-        name = shown_name(self._node)
-        if self.renaming:
-            return " " * min(cell_len(name), room)  # the editor draws the name over these
-        if self._name_scrolls():
-            return marquee_cells(name, room, self._marquee_offset)
-        return fit_name(name, room)
+        return self._row2.name_scrolls
 
     def _detail_scrolls(self) -> bool:
         width = self._detail_width()
@@ -327,7 +304,9 @@ class AgentLeaf(RenameableRow):
             cwd_segments=self._cwd_segments,
             frame=self._frame,
             is_first_root=self._is_first_root,
-            show_harness=self._harness_shown(),
+            layout=row2_layout(
+                node, self._prefix, frame=self._frame, show_harness=self._harness_shown()
+            ),
         )
         return max((len(line) for line in content.plain.splitlines()), default=0)
 
@@ -528,13 +507,7 @@ class AgentLeaf(RenameableRow):
         """Column range of the row-2 name text within this leaf's content area."""
         if self._key[0] != "p":
             return None
-        span = visible_name_span(
-            self._node,
-            self._prefix,
-            reveal=self._reveal,
-            show_harness=self._harness_shown(),
-            name_text=self._displayed_name(),
-        )
+        span = self._row2.name_span
         if span is None:
             return None
         gutter = self._gutter()
@@ -542,18 +515,8 @@ class AgentLeaf(RenameableRow):
 
     def _fold_span(self) -> tuple[int, int] | None:
         """Columns of the fold badge: where a click folds or unfolds the children."""
-        parts = fold_parts(
-            self._node,
-            self._prefix,
-            width=self._label_width(),
-            show_harness=self._harness_shown(),
-            frame=self._frame,
-            hint=self._cost_in_focus(),
-        )
-        span = self._name_span()
-        if not parts or span is None or self.renaming:
-            return None
-        return span[1], span[1] + sum(cell_len(text) for text, _ in parts)
+        span = self._row2.fold_span if self._key[0] == "p" else None
+        return None if span is None else (span[0] + self._gutter(), span[1] + self._gutter())
 
     def _fold_clicked(self, event: events.Click) -> bool:
         span = self._fold_span()
