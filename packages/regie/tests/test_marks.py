@@ -93,7 +93,7 @@ def test_interrupting_an_idle_agent_is_not_news():
 def test_a_refusal_that_says_not_now_is_blocked_not_broken(code, detail):
     mark = marks(operation("controls.send", "failed", "delivery_rejected", error_code=code))["a"]
     assert (mark.kind, mark.glyph, mark.detail) == (MarkKind.BLOCKED, "⊘", detail)
-    assert mark.attention and mark.needs_seen
+    assert mark.attention
 
 
 def test_any_other_refusal_is_a_failure():
@@ -161,7 +161,7 @@ def test_old_operations_stop_marking_the_row():
 def test_a_kill_in_flight_takes_the_status_glyph_and_asks_nothing_of_the_human():
     mark = marks(operation("participants.terminate", "running", "termination_preparing"))["a"]
     assert (mark.kind, mark.glyph, mark.detail) == (MarkKind.TERMINATING, "✕", "terminating")
-    assert mark.replaces_status and not mark.attention and not mark.needs_seen
+    assert mark.replaces_status and not mark.attention
 
 
 def test_a_verified_exit_leaves_no_mark_because_the_row_leaves():

@@ -944,7 +944,7 @@ class ParticipantTree(VerticalScroll):
             ),
             None,
         )
-        return mark.operation_id if isinstance(mark, RowMark) and mark.needs_seen else None
+        return mark.operation_id if isinstance(mark, RowMark) and mark.attention else None
 
     def _report_seen(self, operation_id: str) -> None:
         self._seen_timer = None
