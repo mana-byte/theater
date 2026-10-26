@@ -10,6 +10,8 @@ from regie.widgets import ParticipantTree
 from regie.widgets.leaf import AgentLeaf
 
 from packages.regie.tests.support.app_fakes import build_app, make_participant, make_projection
+from packages.regie.tests.support.tree_rows import leaf as _leaf
+from packages.regie.tests.support.tree_rows import row
 from packages.regie.tests.support.waiting import wait_until
 
 
@@ -31,13 +33,7 @@ async def _change(app, pilot, participant_id: str, status: str) -> None:
 
 def render_text(leaf: AgentLeaf) -> str:
     """The leaf's second row as drawn, rails stripped."""
-    return leaf.render_line(1).text.strip().lstrip("├└│─ ")
-
-
-def _leaf(tree: ParticipantTree, participant_id: str) -> AgentLeaf:
-    leaf = tree._key_widgets[("p", participant_id)]
-    assert isinstance(leaf, AgentLeaf)
-    return leaf
+    return row(leaf).strip().lstrip("├└│─ ")
 
 
 async def test_a_status_change_sweeps_the_row_once_then_clears() -> None:
@@ -140,6 +136,13 @@ async def test_an_await_marks_both_its_ends_until_it_finishes() -> None:
 
         app._animate_bus_row(_await_row("job.await.start"))
         await wait_until(pilot, lambda: waiter._waiting is not None)
+        await wait_until(
+            pilot,
+            lambda: (
+                render_text(waiter)[:1] in REGIE_WAITING_FRAMES
+                and render_text(target).startswith("▏")
+            ),
+        )
         assert target._awaited
         assert render_text(waiter)[0] in REGIE_WAITING_FRAMES  # the waiting clock, not the spinner
         assert render_text(target).startswith("▏")  # the connector's spacer, pointing in
@@ -171,7 +174,9 @@ async def test_reduced_motion_sends_no_comet_and_flashes_nothing() -> None:
         await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
 
         app._animate_bus_row(_await_row("agent.send"))
-        await pilot.pause(0.3)
+        ticks: list[bool] = []
+        app.set_timer(0.3, lambda: ticks.append(True))
+        await wait_until(pilot, lambda: bool(ticks))
         assert not app._animation.has_active()
         assert _leaf(tree, "participant-2")._wipe is None
 

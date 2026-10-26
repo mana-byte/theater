@@ -15,7 +15,9 @@ async def _open_spawn_prompt(app, pilot) -> DirectoryEditor:
     await wait_until(pilot, lambda: len(tree.participant_ids) == 2 and bool(app._harnesses))
     app.spawn_harness("codex")
     await wait_until(pilot, lambda: bool(app.query(DirectoryEditor)))
-    return app.query_one(DirectoryEditor)
+    editor = app.query_one(DirectoryEditor)
+    await wait_until(pilot, lambda: app.focused is editor)
+    return editor
 
 
 async def test_the_directory_prompt_survives_the_terminal_losing_focus() -> None:
@@ -25,7 +27,7 @@ async def test_the_directory_prompt_survives_the_terminal_losing_focus() -> None
         editor = await _open_spawn_prompt(app, pilot)
 
         app.post_message(events.AppBlur())  # tmux tells Régie its terminal lost focus
-        await pilot.pause(0.2)
+        await wait_until(pilot, lambda: not app.app_focus)
         assert app._pending_spawn is not None
         assert ("n", "new") in app.query_one(ParticipantTree)._key_widgets
         assert editor.is_attached
