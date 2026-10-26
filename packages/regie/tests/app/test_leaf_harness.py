@@ -6,21 +6,13 @@ from dataclasses import replace
 from types import MappingProxyType
 
 from regie.widgets import ParticipantTree
-from regie.widgets.leaf import AgentLeaf
 from textual import events
 
 from packages.regie.tests.support.app_fakes import build_app, make_participant, make_projection
+from packages.regie.tests.support.tree_rows import leaf as _leaf
+from packages.regie.tests.support.tree_rows import row as _row
+from packages.regie.tests.support.tree_rows import rows as _rows
 from packages.regie.tests.support.waiting import wait_until
-
-
-def _leaf(tree: ParticipantTree, participant_id: str) -> AgentLeaf:
-    leaf = tree._key_widgets[("p", participant_id)]
-    assert isinstance(leaf, AgentLeaf)
-    return leaf
-
-
-def _row(leaf: AgentLeaf) -> str:
-    return leaf.render_line(1).text
 
 
 async def test_the_harness_comes_back_with_the_cursor_and_with_the_pointer() -> None:
@@ -118,10 +110,6 @@ def _long_name_app():
     return build_app(projection=projection)
 
 
-def _rows(leaf: AgentLeaf) -> list[str]:
-    return [leaf.render_line(row).text.rstrip() for row in range(3)]
-
-
 async def test_a_long_name_is_cut_with_an_ellipsis_and_never_hides_the_directory() -> None:
     app, _client, _presentation = _long_name_app()
 
@@ -164,8 +152,12 @@ async def test_a_name_that_fits_never_starts_a_scroll() -> None:
         tree = app.query_one(ParticipantTree)
         await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
         tree.select("participant-2")
-        await pilot.pause(0.3)
-        assert _leaf(tree, "participant-2")._marquee_sub is None
+        leaf = _leaf(tree, "participant-2")
+        await wait_until(
+            pilot,
+            lambda: tree.selected_participant_id == "participant-2" and "codex" in _row(leaf),
+        )
+        assert leaf._marquee_sub is None
 
 
 async def test_renaming_a_long_name_keeps_one_line_and_the_editor_inside_the_row() -> None:
@@ -179,7 +171,9 @@ async def test_renaming_a_long_name_keeps_one_line_and_the_editor_inside_the_row
         await long.begin_rename()
         editor = long._name_editor
         assert editor is not None
-        await pilot.pause(0.2)
+        await wait_until(
+            pilot, lambda: editor.styles.max_width is not None and "…" not in _rows(long)[1]
+        )
 
         rows = _rows(long)
         assert "…" not in rows[1] and rows[2].strip().endswith("…/proj/api")

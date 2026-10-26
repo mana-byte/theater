@@ -17,7 +17,7 @@ from regie.ui_constants import (
     REGIE_TREE_LEAF_ROWS as LEAF_ROWS,
     REGIE_TREE_RAIL as RAIL,
 )
-from regie.render.glyphs import LeafCell, OverlayGlyph, _rail_above, separator_prefix
+from regie.render.glyphs import LeafCell, OverlayGlyph, rail_above, separator_prefix
 from regie.render.layout import Key, RenderedLine, TreeLines, is_root_prefix, row_count
 
 #: A cell of the rail grid: ``(row, column)``, *row* counts rendered rows across the tree.
@@ -96,7 +96,7 @@ def _rail_cells(entries: list[_RailEntry]) -> set[Cell]:
             # The first row's rail is blank for the first root, as on a leaf.
             if top:
                 cells.update(
-                    (top, col) for col, c in enumerate(_rail_above(entry.prefix)) if c == RAIL[0]
+                    (top, col) for col, c in enumerate(rail_above(entry.prefix)) if c == RAIL[0]
                 )
             # The heading sits on the tree's own branch; its dashes are not a route.
             cells.update((mid, col) for col, c in enumerate(entry.prefix) if c in "│├└")
@@ -208,7 +208,7 @@ def tree_glyph_at(lines: list[RenderedLine], cell: Cell) -> str | None:
         return None
     _, _node, key, prefix, cont_prefix = lines[leaf_index]
     if key[0] == "s":
-        rail = "" if leaf_index == 0 and is_root_prefix(prefix) else _rail_above(prefix)
+        rail = "" if leaf_index == 0 and is_root_prefix(prefix) else rail_above(prefix)
         text = (rail, prefix, separator_prefix(prefix))[min(row_in_leaf, 2)]
         col = cell[1]
         glyph = text[col] if 0 <= col < len(text) else ""
@@ -221,7 +221,7 @@ def tree_glyph_at(lines: list[RenderedLine], cell: Cell) -> str | None:
     if row_in_leaf == 0:
         if leaf_index == 0 and is_root_prefix(prefix):
             return None
-        text = _rail_above(prefix)
+        text = rail_above(prefix)
     elif row_in_leaf == 1:
         text = prefix
     else:

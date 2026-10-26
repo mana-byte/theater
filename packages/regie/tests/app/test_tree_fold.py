@@ -9,9 +9,10 @@ from types import MappingProxyType
 
 from regie.tree_layout import TreeLayout
 from regie.widgets import ParticipantTree
-from regie.widgets.leaf import AgentLeaf
 
 from packages.regie.tests.support.app_fakes import build_app, make_participant, make_projection
+from packages.regie.tests.support.tree_rows import leaf as _leaf
+from packages.regie.tests.support.tree_rows import row as _row
 from packages.regie.tests.support.waiting import wait_until
 
 
@@ -38,16 +39,6 @@ def _family(statuses: dict[str, str] | None = None):
         make_projection(),
         participants=MappingProxyType({item.participant_id: item for item in people}),
     )
-
-
-def _leaf(tree: ParticipantTree, participant_id: str) -> AgentLeaf:
-    leaf = tree._key_widgets[("p", participant_id)]
-    assert isinstance(leaf, AgentLeaf)
-    return leaf
-
-
-def _row(leaf: AgentLeaf) -> str:
-    return leaf.render_line(1).text.rstrip()
 
 
 async def test_space_folds_the_selected_agents_children_and_brings_them_back(
@@ -80,8 +71,10 @@ async def test_space_on_an_agent_with_nothing_below_it_does_nothing(tmp_path: Pa
         tree = app.query_one(ParticipantTree)
         await wait_until(pilot, lambda: len(tree.participant_ids) == 5)
         tree.select("participant-5")
+        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-5")
+        revision = tree.revision
         await pilot.press("space")
-        await pilot.pause(0.2)
+        assert tree.revision == revision
         assert len(tree.participant_ids) == 5 and not path.exists()
 
 
@@ -181,7 +174,7 @@ async def test_folds_survive_a_restart(tmp_path: Path) -> None:
         tree = again.query_one(ParticipantTree)
         await wait_until(pilot, lambda: len(tree.participant_ids) == 4)
         assert "participant-3" not in tree.participant_ids
-        assert "▸1" in _row(_leaf(tree, "participant-2"))
+        await wait_until(pilot, lambda: "▸1" in _row(_leaf(tree, "participant-2")))
 
 
 async def test_an_await_on_a_folded_agent_still_changes_the_waiters_glyph(tmp_path: Path) -> None:
@@ -206,17 +199,20 @@ async def test_an_await_on_a_folded_agent_still_changes_the_waiters_glyph(tmp_pa
 
         app._animate_bus_row(event("job.await.start"))
         await wait_until(pilot, lambda: waiter._waiting is not None)
+        await wait_until(
+            pilot, lambda: _row(waiter).lstrip("└├│─ ")[:1] in set(REGIE_WAITING_FRAMES)
+        )
         assert _row(waiter).lstrip("└├│─ ")[0] in REGIE_WAITING_FRAMES  # the waiting glyph
-        assert boss._awaited == 1  # the fold that hides the target says it is being waited on
+        assert boss._awaited  # the fold that hides the target says it is being waited on
 
         tree.select("participant-1")  # unfold: the marks follow the target out of the fold
         await pilot.press("space")
         await wait_until(pilot, lambda: len(tree.participant_ids) == 5)
         target = _leaf(tree, "participant-3")
-        await wait_until(pilot, lambda: target._awaited == 1 and boss._awaited == 0)
+        await wait_until(pilot, lambda: target._awaited and not boss._awaited)
 
         app._animate_bus_row(event("job.await.end"))
-        await wait_until(pilot, lambda: waiter._waiting is None and target._awaited == 0)
+        await wait_until(pilot, lambda: waiter._waiting is None and not target._awaited)
 
 
 async def test_a_parent_awaiting_its_folded_child_shows_the_waiting_glyph_and_keeps_it_on_unfold(
@@ -243,14 +239,17 @@ async def test_a_parent_awaiting_its_folded_child_shows_the_waiting_glyph_and_ke
 
         app._animate_bus_row(event("job.await.start"))
         await wait_until(pilot, lambda: parent._waiting is not None)
+        await wait_until(
+            pilot, lambda: _row(parent).lstrip("└├│─┢┡┠━┃┗┏ ")[:1] in set(REGIE_WAITING_FRAMES)
+        )
         assert _row(parent).lstrip("└├│─┢┡┠━┃┗┏ ")[0] in REGIE_WAITING_FRAMES
 
         tree.select("participant-1")
         await pilot.press("space")  # unfold: the wait must still be there
         await wait_until(pilot, lambda: len(tree.participant_ids) == 5)
         child = _leaf(tree, "participant-4")
-        await wait_until(pilot, lambda: child._awaited == 1)
+        await wait_until(pilot, lambda: child._awaited)
         assert parent._waiting is not None
 
         app._animate_bus_row(event("job.await.end"))
-        await wait_until(pilot, lambda: parent._waiting is None and child._awaited == 0)
+        await wait_until(pilot, lambda: parent._waiting is None and not child._awaited)

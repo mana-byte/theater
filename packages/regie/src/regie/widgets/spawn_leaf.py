@@ -8,17 +8,18 @@ from typing import cast
 from rich.cells import cell_len
 from textual.content import Content
 
-from regie.motions.wipe import Wipe, apply_wipe
+from regie.motions.wipe import Wipe
 from regie.render.glyphs import node_label
 from regie.render.layout import Key
+from regie.render.row2 import row2_layout
 from regie.tree_nodes import RawRenderNode, RenderNode
 from regie.widgets.name_editor import DirectoryEditor, InlineEditor
-from regie.widgets.renameable import RenameableRow
+from regie.widgets.wipe import WipeMixin
 
 _HINT = "⏎ spawn  esc cancel"
 
 
-class SpawnLeaf(RenameableRow):
+class SpawnLeaf(WipeMixin):
     """Three rows like an agent's; the directory is typed on the third, Tab completes."""
 
     can_focus = False
@@ -52,20 +53,11 @@ class SpawnLeaf(RenameableRow):
             self._prefix,
             cont_prefix=self._cont_prefix,
             detail="" if self.renaming else self._value,
-            hint=[(_HINT, "$text-muted")],
-            width=width,
+            layout=row2_layout(
+                self._node, self._prefix, width=width, hint=[(_HINT, "$text-muted")]
+            ),
         )
-        return (
-            content
-            if self._wipe is None
-            else apply_wipe(content, self._wipe, width=width, blend=not self.app.native_ansi_color)
-        )
-
-    def set_wipe(self, wipe: Wipe | None) -> None:
-        """Draw one frame of the sweep that greets this row when it opens, or end it."""
-        if wipe != self._wipe:
-            self._wipe = wipe
-            self.update(self._render_label(), layout=False)
+        return self._apply_wipe(content, width=width)
 
     def on_resize(self) -> None:
         self.update(self._render_label(), layout=False)

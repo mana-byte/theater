@@ -17,17 +17,9 @@ from packages.regie.tests.support.app_fakes import (
     make_projection,
     with_operations,
 )
+from packages.regie.tests.support.tree_rows import leaf as _leaf
+from packages.regie.tests.support.tree_rows import stripped_rows as _rows
 from packages.regie.tests.support.waiting import press_until, wait_until
-
-
-def _leaf(tree: ParticipantTree, participant_id: str) -> AgentLeaf:
-    leaf = tree._key_widgets[("p", participant_id)]
-    assert isinstance(leaf, AgentLeaf)
-    return leaf
-
-
-def _rows(leaf: AgentLeaf) -> list[str]:
-    return [leaf.render_line(row).text.strip() for row in range(3)]
 
 
 async def _publish(app, pilot, *operations) -> None:
@@ -117,7 +109,7 @@ async def test_a_failure_stops_asking_once_the_cursor_has_rested_on_it(monkeypat
         await wait_until(pilot, lambda: "✗" in _rows(leaf)[1])
 
         tree.select("participant-1")
-        await pilot.pause(0.2)
+        assert tree._seen_pending is None and tree._seen_timer is None
         assert "✗" in _rows(leaf)[1]  # not looked at yet: it stays
 
         tree.select("participant-2")

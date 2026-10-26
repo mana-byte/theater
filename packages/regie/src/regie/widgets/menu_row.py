@@ -14,13 +14,12 @@ from regie.render.glyphs import separator_prefix
 from regie.render.layout import Key, row_count
 from regie.render.menu import help_room, menu_label
 from regie.tree_nodes import RawRenderNode, RenderNode
-from regie.ui_constants import REGIE_LEAF_MARQUEE_INTERVAL
-from regie.widgets.animation_clock import AnimationSubscription, animation_clock
+from regie.widgets.animation_clock import AnimationSubscription
+from regie.widgets.marquee import MarqueeMixin
 from regie.widgets.name_editor import FilterEditor, InlineEditor
-from regie.widgets.renameable import RenameableRow
 
 
-class MenuRow(RenameableRow):
+class MenuRow(MarqueeMixin):
     """Drawn like an agent leaf, but a click picks it and never stages anything.
 
     The root also hosts the filter: its editor sits on the third row, after ``/ ``.
@@ -105,32 +104,8 @@ class MenuRow(RenameableRow):
             and overflows_cells(help_text, help_room(self._cont_prefix, width))
         )
 
-    def _tick_marquee(self) -> None:
-        if self._help_scrolls():
-            self._marquee_offset += 1
-        else:
-            self._stop_marquee()
-        self.update(self._label(), layout=False)
-
-    def _stop_marquee(self) -> None:
-        if self._marquee_sub is not None:
-            self._marquee_sub.stop()
-            self._marquee_sub = None
-        self._marquee_offset = 0
-
-    def _sync_marquee(self) -> None:
-        if not self._help_scrolls():
-            self._stop_marquee()
-        elif self._marquee_sub is None:
-            self._marquee_sub = animation_clock(self.app).subscribe(
-                REGIE_LEAF_MARQUEE_INTERVAL, self._tick_marquee
-            )
-
-    def _restart_marquee(self) -> None:
-        """Start the window over: the row gained or lost focus, or changed size."""
-        self._stop_marquee()
-        self.update(self._label(), layout=False)
-        self._sync_marquee()
+    def _should_marquee(self) -> bool:
+        return self._help_scrolls()
 
     def on_mount(self) -> None:
         self._sync_marquee()
