@@ -118,21 +118,28 @@ class _ClaudeSource(TranscriptSource):
         live_start = _live_turn_start(snapshot.tail, self._live_after, attachment.session_id)
         ends = {record.raw_index: record.end for record in snapshot.tail}
         last_event = None
+        prompt_uuid = last_uuid = None
         for index, _, line in snapshot.tail:
             if truncated and local_start is not None and index < local_start[0]:
                 continue
             if not truncated and live_start is not None and index == live_start[0]:
                 break
+            record = decode_json_record(line) or {}
             for event in self._observer.parse(line, index, clip_text=False):
                 if not event.usage_only:
+                    last_uuid = record.get("uuid")
+                    prompt_uuid = last_uuid if is_prompt(record) else prompt_uuid
                     last_event = replace(event, text=clip(event.text))
                     point = replace(point, records=event.raw_index + 1, size=ends[event.raw_index])
             if index % 32 == 0:
                 await asyncio.sleep(0)
         if self._observer.stream_error is not None:
             raise OSError(errno.ESTALE, self._observer.stream_error)
-        if truncated and (last_event is None or not last_event.turn_end):
-            raise OSError(errno.ESTALE, "truncated transcript has no complete launch-local turn")
+        if truncated and not (
+            last_event is not None
+            and (last_event.turn_end or self._observer.local_turn_known(last_uuid, prompt_uuid))
+        ):
+            raise OSError(errno.ESTALE, "truncated transcript has no proved launch-local turn")
         if live_start is not None:
             # Copied history primes the seal; the current turn settles only through live reads.
             self._restage(index=live_start[0], offset=live_start[1])

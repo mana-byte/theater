@@ -21,15 +21,11 @@ async def _transcript_evidence(live, participant_id: str) -> str:
     return f"; transcript: {transcript_tail(location, launched_at=participant.created_at)}"
 
 
-@pytest.mark.parametrize("history_turns", [1, 33])
-async def test_a_resumed_participant_continues_its_conversation(live, obligation, history_turns):
+async def test_a_resumed_participant_continues_its_conversation(live, obligation):
     first = await live.spawn(live.approval)
     await live.ready(first)
-    earlier = f"Remember {uuid.uuid4().hex[:8]}"
-    prompts = [
-        earlier,
-        *(f"Remember another {uuid.uuid4().hex[:8]}" for _ in range(history_turns - 1)),
-    ]
+    # One scenario per obligation; this history exceeds the seal's former 32-message limit.
+    prompts = [f"Remember {uuid.uuid4().hex[:8]}" for _ in range(33)]
     for history_prompt in prompts:
         live.queue(MockReply("noted"))
         history_job = await live.send(first, history_prompt)

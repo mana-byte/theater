@@ -35,6 +35,9 @@ class ClaudeParser:
     def waiting_for_seal(self) -> bool:
         return self._seal.pending
 
+    def local_turn_known(self, parent: object, prompt: object) -> bool:
+        return self._seal.local_turn_known(parent, prompt)
+
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         record = self._decode(line)
         if record is None:

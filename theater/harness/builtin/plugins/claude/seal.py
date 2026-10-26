@@ -146,6 +146,16 @@ class FinalAnswerSeal:
         self.skipped_history = False
         if self.failure is not None:
             return None
+        pending = self._deferred
+        if (
+            pending is not None
+            and index is not None
+            and not self._continues(pending, record.get("sessionId"), index)
+        ):
+            self._deferred = None
+            if pending.skipped:
+                self._fail("fork_discontinuity")
+                return None
         uuid = record.get("uuid")
         if not isinstance(uuid, str) or not uuid:
             pending = self._deferred
@@ -168,21 +178,17 @@ class FinalAnswerSeal:
         if previous is not None and previous != node:
             self._fail("conflicting_record")
             return None
-        if self._skip_history(record, uuid, node, index):
+        if self._skip_history(record, uuid, node):
             return None
         self._nodes.pop(uuid, None)
         self._nodes[uuid] = node
-        while len(self._nodes) > SEAL_NODE_LIMIT:
-            _, evicted = self._nodes.popitem(last=False)
-            if self._deferred is not None:
-                self._fail("seal_node_limit")
-                return None
-            if evicted.message_id is not None:
-                self._drop_text(evicted.message_id)
         if message_id is not None:
             self._remember_text(record, uuid, message_id)
             if self.failure is not None:
                 return None
+        self._prune_nodes()
+        if self.failure is not None:
+            return None
         if record.get("type") == "user" and self._awaiting is not None:
             self._awaiting = None
             return "marker_missing"
@@ -197,25 +203,50 @@ class FinalAnswerSeal:
             return
         self._text_bytes += len(text.encode("utf-8")) - len(fragments.get(uuid, "").encode("utf-8"))
         fragments[uuid] = text
-        if self._text_bytes > SEAL_TEXT_BYTES_LIMIT:
-            self._fail("seal_text_limit")
-            return
-        while len(self._texts) > SEAL_MESSAGE_LIMIT:
-            self._drop_text(next(iter(self._texts)))
+        protected = {message_id}
+        found = self._final_assistant(self._deferred.parent) if self._deferred is not None else None
+        if isinstance(found, tuple):
+            protected.add(found[1])
+        while len(self._texts) > SEAL_MESSAGE_LIMIT or self._text_bytes > SEAL_TEXT_BYTES_LIMIT:
+            oldest = next((key for key in self._texts if key not in protected), None)
+            if oldest is None:
+                self._fail("seal_text_limit")
+                return
+            self._drop_text(oldest)
 
-    def _skip_history(self, record: dict, uuid: str, node: _Node, index: int | None) -> bool:
+    def _prune_nodes(self) -> None:
+        """Evict cache outside the held message's fragments and causal links."""
+        if len(self._nodes) <= SEAL_NODE_LIMIT:
+            return
+        pending = self._deferred
+        found = self._final_assistant(pending.parent) if pending is not None else None
+        message_id = found[1] if isinstance(found, tuple) else None
+        current = pending.parent if pending is not None else None
+        protected: set[str] = set()
+        for _ in range(SEAL_NODE_LIMIT + 1):
+            if current is None or current in protected:
+                break
+            protected.add(current)
+            node = self._nodes.get(current)
+            if node is None or (
+                not node.bare and not (message_id is not None and node.message_id == message_id)
+            ):
+                break
+            current = node.parent
+        if message_id is not None:
+            protected.update(self._texts.get(message_id, {}))
+        while len(self._nodes) > SEAL_NODE_LIMIT:
+            oldest = next((key for key in self._nodes if key not in protected), None)
+            if oldest is None:
+                self._fail("seal_node_limit")
+                return
+            evicted = self._nodes.pop(oldest)
+            if evicted.message_id is not None:
+                self._drop_text(evicted.message_id)
+
+    def _skip_history(self, record: dict, uuid: str, node: _Node) -> bool:
         """Classify copies before they can evict or contaminate a live causal chain."""
         pending = self._deferred
-        if (
-            pending is not None
-            and index is not None
-            and not self._continues(pending, record.get("sessionId"), index)
-        ):
-            self._deferred = None
-            if self._guard_history:
-                self._fail("fork_discontinuity")
-                return True
-            pending = None
         if self._is_history(record, node.ts):
             self._history[uuid] = node
             self._history.move_to_end(uuid)
@@ -341,9 +372,6 @@ class FinalAnswerSeal:
         pending = self._deferred
         if pending is None or self.skipped_history or self.failure is not None:
             return None
-        if not self._continues(pending, record.get("sessionId"), index):
-            self._deferred = None
-            return None
         if pending.prompt is not None:
             # One prompt is awaited: only attachments that may link it count, anything else drops.
             if _completes_safely(record):
@@ -352,7 +380,7 @@ class FinalAnswerSeal:
             return self._follow_prompt(pending, record["uuid"])
         if not _completes_safely(record):
             self._deferred = None
-            if self._guard_history:
+            if pending.skipped:
                 self._fail("fork_chain_broken")
             return None
         if pending.skipped or not isinstance(record.get("uuid"), str):
@@ -429,26 +457,39 @@ class FinalAnswerSeal:
         self, held: _Deferred, prompt: str
     ) -> tuple[Sealed, float | None, int] | None:
         """Release the message once its ancestry reaches ``prompt``; wait while that is unread."""
-        chain = self._chain_to_prompt(held, prompt)
+        chain = self._chain_to_prompt(held.parent, held.ts, prompt)
         if chain is _Chain.UNREAD:
             self._deferred = replace(held, prompt=prompt)
             return None
         self._deferred = None
         if chain is _Chain.BROKEN:
-            if self._guard_history:
+            if held.skipped:
                 self._fail("fork_chain_broken")
             return None
         outcome = self.resolve({"parentUuid": held.parent})
         return (outcome, held.ts, held.index) if isinstance(outcome, Sealed) else None
 
-    def _chain_to_prompt(self, held: _Deferred, prompt: str) -> _Chain:
+    def local_turn_known(self, parent: object, prompt: object) -> bool:
+        """Whether a retained message has a proved launch-local chain to this typed prompt."""
+        found = self._final_assistant(parent)
+        prompt_node = self._nodes.get(prompt) if isinstance(prompt, str) else None
+        return (
+            isinstance(prompt, str)
+            and prompt_node is not None
+            and self._is_local(prompt_node.ts)
+            and not prompt_node.sidechain
+            and isinstance(found, tuple)
+            and self._chain_to_prompt(parent, found[2].ts, prompt) is _Chain.REACHED
+        )
+
+    def _chain_to_prompt(self, parent: object, ts: float | None, prompt: str) -> _Chain:
         """Whether the held message, written by this session alone, descends from ``prompt``
         through attachment-like records of this session and its own earlier fragments."""
-        found = self._final_assistant(held.parent)
+        found = self._final_assistant(parent)
         if isinstance(found, Unsealed):
             return _Chain.BROKEN
         _, message_id, node = found
-        if not (self._is_local(held.ts) and self._is_local(node.ts)):
+        if not (self._is_local(ts) and self._is_local(node.ts)):
             return _Chain.BROKEN
         if not self._fragments_are_local(message_id):
             return _Chain.BROKEN
