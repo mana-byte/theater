@@ -106,7 +106,7 @@ def turn_changes_between(
     previous: UnifiedStoreView, current: UnifiedStoreView
 ) -> tuple[dict[str, Any], ...] | None:
     """Turn changes from one view of a session to a later one, read from retained journals."""
-    if previous.session_id != current.session_id:
+    if previous.session_id != current.session_id or previous.sequence > current.sequence:
         return None
     try:
         session_root = _session_root(current.current)
@@ -118,31 +118,23 @@ def turn_changes_between(
         through=current.sequence,
         since=latest_turn(previous.snapshot),
     )
-    if changes is None and previous.sequence <= current.sequence:
-        if _one_turn(previous, current):
-            # Vibe keeps two journals and folds on every turn end and reconfigure, so the journal
-            # can be collected before this read; one turn id in both views proves no other ran.
+    if changes is None:
+        turn_id = turn_key(latest_turn(previous.snapshot))[0]
+        # Vibe folds after every turn; one shared turn id in both views proves no other ran.
+        if turn_id is not None and turn_id == turn_key(latest_turn(current.snapshot))[0]:
             return ()
+        try:
+            retained = [int(path.stem) for path in _segments(session_root)]
+        except (OSError, UnifiedStoreError):
+            retained = []
         logger.warning(
             "vibe %s: turn ends in sequences %d..%d are not replayable; retained journals: %s",
             current.session_id,
             previous.sequence + 1,
             current.sequence,
-            _retained(session_root),
+            retained,
         )
     return changes
-
-
-def _retained(session_root: Path) -> list[int]:
-    try:
-        return [int(path.stem) for path in _segments(session_root)]
-    except (OSError, UnifiedStoreError):
-        return []
-
-
-def _one_turn(previous: UnifiedStoreView, current: UnifiedStoreView) -> bool:
-    turn_id = turn_key(latest_turn(previous.snapshot))[0]
-    return turn_id is not None and turn_id == turn_key(latest_turn(current.snapshot))[0]
 
 
 def _segments(session_root: Path) -> list[Path]:
