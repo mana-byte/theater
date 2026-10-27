@@ -444,7 +444,7 @@ def test_routine_verify_refuses_a_floor_the_rule_did_not_compute(
 ) -> None:
     git(repo, "checkout", "-qb", "chore/compat-claude")
     write_policy(repo, "claude", VersionPolicy("1.4.0", "1.7.0"))
-    git(repo, "commit", "-qam", "gate")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qam", "gate")
     asked = _scripted(monkeypatch, [f"1.{minor}.0" for minor in range(8)], {})
 
     code = _main(
@@ -461,7 +461,7 @@ def test_routine_verify_runs_the_window_when_the_floor_matches(
 ) -> None:
     git(repo, "checkout", "-qb", "chore/compat-claude")
     write_policy(repo, "claude", VersionPolicy("1.5.0", "1.7.0"))
-    git(repo, "commit", "-qam", "gate")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qam", "gate")
     asked = _scripted(monkeypatch, [f"1.{minor}.0" for minor in range(8)], {})
 
     code = _main(
