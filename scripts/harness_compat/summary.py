@@ -9,12 +9,12 @@ from .run import Run
 _DETAIL_LIMIT = 160
 
 
-def failing_checks(result: Result) -> list[str]:
+def failing_checks(result: Result, *, detail_limit: int = _DETAIL_LIMIT) -> list[str]:
     """One line per check that is not a pass or a declared skip, failures first."""
     bad = [check for check in result.checks if check.status in ("fail", "error")]
     bad.sort(key=lambda check: check.status != "fail")
     return [
-        f"{check.name} ({check.status}): {clip_diagnostic(check.detail, _DETAIL_LIMIT, tail=True)}"
+        f"{check.name} ({check.status}): {clip_diagnostic(check.detail, detail_limit, tail=True)}"
         for check in bad
     ]
 

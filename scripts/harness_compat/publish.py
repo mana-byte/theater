@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from theater.version_policy import VersionPolicy
+from theater.version_policy import VersionPolicy, version_key
 
 from . import git
 from .contract import Result
@@ -80,7 +80,7 @@ def api(gh: Gh, path: str, *, method: str = "GET", body: dict[str, Any] | None =
         return json.loads(gh(*args, "--input", request.name))
 
 
-def _open_issues(gh: Gh) -> dict[str, int]:
+def _known_issues(gh: Gh) -> dict[str, int]:
     listing = gh(
         "api",
         "--paginate",
@@ -89,41 +89,61 @@ def _open_issues(gh: Gh) -> dict[str, int]:
         "--method",
         "GET",
         "-f",
-        "state=open",
+        "state=all",
         "-f",
         "per_page=100",
     )
-    return {
-        item["title"]: item["number"]
-        for page in json.loads(listing)
-        for item in page
-        if not item.get("pull_request")
-    }
+    known: dict[str, dict[str, Any]] = {}
+    for page in json.loads(listing):
+        for item in page:
+            title = item["title"]
+            if item.get("pull_request"):
+                continue
+            if title not in known or (
+                item.get("state") == "open" and known[title].get("state") != "open"
+            ):
+                known[title] = item
+    return {title: item["number"] for title, item in known.items()}
 
 
-def _write_issue(gh: Gh, title: str, text: str, number: int | None) -> None:
-    with tempfile.NamedTemporaryFile("w", suffix=".md", encoding="utf-8") as body:
-        body.write(text)
-        body.flush()
-        args = (
-            ["issue", "create", "--title", title]
-            if number is None
-            else [
-                "issue",
-                "edit",
-                str(number),
-            ]
+def _managed_body(previous: str, text: str, section: str) -> str:
+    """Only replace our marked section; legacy descriptions and human notes survive."""
+    start = f"<!-- theater-compat:{section}:start -->"
+    end = f"<!-- theater-compat:{section}:end -->"
+    block = f"{start}\n{text.rstrip()}\n{end}"
+    before, marker, remaining = previous.partition(start)
+    _, closing, after = remaining.partition(end)
+    if (
+        previous.count(start) != previous.count(end)
+        or previous.count(start) > 1
+        or (marker and not closing)
+    ):
+        raise PolicyChangeError(
+            "the issue has an ambiguous managed section; its body was preserved"
         )
-        gh(*args, "--body-file", body.name)
+    if marker and closing:
+        return before + block + after
+    return f"{previous.rstrip()}\n\n{block}\n" if previous else block + "\n"
 
 
-def file_attention_issue(title: str, body: str, *, gh: Gh = run_gh) -> None:
-    """Dedupe workflow issues, preserving the original failure when reporting fails later."""
-    number = _open_issues(gh).get(title)
+def _write_issue(
+    gh: Gh, title: str, text: str, number: int | None, *, section: str = "report"
+) -> int:
+    previous = api(gh, f"issues/{number}") if number is not None else {}
+    body: dict[str, Any] = {
+        "body": _managed_body(previous.get("body") or "", text, section),
+    }
     if number is None:
-        _write_issue(gh, title, body, None)
-    else:
-        api(gh, f"issues/{number}/comments", method="POST", body={"body": body})
+        body["title"] = title
+    elif section == "report" and previous["state"] == "closed":
+        body["state"] = "open"
+    result = api(
+        gh,
+        "issues" if number is None else f"issues/{number}",
+        method="POST" if number is None else "PATCH",
+        body=body,
+    )
+    return int(result["number"])
 
 
 def issue_title(harness: str, version: str) -> str:
@@ -131,7 +151,7 @@ def issue_title(harness: str, version: str) -> str:
 
 
 def issue_body(result: Result, *, policy: VersionPolicy, run_url: str) -> str:
-    checks = failing_checks(result)
+    checks = failing_checks(result, detail_limit=1000)
     return (
         "\n".join(
             [
@@ -139,8 +159,8 @@ def issue_body(result: Result, *, policy: VersionPolicy, run_url: str) -> str:
                 "",
                 _MEANINGS[result.verdict],
                 "",
-                "This run proposes an exclusion pending human attention; "
-                "failures do not move the range.",
+                "This version is not qualified for admission. A later ceiling increase "
+                "must exclude it unless requalification passes.",
                 f"Policy: {policy.range_text}",
                 f"Run: {run_url}",
                 "",
@@ -151,21 +171,25 @@ def issue_body(result: Result, *, policy: VersionPolicy, run_url: str) -> str:
     )
 
 
-def file_issues(run: Run, *, run_url: str, gh: Gh = run_gh) -> tuple[list[str], list[str]]:
+def file_issues(
+    run: Run, *, run_url: str, gh: Gh = run_gh, known: dict[str, int] | None = None
+) -> tuple[list[str], list[str]]:
     bad = [result for result in run.results if result.verdict != "green"]
     if not bad:
         return [], []
-    known = _open_issues(gh)
+    if known is None:
+        known = _known_issues(gh)
     created: list[str] = []
     existing: list[str] = []
     failures: list[Exception] = []
     for result in bad:
         title = issue_title(run.harness, result.version)
         try:
-            _write_issue(
+            existed = title in known
+            known[title] = _write_issue(
                 gh, title, issue_body(result, policy=run.policy, run_url=run_url), known.get(title)
             )
-            (existing if title in known else created).append(title)
+            (existing if existed else created).append(title)
         except Exception as exc:
             failures.append(exc)
     if failures:
@@ -173,8 +197,8 @@ def file_issues(run: Run, *, run_url: str, gh: Gh = run_gh) -> tuple[list[str], 
     return created, existing
 
 
-def pr_title(harness: str) -> str:
-    return f"chore(compat): update {harness} version policy"
+def pr_title(harness: str, old: VersionPolicy, proposal: VersionPolicy) -> str:
+    return f"chore(compat): {harness} {old.maximum} → {proposal.maximum}"
 
 
 def pr_body(
@@ -184,12 +208,31 @@ def pr_body(
     *,
     run_url: str,
     max_range: int,
+    issues: Mapping[str, int],
+    results: tuple[Result, ...],
 ) -> str:
+    exclusions = [
+        f"- `{version}`: "
+        + (
+            f"#{number}"
+            if (number := issues.get(issue_title(harness, version)))
+            else "issue pending"
+        )
+        for version in proposal.excluded
+    ]
+    related = [
+        f"- `{result.version}`: #{number} ({result.verdict})"
+        for result in results
+        if result.version not in proposal.excluded
+        and (number := issues.get(issue_title(harness, result.version))) is not None
+    ]
     return (
         f"{harness} policy: `{old.range_text}` to `{proposal.range_text}`\n\n"
         f"Floor: newest {max_range} releases in range (max-range={max_range}); the Nix full "
         "profile may ship older CLIs until flake.lock is bumped.\n\n"
         f"Run: {run_url}\n"
+        + ("\nExcluded versions:\n" + "\n".join(exclusions) + "\n" if exclusions else "")
+        + ("\nRelated version issues:\n" + "\n".join(related) + "\n" if related else "")
     )
 
 
@@ -205,7 +248,13 @@ def _policy_at(gh: Gh, name: str, revision: str) -> VersionPolicy:
 
 
 def _commit_policy(
-    gh: Gh, name: str, branch: str, main: str, head: str | None, proposal: VersionPolicy
+    gh: Gh,
+    name: str,
+    branch: str,
+    main: str,
+    head: str | None,
+    current: VersionPolicy,
+    proposal: VersionPolicy,
 ) -> None:
     """Build on current main and append to the branch without overwriting concurrent commits."""
     commit = api(gh, f"git/commits/{main}")
@@ -230,7 +279,7 @@ def _commit_policy(
         "git/commits",
         method="POST",
         body={
-            "message": pr_title(name),
+            "message": pr_title(name, current, proposal),
             "tree": tree["sha"],
             "parents": list(dict.fromkeys([main, *([head] if head is not None else [])])),
         },
@@ -243,7 +292,28 @@ def _commit_policy(
         )
 
 
-def propose_policy(run: Run, *, run_url: str, gh: Gh, max_range: int) -> Published:
+def _prior_failures(
+    run: Run, current: VersionPolicy, issues: Mapping[str, int]
+) -> tuple[Result, ...]:
+    """Failure-only issues fence later admissions until that exact version is requalified."""
+    observed = {result.version for result in run.results}
+    prior: list[Result] = []
+    for title in issues:
+        prefix, _, version = title.rpartition(" ")
+        if prefix != f"Harness compatibility: {run.harness}" or version in observed:
+            continue
+        try:
+            newer = version_key(version) > version_key(current.maximum)
+        except ValueError:
+            continue
+        if newer:
+            prior.append(Result(run.harness, version, "inconclusive"))
+    return tuple(prior)
+
+
+def propose_policy(
+    run: Run, *, run_url: str, gh: Gh, max_range: int, issues: Mapping[str, int]
+) -> Published:
     """Preserve the pending PR's delta and propose one remote JSON line."""
     branch = f"chore/compat-{run.harness}"
     main = api(gh, "git/ref/heads/main")["object"]["sha"]
@@ -292,29 +362,46 @@ def propose_policy(run: Run, *, run_url: str, gh: Gh, max_range: int) -> Publish
             candidate = _policy_at(gh, run.harness, head)
             check_change(format_policy(original), format_policy(candidate))
             pending = merge_pending(current, original, candidate)
-    proposal = derive(pending, run.results, discovered=run.discovered, max_range=max_range)
+    results = (*_prior_failures(run, current, issues), *run.results)
+    if any(result.version == pending.maximum and result.verdict != "green" for result in results):
+        # Only the unmerged ceiling is withdrawn; committed admission never shrinks here.
+        pending = VersionPolicy(pending.minimum, current.maximum, pending.excluded)
+    proposal = derive(pending, results, discovered=run.discovered, max_range=max_range)
     check_change(format_policy(current), format_policy(proposal))
     number = prs[0]["number"] if prs else None
-    if proposal != current or pending != current:
-        if proposal != pending or head is None or main != merge_base:
-            _commit_policy(gh, run.harness, branch, main, head, proposal)
-        body = {
-            "title": pr_title(run.harness),
-            "body": pr_body(run.harness, current, proposal, run_url=run_url, max_range=max_range),
-        }
-        if number is None:
-            number = api(
-                gh,
-                "pulls",
-                method="POST",
-                body={
-                    **body,
-                    "base": "main",
-                    "head": branch,
-                },
-            )["number"]
-        else:
-            api(gh, f"pulls/{number}", method="PATCH", body=body)
+    if version_key(proposal.maximum) <= version_key(current.maximum) or not proposal.admits(
+        proposal.maximum
+    ):
+        if number is not None:
+            api(gh, f"pulls/{number}", method="PATCH", body={"state": "closed"})
+        return Published(proposal, None)
+    if proposal != pending or head is None or main != merge_base:
+        _commit_policy(gh, run.harness, branch, main, head, current, proposal)
+    body = {
+        "title": pr_title(run.harness, current, proposal),
+        "body": pr_body(
+            run.harness,
+            current,
+            proposal,
+            run_url=run_url,
+            max_range=max_range,
+            issues=issues,
+            results=run.results,
+        ),
+    }
+    if number is None:
+        number = api(
+            gh,
+            "pulls",
+            method="POST",
+            body={
+                **body,
+                "base": "main",
+                "head": branch,
+            },
+        )["number"]
+    else:
+        api(gh, f"pulls/{number}", method="PATCH", body=body)
     return Published(proposal, number)
 
 
@@ -335,14 +422,30 @@ def publish(
     existing: list[str] = []
     failures: list[Exception] = []
     outcome: Published | None = None
+    known: dict[str, int] = {}
     try:
-        created, existing = file_issues(run, run_url=run_url, gh=gh)
+        known = _known_issues(gh)
+        created, existing = file_issues(run, run_url=run_url, gh=gh, known=known)
     except Exception as exc:
         failures.append(exc)
     try:
-        outcome = propose_policy(run, run_url=run_url, gh=gh, max_range=max_range)
+        outcome = propose_policy(run, run_url=run_url, gh=gh, max_range=max_range, issues=known)
     except Exception as exc:
         failures.append(exc)
+    if outcome is not None and outcome.pr is not None:
+        related = set(outcome.proposal.excluded) | {result.version for result in run.results}
+        for version in sorted(related, key=version_key):
+            title = issue_title(run.harness, version)
+            if (number := known.get(title)) is None:
+                if version in outcome.proposal.excluded:
+                    failures.append(
+                        RuntimeError(f"Missing version issue for {run.harness} {version}")
+                    )
+                continue
+            try:
+                _write_issue(gh, title, f"Ceiling PR: #{outcome.pr}", number, section="pr")
+            except Exception as exc:
+                failures.append(exc)
     if failures:
         raise ExceptionGroup("compatibility publication failed", failures)
     assert outcome is not None

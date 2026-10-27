@@ -1,4 +1,4 @@
-"""Failures and passes accumulate in one remote JSON-only PR without checkout writes."""
+"""Version issues and ceiling PRs publish without checkout writes."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from scripts.harness_compat.diagnostics import exception_detail
 from scripts.harness_compat.git import git
 from scripts.harness_compat.policy import PolicyChangeError, load_policy, write_policy
 from scripts.harness_compat.publish import (
-    file_attention_issue,
     file_issues,
     issue_body,
     issue_title,
@@ -74,16 +73,17 @@ def test_passing_newer_version_advances_only_the_shared_json_pr(repo: Path, resu
 
 
 @pytest.mark.parametrize("verdict", ["red", "inconclusive", "tooling"])
-def test_every_known_newer_failure_gets_an_issue_and_exclusion_only_pr(
+def test_every_known_newer_failure_gets_only_a_version_issue(
     repo: Path, result: Make, verdict: str
 ) -> None:
     gh = _github(repo)
     published = _publish(repo, gh, result("1.3.0", verdict))
     assert published.proposal == VersionPolicy("1.0.0", "1.2.0", ("1.3.0",))
-    assert issue_title("claude", "1.3.0") in gh.issues and published.pr == 17
+    assert issue_title("claude", "1.3.0") in gh.issues and published.pr is None
     assert f"**{verdict}**" in gh.bodies[0]
     assert "binary defect" in gh.bodies[0] if verdict != "red" else "Investigation" in gh.bodies[0]
-    _one_line(gh)
+    assert set(gh.refs) == {"main"} and gh.pr is None
+    assert not any("--input" in call and "/git/" in call[1] for call in gh.calls)
 
 
 def test_failure_at_admitted_max_keeps_the_range_and_excludes_max(repo: Path, result: Make) -> None:
@@ -95,12 +95,12 @@ def test_failure_at_admitted_max_keeps_the_range_and_excludes_max(repo: Path, re
     )
 
 
-def test_all_failures_still_create_one_policy_pr(repo: Path, result: Make) -> None:
+def test_all_failures_create_only_version_issues(repo: Path, result: Make) -> None:
     gh = _github(repo)
     published = _publish(repo, gh, result("1.3.0", "red"), result("1.4.0", "inconclusive"))
     assert published.proposal == VersionPolicy("1.0.0", "1.2.0", ("1.3.0", "1.4.0"))
-    assert len(gh.issues) == 2 and gh.pr == 17
-    _one_line(gh)
+    assert len(gh.issues) == 2 and gh.pr is None
+    assert set(gh.refs) == {"main"}
 
 
 def test_mixed_results_advance_past_failed_versions_without_admitting_them(
@@ -110,6 +110,11 @@ def test_mixed_results_advance_past_failed_versions_without_admitting_them(
     _publish(repo, gh, result("1.3.0", "red"), result("1.4.0"), result("1.5.0", "tooling"))
     assert gh.policy() == VersionPolicy("1.0.0", "1.4.0", ("1.3.0", "1.5.0"))
     assert len(gh.issues) == 2
+    assert gh.pr_title == "chore(compat): claude 1.2.0 → 1.4.0"
+    for version in ("1.3.0", "1.5.0"):
+        number = gh.issues[issue_title("claude", version)]
+        assert f"`{version}`: #{number}" in gh.pr_body
+        assert "Ceiling PR: #17" in gh.issue_bodies[number]
     _one_line(gh)
 
 
@@ -127,32 +132,51 @@ def test_existing_pr_keeps_prior_max_and_exclusions_when_new_outcomes_arrive(
     _one_line(gh)
 
 
-def test_a_failed_pending_max_is_excluded_without_shrinking_or_retiring_the_pr(
+def test_a_failed_pending_ceiling_retires_the_pr_without_writing_an_exclusion_branch(
     repo: Path, result: Make
 ) -> None:
     gh = _github(repo)
     gh.seed_pending(VersionPolicy("1.0.0", "1.4.0", ("1.3.0",)))
     _publish(repo, gh, result("1.4.0", "inconclusive"))
-    assert gh.policy() == VersionPolicy("1.0.0", "1.4.0", ("1.3.0", "1.4.0"))
-    _one_line(gh)
+    assert gh.pr is None and gh.refs["chore/compat-claude"] == "pending"
+    assert issue_title("claude", "1.4.0") in gh.issues
+    assert not any("--input" in call and "/git/" in call[1] for call in gh.calls)
 
 
 def test_multiple_runs_reuse_one_pr_and_preserve_earlier_failures(repo: Path, result: Make) -> None:
     gh = _github(repo)
     _publish(repo, gh, result("1.3.0", "red"))
+    assert gh.pr is None and set(gh.refs) == {"main"}
     _publish(repo, gh, result("1.4.0"))
     assert gh.policy() == VersionPolicy("1.0.0", "1.4.0", ("1.3.0",))
     assert sum(call[:2] == ("api", "repos/{owner}/{repo}/pulls") for call in gh.calls) == 1
+    number = gh.issues[issue_title("claude", "1.3.0")]
+    assert "Ceiling PR: #17" in gh.issue_bodies[number]
+    assert f"`1.3.0`: #{number}" in gh.pr_body
     _one_line(gh)
 
 
-def test_matching_pending_change_is_kept_and_an_orphan_branch_gets_its_pr(
-    repo: Path, result: Make
+def test_failed_pending_ceiling_can_be_replaced_by_a_lower_freshly_qualified_extension(
+    repo: Path,
+    result: Make,
 ) -> None:
     gh = _github(repo)
-    gh.seed_pending(VersionPolicy("1.0.0", "1.2.0", ("1.3.0",)), pr=False)
+    gh.seed_pending(VersionPolicy("1.0.0", "1.4.0"))
+    _publish(repo, gh, result("1.3.0"), result("1.4.0", "red"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.3.0", ("1.4.0",))
+    assert gh.pr_title == "chore(compat): claude 1.2.0 → 1.3.0"
+    _one_line(gh)
+
+
+@pytest.mark.parametrize("existing_pr", [False, True])
+def test_exclusion_only_branches_never_keep_or_create_a_pr(
+    repo: Path, result: Make, existing_pr: bool
+) -> None:
+    gh = _github(repo)
+    gh.seed_pending(VersionPolicy("1.0.0", "1.2.0", ("1.3.0",)), pr=existing_pr)
     _publish(repo, gh, result("1.3.0", "tooling"))
-    assert gh.pr == 17 and gh.refs["chore/compat-claude"] == "pending"
+    assert gh.pr is None and gh.refs["chore/compat-claude"] == "pending"
+    assert not any("--input" in call and "/git/" in call[1] for call in gh.calls)
 
 
 def test_existing_issue_is_updated_with_the_current_observed_cause(
@@ -165,7 +189,7 @@ def test_existing_issue_is_updated_with_the_current_observed_cause(
         repo, gh, result("1.3.0", "tooling", Check("suite", "error", "unexpected ValueError"))
     )
     assert published.existing == (title,) and published.created == ()
-    assert any(call[:3] == ("issue", "edit", "42") for call in gh.calls)
+    assert any(call[:2] == ("api", "repos/{owner}/{repo}/issues/42") for call in gh.calls)
     assert "unexpected ValueError" in gh.bodies[0] and "not proof" in gh.bodies[0]
 
 
@@ -175,16 +199,16 @@ def test_all_request_and_body_files_are_removed_even_after_publication_failure(
     gh = _github(repo)
     gh.fail.add("pr create")
     with pytest.raises(ExceptionGroup):
-        _publish(repo, gh, result("1.3.0", "red"))
+        _publish(repo, gh, result("1.3.0", "red"), result("1.4.0"))
     assert gh.temporary_paths and all(not path.exists() for path in gh.temporary_paths)
     assert issue_title("claude", "1.3.0") in gh.issues
     gh.fail.clear()
-    _publish(repo, gh, result("1.3.0", "red"))
+    _publish(repo, gh, result("1.3.0", "red"), result("1.4.0"))
     assert gh.pr == 17
     _one_line(gh)
 
 
-def test_issue_failure_does_not_block_the_required_exclusion_pr(repo: Path, result: Make) -> None:
+def test_issue_failure_does_not_drop_exclusions_from_a_ceiling_pr(repo: Path, result: Make) -> None:
     gh = _github(repo)
     gh.fail.add("issue create")
     with pytest.raises(ExceptionGroup) as caught:
@@ -253,7 +277,7 @@ def test_main_advance_rebases_a_green_proposal_and_preserves_the_pending_policy(
     gh.refs["main"] = "new-main"
     published = _publish(repo, gh, result("1.5.0"))
     assert published.proposal == VersionPolicy("1.0.0", "1.5.0", ("1.3.0",))
-    assert published.pr == 17 and not gh.issues
+    assert published.pr == 17 and not published.created
     _one_line(gh)
 
 
@@ -275,8 +299,18 @@ def test_main_advance_never_drops_failures_beside_a_previously_completed_pass(
     _one_line(gh)
 
 
-def test_paginated_issue_lookup_flattens_pages_and_does_not_treat_prs_as_issues() -> None:
+@pytest.mark.parametrize("open_first", [False, True])
+def test_paginated_issue_lookup_prefers_open_issues_and_ignores_prs(
+    result: Make, open_first: bool
+) -> None:
     calls = []
+    title = issue_title("claude", "1.3.0")
+    issues = [
+        {"title": title, "number": 42, "state": "closed"},
+        {"title": title, "number": 44, "state": "open"},
+    ]
+    if open_first:
+        issues.reverse()
 
     def gh(*args):
         assert_gh_flags(args)
@@ -284,23 +318,130 @@ def test_paginated_issue_lookup_flattens_pages_and_does_not_treat_prs_as_issues(
         if "--paginate" in args:
             return json.dumps(
                 [
-                    [],
+                    [issues[0]],
                     [
-                        {"title": "attention", "number": 42},
-                        {"title": "attention", "number": 17, "pull_request": {"url": "PR"}},
+                        issues[1],
+                        {
+                            "title": title,
+                            "number": 17,
+                            "pull_request": {"url": "PR"},
+                        },
                     ],
                 ]
             )
-        return "{}"
+        return json.dumps({"number": 44, "state": "open", "body": "Human diagnosis"})
 
-    file_attention_issue("attention", "observed failure", gh=gh)
-    assert calls[-1][:2] == ("api", "repos/{owner}/{repo}/issues/42/comments")
+    created, existing = file_issues(_run(result("1.3.0", "red")), run_url=URL, gh=gh)
+    assert not created and existing == [issue_title("claude", "1.3.0")]
+    assert "state=all" in calls[0]
+    assert calls[-1][:2] == ("api", "repos/{owner}/{repo}/issues/44")
+
+
+def test_unrelated_issue_titles_cannot_fence_a_ceiling(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    gh.issues = {
+        issue_title("codex", "1.3.0"): 42,
+        "Harness compatibility: claude not-a-version": 43,
+        "Harness compatibility workflow: 1.3.0": 44,
+    }
+    _publish(repo, gh, result("1.4.0"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.4.0")
+    assert not gh.issue_bodies
+
+
+def test_repeated_failure_reopens_the_same_issue_and_preserves_human_notes(
+    repo: Path,
+    result: Make,
+) -> None:
+    gh = _github(repo)
+    _publish(repo, gh, result("1.3.0", "red", Check("suite", "fail", "old failure")))
+    number = gh.issues[issue_title("claude", "1.3.0")]
+    gh.issue_states[number] = "closed"
+    gh.issue_bodies[number] = (
+        "Diagnosis: adapter bug\n\n" + gh.issue_bodies[number] + "Fix PR: #99\n"
+    )
+    _publish(
+        repo, gh, result("1.3.0", "red", Check("suite", "fail", "new failure")), result("1.4.0")
+    )
+    body = gh.issue_bodies[number]
+    assert len(gh.issues) == 1 and gh.issue_states[number] == "open"
+    assert "Diagnosis: adapter bug" in body and "Fix PR: #99" in body
+    assert "new failure" in body and "old failure" not in body
+    assert body.count("Ceiling PR: #17") == 1
+
+
+def test_legacy_issue_description_is_preserved_when_managed_sections_are_added(
+    repo: Path,
+    result: Make,
+) -> None:
+    gh = _github(repo)
+    title = issue_title("claude", "1.3.0")
+    gh.issues[title] = 42
+    gh.issue_bodies[42] = "Old qualification report\nHuman diagnosis: fixed by #99\n"
+    _publish(repo, gh, result("1.3.0", "red"), result("1.4.0"))
+    assert gh.issue_bodies[42].startswith("Old qualification report\nHuman diagnosis: fixed by #99")
+    assert "Ceiling PR: #17" in gh.issue_bodies[42]
+
+
+def test_fresh_qualification_can_remove_a_prior_failure_exclusion(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    _publish(repo, gh, result("1.3.0", "red"))
+    _publish(repo, gh, result("1.3.0"), result("1.4.0"))
+    assert gh.policy() == VersionPolicy("1.0.0", "1.4.0")
+    number = gh.issues[issue_title("claude", "1.3.0")]
+    assert "Ceiling PR: #17" in gh.issue_bodies[number]
+    assert f"`1.3.0`: #{number} (green)" in gh.pr_body
+
+
+def test_floor_pruning_keeps_links_to_the_failed_version_issue(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    run = _run(
+        result("1.3.0", "red"),
+        result("1.4.0"),
+        result("1.5.0"),
+        discovered=("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"),
+    )
+    published = publish(repo, run, run_url=URL, gh=gh, environ=_context(repo), max_range=2)
+    number = gh.issues[issue_title("claude", "1.3.0")]
+    assert published.proposal == VersionPolicy("1.4.0", "1.5.0")
+    assert f"`1.3.0`: #{number} (red)" in gh.pr_body
+    assert "Ceiling PR: #17" in gh.issue_bodies[number]
+
+
+def test_link_failure_is_retried_without_duplicate_issues_or_lost_exclusions(
+    repo: Path,
+    result: Make,
+) -> None:
+    gh = _github(repo)
+    gh.fail.add("issue edit")
+    with pytest.raises(ExceptionGroup):
+        _publish(repo, gh, result("1.3.0", "red"), result("1.4.0"))
+    assert gh.pr == 17 and gh.policy().excluded == ("1.3.0",)
+    gh.fail.clear()
+    _publish(repo, gh, result("1.3.0", "red"), result("1.4.0"))
+    assert len(gh.issues) == 1
+    assert "Ceiling PR: #17" in gh.issue_bodies[gh.issues[issue_title("claude", "1.3.0")]]
+    assert all(not path.exists() for path in gh.temporary_paths)
+
+
+def test_malformed_managed_section_is_preserved_and_reporting_fails(
+    repo: Path, result: Make
+) -> None:
+    gh = _github(repo)
+    _publish(repo, gh, result("1.3.0", "red"))
+    number = gh.issues[issue_title("claude", "1.3.0")]
+    original = gh.issue_bodies[number].replace("<!-- theater-compat:report:end -->", "Human note")
+    gh.issue_bodies[number] = original
+    with pytest.raises(ExceptionGroup, match="compatibility publication failed"):
+        _publish(repo, gh, result("1.3.0", "red"))
+    assert gh.issue_bodies[number] == original and gh.pr is None
 
 
 def test_issue_explanation_has_the_exact_check_and_run(result: Make) -> None:
+    detail = "Expected plugin directory was missing: " + "path component; " * 30 + "final cause"
     body = issue_body(
-        result("1.3.0", "red", Check("conformance:interrupt", "fail", "turn never stopped")),
+        result("1.3.0", "red", Check("conformance:interrupt", "fail", detail)),
         policy=POLICY,
         run_url=URL,
     )
-    assert "conformance:interrupt (fail): turn never stopped" in body and URL in body
+    assert f"conformance:interrupt (fail): {detail}" in body and URL in body

@@ -8,9 +8,9 @@ Each plugin owns one compact `compatibility.json`, read by runtime admission and
 
 Bounds are inclusive. Min is the floor: the sweep raises it to keep at most the newest N releases
 in range (N is the `HARNESS_COMPAT_MAX_RANGE` repository variable, default 10), and it never falls.
-Exclusions may exceed max: a failed newer release needs an exclusion PR even when no release
-passes. Invalid policies and unsupported binaries fail closed. OpenCode has one plugin/channel
-(`@opencode/cli`); 1.x is removed.
+Exclusions may exceed max inside a ceiling-raising PR. A failed newer release gets a version issue;
+an all-failure sweep creates no policy branch or PR. Invalid policies and unsupported binaries fail
+closed. OpenCode has one plugin/channel (`@opencode/cli`); 1.x is removed.
 
 ## Ownership and flow
 
@@ -18,10 +18,9 @@ Only GitHub workflows invoke `scripts/harness_compat`; there are no local qualif
 
 ```text
 workflow → scripts → exact harness/version → generic live suite
-                   → passing release: advance max
-                   → red/inconclusive/tooling: issue + exclusion
-                   → more than N releases in range: raise min
-                   → one shared policy PR per harness
+                   → passing release: shared ceiling-raising PR
+                   → red/inconclusive/tooling: harness/version issue
+                   → ceiling PR: retain failed-version exclusions and raise min when needed
 ```
 
 The daily workflow discovers every stable release **above committed max**, tests them in ascending
@@ -30,14 +29,30 @@ are rechecked on subsequent runs, without a passing-version cache.
 
 Scripts publish completed outcomes before testing the next release. Updates include earlier
 outcomes from the same run, so a temporary publication failure cannot let a later pass admit a
-known failed version. Discovery failure reports a workflow issue and authorizes no untested release.
+known failed version. Discovery failure stays in Actions and authorizes no untested release.
 An outcome whose publication fails is retained as a tooling failure (or an interrupted run),
 so the next prefix proposes its exclusion before authorizing later releases.
 
-Passing versions may advance max; **failures never move either bound**. Every red, inconclusive or
-tooling result gets an issue and an exclusion, including failures above max and all-failure batches.
+Passing versions may advance max; **failures never move committed bounds**. Every red, inconclusive
+or tooling result gets one issue per harness/version, reused across runs and reopened after a new
+failure if closed. No generic workflow-error issues are created. Issues from earlier failure-only
+sweeps fence later ceiling proposals until that exact version passes fresh qualification.
+Required exclusions travel with a useful ceiling increase; failures alone never produce a PR.
 Issues distinguish failed contract assertions from infrastructure, timeout and unexpected exceptions;
 none of those outcomes alone establishes an upstream binary defect.
+
+Issue titles stay `Harness compatibility: <harness> <version>`. PR titles show the ceiling change:
+`chore(compat): <harness> <old max> → <new max>`. Each excluded version is listed with its issue link
+in the PR body, and related issues link back to the PR. An issue stands alone until a useful PR
+exists. Automation replaces only its marked report/link sections; human diagnoses, decisions and
+links survive reruns. Existing unmarked descriptions are preserved when those sections are added.
+Issue reports retain up to twelve failure excerpts of 1,000 characters each; the workflow's compact
+table supplements the individual check details printed in its logs.
+
+A completed daily sweep succeeds when testing and publication finish reliably, even when candidates
+are red. Their version verdicts remain red and those versions stay unqualified. Incomplete runs,
+inconclusive/tooling outcomes and publication failures fail the workflow. PR admission checks stay
+strict; a successful sweep never establishes compatibility for a failed candidate.
 
 When the discovered range holds more than N releases, publication also raises min to the oldest
 release of the newest N (never an excluded one); exclusions below the new floor are pruned, the
@@ -46,7 +61,11 @@ Moving N itself re-qualifies and re-verifies nothing: the floor is recomputed fr
 the next publication. Routine PR checks recompute the floor from a fresh discovery and require the
 PR's min to match it exactly; a deliberate larger raise goes through a reviewed code PR.
 
-Scripts create or update `chore/compat-<harness>`, preserving pending range/exclusion changes.
+Scripts create or update `chore/compat-<harness>` only for an admitted ceiling above committed max,
+preserving pending exclusions. Old exclusion-only branches cannot generate replacement PRs.
+If a pending ceiling fails requalification, its unmerged increase is withdrawn: a lower freshly
+qualified extension can replace it, otherwise the PR is closed without a policy-branch write.
+An exclusion-only or otherwise obsolete open automation PR is also closed; its branch is retained.
 A routine PR changes **exactly one file, +1/−1**: the plugin's JSON line. It contains no fixture,
 history, evidence, Python or documentation edits. Publication uses GitHub APIs without editing the
 qualification checkout. Concurrent branch updates are refused rather than overwritten.
@@ -66,13 +85,12 @@ edit or comment on issues, policy branches or PRs for a PR-origin run.
 
 A separate `workflow_run` reporter uses trusted main code and system Python, independent of uv
 setup. Only scheduled/manual release sweeps on main can publish: the workflow job guard and Python
-reporter both enforce this before job-log recovery or publication. The CLI's exception fallback
-also requires a confirmed main sweep; an unidentified source stays a visible reporter failure.
-For these sweeps it files issues for discovery, setup/static-check, timeout, cleanup and publication
-failures, including cancellations. It recovers unfinished or failed known versions from qualification
-logs, then proposes exclusions through the same shared PR. Only identities from this repository's
-expected workflow file can propose exclusions; foreign/unidentified source logs get a workflow issue
-without trusting their claimed versions. Reporting never authorizes a pass from logs. Canary runs are not
+reporter both enforce this before job-log recovery or publication. It recovers unfinished known
+harness/version outcomes from trusted qualification logs and reuses their version issues; already
+published outcomes are not reported again. It never authorizes a pass from logs. Discovery,
+setup/static-check, job-log/API and unidentified failures remain in Actions with the failing job,
+step and available error details. Reporter exceptions also stay visible failures, with no generic
+issue fallback. Foreign/unidentified source logs never supply version identities. Canary runs are not
 reported: a red one says the suite missed a planted break, not that a release is bad, so it stays
 a red check or run instead of an issue and an exclusion.
 
@@ -109,6 +127,6 @@ minutes of sweep time left is recorded inconclusive and published instead of lef
 the rest of the sweep is skipped the same way. Three identical tooling errors in a row record
 the remaining releases the same way. Skipped releases stay above max and are retested by the
 next sweep. Finished outcomes are retained in the shared
-PR/issues; an unfinished known version is excluded.
+PR/issues; an unfinished known version gets its version issue and remains unqualified.
 OpenCode's 2.0.18–2.0.20 renderer recovery remains independent of policy because baseline 2.0.18
 needs it.

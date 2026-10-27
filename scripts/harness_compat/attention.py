@@ -18,7 +18,6 @@ from .publish import (
     Gh,
     api,
     check_publication_context,
-    file_attention_issue,
     publish,
     run_gh,
 )
@@ -123,17 +122,11 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
         and (failed_run["head_repository"] or {}).get("full_name")
         == os.environ["GITHUB_REPOSITORY"]
     )
-    try:
-        file_attention_issue(
-            f"Harness compatibility workflow: {run_id}",
-            f"Workflow ended **{failed_run['conclusion']}**. Human attention is required.\n\n"
-            f"Run: {run_url}\n\n"
-            + "\n".join(f"- {job['name']}: {job['conclusion']}" for job in bad)
-            + "\n\nInspect the failing step for setup, cleanup or publication errors.\n",
-            gh=gh,
-        )
-    except Exception as exc:
-        failures.append(exc)
+    print(f"Workflow ended {failed_run['conclusion']}: {run_url}", flush=True)
+    for job in bad:
+        steps = [step["name"] for step in job.get("steps", []) if step["conclusion"] in _FAILED]
+        detail = "; ".join(steps) or job["conclusion"]
+        print(f"{job['name']}: {detail}", flush=True)
     for job in bad:
         if not trusted_logs or job["name"] not in _RECOVERY_JOBS:
             continue
@@ -153,7 +146,7 @@ def report_workflow_failure(root: Path, run_id: int, *, gh: Gh = run_gh) -> None
             if not results:
                 continue
             policy = load_policy(root, harness)
-            # Log identities may propose conservative exclusions; they never authorize a pass.
+            # Log identities may report failures; they never authorize a pass.
             run = Run(harness, policy, tuple(r.version for r in results), results)
             publish(root, run, run_url=run_url, gh=gh)
         except Exception as exc:

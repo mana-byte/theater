@@ -11,7 +11,7 @@ from scripts.harness_compat import attention, cli
 from scripts.harness_compat.contract import Check, Result
 from scripts.harness_compat.git import git
 from scripts.harness_compat.policy import derive, write_policy
-from scripts.harness_compat.publish import Published, file_attention_issue
+from scripts.harness_compat.publish import Published
 from scripts.harness_compat.run import Run, run_harness
 from tests.support.compat_github import CompatGithub
 from theater.harness.contracts.version_policy import VersionPolicy
@@ -103,9 +103,9 @@ def test_entry_points_refuse_non_workflow_calls(
 
 
 @pytest.mark.parametrize(
-    "outcome,code", [("green", 0), ("red", 1), ("inconclusive", 2), ("tooling", 2)]
+    "outcome,code", [("green", 0), ("red", 0), ("inconclusive", 2), ("tooling", 2)]
 )
-def test_workflow_run_returns_a_failure_for_every_unsuccessful_outcome(
+def test_completed_sweeps_succeed_while_unreliable_outcomes_fail(
     repo: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, code: int
 ) -> None:
     _patch_run(monkeypatch, _run(Result("claude", "1.3.0", outcome)))
@@ -136,7 +136,7 @@ def test_main_publishes_completed_prefixes_and_reuses_the_same_run_url(
         return Published(derive(run.policy, run.results), 17)
 
     monkeypatch.setattr(cli, "publish", publish)
-    assert _main(monkeypatch, repo, "run", "claude") == 1
+    assert _main(monkeypatch, repo, "run", "claude") == 0
     assert [len(run.results) for run in published] == [1, 2]
     assert published[-1].results[0].verdict == "red"
 
@@ -148,7 +148,6 @@ def test_a_failed_publication_is_retried_with_all_known_results_before_later_adm
     _publishing(monkeypatch, repo)
     _scripted(monkeypatch, ["1.0.0", "1.2.0", "1.3.0", "1.4.0"], {"1.3.0": first})
     proposals = []
-    issues = []
 
     def publish(root, run, *, run_url, max_range=10):
         proposal = derive(run.policy, run.results)
@@ -158,30 +157,27 @@ def test_a_failed_publication_is_retried_with_all_known_results_before_later_adm
         return Published(proposal, 17)
 
     monkeypatch.setattr(cli, "publish", publish)
-    monkeypatch.setattr(cli, "file_attention_issue", lambda *args: issues.append(args))
     assert _main(monkeypatch, repo, "run", "claude") == 2
     assert proposals[-1] == VersionPolicy("1.0.0", "1.4.0", ("1.3.0",))
-    assert not issues and "temporary publication failure" in capsys.readouterr().out
+    assert "temporary publication failure" in capsys.readouterr().out
 
 
 def test_discovery_failure_exits_with_context_for_the_independent_reporter(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     _publishing(monkeypatch, repo)
-    issues = []
 
     def broken(*args, **kwargs):
         raise OSError("registry unreachable")
 
     monkeypatch.setattr(cli, "run_harness", broken)
-    monkeypatch.setattr(cli, "file_attention_issue", lambda *args: issues.append(args))
     assert _main(monkeypatch, repo, "run", "claude") == 2
     output = capsys.readouterr()
-    assert not issues and "OSError: registry unreachable" in output.err
+    assert "OSError: registry unreachable" in output.err
     assert "compat:start" not in output.out
 
 
-def test_issue_publication_failure_is_explicitly_visible(
+def test_reporter_failure_is_explicitly_visible_without_fallback_publication(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     _reporting(monkeypatch, repo)
@@ -189,40 +185,25 @@ def test_issue_publication_failure_is_explicitly_visible(
         cli, "report_workflow_failure", lambda *a, **k: (_ for _ in ()).throw(OSError("logs"))
     )
 
-    def unavailable(*args):
-        raise RuntimeError("GitHub issues unavailable")
-
-    monkeypatch.setattr(cli, "file_attention_issue", unavailable)
     assert _main(monkeypatch, repo, "report", "42") == 2
-    assert "Failure issue publication" in capsys.readouterr().err
+    assert "OSError: logs" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
-def test_main_sweep_reporter_failure_comments_on_the_original_workflow_issue(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, event: str
+def test_main_sweep_reporter_failure_never_creates_a_workflow_issue(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, event: str, capsys
 ) -> None:
     _reporting(monkeypatch, repo, event=event)
     monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
     gh = CompatGithub(git(repo, "rev-parse", "HEAD").strip(), POLICY)
-    title = "Harness compatibility workflow: 42"
-    original = "Run: https://github.com/o/r/actions/runs/42\n- Qualify claude: failure\n"
 
     def broken_report(*args):
-        file_attention_issue(title, original, gh=gh)
         raise OSError("job logs unavailable")
 
     monkeypatch.setattr(cli, "report_workflow_failure", broken_report)
-    monkeypatch.setattr(
-        cli, "file_attention_issue", lambda *args: file_attention_issue(*args, gh=gh)
-    )
     assert _main(monkeypatch, repo, "report", "42") == 2
-    assert gh.issue_bodies == {1: original}
-    assert len(gh.issues) == 1 and len(gh.issue_comments[1]) == 1
-    comment = gh.issue_comments[1][0]
-    assert "job logs unavailable" in comment
-    assert "Run: https://github.com/o/r/actions/runs/42" in comment
-    assert "Reporter: https://github.com/o/r/actions/runs/7" in comment
-    assert all(not path.exists() for path in gh.temporary_paths)
+    assert not gh.calls and not gh.issues
+    assert "job logs unavailable" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -250,9 +231,6 @@ def test_reporter_exception_fallback_never_mutates_github_without_a_failed_main_
         raise error
 
     monkeypatch.setattr(cli, "report_workflow_failure", broken_report)
-    monkeypatch.setattr(
-        cli, "file_attention_issue", lambda *args: file_attention_issue(*args, gh=gh)
-    )
     assert _main(monkeypatch, repo, "report", "42") == 2
     assert "::error title=Harness compatibility" in capsys.readouterr().out
     assert not gh.calls and not gh.issues and gh.pr is None
@@ -264,27 +242,22 @@ def test_source_run_api_failure_is_visible_and_never_authorizes_a_fallback_issue
 ) -> None:
     _reporting(monkeypatch, repo, event="pull_request")
     requests = []
-    issues = []
 
     def unavailable(gh, endpoint):
         requests.append(endpoint)
         raise OSError("source run API unavailable")
 
     monkeypatch.setattr(attention, "api", unavailable)
-    monkeypatch.setattr(cli, "file_attention_issue", lambda *args: issues.append(args))
     assert _main(monkeypatch, repo, "report", "42") == 2
-    assert requests == ["actions/runs/42", "actions/runs/42"]
-    assert not issues and "source run API unavailable" in capsys.readouterr().err
+    assert requests == ["actions/runs/42"]
+    assert "source run API unavailable" in capsys.readouterr().err
 
 
 def test_pr_source_stops_the_real_reporter_before_job_api_or_publication(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _reporting(monkeypatch, repo, event="pull_request", conclusion="failure")
-    issues = []
-    monkeypatch.setattr(cli, "file_attention_issue", lambda *args: issues.append(args))
     assert _main(monkeypatch, repo, "report", "42") == 0
-    assert not issues
 
 
 def test_routine_check_does_not_depend_on_newer_upstream_heads(
