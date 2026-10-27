@@ -10,9 +10,10 @@ from typing import Any
 STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
 # Highest store minor understood (2: projection_delta; 4: chunk-pool transcripts;
 # 5-7 opaque; 8: pruned settled-action bodies, pooled capability catalogs;
-# 9: session relocation records, system-instruction baselines).
+# 9: session relocation records, system-instruction baselines; 10: baselines omitted from a
+# generation's first Core input, which the reader never consumes).
 # The field defaults to 1, so a pre-minor pointer restores as minor 1.
-STORE_FORMAT_MINOR = 9
+STORE_FORMAT_MINOR = 10
 
 _CHUNKS_DIRNAME = "chunks"
 _GENERATION_PATTERN = re.compile(r"^[0-9]{16}$")
