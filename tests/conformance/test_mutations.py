@@ -12,7 +12,14 @@ import pytest
 
 from tests.support.fake_runtime import fake_runtime_manifest
 from tests.support.manifest_rig import manifest, plan
-from tests.support.mutations import ANY, MUTATIONS, applicable, install, package_source
+from tests.support.mutations import (
+    ANY,
+    MUTATIONS,
+    applicable,
+    install,
+    package_source,
+    undecided,
+)
 from tests.support.obligations import Obligation, required
 from theater.harness import HARNESSES
 from theater.harness.contracts.manifest import ControlManifest, InterruptPlan, LaunchManifest
@@ -48,6 +55,28 @@ def test_a_blanket_mutation_requires_a_plugin_declaration() -> None:
 
     assert applicable(blanket, (), (blanket.name,)) == blanket.breaks
     assert not applicable(blanket, ())
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected", "again"),
+    [
+        pytest.param({"model:model": "error"}, {"model:model": "fail"}, True, id="no-verdict"),
+        pytest.param({"model:model": "pass"}, {"model:model": "fail"}, False, id="a-miss"),
+        pytest.param({"model:model": "fail"}, {"model:model": "fail"}, False, id="caught"),
+        pytest.param(
+            {"resume:resume": "error"}, {"resume:resume": "not-pass"}, False, id="lenient"
+        ),
+        pytest.param(
+            {"edit:gated": "fail", "mcp:call": "error"}, {"edit:gated": "fail"}, False,
+            id="untouched",
+        ),
+        pytest.param({"launch:edits": "error"}, {ANY: "not-pass"}, False, id="blanket"),
+    ],
+)
+def test_a_canary_run_is_repeated_only_when_a_needed_obligation_ended_without_a_verdict(
+    statuses: dict[str, str], expected: dict[str, str], again: bool
+) -> None:
+    assert undecided(statuses, expected) is again
 
 
 def test_a_refused_native_runtime_breaks_the_route_and_what_must_survive_on_it() -> None:
