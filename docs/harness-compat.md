@@ -37,6 +37,8 @@ Passing versions may advance max; **failures never move committed bounds**. Ever
 or tooling result gets one issue per harness/version, reused across runs and reopened after a new
 failure if closed. No generic workflow-error issues are created. Issues from earlier failure-only
 sweeps fence later ceiling proposals until that exact version passes fresh qualification.
+Issue history must be read successfully before publication; a lookup failure blocks all remote
+writes rather than treating the history as empty.
 Required exclusions travel with a useful ceiling increase; failures alone never produce a PR.
 Issues distinguish failed contract assertions from infrastructure, timeout and unexpected exceptions;
 none of those outcomes alone establishes an upstream binary defect.
@@ -46,6 +48,7 @@ Issue titles stay `Harness compatibility: <harness> <version>`. PR titles show t
 in the PR body, and related issues link back to the PR. An issue stands alone until a useful PR
 exists. Automation replaces only its marked report/link sections; human diagnoses, decisions and
 links survive reruns. Existing unmarked descriptions are preserved when those sections are added.
+Both links are retained when a floor increase prunes exclusions recorded in earlier runs.
 Issue reports retain up to twelve failure excerpts of 1,000 characters each; the workflow's compact
 table supplements the individual check details printed in its logs.
 

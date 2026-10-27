@@ -217,6 +217,26 @@ def test_issue_failure_does_not_drop_exclusions_from_a_ceiling_pr(repo: Path, re
     assert gh.policy() == VersionPolicy("1.0.0", "1.4.0", ("1.3.0",)) and gh.pr == 17
 
 
+@pytest.mark.parametrize("existing_pr", [False, True])
+def test_issue_lookup_failure_blocks_all_publication(
+    repo: Path, result: Make, existing_pr: bool
+) -> None:
+    gh = _github(repo)
+    if existing_pr:
+        gh.seed_pending(VersionPolicy("1.0.0", "1.4.0", ("1.3.0",)))
+    gh.issues[issue_title("claude", "1.3.0")] = 42
+    refs = dict(gh.refs)
+    gh.fail.add("api --paginate")
+    run = _run(result("1.4.0"), discovered=("1.0.0", "1.2.0", "1.4.0"))
+
+    with pytest.raises(RuntimeError, match="api --paginate unavailable"):
+        publish(repo, run, run_url=URL, gh=gh, environ=_context(repo))
+
+    assert gh.refs == refs and gh.pr == (17 if existing_pr else None)
+    assert not gh.requests
+    assert len(gh.calls) == 1
+
+
 def test_concurrent_branch_updates_are_refused_and_issues_are_still_attempted(
     repo: Path, result: Make
 ) -> None:
@@ -406,6 +426,37 @@ def test_floor_pruning_keeps_links_to_the_failed_version_issue(repo: Path, resul
     assert published.proposal == VersionPolicy("1.4.0", "1.5.0")
     assert f"`1.3.0`: #{number} (red)" in gh.pr_body
     assert "Ceiling PR: #17" in gh.issue_bodies[number]
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_floor_pruning_keeps_links_to_issues_from_earlier_runs(
+    repo: Path, result: Make, committed: bool
+) -> None:
+    version = "1.1.0" if committed else "1.3.0"
+    policy = VersionPolicy("1.0.0", "1.2.0", (version,) if committed else ())
+    if committed:
+        write_policy(repo, "claude", policy)
+        git(repo, "commit", "-qam", "retain an earlier exclusion")
+    gh = CompatGithub(_context(repo)["GITHUB_SHA"], policy)
+    gh.issues[issue_title("claude", version)] = 42
+    gh.issue_bodies[42] = "Human diagnosis: adapter bug; fix PR: #99.\n"
+    gh.issue_states[42] = "closed"
+    results = (result("1.4.0"), result("1.5.0"))
+    run = Run(
+        "claude",
+        policy,
+        tuple(r.version for r in results),
+        results,
+        discovered=("1.0.0", "1.1.0", "1.2.0", "1.4.0", "1.5.0"),
+    )
+
+    published = publish(repo, run, run_url=URL, gh=gh, environ=_context(repo), max_range=2)
+
+    assert published.proposal == VersionPolicy("1.4.0", "1.5.0")
+    assert f"`{version}`: #42" in gh.pr_body
+    assert "Ceiling PR: #17" in gh.issue_bodies[42]
+    assert "Human diagnosis: adapter bug; fix PR: #99." in gh.issue_bodies[42]
+    assert gh.issue_states[42] == "closed" and not published.created
 
 
 def test_link_failure_is_retried_without_duplicate_issues_or_lost_exclusions(

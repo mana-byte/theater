@@ -265,6 +265,8 @@ Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) 
 - Keep issue titles `Harness compatibility: <harness> <version>` and PR titles
   `chore(compat): <harness> <old max> → <new max>`. Link every excluded version to its issue and
   related issues back to the PR. Update only marked generated sections; preserve human notes.
+  Retain links for exclusions pruned from earlier runs. Read issue history before policy
+  publication; a failed lookup must never be treated as an empty history.
   A completed, reliably published sweep may succeed with red candidates; those remain unqualified.
   Incomplete, inconclusive/tooling and publication failures still fail the workflow.
 - PR checks qualify the proposed code again. A policy refusal never substitutes for a behavioral
