@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-#: Room for the cause of one failure: every producer of a failing check's detail, the end-of-run
-#: ledger and the issue excerpts bound it here, so none clips a cause another one kept.
+#: Room for the cause of one failure: the suite's obligation details, the end-of-run ledger and
+#: the issue excerpts all bound it here, so none clips a cause another one kept.
 FAILURE_DETAIL_CHARS = 1000
 _ANSI = re.compile(r"(?:\x1b|#x1B|\\x1b)\[[0-?]*[ -/]*[@-~]", re.I)
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")

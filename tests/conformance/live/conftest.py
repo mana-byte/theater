@@ -19,7 +19,7 @@ from scripts.harness_compat.contract import SuiteDocument, SuiteRow
 from scripts.harness_compat.diagnostics import FAILURE_DETAIL_CHARS
 from scripts.harness_compat.process import SANDBOX_ENV
 from tests.support.live_rig import LiveRig, LiveSession, assert_isolated, evidence_dir_for
-from tests.support.live_stack import log_excerpt
+from tests.support.log_excerpt import log_excerpt
 from tests.support.obligations import (
     FAMILIES,
     Obligation,
@@ -55,9 +55,7 @@ REQUIRED = required(HARNESS)
 _BY_NODE: dict[str, Obligation] = {}
 _PHASES: dict[str, dict[str, str]] = {}
 _DETAILS: dict[str, str] = {}
-_EVIDENCE: dict[str, Path] = {}
-#: The first failing phase gets the room; a later one (teardown after a failed call) a share.
-_FIRST_CHARS, _LATER_CHARS = 400, 200
+_DETAIL_CHARS = 400
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -79,7 +77,6 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     kept: list[pytest.Item] = []
     undeclared: list[pytest.Item] = []
-    owners: dict[Path, str] = {}
     for item in items:
         params = item.callspec.params if hasattr(item, "callspec") else {}
         obligation = params.get("obligation", ...)
@@ -88,12 +85,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             continue
         if isinstance(obligation, Obligation):
             _BY_NODE[item.nodeid] = obligation
-            evidence = _EVIDENCE[item.nodeid] = evidence_dir_for(SESSION, item.name)
-            # Two scenarios sharing a directory would report each other's logs as their own.
-            if (other := owners.setdefault(evidence, item.nodeid)) != item.nodeid:
-                raise pytest.UsageError(
-                    f"{item.nodeid} and {other} share the evidence path {evidence}"
-                )
         kept.append(item)
     if undeclared:
         config.hook.pytest_deselected(items=undeclared)
@@ -119,26 +110,22 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
         outcome = dict(report.user_properties).get("compat_outcome", "tooling")
     _PHASES.setdefault(obligation.id, {})[report.when or "call"] = outcome
     if report.outcome != "passed":
-        earlier = _DETAILS.get(obligation.id)
-        reason = _detail(report, _FIRST_CHARS if earlier is None else _LATER_CHARS)
-        _DETAILS[obligation.id] = (
-            reason if earlier is None else f"{earlier} ; {report.when}: {reason}"
-        )
+        _DETAILS.setdefault(obligation.id, _detail(report))
     if report.when == "teardown" and obligation.id in _DETAILS:
         # Teardown reports after the fixture finalizers, so the stack's logs are on disk by now.
-        excerpt = log_excerpt(_EVIDENCE[report.nodeid])
+        excerpt = log_excerpt(evidence_dir_for(SESSION, report.nodeid.rsplit("::", 1)[-1]))
         if excerpt:
             joined = f"{excerpt} || {_DETAILS[obligation.id]}"
             _DETAILS[obligation.id] = joined[:FAILURE_DETAIL_CHARS]
 
 
-def _detail(report: pytest.TestReport, limit: int) -> str:
+def _detail(report: pytest.TestReport) -> str:
     """The first failing line a human needs, from a failure, an error or a skip reason."""
     if report.skipped and isinstance(report.longrepr, tuple):
-        return str(report.longrepr[2])[:limit]
+        return str(report.longrepr[2])[:_DETAIL_CHARS]
     lines = [line.strip() for line in report.longreprtext.splitlines() if line.strip()]
     causes = [line.removeprefix("E").strip() for line in lines if line.startswith("E ")]
-    return " ".join(causes or lines[-3:])[:limit]
+    return " ".join(causes or lines[-3:])[:_DETAIL_CHARS]
 
 
 def _outcome(phases: dict[str, str]) -> str | None:

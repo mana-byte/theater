@@ -7,9 +7,6 @@ from .diagnostics import FAILURE_DETAIL_CHARS, clip_diagnostic
 from .run import Run
 
 _DETAIL_LIMIT = 160
-#: Frame the ledger so a reader of a raw log can cut it out whole, wherever it sits.
-LEDGER_BEGIN = "compat:failures:begin"
-LEDGER_END = "compat:failures:end"
 
 
 def failing_checks(result: Result, *, detail_limit: int = _DETAIL_LIMIT) -> list[str]:
@@ -23,7 +20,7 @@ def failing_checks(result: Result, *, detail_limit: int = _DETAIL_LIMIT) -> list
 
 
 def render_run(run: Run) -> str:
-    """Every release's result and admission at the start of this run."""
+    """Every release's result and admission, then every failure of this run in one framed block."""
     lines = [
         f"### {run.harness}: {run.policy.range_text}",
         "",
@@ -34,11 +31,13 @@ def render_run(run: Run) -> str:
         first = (failing_checks(result) or ["—"])[0].replace("|", "\\|")
         admitted = "yes" if run.policy.admits(result.version) else "no"
         lines.append(f"| {result.version} | {admitted} | {result.verdict} | {first} |")
+    if failures := _failures(run):
+        # Framed so a reader of a raw log can cut it out whole.
+        lines += ["", "compat:failures:begin", *failures, "compat:failures:end"]
     return "\n".join(lines)
 
 
-def render_failures(run: Run) -> str:
-    """Every failure of this run in one block, or nothing when the run has none."""
+def _failures(run: Run) -> list[str]:
     lines: list[str] = []
     for result in run.results:
         if result.verdict != "green":
@@ -49,7 +48,7 @@ def render_failures(run: Run) -> str:
     lines += [f"error: {error}" for error in run.errors]
     if unfinished := run.releases[len(run.results) :]:
         lines.append(f"unfinished: {', '.join(unfinished)}")
-    return "\n".join([LEDGER_BEGIN, *lines, LEDGER_END]) if lines else ""
+    return lines
 
 
 def error_annotation(title: str, message: str) -> str:

@@ -250,13 +250,13 @@ class LiveRig:
     ) -> AsyncIterator[LiveRig]:
         if harness.compat is None:
             raise RuntimeError(f"harness {session.harness!r} declares no compat manifest")
+        label = _slug(label)
         root = session.sandbox_root / f"l{next(_ROOMS)}"
         workdir, marker_dir = root / "w", root / "m"
         for directory in (root / "h", root / "t", root / "th", workdir, marker_dir):
             directory.mkdir(parents=True, exist_ok=True)
         assert_isolated(session.sandbox_root, root, workdir, marker_dir)
         evidence = evidence_dir_for(session, label)
-        label = evidence.name
         async with contextlib.AsyncExitStack() as cleanup:  # undone in reverse, whatever came up
             mock = MockServer(
                 session.evidence_dir / f"{label}.requests.jsonl",
