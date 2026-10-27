@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from regie import process
+from regie.cli import _parser
 from regie.contracts import BridgeStatus
 from regie.paths import RegiePaths, paths_from_environment
 from regie.process import (
@@ -155,6 +156,47 @@ def test_bridge_start_is_idempotent_after_readiness(tmp_path: Path, monkeypatch)
     assert command[1:3] == ["-m", "regie"]
     assert kwargs["env"]["TMUX"] == "/tmp/tmux/default,10,0"
     assert "TMUX_PANE" not in kwargs["env"]
+
+
+def test_bridge_worker_command_parses_when_the_urlsafe_token_starts_with_a_dash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """argparse reads a leading "-" as an option: 1 token in 64 killed the worker unseen."""
+    paths = RegiePaths(tmp_path)
+    monkeypatch.setattr(process.secrets, "token_urlsafe", lambda _n: "-" + "A" * 31)
+    monkeypatch.setattr(process, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(process, "_lock_held", lambda _path: True)
+    monkeypatch.setattr(process, "_bridge_worker_matches", lambda *_args: True)
+    commands: list[list[str]] = []
+
+    def popen(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(command)
+        _online(paths, token=command[command.index("--token") + 1])
+        return SimpleNamespace(pid=123, poll=lambda: None, terminate=lambda: None)
+
+    BridgeProcessManager(
+        paths, socket_path=tmp_path / "daemon.sock", popen_factory=popen, sleep=lambda _s: None
+    ).start(timeout=5.0)
+
+    worker = _parser().parse_args(commands[0][3:])  # past "python -m regie"
+    assert worker.token == commands[0][commands[0].index("--token") + 1]
+
+
+def test_bridge_start_reports_a_worker_that_exited_instead_of_a_timeout(
+    tmp_path: Path,
+) -> None:
+    paths = RegiePaths(tmp_path)
+    manager = BridgeProcessManager(
+        paths,
+        socket_path=tmp_path / "daemon.sock",
+        popen_factory=lambda *_a, **_k: SimpleNamespace(
+            pid=123, poll=lambda: 2, terminate=lambda: None
+        ),
+        sleep=lambda _s: None,
+    )
+
+    with pytest.raises(process.BridgeStartupError, match="exited with status 2"):
+        manager.start(timeout=5.0)
 
 
 async def test_bridge_worker_preserves_status_change_published_during_write(
