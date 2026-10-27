@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
-from regie.motions.wipe import LeafWipeController
 from regie.ui_constants import REGIE_WIPE_DEATH_SECONDS
 from regie.widgets import ParticipantTree
 from regie.widgets.leaf import AgentLeaf
@@ -17,6 +17,7 @@ from packages.regie.tests.support.app_fakes import (
     make_projection,
     with_operations,
 )
+from packages.regie.tests.support.sweeps import recorded_sweeps
 from packages.regie.tests.support.tree_rows import leaf as _leaf
 from packages.regie.tests.support.tree_rows import stripped_rows as _rows
 from packages.regie.tests.support.waiting import press_until, wait_until
@@ -54,14 +55,7 @@ async def test_a_spawn_in_flight_fills_its_ring_and_names_the_phase() -> None:
 
 
 async def test_a_refused_send_marks_its_target_and_says_why(monkeypatch) -> None:
-    sweeps: list[tuple] = []
-    start = LeafWipeController.start
-
-    def recording_start(self, key, color, **kwargs) -> None:
-        sweeps.append((key, color))
-        start(self, key, color, **kwargs)
-
-    monkeypatch.setattr(LeafWipeController, "start", recording_start)
+    sweeps = recorded_sweeps(monkeypatch)
     app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
@@ -84,7 +78,7 @@ async def test_a_refused_send_marks_its_target_and_says_why(monkeypatch) -> None
         await wait_until(pilot, lambda: sweeps and leaf._wipe is None)
         assert "⊘" in _rows(leaf)[1]
         assert _rows(leaf)[2].endswith("blocked · human present")
-        assert sweeps == [(("p", "participant-2"), "$warning")]  # the row announced it
+        assert sweeps == [(("p", "participant-2"), "$warning", None)]  # the row announced it
 
 
 async def test_a_failure_stops_asking_once_the_cursor_has_rested_on_it(monkeypatch) -> None:
@@ -158,6 +152,8 @@ async def test_a_failure_on_a_row_hidden_behind_the_usage_footer_is_not_seen(mon
 
 async def test_a_delivered_send_shows_a_tick_that_fades_on_its_own(monkeypatch) -> None:
     monkeypatch.setattr("regie.marks.REGIE_MARK_SENT_SECONDS", 0.3)
+    now = [time.time()]  # a runner that stalls for 0.3s must not fade the tick unseen
+    monkeypatch.setattr("regie.app_parts.projection.time", lambda: now[0])
     app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
@@ -169,10 +165,15 @@ async def test_a_delivered_send_shows_a_tick_that_fades_on_its_own(monkeypatch) 
             app,
             pilot,
             make_operation(
-                "controls.send", "succeeded", "delivery_acknowledged", target="participant-2"
+                "controls.send",
+                "succeeded",
+                "delivery_acknowledged",
+                target="participant-2",
+                updated_at=now[0],
             ),
         )
         await wait_until(pilot, lambda: "✓" in _rows(leaf)[1])
+        now[0] += 1.0
         await wait_until(
             pilot, lambda: "✓" not in _rows(leaf)[1]
         )  # nothing re-rendered it but the timer
@@ -251,7 +252,8 @@ async def test_a_launching_row_sweeps_green_once_it_is_up_and_not_when_it_begins
         assert leaf._wipe[1] == "$success"
 
 
-async def test_a_kill_in_flight_sweeps_red_and_shows_that_it_is_terminating() -> None:
+async def test_a_kill_in_flight_sweeps_red_and_shows_that_it_is_terminating(monkeypatch) -> None:
+    sweeps = recorded_sweeps(monkeypatch)
     app, _client, _presentation = build_app()
 
     async with app.run_test() as pilot:
@@ -266,11 +268,11 @@ async def test_a_kill_in_flight_sweeps_red_and_shows_that_it_is_terminating() ->
                 "participants.terminate", "running", "termination_preparing", target="participant-2"
             ),
         )
-        await wait_until(pilot, lambda: "✕" in _rows(leaf)[1])
+        # A sweep redraws blanks as shade blocks, so the text is read once the row has settled.
+        await wait_until(pilot, lambda: sweeps and leaf._wipe is None)
+        assert "✕" in _rows(leaf)[1]
         assert _rows(leaf)[2].endswith("terminating")
-        await wait_until(pilot, lambda: leaf._wipe is not None)
-        assert leaf._wipe[1] == "$error"
-        assert tree._wipes._sweeps[("p", "participant-2")].seconds == REGIE_WIPE_DEATH_SECONDS
+        assert sweeps == [(("p", "participant-2"), "$error", REGIE_WIPE_DEATH_SECONDS)]
 
 
 def _without(app, participant_id: str) -> None:
