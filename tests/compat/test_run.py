@@ -14,8 +14,9 @@ from scripts.harness_compat.run import (
     DiscoveryError,
     IncompleteRun,
     Run,
-    discover_releases,
+    discovered_releases,
     run_harness,
+    select_releases,
     split_shards,
 )
 from theater.harness.contracts.version_policy import VersionPolicy
@@ -168,6 +169,10 @@ def test_a_failed_green_publication_is_excluded_in_the_next_completed_prefix(rep
     assert run.results[0].checks[-1].name == "publication"
 
 
+def _select(adapter: _Adapter, policy: VersionPolicy, **kwargs) -> list[str]:
+    return select_releases(discovered_releases(adapter), policy, name=adapter.name, **kwargs)
+
+
 @pytest.mark.parametrize(
     "found",
     [
@@ -181,27 +186,41 @@ def test_a_failed_green_publication_is_excluded_in_the_next_completed_prefix(rep
 )
 def test_incomplete_unordered_duplicated_or_unstable_discovery_is_refused(found: list[str]) -> None:
     with pytest.raises(DiscoveryError):
-        discover_releases(_Adapter(found), POLICY)
+        _select(_Adapter(found), POLICY)
 
 
 def test_routine_verification_tests_the_extension_and_added_exclusions_but_no_fresh_head() -> None:
     proposed = VersionPolicy("1.0.0", "1.5.0", ("1.4.0", "1.6.0"))
     found = ["1.0.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0"]
-    assert discover_releases(_Adapter(found), proposed, base=POLICY, routine=True) == found[2:6]
+    assert _select(_Adapter(found), proposed, base=POLICY, routine=True) == found[2:6]
 
 
 def test_removing_an_exclusion_must_requalify_the_newly_admitted_version() -> None:
     base = VersionPolicy("1.0.0", "1.2.0", ("1.1.0",))
-    assert discover_releases(
+    assert _select(
         _Adapter(["1.0.0", "1.1.0", "1.2.0", "1.3.0"]), POLICY, base=base, routine=True
     ) == ["1.1.0"]
     with pytest.raises(DiscoveryError, match=r"lacks the policy release 1\.1\.0"):
-        discover_releases(_Adapter(["1.0.0", "1.2.0", "1.3.0"]), POLICY, base=base, routine=True)
+        _select(_Adapter(["1.0.0", "1.2.0", "1.3.0"]), POLICY, base=base, routine=True)
 
 
 def test_code_verification_rechecks_current_window_with_no_unrelated_new_releases() -> None:
     found = ["1.0.0", "1.1.0", "1.2.0", "1.3.0"]
-    assert discover_releases(_Adapter(found), POLICY, base=POLICY) == found[:3]
+    assert _select(_Adapter(found), POLICY, base=POLICY) == found[:3]
+
+
+def test_a_self_selected_run_records_its_discovery(repo: Path) -> None:
+    run, _ = _run(repo, ["1.0.0", "1.2.0", "1.3.0"], {})
+    assert run.discovered == ("1.0.0", "1.2.0", "1.3.0")
+
+    supplied = run_harness(
+        repo,
+        _Adapter(["1.0.0", "1.2.0", "1.3.0"]),
+        releases=["1.3.0"],
+        qualify=lambda root, adapter, version: Result("claude", version, "green"),
+        say=lambda _: None,
+    )
+    assert supplied.discovered == ()
 
 
 @pytest.mark.parametrize(

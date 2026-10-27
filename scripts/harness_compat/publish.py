@@ -177,8 +177,20 @@ def pr_title(harness: str) -> str:
     return f"chore(compat): update {harness} version policy"
 
 
-def pr_body(harness: str, old: VersionPolicy, proposal: VersionPolicy, *, run_url: str) -> str:
-    return f"{harness} policy: `{old.range_text}` to `{proposal.range_text}`\n\nRun: {run_url}\n"
+def pr_body(
+    harness: str,
+    old: VersionPolicy,
+    proposal: VersionPolicy,
+    *,
+    run_url: str,
+    max_range: int,
+) -> str:
+    return (
+        f"{harness} policy: `{old.range_text}` to `{proposal.range_text}`\n\n"
+        f"Floor: newest {max_range} releases in range (max-range={max_range}); the Nix full "
+        "profile may ship older CLIs until flake.lock is bumped.\n\n"
+        f"Run: {run_url}\n"
+    )
 
 
 def _policy_at(gh: Gh, name: str, revision: str) -> VersionPolicy:
@@ -231,7 +243,7 @@ def _commit_policy(
         )
 
 
-def propose_policy(run: Run, *, run_url: str, gh: Gh) -> Published:
+def propose_policy(run: Run, *, run_url: str, gh: Gh, max_range: int) -> Published:
     """Preserve the pending PR's delta and propose one remote JSON line."""
     branch = f"chore/compat-{run.harness}"
     main = api(gh, "git/ref/heads/main")["object"]["sha"]
@@ -280,7 +292,7 @@ def propose_policy(run: Run, *, run_url: str, gh: Gh) -> Published:
             candidate = _policy_at(gh, run.harness, head)
             check_change(format_policy(original), format_policy(candidate))
             pending = merge_pending(current, original, candidate)
-    proposal = derive(pending, run.results)
+    proposal = derive(pending, run.results, discovered=run.discovered, max_range=max_range)
     check_change(format_policy(current), format_policy(proposal))
     number = prs[0]["number"] if prs else None
     if proposal != current or pending != current:
@@ -288,7 +300,7 @@ def propose_policy(run: Run, *, run_url: str, gh: Gh) -> Published:
             _commit_policy(gh, run.harness, branch, main, head, proposal)
         body = {
             "title": pr_title(run.harness),
-            "body": pr_body(run.harness, current, proposal, run_url=run_url),
+            "body": pr_body(run.harness, current, proposal, run_url=run_url, max_range=max_range),
         }
         if number is None:
             number = api(
@@ -313,6 +325,7 @@ def publish(
     run_url: str,
     gh: Gh = run_gh,
     environ: Mapping[str, str] = os.environ,
+    max_range: int = 10,
 ) -> Published:
     """Attempt both issues and the PR, even if either publication operation fails."""
     check_publication_context(root, environ)
@@ -327,7 +340,7 @@ def publish(
     except Exception as exc:
         failures.append(exc)
     try:
-        outcome = propose_policy(run, run_url=run_url, gh=gh)
+        outcome = propose_policy(run, run_url=run_url, gh=gh, max_range=max_range)
     except Exception as exc:
         failures.append(exc)
     if failures:

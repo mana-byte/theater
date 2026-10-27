@@ -6,9 +6,11 @@ Each plugin owns one compact `compatibility.json`, read by runtime admission and
 {"min":"0.163.0","max":"0.164.0","excluded":[]}
 ```
 
-Bounds are inclusive. Min is pinned to the installed CLI baseline. Exclusions may exceed max:
-a failed newer release needs an exclusion PR even when no release passes. Invalid policies and
-unsupported binaries fail closed. OpenCode has one plugin/channel (`@opencode/cli`); 1.x is removed.
+Bounds are inclusive. Min is the floor: the sweep raises it to keep at most the newest N releases
+in range (N is the `HARNESS_COMPAT_MAX_RANGE` repository variable, default 10), and it never falls.
+Exclusions may exceed max: a failed newer release needs an exclusion PR even when no release
+passes. Invalid policies and unsupported binaries fail closed. OpenCode has one plugin/channel
+(`@opencode/cli`); 1.x is removed.
 
 ## Ownership and flow
 
@@ -18,6 +20,7 @@ Only GitHub workflows invoke `scripts/harness_compat`; there are no local qualif
 workflow → scripts → exact harness/version → generic live suite
                    → passing release: advance max
                    → red/inconclusive/tooling: issue + exclusion
+                   → more than N releases in range: raise min
                    → one shared policy PR per harness
 ```
 
@@ -35,6 +38,13 @@ Passing versions may advance max; **failures never move either bound**. Every re
 tooling result gets an issue and an exclusion, including failures above max and all-failure batches.
 Issues distinguish failed contract assertions from infrastructure, timeout and unexpected exceptions;
 none of those outcomes alone establishes an upstream binary defect.
+
+When the discovered range holds more than N releases, publication also raises min to the oldest
+release of the newest N (never an excluded one); exclusions below the new floor are pruned, the
+floor never falls, and releases below it are never retested, so later PR windows only shrink.
+Moving N itself re-qualifies and re-verifies nothing: the floor is recomputed from the discovery at
+the next publication. Routine PR checks recompute the floor from a fresh discovery and require the
+PR's min to match it exactly; a deliberate larger raise goes through a reviewed code PR.
 
 Scripts create or update `chore/compat-<harness>`, preserving pending range/exclusion changes.
 A routine PR changes **exactly one file, +1/−1**: the plugin's JSON line. It contains no fixture,

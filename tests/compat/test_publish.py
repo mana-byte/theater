@@ -28,8 +28,8 @@ URL = "https://github.com/o/r/actions/runs/7"
 POLICY = VersionPolicy("1.0.0", "1.2.0")
 
 
-def _run(*results: Result) -> Run:
-    return Run("claude", POLICY, tuple(r.version for r in results), results)
+def _run(*results: Result, discovered: tuple[str, ...] = ()) -> Run:
+    return Run("claude", POLICY, tuple(r.version for r in results), results, discovered=discovered)
 
 
 def _context(repo: Path) -> dict[str, str]:
@@ -54,6 +54,15 @@ def _one_line(gh: CompatGithub) -> None:
         {"filename": POLICY_PATH, "additions": 1, "deletions": 1},
     ]
     assert not any(call[:2] == ("pr", "close") for call in gh.calls)
+
+
+def test_publication_raises_the_floor_over_the_discovered_range(repo: Path, result: Make) -> None:
+    gh = _github(repo)
+    run = _run(result("1.3.0"), discovered=("1.0.0", "1.1.0", "1.2.0", "1.3.0"))
+
+    published = publish(repo, run, run_url=URL, gh=gh, environ=_context(repo), max_range=3)
+
+    assert published.proposal == VersionPolicy("1.1.0", "1.3.0")
 
 
 def test_passing_newer_version_advances_only_the_shared_json_pr(repo: Path, result: Make) -> None:

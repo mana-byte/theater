@@ -243,7 +243,9 @@ reports what loaded and why anything was rejected.
 
 Every shipped plugin reads its inclusive `min`, `max` and `excluded` from its own
 `compatibility.json` through `theater.harness.contracts.version_policy.VersionPolicy`.
-The minimum is pinned to the installed CLI baseline; supporting older releases is out of scope.
+The minimum is the floor: the daily sweep raises it to bound the range at the newest
+`HARNESS_COMPAT_MAX_RANGE` releases (repository variable, default 10) and it never falls;
+supporting older releases is out of scope.
 Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) as one contract:
 
 - Keep policy files compact: one JSON line with a trailing newline. A routine gate PR replaces

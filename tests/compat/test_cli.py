@@ -129,7 +129,7 @@ def test_main_publishes_completed_prefixes_and_reuses_the_same_run_url(
     asked = _scripted(monkeypatch, ["1.0.0", "1.2.0", "1.3.0", "1.4.0"], {"1.3.0": "red"})
     published: list[Run] = []
 
-    def publish(root, run, *, run_url):
+    def publish(root, run, *, run_url, max_range=10):
         assert run_url == "https://github.com/o/r/actions/runs/7"
         assert asked == [r.version for r in run.results]
         published.append(run)
@@ -150,7 +150,7 @@ def test_a_failed_publication_is_retried_with_all_known_results_before_later_adm
     proposals = []
     issues = []
 
-    def publish(root, run, *, run_url):
+    def publish(root, run, *, run_url, max_range=10):
         proposal = derive(run.policy, run.results)
         proposals.append(proposal)
         if len(proposals) == 1:
@@ -416,3 +416,57 @@ def test_run_passes_the_sweep_time_budget_to_the_runner(
     monkeypatch.setattr(cli, "run_harness", fake)
     assert _main(monkeypatch, repo, "run", "claude", "--budget-minutes", "310") == 0
     assert seen["budget_seconds"] == 310 * 60
+
+
+def test_run_passes_the_floor_range_to_publication(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publishing(monkeypatch, repo)
+    _scripted(monkeypatch, ["1.0.0", "1.2.0", "1.3.0"], {})
+    seen: list[int] = []
+
+    def publish(root, run, *, run_url, max_range):
+        seen.append(max_range)
+        return Published(derive(run.policy, run.results), 17)
+
+    monkeypatch.setattr(cli, "publish", publish)
+    assert _main(monkeypatch, repo, "run", "claude", "--max-range", "5") == 0
+    assert seen == [5]
+
+
+def test_run_refuses_a_floor_range_below_one(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_run(monkeypatch, _run(Result("claude", "1.3.0", "green")))
+    assert _main(monkeypatch, repo, "run", "claude", "--max-range", "0") == 2
+
+
+def test_routine_verify_refuses_a_floor_the_rule_did_not_compute(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    git(repo, "checkout", "-qb", "chore/compat-claude")
+    write_policy(repo, "claude", VersionPolicy("1.4.0", "1.7.0"))
+    git(repo, "commit", "-qam", "gate")
+    asked = _scripted(monkeypatch, [f"1.{minor}.0" for minor in range(8)], {})
+
+    code = _main(
+        monkeypatch, repo, "verify", "claude", "--base", "main", "--routine", "--max-range", "3"
+    )
+
+    assert code == 2
+    assert asked == []
+    assert "expected 1.5.0" in capsys.readouterr().err
+
+
+def test_routine_verify_runs_the_window_when_the_floor_matches(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git(repo, "checkout", "-qb", "chore/compat-claude")
+    write_policy(repo, "claude", VersionPolicy("1.5.0", "1.7.0"))
+    git(repo, "commit", "-qam", "gate")
+    asked = _scripted(monkeypatch, [f"1.{minor}.0" for minor in range(8)], {})
+
+    code = _main(
+        monkeypatch, repo, "verify", "claude", "--base", "main", "--routine", "--max-range", "3"
+    )
+
+    assert code == 0
+    assert asked == [f"1.{minor}.0" for minor in range(3, 8)]
