@@ -55,6 +55,10 @@ Every `run` and `verify` ends with a ledger between `compat:failures:begin` and 
 each non-green version with all its failing checks, run errors and unfinished releases. A failing
 scenario's detail leads with the last warnings of the daemon, bridge and raw stderr logs its stack
 captured, which would otherwise vanish with the sandbox; no log or result is retained.
+The workflow's last job, `Failures`, lists the ledgers of every finished job of the run attempt in
+its log and the run's step summary, green jobs holding an excluded red version included. Every failed
+job lists its failed steps; one with no ledger also shows the output before each error marker. It only
+reads and reports: its own failure never fails the run, so keep it out of required checks.
 
 A completed daily sweep succeeds when testing and publication finish reliably, even when candidates
 are red. Their version verdicts remain red and those versions stay unqualified. Incomplete runs,
