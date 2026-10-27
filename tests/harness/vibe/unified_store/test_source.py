@@ -399,6 +399,31 @@ def test_a_fold_after_a_generation_published_at_the_read_point_keeps_its_end(sto
     ]
 
 
+def test_one_turn_id_proves_its_end_after_its_journal_is_collected(store: Store) -> None:
+    """Vibe keeps two journals: after a turn end and a later fold, A's is gone and A still ended."""
+    source = attached_to_running_a(store)
+    store.publish(
+        generation=GEN1, snapshot_sequence=0, state=RUNNING_A, watermark=1, journal=[A_ENDS]
+    )
+    settled = turn_doc([USER_A, ANSWER_A], "turn-a", "completed")
+    store.publish(
+        generation=GEN2,
+        snapshot_sequence=1,
+        state=settled,
+        watermark=2,
+        journal=[turn_record(3, "turn-a", "completed")],
+    )
+    store.publish(generation=GEN3, snapshot_sequence=2, state=settled, watermark=3)
+    shutil.rmtree(store.generation_dir(GEN1))
+    (store.session_root / "journal" / f"{1:016d}.jsonl").unlink()
+
+    batch = asyncio.run(source.read())
+    assert batch.turn_state is not None and batch.turn_state.complete
+    assert [end for end in ends(batch) if end[3]] == [
+        (EventKind.ASSISTANT, "ANSWER A", "turn-a", True)
+    ]
+
+
 def test_a_restored_checkpoint_replays_the_turn_ends_behind_it(store: Store) -> None:
     """A restart resumes from its checkpoint; A's end, folded after it, must still be read."""
     checkpoint = attached_to_running_a(store).source_checkpoint()
