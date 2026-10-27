@@ -494,7 +494,13 @@ def test_turn_ends_across_several_generations_replay_every_retained_segment(
         else []
     )
     if not retained:
-        assert "not replayable" in caplog.text
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "theater.harness.vibe" and record.levelname == "WARNING"
+        ] == [
+            "vibe sess-1: turn ends in sequences 1..4 are not replayable; retained journals: [1, 5]"
+        ]
         source.rollback_source_checkpoint()
         retried = asyncio.run(source.read())
         assert retried.turn_state is not None and not retried.turn_state.complete
