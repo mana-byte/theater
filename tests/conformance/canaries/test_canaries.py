@@ -96,7 +96,8 @@ def test_the_suite_notices_a_deliberately_broken_plugin(name: str, mutation: Mut
     for _ in range(_ATTEMPTS):
         report, logs = _run(name, mutation, Path(binary))
         checks = _checks(report)
-        if not undecided({key: check.status for key, check in checks.items()}, expected):
+        ran = {key: check.status for key, check in checks.items()}
+        if not undecided(ran, expected):
             break
 
     banner = LOADED_BANNER % mutation.name
@@ -106,7 +107,6 @@ def test_the_suite_notices_a_deliberately_broken_plugin(name: str, mutation: Mut
     if mutation.effect and not any(re.search(mutation.effect, log) for log in logs):
         pytest.skip(f"{mutation.name} found nothing to break in the {name} launch plan")
     assert not report.problems
-    ran = {key: check.status for key, check in checks.items()}
     if ANY in expected:
         assert any(status in ("fail", "error") for status in ran.values()), ran
         return
