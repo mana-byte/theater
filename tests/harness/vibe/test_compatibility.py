@@ -65,7 +65,7 @@ def test_malformed_version_is_refused(monkeypatch):
 
 
 def test_display_range_uses_the_same_policy_as_admission():
-    assert STORE_FORMAT_MINOR == 9
+    assert STORE_FORMAT_MINOR == 10
     declared = manifest_for_roots().native_compatibility
     assert declared is not None
     assert declared.qualified_range == vibe_qualified_range_text()
