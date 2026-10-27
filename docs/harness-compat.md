@@ -51,6 +51,10 @@ links survive reruns. Existing unmarked descriptions are preserved when those se
 Both links are retained when a floor increase prunes exclusions recorded in earlier runs.
 Issue reports retain up to twelve failure excerpts of 1,000 characters each; the workflow's compact
 table supplements the individual check details printed in its logs.
+Every `run` and `verify` ends with a ledger between `compat:failures:begin` and `compat:failures:end`:
+each non-green version with all its failing checks, run errors and unfinished releases. A failing
+scenario's detail leads with the last warnings of the daemon, bridge and raw stderr logs its stack
+captured, which would otherwise vanish with the sandbox; no log or result is retained.
 
 A completed daily sweep succeeds when testing and publication finish reliably, even when candidates
 are red. Their version verdicts remain red and those versions stay unqualified. Incomplete runs,

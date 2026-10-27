@@ -156,16 +156,15 @@ class Stack:
         return None if self.socket.exists() else "the daemon socket never appeared"
 
     def _copy_logs(self, target: Path) -> None:
-        """Copy the daemon and bridge logs that exist; a stack that never started leaves none."""
-        for source in (
-            self.theater_home / "var" / "logs" / "daemon" / "daemon.log",
-            self.theater_home / DAEMON_START_LOG,
-            self.theater_home / "regie" / "var" / "logs" / "bridge.log",
+        """Copy the daemon and bridge log trees, raw stderr included: a worker that dies before it
+        configures logging leaves only that. A stack that never started leaves none."""
+        for name, source in (
+            ("theater", self.theater_home / "var" / "logs"),
+            ("regie", self.theater_home / "regie" / "var" / "logs"),
         ):
-            if source.is_file():
-                target.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
                 with contextlib.suppress(OSError):
-                    shutil.copyfile(source, target / source.name)
+                    shutil.copytree(source, target / name, dirs_exist_ok=True)
 
 
 def _terminate(pid: int) -> bool:

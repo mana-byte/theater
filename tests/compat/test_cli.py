@@ -13,6 +13,7 @@ from scripts.harness_compat.git import git
 from scripts.harness_compat.policy import derive, write_policy
 from scripts.harness_compat.publish import Published
 from scripts.harness_compat.run import Run, run_harness
+from scripts.harness_compat.summary import render_run
 from tests.support.compat_github import CompatGithub
 from theater.harness.contracts.version_policy import VersionPolicy
 
@@ -120,6 +121,25 @@ def test_run_prints_results_without_writing_a_summary_file(
     _patch_run(monkeypatch, _run(Result("claude", "1.3.0", "green")))
     assert _main(monkeypatch, repo, "run", "claude") == 0
     assert "| 1.3.0 | no | green |" in capsys.readouterr().out and not target.exists()
+
+
+def test_a_run_summary_ends_with_every_failure_in_one_framed_block_or_with_none() -> None:
+    red = Result(
+        "claude",
+        "1.3.0",
+        "red",
+        (Check("conformance:resume", "fail", "CAUSE_ONE"), Check("suite", "error", "CAUSE_TWO")),
+    )
+    releases = ("1.3.0", "1.4.0", "1.5.0")
+    run = Run("claude", POLICY, releases, (red, Result("claude", "1.4.0", "green")), ("STOPPED",))
+
+    ledger = render_run(run).partition("compat:failures:begin")[2]
+
+    assert "claude 1.3.0 ended red:" in ledger
+    assert "conformance:resume (fail): CAUSE_ONE" in ledger and "suite (error): CAUSE_TWO" in ledger
+    assert "error: STOPPED" in ledger and "unfinished: 1.5.0" in ledger
+    assert "1.4.0" not in ledger.partition("unfinished")[0]  # a green version is no failure
+    assert "compat:failures" not in render_run(_run(Result("claude", "1.3.0", "green")))
 
 
 def test_main_publishes_completed_prefixes_and_reuses_the_same_run_url(

@@ -16,8 +16,10 @@ from pathlib import Path
 import pytest
 
 from scripts.harness_compat.contract import SuiteDocument, SuiteRow
+from scripts.harness_compat.diagnostics import FAILURE_DETAIL_CHARS
 from scripts.harness_compat.process import SANDBOX_ENV
-from tests.support.live_rig import LiveRig, LiveSession, assert_isolated
+from tests.support.live_rig import LiveRig, LiveSession, assert_isolated, evidence_dir_for
+from tests.support.log_excerpt import log_excerpt
 from tests.support.obligations import (
     FAMILIES,
     Obligation,
@@ -109,6 +111,12 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     _PHASES.setdefault(obligation.id, {})[report.when or "call"] = outcome
     if report.outcome != "passed":
         _DETAILS.setdefault(obligation.id, _detail(report))
+    if report.when == "teardown" and obligation.id in _DETAILS:
+        # Teardown reports after the fixture finalizers, so the stack's logs are on disk by now.
+        excerpt = log_excerpt(evidence_dir_for(SESSION, report.nodeid.rsplit("::", 1)[-1]))
+        if excerpt:
+            joined = f"{excerpt} || {_DETAILS[obligation.id]}"
+            _DETAILS[obligation.id] = joined[:FAILURE_DETAIL_CHARS]
 
 
 def _detail(report: pytest.TestReport) -> str:

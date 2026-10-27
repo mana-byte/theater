@@ -1,9 +1,9 @@
-"""Human-readable run summary for stdout: the log is the only place results are shown."""
+"""Human-readable run summary and failure ledger for stdout."""
 
 from __future__ import annotations
 
 from .contract import Result
-from .diagnostics import clip_diagnostic
+from .diagnostics import FAILURE_DETAIL_CHARS, clip_diagnostic
 from .run import Run
 
 _DETAIL_LIMIT = 160
@@ -20,7 +20,7 @@ def failing_checks(result: Result, *, detail_limit: int = _DETAIL_LIMIT) -> list
 
 
 def render_run(run: Run) -> str:
-    """Every release's result and admission at the start of this run."""
+    """Every release's result and admission, then every failure of this run in one framed block."""
     lines = [
         f"### {run.harness}: {run.policy.range_text}",
         "",
@@ -31,7 +31,24 @@ def render_run(run: Run) -> str:
         first = (failing_checks(result) or ["—"])[0].replace("|", "\\|")
         admitted = "yes" if run.policy.admits(result.version) else "no"
         lines.append(f"| {result.version} | {admitted} | {result.verdict} | {first} |")
+    if failures := _failures(run):
+        # Framed so a reader of a raw log can cut it out whole.
+        lines += ["", "compat:failures:begin", *failures, "compat:failures:end"]
     return "\n".join(lines)
+
+
+def _failures(run: Run) -> list[str]:
+    lines: list[str] = []
+    for result in run.results:
+        if result.verdict != "green":
+            lines.append(f"{run.harness} {result.version} ended {result.verdict}:")
+            lines += [
+                f"  {check}" for check in failing_checks(result, detail_limit=FAILURE_DETAIL_CHARS)
+            ]
+    lines += [f"error: {error}" for error in run.errors]
+    if unfinished := run.releases[len(run.results) :]:
+        lines.append(f"unfinished: {', '.join(unfinished)}")
+    return lines
 
 
 def error_annotation(title: str, message: str) -> str:

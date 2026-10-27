@@ -16,6 +16,7 @@ from theater.version_policy import VersionPolicy, version_key
 
 from . import git
 from .contract import Result
+from .diagnostics import FAILURE_DETAIL_CHARS
 from .policy import (
     PolicyChangeError,
     PublicationPlan,
@@ -170,7 +171,7 @@ def issue_title(harness: str, version: str) -> str:
 
 
 def issue_body(result: Result, *, policy: VersionPolicy, run_url: str) -> str:
-    checks = failing_checks(result, detail_limit=1000)
+    checks = failing_checks(result, detail_limit=FAILURE_DETAIL_CHARS)
     return (
         "\n".join(
             [
