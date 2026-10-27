@@ -8,8 +8,8 @@ server that will run the session. Session and agent rules stay native.
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from theater.constants.harness import HARNESS_APPROVAL_POLICIES
 from theater.models import BadRequest
@@ -44,8 +44,9 @@ def classify_plugin_state(
 ) -> None:
     """Refuse unless exactly the generated plugin, at its exact path, is active.
 
-    Native reports the resolved `server.js` as the local source path, so the
-    comparison is over realpaths; missing/failed/ambiguous all refuse.
+    Native reports the resolved `server.js` (2.0-2.1) or its plugin directory (2.2) as
+    the local source path, so the comparison is over realpaths; missing/failed/ambiguous
+    all refuse.
     """
     matches = [entry for entry in entries if entry.get("id") == plugin_id]
     if not matches:
@@ -83,7 +84,8 @@ def classify_plugin_state(
             f"plugin {plugin_id} is not the launch-local package; refusing to open a "
             "session whose approval policy cannot be enforced",
         )
-    if os.path.realpath(reported) != os.path.realpath(source_path):
+    generated = Path(source_path).resolve()
+    if Path(reported).resolve() not in {generated, generated.parent}:
         raise PluginNotActive(
             "mismatch",
             f"plugin {plugin_id} loaded from {reported!r}, not the generated {source_path!r}; "
