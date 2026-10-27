@@ -318,7 +318,6 @@ class BridgeProcessManager:
             if ready is not None:
                 return ready
             if (exit_code := process.poll()) is not None and last.detail is None:
-                # Not a timeout: say so, and where the worker's raw output went.
                 raise BridgeStartupError(
                     f"Régie bridge worker exited with status {exit_code} before reporting a "
                     f"ready provider; see {self._paths.bridge_stderr_dir}"
