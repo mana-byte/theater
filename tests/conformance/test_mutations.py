@@ -67,7 +67,9 @@ def test_a_blanket_mutation_requires_a_plugin_declaration() -> None:
             {"resume:resume": "error"}, {"resume:resume": "not-pass"}, False, id="lenient"
         ),
         pytest.param(
-            {"edit:gated": "fail", "mcp:call": "error"}, {"edit:gated": "fail"}, False,
+            {"edit:gated": "fail", "mcp:call": "error"},
+            {"edit:gated": "fail"},
+            False,
             id="untouched",
         ),
         pytest.param({"launch:edits": "error"}, {ANY: "not-pass"}, False, id="blanket"),
