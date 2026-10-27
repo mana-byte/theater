@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+from tests.support.codex_native_items import completed_item
 from tests.support.codex_server import (
     GENERATION,
     PARTICIPANT,
@@ -21,12 +24,15 @@ from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.observation.service import Observer
 from theater.daemon.observation.turns import TurnAccumulator
 from theater.daemon.registry import Registry
+from theater.harness.builtin.plugins.codex import runtime_constants
 from theater.harness.builtin.plugins.codex.manifest import MANIFEST
 from theater.harness.channels.hybrid import HybridSource
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.runtime import (
+    ConnectionHealth,
     RuntimeNotification,
     RuntimeRequestError,
+    RuntimeRequestTimeout,
 )
 from theater.harness.contracts.source import Batch, Source
 from theater.models import JobState, Participant, Tier
@@ -231,3 +237,49 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store)
         assert reasons[job.handle] == REASON_JOB_TERMINAL
     finally:
         await rig.aclose()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeRequestError(-32603, "failed to read thread: failed to read session metadata"),
+        RuntimeRequestTimeout("thread/resume timed out"),
+    ],
+    ids=["internal-error", "timeout"],
+)
+async def test_a_failed_subscription_degrades_the_route_only_until_the_next_one_lands(
+    failure,
+) -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    try:
+        server.fail("thread/resume", failure)
+        await runtime.send(operation_id="op-1", prompt="finish")
+        assert (await runtime.snapshot()).health is ConnectionHealth.DEGRADED
+
+        server.failures.pop("thread/resume")
+        server.respond("thread/resume", completed_resume_response())
+        server.push(idle_broadcast())
+        assert await until(lambda: runtime._subscribed)
+        assert (await runtime.snapshot()).health is ConnectionHealth.CONNECTED
+    finally:
+        await runtime.aclose()
+
+
+async def test_a_degrade_that_lost_events_outlives_the_subscription_that_followed() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    try:
+        server.fail("thread/resume", RuntimeRequestError(-32603, "failed to read thread"))
+        await runtime.send(operation_id="op-1", prompt="finish")
+        for index in range(runtime_constants.CODEX_RUNTIME_EVENTS_BUFFER + 1):
+            server.push(completed_item(f"i-{index}", item_type="agentMessage", text=f"m{index}"))
+        assert await until(lambda: runtime._dropped > 0)
+
+        server.failures.pop("thread/resume")
+        server.respond("thread/resume", completed_resume_response())
+        server.push(idle_broadcast())
+        assert await until(lambda: runtime._subscribed)
+        assert (await runtime.snapshot()).health is ConnectionHealth.DEGRADED
+    finally:
+        await runtime.aclose()
