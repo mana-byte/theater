@@ -113,7 +113,8 @@ server and stock CLI through public contracts against a scripted local model.
 
 Harness-specific onboarding, endpoints, dummy credentials and tool syntax live in the plugin's
 `CompatManifest`. Canary declarations also live there; shared scenarios, assertions and mutations
-are generic. Canaries check suite sensitivity separately, weekly and when wiring changes.
+are generic. Canaries check suite sensitivity separately, weekly and when wiring changes. A
+canary run that leaves a needed obligation inconclusive (`error`) is repeated once; a miss never is.
 
 Each qualification installs and verifies **exactly its supplied version**, then runs in a disposable
 source copy and home. Only that copy may temporarily admit the candidate. Required/inventory
