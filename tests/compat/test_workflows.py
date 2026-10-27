@@ -45,6 +45,17 @@ def test_no_workflow_retains_test_data_or_a_history_cache(name: str) -> None:
         assert forbidden not in text
 
 
+def test_the_failures_job_runs_last_reads_only_and_cannot_fail_the_run() -> None:
+    compat = _load("harness-compat.yml")
+    job = compat["jobs"]["failures"]
+    # Every other job, so a job added later cannot finish unreported.
+    assert set(job["needs"]) == set(compat["jobs"]) - {"failures"}
+    assert job["if"] == "${{ always() }}" and job["continue-on-error"] is True
+    assert job["permissions"] == {"contents": "read", "actions": "read"}
+    assert "secrets." not in yaml.safe_dump(job)
+    assert job["steps"][-1]["run"] == "python3 -m scripts.harness_compat failures"
+
+
 def test_dispatch_selects_a_harness_and_scripts_discover_the_versions() -> None:
     compat = _load("harness-compat.yml")
     inputs = compat["on"]["workflow_dispatch"]["inputs"]

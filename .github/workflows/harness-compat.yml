@@ -172,3 +172,32 @@ jobs:
       base: ${{ needs.plan.outputs.base }}
       routine: ${{ needs.plan.outputs.routine == 'true' }}
       max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
+
+  # Reads every other job's log once they have all finished and lists their failures together; it
+  # reports and decides nothing, so its own failure never fails the run.
+  failures:
+    name: Failures
+    needs:
+      - static-checks
+      - plan
+      - qualify
+      - verify-claude
+      - verify-codex
+      - verify-opencode
+      - verify-pi
+      - verify-vibe
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -m scripts.harness_compat failures

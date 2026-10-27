@@ -22,9 +22,10 @@ from .policy import (
     load_policy,
     policy_relative,
 )
-from .publish import SWEEP_EVENTS, check_publication_context, publish
+from .publish import SWEEP_EVENTS, check_publication_context, publish, run_gh
 from .run import Run, discovered_releases, run_harness, select_releases, split_shards
 from .summary import error_annotation, render_run
+from .workflow_report import run as report_failures
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -64,6 +65,7 @@ def _parser() -> argparse.ArgumentParser:
     canaries.add_argument("harness", choices=ADAPTER_NAMES)
     report = commands.add_parser("report", help="report a failed workflow from trusted main")
     report.add_argument("run_id", type=int)
+    commands.add_parser("failures", help="list every failure of this workflow run")
     return parser
 
 
@@ -200,6 +202,11 @@ def _report(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def _failures(args: argparse.Namespace, root: Path) -> int:
+    report_failures(run_gh, os.environ)
+    return 0  # presentation only: it never decides a verdict
+
+
 def main(argv: list[str] | None = None) -> int:
     """0: complete/pass; 1: rejected admission; 2: inconclusive or automation failure."""
     args = _parser().parse_args(argv)
@@ -213,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         "plan": _plan,
         "canaries": _canaries,
         "report": _report,
+        "failures": _failures,
     }
     try:
         return handlers[args.command](args, Path.cwd())

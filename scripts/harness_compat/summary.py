@@ -7,6 +7,9 @@ from .diagnostics import FAILURE_DETAIL_CHARS, clip_diagnostic
 from .run import Run
 
 _DETAIL_LIMIT = 160
+#: Frame the ledger so a reader of a raw log, or the workflow's failures job, can cut it out whole.
+LEDGER_BEGIN = "compat:failures:begin"
+LEDGER_END = "compat:failures:end"
 
 
 def failing_checks(result: Result, *, detail_limit: int = _DETAIL_LIMIT) -> list[str]:
@@ -32,8 +35,7 @@ def render_run(run: Run) -> str:
         admitted = "yes" if run.policy.admits(result.version) else "no"
         lines.append(f"| {result.version} | {admitted} | {result.verdict} | {first} |")
     if failures := _failures(run):
-        # Framed so a reader of a raw log can cut it out whole.
-        lines += ["", "compat:failures:begin", *failures, "compat:failures:end"]
+        lines += ["", LEDGER_BEGIN, *failures, LEDGER_END]
     return "\n".join(lines)
 
 

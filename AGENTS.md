@@ -269,6 +269,9 @@ Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) 
   publication; a failed lookup must never be treated as an empty history.
   A completed, reliably published sweep may succeed with red candidates; those remain unqualified.
   Incomplete, inconclusive/tooling and publication failures still fail the workflow.
+- The workflow's `failures` job reads completed jobs' logs with GET requests only and lists their
+  failure ledgers in its log and `$GITHUB_STEP_SUMMARY`, on PR runs too. It is the only writer of a
+  step summary, never publishes or saves artifacts, and decides no verdict.
 - PR checks qualify the proposed code again. A policy refusal never substitutes for a behavioral
   test: only the disposable copy may temporarily admit the supplied release.
 - Routine PR verification tests its proposed extension and changed exclusions; unrelated new
