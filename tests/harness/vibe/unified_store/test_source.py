@@ -329,6 +329,52 @@ def test_a_turn_end_folded_into_a_newer_generation_is_drained(store: Store) -> N
     ]
 
 
+def test_republication_keeps_turn_ends_after_their_manifest_is_collected(store: Store) -> None:
+    history = [
+        public_message(f"{role}-{turn}", role, "history", turn_id=f"t{turn}")
+        for turn in range(1, 34)
+        for role in ("user", "assistant")
+    ]
+    generation = f"{661:016d}"
+    state = turn_doc(history, "t33", "completed")
+    store.publish(generation=generation, snapshot_sequence=660, state=state, watermark=200)
+    source = VibeObserver(root=store.session_root.parent.parent).open_source(cwd="/tmp/work")
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+
+    user = public_message("user-34", "user", "resume", turn_id="t34")
+    answer = public_message("assistant-34", "assistant", "resumed", turn_id="t34")
+    store.publish(
+        generation=generation,
+        snapshot_sequence=660,
+        state=state,
+        watermark=200,
+        journal=[
+            ("core_input", {}),
+            turn_record(201, "t34", "in_progress", user),
+            ("core_input", {}),
+            ("core_input", {}),
+            turn_record(202, "t34", "completed", answer),
+            ("core_input", {}),
+        ],
+    )
+    for newer in (667, 668):
+        store.publish(
+            generation=f"{newer:016d}",
+            snapshot_sequence=666,
+            state=turn_doc([*history, user, answer], "t34", "completed"),
+            watermark=202,
+        )
+    # Vibe retains generations and journals independently, keeping the newest two of each.
+    shutil.rmtree(store.generation_dir(generation))
+    assert (store.session_root / "journal" / f"{661:016d}.jsonl").exists()
+
+    batch = asyncio.run(source.read())
+    assert batch.turn_state is not None and batch.turn_state.complete
+    assert [end for end in ends(batch) if end[3]] == [(EventKind.ASSISTANT, "resumed", "t34", True)]
+
+
 def test_a_fold_after_a_generation_published_at_the_read_point_keeps_its_end(store: Store):
     """Vibe publishes a generation right after a turn ends; the next fold must survive it."""
     source = attached_to_running_a(store)
@@ -410,6 +456,7 @@ def test_turn_ends_across_several_generations_replay_every_retained_segment(
     )
     if not retained:
         shutil.rmtree(store.generation_dir(GEN2))
+        (store.session_root / "journal" / f"{2:016d}.jsonl").unlink()
 
     batch = asyncio.run(source.read())
     assert batch.turn_state is not None and batch.turn_state.complete is retained
