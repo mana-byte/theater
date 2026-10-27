@@ -27,12 +27,9 @@ async def test_unknown_send_warning_survives_log_excerpt_clipping(
 ) -> None:
     """A clipped CI excerpt still names the operation, receipt code and native session."""
 
-    sent: list[str] = []
-
     class UnconfirmedSend(FakeRuntime):
         async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
             await super().send(operation_id=operation_id, prompt=prompt)
-            sent.append(operation_id)
             return ControlReceipt(
                 operation_id=operation_id,
                 result=DeliveryResult.UNKNOWN,
@@ -47,16 +44,15 @@ async def test_unknown_send_warning_survives_log_excerpt_clipping(
     )
 
     with caplog.at_level(logging.WARNING, logger="theater.daemon.controls"):
-        await harness.service.send(PARTICIPANT, caller_id="caller", prompt="diagnose it")
+        job = await harness.service.send(PARTICIPANT, caller_id="caller", prompt="diagnose it")
 
     record = next(r for r in caplog.records if "stayed uncertain" in r.getMessage())
-    evidence = tmp_path / "regie"
-    evidence.mkdir()
-    (evidence / "daemon-start.log").write_text(
+    (tmp_path / "daemon-start.log").write_text(
         f"{make_formatter().format(record)}\n", encoding="utf-8"
     )
 
-    excerpt = log_excerpt(evidence)
-    assert sent[0] in excerpt
+    excerpt = log_excerpt(tmp_path)
+    (operation,) = store.control_operations_for_job(job.handle)
+    assert operation.operation_id in excerpt
     assert "send_unconfirmed" in excerpt
     assert SESSION in excerpt
