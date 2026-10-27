@@ -293,6 +293,15 @@ def test_a_routine_pr_keeps_the_main_floor_while_the_range_fits() -> None:
         check_routine_floor(_policy("1.1.0", "1.2.0"), base, discovered, 10)
 
 
+def test_a_routine_pr_whose_window_boundary_is_excluded_passes_the_floor_check() -> None:
+    # The sweep pruned the boundary exclusion below its floor; the recomputed floor
+    # must still skip it instead of treating it as admitted again.
+    base = _policy("1.0.0", "1.7.0", "1.5.0")
+    discovered = [f"1.{minor}.0" for minor in range(8)]
+
+    check_routine_floor(_policy("1.6.0", "1.7.0"), base, discovered, 3)
+
+
 def test_a_plugin_edit_selects_its_harness_for_a_retest_not_only_a_policy_edit(
     repo: Path, git: Git
 ) -> None:

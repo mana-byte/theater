@@ -209,6 +209,14 @@ def test_code_verification_rechecks_current_window_with_no_unrelated_new_release
     assert _select(_Adapter(found), POLICY, base=POLICY) == found[:3]
 
 
+def test_a_pruned_exclusion_below_the_floor_is_not_retested() -> None:
+    found = [f"1.{minor}.0" for minor in range(9)]
+    base = VersionPolicy("1.0.0", "1.7.0", ("1.5.0",))
+    proposed = VersionPolicy("1.6.0", "1.8.0")
+
+    assert _select(_Adapter(found), proposed, base=base, routine=True) == ["1.8.0"]
+
+
 def test_a_self_selected_run_records_its_discovery(repo: Path) -> None:
     run, _ = _run(repo, ["1.0.0", "1.2.0", "1.3.0"], {})
     assert run.discovered == ("1.0.0", "1.2.0", "1.3.0")

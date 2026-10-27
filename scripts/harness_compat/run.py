@@ -84,7 +84,16 @@ def select_releases(
     routine: bool = False,
 ) -> list[str]:
     """Sweeps start above committed max; PR checks stop at the proposed max."""
-    changed_exclusions = set(policy.excluded) ^ set(base.excluded) if base else set()
+    # Exclusions the PR pruned below its floor are retired with it, not un-excluded.
+    changed_exclusions = (
+        {
+            version
+            for version in set(policy.excluded) ^ set(base.excluded)
+            if version_key(version) >= version_key(policy.minimum)
+        }
+        if base
+        else set()
+    )
     for required in {policy.minimum, policy.maximum, *changed_exclusions}:
         if required not in found:
             raise DiscoveryError(f"{name} discovery lacks the policy release {required}")

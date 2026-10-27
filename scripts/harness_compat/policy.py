@@ -148,8 +148,16 @@ def check_routine_floor(
     if max_range < 1:
         raise ValueError("the floor range must hold at least one release")
     # The floor is a pure function of (discovered, proposed max, max_range): the window
-    # opens at main's floor, before the PR's own raise shrank it.
-    pre_raise = VersionPolicy(base.minimum, policy.maximum, policy.excluded)
+    # opens at main's floor, before the PR's own raise shrank it. Exclusions the PR
+    # pruned below its floor still count as excluded when the floor is recomputed.
+    pruned = {
+        version for version in base.excluded if version_key(version) < version_key(policy.minimum)
+    }
+    pre_raise = VersionPolicy(
+        base.minimum,
+        policy.maximum,
+        tuple(sorted(set(policy.excluded) | pruned, key=version_key)),
+    )
     expected = raise_floor(pre_raise, discovered, max_range)
     if policy.minimum != expected.minimum:
         raise PolicyChangeError(
