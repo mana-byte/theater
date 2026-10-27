@@ -15,6 +15,10 @@ on:
         description: Whether the PR is a routine one-line policy gate change
         required: true
         type: boolean
+      max_range:
+        description: The floor a routine PR must carry exactly, as a release count
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -60,6 +64,7 @@ jobs:
       matrix: ${{ fromJSON(needs.fanout.outputs.shards) }}
     env:
       GH_TOKEN: ${{ github.token }}
+      MAX_RANGE: ${{ inputs.max_range }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,4 +91,5 @@ jobs:
         run: |
           args=(verify "$HARNESS" --base "$BASE" --releases "$VERSIONS")
           if [[ "$ROUTINE" == "true" ]]; then args+=(--routine); fi
+          args+=(--max-range "$MAX_RANGE")
           timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat "${args[@]}"

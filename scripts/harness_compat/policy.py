@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from theater.version_policy import VersionPolicy, version_key
@@ -46,8 +47,14 @@ def admit_only(root: Path, name: str, version: str) -> None:
         raise RuntimeError(f"could not admit {name} {version} in the code copy")
 
 
-def derive(policy: VersionPolicy, results: tuple[Result, ...]) -> VersionPolicy:
-    """Passes may advance max; every failure adds an exclusion without moving either bound."""
+def derive(
+    policy: VersionPolicy,
+    results: tuple[Result, ...],
+    *,
+    discovered: Sequence[str] = (),
+    max_range: int | None = None,
+) -> VersionPolicy:
+    """Passes may advance max and raise the floor; failures only add exclusions."""
     verdicts = {result.version: result.verdict for result in results}
     if len(verdicts) != len(results):
         raise Unproposable("a release has more than one outcome")
@@ -63,16 +70,51 @@ def derive(policy: VersionPolicy, results: tuple[Result, ...]) -> VersionPolicy:
             excluded.add(version)
         else:
             raise Unproposable(f"unknown verdict {outcome!r} for {version}")
-    return VersionPolicy(policy.minimum, maximum, tuple(sorted(excluded, key=version_key)))
+    proposal = VersionPolicy(policy.minimum, maximum, tuple(sorted(excluded, key=version_key)))
+    if max_range is not None:
+        proposal = raise_floor(proposal, discovered, max_range)
+    return proposal
+
+
+def floor_window(policy: VersionPolicy, discovered: Sequence[str]) -> tuple[str, ...]:
+    """The discovered stable releases inside the policy range, ascending."""
+    low, high = version_key(policy.minimum), version_key(policy.maximum)
+    return tuple(version for version in discovered if low <= version_key(version) <= high)
+
+
+def raise_floor(policy: VersionPolicy, discovered: Sequence[str], max_range: int) -> VersionPolicy:
+    """Bound the range at the newest ``max_range`` discovered releases; the floor never falls."""
+    if max_range < 1:
+        raise ValueError("the floor range must hold at least one release")
+    window = floor_window(policy, discovered)
+    if len(window) <= max_range:
+        return policy
+    floor = version_key(window[-max_range])
+    # The floor never sits on an excluded release; with none admitted in the top of the
+    # window the policy stays unchanged rather than blocking max and exclusion publication.
+    candidates = [
+        version for version in window if version_key(version) >= floor and policy.admits(version)
+    ]
+    if not candidates:
+        return policy
+    excluded = tuple(
+        version for version in policy.excluded if version_key(version) >= version_key(candidates[0])
+    )
+    return VersionPolicy(candidates[0], policy.maximum, excluded)
 
 
 def merge_pending(
     current: VersionPolicy, original: VersionPolicy, pending: VersionPolicy
 ) -> VersionPolicy:
-    """Apply the pending PR's exclusion delta to main, preserving both maxima."""
-    if current.minimum != original.minimum or current.minimum != pending.minimum:
-        raise PolicyChangeError("the pinned minimum differs in the pending PR")
-    removed = set(original.excluded) - set(pending.excluded)
+    """Apply the pending PR's exclusion delta to main, keeping main's floor; both maxima survive."""
+    if current.minimum != original.minimum:
+        raise PolicyChangeError("the pinned minimum moved on main since the pending PR")
+    # A raised floor prunes exclusions below it; those are pruned, not removed.
+    removed = {
+        version
+        for version in set(original.excluded) - set(pending.excluded)
+        if version_key(version) >= version_key(pending.minimum)
+    }
     added = set(pending.excluded) - set(original.excluded)
     excluded = (set(current.excluded) - removed) | added
     return VersionPolicy(
@@ -83,17 +125,45 @@ def merge_pending(
 
 
 def check_change(old_text: str, new_text: str) -> None:
-    """Refuse anything but a canonical one-line edit that keeps the pinned minimum."""
+    """Refuse anything but a canonical one-line edit that never lowers the floor."""
     try:
         old, new = VersionPolicy.from_text(old_text), VersionPolicy.from_text(new_text)
     except ValueError as exc:
         raise PolicyChangeError(f"the policy is not valid: {exc}") from exc
     if old_text != format_policy(old) or new_text != format_policy(new):
         raise PolicyChangeError("the policy is not the canonical single compact line")
-    if new.minimum != old.minimum:
-        raise PolicyChangeError(f"the pinned minimum moved: {old.minimum} to {new.minimum}")
+    if version_key(new.minimum) < version_key(old.minimum):
+        raise PolicyChangeError(f"the pinned minimum fell: {old.minimum} to {new.minimum}")
     if version_key(new.maximum) < version_key(old.maximum):
         raise PolicyChangeError(f"the maximum shrank: {old.maximum} to {new.maximum}")
+
+
+def check_routine_floor(
+    policy: VersionPolicy,
+    base: VersionPolicy,
+    discovered: Sequence[str],
+    max_range: int,
+) -> None:
+    """A routine PR's floor is exactly the recomputed one: the newest ``max_range`` releases."""
+    if max_range < 1:
+        raise ValueError("the floor range must hold at least one release")
+    # The floor is a pure function of (discovered, proposed max, max_range): the window
+    # opens at main's floor, before the PR's own raise shrank it. Exclusions the PR
+    # pruned below its floor still count as excluded when the floor is recomputed.
+    pruned = {
+        version for version in base.excluded if version_key(version) < version_key(policy.minimum)
+    }
+    pre_raise = VersionPolicy(
+        base.minimum,
+        policy.maximum,
+        tuple(sorted(set(policy.excluded) | pruned, key=version_key)),
+    )
+    expected = raise_floor(pre_raise, discovered, max_range)
+    if policy.minimum != expected.minimum:
+        raise PolicyChangeError(
+            f"the floor is not the newest {max_range} releases: "
+            f"{policy.minimum}, expected {expected.minimum}"
+        )
 
 
 def changed_gates(root: Path, base: str) -> list[str]:

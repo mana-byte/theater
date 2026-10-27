@@ -17,10 +17,12 @@ from scripts.harness_compat.policy import (
     changed_gates,
     check_change,
     check_routine_change,
+    check_routine_floor,
     derive,
     format_policy,
     load_policy,
     merge_pending,
+    raise_floor,
     write_policy,
 )
 from theater.harness.contracts.version_policy import VersionPolicy
@@ -104,7 +106,7 @@ def test_the_old_policy_must_also_be_unambiguous_and_one_line(old_text: str) -> 
 @pytest.mark.parametrize(
     ("new_text", "needle"),
     [
-        (format_policy(_policy("1.0.1", "1.2.0")), "pinned minimum moved"),
+        (format_policy(_policy("0.9.0", "1.2.0")), "pinned minimum fell"),
         (format_policy(_policy("1.0.0", "1.1.0")), "maximum shrank"),
         (json.dumps(_policy().to_json(), indent=2) + "\n", "canonical single compact line"),
         ('{"min":"1.0.0","max":"1.2.0","excluded":[]}', "canonical single compact line"),
@@ -145,13 +147,22 @@ def test_a_routine_gate_change_that_also_touches_code_is_refused(repo: Path, git
         check_routine_change(repo, "main")
 
 
-def test_a_routine_gate_change_that_moves_the_minimum_is_refused(repo: Path, git: Git) -> None:
+def test_a_routine_gate_change_that_lowers_the_minimum_is_refused(repo: Path, git: Git) -> None:
     git(repo, "checkout", "-q", "-b", "chore/compat-claude")
-    write_policy(repo, "claude", _policy("1.0.1", "1.4.0"))
+    write_policy(repo, "claude", _policy("0.9.0", "1.4.0"))
     git(repo, "commit", "-qam", "gate")
 
-    with pytest.raises(PolicyChangeError, match="pinned minimum moved"):
+    with pytest.raises(PolicyChangeError, match="pinned minimum fell"):
         check_routine_change(repo, "main")
+
+
+def test_a_routine_gate_change_may_raise_the_minimum(repo: Path, git: Git) -> None:
+    # The exact floor is enforced by the routine verify check, not by the one-line guard.
+    git(repo, "checkout", "-q", "-b", "chore/compat-claude")
+    write_policy(repo, "claude", _policy("1.1.0", "1.4.0"))
+    git(repo, "commit", "-qam", "gate")
+
+    assert check_routine_change(repo, "main") == "claude"
 
 
 def test_a_change_to_no_policy_selects_no_harness(repo: Path, git: Git) -> None:
@@ -187,6 +198,51 @@ def test_an_empty_run_has_no_policy_effect() -> None:
     assert derive(_policy(), ()) == _policy()
 
 
+def test_derive_raises_the_floor_after_advancing_the_maximum(result: Make) -> None:
+    discovered = [f"1.{minor}.0" for minor in range(6)]
+    results = (result("1.3.0"), result("1.4.0"), result("1.5.0"))
+
+    assert derive(_policy(), results, discovered=discovered, max_range=3) == _policy(
+        "1.3.0", "1.5.0"
+    )
+    assert derive(_policy(), results) == _policy("1.0.0", "1.5.0")
+
+
+def test_the_floor_rises_to_the_oldest_of_the_newest_releases() -> None:
+    discovered = [f"1.{minor}.0" for minor in range(6)]
+
+    assert raise_floor(_policy("1.0.0", "1.5.0"), discovered, 3) == _policy("1.3.0", "1.5.0")
+
+
+def test_the_floor_stays_when_the_range_fits() -> None:
+    discovered = [f"1.{minor}.0" for minor in range(6)]
+
+    assert raise_floor(_policy("1.0.0", "1.5.0"), discovered, 10) == _policy("1.0.0", "1.5.0")
+
+
+def test_the_floor_prunes_exclusions_below_it_and_never_sits_on_one() -> None:
+    discovered = [f"1.{minor}.0" for minor in range(6)]
+    policy = _policy("1.0.0", "1.5.0", "1.2.0", "1.3.0")
+
+    assert raise_floor(policy, discovered, 3) == _policy("1.4.0", "1.5.0")
+
+
+def test_the_floor_stays_without_an_admitted_release_in_the_top_of_the_range() -> None:
+    discovered = [f"1.{minor}.0" for minor in range(6)]
+    policy = _policy("1.0.0", "1.5.0", "1.3.0", "1.4.0", "1.5.0")
+
+    assert raise_floor(policy, discovered, 3) == policy
+
+
+def test_the_floor_range_must_hold_at_least_one_release() -> None:
+    with pytest.raises(ValueError, match="at least one release"):
+        raise_floor(_policy(), ["1.0.0", "1.2.0"], 0)
+
+
+def test_a_one_line_floor_raise_is_a_valid_change() -> None:
+    check_change(format_policy(_policy()), format_policy(_policy("1.1.0", "1.2.0")))
+
+
 def test_pending_range_and_exclusion_deltas_survive_main_updates() -> None:
     original = _policy("1.0.0", "1.2.0", "1.1.0")
     current = _policy("1.0.0", "1.4.0", "1.1.0", "1.3.0")
@@ -199,6 +255,51 @@ def test_pending_updates_do_not_restore_an_exclusion_already_removed_on_main() -
     current = _policy("1.0.0", "1.4.0", "1.3.0")
     pending = _policy("1.0.0", "1.5.0", "1.1.0", "1.6.0")
     assert merge_pending(current, original, pending) == _policy("1.0.0", "1.5.0", "1.3.0", "1.6.0")
+
+
+def test_a_pending_floor_raise_keeps_the_main_floor_and_never_removes_an_exclusion() -> None:
+    # A floor raise prunes the pending PR's exclusions below its floor; those are not removals.
+    current = _policy("1.0.0", "1.2.0", "1.1.0")
+    original = _policy("1.0.0", "1.2.0", "1.1.0")
+    pending = _policy("1.3.0", "1.5.0", "1.4.0")
+
+    assert merge_pending(current, original, pending) == _policy("1.0.0", "1.5.0", "1.1.0", "1.4.0")
+
+
+def test_merge_pending_refuses_a_floor_that_moved_on_main() -> None:
+    with pytest.raises(PolicyChangeError, match="moved on main"):
+        merge_pending(
+            _policy("1.1.0", "1.2.0"), _policy("1.0.0", "1.2.0"), _policy("1.0.0", "1.5.0")
+        )
+
+
+def test_a_routine_pr_carries_exactly_the_recomputed_floor() -> None:
+    base = _policy("1.0.0", "1.2.0")
+    discovered = [f"1.{minor}.0" for minor in range(8)]
+
+    check_routine_floor(_policy("1.5.0", "1.7.0"), base, discovered, 3)
+    with pytest.raises(PolicyChangeError, match="newest 3 releases"):
+        check_routine_floor(_policy("1.4.0", "1.7.0"), base, discovered, 3)
+    with pytest.raises(PolicyChangeError, match="newest 3 releases"):
+        check_routine_floor(_policy("1.0.0", "1.7.0"), base, discovered, 3)
+
+
+def test_a_routine_pr_keeps_the_main_floor_while_the_range_fits() -> None:
+    base = _policy("1.0.0", "1.2.0")
+    discovered = [f"1.{minor}.0" for minor in range(8)]
+
+    check_routine_floor(_policy("1.0.0", "1.2.0"), base, discovered, 10)
+    with pytest.raises(PolicyChangeError, match="newest 10 releases"):
+        check_routine_floor(_policy("1.1.0", "1.2.0"), base, discovered, 10)
+
+
+def test_a_routine_pr_whose_window_boundary_is_excluded_passes_the_floor_check() -> None:
+    # The sweep pruned the boundary exclusion below its floor; the recomputed floor
+    # must still skip it instead of treating it as admitted again.
+    base = _policy("1.0.0", "1.7.0", "1.5.0")
+    discovered = [f"1.{minor}.0" for minor in range(8)]
+
+    check_routine_floor(_policy("1.6.0", "1.7.0"), base, discovered, 3)
 
 
 def test_a_plugin_edit_selects_its_harness_for_a_retest_not_only_a_policy_edit(

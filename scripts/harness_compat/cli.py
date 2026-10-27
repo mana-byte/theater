@@ -18,11 +18,12 @@ from .diagnostics import exception_detail
 from .policy import (
     affected_harnesses,
     check_routine_change,
+    check_routine_floor,
     load_policy,
     policy_relative,
 )
 from .publish import SWEEP_EVENTS, check_publication_context, file_attention_issue, publish
-from .run import Run, discover_releases, run_harness, split_shards
+from .run import Run, discovered_releases, run_harness, select_releases, split_shards
 from .summary import error_annotation, render_run
 
 
@@ -34,11 +35,23 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("harness", choices=ADAPTER_NAMES)
     run.add_argument("--budget-minutes", type=float, help="stop starting releases after this long")
+    run.add_argument(
+        "--max-range",
+        type=int,
+        default=10,
+        help="raise the floor when more releases than this are in range",
+    )
     verify = commands.add_parser("verify", help="check proposed admissions, bounded by the PR")
     verify.add_argument("harness", choices=ADAPTER_NAMES)
     verify.add_argument("--base", required=True)
     verify.add_argument("--routine", action="store_true")
     verify.add_argument("--releases", help="comma-separated releases, from the fan-out shards")
+    verify.add_argument(
+        "--max-range",
+        type=int,
+        default=10,
+        help="the floor a routine PR must carry exactly",
+    )
     shards = commands.add_parser("shards", help="emit the PR verify shard matrix for one harness")
     shards.add_argument("harness", choices=ADAPTER_NAMES)
     shards.add_argument("--base", required=True)
@@ -69,12 +82,19 @@ def _publishes() -> bool:
 
 
 def _run(args: argparse.Namespace, root: Path) -> int:
+    if args.max_range < 1:
+        raise ValueError("--max-range must hold at least one release")
     publishing = _publishes()
     if publishing:
         check_publication_context(root, os.environ)
 
     def completed(run: Run) -> None:
-        published = publish(root, run, run_url=_run_url(os.environ["GITHUB_RUN_ID"]))
+        published = publish(
+            root,
+            run,
+            run_url=_run_url(os.environ["GITHUB_RUN_ID"]),
+            max_range=args.max_range,
+        )
         print(f"{args.harness}: shared policy PR {published.pr}", flush=True)
 
     run = run_harness(
@@ -96,27 +116,29 @@ def _run(args: argparse.Namespace, root: Path) -> int:
 
 def _pr_window(
     root: Path, harness: str, base: str, routine: bool
-) -> tuple[VersionPolicy, list[str]]:
-    """The policy a PR check runs against, and the releases its window covers."""
+) -> tuple[VersionPolicy, VersionPolicy, list[str], list[str]]:
+    """The PR's policy, the base policy, the verify window and the full discovery."""
     policy = load_policy(root, harness)
     relative = policy_relative(harness).as_posix()
     added = git.git(root, "diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", relative)
     base_policy = policy if added else VersionPolicy.from_text(git.show(root, base, relative))
     if routine and check_routine_change(root, base) != harness:
         raise ValueError("the routine PR selected a different harness")
-    return policy, discover_releases(
-        load_adapter(harness), policy, base=base_policy, routine=routine
-    )
+    found = discovered_releases(load_adapter(harness))
+    window = select_releases(found, policy, name=harness, base=base_policy, routine=routine)
+    return policy, base_policy, window, found
 
 
 def _verify(args: argparse.Namespace, root: Path) -> int:
-    policy, discovered = _pr_window(root, args.harness, args.base, args.routine)
+    if args.max_range < 1:
+        raise ValueError("--max-range must hold at least one release")
+    policy, base_policy, window, found = _pr_window(root, args.harness, args.base, args.routine)
+    if args.routine:
+        check_routine_floor(policy, base_policy, found, args.max_range)
     releases = (
-        [version for version in args.releases.split(",") if version]
-        if args.releases
-        else discovered
+        [version for version in args.releases.split(",") if version] if args.releases else window
     )
-    outside = sorted(set(releases) - set(discovered), key=version_key)
+    outside = sorted(set(releases) - set(window), key=version_key)
     if outside:
         raise ValueError(f"the shard releases {', '.join(outside)} are outside the PR window")
     run = run_harness(root, load_adapter(args.harness), releases=releases)
@@ -137,7 +159,7 @@ def _shard_range(shard: list[str]) -> str:
 
 
 def _shards(args: argparse.Namespace, root: Path) -> int:
-    _, releases = _pr_window(root, args.harness, args.base, args.routine)
+    _, _, releases, _ = _pr_window(root, args.harness, args.base, args.routine)
     include = [
         {"range": _shard_range(shard), "versions": ",".join(shard)}
         for shard in split_shards(releases)

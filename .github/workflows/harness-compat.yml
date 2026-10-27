@@ -95,6 +95,7 @@ jobs:
       HARNESS: ${{ matrix.harness }}
       GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.HARNESS_COMPAT || github.token }}
+      MAX_RANGE: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -113,7 +114,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: uv sync --locked --all-packages --group dev
       - name: Test every newer release and publish each completed outcome
-        run: timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat run "$HARNESS" --budget-minutes 310
+        run: timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat run "$HARNESS" --budget-minutes 310 --max-range "$MAX_RANGE"
 
   # Each affected harness gets its own fan-out and shard matrix, so one harness's discovery
   # failure or window size never shapes another harness's verify jobs.
@@ -126,6 +127,7 @@ jobs:
       harness: claude
       base: ${{ needs.plan.outputs.base }}
       routine: ${{ needs.plan.outputs.routine == 'true' }}
+      max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
 
   verify-codex:
     name: Verify codex
@@ -136,6 +138,7 @@ jobs:
       harness: codex
       base: ${{ needs.plan.outputs.base }}
       routine: ${{ needs.plan.outputs.routine == 'true' }}
+      max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
 
   verify-opencode:
     name: Verify opencode
@@ -146,6 +149,7 @@ jobs:
       harness: opencode
       base: ${{ needs.plan.outputs.base }}
       routine: ${{ needs.plan.outputs.routine == 'true' }}
+      max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
 
   verify-pi:
     name: Verify pi
@@ -156,6 +160,7 @@ jobs:
       harness: pi
       base: ${{ needs.plan.outputs.base }}
       routine: ${{ needs.plan.outputs.routine == 'true' }}
+      max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
 
   verify-vibe:
     name: Verify vibe
@@ -166,3 +171,4 @@ jobs:
       harness: vibe
       base: ${{ needs.plan.outputs.base }}
       routine: ${{ needs.plan.outputs.routine == 'true' }}
+      max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}

@@ -40,6 +40,8 @@ class Run:
     releases: tuple[str, ...]
     results: tuple[Result, ...]
     errors: tuple[str, ...] = ()
+    #: The validated discovery behind a self-selected release list; empty when releases were given.
+    discovered: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         keys = [version_key(version) for version in self.releases]
@@ -61,14 +63,8 @@ def _check_identity(result: Result, harness: str, version: str) -> None:
         )
 
 
-def discover_releases(
-    adapter: Adapter,
-    policy: VersionPolicy,
-    *,
-    base: VersionPolicy | None = None,
-    routine: bool = False,
-) -> list[str]:
-    """Sweeps start above committed max; PR checks stop at the proposed max."""
+def discovered_releases(adapter: Adapter) -> list[str]:
+    """Every stable upstream release, validated as unique and ascending."""
     found = adapter.discover()
     try:
         keys = [version_key(version) for version in found]
@@ -76,10 +72,31 @@ def discover_releases(
         raise DiscoveryError(f"{adapter.name} discovery holds a non-stable release: {exc}") from exc
     if keys != sorted(set(keys)):
         raise DiscoveryError(f"{adapter.name} discovery is not unique and ascending")
-    changed_exclusions = set(policy.excluded) ^ set(base.excluded) if base else set()
+    return found
+
+
+def select_releases(
+    found: Sequence[str],
+    policy: VersionPolicy,
+    *,
+    name: str,
+    base: VersionPolicy | None = None,
+    routine: bool = False,
+) -> list[str]:
+    """Sweeps start above committed max; PR checks stop at the proposed max."""
+    # Exclusions the PR pruned below its floor are retired with it, not un-excluded.
+    changed_exclusions = (
+        {
+            version
+            for version in set(policy.excluded) ^ set(base.excluded)
+            if version_key(version) >= version_key(policy.minimum)
+        }
+        if base
+        else set()
+    )
     for required in {policy.minimum, policy.maximum, *changed_exclusions}:
         if required not in found:
-            raise DiscoveryError(f"{adapter.name} discovery lacks the policy release {required}")
+            raise DiscoveryError(f"{name} discovery lacks the policy release {required}")
     if base is None:
         return [version for version in found if version_key(version) > version_key(policy.maximum)]
     low = version_key(base.maximum) if routine else version_key(policy.minimum)
@@ -183,8 +200,14 @@ def run_harness(
 ) -> Run:
     """Continue after failed versions; an interruption or failed cleanup stops after publication."""
     policy = load_policy(root, adapter.name)
-    chosen = tuple(discover_releases(adapter, policy) if releases is None else releases)
-    Run(adapter.name, policy, chosen, ())
+    if releases is None:
+        found = discovered_releases(adapter)
+        chosen = tuple(select_releases(found, policy, name=adapter.name))
+        discovered = tuple(found)
+    else:
+        chosen = tuple(releases)
+        discovered = ()
+    Run(adapter.name, policy, chosen, (), discovered=discovered)
     results: list[Result] = []
     errors: list[str] = []
     # The outer job timeout stays the hard backstop; the budget decides which releases start.
@@ -212,7 +235,16 @@ def run_harness(
             say(f"{check.status:5} {check.name}: {check.detail}")
         if publish is not None:
             try:
-                publish(Run(adapter.name, policy, chosen, tuple(results), tuple(errors)))
+                publish(
+                    Run(
+                        adapter.name,
+                        policy,
+                        chosen,
+                        tuple(results),
+                        tuple(errors),
+                        discovered=discovered,
+                    )
+                )
                 say(f"compat:published {adapter.name} {version}")
             except (Exception, KeyboardInterrupt) as exc:
                 detail = clip_diagnostic(
@@ -233,4 +265,4 @@ def run_harness(
                 stop = stop or isinstance(exc, KeyboardInterrupt)
         if stop:
             break
-    return Run(adapter.name, policy, chosen, tuple(results), tuple(errors))
+    return Run(adapter.name, policy, chosen, tuple(results), tuple(errors), discovered=discovered)

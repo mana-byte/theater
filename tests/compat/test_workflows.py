@@ -121,6 +121,21 @@ def test_routine_pr_checks_use_the_base_and_stop_at_the_proposed_policy() -> Non
     assert "pull_request_target" not in str(reusable)
 
 
+def test_the_floor_range_is_a_repo_variable_wired_into_run_and_verify() -> None:
+    compat = _load("harness-compat.yml")
+    reusable = _load("harness-compat-verify.yml")
+    expression = "${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}"
+    for name in VERIFY_CALLS:
+        assert compat["jobs"][name]["with"]["max_range"] == expression
+    assert reusable["on"]["workflow_call"]["inputs"]["max_range"]["required"] is True
+    qualify = compat["jobs"]["qualify"]
+    assert qualify["env"]["MAX_RANGE"] == expression
+    assert '--max-range "$MAX_RANGE"' in qualify["steps"][-1]["run"]
+    verify = reusable["jobs"]["verify"]
+    assert verify["env"]["MAX_RANGE"] == "${{ inputs.max_range }}"
+    assert '--max-range "$MAX_RANGE"' in verify["steps"][-1]["run"]
+
+
 def test_verify_check_names_are_short_and_show_the_version_range() -> None:
     # Check names read "<caller> / <called job>": "Verify codex / Shards" and
     # "Verify codex / 1.4.0-1.7.0" — the shard job name is the range it tests.
