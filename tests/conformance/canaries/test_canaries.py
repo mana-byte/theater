@@ -68,7 +68,7 @@ def test_the_suite_notices_a_deliberately_broken_plugin(name: str, mutation: Mut
         )
         logs = [
             log.read_text(encoding="utf-8", errors="replace")
-            for log in sb.evidence_dir.glob("*/daemon.log")
+            for log in sb.evidence_dir.rglob("daemon.log")
         ]
 
     banner = LOADED_BANNER % mutation.name

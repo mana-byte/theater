@@ -13,11 +13,15 @@ _PROBLEM = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} (WARNING|ERROR|CRI
 
 
 def log_excerpt(evidence: Path, *, limit: int = EXCERPT_CHARS) -> str:
-    """The last warnings and errors of each captured log, each with an equal share of ``limit``.
+    """The latest warnings and errors of each captured log, newest first, each log with an equal
+    share of ``limit``.
 
     The sandbox is deleted with the logs, and a report clips a failure to its assertion text.
-    An equal share keeps one noisy log from starving a later one; an unreadable log adds nothing.
+    Newest first keeps a clip from dropping the decisive record, an equal share keeps a noisy log
+    from starving another, and a record another log already showed (the daemon's own output is
+    in two files) is shown once. An unreadable log adds nothing.
     """
+    seen: set[str] = set()
     shown: list[str] = []
     for log in sorted(evidence.rglob("*.log")):
         try:
@@ -27,19 +31,21 @@ def log_excerpt(evidence: Path, *, limit: int = EXCERPT_CHARS) -> str:
         except OSError:
             continue
         # A log with no timestamped record is raw output (a crash before logging was configured).
-        records = _problems(lines) if any(map(_STAMP.match, lines)) else _raw(lines)
+        found = _problems(lines) if any(map(_STAMP.match, lines)) else _raw(lines)
+        records = [record for record in found if record not in seen]
+        seen.update(records)
         if records:
             shown.append(f"{log.relative_to(evidence).as_posix()}: {' | '.join(records)}")
     return " ; ".join(entry[: limit // len(shown)] for entry in shown)
 
 
 def _raw(lines: list[str]) -> list[str]:
-    return [line.strip()[:200] for line in lines if line.strip()][-_RECORDS:]
+    return [line.strip()[:200] for line in reversed(lines) if line.strip()][:_RECORDS]
 
 
 def _problems(lines: list[str]) -> list[str]:
-    """Distinct warning and error records without their date. A record keeps its last continuation
-    line: where a logged traceback names the exception."""
+    """Distinct warning and error records, newest first, without their date. A record keeps its
+    last continuation line: where a logged traceback names the exception."""
     records: list[list[str]] = []
     current: list[str] | None = None
     for line in lines:
@@ -55,4 +61,4 @@ def _problems(lines: list[str]) -> list[str]:
         if len(picked) == _RECORDS:
             break
         picked.setdefault(header, tail)
-    return [f"{header} … {tail}" if tail else header for header, tail in reversed(picked.items())]
+    return [f"{header} … {tail}" if tail else header for header, tail in picked.items()]

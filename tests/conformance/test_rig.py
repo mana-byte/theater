@@ -205,11 +205,15 @@ def test_a_log_excerpt_names_the_latest_distinct_problems_and_each_logs_own_caus
     (tmp_path / "daemon.log").write_text("\n".join(daemon), encoding="utf-8")
     # Raw output has no timestamped record: its last lines are the crash, and noise can't hide it.
     (tmp_path / "boot" / "x.log").write_text("\n\nRuntimeError: BRIDGE_CAUSE\n", encoding="utf-8")
+    # The daemon's own output is in two files: the second shows nothing the first did.
+    (tmp_path / "boot" / "start.log").write_text(daemon[-1], encoding="utf-8")
 
     excerpt = log_excerpt(tmp_path)
 
     assert "ERROR theater.test callback failed … ValueError: ROOT_CAUSE" in excerpt
     assert "noise 4" in excerpt and "noise 1" not in excerpt and "benign lag" not in excerpt
+    assert excerpt.index("callback failed") < excerpt.index("noise 4")  # newest first
+    assert excerpt.count("callback failed") == 1
     assert "10:15" not in excerpt  # a clock would make every report differ
     assert "boot/x.log: RuntimeError: BRIDGE_CAUSE" in excerpt
     assert len(excerpt) <= 500
