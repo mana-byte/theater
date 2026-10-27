@@ -183,6 +183,11 @@ def _slug(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:80] or "scenario"
 
 
+def evidence_dir_for(session: LiveSession, name: str) -> Path:
+    """Where a scenario's captured logs land: the rig writes it and the reporter reads it."""
+    return session.evidence_dir / _slug(name)
+
+
 def _toml_list(values: tuple[str, ...]) -> str:
     return "[" + ", ".join(f'"{value}"' for value in values) + "]"
 
@@ -245,13 +250,13 @@ class LiveRig:
     ) -> AsyncIterator[LiveRig]:
         if harness.compat is None:
             raise RuntimeError(f"harness {session.harness!r} declares no compat manifest")
-        label = _slug(label)
         root = session.sandbox_root / f"l{next(_ROOMS)}"
         workdir, marker_dir = root / "w", root / "m"
         for directory in (root / "h", root / "t", root / "th", workdir, marker_dir):
             directory.mkdir(parents=True, exist_ok=True)
         assert_isolated(session.sandbox_root, root, workdir, marker_dir)
-        evidence = session.evidence_dir / label
+        evidence = evidence_dir_for(session, label)
+        label = evidence.name
         async with contextlib.AsyncExitStack() as cleanup:  # undone in reverse, whatever came up
             mock = MockServer(
                 session.evidence_dir / f"{label}.requests.jsonl",

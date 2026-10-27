@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,14 @@ from theater.harness.contracts.runtime import (
     RuntimeSnapshot,
 )
 from theater.observability.catalog import RUNTIME_RECONNECT
+
+logger = logging.getLogger("theater.daemon.harness_runtime.manager")
+
+_UNHEALTHY = frozenset({ConnectionHealth.DEGRADED, ConnectionHealth.DISCONNECTED})
+
+
+def _health(route: CachedNativeRoute | None) -> tuple[ConnectionHealth, tuple[str, ...]] | None:
+    return None if route is None else (route.health, route.health_diagnostics)
 
 
 async def _close_quietly(runtime: HarnessRuntime) -> None:
@@ -276,6 +285,17 @@ class HarnessRuntimeManager:
             self._native_routes.pop(participant_id, None)
         else:
             self._native_routes[participant_id] = route
+        # The plugin's bounded reason otherwise reaches only a get_session_controls caller, and
+        # only while the route is still unhealthy.
+        if route is not None and route.health in _UNHEALTHY and _health(route) != _health(before):
+            logger.warning(
+                "native route of %s is %s (generation %s, session %s): %s",
+                participant_id,
+                route.health.value,
+                route.backend_generation,
+                route.native_session_id,
+                "; ".join(route.health_diagnostics) or "no diagnostics reported",
+            )
         if before == route or self._route_change_callback is None:
             return
         self._route_change_callback(participant_id)

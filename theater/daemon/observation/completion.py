@@ -245,9 +245,12 @@ class CompletionTracker:
         if self.jobs is None or not self.store.completion_candidate_jobs_for_target(pid):
             return
         logger.warning(
-            "%s: turn ends since the last read are not retained; its delivered jobs end "
-            "unverified rather than take another turn's answer",
+            "%s: turn ends since the last read are not retained (turn %s, open=%s, queued=%d); "
+            "its delivered jobs end unverified rather than take another turn's answer",
             pid,
+            turn_state.turn_id,
+            turn_state.open,
+            len(turn_state.queued),
         )
         pinned = await self.jobs.prepare_pins(pid)
         try:

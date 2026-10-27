@@ -31,7 +31,7 @@ from .contract import (
     SuiteRow,
     Verdict,
 )
-from .diagnostics import clip_diagnostic
+from .diagnostics import FAILURE_DETAIL_CHARS, clip_diagnostic
 from .framework import run_pytest
 from .process import run_group
 from .sandbox import make_sandbox
@@ -40,7 +40,6 @@ from .sandbox import make_sandbox
 SUITE_TARGET = "tests/conformance/live"
 #: The live scenarios of one release may not run longer than this.
 SUITE_TIMEOUT_SECONDS = 20 * 60.0
-_DETAIL_LIMIT = 300
 _OUTCOMES: Mapping[str, CheckStatus] = {"passed": "pass", "failed": "fail"}
 #: A word that opens like a release (MAJOR.MINOR.PATCH...): it must then be exactly one.
 _VERSION_WORD = re.compile(r"v?(\d+\.\d+\.\d+\S*)")
@@ -215,7 +214,7 @@ def _obligation_check(promised: SuiteRow, found: SuiteRow, *, partial: bool) -> 
         if partial:
             return Check(name, "skip", "not selected in this partial run"), False
         return Check(name, "error", "its scenario never ran"), True
-    detail = clip_diagnostic(found.detail, _DETAIL_LIMIT)
+    detail = clip_diagnostic(found.detail, FAILURE_DETAIL_CHARS)
     assert found.outcome is not None
     return Check(name, _OUTCOMES.get(found.outcome, "error"), detail or found.outcome), False
 

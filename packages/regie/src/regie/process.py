@@ -32,6 +32,8 @@ from theater.frontend import (
 )
 
 _DEFAULT_START_TIMEOUT = 10.0
+#: A loaded machine can need longer than a connect or stop to bring up the bridge's provider.
+_DEFAULT_BRIDGE_START_TIMEOUT = 30.0
 _POLL_SECONDS = 0.05
 _BUILD = sys.executable
 _BRIDGE_WORKER_MODULE = "regie"
@@ -280,7 +282,7 @@ class BridgeProcessManager:
             return BridgeProcessStatus.stopped("the recorded bridge process is no longer verified")
         return status
 
-    def start(self, *, timeout: float = _DEFAULT_START_TIMEOUT) -> BridgeProcessStatus:
+    def start(self, *, timeout: float = _DEFAULT_BRIDGE_START_TIMEOUT) -> BridgeProcessStatus:
         """Spawn once, then wait boundedly for this exact child to report provider readiness."""
         self._paths.ensure_private_runtime()
         start_lock = _FileLock(self._paths.bridge_start_lock)

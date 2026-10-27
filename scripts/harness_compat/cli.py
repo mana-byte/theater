@@ -24,7 +24,7 @@ from .policy import (
 )
 from .publish import SWEEP_EVENTS, check_publication_context, publish
 from .run import Run, discovered_releases, run_harness, select_releases, split_shards
-from .summary import error_annotation, render_run
+from .summary import error_annotation, render_failures, render_run
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -81,6 +81,13 @@ def _publishes() -> bool:
     )
 
 
+def _show(run: Run) -> None:
+    """The table, then every failure the run had: the cause belongs where a reader stops."""
+    print(render_run(run))
+    if failures := render_failures(run):
+        print(failures)
+
+
 def _run(args: argparse.Namespace, root: Path) -> int:
     if args.max_range < 1:
         raise ValueError("--max-range must hold at least one release")
@@ -108,7 +115,7 @@ def _run(args: argparse.Namespace, root: Path) -> int:
         publish=completed if publishing else None,
         budget_seconds=args.budget_minutes * 60 if args.budget_minutes is not None else None,
     )
-    print(render_run(run))
+    _show(run)
     if run.errors:
         print(error_annotation("Harness compatibility", "; ".join(run.errors)))
         return 2
@@ -147,7 +154,7 @@ def _verify(args: argparse.Namespace, root: Path) -> int:
     if outside:
         raise ValueError(f"the shard releases {', '.join(outside)} are outside the PR window")
     run = run_harness(root, load_adapter(args.harness), releases=releases)
-    print(render_run(run))
+    _show(run)
     if run.errors or len(run.results) != len(releases):
         return 2
     if any(result.verdict in {"inconclusive", "tooling"} for result in run.results):

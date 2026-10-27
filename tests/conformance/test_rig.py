@@ -17,7 +17,7 @@ import pytest
 from scripts.harness_compat.mock import MockServer
 from tests.support import live_rig, live_stack
 from tests.support.live_rig import LiveRig, LiveSession
-from tests.support.live_stack import Stack
+from tests.support.live_stack import Stack, log_excerpt
 
 
 def test_theater_children_import_the_code_copy_with_no_inherited_pythonpath(
@@ -159,6 +159,10 @@ def _write_logs(theater_home: Path) -> None:
     logs = theater_home / "regie" / "var" / "logs"
     logs.mkdir(parents=True)
     (logs / "bridge.log").write_text("bridge said this", encoding="utf-8")
+    (logs / "bridge-stderr").mkdir()
+    (logs / "bridge-stderr" / "20261027-101500-abc.log").write_text(
+        "worker crashed", encoding="utf-8"
+    )
 
 
 def test_a_stack_that_never_started_leaves_no_evidence_directory(tmp_path: Path) -> None:
@@ -179,6 +183,8 @@ def test_capturing_evidence_copies_logs_and_every_pane_and_survives_a_missing_tm
     stack.capture(target)
 
     assert (target / "bridge.log").read_text(encoding="utf-8") == "bridge said this"
+    # A crash before logging is configured leaves only the raw stderr, so it is captured too.
+    assert (target / "bridge-stderr" / "20261027-101500-abc.log").read_text() == "worker crashed"
     assert (target / "pane-2.txt").read_text(encoding="utf-8") == "screen of %2"
 
     def missing(_self: Stack) -> list[str]:
@@ -186,6 +192,38 @@ def test_capturing_evidence_copies_logs_and_every_pane_and_survives_a_missing_tm
 
     monkeypatch.setattr(Stack, "panes", missing)
     stack.capture(tmp_path / "other")  # must not raise: a stack that never started has no tmux
+
+
+def _record(level: str, message: str, *continuation: str) -> str:
+    return "\n".join([f"2026-10-27 10:15:00,123 {level:<7} theater.test {message}", *continuation])
+
+
+def test_a_log_excerpt_names_the_latest_distinct_problems_and_each_logs_own_cause(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "boot").mkdir()
+    daemon = [_record("INFO", "fine")]
+    daemon += [_record("WARNING", "benign lag")] * 2  # a repeat is one record
+    daemon += [_record("WARNING", f"noise {number}") for number in range(5)]
+    daemon.append(_record("ERROR", "callback failed", "Traceback ...", "ValueError: ROOT_CAUSE"))
+    (tmp_path / "daemon.log").write_text("\n".join(daemon), encoding="utf-8")
+    # A raw crash has no record format; a noisy daemon log must not push it out.
+    (tmp_path / "boot" / "bridge-stderr").mkdir()
+    (tmp_path / "boot" / "bridge-stderr" / "x.log").write_text("\n\nRuntimeError: BRIDGE_CAUSE\n")
+
+    excerpt = log_excerpt(tmp_path)
+
+    assert "ERROR theater.test callback failed … ValueError: ROOT_CAUSE" in excerpt
+    assert "noise 4" in excerpt and "noise 1" not in excerpt and "benign lag" not in excerpt
+    assert "10:15" not in excerpt  # the clock would make every report differ
+    assert "boot/bridge-stderr/x.log: RuntimeError: BRIDGE_CAUSE" in excerpt
+    assert len(excerpt) <= 500
+
+
+def test_a_log_excerpt_of_nothing_readable_is_empty(tmp_path: Path) -> None:
+    assert log_excerpt(tmp_path / "never captured") == ""
+    (tmp_path / "daemon.log").write_text(_record("INFO", "all well"), encoding="utf-8")
+    assert log_excerpt(tmp_path) == ""
 
 
 def _recorded_runs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:

@@ -134,6 +134,34 @@ async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None
     await manager.aclose()
 
 
+async def test_an_unhealthy_route_logs_its_plugin_reason_once_per_change(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="theater.daemon.harness_runtime.manager")
+    manager = HarnessRuntimeManager()
+    state = FakeRuntimeState(participant_id="p1", backend_generation=4, native_session_id="s4")
+    runtime = await manager.get_or_create("p1", backend_generation=4, create=_factory("p1", state))
+    snapshot = await runtime.snapshot()
+
+    manager.record_snapshot("p1", runtime, snapshot)  # connected: nothing to say
+    degraded = replace(
+        snapshot, health=ConnectionHealth.DEGRADED, health_diagnostics=("event buffer saturated",)
+    )
+    manager.record_snapshot("p1", runtime, degraded)
+    manager.record_snapshot("p1", runtime, degraded)  # unchanged: said already
+    manager.record_snapshot(
+        "p1", runtime, replace(degraded, health_diagnostics=("callback failed",))
+    )
+
+    reasons = [record.getMessage() for record in caplog.records]
+    assert len(reasons) == 2
+    assert "p1 is degraded" in reasons[0] and "event buffer saturated" in reasons[0]
+    assert "callback failed" in reasons[1]
+    manager.mark_disconnected("p1", runtime)
+    assert "p1 is disconnected" in caplog.records[-1].getMessage()
+    await manager.aclose()
+
+
 async def test_concurrent_get_or_create_builds_exactly_one_instance() -> None:
     manager = HarnessRuntimeManager()
     state = FakeRuntimeState(participant_id="p1")

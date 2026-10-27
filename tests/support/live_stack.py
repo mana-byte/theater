@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -157,15 +158,85 @@ class Stack:
 
     def _copy_logs(self, target: Path) -> None:
         """Copy the daemon and bridge logs that exist; a stack that never started leaves none."""
-        for source in (
-            self.theater_home / "var" / "logs" / "daemon" / "daemon.log",
-            self.theater_home / DAEMON_START_LOG,
-            self.theater_home / "regie" / "var" / "logs" / "bridge.log",
-        ):
+        daemon_logs = self.theater_home / "var" / "logs" / "daemon"
+        bridge_logs = self.theater_home / "regie" / "var" / "logs"
+        # A worker that dies before it configures logging leaves only its raw stderr.
+        stderr_dirs = {
+            "daemon-stderr": daemon_logs / "stderr",
+            "bridge-stderr": bridge_logs / "bridge-stderr",
+        }
+        sources = [
+            (daemon_logs / "daemon.log", target / "daemon.log"),
+            (self.theater_home / DAEMON_START_LOG, target / DAEMON_START_LOG.name),
+            (bridge_logs / "bridge.log", target / "bridge.log"),
+            *(
+                (source, target / name / source.name)
+                for name, directory in stderr_dirs.items()
+                for source in sorted(directory.glob("*.log"))
+            ),
+        ]
+        for source, destination in sources:
             if source.is_file():
-                target.mkdir(parents=True, exist_ok=True)
+                destination.parent.mkdir(parents=True, exist_ok=True)
                 with contextlib.suppress(OSError):
-                    shutil.copyfile(source, target / source.name)
+                    shutil.copyfile(source, destination)
+
+
+_EXCERPT_CHARS = 500
+_EXCERPT_RECORDS = 3
+_LOG_TAIL_BYTES = 64 * 1024
+_STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} ")
+_PROBLEM = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} (WARNING|ERROR|CRITICAL)\s+(.*)$")
+
+
+def log_excerpt(evidence: Path, *, limit: int = _EXCERPT_CHARS) -> str:
+    """The last warnings and errors the captured logs hold, short enough to survive CI clipping.
+
+    A report clips a failure to its assertion text, so the cause the daemon or bridge logged is
+    lost with the sandbox. Each file gets an equal share of ``limit``, so one noisy log cannot
+    starve a later one; an unreadable or absent log adds nothing.
+    """
+    shown: list[tuple[str, list[str]]] = []
+    for log in sorted(evidence.rglob("*.log")):
+        try:
+            with log.open("rb") as handle:
+                handle.seek(max(0, log.stat().st_size - _LOG_TAIL_BYTES))
+                lines = handle.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            continue
+        # Raw stderr has no record format: its last lines are the crash.
+        records = _raw_records(lines) if "stderr" in log.parent.name else _problem_records(lines)
+        if records:
+            shown.append((log.relative_to(evidence).as_posix(), records))
+    if not shown:
+        return ""
+    share = limit // len(shown)
+    return " ; ".join(f"{name}: {' | '.join(records)}"[:share] for name, records in shown)
+
+
+def _raw_records(lines: list[str]) -> list[str]:
+    return [line.strip()[:200] for line in lines if line.strip()][-_EXCERPT_RECORDS:]
+
+
+def _problem_records(lines: list[str]) -> list[str]:
+    """Distinct warning/error records without their date; a record keeps its last continuation
+    line, which is where a logged traceback names the exception."""
+    records: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if _STAMP.match(line):
+            problem = _PROBLEM.match(line)
+            current = [f"{problem[1]} {problem[2]}"[:200], ""] if problem else None
+            if current is not None:
+                records.append(current)
+        elif current is not None and line.strip():
+            current[1] = line.strip()[:120]
+    picked: dict[str, str] = {}
+    for header, tail in reversed(records):
+        if len(picked) == _EXCERPT_RECORDS:
+            break
+        picked.setdefault(header, tail)
+    return [f"{header} … {tail}" if tail else header for header, tail in reversed(picked.items())]
 
 
 def _terminate(pid: int) -> bool:

@@ -1,12 +1,15 @@
-"""Human-readable run summary for stdout: the log is the only place results are shown."""
+"""Human-readable run summary and failure ledger for stdout."""
 
 from __future__ import annotations
 
 from .contract import Result
-from .diagnostics import clip_diagnostic
+from .diagnostics import FAILURE_DETAIL_CHARS, clip_diagnostic
 from .run import Run
 
 _DETAIL_LIMIT = 160
+#: Frame the ledger so a reader of a raw log can cut it out whole, wherever it sits.
+LEDGER_BEGIN = "compat:failures:begin"
+LEDGER_END = "compat:failures:end"
 
 
 def failing_checks(result: Result, *, detail_limit: int = _DETAIL_LIMIT) -> list[str]:
@@ -32,6 +35,21 @@ def render_run(run: Run) -> str:
         admitted = "yes" if run.policy.admits(result.version) else "no"
         lines.append(f"| {result.version} | {admitted} | {result.verdict} | {first} |")
     return "\n".join(lines)
+
+
+def render_failures(run: Run) -> str:
+    """Every failure of this run in one block, or nothing when the run has none."""
+    lines: list[str] = []
+    for result in run.results:
+        if result.verdict != "green":
+            lines.append(f"{run.harness} {result.version} ended {result.verdict}:")
+            lines += [
+                f"  {check}" for check in failing_checks(result, detail_limit=FAILURE_DETAIL_CHARS)
+            ]
+    lines += [f"error: {error}" for error in run.errors]
+    if unfinished := run.releases[len(run.results) :]:
+        lines.append(f"unfinished: {', '.join(unfinished)}")
+    return "\n".join([LEDGER_BEGIN, *lines, LEDGER_END]) if lines else ""
 
 
 def error_annotation(title: str, message: str) -> str:
