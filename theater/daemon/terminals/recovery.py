@@ -307,7 +307,7 @@ class ProviderReceiptReconciler:
                     "reclaimed terminal is bound to another participant"
                 ) from exc
             self._store.terminal_bindings.bind(binding, connection=unit.connection)
-        elif self._binding_key(existing) != self._binding_key(binding):
+        elif existing.route_key != binding.route_key:
             raise ProviderReceiptError("reclaimed terminal does not match its durable binding")
 
         if launch.workspace_usage_id is not None:
@@ -750,17 +750,6 @@ class ProviderReceiptReconciler:
             report_revision=report_revision,
             created_at=timestamp,
             updated_at=timestamp,
-        )
-
-    @staticmethod
-    def _binding_key(binding: TerminalBindingRecord) -> tuple[object, ...]:
-        return (
-            binding.provider_id,
-            binding.provider_generation,
-            binding.terminal_id,
-            binding.terminal_incarnation,
-            binding.occupant_evidence,
-            binding.process_facts,
         )
 
     @staticmethod

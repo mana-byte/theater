@@ -462,7 +462,8 @@ class TerminalProviderService:
         )
         if expected is not None:
             current = self._store.terminal_bindings.get(expected.participant_id)
-            if current != expected:
+            # Only identity fences: a concurrent report re-confirming the binding is not a change.
+            if current is None or current.route_key != expected.route_key:
                 raise TerminalIdentityMismatch(provider_id, terminal_id, "binding_changed")
         terminal = result["terminal"]
         revision = result["report_revision"]
