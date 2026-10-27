@@ -2,26 +2,18 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
 from .unified_store_io import _reject_symlink_components
-from .unified_store_loading import (
-    _enumerate_generations,
-    _load_generation_manifest,
-    _read_journal_detail,
-    _session_root,
-)
+from .unified_store_loading import _read_journal_detail, _session_root
 from .unified_store_types import (
     _DELTA_RECORD_TYPES,
+    _JOURNAL_PATH_PATTERN,
     UnifiedStoreError,
     UnifiedStoreView,
     _JournalRecord,
-    _Manifest,
 )
-
-logger = logging.getLogger("theater.observer")
 
 #: Turn changes kept for one read; more than this cannot be replayed whole and is reported unknown.
 TURN_CHANGES_MAX = 1024
@@ -66,7 +58,7 @@ def retained_turn_changes(
 ) -> tuple[dict[str, Any], ...] | None:
     """Turn changes of records ``after`` < sequence <= ``through``, segment by retained segment.
 
-    None when the retained generations' journals do not cover that range contiguously, or
+    None when the retained journals do not cover that range contiguously, or
     when ``through`` lies behind ``after``: history that moved backwards replays nothing.
     """
     if through < after:
@@ -85,16 +77,16 @@ def _replay_segments(
     segments = _segments(session_root)
     tracker = TurnTracker(since)
     expected = after + 1
-    for index, manifest in enumerate(segments):
-        following = segments[index + 1].first_sequence if index + 1 < len(segments) else None
+    for index, path in enumerate(segments):
+        first_sequence = int(path.stem)
+        following = int(segments[index + 1].stem) if index + 1 < len(segments) else None
         last = through if following is None else min(through, following - 1)
         if last < expected:
             continue
-        if manifest.first_sequence > expected:
+        if first_sequence > expected:
             return None  # the segment holding the next record is no longer retained
-        path = session_root / manifest.journal_path
         _reject_symlink_components(session_root, path)
-        for record in _read_journal_detail(path, manifest.first_sequence).records:
+        for record in _read_journal_detail(path, first_sequence).records:
             if record.sequence > last:
                 break
             if record.sequence == expected:
@@ -125,20 +117,12 @@ def turn_changes_between(
     )
 
 
-def _segments(session_root: Path) -> list[_Manifest]:
-    """Retained generations' journal segments in sequence order; unreadable ones are skipped."""
-    manifests: dict[str, _Manifest] = {}
-    for generation in _enumerate_generations(session_root):
-        try:
-            manifest = _load_generation_manifest(
-                session_root / "generations" / generation,
-                session_root.name,
-                generation,
-                manifest_sha256=None,
-                expected_snapshot_sequence=None,
-            )
-        except (OSError, UnifiedStoreError, ValueError):
-            logger.debug("skipping unreadable Vibe generation %s", generation, exc_info=True)
-            continue
-        manifests.setdefault(manifest.journal_path, manifest)
-    return sorted(manifests.values(), key=lambda manifest: manifest.first_sequence)
+def _segments(session_root: Path) -> list[Path]:
+    """Retained journals in sequence order; generation manifests can be collected first."""
+    journals = session_root / "journal"
+    _reject_symlink_components(session_root, journals)
+    return sorted(
+        path
+        for path in journals.iterdir()
+        if _JOURNAL_PATH_PATTERN.fullmatch(f"journal/{path.name}") is not None
+    )
