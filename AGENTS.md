@@ -257,13 +257,24 @@ Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) 
   history. Temporary CLI, daemon and test data must be deleted after the run.
 - Only GitHub workflows invoke compatibility scripts. Daily runs test every stable release above
   committed max, in order; pending PR releases are rechecked without a success-history cache.
-  Passes may advance max. Red, inconclusive and tooling outcomes add exclusions (even above max)
-  and get issues; failures never move either bound. Publish each outcome before the next release.
-  Reuse one per-harness PR and preserve its pending range and exclusion changes.
+  Passes may advance max. Red, inconclusive and tooling outcomes get one reused harness/version
+  issue; failures never move committed bounds. Publish each outcome before the next release.
+  Create one per-harness PR only for a qualified ceiling increase, carrying required exclusions.
+  Failure-only sweeps create no policy branch or PR; old exclusion-only branches are not revived.
+  Failed pending ceilings are replaced by a freshly qualified extension or their PR is retired.
+- Keep issue titles `Harness compatibility: <harness> <version>` and PR titles
+  `chore(compat): <harness> <old max> → <new max>`. Link every excluded version to its issue and
+  related issues back to the PR. Update only marked generated sections; preserve human notes.
+  Retain links for exclusions pruned from earlier runs. Read issue history before policy
+  publication; a failed lookup must never be treated as an empty history.
+  A completed, reliably published sweep may succeed with red candidates; those remain unqualified.
+  Incomplete, inconclusive/tooling and publication failures still fail the workflow.
 - PR checks qualify the proposed code again. A policy refusal never substitutes for a behavioral
   test: only the disposable copy may temporarily admit the supplied release.
 - Routine PR verification tests its proposed extension and changed exclusions; unrelated new
-  upstream releases cannot fail it. Workflow failures need issues, including setup and timeouts.
+  upstream releases cannot fail it. Recover known unfinished versions into their own issues;
+  already published outcomes get no duplicate report. Unidentified, setup and reporter failures
+  stay in Actions; never create generic workflow-error issues. PR runs remain read-only.
   Check the implementation with `uv run pytest tests/compat tests/conformance tests/harness/<h>`.
 
 A plugin may also export an optional `compat=CompatManifest(provision, native_edit, mcp_call, mcp_discovery, canaries)` (see

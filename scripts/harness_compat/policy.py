@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from theater.version_policy import VersionPolicy, version_key
@@ -21,6 +22,15 @@ class PolicyChangeError(ValueError):
 
 class Unproposable(ValueError):
     """Invalid qualification outcomes cannot change a policy."""
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationPlan:
+    """A ceiling decision and every version its reports must reference."""
+
+    proposal: VersionPolicy
+    related_versions: tuple[str, ...]
+    raises_ceiling: bool
 
 
 def policy_relative(name: str) -> Path:
@@ -74,6 +84,41 @@ def derive(
     if max_range is not None:
         proposal = raise_floor(proposal, discovered, max_range)
     return proposal
+
+
+def plan_publication(
+    current: VersionPolicy,
+    pending: VersionPolicy,
+    results: tuple[Result, ...],
+    *,
+    unqualified_versions: Collection[str],
+    discovered: Sequence[str],
+    max_range: int,
+) -> PublicationPlan:
+    """Plan the ceiling and links without inventing outcomes for historical failures."""
+    observed = {result.version for result in results}
+    prior = {
+        version
+        for version in unqualified_versions
+        if version not in observed and version_key(version) > version_key(current.maximum)
+    }
+    failed = prior | {result.version for result in results if result.verdict != "green"}
+    # Only an unmerged ceiling may be withdrawn; committed admission never shrinks here.
+    maximum = current.maximum if pending.maximum in failed else pending.maximum
+    fenced = VersionPolicy(
+        pending.minimum,
+        maximum,
+        tuple(sorted(set(pending.excluded) | prior, key=version_key)),
+    )
+    proposal = derive(fenced, results, discovered=discovered, max_range=max_range)
+    check_change(format_policy(current), format_policy(proposal))
+    related = set(current.excluded) | set(pending.excluded) | prior | observed
+    return PublicationPlan(
+        proposal,
+        tuple(sorted(related, key=version_key)),
+        version_key(proposal.maximum) > version_key(current.maximum)
+        and proposal.admits(proposal.maximum),
+    )
 
 
 def floor_window(policy: VersionPolicy, discovered: Sequence[str]) -> tuple[str, ...]:

@@ -12,7 +12,7 @@ from theater.version_policy import VersionPolicy, version_key
 
 from . import git
 from .adapters import ADAPTER_NAMES, load_adapter
-from .attention import publication_failure_run, report_workflow_failure
+from .attention import report_workflow_failure
 from .canaries import canary_version, run_canaries
 from .diagnostics import exception_detail
 from .policy import (
@@ -22,7 +22,7 @@ from .policy import (
     load_policy,
     policy_relative,
 )
-from .publish import SWEEP_EVENTS, check_publication_context, file_attention_issue, publish
+from .publish import SWEEP_EVENTS, check_publication_context, publish
 from .run import Run, discovered_releases, run_harness, select_releases, split_shards
 from .summary import error_annotation, render_run
 
@@ -95,7 +95,12 @@ def _run(args: argparse.Namespace, root: Path) -> int:
             run_url=_run_url(os.environ["GITHUB_RUN_ID"]),
             max_range=args.max_range,
         )
-        print(f"{args.harness}: shared policy PR {published.pr}", flush=True)
+        print(
+            f"{args.harness}: shared ceiling PR #{published.pr}"
+            if published.pr is not None
+            else f"{args.harness}: outcome published; no ceiling PR",
+            flush=True,
+        )
 
     run = run_harness(
         root,
@@ -111,7 +116,7 @@ def _run(args: argparse.Namespace, root: Path) -> int:
         raise RuntimeError("qualification stopped before every newer release had an outcome")
     if any(result.verdict in {"inconclusive", "tooling"} for result in run.results):
         return 2
-    return int(any(result.verdict == "red" for result in run.results))
+    return 0
 
 
 def _pr_window(
@@ -196,7 +201,7 @@ def _report(args: argparse.Namespace, root: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """0: complete/pass; 1: contract failure; 2: inconclusive or automation failure."""
+    """0: complete/pass; 1: rejected admission; 2: inconclusive or automation failure."""
     args = _parser().parse_args(argv)
     if os.environ.get("GITHUB_ACTIONS") != "true":
         print("harness-compat entry points are reserved for GitHub workflows", file=sys.stderr)
@@ -215,18 +220,4 @@ def main(argv: list[str] | None = None) -> int:
         message = exception_detail(exc)
         print(f"harness-compat: {message}", file=sys.stderr)
         print(error_annotation("Harness compatibility", message))
-        if args.command == "report":
-            try:
-                check_publication_context(Path.cwd(), os.environ)
-                if publication_failure_run(args.run_id) is not None:
-                    file_attention_issue(
-                        f"Harness compatibility workflow: {args.run_id}",
-                        f"Failure reporting needs human attention for run {args.run_id}.\n\n"
-                        f"Run: {_run_url(args.run_id)}\n"
-                        f"Reporter: {_run_url(os.environ['GITHUB_RUN_ID'])}\n\n{message}\n",
-                    )
-            except Exception as reporting:
-                print(
-                    error_annotation("Failure issue publication", str(reporting)), file=sys.stderr
-                )
         return 2

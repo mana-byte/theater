@@ -28,7 +28,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Report failures and recover known pending exclusions
+      - name: Report unfinished harness-version outcomes
         env:
           FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
           GH_REPO: ${{ github.repository }}

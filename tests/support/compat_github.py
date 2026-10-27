@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from scripts.harness_compat.policy import format_policy, policy_relative
+from scripts.harness_compat.publish import issue_title
 from theater.harness.contracts.version_policy import VersionPolicy
 
 POLICY_PATH = policy_relative("claude").as_posix()
@@ -24,9 +25,11 @@ class CompatGithub:
         self.trees = {"tree-main": {POLICY_PATH: format_policy(policy), "tracked.txt": "tracked\n"}}
         self.commits = {sha: {"tree": {"sha": "tree-main"}, "parents": []}}
         self.pr: int | None = None
+        self.pr_body = ""
+        self.pr_title = ""
         self.issues: dict[str, int] = {}
         self.issue_bodies: dict[int, str] = {}
-        self.issue_comments: dict[int, list[str]] = {}
+        self.issue_states: dict[int, str] = {}
         self.calls: list[tuple[str, ...]] = []
         self.requests: list[dict] = []
         self.bodies: list[str] = []
@@ -41,6 +44,10 @@ class CompatGithub:
         }
         self.refs["chore/compat-claude"] = "pending"
         self.pr = 17 if pr else None
+        for version in policy.excluded:
+            title = issue_title("claude", version)
+            number = self.issues.setdefault(title, max(self.issues.values(), default=0) + 1)
+            self.issue_bodies.setdefault(number, f"Earlier qualification failed for {version}.\n")
 
     def policy(self) -> VersionPolicy:
         head = self.refs.get("chore/compat-claude", self.refs["main"])
@@ -76,28 +83,50 @@ class CompatGithub:
             raise RuntimeError(f"{' '.join(args[:2])} unavailable")
         if args[:2] == ("pr", "list"):
             return json.dumps([] if self.pr is None else [{"number": self.pr}])
-        if args[:2] == ("issue", "create"):
-            number = len(self.issues) + 1
-            self.issues[args[args.index("--title") + 1]] = number
-            self.issue_bodies[number] = self.bodies[-1]
-        elif args[:2] == ("issue", "edit"):
-            self.issue_bodies[int(args[2])] = self.bodies[-1]
         if args[0] != "api":
             return ""
         if "--paginate" in args:
-            return json.dumps([[{"title": title, "number": n} for title, n in self.issues.items()]])
+            return json.dumps(
+                [
+                    [
+                        {"title": title, "number": n, "state": self.issue_states.get(n, "open")}
+                        for title, n in self.issues.items()
+                    ]
+                ]
+            )
         path = args[1].removeprefix("repos/{owner}/{repo}/")
-        if path.startswith("issues/") and path.endswith("/comments"):
-            number = int(path.split("/")[1])
-            self.issue_comments.setdefault(number, []).append(body["body"])
-            return json.dumps({"id": len(self.issue_comments[number])})
+        if path == "issues" or path.startswith("issues/"):
+            return json.dumps(self._issue(path, body))
         return json.dumps(self._api(path, body))
+
+    def _issue(self, path: str, body: dict):
+        if path == "issues":
+            if "issue create" in self.fail:
+                raise RuntimeError("issue create unavailable")
+            number = max(self.issues.values(), default=0) + 1
+            self.issues[body["title"]] = number
+        else:
+            number = int(path.split("/")[1])
+            if body and "issue edit" in self.fail:
+                raise RuntimeError("issue edit unavailable")
+        if "body" in body:
+            self.issue_bodies[number] = body["body"]
+            self.bodies.append(body["body"])
+        if "state" in body:
+            self.issue_states[number] = body["state"]
+        return {
+            "number": number,
+            "body": self.issue_bodies.get(number, ""),
+            "state": self.issue_states.get(number, "open"),
+        }
 
     def _api(self, path: str, body: dict):
         if path == "pulls" or path.startswith("pulls/"):
             if path == "pulls" and "pr create" in self.fail:
                 raise RuntimeError("pr create unavailable")
-            self.pr = 17
+            self.pr = None if body.get("state") == "closed" else 17
+            self.pr_body = body.get("body", self.pr_body)
+            self.pr_title = body.get("title", self.pr_title)
             return {"number": 17}
         if path == "git/ref/heads/main":
             return {"object": {"sha": self.refs["main"]}}
