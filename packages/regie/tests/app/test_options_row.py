@@ -168,9 +168,16 @@ async def test_clicking_a_menu_row_puts_the_cursor_on_it() -> None:
 
     async with app.run_test(size=(60, 30)) as pilot:
         tree = app.query_one(ParticipantTree)
-        await wait_until(pilot, lambda: ROOT in tree._key_widgets)
+        await wait_until(
+            pilot,
+            lambda: (
+                app._catalog_ready.is_set()
+                and ROOT in tree._key_widgets
+                and tree._key_widgets[ROOT].region.height == 1
+            ),
+        )
         tree.menu_source = _items
 
-        await pilot.click(tree._key_widgets[ROOT])
+        assert await pilot.click(tree._key_widgets[ROOT])
         await wait_until(pilot, lambda: tree.selected_key == ROOT)
         assert tree.in_menu

@@ -430,7 +430,7 @@ def test_floor_pruning_keeps_links_to_the_failed_version_issue(repo: Path, resul
 
 @pytest.mark.parametrize("committed", [False, True])
 def test_floor_pruning_keeps_links_to_issues_from_earlier_runs(
-    repo: Path, result: Make, committed: bool
+    repo: Path, result: Make, committed: bool, git: Callable[..., str]
 ) -> None:
     version = "1.1.0" if committed else "1.3.0"
     policy = VersionPolicy("1.0.0", "1.2.0", (version,) if committed else ())
