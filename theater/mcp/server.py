@@ -59,7 +59,8 @@ inherited. Follow the active play's positions and retirement rules.
 _TOOLSETS = frozenset({"all", "control", "wait"})
 _WAIT_TOOL = "await_sessions"
 
-AWAIT_DOC = """Wait for child completion, an input request, or a human to leave.
+AWAIT_DOC = """Wait for a Theater agent's task result or session completion,
+an input request, or a human to leave.
 
 handles: spawn/send job handles, or registered participant ids without a job.
 max_wait: one overall deadline including human holds; default 150 seconds, cap {cap}.
@@ -487,7 +488,8 @@ def _register_discovery_tools(mcp_tool, session: Session) -> None:
 
     @mcp_tool()
     async def whoami(include_git: bool = False) -> dict:
-        """Identify yourself. Returned fields include id, live name, description,
+        """Identify yourself in Theater (who am I): your agent identity and current session.
+        Returned fields include id, live name, description,
         harness, tier, status, cwd, branch, session_id, parent_id, addressable,
         and play inside a live play; unset fields are omitted. play holds play,
         position, master and spawn_options: each child position you may give,
@@ -519,7 +521,8 @@ def _register_discovery_tools(mcp_tool, session: Session) -> None:
         limit: int | None = None,
         after_id: str | None = None,
     ) -> list[dict]:
-        """List every agent on this machine that Theater knows about.
+        """Find and list all Theater agents on this machine:
+        running, idle, or dead sessions with include_dead.
 
         Each entry says who they are (harness, id, session_id, and play while
         they hold a live play position), where they are
@@ -922,9 +925,9 @@ def _register_history_tools(mcp_tool, session: Session) -> None:
     async def read_transcript(
         target: str, cursor: str | None = None, roles: list[str] | None = None
     ) -> dict:
-        """Diagnose a child: read a bounded transcript page, newest first.
+        """Read a Theater agent transcript by agent name or participant ID, newest page first.
 
-        For a stuck, failed or surprising child only; await_sessions already returns the
+        Diagnose a stuck, failed or surprising participant only; await_sessions already returns the
         answer. Call once with a known live name or stable id, inspect the newest
         bounded chunk, and use only the returned next_cursor when older
         content is necessary. Stop when the needed event is found; do not call
@@ -945,7 +948,7 @@ def _register_history_tools(mcp_tool, session: Session) -> None:
         middle_cursor (pages the elided middle). The newest unfiltered page adds
         first_prompt (earliest retained job prompt, omitted when already in the
         events), later_prompts, resumed_from when known; filtering by roles omits them.
-        Which job edited a file: recall(paths), then git diff in the child's branch.
+        Which job edited a file: recall(paths), then git diff in the participant's branch.
 
         Refuses if the transcript needs binding or its identity is lost.
         """
