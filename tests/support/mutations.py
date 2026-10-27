@@ -224,11 +224,9 @@ def undecided(statuses: Mapping[str, str], expected: Mapping[str, Expectation]) 
     """Whether the run left an obligation this canary needs decided at ``error``.
 
     ``error`` is no verdict: the suite neither noticed the breakage nor missed it, so only
-    another run can tell. A ``pass`` (a miss) or a ``fail`` is a verdict, and lenient or
-    untouched obligations never ask for another run.
+    another run can tell. A ``pass`` (a miss) or a ``fail`` is a verdict, and lenient (blanket)
+    or untouched obligations never ask for another run.
     """
-    if ANY in expected:
-        return False  # a blanket canary accepts ``error`` as noticed
     return any(how == "fail" and statuses.get(name) == "error" for name, how in expected.items())
 
 

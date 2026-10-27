@@ -36,8 +36,8 @@ pytestmark = [
     pytest.mark.skipif(os.environ.get(ENV_ENABLE) != "1", reason="enabled by the canary workflow"),
 ]
 #: A run that leaves a needed canary obligation at ``error`` (the bridge missed its start
-#: deadline, a CLI never reached its prompt) proves nothing either way, so it runs once more.
-#: A miss never is.
+#: deadline, a CLI never reached its prompt) proves nothing either way; it runs once more.
+#: A miss never does.
 _ATTEMPTS = 2
 #: Read from disk: the registry is only populated after collection.
 SHIPPED = sorted(path.parent.name for path in plugin_dir().glob("*/manifest.py"))
