@@ -47,6 +47,8 @@ class CodexRuntimeEvents(CodexRuntimeHost):
     _status_hint: Status | None
     _settings_notice: Mapping[str, object] | None
     _settings_notice_event: asyncio.Event
+    _health: ConnectionHealth
+    _subscription_degrade: bool
 
     async def _handle_notification(self, notification: RuntimeNotification) -> None:
         method = notification.method
@@ -365,9 +367,18 @@ class CodexRuntimeEvents(CodexRuntimeHost):
     def _diagnostic(self, message: str) -> None:
         self._diagnostics.append(message[:240])
 
-    def _degrade(self, message: str) -> None:
+    def _degrade(self, message: str, *, subscription: bool = False) -> None:
+        # A failed subscription ends with the next one; lost data or a dead wake hook never does.
+        self._subscription_degrade = subscription and (
+            self._health is not ConnectionHealth.DEGRADED or self._subscription_degrade
+        )
         self._health = ConnectionHealth.DEGRADED
         self._diagnostic(message)
+
+    def _lift_subscription_degrade(self) -> None:
+        if self._subscription_degrade and self._health is ConnectionHealth.DEGRADED:
+            self._health = ConnectionHealth.CONNECTED
+        self._subscription_degrade = False
 
 
 _NOTIFICATION_HANDLERS: dict = {

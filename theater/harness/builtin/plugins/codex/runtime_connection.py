@@ -157,6 +157,7 @@ class CodexRuntimeConnection(CodexRuntimeHost):
             )
         if resumed_thread is not None:
             self._subscribed = True
+            self._lift_subscription_degrade()
             # The separate page is newest-first; reconciliation consumes an
             # oldest-first bounded view. Never fall back to thread.turns.
             await self._reconcile_thread(

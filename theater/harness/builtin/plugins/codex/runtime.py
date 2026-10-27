@@ -82,6 +82,7 @@ class CodexRuntime(
         self._settings_gate_reason: CapabilityUnavailableReason | None = None
         self._subscribed = False
         self._health = ConnectionHealth.UNOPENED
+        self._subscription_degrade = False
         self._native_version: str | None = None
         self._diagnostics: deque[str] = deque(
             maxlen=runtime_constants.CODEX_RUNTIME_DIAGNOSTICS_MAX

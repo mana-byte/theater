@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+from tests.support.codex_native_items import completed_item
 from tests.support.codex_server import (
     GENERATION,
     PARTICIPANT,
@@ -21,12 +24,15 @@ from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.observation.service import Observer
 from theater.daemon.observation.turns import TurnAccumulator
 from theater.daemon.registry import Registry
+from theater.harness.builtin.plugins.codex import runtime_constants
 from theater.harness.builtin.plugins.codex.manifest import MANIFEST
 from theater.harness.channels.hybrid import HybridSource
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.runtime import (
+    ConnectionHealth,
     RuntimeNotification,
     RuntimeRequestError,
+    RuntimeRequestTimeout,
 )
 from theater.harness.contracts.source import Batch, Source
 from theater.models import JobState, Participant, Tier
@@ -160,15 +166,34 @@ async def test_no_rollout_first_send_is_diagnosed_not_swallowed(store) -> None:
         await rig.aclose()
 
 
-async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store) -> None:
+@pytest.mark.parametrize(
+    ("failure", "health_after_send"),
+    [
+        (
+            RuntimeRequestError(-32600, "no rollout found for thread id ui-thread-1"),
+            ConnectionHealth.CONNECTED,
+        ),
+        (
+            RuntimeRequestError(-32603, "failed to read thread: failed to read session metadata"),
+            ConnectionHealth.DEGRADED,
+        ),
+        (RuntimeRequestTimeout("thread/resume timed out"), ConnectionHealth.DEGRADED),
+    ],
+    ids=["no-rollout", "internal-error", "timeout"],
+)
+async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(
+    store, failure, health_after_send
+) -> None:
     rig = RolloutRaceRig(store)
     await rig.open()
     try:
         # The first send hits the first-turn rollout race.
-        await rig.fail_resume_with_no_rollout()
+        rig.server.fail("thread/resume", failure)
         job = await rig.send()
         assert job.state == JobState.RUNNING.value
         assert rig.runtime._subscribed is False
+        # Only a failed subscription degrades the route; a deferred no-rollout never does.
+        assert (await rig.runtime.snapshot()).health is health_after_send
 
         # The rollout exists once the turn completed; a successful resume
         # would now reconcile the completed turn as terminal evidence.
@@ -190,7 +215,8 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store)
         )
         gate.set()
         assert await until(lambda: rig.runtime._subscribed)
-        assert rig.runtime._subscribed is True
+        # The landed subscription lifted a subscription degrade, before terminal evidence.
+        assert (await rig.runtime.snapshot()).health is ConnectionHealth.CONNECTED
 
         # Once subscribed, later idle broadcasts schedule nothing further.
         rig.server.push(idle_broadcast())
@@ -231,3 +257,22 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(store)
         assert reasons[job.handle] == REASON_JOB_TERMINAL
     finally:
         await rig.aclose()
+
+
+async def test_a_degrade_that_lost_events_outlives_the_subscription_that_followed() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    try:
+        server.fail("thread/resume", RuntimeRequestError(-32603, "failed to read thread"))
+        await runtime.send(operation_id="op-1", prompt="finish")
+        for index in range(runtime_constants.CODEX_RUNTIME_EVENTS_BUFFER + 1):
+            server.push(completed_item(f"i-{index}", item_type="agentMessage", text=f"m{index}"))
+        assert await until(lambda: runtime._dropped > 0)
+
+        server.failures.pop("thread/resume")
+        server.respond("thread/resume", completed_resume_response())
+        server.push(idle_broadcast())
+        assert await until(lambda: runtime._subscribed)
+        assert (await runtime.snapshot()).health is ConnectionHealth.DEGRADED
+    finally:
+        await runtime.aclose()
