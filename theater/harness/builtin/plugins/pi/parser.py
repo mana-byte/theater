@@ -29,7 +29,7 @@ from theater.trajectory.content import ContentFormat
 from theater.trajectory.enums import TimingProvenance, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing
 
-from .record_projection import SEND_CUSTOM_TYPE, project_record
+from .record_projection import is_native_send, project_record
 
 _pi_fact = fact_builder(
     source="pi",
@@ -91,11 +91,6 @@ def _pi_mcp_identity(value: object) -> tuple[str, str] | None:
 
 def _record_id(record: dict) -> str | None:
     return trajectory_identifier(record.get("id"), overflow_prefix="pi")
-
-
-def _is_native_send(record: dict) -> bool:
-    """Whether this entry is the prompt of a Theater native send (``custom_message``, not user)."""
-    return record.get("type") == "custom_message" and record.get("customType") == SEND_CUSTOM_TYPE
 
 
 def _lifecycle_phase(record: dict) -> str | None:
@@ -385,7 +380,7 @@ class PiParserMixin:
         phase = _lifecycle_phase(record)
         if phase is not None:
             return self._lifecycle_record(phase, index, entry_id, timestamp)
-        if _is_native_send(record):
+        if is_native_send(record):
             return self._user_record(record.get("content"), index, entry_id, timestamp, clip_text)
         if record_type != "message" or not isinstance((message := record.get("message")), dict):
             return ParsedRecord()
@@ -411,7 +406,7 @@ class PiParserMixin:
                 self._pending_terminal_outcome = None
                 self._active_turn_id = None
             return
-        if _is_native_send(record):
+        if is_native_send(record):
             self._open_turn(_record_id(record))
             return
         if record_type != "message" or not isinstance((message := record.get("message")), dict):

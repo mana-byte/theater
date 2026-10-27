@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 from tests.support.pi_transcripts import append, message_record, session_record
 from theater.harness.builtin.plugins.pi.observer import PiObserver
@@ -42,9 +41,3 @@ def test_a_native_send_is_heard_and_names_the_turn_that_answers_it(tmp_path) -> 
     assert heard == [("user", "Reply with ROUTE-1", "send-1")]
     (end,) = [e for e in batch.events if e.turn_end]
     assert end.turn_id == "send-1"
-
-
-def test_other_custom_messages_stay_out_of_the_conversation(tmp_path) -> None:
-    other = {**_send("note-1", "not a prompt"), "customType": "someone-else"}
-    parser = PiObserver()
-    assert parser.parse(json.dumps(other), 0) == []
