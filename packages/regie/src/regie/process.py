@@ -306,7 +306,8 @@ class BridgeProcessManager:
                 raise BridgeStartupError(
                     f"Régie bridge did not become ready within {timeout:g}s: {detail}"
                 )
-            token = secrets.token_urlsafe(24)
+            # Hex, not urlsafe: argparse reads a leading "-" as an option, 1 urlsafe token in 64.
+            token = secrets.token_hex(24)
             process = self._spawn_worker(token)
             ready, last = self._wait_ready(
                 expected_pid=process.pid,
@@ -316,6 +317,11 @@ class BridgeProcessManager:
             )
             if ready is not None:
                 return ready
+            if (exit_code := process.poll()) is not None and last.detail is None:
+                raise BridgeStartupError(
+                    f"Régie bridge worker exited with status {exit_code} before reporting a "
+                    f"ready provider; see {self._paths.bridge_stderr_dir}"
+                )
             self._terminate_started(process)
             detail = last.detail or "bridge did not report a ready provider"
             raise BridgeStartupError(
