@@ -69,10 +69,10 @@ class CodexRuntimeHistory(CodexRuntimeHost):
                 # is a deferred subscription, never a silent one.
                 self._diagnostic(f"thread/resume deferred: no rollout yet for session {session}")
                 return
-            self._degrade(f"thread/resume subscription failed: {error.message}")
+            self._degrade(f"thread/resume subscription failed: {error.message}", subscription=True)
             return
         except (RuntimeRequestTimeout, RuntimeConnectionClosed, RuntimeConnectionError) as error:
-            self._degrade(f"thread/resume subscription failed: {error}")
+            self._degrade(f"thread/resume subscription failed: {error}", subscription=True)
             return
         await self._reconcile_resume_result(result, session, status_revision=status_revision)
 
