@@ -40,11 +40,20 @@ JOBS = [
     _job(4, "Failures", "in_progress", None),  # this job itself
     _job(5, "Static checks", "completed", "success"),
     _job(6, "Verify claude / 2.1.0", "completed", "success"),
+    # A red ledger and, apart from it, a failed step.
+    _job(7, "Verify codex / 0.164.0", "completed", "failure", ("Post checkout", "failure")),
 ]
 LOGS = {
     1: LEDGER,
-    2: _log("starting", "E: Unable to locate package tmux"),
+    # The runner's marker comes after the step's output and before its own cleanup.
+    2: _log(
+        "starting",
+        "E: Unable to locate package tmux",
+        "##[error]Process completed with exit code 100.",
+        *(f"cleanup {number}" for number in range(12)),
+    ),
     5: _log("all fine"),
+    7: LEDGER,
 }
 
 
@@ -65,9 +74,21 @@ def test_every_completed_job_with_a_failure_is_listed_and_an_unreadable_one_is_n
         "vibe 3.0.2 ended red:",
         "suite (fail): CAUSE ::error::injected",
     ]
-    assert "Verify pi / 1.4.0 (failure):" in report
-    assert "no failure ledger; failed steps: uv sync" in report
-    assert "E: Unable to locate package tmux" in report
+    # No ledger: the failed step and what it printed last, not the cleanup that follows.
+    pi = report.index("Verify pi / 1.4.0 (failure):")
+    assert report[pi + 1 : pi + 5] == [
+        "failed steps: uv sync (failure)",
+        "starting",
+        "E: Unable to locate package tmux",
+        "##[error]Process completed with exit code 100.",
+    ]
+    assert "cleanup 11" not in report
+    # A ledger does not hide the failed step beside it.
+    codex = report.index("Verify codex / 0.164.0 (failure):")
+    assert report[codex + 1 : codex + 3] == [
+        "failed steps: Post checkout (failure)",
+        "vibe 3.0.2 ended red:",
+    ]
     assert "Verify claude / 2.1.0 (success):" in report  # its log could not be read
     assert any(line.startswith("log unavailable: ") for line in report)
     assert not any("Failures" in line or "Static checks" in line for line in report)
@@ -78,9 +99,13 @@ def test_the_report_is_replayed_inert_bounded_and_never_raises(tmp_path: Path, c
 
     run(_gh, {"GITHUB_RUN_ID": "9", "GITHUB_STEP_SUMMARY": str(target)})
 
-    out = capsys.readouterr().out
-    assert "  suite (fail): CAUSE ::error::injected" in out  # indented, so no workflow command
-    assert not any(line.startswith("::") for line in out.splitlines())
+    # The runner trims leading spaces and matches `##[error]` anywhere, so only stopping
+    # command processing makes replayed text inert.
+    lines = capsys.readouterr().out.splitlines()
+    token = lines[0].removeprefix("::stop-commands::")
+    assert lines[0] != token and lines[-1] == f"::{token}::"
+    assert "suite (fail): CAUSE ::error::injected" in lines[1:-1]
+    assert "##[error]Process completed with exit code 100." in lines[1:-1]
     assert "CAUSE" in target.read_text()
 
     def broken(*args: str) -> str:
@@ -88,6 +113,5 @@ def test_the_report_is_replayed_inert_bounded_and_never_raises(tmp_path: Path, c
 
     run(broken, {"GITHUB_RUN_ID": "9", "GITHUB_STEP_SUMMARY": str(target)})
     assert "collector failed: RuntimeError: API unavailable" in capsys.readouterr().out
-    huge = "x" * 1000 + "\n"
-    assert len(summary("```\n" + huge * 2000).encode()) <= SUMMARY_BYTES + 200
-    assert "more lines are in the job log" in summary("```\n" + huge * 2000)
+    cut = summary("```\n" + "x" * (2 * SUMMARY_BYTES))
+    assert len(cut.encode()) <= SUMMARY_BYTES + 200 and "the rest is in the job log" in cut
