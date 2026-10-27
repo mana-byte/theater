@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,8 @@ from .unified_store_types import (
     UnifiedStoreView,
     _JournalRecord,
 )
+
+logger = logging.getLogger("theater.harness.vibe")
 
 #: Turn changes kept for one read; more than this cannot be replayed whole and is reported unknown.
 TURN_CHANGES_MAX = 1024
@@ -109,12 +112,37 @@ def turn_changes_between(
         session_root = _session_root(current.current)
     except (OSError, UnifiedStoreError):
         return None
-    return retained_turn_changes(
+    changes = retained_turn_changes(
         session_root,
         after=previous.sequence,
         through=current.sequence,
         since=latest_turn(previous.snapshot),
     )
+    if changes is None and previous.sequence <= current.sequence:
+        if _one_turn(previous, current):
+            # Vibe keeps two journals and folds on every turn end and reconfigure, so the journal
+            # can be collected before this read; one turn id in both views proves no other ran.
+            return ()
+        logger.warning(
+            "vibe %s: turn ends in sequences %d..%d are not replayable; retained journals: %s",
+            current.session_id,
+            previous.sequence + 1,
+            current.sequence,
+            _retained(session_root),
+        )
+    return changes
+
+
+def _retained(session_root: Path) -> list[int]:
+    try:
+        return [int(path.stem) for path in _segments(session_root)]
+    except (OSError, UnifiedStoreError):
+        return []
+
+
+def _one_turn(previous: UnifiedStoreView, current: UnifiedStoreView) -> bool:
+    turn_id = turn_key(latest_turn(previous.snapshot))[0]
+    return turn_id is not None and turn_id == turn_key(latest_turn(current.snapshot))[0]
 
 
 def _segments(session_root: Path) -> list[Path]:

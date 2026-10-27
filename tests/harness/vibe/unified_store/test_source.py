@@ -455,7 +455,7 @@ def test_a_restored_checkpoint_replays_the_turn_ends_behind_it(store: Store) -> 
 
 @pytest.mark.parametrize("retained", [True, False])
 def test_turn_ends_across_several_generations_replay_every_retained_segment(
-    store: Store, retained: bool
+    store: Store, retained: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
     """GEN2's journal alone holds B's end; without it the read must say so, never claim none."""
     source = attached_to_running_a(store)
@@ -494,6 +494,7 @@ def test_turn_ends_across_several_generations_replay_every_retained_segment(
         else []
     )
     if not retained:
+        assert "not replayable" in caplog.text
         source.rollback_source_checkpoint()
         retried = asyncio.run(source.read())
         assert retried.turn_state is not None and not retried.turn_state.complete

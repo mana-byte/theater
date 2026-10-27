@@ -817,7 +817,9 @@ reader keeps every `latestTurn` change, and after a generation switch, a
 restored checkpoint or a rolled-back batch it replays every retained
 generation's journal segment from the acknowledged point. A range those
 segments no longer cover — an expired checkpoint says so on its attachment
-itself — is reported as `complete=False`, and the observer fails closed:
+itself — is reported as `complete=False`, unless one `latestTurn` id spans both
+views (no other turn can have ended between; Vibe keeps only two journals), and
+the observer fails closed:
 delivered jobs crash `completion_unverified` rather than take another turn's
 answer, before any checkpoint advances. The fact repeats until a batch carrying
 it is applied and acknowledged. A journal that moves backwards is rejected: the
