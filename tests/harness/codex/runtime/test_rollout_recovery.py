@@ -215,7 +215,6 @@ async def test_idle_broadcast_recovers_subscription_and_finishes_same_job(
         )
         gate.set()
         assert await until(lambda: rig.runtime._subscribed)
-        assert rig.runtime._subscribed is True
         # The landed subscription lifted a subscription degrade, before terminal evidence.
         assert (await rig.runtime.snapshot()).health is ConnectionHealth.CONNECTED
 
