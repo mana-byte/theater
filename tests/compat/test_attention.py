@@ -71,7 +71,7 @@ def _report(
     log_reads: list[str] = []
     job_specs = [
         (
-            "Verify claude plugin and policy" if event == "pull_request" else "Qualify claude",
+            "Verify claude" if event == "pull_request" else "Qualify claude",
             stage,
             log,
         ),
@@ -203,7 +203,7 @@ def test_pr_mixed_failed_and_cancelled_jobs_never_publish_or_check_supersession(
         log="compat:start claude 1.3.0\ncompat:result claude 1.3.0 red\ncompat:start claude 1.4.0",
         additional_jobs=(
             (
-                "Verify codex plugin and policy",
+                "Verify codex",
                 "cancelled",
                 "compat:start codex 1.3.0\ncompat:result codex 1.3.0 tooling\n"
                 "compat:start codex 1.4.0",

@@ -121,6 +121,17 @@ def test_routine_pr_checks_use_the_base_and_stop_at_the_proposed_policy() -> Non
     assert "pull_request_target" not in str(reusable)
 
 
+def test_verify_check_names_are_short_and_show_the_version_range() -> None:
+    # Check names read "<caller> / <called job>": "Verify codex / Shards" and
+    # "Verify codex / 1.4.0-1.7.0" — the shard job name is the range it tests.
+    compat = _load("harness-compat.yml")
+    for name in VERIFY_CALLS:
+        assert compat["jobs"][name]["name"] == f"Verify {name.removeprefix('verify-')}"
+    reusable = _load("harness-compat-verify.yml")
+    assert reusable["jobs"]["fanout"]["name"] == "Shards"
+    assert reusable["jobs"]["verify"]["name"] == "${{ matrix.range }}"
+
+
 @pytest.mark.parametrize(
     "name", ["harness-compat.yml", "harness-compat-verify.yml", "harness-compat-canaries.yml"]
 )

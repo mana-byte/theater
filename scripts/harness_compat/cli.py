@@ -131,11 +131,16 @@ def _verify(args: argparse.Namespace, root: Path) -> int:
     )
 
 
+def _shard_range(shard: list[str]) -> str:
+    """The shard's version span, used as its job name."""
+    return shard[0] if len(shard) == 1 else f"{shard[0]}-{shard[-1]}"
+
+
 def _shards(args: argparse.Namespace, root: Path) -> int:
     _, releases = _pr_window(root, args.harness, args.base, args.routine)
     include = [
-        {"shard": str(number), "versions": ",".join(shard)}
-        for number, shard in enumerate(split_shards(releases), start=1)
+        {"range": _shard_range(shard), "versions": ",".join(shard)}
+        for shard in split_shards(releases)
     ]
     print(json.dumps({"include": include}, separators=(",", ":")))
     return 0

@@ -24,7 +24,7 @@ env:
 
 jobs:
   fanout:
-    name: Discover ${{ inputs.harness }} verify shards
+    name: Shards
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -50,7 +50,7 @@ jobs:
           echo "count=$count" >> "$GITHUB_OUTPUT"
 
   verify:
-    name: Verify ${{ inputs.harness }} shard ${{ matrix.shard }}
+    name: ${{ matrix.range }}
     needs: fanout
     if: needs.fanout.outputs.count != '0'
     runs-on: ubuntu-24.04

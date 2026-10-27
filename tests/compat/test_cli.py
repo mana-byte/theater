@@ -370,10 +370,15 @@ def test_shards_emit_the_verify_matrix_with_explicit_version_lists(
     assert _main(monkeypatch, repo, "shards", "claude", "--base", "main") == 0
     assert json.loads(capsys.readouterr().out) == {
         "include": [
-            {"shard": "1", "versions": "1.0.0,1.1.0,1.2.0,1.3.0"},
-            {"shard": "2", "versions": "1.4.0,1.5.0,1.6.0"},
+            {"range": "1.0.0-1.3.0", "versions": "1.0.0,1.1.0,1.2.0,1.3.0"},
+            {"range": "1.4.0-1.6.0", "versions": "1.4.0,1.5.0,1.6.0"},
         ]
     }
+
+
+def test_a_shard_is_named_by_its_version_span() -> None:
+    assert cli._shard_range(["1.3.0"]) == "1.3.0"
+    assert cli._shard_range(["1.3.0", "1.4.0", "1.5.0"]) == "1.3.0-1.5.0"
 
 
 def test_verify_accepts_the_fanout_shard_version_list(
