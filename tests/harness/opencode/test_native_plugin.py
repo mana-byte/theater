@@ -117,6 +117,11 @@ def test_an_ambiguous_plugin_refuses():
         )
 
 
+def test_the_plugin_directory_is_the_generated_plugin():
+    entry = active_entry(source={"type": "local", "path": str(Path(SOURCE).parent)})
+    classify_plugin_state([entry], plugin_id=PLUGIN_ID, source_path=SOURCE)
+
+
 def test_a_foreign_plugin_path_refuses():
     entry = active_entry(source={"type": "local", "path": "/elsewhere/server.js"})
     with pytest.raises(PluginNotActive, match="not the generated"):
