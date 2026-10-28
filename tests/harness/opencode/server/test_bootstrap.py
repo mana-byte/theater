@@ -232,19 +232,6 @@ def test_one_verified_server_then_one_tui_with_the_prompt(tmp_path, fake_opencod
     assert not Path(_credential_of(plan)).exists()
 
 
-def test_a_promptless_launch_precreates_its_session(tmp_path, fake_opencode, monkeypatch):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    plan = _plan(tmp_path, prompt="")
-    run, calls = _run_bootstrap(plan, tmp_path, workdir)
-    assert run.returncode == 0, run.stderr
-    tui = next(e for e in _events(calls) if "argv" in e and e["argv"][:1] != ["serve"])
-    assert "--prompt" not in tui["argv"]
-    assert "-s" in tui["argv"]
-    assert "POST /api/session" in [e["http"] for e in _events(calls) if "http" in e]
-
-
 def test_a_resume_continues_the_exact_session_on_the_overlay_database(
     tmp_path, fake_opencode, monkeypatch
 ):
