@@ -12,9 +12,11 @@ from theater.version_policy import VersionPolicy, version_key
 
 from . import git
 from .adapters import ADAPTER_NAMES, load_adapter
-from .attention import report_workflow_failure
-from .canaries import canary_version, run_canaries
 from .diagnostics import exception_detail
+from .github.attention import report_workflow_failure
+from .github.publish import SWEEP_EVENTS, check_publication_context, publish, run_gh
+from .github.summary import error_annotation, render_run
+from .github.workflow_report import run as report_failures
 from .policy import (
     affected_harnesses,
     check_routine_change,
@@ -22,10 +24,8 @@ from .policy import (
     load_policy,
     policy_relative,
 )
-from .publish import SWEEP_EVENTS, check_publication_context, publish, run_gh
-from .run import Run, discovered_releases, run_harness, select_releases, split_shards
-from .summary import error_annotation, render_run
-from .workflow_report import run as report_failures
+from .qualification.canaries import canary_version, run_canaries
+from .qualification.run import Run, discovered_releases, run_harness, select_releases, split_shards
 
 
 def _parser() -> argparse.ArgumentParser:

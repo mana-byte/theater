@@ -13,7 +13,7 @@ import pytest
 
 from harness_compat.adapters import load_adapter
 from harness_compat.contract import MockProtocol
-from harness_compat.provisioning import ProvisionContext
+from harness_compat.mock.provisioning import ProvisionContext
 from harness_compat.support.coverage import COVERAGE, NoLive
 from harness_compat.support.declarations import declarations
 from harness_compat.support.mutations import MUTATIONS

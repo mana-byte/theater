@@ -7,10 +7,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import github
 from ..contract import InstallFailed, Sandbox
-from ..process import run_group
-from ..provisioning import CompatManifest
+from ..mock.provisioning import CompatManifest
+from ..qualification.process import run_group
+from . import _registries
 
 _TIMEOUT_SECONDS = 600
 
@@ -22,7 +22,7 @@ class NpmAdapter:
     compat: CompatManifest
 
     def discover(self) -> list[str]:
-        return github.npm_versions(self.package)
+        return _registries.npm_versions(self.package)
 
     def install(self, sb: Sandbox, version: str) -> Path:
         prefix = sb.root / "npm"

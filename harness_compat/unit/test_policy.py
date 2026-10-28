@@ -347,7 +347,7 @@ def test_edits_outside_every_plugin_select_no_harness(repo: Path, git: Git) -> N
         "theater/daemon/controls/service.py",
         "theater/harness/builtin/plugins/__init__.py",
         "packages/regie/src/regie/bridge.py",
-        "harness_compat/qualify.py",
+        "harness_compat/qualification/qualify.py",
         "harness_compat/adapters/_npm.py",
         "harness_compat/support/live_rig.py",
         "tests/support/isolation.py",

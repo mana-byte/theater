@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from harness_compat.process import SANDBOX_ENV
-from harness_compat.sandbox import make_sandbox
+from harness_compat.qualification.process import SANDBOX_ENV
+from harness_compat.qualification.sandbox import make_sandbox
 from harness_compat.support.live_rig import (
     ENV_BINARY,
     ENV_EVIDENCE_DIR,

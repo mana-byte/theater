@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Mapping
 from pathlib import Path
 
-from .diagnostics import clean_diagnostic, exception_detail
+from ..diagnostics import clean_diagnostic, exception_detail
 from .publish import Gh
 from .summary import LEDGER_BEGIN, LEDGER_END
 

@@ -10,9 +10,10 @@ from typing import Any
 
 from theater.version_policy import version_key
 
-from .adapters import ADAPTER_NAMES
-from .contract import Check, Result, Verdict
-from .policy import load_policy
+from ..adapters import ADAPTER_NAMES
+from ..contract import Check, Result, Verdict
+from ..policy import load_policy
+from ..qualification.run import Run
 from .publish import (
     SWEEP_EVENTS,
     Gh,
@@ -21,7 +22,6 @@ from .publish import (
     publish,
     run_gh,
 )
-from .run import Run
 
 _WORKFLOW = "Harness compatibility"
 _WORKFLOW_PATH = ".github/workflows/harness-compat.yml"

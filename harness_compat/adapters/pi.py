@@ -6,10 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .. import github
 from ..contract import InstallFailed, Sandbox
-from ..provisioning import CompatManifest, ProvisionContext, Provisioned
-from . import _npm
+from ..mock.provisioning import CompatManifest, ProvisionContext, Provisioned
+from . import _npm, _registries
 
 #: Used when the run names no logical models; two are needed to prove a selection takes effect.
 _DEFAULT_MODELS = ("mock-a", "mock-b")
@@ -70,7 +69,7 @@ class PiAdapter:
     compat = COMPAT
 
     def discover(self) -> list[str]:
-        return github.npm_versions(_PACKAGE)
+        return _registries.npm_versions(_PACKAGE)
 
     def install(self, sb: Sandbox, version: str) -> Path:
         spec = f"{_PACKAGE}@{version}"

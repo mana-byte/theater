@@ -11,7 +11,7 @@ import zipfile
 from collections.abc import Mapping
 from pathlib import Path
 
-from ..process import run_group
+from ..qualification.process import run_group
 
 REPO = "openai/codex"
 _DOWNLOAD_TIMEOUT_SECONDS = 600.0

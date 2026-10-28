@@ -14,7 +14,7 @@ from collections import abc
 from collections.abc import Iterator
 from typing import Any, Literal, get_args, get_origin, get_type_hints
 
-from harness_compat.provisioning import CompatManifest
+from harness_compat.mock.provisioning import CompatManifest
 from theater.harness.contracts.manifest import HarnessManifest
 
 

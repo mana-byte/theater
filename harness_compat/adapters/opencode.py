@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from ..provisioning import CompatManifest, NativeEdit, ProvisionContext, Provisioned
+from ..mock.provisioning import CompatManifest, NativeEdit, ProvisionContext, Provisioned
 from ._npm import NpmAdapter
 
 #: Used when the run names no logical models; two are needed to prove a selection takes effect.

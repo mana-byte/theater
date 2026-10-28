@@ -15,14 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from harness_compat import adapters, github
-from harness_compat.adapters import ADAPTER_NAMES, _codex_release, _npm, load_adapter
+from harness_compat import adapters
+from harness_compat.adapters import ADAPTER_NAMES, _codex_release, _npm, _registries, load_adapter
 from harness_compat.adapters import codex as codex_adapter
 from harness_compat.adapters import vibe as vibe_adapter
-from harness_compat.codecopy import code_copy
 from harness_compat.contract import InstallFailed
 from harness_compat.policy import load_policy
-from harness_compat.sandbox import make_sandbox
+from harness_compat.qualification.codecopy import code_copy
+from harness_compat.qualification.sandbox import make_sandbox
 from tests.support.paths import REPO_ROOT
 from theater.harness import HARNESSES
 
@@ -69,9 +69,9 @@ def _registry(monkeypatch: pytest.MonkeyPatch, **versions: list[str]) -> list[st
         asked.append(package)
         return versions["npm"]
 
-    monkeypatch.setattr(github, "npm_versions", npm_versions)
+    monkeypatch.setattr(_registries, "npm_versions", npm_versions)
     monkeypatch.setattr(
-        github, "pypi_versions", lambda package: asked.append(package) or versions["pypi"]
+        _registries, "pypi_versions", lambda package: asked.append(package) or versions["pypi"]
     )
     return asked
 
@@ -243,7 +243,7 @@ def test_codex_discovery_falls_back_to_public_tags_when_the_api_is_limited(
         f"abc\trefs/tags/{tag}"
         for tag in ("rust-v0.164.0", "rust-v0.163.0", "rust-v0.165.0-alpha.1", "v1.0.0", "other")
     )
-    monkeypatch.setattr(github, "github_release_versions", limited)
+    monkeypatch.setattr(_registries, "github_release_versions", limited)
     monkeypatch.setattr(codex_adapter, "run_group", lambda *a, **k: _done(0, stdout=listing))
 
     assert load_adapter("codex").discover() == ["0.163.0", "0.164.0"]

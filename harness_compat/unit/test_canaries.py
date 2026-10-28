@@ -9,13 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from harness_compat import canaries
-from harness_compat.codecopy import code_copy
 from harness_compat.contract import InstallFailed, Sandbox
-from harness_compat.framework import python_path
 from harness_compat.policy import load_policy, write_policy
-from harness_compat.process import run_group
-from harness_compat.sandbox import make_sandbox
+from harness_compat.qualification import canaries
+from harness_compat.qualification.codecopy import code_copy
+from harness_compat.qualification.framework import python_path
+from harness_compat.qualification.process import run_group
+from harness_compat.qualification.sandbox import make_sandbox
 from harness_compat.support.mutations import MUTATIONS
 from tests.support.paths import REPO_ROOT
 from theater.harness.contracts.version_policy import VersionPolicy

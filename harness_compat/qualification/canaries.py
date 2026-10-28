@@ -16,11 +16,11 @@ from pathlib import Path
 
 from theater.version_policy import version_key
 
+from ..contract import Adapter, Check, InstallFailed
+from ..diagnostics import clip_diagnostic
+from ..policy import admit_only, load_policy
 from .codecopy import code_copy
-from .contract import Adapter, Check, InstallFailed
-from .diagnostics import clip_diagnostic
 from .framework import python_path
-from .policy import admit_only, load_policy
 from .process import run_group
 from .qualify import install_verified
 from .sandbox import make_sandbox

@@ -11,7 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar, Protocol, get_args
 
-from .contract import MockProtocol
+from ..contract import MockProtocol
 
 #: Bounds of a scripted tool call: the tool's name, and its payload with the tokens unexpanded.
 TOOL_NAME_MAX_CHARS = 128

@@ -6,10 +6,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .. import github
 from ..contract import InstallFailed, Sandbox
-from ..process import run_group
-from ..provisioning import CompatManifest, McpCall, NativeEdit, ProvisionContext, Provisioned
+from ..mock.provisioning import CompatManifest, McpCall, NativeEdit, ProvisionContext, Provisioned
+from ..qualification.process import run_group
+from . import _registries
 
 #: Used when the run names no logical models; two are needed to prove a selection takes effect.
 _DEFAULT_MODELS = ("mock-a", "mock-b")
@@ -62,7 +62,7 @@ class VibeAdapter:
     compat = COMPAT
 
     def discover(self) -> list[str]:
-        return github.pypi_versions("mistral-vibe")
+        return _registries.pypi_versions("mistral-vibe")
 
     def install(self, sb: Sandbox, version: str) -> Path:
         uv = shutil.which("uv", path=sb.env.get("PATH"))

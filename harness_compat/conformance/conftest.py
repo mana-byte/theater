@@ -4,6 +4,6 @@ from __future__ import annotations
 
 import os
 
-from harness_compat.process import SANDBOX_ENV
+from harness_compat.qualification.process import SANDBOX_ENV
 
 collect_ignore = [] if os.environ.get(SANDBOX_ENV) else ["live"]

@@ -7,13 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from harness_compat import attention, cli
+from harness_compat import cli
 from harness_compat.contract import Check, Result
 from harness_compat.git import git
+from harness_compat.github import attention
+from harness_compat.github.publish import Published
+from harness_compat.github.summary import render_run
 from harness_compat.policy import derive, write_policy
-from harness_compat.publish import Published
-from harness_compat.run import Run, run_harness
-from harness_compat.summary import render_run
+from harness_compat.qualification.run import Run, run_harness
 from harness_compat.support.compat_github import CompatGithub
 from theater.harness.contracts.version_policy import VersionPolicy
 

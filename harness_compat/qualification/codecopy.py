@@ -8,8 +8,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from ..git import code_files
 from .cleanup import remove_tree
-from .git import code_files
 
 
 class UnsafeCopy(ValueError):

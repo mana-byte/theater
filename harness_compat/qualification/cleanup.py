@@ -10,7 +10,7 @@ import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from .contract import CleanupFailed
+from ..contract import CleanupFailed
 from .process import SANDBOX_ENV, stop_owned
 
 _SKIPPED_DIRS = frozenset({"node_modules", ".git", "uv-cache", "uv-tools", "npm"})

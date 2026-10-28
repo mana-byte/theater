@@ -14,11 +14,11 @@ from pathlib import Path
 import pytest
 
 from harness_compat.adapters import load_adapter
-from harness_compat.canaries import ENV_BINARY, ENV_ENABLE, ENV_HARNESS
-from harness_compat.codecopy import code_copy
 from harness_compat.contract import SUITE_ENV_MUTATION, Check
-from harness_compat.sandbox import make_sandbox
-from harness_compat.suite_runner import SuiteReport, installed_version, run_suite
+from harness_compat.qualification.canaries import ENV_BINARY, ENV_ENABLE, ENV_HARNESS
+from harness_compat.qualification.codecopy import code_copy
+from harness_compat.qualification.sandbox import make_sandbox
+from harness_compat.qualification.suite_runner import SuiteReport, installed_version, run_suite
 from harness_compat.support.mutations import (
     ANY,
     LOADED_BANNER,

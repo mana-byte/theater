@@ -8,8 +8,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from ..contract import Sandbox
 from .cleanup import remove_tree, stop_sandbox_processes
-from .contract import Sandbox
 from .process import SANDBOX_ENV, new_token
 
 #: Nothing listens here, so a CLI that honours the proxy variables cannot leave the machine.
