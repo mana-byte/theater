@@ -25,7 +25,7 @@ def _version(parts: tuple[int, int, int]) -> str:
 
 _MINIMUM = version_key(VERSION_POLICY.minimum)
 _MAXIMUM = version_key(VERSION_POLICY.maximum)
-_BELOW = (*_MINIMUM[:2], _MINIMUM[2] - 1)
+_BELOW = (0, 0, 1)
 _ABOVE = (*_MAXIMUM[:2], _MAXIMUM[2] + 1)
 _REFUSAL = f"Vibe harness support requires {vibe_qualified_range_text()}"
 

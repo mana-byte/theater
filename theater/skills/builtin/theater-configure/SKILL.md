@@ -111,7 +111,7 @@ what was granted before the file takes effect.
    case-sensitive). Write a key only for a harness you actually filled.
 4. `[reasoning]`, per harness that takes a thinking level — write every level the CLI
    advertises as of this release: codex — none, minimal, low, medium, high, xhigh, max,
-   ultra; claude — low, medium, high; pi — the `--thinking <level>` line of `pi --help`
+   ultra; claude — low, medium, high, xhigh, max; pi — the `--thinking <level>` line of `pi --help`
    lists exactly: off, minimal, low, medium, high, xhigh, max — run that one command and
    copy the list verbatim, never from memory. opencode and vibe take none — never write
    a key for them. Matching is exact.

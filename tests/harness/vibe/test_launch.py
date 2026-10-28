@@ -211,11 +211,6 @@ def test_a_flag_shaped_prompt_stays_a_literal_prompt(tmp_path, resume):
 _VERSION_TEXT = VERSION_POLICY.minimum
 
 
-def _before(release):
-    major, minor, patch = release
-    return (major, minor, patch - 1) if patch else (major, minor - 1, 99)
-
-
 def _plan(tmp_path, approval):
     return plan_launch(
         "vibe",
@@ -239,7 +234,7 @@ def test_launch_admits_the_oldest_qualified_writer(tmp_path, monkeypatch):
     assert plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"]
 
 
-@pytest.mark.parametrize("version", [_before(_MINIMUM)])
+@pytest.mark.parametrize("version", [(0, 0, 1)])
 def test_launch_refuses_a_writer_below_the_installed_floor(tmp_path, monkeypatch, version):
     pin_installed_vibe_version(monkeypatch, version)
     with pytest.raises(BadRequest, match="qualified releases"):

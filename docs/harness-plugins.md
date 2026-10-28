@@ -1267,7 +1267,7 @@ bounded during replacement and shutdown.
 
 OpenCode uses `RuntimeHost.DETACHED_BACKEND`: Theater starts authenticated
 `opencode serve` on a discovered loopback endpoint, creates the exact session, and
-launches the stock `opencode attach` UI. The backend and its safe ordinary fallback
+launches the stock UI with `opencode --server <url> -s <id>`. The backend and its safe ordinary fallback
 receive the same participant-scoped MCP sidecars.
 
 Declare each retained pane route in `legacy_fallback` and each unsupported

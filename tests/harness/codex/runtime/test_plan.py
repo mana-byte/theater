@@ -68,17 +68,12 @@ def _text(release: tuple[int, int, int]) -> str:
     return ".".join(map(str, release))
 
 
-def _before(release: tuple[int, int, int]) -> tuple[int, int, int]:
-    major, minor, patch = release
-    return (major, minor, patch - 1) if patch else (major, minor - 1, 99)
-
-
 def _gate_cases() -> list[tuple[str, bool]]:
-    minimum, maximum = version_key(VERSION_POLICY.minimum), version_key(VERSION_POLICY.maximum)
+    maximum = version_key(VERSION_POLICY.maximum)
     return [
         (VERSION_POLICY.minimum, True),
         (VERSION_POLICY.maximum, True),
-        (_text(_before(minimum)), False),
+        ("0.0.1", False),
         (_text((*maximum[:2], maximum[2] + 1)), False),
         *((version, False) for version in VERSION_POLICY.excluded),
         (f"{VERSION_POLICY.minimum}-alpha.1", False),

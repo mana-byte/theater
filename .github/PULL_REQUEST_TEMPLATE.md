@@ -11,7 +11,8 @@ Title: a conventional commit, e.g. feat(regie): escape closes the options menu.
 
 ## Implementation
 
-<!-- What changed, and how it works, briefly. -->
+<!-- What changed, and how it works, briefly. Code or tests only right for releases below a future
+floor? Name the min at which they die and add a row to docs/harness-compat.md ("After a floor raise"). -->
 
 ## Testing
 

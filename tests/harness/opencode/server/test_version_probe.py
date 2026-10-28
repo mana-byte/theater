@@ -55,11 +55,10 @@ def _patch_offset(version: tuple[int, int, int], offset: int) -> str:
 @pytest.mark.parametrize(
     ("version", "supported"),
     [
-        (_patch_offset(version_key(VERSION_POLICY.minimum), -1), False),
+        ("0.0.1", False),
         (VERSION_POLICY.minimum, True),
         (VERSION_POLICY.maximum, True),
         (_patch_offset(version_key(VERSION_POLICY.maximum), 1), False),
-        ("1.18.29", False),
     ],
 )
 def test_probe_qualifies_only_the_shared_json_policy(

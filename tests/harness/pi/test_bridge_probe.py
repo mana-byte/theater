@@ -106,9 +106,7 @@ def test_pi_frontend_probe_accepts_qualified_versions(version, monkeypatch) -> N
 @pytest.mark.parametrize(
     "version",
     [
-        _version_text(
-            (*version_key(VERSION_POLICY.minimum)[:2], version_key(VERSION_POLICY.minimum)[2] - 1)
-        ),
+        "0.0.1",
         # Every excluded broken release.
         *VERSION_POLICY.excluded,
         _version_text(

@@ -250,6 +250,8 @@ Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) 
 
 - Keep policy files compact: one JSON line with a trailing newline. A routine gate PR replaces
   exactly that line in exactly one plugin; it adds no evidence, fixtures, docs or Python code.
+  A raise leaves behind code only the old releases needed: delete it in a separate code PR from
+  the ledger in `docs/harness-compat.md` ("After a floor raise"), never in the routine PR.
 - The live manifest-derived conformance suite is the sole qualification authority. Changing
   runtime, launch, hooks or transcript behavior requires corresponding suite obligations.
 - One qualification tests exactly its supplied version in a disposable code copy and home.

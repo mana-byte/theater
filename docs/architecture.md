@@ -1772,7 +1772,7 @@ Detached hosts run one isolated backend per participant and attach one stock UI:
 Codex:    codex app-server --listen unix://<private-socket>
           codex --remote unix://<private-socket> resume <thread-id>
 OpenCode: opencode serve --hostname 127.0.0.1 --port 0
-          opencode attach http://127.0.0.1:<port> --session <session-id>
+          opencode --server http://127.0.0.1:<port> -s <session-id>
 ```
 
 Codex uses WebSocket frames over its private Unix endpoint. OpenCode announces a

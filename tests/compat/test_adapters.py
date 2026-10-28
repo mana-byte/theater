@@ -175,10 +175,8 @@ def test_pi_without_a_valid_package_bin_is_an_install_failure(
         load_adapter("pi").install(sb, "0.84.4")
 
 
-@pytest.mark.parametrize("version", ["3.0.2", "3.1.0"])
-def test_vibe_pins_python_314_for_every_supported_release(
-    monkeypatch: pytest.MonkeyPatch, version: str
-) -> None:
+def test_vibe_installs_under_the_pinned_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    version = "1.2.3"
     seen: list[list[str]] = []
 
     def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:

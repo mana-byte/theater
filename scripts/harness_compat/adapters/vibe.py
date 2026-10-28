@@ -10,7 +10,8 @@ from .. import github
 from ..contract import InstallFailed, Sandbox
 from ..process import run_group
 
-#: Every supported release (3.0.2 and up) requires Python 3.14 (`requires-python >=3.14`).
+#: Qualification must not depend on the runner's default interpreter (3.0.0 required `>=3.14`;
+#: later releases declare `>=3.12`).
 _PYTHON = "3.14"
 
 
