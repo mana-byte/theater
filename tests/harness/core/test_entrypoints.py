@@ -178,7 +178,13 @@ def _transcript_case(name: str, tmp_path: Path):
             cwd=str(workdir), session_id="session-1"
         )
         records = [
-            {"type": "event_msg", "payload": {"type": "user_message", "message": "ask"}},
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {"type": "UserMessage", "content": [{"type": "text", "text": "ask"}]},
+                },
+            },
             {
                 "type": "event_msg",
                 "payload": {

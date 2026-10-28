@@ -76,7 +76,13 @@ UNCLIPPED_CASES = [
     ),
     (
         CodexObserver(),
-        {"type": "event_msg", "payload": {"type": "user_message", "message": LONG}},
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "UserMessage", "content": [{"type": "text", "text": LONG}]},
+            },
+        },
     ),
 ]
 

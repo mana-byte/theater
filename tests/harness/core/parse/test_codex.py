@@ -143,7 +143,12 @@ def test_codex_finds_a_transcript_by_cwd_and_by_session_id(tmp_path):
                 {
                     "timestamp": "2026-08-12T11:40:50.100Z",
                     "type": "session_meta",
-                    "payload": {"session_id": "ignored", "cwd": cwd},
+                    "payload": {
+                        "session_id": "ignored",
+                        "cwd": cwd,
+                        "thread_source": "user",
+                        "source": "cli",
+                    },
                 }
             )
             + "\n"
@@ -176,7 +181,19 @@ def test_codex_after_excludes_transcripts_that_predate_the_participant(tmp_path)
     project = tmp_path / "work"
     project.mkdir()
     path = day / "rollout-2026-08-12T13-40-50-abc.jsonl"
-    path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": str(project)}}) + "\n")
+    path.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "cwd": str(project),
+                    "thread_source": "user",
+                    "source": "cli",
+                },
+            }
+        )
+        + "\n"
+    )
 
     observer = CodexObserver(root=root)
     assert observer.find_transcript(cwd=str(project), after=0) == path

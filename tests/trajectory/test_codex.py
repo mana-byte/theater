@@ -151,7 +151,12 @@ async def test_codex_history_associates_context_model_and_usage_with_the_active_
     records = [
         {
             "type": "session_meta",
-            "payload": {"cwd": str(tmp_path), "model_provider": "azure"},
+            "payload": {
+                "cwd": str(tmp_path),
+                "model_provider": "azure",
+                "thread_source": "user",
+                "source": "cli",
+            },
         },
         {
             "type": "event_msg",
@@ -243,7 +248,12 @@ async def test_codex_live_attachment_seeds_model_context_for_usage(tmp_path: Pat
     records = [
         {
             "type": "session_meta",
-            "payload": {"cwd": str(tmp_path), "model_provider": "openai"},
+            "payload": {
+                "cwd": str(tmp_path),
+                "model_provider": "openai",
+                "thread_source": "user",
+                "source": "cli",
+            },
         },
         {
             "type": "turn_context",
@@ -251,7 +261,13 @@ async def test_codex_live_attachment_seeds_model_context_for_usage(tmp_path: Pat
         },
         {
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "work"},
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "content": [{"type": "text", "text": "work"}],
+                },
+            },
         },
     ]
     path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
@@ -343,7 +359,7 @@ def test_codex_missing_message_id_uses_fallback_coordinates():
     fallback = next(fact for fact in facts if fact.summary == "fallback")
 
     assert fallback.native_id is None
-    assert fallback.raw_index == 12
+    assert fallback.raw_index == 11
     assert fallback.event_ordinal == 0
 
 

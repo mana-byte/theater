@@ -443,7 +443,12 @@ async def test_probe_identity_loss_session_id_none_when_candidate_has_no_session
             {
                 "timestamp": "2026-08-17T01:21:00.000Z",
                 "type": "session_meta",
-                "payload": {"id": "no-uuid-here", "cwd": str(rollout_pair["project"])},
+                "payload": {
+                    "id": "no-uuid-here",
+                    "cwd": str(rollout_pair["project"]),
+                    "thread_source": "user",
+                    "source": "cli",
+                },
             }
         )
         + "\n",

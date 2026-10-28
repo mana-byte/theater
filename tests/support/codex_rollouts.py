@@ -32,14 +32,26 @@ def write_rollout(
                     {
                         "timestamp": "2026-08-17T01:19:02.000Z",
                         "type": "session_meta",
-                        "payload": {"id": session_id, "cwd": str(cwd), **(metadata or {})},
+                        "payload": {
+                            "id": session_id,
+                            "cwd": str(cwd),
+                            "thread_source": "user",
+                            "source": "cli",
+                            **(metadata or {}),
+                        },
                     }
                 ),
                 json.dumps(
                     {
                         "timestamp": "2026-08-17T01:19:03.000Z",
                         "type": "event_msg",
-                        "payload": {"type": "agent_message", "message": text},
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "AgentMessage",
+                                "content": [{"type": "Text", "text": text}],
+                            },
+                        },
                     }
                 ),
             ]
