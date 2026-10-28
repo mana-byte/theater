@@ -20,7 +20,7 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 
 | Directory | Purpose |
 |---|---|
-| `support/` | Shared helpers (and `test_tmux_guard.py`); import as `from tests.support.x import ...`. The live suite's rig and the stack of processes it owns (`live_rig`, `live_stack`), obligations, coverage registry, declaration walker, tool and channel oracles, process table, mutations and probe sidecar (`compat_probe/`) live here |
+| `support/` | Shared helpers (and `test_tmux_guard.py`); import as `from tests.support.x import ...`. `isolation.py` holds the autouse fixtures every root conftest star-imports |
 | `fixtures/` | Data only: recorded transcripts and protocol payloads |
 | `daemon/controls/` | Send, steer, follow-up and dispatch control state machine |
 | `daemon/presence/` | Human-presence classification, monitor and provider access |
@@ -54,8 +54,6 @@ from `make test-unit`; `requires_node` shells out to node and skips when it is a
 | `packaging/` | Built distributions and artifacts |
 | `perf/` | Latency baselines and synthetic loads |
 | `integration/<vendor>/` | Distribution and focused SDK integration regressions; not qualification authority |
-| `compat/` | Harness-compat pipeline tests |
-| `conformance/` | Generic completeness and guard tests; `live/` exercises a real daemon, Régie provider and stock CLI against a mock model; `canaries/` checks deliberately broken plugins. Live checks run only in workflow-owned compatibility sandboxes |
 
 Régie tests live in `packages/regie/tests`, grouped like `packages/regie/src/regie`
 (`ambience/`, `app/`, `bridge/`, `controllers/`, `dashboard/`, `motions/`, `render/`, `tmux/`,
@@ -82,11 +80,8 @@ fresh container; the default-server proof creates and destroys that container's 
   commit message.
 - Every module opens with a one-line docstring stating its subject.
 
-## The live conformance suite
+## Harness compatibility
 
-`tests/conformance/live` never runs under `make test`: it is collected only inside the harness-compat
-sandbox (`HARNESS_COMPAT_SANDBOX`), so it can never touch a developer's `~/.theater`, CLI homes or
-tmux server. Its scenarios are derived from each plugin's manifest (`tests/support/obligations.py`);
-`tests/support/coverage.py` must map every manifest declaration to a scenario family or a reasoned
-exemption, and `tests/conformance/test_completeness.py` fails when it does not. GitHub workflows
-own qualification and canary runs; see [`docs/harness-compat.md`](../docs/harness-compat.md).
+The live conformance suite, the compatibility pipeline and their tests live in
+[`harness_compat/`](../harness_compat/README.md); `make test` collects them too. Nothing under
+`tests/` imports that package.

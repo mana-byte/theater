@@ -1106,7 +1106,7 @@ binary that changed between probe and connect fails closed.
 Each shipped plugin reads its inclusive bounds and excluded releases from `compatibility.json`.
 The [compatibility pipeline](harness-compat.md) tests every stable release above committed max
 and proposes one JSON line. Probe or runtime changes need matching manifest-derived
-live scenarios; adapters under `scripts/harness_compat/adapters/` only discover and install CLIs.
+live scenarios; adapters under `harness_compat/adapters/` only discover and install CLIs.
 
 Settings are separately gated: a runtime must not emulate `update_settings`
 by storing values that might apply to an unrelated future turn. Report
