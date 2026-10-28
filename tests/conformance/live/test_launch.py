@@ -7,6 +7,7 @@ import uuid
 import pytest
 
 from scripts.harness_compat.contract import MockReply
+from theater.constants.harness import HARNESS_APPROVAL_POLICIES
 
 pytestmark = [pytest.mark.integration, pytest.mark.family("launch")]
 
@@ -29,7 +30,10 @@ async def _launches_with_an_initial_prompt(live) -> None:
     nonce = f"ANSWER-{uuid.uuid4().hex[:8]}"
     prompt = f"Reply with {nonce}"
     live.queue(MockReply(nonce))
-    participant = await live.spawn(live.approval, prompt=prompt)
+    # The least restrictive approval: no gating machinery between launch and the prompt's turn.
+    declared = live.harness.launch_parameter_support.approvals
+    approval = next(policy for policy in reversed(HARNESS_APPROVAL_POLICIES) if policy in declared)
+    participant = await live.spawn(approval, prompt=prompt)
     # A spawn's job handle is its participant id: one task handle, the launch prompt's turn.
     job = await live.job(participant)
 
