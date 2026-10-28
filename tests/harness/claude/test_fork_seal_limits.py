@@ -253,7 +253,7 @@ async def test_history_copied_in_after_the_attach_never_answers_a_resumed_job(
 ):
     """Claude creates a fork's file, then copies the history in ahead of the first turn."""
     fork = claude_fork(33)
-    # 2.1.312 causal order: history, then prompt, answer, marker.
+    # Causal order: the history, then the fork's prompt, answer and marker.
     lines = [fork[0], *fork[3:], *fork[1:3]]
     root = tmp_path / "projects"
     path = root / "project" / f"{SESSION}.jsonl"
