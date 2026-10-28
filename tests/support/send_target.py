@@ -17,8 +17,8 @@ def trust_target(daemon, participant_id: str, *, provenance: str = "operator") -
 
 def ready_screen(daemon, terminal_id: str, harness: str) -> None:
     """Provider sends require a proven ready composer on screen."""
-    # Codex's screen is synthetic (tests/support/codex_screens.py); the other
-    # harnesses still have recorded idle captures.
+    # Codex's screen is synthetic (tests/support/codex_screens.py); vibe's
+    # recorded idle capture stays until a later wave replaces it.
     screen = CODEX_IDLE if harness == "codex" else (SCREENS / f"{harness}_idle.txt").read_text()
     daemon._test_terminal_provider.screens[terminal_id] = screen
 

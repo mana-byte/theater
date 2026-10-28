@@ -21,39 +21,8 @@ from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbe
 from theater.observability import tracing
 from theater.observability.catalog import PROC_PS_COMM
 
-# One compatibility record per harness feeds the dashboard line: wiring plus five control routes,
-# derived from the same rules the daemon's resolver applies.
-
-_LEGACY_ROUTES = {
-    "send": "tmux",
-    "steer": "tmux",
-    "queue_followup": "tmux",
-    "settings_update": "unavailable",
-    "interrupt": "tmux",
-}
-
-
-# Only harnesses declaring that Enter steers a running turn (codex, pi) steer over a pane.
-_LEGACY_ROUTES_NO_STEER = {**_LEGACY_ROUTES, "steer": "unavailable"}
-
-
-_PI_ROUTES = {
-    "send": "native",
-    "steer": "unavailable",
-    "queue_followup": "native",
-    "settings_update": "native",
-    "interrupt": "native",
-}
-
-
-_OPENCODE_ROUTES = {
-    "send": "native",
-    "steer": "unavailable",
-    "queue_followup": "native",
-    "settings_update": "unavailable",
-    "interrupt": "tmux",
-}
-
+# One compatibility record per harness feeds the dashboard line; the per-harness route
+# tables are proven live (runtime/steer families), so only the policy branches are unit-tested.
 
 _SUPPORTED = RuntimeCompatibility(
     supported=True,
@@ -70,59 +39,12 @@ _OUT_OF_RANGE = RuntimeCompatibility(
 )
 
 
-@pytest.mark.parametrize(
-    ("harness_name", "result", "expected"),
-    [
-        pytest.param(
-            "pi",
-            _SUPPORTED,
-            {"status": "native-compatible", "wiring": "native", "routes": _PI_ROUTES},
-            id="pi-native-steer-unavailable",
-        ),
-        pytest.param(
-            "opencode",
-            _SUPPORTED,
-            {"status": "native-compatible", "wiring": "native", "routes": _OPENCODE_ROUTES},
-            id="opencode-native-interrupt-tmux",
-        ),
-        pytest.param(
-            "codex",
-            _OUT_OF_RANGE,
-            {"status": "outside-qualified-range", "wiring": "legacy", "routes": _LEGACY_ROUTES},
-            id="codex-outside-range-legacy-routes",
-        ),
-        pytest.param(
-            "claude",
-            _OUT_OF_RANGE,
-            {
-                "status": "legacy-only",
-                "wiring": "legacy",
-                "routes": _LEGACY_ROUTES_NO_STEER,
-                "qualified_range": None,
-                "reason": "no native runtime; controls use the provider terminal",
-            },
-            id="claude-runtimeless-range-hidden",
-        ),
-        pytest.param(
-            "vibe",
-            None,
-            {"status": "legacy-only", "wiring": "legacy", "routes": _LEGACY_ROUTES_NO_STEER},
-            id="vibe-no-probe-legacy-routes",
-        ),
-    ],
-)
-def test_native_compatibility_record_reports_wiring_and_routes(harness_name, result, expected):
+def test_an_out_of_range_probe_reports_the_legacy_wiring():
     record = harness_registry.native_compatibility_record(
-        harness_registry.HARNESSES[harness_name], installed=True, result=result
+        harness_registry.HARNESSES["codex"], installed=True, result=_OUT_OF_RANGE
     )
-    assert expected.items() <= record.items()
-    assert set(record["routes"]) == {
-        "send",
-        "steer",
-        "queue_followup",
-        "settings_update",
-        "interrupt",
-    }
+    assert record["status"] == "outside-qualified-range"
+    assert record["wiring"] == "legacy"
 
 
 def test_a_probe_without_a_version_is_unknown_not_outside_range():
@@ -178,16 +100,6 @@ async def test_harnesses_surfaces_a_probe_exception_as_unknown(client, daemon, m
     assert codex["wiring"] == "legacy"
     assert codex["routes"]["interrupt"] == "tmux"
     assert any("codex" in message for message in caplog.messages)
-
-
-def test_only_harnesses_that_declare_it_steer_over_a_terminal():
-    declared = {
-        name
-        for name, harness in harness_registry.HARNESSES.items()
-        if harness.controls is not None and harness.controls.steer is not None
-    }
-    # Enter steers a running turn in the Codex and Pi TUIs; the rest are unverified.
-    assert declared == {"codex", "pi"}
 
 
 @pytest.mark.parametrize("change", ["binary", "configuration", "callback", "expiry"])

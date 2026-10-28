@@ -207,9 +207,9 @@ class FakeRuntime(HarnessRuntime):
             pid=4242,
             native_session_id=self.state.native_session_id,
             protocol="websocket-jsonrpc",
-            protocol_version="0.154.0",
-            native_version="0.154.0",
-            compatibility_policy="codex-0.154-verified",
+            protocol_version="0.0.1",
+            native_version="0.0.1",
+            compatibility_policy="fake-verified",
         )
 
     async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
@@ -354,7 +354,7 @@ def fake_runtime_manifest() -> RuntimeManifest:
         return RuntimeCompatibility(
             supported=True,
             policy="fake-verified",
-            native_version="0.154.0",
+            native_version="0.0.1",
         )
 
     def plan(context) -> RuntimePlan:

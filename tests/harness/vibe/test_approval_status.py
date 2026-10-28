@@ -9,6 +9,7 @@ import pytest
 from tests.support.observation import apply_batch
 from tests.support.paths import fixture
 from tests.support.shipped import VibeHarness
+from tests.support.vibe_screens import VIBE_QUESTION
 from tests.support.vibe_store import SESSION_ID, make_state, public_message
 from tests.support.vibe_store import Store as VibeStore
 from tests.support.waiting import wait_until
@@ -41,7 +42,7 @@ async def test_question_dialog_overrides_quiet_running_store_in_full_watch(
     daemon.store.upsert_participant(participant)
     terminal = terminal_provider.bind(daemon, participant.id)
     screens = fixture("screens")
-    terminal_provider.screens[terminal] = (screens / "vibe_question.txt").read_text()
+    terminal_provider.screens[terminal] = VIBE_QUESTION
     observer = Observer(
         daemon.registry,
         {"vibe": VibeHarness(root=tmp_path, isolated=True)},

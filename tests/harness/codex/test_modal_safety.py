@@ -2,34 +2,32 @@
 
 import pytest
 
-from tests.support.codex_screens import CODEX_APPROVAL, CODEX_IDLE
 from tests.support.shipped import CodexObserver
 from theater.harness.observation import ScreenConfidence, ScreenKind
 
-#: Stock Codex trust dialog: header plus a numbered option list whose
-#: selected row renders with the composer's `›` glyph.
+#: Stock trust dialog (tui/src/onboarding/trust_directory.rs, in-window tags).
 TRUST_MENU_STOCK = """\
-Codex CLI
+Trust this folder? Codex can read, edit, and run files here, subject to your permission \
+settings. Folder settings can run code automatically, even without a model request. Continue \
+only if you trust these files. Your trust decision will be saved.
 
-Trust this folder?
-Working with untrusted contents carries risk.
+\u203a 1. Trust and continue
+  2. Quit
 
-› 1. Trust and continue
-  2. Start with restrictions
-
-  Press enter to continue
+  enter continue \u00b7 esc quit
 """
 
-#: A restricted-folder variant keeps the stock header but warns about the
-#: restricted workspace in its own words.
+#: The restricted-open dialog keeps the numbered chrome but never the trust
+#: header; its wording must never advertise a ready composer, known or not.
 TRUST_MENU_RESTRICTED = """\
-Trust this folder?
-This workspace contains restricted files.
+Config, hooks, and exec policies from untrusted folders stay disabled. Trusted project \
+folders can still contribute settings. Skills still load, and tools follow your permission \
+settings. Opening will not change saved trust.
 
-› 1. Trust and continue
-  2. Start with restrictions
+\u203a 1. Open restricted
+  2. Quit
 
-  Press enter to continue
+  enter continue \u00b7 esc quit
 """
 
 #: A trust-family dialog whose header wording is not confirmed evidence:
@@ -37,48 +35,34 @@ This workspace contains restricted files.
 TRUST_MENU_UNCONFIRMED = """\
 Open this workspace in restricted mode?
 
-› 1. Trust and continue
-  2. Start with restrictions
+\u203a 1. Trust and continue
+  2. Quit
 
-  Press enter to continue
+  enter continue \u00b7 esc quit
 """
 
 
-@pytest.mark.parametrize(
-    ("capture", "expected"),
-    [(CODEX_IDLE, ScreenKind.PROMPT), (CODEX_APPROVAL, ScreenKind.APPROVAL)],
-    ids=["idle", "approval"],
-)
-def test_stock_screens_keep_their_readings(capture, expected):
-    """Modern idle and approval screens keep their readings."""
+def test_trust_menu_classifies_as_trust_not_prompt():
+    """The stock trust menu must never advertise a ready composer."""
     observer = CodexObserver()
-    reading = observer.screen_reading(capture)
-    assert reading.kind is expected
+    reading = observer.screen_reading(TRUST_MENU_STOCK)
+    assert reading.kind is ScreenKind.TRUST
     assert reading.confidence is ScreenConfidence.HIGH
-    assert observer.is_idle_screen(capture) is (expected is ScreenKind.PROMPT)
+    assert observer.is_idle_screen(TRUST_MENU_STOCK) is False
 
 
 @pytest.mark.parametrize(
     "capture",
-    [TRUST_MENU_STOCK, TRUST_MENU_RESTRICTED],
-    ids=["stock", "restricted-folder"],
+    [TRUST_MENU_RESTRICTED, TRUST_MENU_UNCONFIRMED],
+    ids=["restricted-open", "unconfirmed"],
 )
-def test_trust_menu_classifies_as_trust_not_prompt(capture):
-    """The stock trust menu must never advertise a ready composer."""
+def test_unconfirmed_trust_menu_wording_is_not_a_prompt(capture):
+    """Dialog wording without the trust header stays unknown; the send gate refuses it."""
     observer = CodexObserver()
     reading = observer.screen_reading(capture)
-    assert reading.kind is ScreenKind.TRUST
-    assert reading.confidence is ScreenConfidence.HIGH
-    assert observer.is_idle_screen(capture) is False
-
-
-def test_unconfirmed_trust_menu_wording_is_not_a_prompt():
-    """Unconfirmed dialog wording stays unknown; the send gate refuses it."""
-    observer = CodexObserver()
-    reading = observer.screen_reading(TRUST_MENU_UNCONFIRMED)
     assert reading.kind is ScreenKind.UNKNOWN
     assert reading.confidence is ScreenConfidence.LOW
-    assert observer.is_idle_screen(TRUST_MENU_UNCONFIRMED) is False
+    assert observer.is_idle_screen(capture) is False
 
 
 def test_numbered_menu_row_is_not_a_prompt():
@@ -104,22 +88,22 @@ def test_numbered_menu_row_is_not_a_prompt():
 QUOTED_MENU_THEN_COMPOSER = """\
 The dialog looks like this:
 Trust this folder?
-› 1. Trust and continue
-  2. Start with restrictions
-Press enter to continue
+\u203a 1. Trust and continue
+  2. Quit
+enter continue \u00b7 esc quit
 
-› Ask Codex to do anything
+\u203a Ask Codex to do anything
 """
 
 #: A composer row above a live modal is scrollback; the modal still wins.
 COMPOSER_THEN_LIVE_MENU = """\
-› Ask Codex to do anything
+\u203a Ask Codex to do anything
 
 Trust this folder?
-› 1. Trust and continue
-  2. Start with restrictions
+\u203a 1. Trust and continue
+  2. Quit
 
-Press enter to continue
+enter continue \u00b7 esc quit
 """
 
 

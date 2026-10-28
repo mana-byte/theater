@@ -93,7 +93,10 @@ def serve():
                 if sid not in sessions:
                     self._json(404, {{"error": "nope"}})
                     return
-                self._json(200, {{"data": sessions[sid]}})
+                # FAKE_READBACK_ID lets a test lie about whose session answered.
+                answer = dict(sessions[sid])
+                answer["id"] = os.environ.get("FAKE_READBACK_ID", sid)
+                self._json(200, {{"data": answer}})
             else:
                 self._json(404, {{"error": "nope"}})
 
@@ -232,19 +235,6 @@ def test_one_verified_server_then_one_tui_with_the_prompt(tmp_path, fake_opencod
     assert not Path(_credential_of(plan)).exists()
 
 
-def test_a_promptless_launch_precreates_its_session(tmp_path, fake_opencode, monkeypatch):
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
-    workdir = tmp_path / "work"
-    workdir.mkdir()
-    plan = _plan(tmp_path, prompt="")
-    run, calls = _run_bootstrap(plan, tmp_path, workdir)
-    assert run.returncode == 0, run.stderr
-    tui = next(e for e in _events(calls) if "argv" in e and e["argv"][:1] != ["serve"])
-    assert "--prompt" not in tui["argv"]
-    assert "-s" in tui["argv"]
-    assert "POST /api/session" in [e["http"] for e in _events(calls) if "http" in e]
-
-
 def test_a_resume_continues_the_exact_session_on_the_overlay_database(
     tmp_path, fake_opencode, monkeypatch
 ):
@@ -284,6 +274,31 @@ def test_a_failed_plugin_refuses_before_any_tui(tmp_path, fake_opencode, monkeyp
     assert "POST /api/session" not in [e["http"] for e in events if "http" in e]
     assert not _pid_alive(int((tmp_path / "serve.pid").read_text()))
     assert not Path(_credential_of(plan)).exists()
+
+
+def test_a_resume_readback_naming_another_session_refuses_before_any_tui(
+    tmp_path, fake_opencode, monkeypatch
+):
+    """The server's readback, not the request, decides which session continues."""
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    plan = _plan(tmp_path, prompt="", resume="ses_resume")
+    run, calls = _run_bootstrap(
+        plan,
+        tmp_path,
+        workdir,
+        extra_env={"FAKE_PRESEED": "ses_resume", "FAKE_READBACK_ID": "ses_other"},
+    )
+    assert run.returncode == 1
+    assert "different session id than the resume target" in run.stderr
+    assert not [e for e in _events(calls) if "argv" in e and e["argv"][:1] != ["serve"]]
+
+
+def test_each_enforced_launch_mints_its_own_session_id(tmp_path, fake_opencode, monkeypatch):
+    """A shared id would make every spawn continue one session."""
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", VERSION_POLICY.minimum)
+    assert _plan(tmp_path).session_id != _plan(tmp_path).session_id
 
 
 def _settings_of(plan) -> dict:

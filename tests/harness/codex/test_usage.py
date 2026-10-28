@@ -74,6 +74,20 @@ def test_response_usage_key_identifies_the_snapshot_not_the_turn():
     assert _codex_response_usage_key(None) is None
 
 
+def test_response_usage_key_keeps_two_snapshots_with_equal_last_turn_usage_distinct():
+    # Same last-turn usage, different cumulative totals: two provider responses,
+    # never one deduped snapshot.
+    first = _codex_response_usage_key(
+        {"last_token_usage": {"input_tokens": 100}, "total_token_usage": {"input_tokens": 100}}
+    )
+    second = _codex_response_usage_key(
+        {"last_token_usage": {"input_tokens": 100}, "total_token_usage": {"input_tokens": 250}}
+    )
+
+    assert first is not None and second is not None
+    assert first != second
+
+
 def test_two_responses_in_one_turn_sum_usage():
     records = _turn_with_usage(
         "turn-1",

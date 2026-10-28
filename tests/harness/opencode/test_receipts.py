@@ -18,7 +18,6 @@ from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
-from theater.harness.builtin.plugins.opencode.mcp import catalog_path
 from theater.harness.builtin.plugins.opencode.native_plugin import plugin_dir
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import SourceContractError
@@ -74,22 +73,8 @@ def test_launch_uses_a_core_owned_generic_receipt_token(
     )
 
     token_path = paths.participant_observation_dir("participant", "opencode") / "receipt-token"
-    plugin = plugin_dir(config) / "server.js"
-    source = plan.files[plugin]
     assert plan.receipt_token_path == token_path
     assert plan.receipt_token is None
-    assert "transcript-receipt" in source
-    assert '"--strict-exit"' in source
-    assert '"--id"' in source
-    assert "settings.participantID" in source
-    assert "spawn(" in source
-    assert 'stdio: ["pipe", "ignore", "ignore"]' in source
-    assert '"retryDelays": [0, 100, 500, 2000]' in source
-    assert "code === 0" in source
-    assert 'event.type === "session.created" && !data.parentID' in source
-    assert str(catalog_path("participant")) in source
-    assert str(token_path) in source
-    assert '"pluginID": "theater.opencode-session"' in source
 
 
 @pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])

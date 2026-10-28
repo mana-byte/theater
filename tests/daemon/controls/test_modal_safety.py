@@ -13,15 +13,17 @@ from theater.harness.contracts.runtime import SessionOpenMode
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.models import AwaitingDecision, Busy, JobState, StaleTarget, Status
 
-#: Stock Codex 0.158 trust dialog rendered by the provider fixture.
-TRUST_MENU_0158 = """\
-Trust this folder?
-Working with untrusted contents carries risk.
+#: Stock Codex trust dialog (tui/src/onboarding/trust_directory.rs) rendered
+#: by the provider fixture.
+TRUST_MENU_STOCK = """\
+Trust this folder? Codex can read, edit, and run files here, subject to your permission \
+settings. Folder settings can run code automatically, even without a model request. Continue \
+only if you trust these files. Your trust decision will be saved.
 
-› 1. Trust and continue
-  2. Start with restrictions
+\u203a 1. Trust and continue
+  2. Quit
 
-  Press enter to continue
+  enter continue \u00b7 esc quit
 """
 
 #: An interactive menu that no classifier knows: never a ready composer.
@@ -48,9 +50,9 @@ def _spawn(daemon, terminal_provider, *, screen):
     ("screen", "expected_kind"),
     [
         (CODEX_APPROVAL, "approval"),
-        (TRUST_MENU_0158, "trust"),
+        (TRUST_MENU_STOCK, "trust"),
     ],
-    ids=["approval", "stock-0.158-trust"],
+    ids=["approval", "stock-trust"],
 )
 async def test_send_refuses_dialog_even_with_stale_idle_status(
     daemon, terminal_provider, screen, expected_kind
@@ -184,7 +186,7 @@ async def test_send_delivers_on_a_proven_ready_prompt(daemon, terminal_provider)
     assert [item.handle for item in running] == [job.handle]
 
 
-@pytest.mark.parametrize("screen", [TRUST_MENU_0158, UNKNOWN_MENU], ids=["dialog", "unknown-menu"])
+@pytest.mark.parametrize("screen", [TRUST_MENU_STOCK, UNKNOWN_MENU], ids=["dialog", "unknown-menu"])
 async def test_queued_followup_defers_then_recovers(daemon, terminal_provider, screen):
     """Dispatch refuses and stays queued until a real prompt appears."""
     participant, terminal = _spawn(daemon, terminal_provider, screen=screen)

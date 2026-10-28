@@ -43,7 +43,7 @@ def _thread_id_of(thread: object) -> str | None:
 
 def _resume_params(session: str) -> dict[str, object]:
     # initialTurnsPage is a *separate* response field. It does not disable
-    # full thread.turns hydration; excludeTurns is essential on stock 0.154.
+    # full thread.turns hydration; excludeTurns is essential on the stock CLI.
     return {
         "threadId": session,
         "excludeTurns": True,

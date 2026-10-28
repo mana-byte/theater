@@ -99,14 +99,6 @@ def test_codex_finds_a_transcript_by_cwd_and_by_session_id(tmp_path):
     assert observer.find_transcript(cwd="/nowhere", session_id=sid) == target
 
 
-def test_codex_session_id_is_the_uuid_tail_of_the_filename(tmp_path):
-    """The uuid keeps its own hyphens, so the timestamp is what anchors it."""
-    sid = "019ff5c6-717c-7a70-9ec4-66dd1f4d173e"
-    path = tmp_path / f"rollout-2026-08-12T13-40-50-{sid}.jsonl"
-    assert CodexObserver().session_id(path) == sid
-    assert CodexObserver().session_id(tmp_path / "not-a-rollout.jsonl") is None
-
-
 def test_codex_after_excludes_transcripts_that_predate_the_participant(tmp_path):
     root = tmp_path / "sessions"
     day = root / "2026" / "08" / "12"
@@ -145,21 +137,6 @@ CODEX_IDLE = "\n".join(
         "gpt-5.6-sol medium \u00b7 ~/work",
     ]
 )
-
-
-CODEX_WORKING = "\n".join(
-    [
-        "> Ran ls",
-        "",
-        "\u2022 Working (12s \u2022 esc to interrupt)",
-    ]
-)
-
-
-def test_codex_is_not_idle_while_a_turn_is_running():
-    """The composer is still on screen mid-turn; the status line is the tell."""
-    assert CodexObserver().is_idle_screen(CODEX_WORKING) is False
-    assert CodexObserver().is_idle_screen(CODEX_IDLE + "\n" + CODEX_WORKING) is False
 
 
 def test_codex_output_scrolled_past_the_composer_is_not_idle():

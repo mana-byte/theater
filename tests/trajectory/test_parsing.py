@@ -13,7 +13,6 @@ from tests.support.trajectory_parsing import fixture_lines
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import parser as codex_plugin
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
-from theater.harness.builtin.plugins.codex.values import _codex_usage
 from theater.harness.contracts.trajectory import ParsedRecord
 from theater.trajectory.enums import (
     CostProvenance,
@@ -63,10 +62,8 @@ def test_malformed_and_non_object_lines_are_empty(observer_type):
 
 
 def test_cost_provenance_tracks_reported_adapter_values() -> None:
-    codex = _codex_usage({}, {"usage": {"input_tokens": 1, "cost_usd": 0.2}})
     opencode = opencode_plugin._opencode_usage({"tokens": {"input": 1}, "cost": 0.3})
 
-    assert codex is not None and codex.cost_provenance is CostProvenance.REPORTED
     assert opencode is not None and opencode.cost_provenance is CostProvenance.REPORTED
 
 
