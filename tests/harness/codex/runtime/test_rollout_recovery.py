@@ -276,3 +276,27 @@ async def test_a_degrade_that_lost_events_outlives_the_subscription_that_followe
         assert (await runtime.snapshot()).health is ConnectionHealth.DEGRADED
     finally:
         await runtime.aclose()
+
+
+async def test_a_degrade_from_lost_events_preceding_the_subscription_stays_latched() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    try:
+        # Lost data first: the overflow degrades the route before any subscription attempt.
+        for index in range(runtime_constants.CODEX_RUNTIME_EVENTS_BUFFER + 1):
+            server.push(completed_item(f"i-{index}", item_type="agentMessage", text=f"m{index}"))
+        assert await until(lambda: runtime._dropped > 0)
+        assert (await runtime.snapshot()).health is ConnectionHealth.DEGRADED
+
+        # A failed subscription degrade arriving later must not take over the flag: another
+        # cause already degraded the route, so only that cause can lift it.
+        server.fail("thread/resume", RuntimeRequestError(-32603, "failed to read thread"))
+        await runtime.send(operation_id="op-1", prompt="finish")
+
+        server.failures.pop("thread/resume")
+        server.respond("thread/resume", completed_resume_response())
+        server.push(idle_broadcast())
+        assert await until(lambda: runtime._subscribed)
+        assert (await runtime.snapshot()).health is ConnectionHealth.DEGRADED
+    finally:
+        await runtime.aclose()
