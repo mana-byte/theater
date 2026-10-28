@@ -578,7 +578,6 @@ def test_claude_requests_share_the_enclosing_user_turn() -> None:
         claude_record(
             "a1",
             "u0",
-            promptId="turn-1",
             requestId="req-1",
             message={
                 "id": "m1",
@@ -589,7 +588,6 @@ def test_claude_requests_share_the_enclosing_user_turn() -> None:
         claude_record(
             "a2",
             "a1",
-            promptId="turn-1",
             requestId="req-2",
             message={
                 "id": "m2",
@@ -600,7 +598,6 @@ def test_claude_requests_share_the_enclosing_user_turn() -> None:
         claude_record(
             "a3",
             "a2",
-            promptId="turn-1",
             requestId="req-3",
             message={
                 "id": "m3",
@@ -609,10 +606,11 @@ def test_claude_requests_share_the_enclosing_user_turn() -> None:
             },
         ),
     ]
+    observer = ClaudeCodeObserver()
     facts = [
         fact
         for index, line in enumerate(lines)
-        for fact in ClaudeCodeObserver().parse_record(line, index).trajectory
+        for fact in observer.parse_record(line, index).trajectory
     ]
     records = tuple(
         fact_to_record(fact, participant_id="participant", source_epoch="epoch") for fact in facts
