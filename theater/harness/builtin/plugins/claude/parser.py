@@ -144,8 +144,7 @@ class ClaudeParser:
     ) -> list[Event]:
         _clip = clipper(clip_text)
         stop = message.get("stop_reason")
-        sidechain = record.get("isSidechain") is True
-        turn_end = stop is not None and stop != "tool_use" and not sidechain
+        turn_end = stop is not None and stop != "tool_use"
         final_candidate = turn_end and stop == "end_turn"
         tid = message.get("id") or record.get("requestId")
         tid = tid if isinstance(tid, str) and tid else None
@@ -192,8 +191,6 @@ class ClaudeParser:
                     usage=usage,
                 )
             )
-        if sidechain:
-            return out
         if final_candidate:
             self._seal.expect_marker(tid)
         elif turn_end and out and _carries_answer(out[-1]):
@@ -205,8 +202,6 @@ class ClaudeParser:
         self, record: dict, ts: float | None, index: int, *, clip_text: bool
     ) -> list[Event]:
         """One terminal event when the chain proves the message, else hold the marker for later."""
-        if record.get("isSidechain") is True:
-            return []
         outcome = self._seal.resolve_or_defer(record, ts, index)
         if isinstance(outcome, Sealed):
             return self._boundary_event(outcome, ts, index, clip_text=clip_text)

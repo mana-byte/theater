@@ -107,9 +107,9 @@ class ClaudeTrajectory:
             if starts_turn
             else explicit_turn
             or (parent.turn_id if parent is not None else None)
-            or (self._main_turn_id if record.get("isSidechain") is not True else None)
+            or self._main_turn_id
         )
-        if record.get("isSidechain") is not True and (explicit_turn is not None or starts_turn):
+        if explicit_turn is not None or starts_turn:
             self._main_turn_id = turn_id
 
         is_turn_duration = (
