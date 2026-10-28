@@ -9,7 +9,6 @@ from theater.harness.normalization.values import (
 from theater.harness.normalization.values import (
     trajectory_identifier as _trajectory_id,
 )
-from theater.trajectory.enums import CostProvenance
 from theater.trajectory.records import TrajectoryUsage
 
 from .timing import _claude_request_id
@@ -51,6 +50,4 @@ def _claude_trajectory_usage(message: dict, record: dict) -> TrajectoryUsage | N
         output_tokens=_trajectory_int(raw.get("output_tokens")),
         cache_read_tokens=_trajectory_int(raw.get("cache_read_input_tokens")),
         cache_write_tokens=_trajectory_int(raw.get("cache_creation_input_tokens")),
-        cost_usd=None,
-        cost_provenance=CostProvenance.UNKNOWN,
     )
