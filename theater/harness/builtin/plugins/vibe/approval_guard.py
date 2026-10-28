@@ -1,9 +1,9 @@
 """Fail-closed detection of custom agent profiles shadowing the approval profiles.
 
-Verified against real wheels (2.24.1 and 2.25.8): a same-name custom file in a
-project or user agents dir replaces the builtin profile, and profile overrides
-merge ABOVE the environment layer — so ``VIBE_BYPASS_TOOL_PERMISSIONS=false``
-cannot neutralise a profile-level ``bypass_tool_permissions = true``.
+Verified against real wheels: a same-name custom file in a project or user
+agents dir replaces the builtin profile, and profile overrides merge ABOVE the
+environment layer — so ``VIBE_BYPASS_TOOL_PERMISSIONS=false`` cannot neutralise
+a profile-level ``bypass_tool_permissions = true``.
 """
 
 from __future__ import annotations

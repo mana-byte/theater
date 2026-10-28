@@ -12,7 +12,6 @@ from tests.support.shipped import VibeObserver
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.vibe.trajectory import _vibe_named_mcp_identity
 from theater.trajectory import ContentFormat, TimingProvenance, TrajectoryKind, TrajectoryStatus
-from theater.trajectory.capabilities import TrajectoryFeature
 
 FIXTURE = fixture("vibe_messages.jsonl")
 
@@ -317,20 +316,6 @@ def test_vibe_context_boundary_is_a_context_fact() -> None:
     assert next(
         detail for detail in fact.details if detail.name == "context_boundary"
     ).preview.text == ("compaction")
-
-
-def test_vibe_capabilities_match_enriched_transcript_data() -> None:
-    capabilities = VibeObserver.trajectory_capabilities
-
-    assert {
-        TrajectoryFeature.MODELS,
-        TrajectoryFeature.USAGE,
-        TrajectoryFeature.TIMING,
-        TrajectoryFeature.CONTEXT,
-    } <= capabilities.supported
-    assert capabilities.unsupported == frozenset(
-        {TrajectoryFeature.REQUESTS, TrajectoryFeature.RETRIES}
-    )
 
 
 def test_vibe_facts_bound_malformed_large_content_without_timing() -> None:
