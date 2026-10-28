@@ -9,12 +9,15 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from tests.support.pi_bridge import bridge_snapshot
 from tests.support.waiting import wait_until
 from theater.daemon.server import Daemon
 from theater.daemon.spawning.models import SpawnRequest
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import HARNESSES
+from theater.harness.builtin.plugins.pi.frontend import install_pi_frontend
 from theater.harness.builtin.plugins.pi.manifest import MANIFEST
 from theater.harness.builtin.plugins.pi.runtime_constants import VERSION_POLICY
 from theater.harness.contracts.channels import ChannelKind
@@ -22,6 +25,7 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
     RuntimeCapability,
     RuntimeCompatibility,
+    RuntimeFrontendInstallContext,
     RuntimeWiring,
 )
 from theater.harness.manifests.compiler import compile_manifest
@@ -201,6 +205,22 @@ async def test_pi_launch_connect_settings_and_reconnect_preserve_pinned_routes(
         assert all(r["method"] == "pi.snapshot" for r in replacement.requests)
     finally:
         await replacement.close()
+
+
+def test_pi_frontend_overlay_accepts_only_loopback_endpoints() -> None:
+    # The bundled bridge must never dial off-machine: one synthetic check for
+    # the endpoint validator behind install_pi_frontend.
+    context = RuntimeFrontendInstallContext(
+        participant_id="pi-child",
+        endpoint="tcp://127.0.0.1:43123",
+        token_file=Path("/tmp/pi-token"),
+    )
+    assert "THEATER_PI_FRONTEND_CONFIG" in install_pi_frontend(context).env
+    for endpoint in ("tcp://10.0.0.1:43123", "tcp://127.0.0.1:notaport"):
+        with pytest.raises(ValueError, match="never dials a non-loopback endpoint"):
+            install_pi_frontend(
+                replace(context, endpoint=endpoint),
+            )
 
 
 async def test_pi_daemon_restart_restores_credentials_and_fails_native_followups(
