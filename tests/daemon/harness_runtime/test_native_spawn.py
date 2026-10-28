@@ -24,7 +24,7 @@ from tests.support.runtime_processes import (
     await_reaped,
     pid_alive,
 )
-from tests.support.waiting import wait_until
+from tests.support.waiting import settle_operations, wait_until
 from theater import paths
 from theater.daemon.controls.service import INTERRUPTED_ERROR_CODE
 from theater.daemon.runtime import recovery
@@ -393,6 +393,33 @@ async def test_initial_prompt_binds_the_spawn_job_handle_exactly_once(
     finally:
         if p is not None:
             await teardown_backend(d, p.id)
+        await d.aclose()
+
+
+async def test_parentless_public_spawn_delivers_the_initial_prompt_once(
+    theater_home, terminal_provider, native_rig, tmp_path
+):
+    """The public route: the reserved spawn job's caller matches the native dispatch's."""
+    d = await native_daemon(native_rig.io, native_rig.harness, terminal_provider)
+    pid = None
+    try:
+        accepted = await ParticipantLaunchService(d).spawn(
+            client_id="operator-a",
+            idempotency_key="public-prompt",
+            params={
+                "harness": "native-fixture",
+                "approval": "manual",
+                "cwd": str(tmp_path),
+                "prompt": "do the task",
+            },
+        )
+        pid = accepted["participant_id"]
+        await settle_operations(d)
+        assert d.runtime_manager.get(pid).state.sent == ["do the task"]
+        assert d.store.get_job(pid).caller_id == "cli"
+    finally:
+        if pid is not None:
+            await teardown_backend(d, pid)
         await d.aclose()
 
 
