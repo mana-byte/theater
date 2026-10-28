@@ -5,15 +5,13 @@ from dataclasses import replace
 import pytest
 from sqlalchemy import text
 
+from tests.support.codex_screens import CODEX_APPROVAL, CODEX_IDLE
 from tests.support.control_harness import Harness, make_runtime, state_of
-from tests.support.paths import fixture
 from tests.support.waiting import wait_until
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import SessionOpenMode
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.models import AwaitingDecision, Busy, JobState, StaleTarget, Status
-
-SCREENS = fixture("screens")
 
 #: Stock Codex 0.158 trust dialog rendered by the provider fixture.
 TRUST_MENU_0158 = """\
@@ -49,11 +47,10 @@ def _spawn(daemon, terminal_provider, *, screen):
 @pytest.mark.parametrize(
     ("screen", "expected_kind"),
     [
-        ((SCREENS / "codex_trust.txt").read_text(), "trust"),
-        ((SCREENS / "codex_approval.txt").read_text(), "approval"),
+        (CODEX_APPROVAL, "approval"),
         (TRUST_MENU_0158, "trust"),
     ],
-    ids=["old-trust-fixture", "approval-fixture", "stock-0.158-trust"],
+    ids=["approval", "stock-0.158-trust"],
 )
 async def test_send_refuses_dialog_even_with_stale_idle_status(
     daemon, terminal_provider, screen, expected_kind
@@ -83,9 +80,7 @@ async def test_send_refuses_missing_capture_evidence(daemon, terminal_provider):
 
 async def test_send_refuses_failed_capture(daemon, terminal_provider, monkeypatch):
     """A provider capture error refuses delivery instead of failing open."""
-    participant, _terminal = _spawn(
-        daemon, terminal_provider, screen=(SCREENS / "codex_idle.txt").read_text()
-    )
+    participant, _terminal = _spawn(daemon, terminal_provider, screen=CODEX_IDLE)
 
     async def exploding(_participant_id, *, max_bytes):
         raise RuntimeError("provider inspect broke")
@@ -100,9 +95,7 @@ async def test_send_refuses_failed_capture(daemon, terminal_provider, monkeypatc
 
 async def test_send_refuses_classifier_failure(daemon, terminal_provider, monkeypatch):
     """A harness classifier error refuses delivery instead of failing open."""
-    participant, _terminal = _spawn(
-        daemon, terminal_provider, screen=(SCREENS / "codex_idle.txt").read_text()
-    )
+    participant, _terminal = _spawn(daemon, terminal_provider, screen=CODEX_IDLE)
 
     def exploding(_capture):
         raise RuntimeError("classifier broke")
@@ -155,9 +148,7 @@ async def test_send_refuses_when_binding_changes_during_capture(
     daemon, terminal_provider, monkeypatch
 ):
     """Screen evidence of a previous terminal never authorizes delivery."""
-    participant, _terminal = _spawn(
-        daemon, terminal_provider, screen=(SCREENS / "codex_idle.txt").read_text()
-    )
+    participant, _terminal = _spawn(daemon, terminal_provider, screen=CODEX_IDLE)
     original = daemon.presence.capture_screen
 
     async def capture_then_rebind(participant_id, *, max_bytes):
@@ -183,9 +174,7 @@ async def test_send_refuses_when_binding_changes_during_capture(
 
 async def test_send_delivers_on_a_proven_ready_prompt(daemon, terminal_provider):
     """A high-confidence prompt composer delivers exactly once."""
-    participant, terminal = _spawn(
-        daemon, terminal_provider, screen=(SCREENS / "codex_idle.txt").read_text()
-    )
+    participant, terminal = _spawn(daemon, terminal_provider, screen=CODEX_IDLE)
 
     job = await daemon.controls.send(participant.id, caller_id="cli", prompt="Investigate only")
 
@@ -211,7 +200,7 @@ async def test_queued_followup_defers_then_recovers(daemon, terminal_provider, s
     assert [op.operation_id for op in daemon.store.queued_control_operations(participant.id)]
     assert daemon.store.get_job(job.handle).state == JobState.RUNNING
 
-    terminal_provider.screens[terminal] = (SCREENS / "codex_idle.txt").read_text()
+    terminal_provider.screens[terminal] = CODEX_IDLE
     # The daemon's own maintenance may win the recovery race; either way the
     # queued prompt is delivered exactly once and the queue drains.
     await wait_until(

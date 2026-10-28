@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.support.paths import fixture
+from tests.support.codex_screens import CODEX_IDLE
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -68,7 +68,7 @@ def online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
             )
         # Provider sends require a proven ready composer; this fixture's
         # participants are idle codex terminals.
-        idle_screen = fixture("screens", "codex_idle.txt")
+        idle_screen = CODEX_IDLE
         return {
             "provider_generation": generation,
             "report_revision": revision,
@@ -85,7 +85,7 @@ def online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
                 "revision": revision,
                 "reason": "test-no-human-focus",
             },
-            "screen": (idle_screen.read_text() if screen_max_bytes else None),
+            "screen": (idle_screen if screen_max_bytes else None),
         }
 
     monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)

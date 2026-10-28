@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.codex_screens import CODEX_IDLE
 from tests.support.frontend_wire import projection_wire
-from tests.support.paths import fixture
 from tests.support.provider_launcher import physical_events, provider_process, raw_register_provider
 from tests.support.waiting import wait_until
 from theater import paths
@@ -356,7 +356,7 @@ async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
         plan={
             "bind_requested_participant": True,
             "disconnect_after": ["terminal.deliver"],
-            "screen": (fixture("screens", "codex_idle.txt")).read_text(),
+            "screen": CODEX_IDLE,
         },
     ) as provider:
         client = FrontendClient(paths.socket_path(), client_id="e2e-lost-input")

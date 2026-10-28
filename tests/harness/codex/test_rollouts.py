@@ -1,4 +1,4 @@
-"""Codex paginated rollouts: native items, prompts, completion and legacy equivalence."""
+"""Codex paginated rollouts: native items, prompts and completion."""
 
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ def test_item_completed_events_carry_exact_native_identity():
 def test_multi_event_tool_items_stay_anonymous_to_avoid_collapsing():
     """MCP/file items emit several control events; a shared id would collapse them.
 
-    They have no live event counterpart, so they keep legacy anonymity.
+    They have no live event counterpart, so they stay anonymous.
     """
     observer = CodexObserver()
     records = [
@@ -458,14 +458,18 @@ def test_failed_mcp_item_reports_the_error_path():
 
 def test_file_change_item_reports_apply_patch_paths():
     observer = CodexObserver()
+    item = file_change_item("patch-1")
+    item["changes"] = {
+        "/repo/src/main.py": {"type": "update", "move_path": "/repo/src/moved.py"},
+        "/repo/src/new.py": {"type": "add", "content": "x = 1\n"},
+        "/repo/src/gone.py": {"type": "delete"},
+        "/outside/secret.py": {"type": "delete"},
+        "../escape.py": {"type": "add"},
+        "/repo/not-a-change": {"type": "unknown"},
+    }
     records = [
         session_meta(),
-        item_completed(
-            "turn-a",
-            file_change_item("patch-1"),
-            started_ms=1789040008000,
-            completed_ms=1789040009000,
-        ),
+        item_completed("turn-a", item, started_ms=1789040008000, completed_ms=1789040009000),
     ]
     parsed = parse_rollout(observer, records)
     events = rollout_events(parsed)
@@ -473,7 +477,12 @@ def test_file_change_item_reports_apply_patch_paths():
     patch_events = [e for e in events if e.tool_name == "apply_patch"]
     assert len(patch_events) == 1
     assert patch_events[0].kind is EventKind.TOOL_CALL
-    assert [(p.path, p.mode) for p in patch_events[0].paths] == [("theater/new.py", "write")]
+    assert [(p.path, p.mode) for p in patch_events[0].paths] == [
+        ("src/main.py", "write"),
+        ("src/moved.py", "write"),
+        ("src/new.py", "write"),
+        ("src/gone.py", "write"),
+    ]
 
     facts = rollout_facts(parsed)
     call_fact = next(f for f in facts if f.kind is TrajectoryKind.TOOL_CALL)
@@ -513,86 +522,6 @@ def test_plan_and_compaction_items_report_context_facts():
     ]
     assert parsed[1].trajectory[0].timing is not None
     assert parsed[1].trajectory[0].timing.end == pytest.approx(1789040010.001)
-
-
-def _legacy_turn(turn_id: str, prompt: str, reply: str) -> list[dict]:
-    return [
-        rollout_record("event_msg", {"type": "task_started", "turn_id": turn_id}),
-        rollout_record(
-            "event_msg", {"type": "user_message", "message": prompt, "turn_id": turn_id}
-        ),
-        _raw_message(turn_id, "user", f"raw-user-{turn_id}", prompt, "input_text"),
-        rollout_record(
-            "event_msg",
-            {"type": "agent_message", "message": reply, "phase": "final_answer"},
-        ),
-        rollout_record(
-            "event_msg",
-            {"type": "task_complete", "turn_id": turn_id, "last_agent_message": reply},
-        ),
-    ]
-
-
-def test_legacy_events_still_drive_the_same_control_outcome():
-    """Legacy `user_message`/`agent_message` records keep their meaning."""
-    observer = CodexObserver()
-    legacy = [*_legacy_turn("turn-a", "do the audit", "audit done")]
-    events = rollout_events(parse_rollout(observer, legacy))
-    turns = _accumulate(events)
-
-    assert [e.turn_id for e in events if e.turn_end] == ["turn-a"]
-    assert len(turns) == 1
-    assert answers_prompt(turns[0].heard, "do the audit") is True
-    assert turns[0].said == "audit done"
-
-
-def test_legacy_patch_and_mcp_events_still_parse():
-    observer = CodexObserver()
-    records = [
-        session_meta(),
-        rollout_record(
-            "event_msg",
-            {
-                "type": "patch_apply_end",
-                "call_id": "call-1",
-                "turn_id": "turn-a",
-                "stdout": "",
-                "stderr": "",
-                "success": True,
-                "changes": {"a/b.py": {"type": "update", "unified_diff": "..."}},
-            },
-        ),
-        rollout_record(
-            "event_msg",
-            {
-                "type": "mcp_tool_call_begin",
-                "call_id": "mcp-1",
-                "invocation": {"server": "theater", "tool": "whoami", "arguments": {}},
-            },
-        ),
-        rollout_record(
-            "event_msg",
-            {
-                "type": "mcp_tool_call_end",
-                "call_id": "mcp-1",
-                "invocation": {"server": "theater", "tool": "whoami", "arguments": {}},
-                "result": {"Ok": {"content": [{"type": "text", "text": "ok"}]}},
-            },
-        ),
-    ]
-    parsed = parse_rollout(observer, records)
-    events = rollout_events(parsed)
-    assert [(e.tool_name, e.kind) for e in events] == [
-        ("apply_patch", EventKind.TOOL_CALL),
-        ("theater.whoami", EventKind.TOOL_CALL),
-        ("theater.whoami", EventKind.TOOL_RESULT),
-    ]
-    facts = rollout_facts(parsed)
-    assert any(f.kind is TrajectoryKind.TOOL_CALL and f.summary == "apply_patch" for f in facts)
-    mcp_result = next(
-        f for f in facts if f.kind is TrajectoryKind.TOOL_RESULT and f.call_id == "mcp-1"
-    )
-    assert mcp_result.summary == "ok"
 
 
 @pytest.mark.asyncio

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from tests.support.codex_server import (
     ScriptedCodexServer,
     make_runtime,
@@ -108,62 +106,6 @@ async def test_settings_update_with_unconfirmed_readback_exposes_uncertainty() -
     assert snapshot.settings.model is None
     health = runtime.live_source().health_snapshot()[0]
     assert health.state is ChannelHealthState.DEGRADED
-    await runtime.aclose()
-
-
-async def test_settings_are_confirmed_by_the_applied_broadcast_when_readback_carries_none() -> None:
-    server = ScriptedCodexServer()
-    runtime, _binding = await open_new(server)
-
-    async def update_and_broadcast(operation_id: str, applied_effort: str):
-        # Older Codex: thread/read never carries effort; only this broadcast names it.
-        task = asyncio.create_task(
-            runtime.update_settings(operation_id=operation_id, reasoning_effort="medium")
-        )
-        await wait_until(
-            lambda: server.requested("thread/settings/update"),
-            what="settings update request in flight",
-        )
-        server.push(
-            RuntimeNotification(
-                method="thread/settings/updated",
-                params={
-                    "threadId": "ui-thread-1",
-                    "threadSettings": {"model": "m", "effort": applied_effort},
-                },
-            )
-        )
-        return await task
-
-    receipt = await update_and_broadcast("op-notice", "medium")
-    assert receipt.result is DeliveryResult.ACCEPTED
-    assert (await runtime.snapshot()).settings.reasoning_effort == "medium"
-    # A broadcast that names another value never confirms the requested one.
-    receipt = await update_and_broadcast("op-contradicted", "high")
-    assert receipt.result is DeliveryResult.UNKNOWN
-    assert receipt.error_code == "settings_unconfirmed"
-    # A readback contradicting one field is never rescued by a broadcast, even when a
-    # sibling field is missing from it.
-    server.respond("thread/read", {"thread": {"id": "ui-thread-1", "reasoningEffort": "high"}})
-    task = asyncio.create_task(
-        runtime.update_settings(operation_id="op-mixed", model="m", reasoning_effort="medium")
-    )
-    await wait_until(
-        lambda: server.requested("thread/settings/update"),
-        what="settings update request in flight",
-    )
-    server.push(
-        RuntimeNotification(
-            method="thread/settings/updated",
-            params={
-                "threadId": "ui-thread-1",
-                "threadSettings": {"model": "m", "effort": "medium"},
-            },
-        )
-    )
-    receipt = await task
-    assert receipt.result is DeliveryResult.UNKNOWN
-    assert receipt.error_code == "settings_contradicted"
     await runtime.aclose()
 
 

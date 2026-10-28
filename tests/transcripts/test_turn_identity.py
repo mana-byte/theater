@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from tests.support.codex_rollout_items import parse_rollout, rollout_events, rollout_record
 from tests.support.observation import apply_batch
 from tests.support.opencode_recorder import Recorder, text
 from tests.support.paths import FIXTURES
@@ -45,14 +46,18 @@ def test_codex_reports_the_turn_id_it_stamps_on_both_ends():
     Which makes the boundary joinable to its own beginning with no inference
     at all — the only harness of the four that gives us that outright.
     """
-    events = events_for(CodexObserver(), FIXTURES / "turn_codex.jsonl")
+    records = [
+        rollout_record("event_msg", {"type": "task_started", "turn_id": "turn-1"}),
+        rollout_record(
+            "event_msg",
+            {"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "done"},
+        ),
+    ]
+    events = rollout_events(parse_rollout(CodexObserver(), records))
     ends = boundaries(events)
 
-    started = json.loads((FIXTURES / "turn_codex.jsonl").read_text().splitlines()[1])
-    assert started["payload"]["type"] == "task_started"
-
     assert len(ends) == 1
-    assert ends[0].turn_id == started["payload"]["turn_id"]
+    assert ends[0].turn_id == "turn-1"
 
 
 def test_claude_reports_the_message_id_the_split_records_share():
@@ -195,8 +200,8 @@ def test_unidentified_boundaries_are_never_treated_as_duplicates(registry):
 def test_text_from_an_earlier_poll_still_answers_the_boundary(registry):
     """The turn spoke in one batch and ended in the next.
 
-    Codex writes its reply as `agent_message` and ends the turn on a separate
-    `task_complete` record; a poll landing between the two used to resolve the
+    Codex writes its reply as an `AgentMessage` item and ends the turn on a
+    separate `task_complete` record; a poll landing between the two used to resolve the
     job with an empty string.
     """
     observer, p, jobs = poised(registry)

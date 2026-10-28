@@ -6,7 +6,7 @@ import pytest
 
 from tests.support.observation import apply_batch
 from tests.support.paths import FIXTURES
-from tests.support.shipped import ClaudeCodeObserver, CodexObserver, VibeObserver
+from tests.support.shipped import ClaudeCodeObserver, VibeObserver
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     _PROMPT_MATCH,
@@ -391,7 +391,6 @@ def test_two_prompts_sharing_only_a_short_opening_are_not_confused():
 
 CAPTURED = {
     "claude": ClaudeCodeObserver,
-    "codex": CodexObserver,
     "vibe": VibeObserver,
 }
 

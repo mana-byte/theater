@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.support.codex_screens import CODEX_IDLE
 from tests.support.paths import fixture
 
 SCREENS = fixture("screens")
@@ -16,9 +17,10 @@ def trust_target(daemon, participant_id: str, *, provenance: str = "operator") -
 
 def ready_screen(daemon, terminal_id: str, harness: str) -> None:
     """Provider sends require a proven ready composer on screen."""
-    daemon._test_terminal_provider.screens[terminal_id] = (
-        SCREENS / f"{harness}_idle.txt"
-    ).read_text()
+    # Codex's screen is synthetic (tests/support/codex_screens.py); the other
+    # harnesses still have recorded idle captures.
+    screen = CODEX_IDLE if harness == "codex" else (SCREENS / f"{harness}_idle.txt").read_text()
+    daemon._test_terminal_provider.screens[terminal_id] = screen
 
 
 async def send_target(client, daemon, *, pane: str = "%1", harness: str = "vibe"):
