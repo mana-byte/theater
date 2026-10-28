@@ -822,7 +822,11 @@ delivered jobs crash `completion_unverified` rather than take another turn's
 answer, before any checkpoint advances. The fact repeats until a batch carrying
 it is applied and acknowledged. One exception is proven: matching `latestTurn`
 ids in both views mean no other turn ended in between (Vibe keeps only two
-journals), and that turn's end stands on the current view alone. A journal that
+journals), and that turn's end stands on the current view alone. A second is
+proven: with no open work in either view (no turn in progress, nothing queued,
+the session not busy) and a watermark gap of at most three publishes, no other
+turn can have ended in between — every turn, even an injected `/retry` one that
+types no entry, publishes its start and its end. A journal that
 moves backwards is rejected: the
 acknowledged point and its open turn stand. Replaying is safe only because a
 Vibe provider steer is refused: Enter there queues a separate turn.

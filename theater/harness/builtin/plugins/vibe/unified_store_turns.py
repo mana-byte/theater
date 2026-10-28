@@ -123,6 +123,14 @@ def turn_changes_between(
         # Vibe folds after every turn; one shared turn id in both views proves no other ran.
         if turn_id is not None and turn_id == turn_key(latest_turn(current.snapshot))[0]:
             return ()
+        from .unified_source import _turn_state  # local: the source imports this module
+
+        # Every turn publishes its start and its end: with no work open in either view,
+        # a gap of at most three publishes holds only the current view's turn.
+        if current.watermark - previous.watermark <= 3 and not (
+            _turn_state(previous).open or _turn_state(current).open
+        ):
+            return ()
         try:
             retained = [int(path.stem) for path in _segments(session_root)]
         except (OSError, UnifiedStoreError):
