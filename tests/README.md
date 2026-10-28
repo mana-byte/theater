@@ -73,7 +73,13 @@ fresh container; the default-server proof creates and destroys that container's 
 - Test directories get no `__init__.py` (only `support/` is a package): pytest
   runs with `--import-mode=importlib`, so the same basename may appear in different directories.
 - Shared test code lives in `tests/support`; fixture data describes behavior, never a history of
-  CLI releases that passed qualification.
+  CLI releases that passed qualification. Fixtures are synthetic: a capture is stamped with a
+  release that leaves the window within days.
+- A test never names a CLI release inside or below a plugin's window and never computes "one below
+  the floor" from a version digit. Use `VERSION_POLICY.minimum` and `maximum` as they are, a neutral
+  extreme (`0.0.1`, `99.0.0`) or the maximum's next patch; the boundaries are proven once, in
+  `tests/harness/core/test_version_policy.py`. The release that exposed a bug belongs in the
+  commit message.
 - Every module opens with a one-line docstring stating its subject.
 
 ## The live conformance suite

@@ -28,7 +28,6 @@ from theater.harness.contracts.runtime import (
     RuntimePlanningContext,
     RuntimeProbeContext,
 )
-from theater.harness.contracts.version_policy import version_key
 
 
 class _FakeCompleted:
@@ -52,29 +51,15 @@ def _patch_version(
     )
 
 
-def _text(release: tuple[int, int, int]) -> str:
-    return ".".join(map(str, release))
-
-
-def _before(release: tuple[int, int, int]) -> tuple[int, int, int]:
-    major, minor, patch = release
-    return (major, minor, patch - 1) if patch else (major, minor - 1, 99)
-
-
-def _gate_cases() -> list[tuple[str, bool]]:
-    minimum, maximum = version_key(VERSION_POLICY.minimum), version_key(VERSION_POLICY.maximum)
-    return [
+@pytest.mark.parametrize(
+    ("version", "supported"),
+    [
         (VERSION_POLICY.minimum, True),
-        (VERSION_POLICY.maximum, True),
-        (_text(_before(minimum)), False),
-        (_text((*maximum[:2], maximum[2] + 1)), False),
-        *((version, False) for version in VERSION_POLICY.excluded),
+        ("0.0.1", False),
+        # A matched-yet-unstable banner must fail closed, not fall through as supported.
         (f"{VERSION_POLICY.minimum}-alpha.1", False),
-        (f"0{VERSION_POLICY.minimum}", False),
-    ]
-
-
-@pytest.mark.parametrize(("version", "supported"), _gate_cases())
+    ],
+)
 def test_probe_range_gate_and_manifest_range(monkeypatch, version: str, supported: bool) -> None:
     _patch_version(monkeypatch, f"codex-cli {version}\n")
     compatibility = probe_codex_compatibility(RuntimeProbeContext(binary="codex"))

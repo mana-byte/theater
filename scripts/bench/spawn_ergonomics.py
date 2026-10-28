@@ -169,7 +169,9 @@ def _c8(daemon, home: Path) -> list[dict]:
 
 async def _measure(home: Path) -> dict:
     os.environ["THEATER_HOME"] = str(home)
-    os.environ["THEATER_OPENCODE_VERSION"] = "1.18.29"
+    from theater.harness.builtin.plugins.opencode.runtime_plan import VERSION_POLICY
+
+    os.environ["THEATER_OPENCODE_VERSION"] = VERSION_POLICY.minimum
     os.environ["XDG_DATA_HOME"] = str(home / "xdg-data")
     import pytest
 
