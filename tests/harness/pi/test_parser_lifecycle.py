@@ -219,37 +219,6 @@ def test_pi_parser_error_response_defers_turn_end_until_settled_marker(tmp_path)
     _ = user
 
 
-def test_pi_parser_error_then_retry_marker_has_no_turn_end(tmp_path) -> None:
-    observer = PiObserver(root=tmp_path)
-    observer.parse_record(
-        json.dumps(message_record("user-1", {"role": "user", "content": "do it"})), 1
-    )
-    error = observer.parse_record(
-        json.dumps(
-            message_record(
-                "assistant-1",
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": ""}],
-                    "stopReason": "error",
-                    "errorMessage": "overloaded",
-                },
-            )
-        ),
-        2,
-    )
-    assert not any(event.turn_end for event in error.events)
-    assert observer._pending_terminal_turn_id == "user-1"
-    # A retry-scheduled marker is an informational no-op: it signals continued
-    # work, not its success. Compaction may still fail and then settled must
-    # close, so the pending terminal is retained.
-    retry = observer.parse_record(json.dumps(_lifecycle("retry-scheduled")), 3)
-    assert not retry.events
-    assert observer._pending_terminal is True
-    assert observer._pending_terminal_turn_id == "user-1"
-    assert observer._active_turn_id == "user-1"
-
-
 def test_pi_parser_settled_marker_may_arrive_in_a_later_parse_record_call(tmp_path) -> None:
     observer = PiObserver(root=tmp_path)
     observer.parse_record(

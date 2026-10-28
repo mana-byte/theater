@@ -148,16 +148,13 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
     if value.get("protocol") != PI_FRONTEND_PROTOCOL:
         raise PiFrontendProtocolError("Pi frontend snapshot has an unsupported protocol")
     capabilities = value.get("capabilities")
-    interrupt_capability = (
-        capabilities.get("interrupt", False) if isinstance(capabilities, Mapping) else False
-    )
     if (
         not isinstance(capabilities, Mapping)
         or not isinstance(capabilities.get("settings_update"), bool)
         or not isinstance(capabilities.get("model_update"), bool)
         or not isinstance(capabilities.get("reasoning_effort_update"), bool)
         or not isinstance(capabilities.get("send"), bool)
-        or not isinstance(interrupt_capability, bool)
+        or not isinstance(capabilities.get("interrupt"), bool)
     ):
         raise PiFrontendProtocolError("Pi frontend snapshot has invalid capabilities")
     turn_id = value.get("native_turn_id")
@@ -176,7 +173,7 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
         native_turn_id=turn_id,
         settings_available=capabilities["settings_update"],
         send_available=capabilities["send"],
-        interrupt_available=interrupt_capability,
+        interrupt_available=capabilities["interrupt"],
         model_update_available=capabilities["model_update"],
         reasoning_effort_update_available=capabilities["reasoning_effort_update"],
         pending_interaction=_decode_pending_interaction(value.get("pending_interaction")),

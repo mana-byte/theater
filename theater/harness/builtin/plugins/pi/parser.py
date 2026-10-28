@@ -41,7 +41,7 @@ _IMMEDIATE_CLOSE_STOPS = {"stop"}
 _DEFERRED_CLOSE_STOPS = {"error", "length", "aborted"}
 _LIFECYCLE_CUSTOM_TYPE = "theater:lifecycle"
 _LIFECYCLE_VERSION = 1
-_LIFECYCLE_PHASES = frozenset({"retry-scheduled", "compaction-will-retry", "settled"})
+_LIFECYCLE_PHASES = frozenset({"compaction-will-retry", "settled"})
 
 
 def _assistant_status(stop_reason: object) -> TrajectoryStatus:
@@ -447,10 +447,11 @@ class PiParserMixin:
     ) -> ParsedRecord:
         """Resolve a deferred terminal turn on a durable lifecycle marker.
 
-        Retry markers are no-ops (clearing would lose the final ``turn_end`` if compaction fails);
-        ``settled`` emits one synthetic ``turn_end`` without duplicating text, usage, or facts.
+        ``compaction-will-retry`` is a no-op (clearing would lose the final ``turn_end``
+        if compaction fails); ``settled`` emits one synthetic ``turn_end`` without
+        duplicating text, usage, or facts.
         """
-        if phase in {"retry-scheduled", "compaction-will-retry"}:
+        if phase == "compaction-will-retry":
             return ParsedRecord()
         if phase != "settled":
             return ParsedRecord()

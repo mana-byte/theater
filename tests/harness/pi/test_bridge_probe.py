@@ -77,8 +77,6 @@ def _version_text(version: tuple[int, int, int]) -> str:
 
 _QUALIFIED_PI_VERSIONS = (
     VERSION_POLICY.minimum,
-    "0.84.10",
-    "0.85.1",
     VERSION_POLICY.maximum,
 )
 

@@ -160,18 +160,3 @@ class UnknownPresence(_BasePresence):
         super().__init__(
             PresenceState.UNKNOWN, "test double: unknown focus", capture_screen=capture_screen
         )
-
-
-class FlipOnRefreshPresence(_BasePresence):
-    """Absent until refresh() runs, then flips to the configured state."""
-
-    def __init__(self, state: PresenceState = PresenceState.PRESENT, capture_screen=None) -> None:
-        super().__init__(
-            PresenceState.ABSENT, "test double: absent so far", capture_screen=capture_screen
-        )
-        self._flip_state = state
-
-    async def refresh(self) -> None:
-        await super().refresh()
-        if self.refreshes == 1:
-            self.set_state(self._flip_state, "test double: focus arrived")

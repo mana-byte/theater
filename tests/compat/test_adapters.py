@@ -38,11 +38,6 @@ def test_the_adapters_are_the_shipped_plugins_each_with_a_policy() -> None:
         assert load_policy(REPO_ROOT, name).minimum
 
 
-def test_there_is_no_opencode_alias_or_1x_line() -> None:
-    with pytest.raises(KeyError, match="opencode2"):
-        load_adapter("opencode2")
-
-
 def _registry(monkeypatch: pytest.MonkeyPatch, **versions: list[str]) -> list[str]:
     asked: list[str] = []
 

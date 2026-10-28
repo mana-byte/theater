@@ -203,28 +203,10 @@ async def test_pi_interrupt_in_flight_replacement_is_unknown_not_replayed() -> N
         await runtime.aclose()
 
 
-async def test_pi_snapshot_without_interrupt_capability_decodes_compatibility() -> None:
-    partial = bridge_snapshot()
-    capabilities = partial["capabilities"]
-    assert isinstance(capabilities, dict)
-    del capabilities["interrupt"]
-    peer = ScriptedPiPeer(responses={"pi.snapshot": partial})
-    runtime = make_runtime(peer)
-
-    snapshot = await runtime.attach()
-
-    assert snapshot.capabilities.supports(RuntimeCapability.INTERRUPT) is False
-    assert (
-        snapshot.capabilities.unavailable_reasons[RuntimeCapability.INTERRUPT]
-        is CapabilityUnavailableReason.GATED_BY_BACKEND
-    )
-    await runtime.aclose()
-
-
 async def test_pi_interrupt_requires_a_backend_confirmed_capability() -> None:
     peer = ScriptedPiPeer(
         responses={
-            # An older bridge never advertises the additive interrupt key.
+            # The bridge explicitly denies interrupt; capability is never assumed.
             "pi.snapshot": bridge_snapshot(interrupt=False),
         }
     )

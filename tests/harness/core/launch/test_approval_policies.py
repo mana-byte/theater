@@ -8,7 +8,8 @@ from tests.support.shipped import ClaudeCodeHarness, OpenCodeHarness
 from theater.harness import plan_launch
 from theater.models import BadRequest
 
-# Every approval pins its native policy explicitly; OpenCode enforcement is tested in v2/.
+# Every approval pins its native policy explicitly; OpenCode enforcement is
+# tested in tests/harness/opencode/test_launch_plan.py.
 
 pytestmark = pytest.mark.usefixtures("available_harness_binaries")
 
