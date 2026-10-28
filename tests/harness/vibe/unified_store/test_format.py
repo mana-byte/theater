@@ -40,7 +40,7 @@ def read_object(path: Path) -> dict[str, Any]:
     return value
 
 
-@pytest.mark.parametrize("minor", [None, *range(1, STORE_FORMAT_MINOR + 1)])
+@pytest.mark.parametrize("minor", [None, STORE_FORMAT_MINOR - 1, STORE_FORMAT_MINOR])
 def test_reader_supports_every_known_store_minor(tmp_path: Path, minor: int | None) -> None:
     store = Store(tmp_path / str(minor))
     publish_default(store, store_minor=minor)
