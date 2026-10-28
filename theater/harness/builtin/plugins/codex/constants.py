@@ -37,10 +37,7 @@ APPROVAL_MARKER = "to cancel"
 #: tail and only alongside dialog chrome — never as bare prose. Unconfirmed
 #: variants (e.g. restricted-folder wording) classify unknown and fail
 #: closed at the send gate instead.
-TRUST_MARKERS = (
-    "Do you trust the contents",
-    "Trust this folder?",
-)
+TRUST_MARKERS = ("Trust this folder?",)
 #: Recent-screen window the modal classifiers may look at.
 _MODAL_TAIL_LINES = 12
 _SCREEN_TAIL_LINES = 5

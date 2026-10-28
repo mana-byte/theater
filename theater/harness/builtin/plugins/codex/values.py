@@ -197,7 +197,7 @@ def _codex_response_usage_key(info: object) -> str | None:
     """Stable per-response identity for one token-count snapshot.
 
     The cumulative-totals/last pair is unique per response, so repeats dedupe across turns
-    while two responses in one turn stay distinct; legacy snapshots fall back to turn keys.
+    while two responses in one turn stay distinct.
     """
     if not isinstance(info, dict):
         return None
@@ -223,8 +223,6 @@ def _codex_usage(
 ) -> TrajectoryUsage | None:
     info = payload.get("info") if payload.get("type") == "token_count" else None
     raw = info.get("last_token_usage") if isinstance(info, dict) else None
-    if not isinstance(raw, dict) and isinstance(info, dict):
-        raw = info.get("total_token_usage")
     if not isinstance(raw, dict):
         raw = payload.get("usage") or payload.get("token_usage")
     if not isinstance(raw, dict):

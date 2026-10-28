@@ -30,7 +30,16 @@ def item_completed(turn_id: str, item: dict, *, started_ms: int, completed_ms: i
 
 
 def session_meta() -> dict:
-    return rollout_record("session_meta", {"id": THREAD, "cwd": CWD, "model": "gpt-5.6-sol"})
+    return rollout_record(
+        "session_meta",
+        {
+            "id": THREAD,
+            "cwd": CWD,
+            "model": "gpt-5.6-sol",
+            "thread_source": "user",
+            "source": "cli",
+        },
+    )
 
 
 def parse_rollout(observer: CodexObserver, records: list[dict]):

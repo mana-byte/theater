@@ -113,11 +113,3 @@ def test_a_reply_is_stamped_with_when_it_ended(rec, workdir):
     created, completed = rec.tick(), rec.tick()
     rec.step("msg_a1", created, [text("done")], finish="stop", times={"completed": completed})
     assert drain(src)[0].ts == completed / 1000
-
-
-#: The footer opencode draws once a conversation exists. The `Ask anything...`
-#: placeholder is gone by then, which is why there is no positive marker.
-IDLE = "\n".join(["> ", "~/work  90.7K       ctrl+p commands"])
-
-
-WORKING = "\n".join(["> ", "esc interrupt       ctrl+p commands"])

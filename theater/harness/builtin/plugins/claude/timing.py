@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from theater.harness.normalization.timing import epoch_or_number as _trajectory_time
 from theater.harness.normalization.values import finite_float as _trajectory_float
 from theater.harness.normalization.values import trajectory_identifier as _trajectory_id
 from theater.trajectory.enums import TimingProvenance
@@ -31,38 +30,15 @@ class _ClaudeTimingProjection:
 
 
 def _trajectory_duration(record: dict) -> float | None:
-    for key in ("durationMs", "duration_ms"):
-        value = _trajectory_float(record.get(key))
-        if value is not None and value >= 0:
-            return value
-    return None
+    value = _trajectory_float(record.get("durationMs"))
+    return value if value is not None and value >= 0 else None
 
 
 def _claude_timing(record: dict, timestamp: float | None) -> Timing | None:
-    start = next(
-        (
-            _trajectory_time(record.get(key))
-            for key in ("startTimestamp", "start_timestamp", "startedAt", "started_at")
-            if _trajectory_time(record.get(key)) is not None
-        ),
-        None,
-    )
-    end = next(
-        (
-            _trajectory_time(record.get(key))
-            for key in ("endTimestamp", "end_timestamp", "completedAt", "completed_at")
-            if _trajectory_time(record.get(key)) is not None
-        ),
-        None,
-    )
-    if start is None and timestamp is not None:
-        start = timestamp
     duration = _trajectory_duration(record)
-    if start is None and end is None and duration is None:
+    if timestamp is None and duration is None:
         return None
-    if start is not None and end is not None and end < start:
-        end = None
-    return Timing(start=start, end=end, duration_ms=duration, provenance=TimingProvenance.SOURCE)
+    return Timing(start=timestamp, duration_ms=duration, provenance=TimingProvenance.SOURCE)
 
 
 def _claude_turn_timing(record: dict, timestamp: float | None) -> Timing | None:
@@ -95,13 +71,7 @@ def _claude_turn_timing(record: dict, timestamp: float | None) -> Timing | None:
 
 
 def _claude_request_id(message: dict, record: dict) -> str | None:
-    return _trajectory_id(
-        record.get("requestId")
-        or record.get("request_id")
-        or message.get("requestId")
-        or message.get("request_id")
-        or message.get("id")
-    )
+    return _trajectory_id(record.get("requestId") or message.get("id"))
 
 
 def _claude_request_bounds(

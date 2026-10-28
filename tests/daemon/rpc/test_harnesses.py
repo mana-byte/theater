@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from theater import harness as harness_registry
 from theater.harness import HARNESSES
-from theater.harness.contracts.runtime import RuntimeCompatibility
 
 
 async def test_hello_normalizes_claude_code_to_claude(client):
@@ -36,36 +35,3 @@ async def test_harnesses_reports_install_state(client, monkeypatch):
 async def test_harnesses_is_sorted_so_callers_need_not_re_sort(client):
     rows = await client.call("harnesses")
     assert [r["name"] for r in rows] == sorted(r["name"] for r in rows)
-
-
-async def test_harnesses_reports_daemon_native_compatibility(client, daemon, monkeypatch):
-    monkeypatch.setattr(harness_registry.shutil, "which", lambda binary: f"/bin/{binary}")
-
-    async def probe(name, callback, context, *, configuration):
-        del name, context, configuration
-        if callback.__name__ == "probe_claude_native_compatibility":
-            return RuntimeCompatibility(
-                supported=False,
-                policy="claude-messaging-native-controls-2.1.248",
-                native_version="2.1.220",
-                reason="below floor",
-            )
-        return RuntimeCompatibility(
-            supported=True,
-            policy="qualified-test",
-            native_version="1.0.0",
-        )
-
-    monkeypatch.setattr(daemon.compatibility_probes, "probe", probe)
-    rows = {row["name"]: row for row in await client.call("harnesses")}
-
-    assert rows["claude"]["native_compatibility"]["status"] == "legacy-only"
-    assert rows["claude"]["native_compatibility"]["qualified_range"] is None
-    assert rows["claude"]["native_compatibility"]["reason"] == (
-        "no native runtime; controls use the provider terminal"
-    )
-    assert rows["codex"]["native_compatibility"]["status"] == "native-compatible"
-    assert rows["codex"]["native_compatibility"]["wiring"] == "native"
-    assert rows["opencode"]["native_compatibility"]["status"] == "native-compatible"
-    assert rows["pi"]["native_compatibility"]["status"] == "native-compatible"
-    assert rows["vibe"]["native_compatibility"]["status"] == "legacy-only"

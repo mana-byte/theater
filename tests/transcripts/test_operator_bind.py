@@ -80,7 +80,12 @@ def _codex_rollout(root: Path, sid: str, cwd: Path, *, text: str = "hello") -> P
             {
                 "timestamp": "2026-08-17T12:00:00.000Z",
                 "type": "session_meta",
-                "payload": {"session_id": sid, "cwd": str(cwd)},
+                "payload": {
+                    "session_id": sid,
+                    "cwd": str(cwd),
+                    "thread_source": "user",
+                    "source": "cli",
+                },
             }
         )
         + "\n"
@@ -88,7 +93,10 @@ def _codex_rollout(root: Path, sid: str, cwd: Path, *, text: str = "hello") -> P
             {
                 "timestamp": "2026-08-17T12:00:01.000Z",
                 "type": "event_msg",
-                "payload": {"type": "agent_message", "message": text},
+                "payload": {
+                    "type": "item_completed",
+                    "item": {"type": "AgentMessage", "content": [{"type": "Text", "text": text}]},
+                },
             }
         )
         + "\n",

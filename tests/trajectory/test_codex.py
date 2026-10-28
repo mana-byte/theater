@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.paths import fixture
 from tests.support.trajectory_parsing import fixture_lines, parse_facts
 from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
@@ -151,7 +150,12 @@ async def test_codex_history_associates_context_model_and_usage_with_the_active_
     records = [
         {
             "type": "session_meta",
-            "payload": {"cwd": str(tmp_path), "model_provider": "azure"},
+            "payload": {
+                "cwd": str(tmp_path),
+                "model_provider": "azure",
+                "thread_source": "user",
+                "source": "cli",
+            },
         },
         {
             "type": "event_msg",
@@ -243,7 +247,12 @@ async def test_codex_live_attachment_seeds_model_context_for_usage(tmp_path: Pat
     records = [
         {
             "type": "session_meta",
-            "payload": {"cwd": str(tmp_path), "model_provider": "openai"},
+            "payload": {
+                "cwd": str(tmp_path),
+                "model_provider": "openai",
+                "thread_source": "user",
+                "source": "cli",
+            },
         },
         {
             "type": "turn_context",
@@ -251,7 +260,13 @@ async def test_codex_live_attachment_seeds_model_context_for_usage(tmp_path: Pat
         },
         {
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "work"},
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "content": [{"type": "text", "text": "work"}],
+                },
+            },
         },
     ]
     path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
@@ -343,49 +358,5 @@ def test_codex_missing_message_id_uses_fallback_coordinates():
     fallback = next(fact for fact in facts if fact.summary == "fallback")
 
     assert fallback.native_id is None
-    assert fallback.raw_index == 12
+    assert fallback.raw_index == 11
     assert fallback.event_ordinal == 0
-
-
-def test_codex_dual_assistant_representations_have_one_canonical_fact():
-    lines = fixture_lines("trajectory_codex_dual.jsonl")
-    control = CodexObserver()
-    rich = CodexObserver()
-
-    facts = [
-        fact
-        for index, line in enumerate(lines)
-        for fact in rich.parse_record(line, index).trajectory
-    ]
-    assistants = [fact for fact in facts if fact.kind is TrajectoryKind.ASSISTANT]
-
-    assert len(assistants) == 1
-    assert assistants[0].native_id == "dual-message-1"
-    assert assistants[0].summary == "canonical answer"
-    assert [list(rich.parse_record(line, index).events) for index, line in enumerate(lines)] == [
-        control.parse(line, index) for index, line in enumerate(lines)
-    ]
-    event_record = rich.parse_record(lines[0], 0)
-    assert event_record.events
-    assert event_record.baseline_events == ()
-
-
-CODEX_FIXTURE = fixture("trajectory_codex.jsonl")
-
-
-def test_codex_extracts_and_remembers_mcp_identity_for_results() -> None:
-    observer = CodexObserver()
-    facts = [
-        fact
-        for index, line in enumerate(CODEX_FIXTURE.read_text().splitlines())
-        for fact in observer.parse_record(line, index).trajectory
-        if fact.call_id == "mcp-1"
-    ]
-
-    assert [fact.kind for fact in facts] == [
-        TrajectoryKind.TOOL_CALL,
-        TrajectoryKind.TOOL_RESULT,
-    ]
-    assert {(fact.mcp_server, fact.mcp_tool) for fact in facts} == {
-        ("theater", "list_participants")
-    }

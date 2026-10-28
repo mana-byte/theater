@@ -16,7 +16,6 @@ UNKNOWN_AUTOMATIC_REJECTION = "unrecognized codex rollout metadata; explicit bin
 
 class RolloutKind(Enum):
     PRIMARY = "primary"
-    LEGACY = "legacy"
     SUBAGENT = "subagent"
     UNKNOWN = "unknown"
     MALFORMED = "malformed"
@@ -69,8 +68,6 @@ def read_rollout_metadata(path: Path) -> RolloutMetadata:
         return RolloutMetadata(cwd, RolloutKind.SUBAGENT)
     if cwd is None:
         return RolloutMetadata(None, RolloutKind.MALFORMED)
-    if "thread_source" not in payload and "source" not in payload:
-        return RolloutMetadata(cwd, RolloutKind.LEGACY)
     if payload.get("thread_source") == "user" and isinstance(source, str):
         return RolloutMetadata(cwd, RolloutKind.PRIMARY)
     return RolloutMetadata(cwd, RolloutKind.UNKNOWN)

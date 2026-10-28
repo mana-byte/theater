@@ -18,7 +18,6 @@ from theater.harness.contracts.channels import (
 from theater.harness.contracts.manifest import (
     HookChannelManifest,
     IdentityManifest,
-    LineageManifest,
     ObservationManifest,
     OtelChannelManifest,
     ScreenManifest,
@@ -27,7 +26,6 @@ from theater.harness.contracts.manifest import (
 from theater.harness.transcript import file_stream_floor
 
 from .callbacks import (
-    native_children,
     operator_candidate_admitter,
     receipt_validator,
     screen_classifier,
@@ -92,7 +90,6 @@ OBSERVATION = ObservationManifest(
         receipt_validator=receipt_validator,
         operator_candidate_admitter=operator_candidate_admitter,
     ),
-    lineage=LineageManifest(native_children=native_children),
     trajectory_capabilities=ClaudeCodeObserver.trajectory_capabilities,
     enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
 )

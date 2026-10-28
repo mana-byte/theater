@@ -55,17 +55,11 @@ def test_claude_facts_include_ids_pairing_reasoning_usage_timing_and_system_cont
     assert not any("opaque" in fact.summary for fact in reasoning)
 
 
-def test_claude_revisions_are_monotonic_and_missing_ids_use_coordinates():
+def test_claude_facts_without_native_ids_use_coordinates():
     lines = fixture_lines("trajectory_claude.jsonl")
     facts = parse_facts(ClaudeCodeObserver(), lines)
-    revisions = [fact.revision for fact in facts if fact.native_id == "revision-1"]
     fallback = next(fact for fact in facts if fact.summary == "fallback")
 
-    assert revisions == sorted(revisions)
-    assert len(revisions) == 2
-    assert next(fact for fact in facts if fact.native_id == "assistant-1").revision == 0
-    shifted = ClaudeCodeObserver().parse_record(lines[1], 101).trajectory
-    assert next(fact for fact in shifted if fact.native_id == "assistant-1").revision == 0
     assert fallback.native_id is None
     assert fallback.revision == 0
     assert fallback.raw_index == 8

@@ -33,55 +33,6 @@ def test_live_receipt_tokens_ignore_legacy_expiry(registry, tmp_path):
     assert token_file.exists()
 
 
-def test_mark_dead_removes_receipt_token_file(registry, tmp_path):
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    token_file = paths.participant_observation_dir("p-claude", "claude") / "receipt-token"
-    token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text("secret")
-    p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
-    registry.store.set_receipt_token(p.id, "secret", token_path=str(token_file))
-
-    registry.mark_dead(p.id)
-
-    assert registry.store.get_meta(f"receipt_token:{p.id}") is None
-    assert not token_file.exists()
-
-
-async def test_gc_removes_orphaned_receipt_tokens(store, tmp_path):
-    from theater.config import RetentionSection
-    from theater.daemon.gc import sweep
-
-    token_file = paths.participant_observation_dir("missing", "claude") / "receipt-token"
-    token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text("secret")
-    store.set_receipt_token("missing", "secret", token_path=str(token_file))
-
-    await sweep(store, RetentionSection())
-
-    assert store.get_meta("receipt_token:missing") is None
-    assert not token_file.exists()
-
-
-async def test_gc_removes_dead_participant_receipt_tokens(registry, tmp_path):
-    from theater.config import RetentionSection
-    from theater.daemon.gc import sweep
-
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    token_file = paths.participant_observation_dir("p-claude", "claude") / "receipt-token"
-    token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text("secret")
-    p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
-    registry.store.set_receipt_token(p.id, "secret", token_path=str(token_file))
-    registry.store.set_status(p.id, "dead")
-
-    await sweep(registry.store, RetentionSection())
-
-    assert registry.store.get_meta(f"receipt_token:{p.id}") is None
-    assert not token_file.exists()
-
-
 def test_private_token_file_is_restricted_even_when_preexisting(registry, tmp_path):
     from theater.daemon.spawning.service import Spawner
     from theater.harness.base import LaunchPlan

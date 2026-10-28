@@ -2,11 +2,9 @@
 
 import pytest
 
-from tests.support.paths import fixture
+from tests.support.codex_screens import CODEX_APPROVAL, CODEX_IDLE
 from tests.support.shipped import CodexObserver
 from theater.harness.observation import ScreenConfidence, ScreenKind
-
-SCREENS = fixture("screens")
 
 #: Stock Codex trust dialog: header plus a numbered option list whose
 #: selected row renders with the composer's `›` glyph.
@@ -46,8 +44,18 @@ Open this workspace in restricted mode?
 """
 
 
-def _screen(name: str) -> str:
-    return (SCREENS / f"{name}.txt").read_text()
+@pytest.mark.parametrize(
+    ("capture", "expected"),
+    [(CODEX_IDLE, ScreenKind.PROMPT), (CODEX_APPROVAL, ScreenKind.APPROVAL)],
+    ids=["idle", "approval"],
+)
+def test_stock_screens_keep_their_readings(capture, expected):
+    """Modern idle and approval screens keep their readings."""
+    observer = CodexObserver()
+    reading = observer.screen_reading(capture)
+    assert reading.kind is expected
+    assert reading.confidence is ScreenConfidence.HIGH
+    assert observer.is_idle_screen(capture) is (expected is ScreenKind.PROMPT)
 
 
 @pytest.mark.parametrize(
@@ -71,22 +79,6 @@ def test_unconfirmed_trust_menu_wording_is_not_a_prompt():
     assert reading.kind is ScreenKind.UNKNOWN
     assert reading.confidence is ScreenConfidence.LOW
     assert observer.is_idle_screen(TRUST_MENU_UNCONFIRMED) is False
-
-
-@pytest.mark.parametrize("name", ["codex_idle", "codex_trust", "codex_approval"])
-def test_existing_fixture_readings_are_preserved(name):
-    """Real idle, old trust, and approval fixtures keep their readings."""
-    capture = _screen(name)
-    observer = CodexObserver()
-    reading = observer.screen_reading(capture)
-    expected = {
-        "codex_idle": ScreenKind.PROMPT,
-        "codex_trust": ScreenKind.TRUST,
-        "codex_approval": ScreenKind.APPROVAL,
-    }[name]
-    assert reading.kind is expected
-    assert reading.confidence is ScreenConfidence.HIGH
-    assert observer.is_idle_screen(capture) is (expected is ScreenKind.PROMPT)
 
 
 def test_numbered_menu_row_is_not_a_prompt():
@@ -175,7 +167,7 @@ def test_prose_quoting_a_trust_header_is_not_a_trust_dialog():
     """Assistant prose quoting a trust header, with a live composer, is a prompt."""
     capture = "\n".join(
         [
-            "The agent asked: Do you trust the contents of this directory?",
+            "The agent asked: Trust this folder?",
             "Then it kept summarising the review.",
             "",
             "› Write more tests",

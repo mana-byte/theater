@@ -30,7 +30,6 @@ from theater.harness.normalization.values import (
 )
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
-    TimingProvenance,
     TrajectoryFailureCategory,
     TrajectoryKind,
     TrajectoryLane,
@@ -71,7 +70,6 @@ class CodexTrajectoryMixin:
         _last_model: str | None
         _last_provider: str | None
         _mcp_calls: dict[str, tuple[str, str]]
-        _pending_patch_exec: tuple[str, float] | None
         _tool_correlation: ToolCorrelation
         _usage_responses: dict[str, tuple[str, str | None, str | None]]
 
@@ -141,147 +139,6 @@ class CodexTrajectoryMixin:
             turn=_codex_trajectory_turn_id(context) if isinstance(context, dict) else turn_id,
             status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
             details=(_trajectory_detail("context", context, format=ContentFormat.JSON),),
-        )
-
-    def _patch_event_facts(
-        self,
-        payload: dict,
-        timestamp: float | None,
-        timing: Timing | None,
-        add: FactAdder,
-    ) -> None:
-        call_id = _trajectory_id(payload.get("call_id"))
-        paths = _patch_change_paths(payload.get("changes"), cwd=self._last_cwd)
-        status_name = payload.get("status")
-        status = (
-            TrajectoryStatus.CANCELLED
-            if status_name == "declined"
-            else TrajectoryStatus.COMPLETED
-            if _codex_flag(payload.get("success")) or status_name == "completed"
-            else TrajectoryStatus.ERROR
-        )
-        path_detail_fields = path_details(paths)
-        call_timing = result_timing = timing
-        if self._pending_patch_exec is not None and timestamp is not None:
-            started_at = self._pending_patch_exec[1]
-            if started_at < timestamp:
-                call_timing = Timing(start=started_at, provenance=TimingProvenance.DERIVED)
-                result_timing = Timing(end=timestamp, provenance=TimingProvenance.DERIVED)
-        add(
-            TrajectoryKind.TOOL_CALL,
-            TrajectoryLane.TOOLS,
-            "apply_patch",
-            native_id=_codex_scoped_id(call_id, "call"),
-            status=status,
-            call_id=call_id,
-            fact_timing=call_timing,
-            details=(
-                _trajectory_detail(
-                    "input",
-                    {"files": [path.path for path in paths]},
-                    format=ContentFormat.JSON,
-                ),
-                *path_detail_fields,
-            ),
-        )
-        patch_result = {
-            "success": _codex_flag(payload.get("success")),
-            "status": status_name,
-            "stdout": payload.get("stdout") or "",
-            "stderr": payload.get("stderr") or "",
-        }
-        failure_detail = str(patch_result["stderr"] or patch_result["stdout"])
-        add(
-            TrajectoryKind.TOOL_RESULT,
-            TrajectoryLane.TOOLS,
-            "patch applied" if status is TrajectoryStatus.COMPLETED else "patch failed",
-            native_id=_codex_scoped_id(call_id, "result"),
-            status=status,
-            call_id=call_id,
-            parent_call_id=call_id,
-            fact_timing=result_timing,
-            failure=(
-                TrajectoryFailure(
-                    TrajectoryFailureCategory.TOOL,
-                    code=str(status_name or "failed"),
-                    detail=failure_detail,
-                )
-                if status is TrajectoryStatus.ERROR
-                else None
-            ),
-            details=(_trajectory_detail("result", patch_result, format=ContentFormat.JSON),),
-        )
-
-    def _mcp_event_facts(
-        self,
-        payload: dict,
-        event_type: object,
-        event_id: str | None,
-        add: FactAdder,
-    ) -> None:
-        invocation = payload.get("invocation")
-        invocation = invocation if isinstance(invocation, dict) else {}
-        mcp_parts = [invocation.get("server"), invocation.get("tool")]
-        tool_name = ".".join(str(part) for part in mcp_parts if part)
-        call_id = _trajectory_id(payload.get("call_id"))
-        mcp_identity = _codex_mcp_identity(invocation)
-        if mcp_identity is None and call_id is not None:
-            mcp_identity = self._mcp_calls.get(call_id)
-        mcp_server, mcp_tool = mcp_identity or (None, None)
-        if event_type == "mcp_tool_call_begin":
-            args = invocation.get("arguments") or invocation.get("input")
-            mcp_details = (
-                (_trajectory_detail("input", args, format=_codex_input_format(args)),)
-                if args is not None
-                else ()
-            )
-            add(
-                TrajectoryKind.TOOL_CALL,
-                TrajectoryLane.TOOLS,
-                tool_name or "MCP tool call",
-                native_id=event_id or _codex_scoped_id(call_id, "call"),
-                status=_trajectory_status(payload.get("status"), TrajectoryStatus.PENDING),
-                call_id=call_id,
-                parent_call_id=_trajectory_id(
-                    payload.get("parent_call_id") or payload.get("parent_id")
-                ),
-                mcp_server=mcp_server,
-                mcp_tool=mcp_tool,
-                details=mcp_details,
-            )
-            return
-        result = payload.get("result")
-        raw = self._mcp_result(result)
-        result_error = isinstance(result, dict) and result.get("Err") is not None
-        if isinstance(result, dict):
-            ok = result.get("Ok")
-            if isinstance(ok, dict):
-                result_error = result_error or _codex_flag(ok.get("isError"))
-        add(
-            TrajectoryKind.TOOL_RESULT,
-            TrajectoryLane.TOOLS,
-            raw,
-            native_id=event_id or _codex_scoped_id(call_id, "result"),
-            status=(
-                TrajectoryStatus.ERROR
-                if result_error
-                else _trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED)
-            ),
-            call_id=call_id,
-            parent_call_id=(
-                _trajectory_id(payload.get("parent_call_id") or payload.get("parent_id")) or call_id
-            ),
-            mcp_server=mcp_server,
-            mcp_tool=mcp_tool,
-            failure=tool_failure(
-                TrajectoryStatus.ERROR if result_error else TrajectoryStatus.COMPLETED,
-                raw,
-            ),
-            details=(
-                (_trajectory_detail("result", result, format=ContentFormat.JSON),)
-                if result is not None
-                else ()
-            ),
         )
 
     def _rich_mcp_facts(
@@ -487,7 +344,6 @@ class CodexTrajectoryMixin:
         record: dict,
         payload: dict,
         timestamp: float | None,
-        timing: Timing | None,
         turn_id: str | None,
         add: FactAdder,
     ) -> None:
@@ -495,8 +351,6 @@ class CodexTrajectoryMixin:
         event_id = _trajectory_id(
             payload.get("id") or payload.get("message_id") or payload.get("item_id")
         )
-        if event_type in {"user_message", "agent_message"}:
-            return
         if event_type == "task_complete":
             add(
                 TrajectoryKind.CONTEXT,
@@ -523,10 +377,6 @@ class CodexTrajectoryMixin:
                 status=TrajectoryStatus.INTERRUPTED,
                 turn=_turn_id(payload),
             )
-        elif event_type == "patch_apply_end":
-            self._patch_event_facts(payload, timestamp, timing, add)
-        elif event_type in ("mcp_tool_call_begin", "mcp_tool_call_end"):
-            self._mcp_event_facts(payload, event_type, event_id, add)
         elif event_type == "item_completed":
             self._completed_item_facts(record, payload, timestamp, turn_id, add)
         elif event_type == "token_count":
@@ -547,7 +397,7 @@ class CodexTrajectoryMixin:
                     status=TrajectoryStatus.COMPLETED,
                     usage=usage,
                 )
-        elif event_type in ("task_started", "context_compacted", "turn_context"):
+        elif event_type in ("task_started", "turn_context"):
             status = (
                 TrajectoryStatus.RUNNING
                 if event_type == "task_started"
@@ -858,7 +708,7 @@ class CodexTrajectoryMixin:
             return facts
 
         if record_kind == "event_msg":
-            self._event_message_facts(record, payload, timestamp, timing, turn_id, add)
+            self._event_message_facts(record, payload, timestamp, turn_id, add)
             return facts
 
         if record_kind == "response_item":

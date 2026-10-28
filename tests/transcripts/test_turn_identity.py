@@ -6,10 +6,11 @@ import asyncio
 import json
 from pathlib import Path
 
+from tests.support.codex_rollout_items import parse_rollout, rollout_events, rollout_record
 from tests.support.observation import apply_batch
 from tests.support.opencode_recorder import Recorder, text
 from tests.support.paths import FIXTURES
-from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
+from tests.support.shipped import CodexObserver, OpenCodeObserver, VibeObserver
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     _ANSWERED_TURNS,
@@ -45,33 +46,18 @@ def test_codex_reports_the_turn_id_it_stamps_on_both_ends():
     Which makes the boundary joinable to its own beginning with no inference
     at all — the only harness of the four that gives us that outright.
     """
-    events = events_for(CodexObserver(), FIXTURES / "turn_codex.jsonl")
-    ends = boundaries(events)
-
-    started = json.loads((FIXTURES / "turn_codex.jsonl").read_text().splitlines()[1])
-    assert started["payload"]["type"] == "task_started"
-
-    assert len(ends) == 1
-    assert ends[0].turn_id == started["payload"]["turn_id"]
-
-
-def test_claude_reports_the_message_id_the_split_records_share():
-    """One message, several records, one id.
-
-    `message.id` is what the duplicate boundary records have in common, so it
-    is the only field that can be used to recognise the duplicate. The record
-    `uuid` differs per record and would name each half a separate turn.
-    """
-    events = events_for(ClaudeCodeObserver(), FIXTURES / "turn_claude.jsonl")
-    ends = boundaries(events)
-
     records = [
-        json.loads(line) for line in (FIXTURES / "turn_claude.jsonl").read_text().splitlines()
+        rollout_record("event_msg", {"type": "task_started", "turn_id": "turn-1"}),
+        rollout_record(
+            "event_msg",
+            {"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "done"},
+        ),
     ]
-    assistant = next(r for r in records if r.get("type") == "assistant")
+    events = rollout_events(parse_rollout(CodexObserver(), records))
+    ends = boundaries(events)
 
     assert len(ends) == 1
-    assert ends[0].turn_id == assistant["message"]["id"]
+    assert ends[0].turn_id == "turn-1"
 
 
 def test_vibe_uses_the_user_message_id_as_its_turn_identity():
@@ -195,8 +181,8 @@ def test_unidentified_boundaries_are_never_treated_as_duplicates(registry):
 def test_text_from_an_earlier_poll_still_answers_the_boundary(registry):
     """The turn spoke in one batch and ended in the next.
 
-    Codex writes its reply as `agent_message` and ends the turn on a separate
-    `task_complete` record; a poll landing between the two used to resolve the
+    Codex writes its reply as an `AgentMessage` item and ends the turn on a
+    separate `task_complete` record; a poll landing between the two used to resolve the
     job with an empty string.
     """
     observer, p, jobs = poised(registry)

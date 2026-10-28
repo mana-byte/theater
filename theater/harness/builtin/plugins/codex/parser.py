@@ -43,7 +43,6 @@ from .paths import _apply_patch_paths, _patch_change_paths
 from .values import (
     _codex_mcp_identity,
     _codex_response_usage_key,
-    _codex_timing,
     _codex_trajectory_turn_id,
     _flatten,
     _trajectory_id,
@@ -55,18 +54,15 @@ if TYPE_CHECKING:
 
 
 def _trajectory_only_event(payload: dict) -> bool:
-    """Whether a legacy or paginated message event is control-only.
+    """Whether a paginated message event is control-only.
 
     Trajectory takes the words from raw ``response_item`` facts; projecting these would duplicate
     them.
     """
-    event_type = payload.get("type")
-    if event_type in {"user_message", "agent_message"}:
-        return True
-    if event_type == "item_completed":
-        item = payload.get("item")
-        return isinstance(item, dict) and item.get("type") in {"UserMessage", "AgentMessage"}
-    return False
+    if payload.get("type") != "item_completed":
+        return False
+    item = payload.get("item")
+    return isinstance(item, dict) and item.get("type") in {"UserMessage", "AgentMessage"}
 
 
 class CodexParserMixin:
@@ -76,7 +72,6 @@ class CodexParserMixin:
         _last_model: str | None
         _last_provider: str | None
         _mcp_calls: dict[str, tuple[str, str]]
-        _pending_patch_exec: tuple[str, float] | None
         _tool_correlation: ToolCorrelation
         _usage_responses: dict[str, tuple[str, str | None, str | None]]
 
@@ -124,7 +119,6 @@ class CodexParserMixin:
         return []
 
     def _remember_context(self, record: dict, payload: dict) -> None:
-        self._remember_patch_exec(record, payload)
         self._remember_mcp_call(record, payload)
         self._tool_correlation.remember(record, payload)
         turn_id = _codex_trajectory_turn_id(payload)
@@ -177,17 +171,9 @@ class CodexParserMixin:
             self._usage_responses.pop(next(iter(self._usage_responses)))
 
     def _remember_mcp_call(self, record: dict, payload: dict) -> None:
-        record_kind = record.get("type")
-        payload_kind = payload.get("type")
-        if record_kind == "event_msg" and payload_kind in {
-            "mcp_tool_call_begin",
-            "mcp_tool_call_end",
-        }:
-            identity = _codex_mcp_identity(payload.get("invocation"))
-        elif record_kind == "response_item" and payload_kind == "mcp_tool_call":
-            identity = _codex_mcp_identity(payload)
-        else:
+        if record.get("type") != "response_item" or payload.get("type") != "mcp_tool_call":
             return
+        identity = _codex_mcp_identity(payload)
         call_id = _trajectory_id(payload.get("call_id"))
         if identity is None or call_id is None:
             return
@@ -195,36 +181,11 @@ class CodexParserMixin:
         while len(self._mcp_calls) > TRAJECTORY_MCP_CALL_CONTEXT_LIMIT:
             self._mcp_calls.pop(next(iter(self._mcp_calls)))
 
-    def _remember_patch_exec(self, record: dict, payload: dict) -> None:
-        if record.get("type") != "response_item":
-            return
-        item_type = payload.get("type")
-        call_id = _trajectory_id(payload.get("call_id"))
-        if item_type in {"custom_tool_call", "function_call"}:
-            input_value = payload.get("input")
-            if input_value is None:
-                input_value = payload.get("arguments")
-            timing = _codex_timing(record, payload, _epoch(record.get("timestamp")))
-            self._pending_patch_exec = (
-                (call_id, timing.start)
-                if payload.get("name") in {"exec", "exec_command"}
-                and isinstance(input_value, str)
-                and "tools.apply_patch" in input_value
-                and call_id is not None
-                and timing is not None
-                and timing.start is not None
-                else None
-            )
-        elif item_type in {"custom_tool_call_output", "function_call_output"}:
-            if self._pending_patch_exec is not None and call_id == self._pending_patch_exec[0]:
-                self._pending_patch_exec = None
-
     def _seed_history_context(self, fh: BinaryIO, start: int) -> None:
         self._active_turn_id = None
         self._last_model = None
         self._last_provider = None
         self._last_cwd = None
-        self._pending_patch_exec = None
         self._mcp_calls.clear()
         self._tool_correlation.clear()
         self._usage_responses.clear()
@@ -258,30 +219,6 @@ class CodexParserMixin:
         _clip = clipper(clip_text)
         ptype = payload.get("type")
 
-        if ptype == "user_message":
-            raw = payload.get("message") if isinstance(payload.get("message"), str) else ""
-            return [
-                Event(
-                    kind=EventKind.USER,
-                    text=_clip(raw),
-                    raw_text=raw,
-                    ts=ts,
-                    raw_index=index,
-                )
-            ]
-        if ptype == "agent_message":
-            if payload.get("phase") == "final_answer":
-                return []
-            raw = payload.get("message") if isinstance(payload.get("message"), str) else ""
-            return [
-                Event(
-                    kind=EventKind.ASSISTANT,
-                    text=_clip(raw),
-                    raw_text=raw,
-                    ts=ts,
-                    raw_index=index,
-                )
-            ]
         if ptype == "task_complete":
             raw = (
                 payload.get("last_agent_message")
@@ -311,45 +248,6 @@ class CodexParserMixin:
                     turn_end=True,
                     turn_terminal=TurnTerminal.INTERRUPTED,
                     turn_id=_turn_id(payload),
-                    raw_index=index,
-                )
-            ]
-        if ptype == "patch_apply_end":
-            paths = _patch_change_paths(payload.get("changes"), cwd=self._last_cwd)
-            if not paths:
-                return []
-            return [
-                Event(
-                    kind=EventKind.TOOL_CALL,
-                    tool_name="apply_patch",
-                    ts=ts,
-                    raw_index=index,
-                    paths=paths,
-                )
-            ]
-        if ptype in ("mcp_tool_call_begin", "mcp_tool_call_end"):
-            invocation = payload.get("invocation")
-            invocation = invocation if isinstance(invocation, dict) else {}
-            tool_name = ".".join(
-                str(part) for part in (invocation.get("server"), invocation.get("tool")) if part
-            )
-            if ptype == "mcp_tool_call_begin":
-                return [
-                    Event(
-                        kind=EventKind.TOOL_CALL,
-                        tool_name=tool_name or None,
-                        ts=ts,
-                        raw_index=index,
-                    )
-                ]
-            raw = self._mcp_result(payload.get("result"))
-            return [
-                Event(
-                    kind=EventKind.TOOL_RESULT,
-                    text=_clip(raw),
-                    raw_text=raw,
-                    tool_name=tool_name or None,
-                    ts=ts,
                     raw_index=index,
                 )
             ]
