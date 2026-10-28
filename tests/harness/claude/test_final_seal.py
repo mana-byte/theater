@@ -745,12 +745,12 @@ def test_the_final_message_must_be_this_sessions_own_to_be_released_by_a_prompt(
     assert not _answered([_OLD_USER, answer, marker, _NEW_PROMPT])
 
 
-def test_a_session_that_never_showed_copied_history_has_only_the_base_rules():
-    # No fork, no copy: a prompt written after the answer it began is a new user turn, which drops
-    # the held marker exactly as before.
+def test_a_fresh_sessions_first_prompt_written_after_its_answer_releases_the_turn():
+    # No fork, no copy: Claude still writes a fresh session's first answer and marker before the
+    # prompt that began them, so that prompt releases the turn, as a fork's does.
     prompt = _prompt("new_user", None, "new", 4)
 
-    assert not _answered([_NEW_ANSWER, _NEW_MARKER, prompt])
+    assert _ended([_NEW_ANSWER, _NEW_MARKER, prompt]) == ["NEW"]
 
 
 def test_two_late_prompts_do_not_let_the_second_turn_end_before_the_first():
