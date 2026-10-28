@@ -29,7 +29,7 @@ from theater.trajectory.content import ContentFormat
 from theater.trajectory.enums import TimingProvenance, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing
 
-from .record_projection import project_record
+from .record_projection import is_native_send, project_record
 
 _pi_fact = fact_builder(
     source="pi",
@@ -380,6 +380,8 @@ class PiParserMixin:
         phase = _lifecycle_phase(record)
         if phase is not None:
             return self._lifecycle_record(phase, index, entry_id, timestamp)
+        if is_native_send(record):
+            return self._user_record(record.get("content"), index, entry_id, timestamp, clip_text)
         if record_type != "message" or not isinstance((message := record.get("message")), dict):
             return ParsedRecord()
         return self._message_record(record, message, index, entry_id, clip_text)
@@ -404,14 +406,14 @@ class PiParserMixin:
                 self._pending_terminal_outcome = None
                 self._active_turn_id = None
             return
+        if is_native_send(record):
+            self._open_turn(_record_id(record))
+            return
         if record_type != "message" or not isinstance((message := record.get("message")), dict):
             return
         role = message.get("role")
         if role == "user":
-            self._active_turn_id = _record_id(record)
-            self._pending_terminal = False
-            self._pending_terminal_turn_id = None
-            self._pending_terminal_outcome = None
+            self._open_turn(_record_id(record))
         elif role == "assistant":
             stop_reason = message.get("stopReason")
             calls = _blocks(message.get("content"), "toolCall")
@@ -476,6 +478,49 @@ class PiParserMixin:
             trajectory_events=(),
         )
 
+    def _open_turn(self, entry_id: str | None) -> None:
+        self._active_turn_id = entry_id
+        self._pending_terminal = False
+        self._pending_terminal_turn_id = None
+        self._pending_terminal_outcome = None
+
+    def _user_record(
+        self,
+        content: object,
+        index: int,
+        entry_id: str | None,
+        timestamp: float | None,
+        clip_text: bool,
+    ) -> ParsedRecord:
+        """A prompt: a typed user message or Theater's own native send, which starts its turn."""
+        self._active_turn_id = entry_id
+        raw = _content_text(content)
+        fact = _pi_fact(
+            kind=TrajectoryKind.USER,
+            summary=raw,
+            status=TrajectoryStatus.COMPLETED,
+            native_id=entry_id,
+            raw_index=index,
+            turn_id=entry_id,
+            timing=_timing(timestamp),
+        )
+        return ParsedRecord(
+            events=(
+                Event(
+                    kind=EventKind.USER,
+                    text=clipper(clip_text)(raw),
+                    raw_text=raw,
+                    ts=timestamp,
+                    turn_id=entry_id,
+                    raw_index=index,
+                ),
+            )
+            if raw
+            else (),
+            trajectory=(fact,),
+            trajectory_events=(),
+        )
+
     def _message_record(
         self,
         record: dict,
@@ -487,34 +532,7 @@ class PiParserMixin:
         role = message.get("role")
         timestamp = _timestamp(record, message)
         if role == "user":
-            turn_id = entry_id
-            self._active_turn_id = turn_id
-            raw = _content_text(message.get("content"))
-            fact = _pi_fact(
-                kind=TrajectoryKind.USER,
-                summary=raw,
-                status=TrajectoryStatus.COMPLETED,
-                native_id=entry_id,
-                raw_index=index,
-                turn_id=turn_id,
-                timing=_timing(timestamp),
-            )
-            return ParsedRecord(
-                events=(
-                    Event(
-                        kind=EventKind.USER,
-                        text=clipper(clip_text)(raw),
-                        raw_text=raw,
-                        ts=timestamp,
-                        turn_id=turn_id,
-                        raw_index=index,
-                    ),
-                )
-                if raw
-                else (),
-                trajectory=(fact,),
-                trajectory_events=(),
-            )
+            return self._user_record(message.get("content"), index, entry_id, timestamp, clip_text)
         if role == "assistant":
             inner = _message_timestamp(message)
             outer = _record_timestamp(record)

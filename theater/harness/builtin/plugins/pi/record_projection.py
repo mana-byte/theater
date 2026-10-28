@@ -6,6 +6,14 @@ import json
 
 from .constants import PI_FIELD_TEXT_BYTES, PI_PROJECTED_RECORD_BYTES, PI_RECORD_TEXT_BYTES
 
+#: The ``customType`` of the durable entry the bridge writes for every native send.
+_SEND_CUSTOM_TYPE = "theater:send"
+
+
+def is_native_send(record: dict) -> bool:
+    return record.get("type") == "custom_message" and record.get("customType") == _SEND_CUSTOM_TYPE
+
+
 _RECORD_FIELDS = (
     "type",
     "id",
@@ -107,6 +115,9 @@ def project_record(raw: bytes) -> bytes | None:
             projected["summary"] = budget.preview(summary)
         if isinstance(data := record.get("data"), dict):
             projected["data"] = _pick(data, ("version", "phase"))
+        if is_native_send(record):
+            # The only identity a native-send turn carries in the durable log is its prompt.
+            projected["content"] = _content(record.get("content"), budget)
         if isinstance(message := record.get("message"), dict):
             output = _pick(message, _MESSAGE_FIELDS) | _usage(message)
             output["content"] = _content(message.get("content"), budget)
