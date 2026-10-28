@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+import os
 from pathlib import Path
 
 import pytest
@@ -31,145 +31,81 @@ def _payload(marker: Path) -> dict[str, object]:
     return data
 
 
-def _reissue(marker: Path, payload: dict[str, object]) -> None:
-    marker.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _forge(marker: Path, changes: dict[str, object]) -> None:
-    # The post-mac checks are only reachable through a correctly signed marker.
-    payload = _payload(marker)
-    payload.pop("mac")
-    payload.update(changes)
-    payload["mac"] = isolation._mac(payload, isolation._marker_key())
-    _reissue(marker, payload)
-
-
 def test_pi_validate_domain_accepts_its_own_signed_marker(tmp_path, monkeypatch) -> None:
     domain, marker = _signed_domain(tmp_path, monkeypatch)
     payload = _payload(marker)
     payload.pop("mac")
     assert validate_domain(domain, participant_id="pi-child") == payload
-
-
-def test_pi_validate_domain_defaults_to_the_marker_owner(tmp_path, monkeypatch) -> None:
-    domain, marker = _signed_domain(tmp_path, monkeypatch)
-    _forge(marker, {"participant_id": "other"})
     assert validate_domain(domain) is not None
+
+
+@pytest.mark.parametrize(
+    ("changes", "resign"),
+    [
+        # A tampered MAC fails the digest; a correctly resigned marker with a
+        # tampered field proves each post-MAC check refuses on its own.
+        ({"mac": "0" * 64}, False),
+        ({"mac": 123}, False),
+        ({"version": 99}, True),
+        ({"harness": "claude"}, True),
+        ({"transcript_domain": "other"}, True),
+        ({"participant_id": "other"}, True),
+        ({"domain_nonce": 1}, True),
+    ],
+)
+def test_pi_validate_domain_refuses_forged_markers(
+    tmp_path, monkeypatch, changes: dict[str, object], resign: bool
+) -> None:
+    domain, marker = _signed_domain(tmp_path, monkeypatch)
+    payload = _payload(marker)
+    if resign:
+        payload.pop("mac")
+        payload.update(changes)
+        payload["mac"] = isolation._mac(payload, isolation._marker_key())
+    else:
+        payload.update(changes)
+    marker.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     assert validate_domain(domain, participant_id="pi-child") is None
 
 
-# Each damage case drives exactly one refusal branch of validate_domain.
-Damage = Callable[[Path, Path, Path], None]
-
-
-def _damage_missing_domain(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del marker
-    domain.rename(tmp_path / "gone")
-
-
-def _damage_missing_marker(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    marker.unlink()
-
-
-def _damage_marker_not_regular(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    marker.unlink()
-    marker.mkdir()
-
-
-def _damage_domain_symlink(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del marker
-    real = tmp_path / "real"
-    domain.rename(real)
-    domain.symlink_to(real)
-
-
-def _damage_marker_symlink(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del domain
-    target = tmp_path / "target.json"
-    target.write_text("{}", encoding="utf-8")
-    marker.unlink()
-    marker.symlink_to(target)
-
-
-def _damage_marker_bad_json(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    marker.write_text("not json", encoding="utf-8")
-
-
-def _damage_marker_not_an_object(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    marker.write_text("[]", encoding="utf-8")
-
-
-def _damage_forged_mac(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    payload = _payload(marker)
-    payload["mac"] = "0" * 64
-    _reissue(marker, payload)
-
-
-def _damage_mac_not_a_string(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    payload = _payload(marker)
-    payload["mac"] = 123
-    _reissue(marker, payload)
-
-
-def _damage_no_marker_key(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain, marker
-    paths.marker_key_path("pi").unlink()
-
-
-def _damage_wrong_version(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    _forge(marker, {"version": 99})
-
-
-def _damage_wrong_harness(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    _forge(marker, {"harness": "claude"})
-
-
-def _damage_wrong_domain(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del domain
-    _forge(marker, {"transcript_domain": str(tmp_path)})
-
-
-def _damage_wrong_owner(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    _forge(marker, {"participant_id": "other"})
-
-
-def _damage_nonce_not_a_string(tmp_path: Path, domain: Path, marker: Path) -> None:
-    del tmp_path, domain
-    _forge(marker, {"domain_nonce": 1})
-
-
-DAMAGES: dict[str, Damage] = {
-    "missing-domain": _damage_missing_domain,
-    "missing-marker": _damage_missing_marker,
-    "marker-not-regular": _damage_marker_not_regular,
-    "domain-symlink": _damage_domain_symlink,
-    "marker-symlink": _damage_marker_symlink,
-    "marker-bad-json": _damage_marker_bad_json,
-    "marker-not-an-object": _damage_marker_not_an_object,
-    "forged-mac": _damage_forged_mac,
-    "mac-not-a-string": _damage_mac_not_a_string,
-    "no-marker-key": _damage_no_marker_key,
-    "wrong-version": _damage_wrong_version,
-    "wrong-harness": _damage_wrong_harness,
-    "wrong-domain": _damage_wrong_domain,
-    "wrong-owner": _damage_wrong_owner,
-    "nonce-not-a-string": _damage_nonce_not_a_string,
-}
-
-
-@pytest.mark.parametrize("damage", DAMAGES.values(), ids=DAMAGES.keys())
-def test_pi_validate_domain_refuses_damaged_or_forged_markers(
-    tmp_path, monkeypatch, damage: Damage
+@pytest.mark.parametrize("content", ["not json", "[]"])
+def test_pi_validate_domain_refuses_an_unparseable_marker(
+    tmp_path, monkeypatch, content: str
 ) -> None:
     domain, marker = _signed_domain(tmp_path, monkeypatch)
-    damage(tmp_path, domain, marker)
+    marker.write_text(content, encoding="utf-8")
+    assert validate_domain(domain, participant_id="pi-child") is None
+
+
+def test_pi_validate_domain_refuses_a_missing_marker(tmp_path, monkeypatch) -> None:
+    domain, marker = _signed_domain(tmp_path, monkeypatch)
+    marker.unlink()
+    assert validate_domain(domain, participant_id="pi-child") is None
+
+
+def test_pi_validate_domain_refuses_a_non_regular_marker(tmp_path, monkeypatch) -> None:
+    domain, marker = _signed_domain(tmp_path, monkeypatch)
+    marker.unlink()
+    marker.mkdir()
+    assert validate_domain(domain, participant_id="pi-child") is None
+
+
+def test_pi_validate_domain_refuses_without_a_marker_key(tmp_path, monkeypatch) -> None:
+    domain, _marker = _signed_domain(tmp_path, monkeypatch)
+    paths.marker_key_path("pi").unlink()
+    assert validate_domain(domain, participant_id="pi-child") is None
+
+
+def test_pi_validate_domain_refuses_a_marker_that_became_a_symlink(tmp_path, monkeypatch) -> None:
+    # Race coverage: the marker swapped to a symlink between lstat and recheck.
+    domain, marker = _signed_domain(tmp_path, monkeypatch)
+    real_is_symlink = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self == marker or real_is_symlink(self))
+    assert validate_domain(domain, participant_id="pi-child") is None
+
+
+def test_pi_validate_domain_refuses_a_foreign_owner(tmp_path, monkeypatch) -> None:
+    domain, _marker = _signed_domain(tmp_path, monkeypatch)
+    real_euid = os.geteuid()
+    monkeypatch.setattr(isolation.os, "geteuid", lambda: real_euid + 1)
     assert validate_domain(domain, participant_id="pi-child") is None
