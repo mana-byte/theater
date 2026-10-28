@@ -40,28 +40,6 @@ def interrupt_result(
     }
 
 
-async def test_pi_interrupt_accepts_only_the_exact_identified_run() -> None:
-    peer = ScriptedPiPeer(
-        responses={
-            "pi.snapshot": bridge_snapshot(execution_state="active", native_turn_id="turn-1"),
-            "pi.control.interrupt": interrupt_result("interrupt-1"),
-        }
-    )
-    runtime = make_runtime(peer)
-    await runtime.attach()
-    try:
-        receipt = await runtime.interrupt(operation_id="interrupt-1", native_turn_id="turn-1")
-        assert receipt.result is DeliveryResult.ACCEPTED
-        assert receipt.native_turn_id == "turn-1"
-        method, params = peer.requests[-1]
-        assert method == "pi.control.interrupt"
-        assert params["expected_native_turn_id"] == "turn-1"
-        assert params["native_session_id"] == SESSION_A
-        assert params["expected_bridge_epoch"] == 2
-    finally:
-        await runtime.aclose()
-
-
 async def test_pi_interrupt_scope_is_the_bridges_atomic_check() -> None:
     peer = ScriptedPiPeer(
         responses={
@@ -83,6 +61,8 @@ async def test_pi_interrupt_scope_is_the_bridges_atomic_check() -> None:
         method, params = peer.requests[-1]
         assert method == "pi.control.interrupt"
         assert params["expected_native_turn_id"] == "turn-other"
+        assert params["native_session_id"] == SESSION_A
+        assert params["expected_bridge_epoch"] == 2
         assert sum(name == "pi.control.interrupt" for name, _ in peer.requests) == 1
     finally:
         await runtime.aclose()

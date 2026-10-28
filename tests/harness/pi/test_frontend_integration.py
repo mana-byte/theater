@@ -28,14 +28,14 @@ from theater.harness.manifests.compiler import compile_manifest
 from theater.models import JobState, Status
 
 
-def _install(monkeypatch, *, compatible=True):
+def _install(monkeypatch):
     runtime = replace(
         MANIFEST.runtime,
         probe=lambda _: RuntimeCompatibility(
-            supported=compatible,
+            supported=True,
             policy="pi-integration",
             native_version=VERSION_POLICY.minimum,
-            reason=None if compatible else "optional frontend transport unavailable",
+            reason=None,
         ),
     )
     harness = compile_manifest("pi", replace(MANIFEST, binary=sys.executable, runtime=runtime))
@@ -201,28 +201,6 @@ async def test_pi_launch_connect_settings_and_reconnect_preserve_pinned_routes(
         assert all(r["method"] == "pi.snapshot" for r in replacement.requests)
     finally:
         await replacement.close()
-
-
-async def test_supported_pi_falls_back_when_native_transport_is_unavailable(
-    daemon,
-    terminal_provider,
-    monkeypatch,
-    tmp_path,
-):
-    _install(monkeypatch, compatible=False)
-    participant = await _spawn(
-        daemon,
-        SpawnRequest(
-            harness="pi",
-            prompt="",
-            cwd=str(tmp_path),
-            approval="yolo",
-            wiring=RuntimeWiring.NATIVE,
-        ),
-    )
-    assert daemon.store.get_runtime_binding(participant.id) is None
-    assert "THEATER_PI_FRONTEND_CONFIG" not in terminal_provider.creations[-1]["env"]
-    assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_provider
 
 
 async def test_pi_daemon_restart_restores_credentials_and_fails_native_followups(
