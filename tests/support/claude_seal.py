@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 
+# Neutral stamp: production never reads a transcript record version key.
+VERSION = "0.0.1"
+
 
 def claude_record(uuid: str, parent: str | None, kind: str = "assistant", **extra) -> str:
     return json.dumps({"type": kind, "uuid": uuid, "parentUuid": parent, **extra})
