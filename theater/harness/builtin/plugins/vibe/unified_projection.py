@@ -6,6 +6,7 @@ import json
 import math
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 from theater.harness.contracts.events import Event, EventKind, EventPath, clipper
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
@@ -27,7 +28,7 @@ from .trajectory import (
 _TERMINAL_EFFECT_STATES = frozenset({"completed", "failed", "cancelled", "skipped"})
 # Vibe 3.x persists builtin file tools as generic tool effects; the path key
 # comes from each tool's runtime arguments, never from the effect kind.
-_TOOL_PATH_KEYS = {
+_TOOL_PATH_KEYS: dict[str, tuple[Literal["read", "write"], str]] = {
     "file_system.read_file": ("read", "path"),
     "file_system.write_file": ("write", "path"),
     "file_system.edit": ("write", "file_path"),
