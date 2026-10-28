@@ -439,7 +439,7 @@ class SpawnAdmission(ParticipantLaunchHost):
     ) -> Job:
         job = Job(
             handle=participant_id,
-            # The native initial dispatch sends as parent_id or "cli"; the caller guard requires equality.
+            # The native dispatch sends as parent_id or "cli"; the caller guard needs equality.
             caller_id=parent_id or "cli",
             target_id=participant_id,
             kind="spawn",
