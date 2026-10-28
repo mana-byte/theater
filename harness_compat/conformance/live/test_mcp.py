@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.support.tool_effects import (
+from harness_compat.support.tool_effects import (
     expect_gated,
     expect_runs,
     mcp_effect,

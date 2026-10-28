@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from tests.support.scenario_outcome import failure_outcome
+from harness_compat.support.scenario_outcome import failure_outcome
 
 
 @pytest.mark.parametrize(

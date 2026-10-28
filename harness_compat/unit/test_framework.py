@@ -12,16 +12,16 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.contract import Check
-from scripts.harness_compat.diagnostics import clip_diagnostic
-from scripts.harness_compat.framework import _suite_check, python_path, run_pytest
-from scripts.harness_compat.process import (
+from harness_compat.contract import Check
+from harness_compat.diagnostics import clip_diagnostic
+from harness_compat.framework import _suite_check, python_path, run_pytest
+from harness_compat.process import (
     SANDBOX_ENV,
     new_token,
     owned_pids,
     run_group,
 )
-from scripts.harness_compat.sandbox import make_sandbox
+from harness_compat.sandbox import make_sandbox
 
 
 def test_run_pytest_maps_skips_and_failures(tmp_path: Path) -> None:
@@ -86,11 +86,11 @@ def test_a_skip_or_setup_error_can_never_pass(kind: str) -> None:
     case = ET.Element("testcase", classname="test_suite", name="test_unproven")
     ET.SubElement(case, kind, message="not proven")
 
-    check = _suite_check("tests/conformance/live", [case])
+    check = _suite_check("harness_compat/conformance/live", [case])
 
     assert check.status == "error"
     assert "not proven" in check.detail
-    assert _suite_check("tests/conformance/live", []).status == "error"
+    assert _suite_check("harness_compat/conformance/live", []).status == "error"
 
 
 def test_a_failed_case_is_not_hidden_by_a_later_passing_duplicate() -> None:
@@ -98,7 +98,7 @@ def test_a_failed_case_is_not_hidden_by_a_later_passing_duplicate() -> None:
     ET.SubElement(failed, "failure", message="broken")
     passed = ET.Element("testcase", classname="test_suite", name="test_same")
 
-    assert _suite_check("tests/conformance/live", [failed, passed]).status == "fail"
+    assert _suite_check("harness_compat/conformance/live", [failed, passed]).status == "fail"
 
 
 def test_a_non_clean_pytest_exit_cannot_pass_despite_all_passing_cases(tmp_path, monkeypatch):
@@ -109,7 +109,7 @@ def test_a_non_clean_pytest_exit_cannot_pass_despite_all_passing_cases(tmp_path,
         xml.write_text('<testsuite><testcase name="test_ok"/></testsuite>')
         return subprocess.CompletedProcess(argv, 1, "session completion failed", "")
 
-    monkeypatch.setattr("scripts.harness_compat.framework.run_group", run)
+    monkeypatch.setattr("harness_compat.framework.run_group", run)
     check = run_pytest(tmp_path, "test_x.py", env={})
     assert check.status == "error" and "pytest exit 1" in check.detail
 
@@ -142,7 +142,7 @@ def test_sandbox_keeps_unix_socket_paths_short(
         long_root.mkdir()
         return str(long_root)
 
-    monkeypatch.setattr("scripts.harness_compat.sandbox.tempfile.mkdtemp", long_temp)
+    monkeypatch.setattr("harness_compat.sandbox.tempfile.mkdtemp", long_temp)
     with (
         pytest.raises(RuntimeError, match="tmux AF_UNIX socket path is too long"),
         make_sandbox("codex"),

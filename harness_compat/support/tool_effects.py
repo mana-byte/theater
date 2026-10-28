@@ -13,8 +13,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.harness_compat.contract import MockReply, MockToolCall, RecordedRequest
-from tests.support.live_rig import PROBE_SERVER, PROBE_TOOL, LiveRig, inconclusive, violation
+from harness_compat.contract import MockReply, MockToolCall, RecordedRequest
+from harness_compat.support.live_rig import (
+    PROBE_SERVER,
+    PROBE_TOOL,
+    LiveRig,
+    inconclusive,
+    violation,
+)
 from theater.constants.harness import HARNESS_MCP_SERVER_NAME
 from theater.harness.contracts.observation import ScreenKind
 

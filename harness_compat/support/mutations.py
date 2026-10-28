@@ -13,7 +13,7 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Literal
 
-from tests.support.obligations import Obligation
+from harness_compat.support.obligations import Obligation
 
 #: ``fail`` is a proven violation; ``not-pass`` also accepts an inconclusive error (a turn that
 #: never completes cannot always be told from a slow one).

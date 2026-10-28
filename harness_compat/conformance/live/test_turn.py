@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from scripts.harness_compat.contract import MockReply
+from harness_compat.contract import MockReply
 
 pytestmark = [pytest.mark.integration, pytest.mark.family("turn")]
 

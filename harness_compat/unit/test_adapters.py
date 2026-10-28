@@ -13,13 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat import github
-from scripts.harness_compat.adapters import ADAPTER_NAMES, codex_release, load_adapter, npm
-from scripts.harness_compat.adapters import codex as codex_adapter
-from scripts.harness_compat.adapters import vibe as vibe_adapter
-from scripts.harness_compat.contract import InstallFailed
-from scripts.harness_compat.policy import load_policy, policy_relative
-from scripts.harness_compat.sandbox import make_sandbox
+from harness_compat import github
+from harness_compat.adapters import ADAPTER_NAMES, codex_release, load_adapter, npm
+from harness_compat.adapters import codex as codex_adapter
+from harness_compat.adapters import vibe as vibe_adapter
+from harness_compat.contract import InstallFailed
+from harness_compat.policy import load_policy, policy_relative
+from harness_compat.sandbox import make_sandbox
 from tests.support.paths import REPO_ROOT
 
 Run = Callable[..., subprocess.CompletedProcess[str]]

@@ -1,9 +1,9 @@
 """Which live scenario family proves each declaration a manifest can make, or why none can.
 
-Every declaration found by :func:`tests.support.declarations.declarations` is listed here exactly
-once, either under the family whose scenario exercises it or under a reasoned exemption. There are
-no patterns: adding a capability to a manifest type fails the completeness test until someone
-decides how the live suite will prove it, or writes down why it cannot.
+Every declaration found by :func:`harness_compat.support.declarations.declarations` is listed here
+exactly once, either under the family whose scenario exercises it or under a reasoned exemption.
+There are no patterns: adding a capability to a manifest type fails the completeness test until
+someone decides how the live suite will prove it, or writes down why it cannot.
 """
 
 from __future__ import annotations

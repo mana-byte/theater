@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from scripts.harness_compat import github
+from harness_compat import github
 
 
 def _release(tag: str, **flags: bool) -> dict:

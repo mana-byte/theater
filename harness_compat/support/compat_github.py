@@ -6,8 +6,8 @@ import base64
 import json
 from pathlib import Path
 
-from scripts.harness_compat.policy import format_policy, policy_relative
-from scripts.harness_compat.publish import issue_title
+from harness_compat.policy import format_policy, policy_relative
+from harness_compat.publish import issue_title
 from theater.harness.contracts.version_policy import VersionPolicy
 
 POLICY_PATH = policy_relative("claude").as_posix()

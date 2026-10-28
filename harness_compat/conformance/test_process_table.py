@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 
-from tests.support import process_table
-from tests.support.process_table import Process
+from harness_compat.support import process_table
+from harness_compat.support.process_table import Process
 
 _PS = """\
     1     0     1 Sat Oct 24 11:00:00 2026

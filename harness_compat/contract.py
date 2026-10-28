@@ -23,7 +23,7 @@ SUITE_ENV_BINARY = "HARNESS_COMPAT_BINARY"
 SUITE_ENV_VERSION = "HARNESS_COMPAT_VERSION"
 SUITE_ENV_SANDBOX_ROOT = "HARNESS_COMPAT_SANDBOX_ROOT"
 SUITE_ENV_EVIDENCE_DIR = "HARNESS_COMPAT_EVIDENCE_DIR"
-#: Names a mutation canary (``tests/support/mutations.py``); never set for a release run.
+#: Names a mutation canary (``harness_compat/support/mutations.py``); never set for a release run.
 SUITE_ENV_MUTATION = "HARNESS_COMPAT_MUTATION"
 #: Schema of ``required.json`` and ``inventory.json``, written transiently into the sandbox.
 SUITE_DOCUMENT_SCHEMA = 1

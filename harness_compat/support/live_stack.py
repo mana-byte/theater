@@ -1,7 +1,8 @@
 """One scenario's daemon, Régie bridge and private tmux server: start, restart, stop, evidence.
 
 Everything here is a process or a file below the scenario's root, run in its hermetic environment.
-The SDK that drives the stack, and every scenario operation, lives in :mod:`tests.support.live_rig`.
+The SDK that drives the stack, and every scenario operation, lives in
+:mod:`harness_compat.support.live_rig`.
 """
 
 from __future__ import annotations

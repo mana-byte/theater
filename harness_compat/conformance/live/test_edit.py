@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.support.tool_effects import edit_effect, expect_gated, expect_runs
+from harness_compat.support.tool_effects import edit_effect, expect_gated, expect_runs
 
 pytestmark = [pytest.mark.integration, pytest.mark.family("edit")]
 

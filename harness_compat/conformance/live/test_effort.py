@@ -6,8 +6,8 @@ import uuid
 
 import pytest
 
-from scripts.harness_compat.contract import MockReply
-from tests.support.live_rig import inconclusive, violation
+from harness_compat.contract import MockReply
+from harness_compat.support.live_rig import inconclusive, violation
 
 pytestmark = [pytest.mark.integration, pytest.mark.family("effort")]
 

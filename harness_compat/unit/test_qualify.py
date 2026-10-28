@@ -12,14 +12,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.harness_compat import qualify
-from scripts.harness_compat.cleanup import CleanupFailed
-from scripts.harness_compat.codecopy import UnsafeCopy, code_copy
-from scripts.harness_compat.contract import Check, InstallFailed, Sandbox
-from scripts.harness_compat.policy import load_policy
-from scripts.harness_compat.run import run_harness
-from scripts.harness_compat.sandbox import make_sandbox
-from scripts.harness_compat.suite_runner import SuiteReport, run_suite, verdict
+from harness_compat import qualify
+from harness_compat.cleanup import CleanupFailed
+from harness_compat.codecopy import UnsafeCopy, code_copy
+from harness_compat.contract import Check, InstallFailed, Sandbox
+from harness_compat.policy import load_policy
+from harness_compat.run import run_harness
+from harness_compat.sandbox import make_sandbox
+from harness_compat.suite_runner import SuiteReport, run_suite, verdict
 from theater.harness.contracts.version_policy import VersionPolicy
 
 Git = Callable[..., str]
@@ -41,7 +41,10 @@ class _Suite:
 
 def _green() -> SuiteReport:
     return SuiteReport(
-        (Check("tests/conformance/live", "pass", "3 passed"), Check("conformance:launch", "pass"))
+        (
+            Check("harness_compat/conformance/live", "pass", "3 passed"),
+            Check("conformance:launch", "pass"),
+        )
     )
 
 
@@ -252,7 +255,7 @@ def _report(*checks: Check, problems: tuple[str, ...] = (), partial: bool = Fals
     return SuiteReport(checks, problems, partial)
 
 
-SUITE = Check("tests/conformance/live", "pass", "")
+SUITE = Check("harness_compat/conformance/live", "pass", "")
 
 
 @pytest.mark.parametrize(
@@ -454,8 +457,8 @@ def test_the_copy_admits_only_the_candidate():
 
 @pytest.fixture
 def mini_suite(repo: Path, git: Git) -> Path:
-    """The repository with a three-line stand-in for ``tests/conformance/live``."""
-    live = repo / "tests/conformance/live"
+    """The repository with a three-line stand-in for ``harness_compat/conformance/live``."""
+    live = repo / "harness_compat/conformance/live"
     live.mkdir(parents=True)
     (live / "conftest.py").write_text(_MINI_CONFTEST, encoding="utf-8")
     (live / "test_mini.py").write_text(_MINI_TEST, encoding="utf-8")
@@ -485,7 +488,7 @@ def test_a_real_suite_run_in_the_copy_reaches_its_verdict(
     assert result.verdict == verdict, result.checks
     assert load_policy(mini_suite, "claude") == VersionPolicy("1.0.0", "1.2.0")
     names = [check.name for check in result.checks]
-    assert names[0] == "tests/conformance/live"
+    assert names[0] == "harness_compat/conformance/live"
     assert ("conformance:launch:yolo" in names) == (verdict != "tooling")
 
 
@@ -505,7 +508,9 @@ def test_a_filtered_qualification_can_never_authorize(
 def test_a_filtered_qualification_that_fails_is_still_red(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    report = SuiteReport((Check("tests/conformance/live", "fail"), Check("conformance:a", "fail")))
+    report = SuiteReport(
+        (Check("harness_compat/conformance/live", "fail"), Check("conformance:a", "fail"))
+    )
     monkeypatch.setattr(qualify, "run_suite", _Suite(report))
 
     with make_sandbox("claude") as sb:
@@ -548,7 +553,7 @@ def test_cleanup_failure_preserves_completed_checks_and_stops_the_run(
 ):
     report = SuiteReport(
         (
-            Check("tests/conformance/live", "pass", "2 passed"),
+            Check("harness_compat/conformance/live", "pass", "2 passed"),
             Check("conformance:interrupt", status, "behavioral evidence"),
         )
     )

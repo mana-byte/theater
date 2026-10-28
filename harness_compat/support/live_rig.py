@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.contract import (
+from harness_compat.contract import (
     SUITE_ENV_BINARY,
     SUITE_ENV_EVIDENCE_DIR,
     SUITE_ENV_HARNESS,
@@ -36,12 +36,12 @@ from scripts.harness_compat.contract import (
     MockReply,
     RecordedRequest,
 )
-from scripts.harness_compat.framework import python_path
-from scripts.harness_compat.mock import MockServer
-from scripts.harness_compat.process import RUN_ENV, SANDBOX_ENV
-from scripts.harness_compat.sandbox import sandbox_environment
-from tests.support import mutations
-from tests.support.live_stack import BOOT_SECONDS, Stack
+from harness_compat.framework import python_path
+from harness_compat.mock import MockServer
+from harness_compat.process import RUN_ENV, SANDBOX_ENV
+from harness_compat.sandbox import sandbox_environment
+from harness_compat.support import mutations
+from harness_compat.support.live_stack import BOOT_SECONDS, Stack
 from tests.support.paths import REPO_ROOT
 from theater.frontend import FrontendClient
 from theater.frontend.dto import Controls, Job, Participant

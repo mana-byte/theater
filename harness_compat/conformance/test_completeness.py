@@ -11,11 +11,11 @@ from typing import Literal
 
 import pytest
 
-from tests.support.coverage import COVERAGE, NoLive
-from tests.support.declarations import declarations
+from harness_compat.support.coverage import COVERAGE, NoLive
+from harness_compat.support.declarations import declarations
+from harness_compat.support.mutations import MUTATIONS
+from harness_compat.support.obligations import FAMILIES, document, required
 from tests.support.manifest_rig import manifest, plan
-from tests.support.mutations import MUTATIONS
-from tests.support.obligations import FAMILIES, document, required
 from theater.harness import HARNESSES
 from theater.harness.builtin import plugin_dir
 from theater.harness.contracts.compat import COMPAT_PROTOCOLS, ProvisionContext
@@ -103,7 +103,7 @@ def test_every_declaration_a_manifest_can_make_is_mapped_or_exempted() -> None:
     found = declarations()
 
     assert not found - set(COVERAGE), (
-        "map each of these to a family or a reasoned NoLive in tests/support/coverage.py: "
+        "map each of these to a family or a reasoned NoLive in harness_compat/support/coverage.py: "
         f"{sorted(found - set(COVERAGE))}"
     )
     assert not set(COVERAGE) - found, (

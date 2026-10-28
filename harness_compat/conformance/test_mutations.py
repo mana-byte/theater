@@ -10,9 +10,7 @@ from typing import Any
 
 import pytest
 
-from tests.support.fake_runtime import fake_runtime_manifest
-from tests.support.manifest_rig import manifest, plan
-from tests.support.mutations import (
+from harness_compat.support.mutations import (
     ANY,
     MUTATIONS,
     applicable,
@@ -20,7 +18,9 @@ from tests.support.mutations import (
     package_source,
     undecided,
 )
-from tests.support.obligations import Obligation, required
+from harness_compat.support.obligations import Obligation, required
+from tests.support.fake_runtime import fake_runtime_manifest
+from tests.support.manifest_rig import manifest, plan
 from theater.harness import HARNESSES
 from theater.harness.contracts.manifest import ControlManifest, InterruptPlan, LaunchManifest
 

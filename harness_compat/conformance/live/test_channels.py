@@ -12,9 +12,9 @@ import time
 
 import pytest
 
-from tests.support.channel_oracles import capture_channel_facts, expect_channel_tool_facts
-from tests.support.live_rig import inconclusive
-from tests.support.tool_effects import expect_runs, mcp_effect
+from harness_compat.support.channel_oracles import capture_channel_facts, expect_channel_tool_facts
+from harness_compat.support.live_rig import inconclusive
+from harness_compat.support.tool_effects import expect_runs, mcp_effect
 from theater.harness.contracts.manifest import HookChannelManifest, OtelChannelManifest
 
 pytestmark = [pytest.mark.integration, pytest.mark.family("channels")]

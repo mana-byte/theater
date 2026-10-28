@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.canaries import ENV_BINARY, ENV_ENABLE, ENV_HARNESS
-from scripts.harness_compat.codecopy import code_copy
-from scripts.harness_compat.contract import SUITE_ENV_MUTATION, Check
-from scripts.harness_compat.sandbox import make_sandbox
-from scripts.harness_compat.suite_runner import SuiteReport, installed_version, run_suite
-from tests.support.mutations import (
+from harness_compat.canaries import ENV_BINARY, ENV_ENABLE, ENV_HARNESS
+from harness_compat.codecopy import code_copy
+from harness_compat.contract import SUITE_ENV_MUTATION, Check
+from harness_compat.sandbox import make_sandbox
+from harness_compat.suite_runner import SuiteReport, installed_version, run_suite
+from harness_compat.support.mutations import (
     ANY,
     LOADED_BANNER,
     MUTATIONS,
@@ -26,7 +26,7 @@ from tests.support.mutations import (
     applicable,
     undecided,
 )
-from tests.support.obligations import required
+from harness_compat.support.obligations import required
 from tests.support.paths import REPO_ROOT
 from theater.harness import HARNESSES
 from theater.harness.builtin import plugin_dir

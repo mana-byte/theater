@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from scripts.harness_compat.contract import (
+from harness_compat.contract import (
     SUITE_ENV_BINARY,
     SUITE_ENV_EVIDENCE_DIR,
     SUITE_ENV_HARNESS,
@@ -14,7 +14,7 @@ from scripts.harness_compat.contract import (
     SUITE_ENV_VERSION,
     SuiteDocument,
 )
-from scripts.harness_compat.process import SANDBOX_ENV
+from harness_compat.process import SANDBOX_ENV
 from tests.support.paths import REPO_ROOT
 
 pytest_plugins = ["pytester"]
@@ -23,7 +23,7 @@ pytest_plugins = ["pytester"]
 SCENARIOS = """
 import pytest
 
-from tests.support.live_rig import LiveSession, evidence_dir_for
+from harness_compat.support.live_rig import LiveSession, evidence_dir_for
 
 
 def _capture(request, line):
@@ -75,7 +75,7 @@ def test_the_captured_cause_reaches_the_inventory_whichever_phase_failed(
         "PYTHONPATH": str(REPO_ROOT),
     }.items():
         monkeypatch.setenv(name, value)
-    live_conftest = REPO_ROOT / "tests" / "conformance" / "live" / "conftest.py"
+    live_conftest = REPO_ROOT / "harness_compat" / "conformance" / "live" / "conftest.py"
     pytester.makeconftest(live_conftest.read_text(encoding="utf-8"))
     pytester.makepyfile(test_scenarios=SCENARIOS)
 

@@ -220,13 +220,11 @@ def changed_gates(root: Path, base: str) -> list[str]:
 def affected_harnesses(root: Path, base: str) -> list[str]:
     """Plugin changes select that harness; shared code, dependencies or suite changes select all."""
     changed = git.diff_names(root, base)
-    shared_files = {"Makefile", "pyproject.toml", "uv.lock", "tests/conftest.py"}
+    shared_files = {"Makefile", "pyproject.toml", "uv.lock"}
     shared_prefixes = (
         "theater/",
         "packages/regie/src/",
-        "scripts/harness_compat/",
-        "tests/compat/",
-        "tests/conformance/",
+        "harness_compat/",
         "tests/support/",
         ".github/workflows/harness-compat",
     )

@@ -29,7 +29,7 @@ from .workflow_report import run as report_failures
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m scripts.harness_compat")
+    parser = argparse.ArgumentParser(prog="python -m harness_compat")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser(
         "run", help="qualify every newer release; main runs publish issues/PRs"

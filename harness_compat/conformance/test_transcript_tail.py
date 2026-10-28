@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tests.support.transcript_tail import transcript_tail
+from harness_compat.support.transcript_tail import transcript_tail
 
 LAUNCHED = datetime(2026, 10, 26, 0, 0, 1, tzinfo=UTC).timestamp()
 

@@ -1,9 +1,10 @@
 """Run the mutation canaries against the newest admitted release of one harness.
 
-A canary breaks a plugin's wiring on purpose (``tests/support/mutations.py``); the live suite must
-fail the obligations it breaks. They prove the suite still has teeth, so they run when the suite
-changes and weekly, never per release. The canary tests run in a disposable code copy that admits
-only the chosen release, and each scenario copies that copy again: nothing runs in the checkout.
+A canary breaks a plugin's wiring on purpose (``harness_compat/support/mutations.py``); the live
+suite must fail the obligations it breaks. They prove the suite still has teeth, so they run when
+the suite changes and weekly, never per release. The canary tests run in a disposable code copy
+that admits only the chosen release, and each scenario copies that copy again: nothing runs in the
+checkout.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from .process import run_group
 from .qualify import install_verified
 from .sandbox import make_sandbox
 
-CANARIES_TARGET = "tests/conformance/canaries"
+CANARIES_TARGET = "harness_compat/conformance/canaries"
 CANARIES_TIMEOUT_SECONDS = 45 * 60.0
 #: Read by the canary tests: opt in, and the one harness and installed binary to run against.
 ENV_ENABLE = "HARNESS_COMPAT_CANARIES"

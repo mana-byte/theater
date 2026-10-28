@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.suite_runner import installed_version
+from harness_compat.suite_runner import installed_version
 
 
 def _cli(tmp_path: Path, body: str) -> Path:

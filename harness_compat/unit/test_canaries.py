@@ -9,14 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat import canaries
-from scripts.harness_compat.codecopy import code_copy
-from scripts.harness_compat.contract import InstallFailed, Sandbox
-from scripts.harness_compat.framework import python_path
-from scripts.harness_compat.policy import load_policy, write_policy
-from scripts.harness_compat.process import run_group
-from scripts.harness_compat.sandbox import make_sandbox
-from tests.support.mutations import MUTATIONS
+from harness_compat import canaries
+from harness_compat.codecopy import code_copy
+from harness_compat.contract import InstallFailed, Sandbox
+from harness_compat.framework import python_path
+from harness_compat.policy import load_policy, write_policy
+from harness_compat.process import run_group
+from harness_compat.sandbox import make_sandbox
+from harness_compat.support.mutations import MUTATIONS
 from tests.support.paths import REPO_ROOT
 from theater.harness.contracts.version_policy import VersionPolicy
 
@@ -131,7 +131,10 @@ def test_a_canary_the_suite_missed_is_a_failure(
 def test_a_missed_canary_reports_which_obligations_were_not_as_expected(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    line = "tests/conformance/canaries/test_canaries.py:93: AssertionError: {'mcp:call': 'fail'}"
+    line = (
+        "harness_compat/conformance/canaries/test_canaries.py:93: "
+        "AssertionError: {'mcp:call': 'fail'}"
+    )
     seen = _pytest(monkeypatch, 1, f"{'.' * 800}\n{line}\nFAILED x::test\n1 failed")
 
     check = canaries.run_canaries(repo, _Adapter())  # type: ignore[arg-type]

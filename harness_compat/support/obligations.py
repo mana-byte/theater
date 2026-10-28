@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from scripts.harness_compat.contract import SuiteDocument, SuiteRow
+from harness_compat.contract import SuiteDocument, SuiteRow
 from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.manifest import HookChannelManifest, OtelChannelManifest
 from theater.harness.contracts.runtime import RuntimeCapability
@@ -38,7 +38,7 @@ class Family:
 
     name: str
     derive: Callable[[Harness], tuple[str, ...]]
-    #: The test module under ``tests/conformance/live``.
+    #: The test module under ``harness_compat/conformance/live``.
     scenario: str
 
 

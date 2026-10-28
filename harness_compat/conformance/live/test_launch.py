@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from scripts.harness_compat.contract import MockReply
+from harness_compat.contract import MockReply
 from theater.constants.harness import HARNESS_APPROVAL_POLICIES
 
 pytestmark = [pytest.mark.integration, pytest.mark.family("launch")]

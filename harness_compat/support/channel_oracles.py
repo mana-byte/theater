@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Collection, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from tests.support.live_rig import inconclusive, violation
+from harness_compat.support.live_rig import inconclusive, violation
 from theater.constants.daemon import BUS_KIND_AGENT_HARNESS_EVENT
 from theater.frontend import FrontendClient
 from theater.frontend.trajectory import (

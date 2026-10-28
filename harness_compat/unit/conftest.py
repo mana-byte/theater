@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.contract import Check, Result, Verdict
-from scripts.harness_compat.git import git as run_git
-from scripts.harness_compat.policy import policy_relative
+from harness_compat.contract import Check, Result, Verdict
+from harness_compat.git import git as run_git
+from harness_compat.policy import policy_relative
 
 _POLICY = '{"min":"1.0.0","max":"1.2.0","excluded":[]}\n'
 

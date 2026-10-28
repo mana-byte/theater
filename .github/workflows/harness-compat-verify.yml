@@ -48,7 +48,7 @@ jobs:
         run: |
           args=(shards "$HARNESS" --base "$BASE")
           if [[ "$ROUTINE" == "true" ]]; then args+=(--routine); fi
-          matrix="$(python3 -m scripts.harness_compat "${args[@]}")"
+          matrix="$(python3 -m harness_compat "${args[@]}")"
           echo "shards=$matrix" >> "$GITHUB_OUTPUT"
           count="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["include"]))' "$matrix")"
           echo "count=$count" >> "$GITHUB_OUTPUT"
@@ -92,4 +92,4 @@ jobs:
           args=(verify "$HARNESS" --base "$BASE" --releases "$VERSIONS")
           if [[ "$ROUTINE" == "true" ]]; then args+=(--routine); fi
           args+=(--max-range "$MAX_RANGE")
-          timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat "${args[@]}"
+          timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m harness_compat "${args[@]}"

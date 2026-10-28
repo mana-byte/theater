@@ -15,19 +15,19 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.contract import SuiteDocument, SuiteRow
-from scripts.harness_compat.diagnostics import FAILURE_DETAIL_CHARS
-from scripts.harness_compat.process import SANDBOX_ENV
-from tests.support.live_rig import LiveRig, LiveSession, assert_isolated, evidence_dir_for
-from tests.support.log_excerpt import log_excerpt
-from tests.support.obligations import (
+from harness_compat.contract import SuiteDocument, SuiteRow
+from harness_compat.diagnostics import FAILURE_DETAIL_CHARS
+from harness_compat.process import SANDBOX_ENV
+from harness_compat.support.live_rig import LiveRig, LiveSession, assert_isolated, evidence_dir_for
+from harness_compat.support.log_excerpt import log_excerpt
+from harness_compat.support.obligations import (
     FAMILIES,
     Obligation,
     document,
     obligations_for,
     required,
 )
-from tests.support.scenario_outcome import failure_outcome
+from harness_compat.support.scenario_outcome import failure_outcome
 from theater import config as theater_config
 from theater import harness as harness_registry
 from theater import paths as theater_paths

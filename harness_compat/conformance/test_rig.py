@@ -14,11 +14,11 @@ from typing import Any, cast
 
 import pytest
 
-from scripts.harness_compat.mock import MockServer
-from tests.support import live_rig, live_stack
-from tests.support.live_rig import LiveRig, LiveSession
-from tests.support.live_stack import Stack
-from tests.support.log_excerpt import log_excerpt
+from harness_compat.mock import MockServer
+from harness_compat.support import live_rig, live_stack
+from harness_compat.support.live_rig import LiveRig, LiveSession
+from harness_compat.support.live_stack import Stack
+from harness_compat.support.log_excerpt import log_excerpt
 
 
 def test_theater_children_import_the_code_copy_with_no_inherited_pythonpath(
@@ -690,7 +690,7 @@ async def test_the_rig_undoes_what_came_up_in_reverse_however_far_it_got(
 def test_rig_environment_preserves_command_ownership_only_when_present(
     tmp_path, monkeypatch, run_token
 ):
-    from scripts.harness_compat.process import RUN_ENV, SANDBOX_ENV
+    from harness_compat.process import RUN_ENV, SANDBOX_ENV
 
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
     if run_token is None:

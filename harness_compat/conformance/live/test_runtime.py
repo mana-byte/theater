@@ -9,9 +9,9 @@ from collections.abc import Mapping
 
 import pytest
 
-from scripts.harness_compat.contract import MockReply
-from tests.support import process_table
-from tests.support.live_rig import inconclusive, violation
+from harness_compat.contract import MockReply
+from harness_compat.support import process_table
+from harness_compat.support.live_rig import inconclusive, violation
 from theater.frontend.client import FrontendResponseError
 
 pytestmark = [pytest.mark.integration, pytest.mark.family("runtime")]

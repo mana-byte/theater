@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat import attention
-from scripts.harness_compat.codecopy import code_copy
-from scripts.harness_compat.git import git
-from scripts.harness_compat.run import Run
-from tests.support.compat_github import assert_gh_flags
+from harness_compat import attention
+from harness_compat.codecopy import code_copy
+from harness_compat.git import git
+from harness_compat.run import Run
+from harness_compat.support.compat_github import assert_gh_flags
 from tests.support.paths import REPO_ROOT
 
 URL = "https://github.com/o/r/actions/runs/42"
@@ -275,7 +275,7 @@ def test_published_failure_is_not_reported_again(repo: Path, monkeypatch) -> Non
 def test_reporting_imports_without_project_dependencies_or_site_packages() -> None:
     with code_copy(REPO_ROOT) as tree:
         result = subprocess.run(
-            [sys.executable, "-S", "-c", "import scripts.harness_compat.cli"],
+            [sys.executable, "-S", "-c", "import harness_compat.cli"],
             cwd=tree,
             env={**os.environ, "PYTHONPATH": str(tree), "PYTHONDONTWRITEBYTECODE": "1"},
             capture_output=True,

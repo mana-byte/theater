@@ -36,10 +36,10 @@ jobs:
         with:
           enable-cache: false
       - run: uv sync --locked --all-packages --group dev
-      - run: uv run ruff check --no-cache scripts/harness_compat
-      - run: uv run ruff format --check --no-cache scripts/harness_compat
+      - run: uv run ruff check --no-cache harness_compat
+      - run: uv run ruff format --check --no-cache harness_compat
       - run: uv run mypy
-      - run: uv run --no-sync --no-cache pytest -p no:cacheprovider tests/compat tests/conformance -q
+      - run: uv run --no-sync --no-cache pytest -p no:cacheprovider harness_compat -q
 
   plan:
     name: Select harnesses
@@ -71,7 +71,7 @@ jobs:
             echo "base=$base" >> "$GITHUB_OUTPUT"
             echo "routine=$routine" >> "$GITHUB_OUTPUT"
           fi
-          harnesses="$(python3 -m scripts.harness_compat "${args[@]}")"
+          harnesses="$(python3 -m harness_compat "${args[@]}")"
           echo "harnesses=$harnesses" >> "$GITHUB_OUTPUT"
 
   qualify:
@@ -114,7 +114,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: uv sync --locked --all-packages --group dev
       - name: Test every newer release and publish each completed outcome
-        run: timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m scripts.harness_compat run "$HARNESS" --budget-minutes 310 --max-range "$MAX_RANGE"
+        run: timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m harness_compat run "$HARNESS" --budget-minutes 310 --max-range "$MAX_RANGE"
 
   # Each affected harness gets its own fan-out and shard matrix, so one harness's discovery
   # failure or window size never shapes another harness's verify jobs.
@@ -200,4 +200,4 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: python3 -m scripts.harness_compat failures
+      - run: python3 -m harness_compat failures

@@ -7,10 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.harness_compat import run as run_module
-from scripts.harness_compat.cleanup import CleanupFailed
-from scripts.harness_compat.contract import Adapter, Check, Result
-from scripts.harness_compat.run import (
+from harness_compat import run as run_module
+from harness_compat.cleanup import CleanupFailed
+from harness_compat.contract import Adapter, Check, Result
+from harness_compat.run import (
     DiscoveryError,
     IncompleteRun,
     Run,

@@ -8,17 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.contract import (
+from harness_compat.contract import (
     SUITE_DOCUMENT_SCHEMA,
     Check,
     SuiteDocument,
     SuiteDocumentError,
     SuiteRow,
 )
-from scripts.harness_compat.sandbox import make_sandbox
-from scripts.harness_compat.suite_runner import _load, reconcile, suite_environment, verdict
+from harness_compat.sandbox import make_sandbox
+from harness_compat.suite_runner import _load, reconcile, suite_environment, verdict
 
-SUITE = Check("tests/conformance/live", "pass", "10 passed")
+SUITE = Check("harness_compat/conformance/live", "pass", "10 passed")
 
 
 def _entry(id_: str, scenario: str = "test_x.py") -> SuiteRow:
@@ -74,7 +74,7 @@ def test_every_obligation_becomes_one_check_with_its_outcome() -> None:
 
 def test_an_unexpected_test_exception_is_tooling_even_if_junit_marks_the_case_failed() -> None:
     report = reconcile(
-        Check("tests/conformance/live", "fail", "RuntimeError: broken helper"),
+        Check("harness_compat/conformance/live", "fail", "RuntimeError: broken helper"),
         _required(_entry("launch:manual")),
         _inventory(("launch:manual", "executed", "tooling", "RuntimeError: broken helper")),
         harness="acme",

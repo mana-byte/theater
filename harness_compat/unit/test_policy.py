@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.contract import Result
-from scripts.harness_compat.policy import (
+from harness_compat.contract import Result
+from harness_compat.policy import (
     PolicyChangeError,
     Unproposable,
     admit_only,
@@ -336,16 +336,14 @@ def test_edits_outside_every_plugin_select_no_harness(repo: Path, git: Git) -> N
         "theater/daemon/controls/service.py",
         "theater/harness/builtin/plugins/__init__.py",
         "packages/regie/src/regie/bridge.py",
-        "scripts/harness_compat/qualify.py",
-        "tests/support/live_rig.py",
-        "tests/support/channel_oracles.py",
-        "tests/support/process_table.py",
-        "tests/conftest.py",
+        "harness_compat/qualify.py",
+        "harness_compat/support/live_rig.py",
+        "tests/support/isolation.py",
         "pyproject.toml",
     ],
 )
 def test_shared_code_and_suite_changes_retest_every_harness(repo: Path, git: Git, path: str):
-    from scripts.harness_compat.adapters import ADAPTER_NAMES
+    from harness_compat.adapters import ADAPTER_NAMES
 
     git(repo, "checkout", "-q", "-b", "topic")
     target = repo / path

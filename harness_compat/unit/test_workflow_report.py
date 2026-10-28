@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.harness_compat.workflow_report import SUMMARY_BYTES, collect, run, summary
+from harness_compat.workflow_report import SUMMARY_BYTES, collect, run, summary
 
 
 def _log(*lines: str) -> str:

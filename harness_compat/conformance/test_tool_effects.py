@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from scripts.harness_compat.contract import MockToolCall, RecordedRequest, ToolShape
-from tests.support.tool_effects import (
+from harness_compat.contract import MockToolCall, RecordedRequest, ToolShape
+from harness_compat.support.tool_effects import (
     Effect,
     _mark,
     _misfit,

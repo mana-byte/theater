@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from scripts.harness_compat.process import SANDBOX_ENV
-from scripts.harness_compat.sandbox import make_sandbox
-from tests.support.live_rig import (
+from harness_compat.process import SANDBOX_ENV
+from harness_compat.sandbox import make_sandbox
+from harness_compat.support.live_rig import (
     ENV_BINARY,
     ENV_EVIDENCE_DIR,
     ENV_HARNESS,

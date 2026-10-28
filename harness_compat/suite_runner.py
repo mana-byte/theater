@@ -37,7 +37,7 @@ from .process import run_group
 from .sandbox import make_sandbox
 
 #: The pytest target of the live suite; it is collected only under the pipeline sandbox token.
-SUITE_TARGET = "tests/conformance/live"
+SUITE_TARGET = "harness_compat/conformance/live"
 #: The live scenarios of one release may not run longer than this.
 SUITE_TIMEOUT_SECONDS = 20 * 60.0
 _OUTCOMES: Mapping[str, CheckStatus] = {"passed": "pass", "failed": "fail"}

@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 import yaml
 
-from scripts.harness_compat.adapters import ADAPTER_NAMES
-from scripts.harness_compat.policy import policy_relative
+from harness_compat.adapters import ADAPTER_NAMES
+from harness_compat.policy import policy_relative
 from tests.support.paths import REPO_ROOT
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
@@ -53,7 +53,7 @@ def test_the_failures_job_runs_last_reads_only_and_cannot_fail_the_run() -> None
     assert job["if"] == "${{ always() }}" and job["continue-on-error"] is True
     assert job["permissions"] == {"contents": "read", "actions": "read"}
     assert "secrets." not in yaml.safe_dump(job)
-    assert job["steps"][-1]["run"] == "python3 -m scripts.harness_compat failures"
+    assert job["steps"][-1]["run"] == "python3 -m harness_compat failures"
 
 
 def test_dispatch_selects_a_harness_and_scripts_discover_the_versions() -> None:
@@ -198,7 +198,7 @@ def test_failure_reporter_runs_from_trusted_main_without_project_setup() -> None
     job = report["jobs"]["report"]
     assert "timed_out" in job["if"] and "failure" in job["if"]
     assert job["steps"][0]["with"]["ref"] == "${{ github.sha }}"
-    assert job["steps"][-1]["run"] == 'python3 -m scripts.harness_compat report "$FAILED_RUN_ID"'
+    assert job["steps"][-1]["run"] == 'python3 -m harness_compat report "$FAILED_RUN_ID"'
     assert "uv sync" not in yaml.safe_dump(job)
 
 
@@ -232,7 +232,9 @@ def test_canaries_are_workflow_self_checks_for_each_plugin() -> None:
     job = workflow["jobs"]["canaries"]
     assert job["strategy"]["matrix"]["harness"] == list(ADAPTER_NAMES)
     assert 'harness_compat canaries "$HARNESS"' in job["steps"][-1]["run"]
-    assert "tests/support/**" in workflow["on"]["pull_request"]["paths"]
+    paths = workflow["on"]["pull_request"]["paths"]
+    assert "tests/support/**" in paths
+    assert paths.index("!harness_compat/unit/**") > paths.index("harness_compat/**")
     makefile = (REPO_ROOT / "Makefile").read_text()
     for removed in ("compat:", "suite:", "canaries:"):
         assert removed not in makefile

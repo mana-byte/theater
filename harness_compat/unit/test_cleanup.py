@@ -14,9 +14,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.harness_compat import cleanup, process
-from scripts.harness_compat.diagnostics import exception_detail
-from scripts.harness_compat.sandbox import make_sandbox
+from harness_compat import cleanup, process
+from harness_compat.diagnostics import exception_detail
+from harness_compat.sandbox import make_sandbox
 
 
 def test_a_child_deleted_during_traversal_does_not_fail_cleanup(tmp_path, monkeypatch):
@@ -129,12 +129,12 @@ def test_repeated_ownership_sweeps_have_a_deadline(monkeypatch):
 
 def test_sandbox_keeps_data_if_process_shutdown_fails(theater_home, monkeypatch):
     root = theater_home / "sandbox"
-    monkeypatch.setattr("scripts.harness_compat.sandbox._new_temp_dir", lambda: root)
+    monkeypatch.setattr("harness_compat.sandbox._new_temp_dir", lambda: root)
 
     def failed(*args):
         raise cleanup.CleanupFailed("processes still running")
 
-    monkeypatch.setattr("scripts.harness_compat.sandbox.stop_sandbox_processes", failed)
+    monkeypatch.setattr("harness_compat.sandbox.stop_sandbox_processes", failed)
     try:
         with (
             pytest.raises(cleanup.CleanupFailed, match="processes still running"),
