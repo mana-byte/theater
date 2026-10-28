@@ -353,7 +353,7 @@ class FinalAnswerSeal:
     ) -> tuple[Sealed, float | None, int] | None:
         """Seal a held marker when a later record completes its chain.
 
-        Only an attachment-like record, or a fork's first prompt that the held message answers
+        Only an attachment-like record, or a session's first prompt that the held message answers
         (and the attachments that link them, whichever of these is read last), may; fail closed on
         any discontinuity: a non-increasing index (rewrite/rewind), a changed session, or a record
         that could itself be a fragment of the answer.
@@ -427,19 +427,19 @@ class FinalAnswerSeal:
         return None
 
     def _is_first_prompt(self, record: dict, ts: float | None) -> bool:
-        """Whether ``record`` is a fork's first prompt: typed, written by this session, and the one
-        record that follows the copied history and nothing else.
+        """Whether ``record`` is a session's first prompt: typed, written by this session, and the
+        root of a fresh session or the one record that follows a fork's copied history.
 
-        A fork writes its first turn before that turn's own prompt, which therefore began the turn
+        Claude can write a first turn before that turn's own prompt, which therefore began the turn
         a held marker ended. A later turn's prompt follows this session's own records, so it never
         qualifies.
         """
+        parent = record.get("parentUuid")
         return (
             is_prompt(record)
             and isinstance(record.get("uuid"), str)
             and self._is_local(ts)
-            and record.get("parentUuid") is not None
-            and self._descends_from_history(record.get("parentUuid"))
+            and (parent is None or self._descends_from_history(parent))
         )
 
     def _follow_prompt(
