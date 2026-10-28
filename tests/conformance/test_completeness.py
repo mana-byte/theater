@@ -70,6 +70,7 @@ def test_a_shipped_harness_derives_obligations_only_from_what_it_declares(name: 
         harness.compat is not None and harness.compat.native_edit is not None
     )
     assert "turn:prompt" in derived
+    assert "launch:prompt" in derived
     assert ("runtime:survival" in derived) is (harness.runtime is not None)
     if harness.runtime is not None:
         assert ("runtime:legacy" in derived) is harness.observer.has_screen

@@ -46,6 +46,11 @@ def _approvals(harness: Harness) -> tuple[str, ...]:
     return tuple(harness.launch_parameter_support.approvals)
 
 
+def _launch(harness: Harness) -> tuple[str, ...]:
+    # The planner contract carries a launch prompt for every harness (LaunchContext.prompt).
+    return (*_approvals(harness), "prompt")
+
+
 def _always(_harness: Harness) -> tuple[str, ...]:
     return ("prompt",)
 
@@ -125,7 +130,7 @@ def _runtime(harness: Harness) -> tuple[str, ...]:
 
 
 FAMILIES: tuple[Family, ...] = (
-    Family("launch", _approvals, "test_launch.py"),
+    Family("launch", _launch, "test_launch.py"),
     Family("turn", _always, "test_turn.py"),
     Family("interrupt", _flag("interrupt", _interrupt), "test_interrupt.py"),
     Family("steer", _steer, "test_steer.py"),
