@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from tests.support.parse_rig import read_screen
+from tests.support.opencode_screens import (
+    OPENCODE_APPROVAL,
+    OPENCODE_IDLE,
+    OPENCODE_QUESTION,
+    OPENCODE_WORKING,
+    OPENCODE_WORKING_INTERRUPT,
+)
 from tests.support.shipped import OpenCodeObserver
 from theater.harness.base import MAX_TEXT
 from theater.harness.observation import ScreenConfidence, ScreenKind
@@ -13,7 +19,7 @@ LONG = "x" * (MAX_TEXT * 3)
 def test_opencode_source_preserves_raw_text_before_clipping(tmp_path):
     from theater.harness.builtin.plugins.opencode import OpenCodeSource
 
-    src = OpenCodeSource(tmp_path / "opencode-stable.db", cwd=str(tmp_path))
+    src = OpenCodeSource(tmp_path / "opencode.db", cwd=str(tmp_path))
     src._roles["msg_a1"] = "assistant"
     src._text["msg_a1"] = {"prt_1": LONG}
 
@@ -37,7 +43,7 @@ def test_opencode_source_preserves_raw_text_before_clipping(tmp_path):
 def test_opencode_emits_usage_for_an_empty_tool_step(tmp_path):
     from theater.harness.builtin.plugins.opencode import OpenCodeSource
 
-    src = OpenCodeSource(tmp_path / "opencode-stable.db", cwd=str(tmp_path))
+    src = OpenCodeSource(tmp_path / "opencode.db", cwd=str(tmp_path))
     events = src._on_message(
         {
             "info": {
@@ -70,7 +76,7 @@ def test_opencode_emits_usage_for_an_empty_tool_step(tmp_path):
 def test_opencode_reported_terminal_signal_remains_unmarked(tmp_path):
     from theater.harness.builtin.plugins.opencode import OpenCodeSource
 
-    src = OpenCodeSource(tmp_path / "opencode-stable.db", cwd=str(tmp_path))
+    src = OpenCodeSource(tmp_path / "opencode.db", cwd=str(tmp_path))
     src._snapshotted.add("msg_a1")
     events = src._on_message({"info": {"id": "msg_a1", "role": "assistant", "finish": "stop"}}, 1)
     assert len(events) == 1
@@ -79,26 +85,25 @@ def test_opencode_reported_terminal_signal_remains_unmarked(tmp_path):
     assert events[0].answer_final is False
 
 
-def test_opencode_idle_fixture_classifies_as_prompt():
-    capture = read_screen("opencode_idle.txt")
-    reading = OpenCodeObserver().screen_reading(capture)
+def test_opencode_idle_footer_classifies_as_prompt():
+    reading = OpenCodeObserver().screen_reading(OPENCODE_IDLE)
     assert reading.kind is ScreenKind.PROMPT
 
 
-def test_opencode_working_fixture_classifies_as_working_with_high_confidence():
-    capture = read_screen("opencode_working.txt")
+def test_opencode_working_footer_classifies_as_working_with_high_confidence():
+    capture = OPENCODE_WORKING
     reading = OpenCodeObserver().screen_reading(capture)
     assert reading.kind is ScreenKind.WORKING
     assert reading.confidence is ScreenConfidence.HIGH
 
 
-def test_opencode_working_interrupt_fixture_classifies_as_working_with_high_confidence():
+def test_opencode_working_interrupt_footer_classifies_as_working_with_high_confidence():
     """After one Esc press, the footer reads `esc again to interrupt` for ~5s
-    (component/prompt/index.tsx:410-418). The plain `esc interrupt` marker
+    (component/prompt/index.tsx). The plain `esc interrupt` marker
     misses this spelling, so a working pane mid-interrupt falls through to the
     tail scan, reads PROMPT -> IDLE, and `_rescue_jobs` finishes the caller's
     job mid-turn."""
-    capture = read_screen("opencode_working_interrupt.txt")
+    capture = OPENCODE_WORKING_INTERRUPT
     assert "esc again to interrupt" in capture
     assert "esc interrupt" not in capture.split("esc again to interrupt")[0][-1:]
     reading = OpenCodeObserver().screen_reading(capture)
@@ -106,8 +111,8 @@ def test_opencode_working_interrupt_fixture_classifies_as_working_with_high_conf
     assert reading.confidence is ScreenConfidence.HIGH
 
 
-def test_opencode_approval_fixture_classifies_as_approval_with_high_confidence():
-    capture = read_screen("opencode_approval.txt")
+def test_opencode_permission_header_classifies_as_approval_with_high_confidence():
+    capture = OPENCODE_APPROVAL
     assert "Permission required" in capture
     assert "esc interrupt" not in capture
     assert "ctrl+p commands" not in capture
@@ -116,13 +121,13 @@ def test_opencode_approval_fixture_classifies_as_approval_with_high_confidence()
     assert reading.confidence is ScreenConfidence.HIGH
 
 
-def test_opencode_question_fixture_classifies_as_approval_with_high_confidence():
-    """The question screen (`routes/session/question.tsx`) renders a footer
-    `esc dismiss` and no prompt chrome. It classifies as APPROVAL (HIGH) — not
+def test_opencode_form_question_classifies_as_approval_with_high_confidence():
+    """The form dialog (mini/footer.form.tsx) renders an `esc dismiss`
+    footer and no prompt chrome. It classifies as APPROVAL (HIGH) — not
     a new ScreenKind — because it is functionally an approval: the agent is
     blocked and Enter commits a choice. The send gate blocks APPROVAL at HIGH
     confidence, so classifying it as APPROVAL prevents injection."""
-    capture = read_screen("opencode_question.txt")
+    capture = OPENCODE_QUESTION
     assert "esc dismiss" in capture
     assert "esc interrupt" not in capture
     assert "ctrl+p commands" not in capture

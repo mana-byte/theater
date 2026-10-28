@@ -9,6 +9,13 @@ import pytest
 from tests.support.parse_rig import events_for, read_screen
 from tests.support.paths import FIXTURES
 from tests.support.shipped import VibeObserver
+from tests.support.vibe_screens import (
+    VIBE_APPROVAL,
+    VIBE_QUESTION,
+    VIBE_TRUST,
+    VIBE_WORKING,
+    VIBE_WORKING_QUEUED,
+)
 from theater.harness import EventKind
 from theater.harness.observation import ScreenConfidence, ScreenKind
 
@@ -111,17 +118,15 @@ def test_vibe_native_children_come_from_meta_json(tmp_path):
     assert children[0].relative_path.startswith("agents/explore_")
 
 
-def test_vibe_approval_fixture_classifies_as_approval_not_working():
-    """The working marker is present in the same capture as the permission box.
+def test_vibe_approval_classifies_as_approval_not_working():
+    """The spinner hint stays on screen under the open approval box.
 
     This is the regression test for the rule that approval must be tested
     before the working marker: vibe renders both simultaneously, so a matcher
     that checks `working` first would classify every approval dialog as
     `working` and the bug survives.
     """
-    capture = read_screen("vibe_approval.txt")
-    assert "esc" in capture.lower()  # the working spinner is on screen
-    reading = VibeObserver().screen_reading(capture)
+    reading = VibeObserver().screen_reading(VIBE_APPROVAL)
     assert reading.kind is ScreenKind.APPROVAL
     assert reading.kind is not ScreenKind.WORKING
     assert reading.confidence is ScreenConfidence.HIGH
@@ -135,40 +140,23 @@ def test_vibe_idle_fixture_classifies_as_prompt():
 
 # Vibe's spinner hint has a second spelling when a message is queued, and the workspace-trust
 # dialog was once unhandled: a working pane fell through to the composer prompt and read idle.
-def test_vibe_working_fixture_classifies_as_working_not_prompt():
-    """The composer's empty prompt line stays on screen during a turn.
-
-    A tail scan for a bare prompt therefore matches while vibe is working, so
-    the working marker has to be tested first.
-    """
-    capture = read_screen("vibe_working.txt")
-    reading = VibeObserver().screen_reading(capture)
-    assert reading.kind is ScreenKind.WORKING
-    assert reading.confidence is ScreenConfidence.HIGH
-
-
-def test_vibe_trust_fixture_classifies_as_trust_with_high_confidence():
-    """The trust dialog renders before any turn or prompt and blocks all
-    interaction, so it must be classified as TRUST — the send gate refuses to
-    inject on a TRUST reading at HIGH confidence."""
-    capture = read_screen("vibe_trust.txt")
-    reading = VibeObserver().screen_reading(capture)
-    assert reading.kind is ScreenKind.TRUST
-    assert reading.confidence is ScreenConfidence.HIGH
-
-
-def test_vibe_working_queued_fixture_classifies_as_working_not_prompt():
-    """The queued-message spinner hint spells `Esc to interrupt`, not
-    `Esc/Ctrl+C to interrupt`. The composer's empty prompt line is still
-    visible below the spinner, so without a matching WORKING_MARKER this
-    screen reads as PROMPT -> IDLE and `_rescue_jobs` ends the caller's job
-    mid-turn. This test must fail before the marker fix and pass after."""
-    capture = read_screen("vibe_working_queued.txt")
-    assert "Esc to interrupt" in capture  # the queued variant
-    assert "Esc/Ctrl+C to interrupt" not in capture  # NOT the plain variant
+@pytest.mark.parametrize("capture", [VIBE_WORKING, VIBE_WORKING_QUEUED], ids=["plain", "queued"])
+def test_vibe_spinner_hint_classifies_as_working_not_prompt(capture):
+    """The composer's empty prompt line stays on screen during a turn, so
+    the working marker has to be tested first. The queued spelling is
+    `Esc to interrupt`, without Ctrl+C (ui/loading/hint.rs)."""
     reading = VibeObserver().screen_reading(capture)
     assert reading.kind is ScreenKind.WORKING
     assert reading.kind is not ScreenKind.PROMPT
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_vibe_trust_dialog_classifies_as_trust_with_high_confidence():
+    """The trust dialog renders before any turn or prompt and blocks all
+    interaction, so it must be classified as TRUST — the send gate refuses to
+    inject on a TRUST reading at HIGH confidence."""
+    reading = VibeObserver().screen_reading(VIBE_TRUST)
+    assert reading.kind is ScreenKind.TRUST
     assert reading.confidence is ScreenConfidence.HIGH
 
 
@@ -188,7 +176,7 @@ def test_vibe_picker_footer_esc_cancel_is_not_approval(cancel):
 
 @pytest.mark.parametrize("select", ["select", "toggle"])
 def test_vibe_question_requires_current_dialog_and_input_status(select):
-    capture = read_screen("vibe_question.txt").replace("Enter select", f"Enter {select}")
+    capture = VIBE_QUESTION.replace("Enter select", f"Enter {select}")
     reading = VibeObserver().screen_reading(capture)
     assert reading.kind is ScreenKind.APPROVAL
     assert reading.confidence is ScreenConfidence.HIGH
