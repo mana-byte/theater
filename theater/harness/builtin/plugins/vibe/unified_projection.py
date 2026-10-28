@@ -7,7 +7,7 @@ import math
 from dataclasses import replace
 from pathlib import Path
 
-from theater.harness.contracts.events import Event, EventKind, EventPath, clipper
+from theater.harness.contracts.events import Event, EventKind, clipper
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.normalization.facts import tool_failure
 from theater.harness.normalization.values import text_block_items
@@ -16,7 +16,7 @@ from theater.trajectory.enums import TimingProvenance, TrajectoryKind, Trajector
 from theater.trajectory.records import Timing
 
 from .trajectory import (
-    _relativise,
+    _extract_paths,
     _vibe_detail,
     _vibe_fact,
     _vibe_mcp_identity,
@@ -25,8 +25,6 @@ from .trajectory import (
 )
 
 _TERMINAL_EFFECT_STATES = frozenset({"completed", "failed", "cancelled", "skipped"})
-_WRITE_EFFECT_KINDS = frozenset({"file_edit", "file_write"})
-_READ_EFFECT_KINDS = frozenset({"file_read", "file_search"})
 
 
 def _string(value: object) -> str | None:
@@ -88,31 +86,6 @@ def _entry_status(entry: dict) -> TrajectoryStatus:
     if entry.get("generationStatus") == "in_progress":
         return TrajectoryStatus.PARTIAL
     return TrajectoryStatus.COMPLETED
-
-
-def _effect_paths(detail: dict, cwd: str | None) -> tuple[EventPath, ...]:
-    kind = detail.get("kind")
-    arguments = detail.get("input")
-    if not isinstance(arguments, dict):
-        return ()
-    raw = next(
-        (
-            arguments.get(key)
-            for key in ("filePath", "file_path", "path")
-            if isinstance(arguments.get(key), str) and arguments.get(key)
-        ),
-        None,
-    )
-    if raw is None:
-        return ()
-    path = _relativise(raw, cwd)
-    if path is None:
-        return ()
-    if kind in _WRITE_EFFECT_KINDS:
-        return (EventPath(path=path, mode="write"),)
-    if kind in _READ_EFFECT_KINDS:
-        return (EventPath(path=path, mode="read"),)
-    return ()
 
 
 def _mcp_identity(tool_name: str | None, detail: dict) -> tuple[str, str] | None:
@@ -316,7 +289,7 @@ def _project_effect(
     tool_name = _string(effect_detail.get("toolName"))
     effect_kind = _string(effect_detail.get("kind"))
     title = _string(entry.get("title")) or tool_name or "tool"
-    paths = _effect_paths(effect_detail, cwd)
+    paths = _extract_paths(tool_name, effect_detail.get("input"), cwd)
     mcp_server, mcp_tool = _mcp_identity(tool_name, effect_detail) or (None, None)
     arguments = effect_detail.get("input")
     call_details = tuple(
