@@ -180,7 +180,7 @@ def fast_rereads(monkeypatch: pytest.MonkeyPatch, short_grace: None) -> None:
 async def test_a_resume_response_reading_the_acknowledged_turn_as_over_does_not_end_it(
     status: str,
 ) -> None:
-    """Stock 0.163.0 answered thread/resume for a running turn this way with either thread status.
+    """The stock CLI answered thread/resume for a running turn this way with either thread status.
 
     Captured over 300 same-connection turns: 7 unfinished snapshots said idle, 3 said active; every
     one of those turns then completed.
