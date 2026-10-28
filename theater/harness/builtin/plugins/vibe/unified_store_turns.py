@@ -147,8 +147,11 @@ def turn_changes_between(
 def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreView) -> bool:
     """Prove from the two views alone that one new turn ran and ended in the gap.
 
-    Any other turn would leave a history entry tagged with its own id, so the new
-    turn's entries must be the only history change and its input entry new."""
+    Any turn that produced output would leave a history entry tagged with its own id, so
+    the new turn's entries must be the only history change and its input entry new. A turn
+    with no output at all is invisible to both views — and carries no answer any job could
+    take: only injected input can start one (Vibe's /retry), and a delivered prompt always
+    types a public user entry, so its job's turn is never the invisible one."""
 
     from .unified_history import _entries
     from .unified_source import _TERMINAL_TURNS  # local: the source imports this module
