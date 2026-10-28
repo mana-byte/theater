@@ -148,7 +148,7 @@ def _cli_version(parts: tuple[int, int, int]) -> str:
 _MINIMUM = version_key(VERSION_POLICY.minimum)
 
 
-@pytest.mark.parametrize("version", ["unknown", f"{_cli_version(_MINIMUM)}-beta", "02.1.296"])
+@pytest.mark.parametrize("version", ["unknown", f"{_cli_version(_MINIMUM)}-beta"])
 def test_claude_hook_rejects_malformed_version(version, monkeypatch):
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",

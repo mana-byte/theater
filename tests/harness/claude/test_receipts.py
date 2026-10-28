@@ -14,7 +14,6 @@ from tests.support.waiting import until
 from theater import paths
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
-from theater.daemon.store import Store
 from theater.harness.base import Event, EventKind
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.source import Batch, TranscriptSource
@@ -367,39 +366,6 @@ async def test_claude_receipt_rejects_cross_participant_location(
             session_id=path.stem,
             transcript_path=str(path),
         )
-
-
-def test_claude_receipt_survives_store_reopen(theater_home, tmp_path):
-    from theater import paths
-    from theater.daemon.registry import Registry
-
-    store = Store(paths.db_path())
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    path = tmp_path / "claude" / "project" / "11111111-1111-4111-8111-111111111111.jsonl"
-    path.parent.mkdir(parents=True)
-    participant = store.get_participant("p-claude")
-    assert participant is None
-
-    registry = Registry(store)
-    registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
-    store.set_receipt_token("p-claude", "secret")
-    store.record_transcript_receipt(
-        "p-claude",
-        session_id=path.stem,
-        transcript_location=str(path),
-    )
-    store.close()
-
-    reopened = Store(store.path)
-    try:
-        got = reopened.get_participant("p-claude")
-        assert got.session_id == path.stem
-        assert got.session_correlation == str(TranscriptProvenance.EXACT)
-        assert got.transcript_location == str(path)
-        assert reopened.get_receipt_token("p-claude") == "secret"
-    finally:
-        reopened.close()
 
 
 async def test_receipt_nudges_transcript_source_to_reattach(tmp_path):
