@@ -50,7 +50,7 @@ uv run pytest tests/daemon/controls # one area (see tests/README.md)
 PYTEST_ADDOPTS=--cov make test # full suite with the 80% coverage gate
 uv run ruff check             # lint
 uv run ruff format --check    # verify formatting; omit --check to format
-uv run mypy                   # Theater, Régie, compat scripts; no --strict
+uv run mypy                   # Theater, Régie, the harness_compat pipeline; no --strict
 ```
 
 Schema changes (see architecture §5):
@@ -77,6 +77,7 @@ in a sandbox without it. Verify tmux-facing changes by hand or under
 - `theater/observability/` — process-level logging, metrics, tracing.
 - `theater/skills/`, `theater/mcp_plugins/` — declarative skills and MCP plugins.
 - `packages/regie/src/regie/` — Textual frontend and tmux terminal provider.
+- `harness_compat/` — workflow-only release qualification: pipeline, adapters, live suite, tests.
 
 See the [module map](docs/architecture.md#11-module-map) for detail and
 [tests/README.md](tests/README.md) for test placement.
@@ -280,13 +281,13 @@ Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) 
   upstream releases cannot fail it. Recover known unfinished versions into their own issues;
   already published outcomes get no duplicate report. Unidentified, setup and reporter failures
   stay in Actions; never create generic workflow-error issues. PR runs remain read-only.
-  Check the implementation with `uv run pytest tests/compat tests/conformance tests/harness/<h>`.
+  Check the implementation with `uv run pytest harness_compat tests/harness/<h>`.
 
 A plugin may also export an optional `compat=CompatManifest(provision, native_edit, mcp_call, mcp_discovery, canaries)` (see
 `docs/harness-plugins.md`, "Qualification"). It is read only by the live conformance suite, never at
 runtime; `provision` must stay endpoint, credential, catalog and onboarding setup. Scenarios are derived
 from the rest of the manifest, so a new manifest capability needs a mapping in
-`tests/support/coverage.py` (the completeness test fails until it has one) and, if it is provable,
+`harness_compat/support/coverage.py` (the completeness test fails until it has one) and, if it is provable,
 a scenario family. Extra generic mutation choices belong in the plugin's `compat.canaries`, not
 in shared harness-name branches. Canaries check the suite separately from release qualification.
 Non-model mock routes belong in `compat.acknowledged_routes`; they never consume scripted replies.
@@ -327,6 +328,6 @@ binding no longer holds; sends without play skills never touch that gate.
 
 - [`docs/architecture.md`](docs/architecture.md) — why every piece is shaped this way (the authoritative doc)
 - [`docs/harness-plugins.md`](docs/harness-plugins.md) — writing an adapter
-- [`docs/harness-compat.md`](docs/harness-compat.md) — the daily pipeline that qualifies new upstream harness CLI releases (`scripts/harness_compat/`)
+- [`docs/harness-compat.md`](docs/harness-compat.md) — the daily pipeline that qualifies new upstream harness CLI releases (`harness_compat/`)
 - [`docs/mcp-server-plugins.md`](docs/mcp-server-plugins.md) — MCP sidecars, skills, and plays
 - [`config.example.toml`](config.example.toml) — every setting at its default

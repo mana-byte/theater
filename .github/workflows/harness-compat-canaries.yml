@@ -10,10 +10,10 @@ on:
   pull_request:
     paths:
       - ".github/workflows/harness-compat*.yml"
-      - "scripts/harness_compat/**"
-      - "tests/conformance/**"
+      - "harness_compat/**"
+      # The pipeline's own tests cannot change what the suite notices.
+      - "!harness_compat/unit/**"
       - "tests/support/**"
-      - "tests/conftest.py"
       - "theater/**"
       # A policy file gates one release, so a gate PR (it edits only that file) must not run these.
       - "!theater/harness/builtin/plugins/*/compatibility.json"
@@ -61,4 +61,4 @@ jobs:
       - name: Break each plugin on purpose and require the suite to notice
         env:
           HARNESS: ${{ matrix.harness }}
-        run: timeout --signal=INT --kill-after=5m 50m .venv/bin/python -m scripts.harness_compat canaries "$HARNESS"
+        run: timeout --signal=INT --kill-after=5m 50m .venv/bin/python -m harness_compat canaries "$HARNESS"

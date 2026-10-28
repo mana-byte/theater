@@ -96,16 +96,18 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ASYNC110", "ASYNC240"]
+"harness_compat/{conformance,support,unit}/*" = ["ASYNC110", "ASYNC240"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["theater", "packages/regie/src/regie", "scripts/harness_compat"]
+files = ["theater", "packages/regie/src/regie", "harness_compat"]
+exclude = ["^harness_compat/(conftest\\.py|conformance/|support/|unit/)"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 addopts = ["--import-mode=importlib"]
-testpaths = ["tests", "packages/regie/tests"]
+testpaths = ["tests", "packages/regie/tests", "harness_compat"]
 markers = [
     "tmux: drives a real tmux server; skipped when tmux is not installed",
     "integration: launches real third-party binaries or builds distributions; slow, excluded by make test-unit",

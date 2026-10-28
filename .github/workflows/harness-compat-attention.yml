@@ -33,4 +33,4 @@ jobs:
           FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.HARNESS_COMPAT || github.token }}
-        run: python3 -m scripts.harness_compat report "$FAILED_RUN_ID"
+        run: python3 -m harness_compat report "$FAILED_RUN_ID"

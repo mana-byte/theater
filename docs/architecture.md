@@ -1368,9 +1368,9 @@ theater/
 └── tmux/               legacy compatibility/client facts; terminal execution belongs to a provider
 ```
 
-Qualification sits outside this tree on purpose. `tests/conformance/live` runs a real daemon, the real
-Régie bridge and a stock CLI against a mock model server, driven only through `theater.frontend`;
-`scripts/harness_compat` uses only the public version-policy contract to read each plugin's
+Qualification sits outside this tree on purpose, in `harness_compat/`. Its live suite runs a real
+daemon, the real Régie bridge and a stock CLI against a mock model server, driven only through
+`theater.frontend`; its pipeline uses only the public version-policy contract to read each plugin's
 `compatibility.json`, installs one supplied release and runs the suite in a disposable code copy,
 home and pytest subprocess. Results stay in memory; required/inventory documents and CLI state
 are deleted with the sandbox. A plugin contributes the

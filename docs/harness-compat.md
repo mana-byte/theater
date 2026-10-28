@@ -14,13 +14,13 @@ closed. OpenCode has one plugin/channel (`@opencode/cli`); 1.x is removed.
 
 ## Ownership and flow
 
-Only GitHub workflows invoke `scripts/harness_compat`; there are no local qualification targets.
+Only GitHub workflows invoke `harness_compat`; there are no local qualification targets.
 
 ```text
-workflow → scripts → exact harness/version → generic live suite
-                   → passing release: shared ceiling-raising PR
-                   → red/inconclusive/tooling: harness/version issue
-                   → ceiling PR: retain failed-version exclusions and raise min when needed
+workflow → harness_compat → exact harness/version → generic live suite
+                          → passing release: shared ceiling-raising PR
+                          → red/inconclusive/tooling: harness/version issue
+                          → ceiling PR: retain failed-version exclusions and raise min when needed
 ```
 
 The daily workflow discovers every stable release **above committed max**, tests them in ascending
@@ -107,7 +107,7 @@ a red check or run instead of an issue and an exclusion.
 
 ## Suite and temporary data
 
-`tests/conformance/live/` is the sole qualification authority. Its scenarios derive from the
+`harness_compat/conformance/live/` is the sole qualification authority. Its scenarios derive from the
 selected plugin's production manifest and exercise a real daemon, Régie provider, private tmux
 server and stock CLI through public contracts against a scripted local model.
 
@@ -131,7 +131,7 @@ Distinct parser, safety/recovery and SDK regressions remain supplementary.
 
 Available OTel channels have no live payload scenario and make qualification inconclusive.
 Native child stimulation, timing/usage accounting and foreground MCP timeouts retain explicit
-exemptions in `tests/support/coverage.py`; ordinary regressions cover their current behavior.
+exemptions in `harness_compat/support/coverage.py`; ordinary regressions cover their current behavior.
 
 Hosted sweeps interrupt after 320 minutes, leaving five minutes for cleanup and publication.
 The sweep also carries a 310-minute time budget: a release that cannot start with at least ten

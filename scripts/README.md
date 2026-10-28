@@ -1,11 +1,11 @@
 # Development scripts
 
-Repository tooling for developers and GitHub Actions; these scripts are not shipped runtime code.
+Repository tooling for developers; these scripts are not shipped runtime code. Harness release
+qualification lives in [`harness_compat/`](../harness_compat/README.md).
 
 | Directory | Purpose |
 | --- | --- |
 | `bench/` | Performance, latency and MCP surface measurements. |
-| `harness_compat/` | Workflow qualification of CLI releases and plugin policy updates. |
 
 ## Benchmarks
 
@@ -24,14 +24,3 @@ uv run --all-packages python scripts/bench/regie_spawn_latency.py --tree . --run
 
 Benchmarks print measurements or write reports to their selected output paths. Each script's
 docstring and `--help` explain its options and how to compare checkouts.
-
-## Harness compatibility
-
-Only `.github/workflows/harness-compat*.yml` invoke the compatibility entry points.
-Scripts test every newer stable release through the generic live suite. Passing releases may
-advance `max`; red, inconclusive and tooling failures get issues and exclusions. Updates accumulate
-in one PR per harness, changing one line in that plugin's `compatibility.json`.
-
-Qualification uses disposable source copies, homes and reports. It retains no generated test data
-or passing-version history.
-See [Harness compatibility](../docs/harness-compat.md) for the full flow.

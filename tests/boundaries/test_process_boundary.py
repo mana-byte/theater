@@ -112,21 +112,37 @@ def test_raw_client_uses_only_stdlib_imports() -> None:
     assert not {name for name in imports if name.startswith(("theater", "jsonschema"))}
 
 
-def test_root_conftest_takes_every_autouse_fixture_from_isolation() -> None:
-    conftest = ROOT / "tests" / "conftest.py"
-    tree = ast.parse(conftest.read_text(), filename=str(conftest))
-    star_imports = [
-        node.module
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom) and [alias.name for alias in node.names] == ["*"]
+def test_root_conftests_take_every_autouse_fixture_from_isolation() -> None:
+    for conftest in (ROOT / "tests" / "conftest.py", ROOT / "harness_compat" / "conftest.py"):
+        tree = ast.parse(conftest.read_text(), filename=str(conftest))
+        star_imports = [
+            node.module
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom) and [alias.name for alias in node.names] == ["*"]
+        ]
+        autouse = [
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            for decorator in node.decorator_list
+            if isinstance(decorator, ast.Call)
+            and any(keyword.arg == "autouse" for keyword in decorator.keywords)
+        ]
+        assert "tests.support.isolation" in star_imports, conftest
+        assert autouse == [], "autouse fixtures belong in tests/support/isolation.py"
+
+
+def test_harness_compat_is_imported_by_nothing_it_qualifies() -> None:
+    forbidden = {
+        THEATER: ("tests", "harness_compat"),
+        ROOT / "tests": ("harness_compat",),
+        REGIE: ("harness_compat",),
+    }
+    violations = [
+        f"{path.relative_to(ROOT)}: {name}"
+        for root, packages in forbidden.items()
+        for path in root.rglob("*.py")
+        for name in _imports(path)
+        if name.split(".")[0] in packages
     ]
-    autouse = [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-        for decorator in node.decorator_list
-        if isinstance(decorator, ast.Call)
-        and any(keyword.arg == "autouse" for keyword in decorator.keywords)
-    ]
-    assert "tests.support.isolation" in star_imports
-    assert autouse == [], "autouse fixtures belong in tests/support/isolation.py"
+    assert violations == []
