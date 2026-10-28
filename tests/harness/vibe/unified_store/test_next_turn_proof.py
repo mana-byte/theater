@@ -18,6 +18,7 @@ from tests.support.vibe_store import (
     Store,
     attached_to_running_a,
     make_state,
+    public_effect,
     public_message,
     turn_doc,
     turn_record,
@@ -31,7 +32,13 @@ GEN4 = "0" * 15 + "4"
 
 USER_B = public_message("user-b", "user", "job B prompt", turn_id="turn-b")
 
-USER_C = public_message("user-c", "user", "job C prompt", turn_id="turn-c")
+# An injected turn types no user entry (Vibe skips it), so the entry it can leave is its answer.
+ANSWER_C = public_message("asst-c", "assistant", "ANSWER C", turn_id="turn-c")
+
+# B's input entry reusing an id the previous view already acknowledges.
+USER_B_REUSE = public_message("user-a", "user", "job B prompt", turn_id="turn-b")
+
+UNTAGGED_EFFECT = {key: value for key, value in public_effect().items() if key != "turnId"}
 
 ANSWER_B = public_message("asst-b", "assistant", "ANSWER B", turn_id="turn-b")
 
@@ -66,7 +73,12 @@ def _attach_acknowledged(store: Store, state: dict[str, Any]) -> Any:
 
 
 def _b_folds_away(
-    store: Store, *, base: int, settled: dict[str, Any], current: dict[str, Any]
+    store: Store,
+    *,
+    base: int,
+    settled: dict[str, Any],
+    current: dict[str, Any],
+    current_watermark: int | None = None,
 ) -> None:
     """Publish B's whole lifecycle across three folds, then keep only the two newest journals."""
     store.publish(
@@ -87,7 +99,7 @@ def _b_folds_away(
         generation=GEN4,
         snapshot_sequence=base + 2,
         state=current,
-        watermark=base + 3,
+        watermark=base + 3 if current_watermark is None else current_watermark,
         journal=[("core_input", {})],
     )
     shutil.rmtree(store.generation_dir(GEN1))
@@ -96,7 +108,8 @@ def _b_folds_away(
         (store.session_root / "journal" / f"{sequence:016d}.jsonl").unlink()
 
 
-def test_a_later_turns_end_is_proved_from_the_two_views(store: Store) -> None:
+@pytest.mark.parametrize("extra_publishes", [0, 1])
+def test_a_later_turns_end_is_proved_from_the_two_views(store: Store, extra_publishes: int) -> None:
     """Two folds collect the acknowledged journal; the views alone must still prove B's end."""
     source = attached_to_running_a(store)
     store.publish(
@@ -115,6 +128,7 @@ def test_a_later_turns_end_is_proved_from_the_two_views(store: Store) -> None:
         current=turn_doc_with_input(
             [USER_A, ANSWER_A, USER_B, ANSWER_B], "turn-b", "completed", "user-b"
         ),
+        current_watermark=4 + extra_publishes,
     )
 
     batch = asyncio.run(source.read())
@@ -128,8 +142,15 @@ def test_a_later_turns_end_is_proved_from_the_two_views(store: Store) -> None:
 def _current_state(case: str) -> dict[str, Any]:
     history: list[dict[str, Any]] = [USER_A, ANSWER_A, USER_B, ANSWER_B]
     input_entry_id = "user-b"
-    if case == "entry tagged with a third turn":
-        history = [USER_A, ANSWER_A, USER_C, USER_B, ANSWER_B]
+    if case == "injected turn's answer entry":
+        history = [USER_A, ANSWER_A, ANSWER_C, USER_B, ANSWER_B]
+    elif case == "input entry id reused":
+        history = [USER_A, ANSWER_A, USER_B_REUSE, ANSWER_B]
+        input_entry_id = "user-a"
+    elif case == "input entry names the answer":
+        input_entry_id = "asst-b"
+    elif case == "appended entry without a turnId":
+        history = [USER_A, ANSWER_A, UNTAGGED_EFFECT, USER_B, ANSWER_B]
     elif case == "previous entry removed":
         history = [USER_A, USER_B, ANSWER_B]
     elif case == "previous entry altered":
@@ -145,8 +166,12 @@ def _current_state(case: str) -> dict[str, Any]:
     "case",
     [
         "previous turn in_progress",
-        "entry tagged with a third turn",
+        "injected turn's answer entry",
+        "input entry id reused",
+        "input entry names the answer",
         "input entry not new",
+        "appended entry without a turnId",
+        "too many publishes in the gap",
         "previous entry removed",
         "previous entry altered",
         "latestTurn missing",
@@ -170,7 +195,13 @@ def test_an_unprovable_gap_fails_closed_and_names_its_facts(
         base = 1
         settled = turn_doc([USER_A, ANSWER_A], "turn-a", "completed")
 
-    _b_folds_away(store, base=base, settled=settled, current=_current_state(case))
+    _b_folds_away(
+        store,
+        base=base,
+        settled=settled,
+        current=_current_state(case),
+        current_watermark=7 if case == "too many publishes in the gap" else None,
+    )
 
     batch = asyncio.run(source.read())
     assert batch.turn_state is not None and not batch.turn_state.complete

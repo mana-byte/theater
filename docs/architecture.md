@@ -823,11 +823,14 @@ answer, before any checkpoint advances. The fact repeats until a batch carrying
 it is applied and acknowledged. Two exceptions are proven: matching `latestTurn`
 ids in both views mean no other turn ended in between (Vibe keeps only two
 journals), and that turn's end stands on the current view alone. And when the
-previous turn was already terminal, the new turn is terminal, every new or
-changed history entry carries the new turn's id and its input entry is new in
-the current view, no turn with output ran in between (one that produced none
-has no entry and no answer to take), and the new turn's end stands on the
-current view alone. A journal that
+previous turn was already terminal, the new turn is terminal, the views'
+watermarks lie at most three publishes apart, every new or changed history
+entry carries the new turn's id and its input entry is new in the current view,
+no other turn ran in between — a turn that typed no entry can only be injected
+(Vibe's /retry skips the user entry), but every turn, injected or not, spans at
+least two publishes (its start input; the input carrying its terminal
+observation) and each publish advances the watermark exactly once — and the new
+turn's end stands on the current view alone. A journal that
 moves backwards is rejected: the
 acknowledged point and its open turn stand. Replaying is safe only because a
 Vibe provider steer is refused: Enter there queues a separate turn.

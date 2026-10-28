@@ -6,18 +6,21 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .unified_projection import entry_fingerprint
 from .unified_store_io import _reject_symlink_components
 from .unified_store_loading import _read_journal_detail, _session_root
 from .unified_store_types import (
     _DELTA_RECORD_TYPES,
     _JOURNAL_PATH_PATTERN,
+    _TURN_STATUSES,
     UnifiedStoreError,
     UnifiedStoreView,
     _JournalRecord,
 )
 
 logger = logging.getLogger("theater.harness.vibe")
+
+#: Turn statuses that reached an end; ``in_progress`` is the only one that has not.
+_ENDED_TURNS = _TURN_STATUSES - {"in_progress"}
 
 #: Turn changes kept for one read; more than this cannot be replayed whole and is reported unknown.
 TURN_CHANGES_MAX = 1024
@@ -145,41 +148,49 @@ def turn_changes_between(
 
 
 def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreView) -> bool:
-    """Prove from the two views alone that one new turn ran and ended in the gap.
+    """Prove from the two views alone that no turn but the later one ran in the gap.
 
-    Any turn that produced output would leave a history entry tagged with its own id, so
-    the new turn's entries must be the only history change and its input entry new. A turn
-    with no output at all is invisible to both views — and carries no answer any job could
-    take: only injected input can start one (Vibe's /retry), and a delivered prompt always
-    types a public user entry, so its job's turn is never the invisible one."""
+    History cannot rule out a turn that typed no entry: only injected input starts
+    one (Vibe's /retry), and it skips the user entry. The watermark can: it advances
+    once per journaled publish, and every turn, injected or not, spans at least two
+    publishes — its start input, then the input that carries its terminal
+    observation — so a gap of at most three publishes fits no second turn. With no
+    other turn possible, the later turn's own entries must be the only history
+    change and its input entry new."""
 
     from .unified_history import _entries
-    from .unified_source import _TERMINAL_TURNS  # local: the source imports this module
 
     previous_id, previous_status = turn_key(latest_turn(previous.snapshot))
     later = latest_turn(current.snapshot)
     later_id, later_status = turn_key(later)
     if (
         previous_id is None
+        or later is None
         or later_id is None
         or previous_id == later_id
-        or previous_status not in _TERMINAL_TURNS
-        or later_status not in _TERMINAL_TURNS
+        or previous_status not in _ENDED_TURNS
+        or later_status not in _ENDED_TURNS
     ):
         return False
+    if not 0 < current.watermark - previous.watermark <= 3:
+        return False  # too many publishes: an invisible injected turn could fit in the gap
     old_entries = _entries(previous)
     new_entries = _entries(current)
-    if len(new_entries) < len(old_entries) or any(
-        entry_fingerprint(before) != entry_fingerprint(after)
-        for before, after in zip(old_entries, new_entries, strict=False)
-    ):
+    if new_entries[: len(old_entries)] != old_entries:
         return False  # history moved backwards, lost or altered: another turn could hide there
     appended = new_entries[len(old_entries) :]
     if any(entry.get("turnId") != later_id for entry in appended):
         return False
     input_entry_id = later.get("inputEntryId")
-    return isinstance(input_entry_id, str) and any(
-        entry.get("id") == input_entry_id for entry in appended
+    return (
+        isinstance(input_entry_id, str)
+        and not any(entry.get("id") == input_entry_id for entry in old_entries)
+        and any(
+            entry.get("id") == input_entry_id
+            and entry.get("type") == "message"
+            and entry.get("role") == "user"
+            for entry in appended
+        )
     )
 
 
