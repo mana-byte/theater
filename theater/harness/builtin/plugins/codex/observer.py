@@ -62,7 +62,6 @@ class CodexObserver(
         self._last_provider: str | None = None
         self._last_cwd: str | None = None
         self._active_turn_id: str | None = None
-        self._pending_patch_exec: tuple[str, float] | None = None
         self._mcp_calls: dict[str, tuple[str, str]] = {}
         self._tool_correlation = ToolCorrelation()
         # token_count snapshots do not carry response or model identity. Newer

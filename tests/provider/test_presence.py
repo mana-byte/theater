@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.codex_screens import CODEX_APPROVAL, CODEX_IDLE
 from tests.support.paths import fixture
 from tests.support.provider_presence import (
     Clock,
@@ -559,6 +560,13 @@ async def test_refresh_forgets_evidence_of_participants_no_longer_live(provider_
     assert monitor.observed_at is None  # cached screens and evidence were released
 
 
+def _screen_for(harness: str, kind: str, screens) -> str:
+    """Codex's screens are synthetic; other harnesses have recorded captures."""
+    if harness == "codex":
+        return CODEX_IDLE if kind == "idle" else CODEX_APPROVAL
+    return (screens / f"{harness}_{kind}.txt").read_text()
+
+
 @pytest.mark.parametrize(
     ("harness", "dialog"),
     [(name, "approval") for name in ("claude", "codex", "opencode", "pi", "vibe")]
@@ -580,7 +588,7 @@ async def test_provider_screen_input_requests_follow_the_harness_classifier(
             expected = phase if observer.has_screen else Status.IDLE
             if observer.has_screen:
                 kind = dialog if phase is Status.AWAITING_INPUT else "idle"
-                screen = (screens / f"{harness}_{kind}.txt").read_text()
+                screen = _screen_for(harness, kind, screens)
             else:
                 state = "awaiting input" if phase is Status.AWAITING_INPUT else "idle"
                 screen = f"theater: {state}"

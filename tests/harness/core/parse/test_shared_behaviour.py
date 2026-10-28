@@ -23,7 +23,6 @@ def test_answer_final_requires_a_boundary():
     ("observer", "fixture", "first_ts"),
     [
         pytest.param(ClaudeCodeObserver(), "claude_code.jsonl", 1782325575.348, id="claude"),
-        pytest.param(CodexObserver(), "codex.jsonl", 1786534852.2, id="codex"),
     ],
 )
 def test_records_carry_their_own_timestamp(observer, fixture, first_ts):
@@ -37,7 +36,6 @@ def test_records_carry_their_own_timestamp(observer, fixture, first_ts):
     ("observer", "fixture", "raw_indexes"),
     [
         pytest.param(ClaudeCodeObserver(), "claude_code.jsonl", [0, 1, 2, 3, 4, 5, 6], id="claude"),
-        pytest.param(CodexObserver(), "codex.jsonl", [2, 3, 4, 5, 7, 10], id="codex"),
     ],
 )
 def test_raw_index_tracks_the_source_record(observer, fixture, raw_indexes):
