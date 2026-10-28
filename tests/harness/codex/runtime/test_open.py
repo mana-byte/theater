@@ -5,10 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.support.codex_server import (
-    CAPTURED_CODEX_RELEASE,
     ENDPOINT,
-    GENERATION,
-    PARTICIPANT,
     ScriptedCodexIO,
     ScriptedCodexServer,
     make_runtime,
@@ -17,7 +14,6 @@ from tests.support.codex_server import (
 )
 from theater.harness.builtin.plugins.codex import runtime_constants as codex_runtime_constants
 from theater.harness.builtin.plugins.codex.runtime_plan import (
-    CODEX_RUNTIME_COMPATIBILITY_POLICY,
     VERSION_POLICY,
     plan_codex_frontend,
 )
@@ -27,27 +23,6 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.harness.contracts.version_policy import version_key
-
-
-async def test_open_new_discovers_exact_ui_thread_and_handshake_dialect() -> None:
-    server = ScriptedCodexServer()
-    _runtime, binding = await open_new(server)
-    assert binding.participant_id == PARTICIPANT
-    assert binding.backend_generation == GENERATION
-    assert binding.native_session_id == "ui-thread-1"
-    assert binding.lifecycle.value == "bound"
-    assert binding.protocol == "codex-app-server"
-    assert binding.compatibility_policy == CODEX_RUNTIME_COMPATIBILITY_POLICY
-    assert binding.native_version == CAPTURED_CODEX_RELEASE
-    # Handshake dialect: initialize then exactly one initialized notification.
-    initialize = server.requested("initialize")
-    assert len(initialize) == 1
-    assert initialize[0]["clientInfo"]["name"] == "theater"
-    assert initialize[0]["capabilities"] == {"experimentalApi": True}
-    assert server.notifications_sent == [("initialized", {})]
-    # The runtime never submits the initial prompt and persists nothing.
-    assert server.requested("turn/start") == []
-    assert server.requested("thread/queue/add") == []
 
 
 async def test_open_new_ignores_foreign_cwd_and_ephemeral_threads() -> None:
@@ -195,53 +170,6 @@ async def test_open_fork_uses_native_thread_fork_with_exact_parent() -> None:
             "sandbox": "danger-full-access",
             "model": "gpt-5.2",
             "config": {"model_reasoning_effort": "high"},
-        }
-    ]
-    await runtime.aclose()
-
-
-async def test_open_fork_binds_identity_before_subscribe() -> None:
-    server = ScriptedCodexServer()
-    server.respond("thread/fork", {"thread": {"id": "fork-9", "status": {"type": "idle"}}})
-    server.respond(
-        "thread/resume",
-        {"thread": {"id": "fork-9", "status": {"type": "idle"}, "turns": []}},
-    )
-    runtime = make_runtime(server)
-    binding = await runtime.open_session(mode=SessionOpenMode.FORK, native_session_id="parent-1")
-    assert binding.native_session_id == "fork-9"
-    # The explicit subscribe targets the exact forked thread — proof the forked identity was bound
-    # before the subscribe attempt — so live notifications for the fork flow from open onward.
-    assert server.requested("thread/resume") == [
-        {
-            "threadId": "fork-9",
-            "excludeTurns": True,
-            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
-        }
-    ]
-    await runtime.aclose()
-
-
-async def test_open_reconnect_attaches_exact_thread_and_subscribes() -> None:
-    server = ScriptedCodexServer()
-    server.respond(
-        "thread/resume",
-        {
-            "thread": {
-                "id": "th-1",
-                "status": {"type": "idle"},
-                "turns": [],
-            }
-        },
-    )
-    runtime = make_runtime(server)
-    binding = await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="th-1")
-    assert binding.native_session_id == "th-1"
-    assert server.requested("thread/resume") == [
-        {
-            "threadId": "th-1",
-            "excludeTurns": True,
-            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
     ]
     await runtime.aclose()

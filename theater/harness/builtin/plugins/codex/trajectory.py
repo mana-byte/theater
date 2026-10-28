@@ -116,7 +116,7 @@ class CodexTrajectoryMixin:
                 details=(_trajectory_detail("session", payload, format=ContentFormat.JSON),),
             )
             return
-        context = payload.get("thread_context") or payload.get("thread_settings")
+        context = payload.get("thread_settings")
         context = context if context is not None else payload.get("state")
         if context is None:
             context = payload
@@ -125,7 +125,7 @@ class CodexTrajectoryMixin:
             context_id = _codex_scoped_id(turn_id, str(record_kind))
         model = None
         if isinstance(context, dict):
-            model = _trajectory_id(context.get("model") or context.get("model_name"))
+            model = _trajectory_id(context.get("model"))
         summary = (
             "turn context" if record_kind == "turn_context" else str(record_kind).replace("_", " ")
         )

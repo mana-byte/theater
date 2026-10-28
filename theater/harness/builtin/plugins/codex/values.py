@@ -6,7 +6,6 @@ import json
 import math
 
 from theater.harness.normalization.timing import epoch_or_number as _trajectory_time
-from theater.harness.normalization.usage import reported_cost
 from theater.harness.normalization.values import finite_float as _trajectory_float
 from theater.harness.normalization.values import json_container_format, revision_from
 from theater.harness.normalization.values import nonnegative_int as _trajectory_int
@@ -243,7 +242,7 @@ def _codex_usage(
         return None
     model_value = None
     if isinstance(info, dict):
-        model_value = info.get("model") or info.get("model_name")
+        model_value = info.get("model")
     model_value = model_value or payload.get("model") or record.get("model") or model
     # A native request id is authoritative. The supplied identity outranks
     # only a payload turn id: token_count carries the turn where a cached
@@ -252,8 +251,6 @@ def _codex_usage(
     source_request_id = (
         source_request_id or _trajectory_id(request_id) or _trajectory_id(payload.get("turn_id"))
     )
-    cost = _trajectory_float(raw.get("cost_usd") if "cost_usd" in raw else raw.get("costUSD"))
-    cost_usd, cost_provenance = reported_cost(cost, strict_positive=False)
     return TrajectoryUsage(
         model=_trajectory_id(model_value),
         provider=_trajectory_id(
@@ -268,6 +265,4 @@ def _codex_usage(
         reasoning_tokens=reasoning,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
-        cost_usd=cost_usd,
-        cost_provenance=cost_provenance,
     )
