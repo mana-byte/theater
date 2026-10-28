@@ -268,7 +268,7 @@ def test_codex_approval_modes_set_both_axes(tmp_path, approval, expected):
 
 
 def test_codex_model_reaches_the_legacy_flag(tmp_path):
-    """The live suite never asks Codex for a model, so its `--model` argv has only this proof."""
+    """The live native-runtime path does not exercise Codex's legacy `--model` flag."""
     plan = plan_launch(
         "codex",
         participant_id="a",

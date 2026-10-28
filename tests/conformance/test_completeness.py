@@ -173,40 +173,10 @@ def test_enabling_mcp_rendering_adds_the_mcp_obligations() -> None:
     assert added == {"mcp:gated", "mcp:call", "mcp:refusal"}
 
 
+@pytest.mark.parametrize("models", [(), ("mock-a", "mock-b")], ids=["fallback", "served"])
 @pytest.mark.parametrize("name", SHIPPED)
 def test_a_provisioning_plugin_offers_what_its_declared_capabilities_need(
-    name: str, tmp_path: Path
-) -> None:
-    harness = HARNESSES[name]
-    if harness.compat is None:
-        pytest.skip(f"{name} declares no compat manifest yet")
-    context = ProvisionContext(
-        sandbox_root=tmp_path,
-        home=tmp_path / "home",
-        config_dir=tmp_path / "home" / ".config",
-        workdir=tmp_path / "work",
-        mock_urls={protocol: f"http://127.0.0.1:1/{protocol}" for protocol in COMPAT_PROTOCOLS},
-        binary=tmp_path / name,
-        version="1.2.3",
-        models=("mock-a", "mock-b"),
-    )
-
-    provisioned = harness.compat.provision(context)
-
-    support = harness.launch_parameter_support
-    assert provisioned.protocol in COMPAT_PROTOCOLS
-    assert not support.model or len(provisioned.models) >= 2, "model selection needs two models"
-    assert not support.reasoning_effort or len(provisioned.efforts) >= 2, (
-        "effort selection needs two efforts"
-    )
-    assert all(path.is_relative_to(tmp_path) for path in provisioned.files), (
-        "provisioning writes only inside the sandbox"
-    )
-
-
-@pytest.mark.parametrize("name", SHIPPED)
-def test_provision_stays_inside_the_sandbox_and_names_the_resolved_workdir(
-    name: str, tmp_path: Path
+    name: str, tmp_path: Path, models: tuple[str, ...]
 ) -> None:
     harness = HARNESSES[name]
     if harness.compat is None:
@@ -216,29 +186,37 @@ def test_provision_stays_inside_the_sandbox_and_names_the_resolved_workdir(
     link = tmp_path / "link"
     # An explicit symlink: Linux CI tmp is not one, so a missing resolve() is invisible without it.
     link.symlink_to(work)
+    home = tmp_path / "home"
     context = ProvisionContext(
         sandbox_root=tmp_path,
-        home=tmp_path / "home",
-        config_dir=tmp_path / "home" / ".config",
+        home=home,
+        config_dir=home / ".config",
         workdir=link,
         mock_urls={protocol: f"http://127.0.0.1:1/{protocol}" for protocol in COMPAT_PROTOCOLS},
         binary=tmp_path / name,
         version="1.2.3",
-        models=(),
+        models=models,
     )
 
+    sandbox = set(tmp_path.rglob("*"))
     provisioned = harness.compat.provision(context)
+    assert set(tmp_path.rglob("*")) == sandbox, (
+        "provisioning declares files; it writes nothing itself"
+    )
 
+    support = harness.launch_parameter_support
+    assert provisioned.protocol in COMPAT_PROTOCOLS
+    assert not support.model or len(provisioned.models) >= 2, "model selection needs two models"
+    assert not support.reasoning_effort or len(provisioned.efforts) >= 2, (
+        "effort selection needs two efforts"
+    )
+    assert all(
+        path.is_relative_to(home) or path.is_relative_to(work) for path in provisioned.files
+    ), "provisioning writes only inside the given home or workdir"
     mentions = [*(str(path) for path in provisioned.files), *provisioned.files.values()]
     assert all(str(link) not in mention for mention in mentions), (
         "a file naming the workdir must use its resolved path"
     )
-    assert all(
-        not Path(value).is_absolute() or Path(value).is_relative_to(tmp_path)
-        for value in provisioned.env.values()
-    ), "env paths stay inside the sandbox"
-    if harness.launch_parameter_support.model:
-        assert len(provisioned.models) >= 2, "no models offered: selection needs two"
 
 
 def test_a_declared_unavailable_capability_becomes_one_refusal_obligation() -> None:
