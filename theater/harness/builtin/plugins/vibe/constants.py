@@ -32,10 +32,15 @@ ISOLATION_MARKER = ".theater-vibe-source"
 _MARKER_VERSION = 1
 _MARKER_KEY = "vibe-domain-marker.key"
 
+# Unified-store effects persist builtin file tools under their runtime names.
 _WRITE_TOOLS: dict[str, str] = {
     "write_file": "file_path",
     "edit": "file_path",
+    "file_system.write_file": "path",
+    "file_system.edit": "file_path",
+    "file_system.search_replace": "file_path",
 }
 _READ_TOOLS: dict[str, str] = {
     "read_file": "file_path",
+    "file_system.read_file": "path",
 }

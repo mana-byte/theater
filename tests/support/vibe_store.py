@@ -282,14 +282,6 @@ def public_effect(child_session_id: str | None = None) -> dict[str, Any]:
         "kind": "tool",
         "toolName": "file_system.write_file",
         "input": {"path": "/tmp/work/result.txt", "content": "done"},
-        "display": {
-            "summary": "file_system.write_file",
-            "verb": "Running",
-            "message": "file_system.write_file",
-            "settledVerb": "Ran",
-            "settledMessage": "file_system.write_file",
-            "statusText": "Running file_system.write_file",
-        },
     }
     if child_session_id is not None:
         detail = {
