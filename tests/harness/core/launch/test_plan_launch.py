@@ -36,43 +36,6 @@ def _modern_vibe(monkeypatch, available_harness_binaries):
     pin_installed_vibe_version(monkeypatch, version_key(VERSION_POLICY.minimum))
 
 
-def test_vibe_carries_the_id_in_an_env_override(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc123",
-        prompt="say hello",
-        config_path=tmp_path / "unused.json",
-        approval="manual",
-    )
-
-    assert plan.argv[0] == "vibe"
-    assert "--experimental-harness" not in plan.argv
-    assert plan.argv[-1] == "say hello"
-    assert list(plan.files) == [Path(plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"]) / ISOLATION_MARKER]
-
-    servers = json.loads(plan.env["VIBE_MCP_SERVERS"])
-    assert [server["name"] for server in servers] == ["theater", "theater_wait"]
-    assert servers[0]["args"] == [
-        "mcp",
-        "--id",
-        "abc123",
-        "--harness",
-        "vibe",
-        "--toolset",
-        "control",
-    ]
-    assert servers[1]["args"] == [
-        "mcp",
-        "--id",
-        "abc123",
-        "--harness",
-        "vibe",
-        "--toolset",
-        "wait",
-    ]
-    assert servers[0]["command"] == servers[1]["command"]
-
-
 def test_core_mcp_specs_use_resolved_executable_and_separate_toolsets():
     servers = theater_mcp_servers("abc123", "codex")
 
@@ -152,35 +115,6 @@ def test_vibe_outlasts_a_full_length_await(tmp_path):
     servers = json.loads(plan.env["VIBE_MCP_SERVERS"])
     assert len(servers) == 2
     assert all(server["tool_timeout_sec"] > MAX_AWAIT for server in servers)
-
-
-def test_codex_carries_the_id_in_a_config_override(monkeypatch, tmp_path):
-    monkeypatch.delenv("CODEX_HOME", raising=False)
-    plan = plan_launch(
-        "codex",
-        participant_id="abc123",
-        prompt="say hello",
-        config_path=tmp_path / "unused.json",
-        approval="manual",
-    )
-
-    assert plan.argv[0] == "codex"
-    assert plan.argv[-1] == "say hello"
-    # Nothing is written to disk; the only env entry is the deliberate empty
-    # CODEX_HOME pin, which selects Codex's default home for the pane.
-    assert plan.files == {} and plan.env == {"CODEX_HOME": ""}
-    # `-c` values are parsed as TOML, so both sides must be valid TOML literals.
-    assert (
-        'mcp_servers.theater.args=["mcp", "--id", "abc123", "--harness", '
-        '"codex", "--toolset", "control"]'
-    ) in plan.argv
-    assert (
-        'mcp_servers.theater_wait.args=["mcp", "--id", "abc123", "--harness", '
-        '"codex", "--toolset", "wait"]'
-    ) in plan.argv
-    commands = [a for a in plan.argv if a.startswith("mcp_servers.") and ".command=" in a]
-    assert len(commands) == 2
-    assert all(command.endswith('"') and '="' in command for command in commands)
 
 
 def test_codex_mcp_servers_outlast_a_full_length_await(monkeypatch, tmp_path):
@@ -333,36 +267,8 @@ def test_codex_approval_modes_set_both_axes(tmp_path, approval, expected):
     assert all(flag in plan.argv for flag in expected)
 
 
-def test_empty_prompt_yields_no_positional(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc123",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-    )
-    assert plan.argv[0] == "vibe"
-    assert "--experimental-harness" not in plan.argv
-    assert all(argument.startswith("-") for argument in plan.argv[1:])
-
-
-def test_model_reaches_every_harness_by_its_own_lever(tmp_path, available_harness_binaries):
-    """Three CLIs take a flag, one takes an environment variable.
-
-    Asserted per harness rather than by searching the whole plan, because
-    "the string is in there somewhere" would pass if a model ended up in the
-    prompt positional.
-    """
-    plan = plan_launch(
-        "claude",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        model="opus-4.1",
-    )
-    assert "--model=opus-4.1" in plan.argv
-
+def test_codex_model_reaches_the_legacy_flag(tmp_path):
+    """The live suite never asks Codex for a model, so its `--model` argv has only this proof."""
     plan = plan_launch(
         "codex",
         participant_id="a",
@@ -372,27 +278,6 @@ def test_model_reaches_every_harness_by_its_own_lever(tmp_path, available_harnes
         model="gpt-5",
     )
     assert plan.argv[plan.argv.index("--model") :][:2] == ["--model", "gpt-5"]
-
-    plan = plan_launch(
-        "opencode",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="yolo",
-        model="anthropic/claude-sonnet-4",
-    )
-    assert json.loads(plan.files[tmp_path / "x.json"])["model"] == "anthropic/claude-sonnet-4"
-
-    plan = plan_launch(
-        "vibe",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        model="mistral-large",
-    )
-    assert plan.env["VIBE_ACTIVE_MODEL"] == "mistral-large"
-    assert not any(a.startswith("--model") for a in plan.argv)
 
 
 def test_claude_launch_adds_receipt_hooks_without_editing_user_settings(tmp_path, monkeypatch):
@@ -422,18 +307,6 @@ def test_claude_launch_adds_receipt_hooks_without_editing_user_settings(tmp_path
         assert "transcript-receipt" in command
         assert "--id abc123" in command
         assert str(plan.receipt_token_path) in command
-
-
-def test_no_model_asked_means_no_model_flag(tmp_path, available_harness_binaries):
-    for harness in ("claude", "codex", "opencode", "vibe"):
-        plan = plan_launch(
-            harness,
-            participant_id="a",
-            prompt="",
-            config_path=tmp_path / "x.json",
-            approval="yolo" if harness == "opencode" else "manual",
-        )
-        assert not any(a.startswith("--model") for a in plan.argv), harness
 
 
 def test_vibe_pins_the_model_env_even_when_none_was_asked_for(tmp_path):
@@ -502,43 +375,6 @@ def test_unknown_harness_and_approval_are_rejected(tmp_path):
         plan_launch(
             "vibe", participant_id="a", prompt="", config_path=Path("/x"), approval="whatever"
         )
-
-
-def test_reasoning_effort_reaches_codex_via_config_override(tmp_path):
-    plan = plan_launch(
-        "codex",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        reasoning_effort="high",
-    )
-    assert "model_reasoning_effort=high" in plan.argv
-
-
-def test_reasoning_effort_reaches_claude_via_effort_flag(tmp_path):
-    plan = plan_launch(
-        "claude",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        reasoning_effort="high",
-    )
-    assert "--effort=high" in plan.argv
-
-
-def test_no_reasoning_effort_asked_means_no_lever(tmp_path, available_harness_binaries):
-    for harness in ("claude", "codex", "opencode", "vibe"):
-        plan = plan_launch(
-            harness,
-            participant_id="a",
-            prompt="",
-            config_path=tmp_path / "x.json",
-            approval="yolo" if harness == "opencode" else "manual",
-        )
-        assert not any(a.startswith("--effort") for a in plan.argv), harness
-        assert not any("model_reasoning_effort=" in a for a in plan.argv), harness
 
 
 def test_a_harness_that_does_not_support_reasoning_is_refused(tmp_path):

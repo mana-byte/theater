@@ -204,6 +204,43 @@ def test_a_provisioning_plugin_offers_what_its_declared_capabilities_need(
     )
 
 
+@pytest.mark.parametrize("name", SHIPPED)
+def test_provision_stays_inside_the_sandbox_and_names_the_resolved_workdir(
+    name: str, tmp_path: Path
+) -> None:
+    harness = HARNESSES[name]
+    if harness.compat is None:
+        pytest.skip(f"{name} declares no compat manifest yet")
+    work = tmp_path / "work"
+    work.mkdir()
+    link = tmp_path / "link"
+    # An explicit symlink: Linux CI tmp is not one, so a missing resolve() is invisible without it.
+    link.symlink_to(work)
+    context = ProvisionContext(
+        sandbox_root=tmp_path,
+        home=tmp_path / "home",
+        config_dir=tmp_path / "home" / ".config",
+        workdir=link,
+        mock_urls={protocol: f"http://127.0.0.1:1/{protocol}" for protocol in COMPAT_PROTOCOLS},
+        binary=tmp_path / name,
+        version="1.2.3",
+        models=(),
+    )
+
+    provisioned = harness.compat.provision(context)
+
+    mentions = [*(str(path) for path in provisioned.files), *provisioned.files.values()]
+    assert all(str(link) not in mention for mention in mentions), (
+        "a file naming the workdir must use its resolved path"
+    )
+    assert all(
+        not Path(value).is_absolute() or Path(value).is_relative_to(tmp_path)
+        for value in provisioned.env.values()
+    ), "env paths stay inside the sandbox"
+    if harness.launch_parameter_support.model:
+        assert len(provisioned.models) >= 2, "no models offered: selection needs two"
+
+
 def test_a_declared_unavailable_capability_becomes_one_refusal_obligation() -> None:
     opencode = {item.id for item in required(HARNESSES["opencode"])}
     pi = {item.id for item in required(HARNESSES["pi"])}
