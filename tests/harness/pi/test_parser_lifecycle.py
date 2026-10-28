@@ -381,7 +381,19 @@ def test_pi_parser_malformed_lifecycle_marker_ignored(tmp_path) -> None:
     assert observer._pending_terminal_turn_id == "user-1"
 
 
-def test_pi_parser_aborted_partial_calls_are_interrupted_not_pending(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("stop_reason", "call_status", "settled_terminal"),
+    [
+        ("aborted", TrajectoryStatus.INTERRUPTED, TurnTerminal.INTERRUPTED),
+        ("error", TrajectoryStatus.ERROR, TurnTerminal.FAILED),
+        # A recoverable length response is discarded by Pi's agent-core and
+        # retried; its toolCall blocks never execute, so they are ERROR.
+        ("length", TrajectoryStatus.ERROR, TurnTerminal.COMPLETED),
+    ],
+)
+def test_pi_parser_partial_calls_carry_the_stop_reason_and_settle_once(
+    tmp_path, stop_reason, call_status, settled_terminal
+) -> None:
     observer = PiObserver(root=tmp_path)
     observer.parse_record(
         json.dumps(message_record("user-1", {"role": "user", "content": "do it"})), 1
@@ -400,86 +412,25 @@ def test_pi_parser_aborted_partial_calls_are_interrupted_not_pending(tmp_path) -
                             "arguments": {},
                         }
                     ],
-                    "stopReason": "aborted",
-                    "errorMessage": "user cancelled",
+                    "stopReason": stop_reason,
+                    **(
+                        {"errorMessage": "overloaded"}
+                        if stop_reason in {"error", "aborted"}
+                        else {}
+                    ),
                 },
             )
         ),
         2,
     )
-    # Aborted defers the turn_end (a settled marker will release it).
+    # Deferred stops keep the turn open until the settled marker releases it.
     assert not any(event.turn_end for event in parsed.events)
     call = next(f for f in parsed.trajectory if f.kind is TrajectoryKind.TOOL_CALL)
-    assert call.status is TrajectoryStatus.INTERRUPTED
+    assert call.status is call_status
     assert observer._pending_terminal_turn_id == "user-1"
     settled = observer.parse_record(json.dumps(_lifecycle("settled")), 3)
     assert settled.events[0].turn_end is True
-    assert settled.events[0].turn_terminal is TurnTerminal.INTERRUPTED
-
-
-def test_pi_parser_error_partial_calls_are_error_not_pending(tmp_path) -> None:
-    observer = PiObserver(root=tmp_path)
-    observer.parse_record(
-        json.dumps(message_record("user-1", {"role": "user", "content": "do it"})), 1
-    )
-    parsed = observer.parse_record(
-        json.dumps(
-            message_record(
-                "assistant-1",
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "toolCall",
-                            "id": "call-1",
-                            "name": "bash",
-                            "arguments": {},
-                        }
-                    ],
-                    "stopReason": "error",
-                    "errorMessage": "overloaded",
-                },
-            )
-        ),
-        2,
-    )
-    assert not any(event.turn_end for event in parsed.events)
-    call = next(f for f in parsed.trajectory if f.kind is TrajectoryKind.TOOL_CALL)
-    assert call.status is TrajectoryStatus.ERROR
-
-
-def test_pi_parser_length_with_calls_marks_calls_error(tmp_path) -> None:
-    # A recoverable length response is discarded by Pi's agent-core and retried;
-    # its toolCall blocks never execute, so they must be ERROR, not PENDING.
-    observer = PiObserver(root=tmp_path)
-    observer.parse_record(
-        json.dumps(message_record("user-1", {"role": "user", "content": "do it"})), 1
-    )
-    parsed = observer.parse_record(
-        json.dumps(
-            message_record(
-                "assistant-1",
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "partial"},
-                        {
-                            "type": "toolCall",
-                            "id": "call-1",
-                            "name": "bash",
-                            "arguments": {},
-                        },
-                    ],
-                    "stopReason": "length",
-                },
-            )
-        ),
-        2,
-    )
-    assert not any(event.turn_end for event in parsed.events)
-    call = next(f for f in parsed.trajectory if f.kind is TrajectoryKind.TOOL_CALL)
-    assert call.status is TrajectoryStatus.ERROR
-    assert observer._pending_terminal_turn_id == "user-1"
+    assert settled.events[0].turn_terminal is settled_terminal
 
 
 def test_pi_parser_reset_turn_context_clears_lifecycle_state(tmp_path) -> None:

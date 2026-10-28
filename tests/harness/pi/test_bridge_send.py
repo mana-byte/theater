@@ -43,27 +43,6 @@ def send_result(
     }
 
 
-async def test_pi_send_accepts_and_binds_the_durable_native_turn_id() -> None:
-    peer = ScriptedPiPeer(
-        responses={
-            "pi.snapshot": bridge_snapshot(),
-            "pi.control.send": send_result("send-1"),
-        }
-    )
-    runtime = make_runtime(peer)
-    await runtime.attach()
-    try:
-        receipt = await runtime.send(operation_id="send-1", prompt="hello")
-        assert receipt.result is DeliveryResult.ACCEPTED
-        assert receipt.native_turn_id == "turn-1"
-        method, params = peer.requests[-1]
-        assert method == "pi.control.send"
-        assert params["native_session_id"] == SESSION_A
-        assert (await runtime.snapshot()).native_turn_id == "turn-1"
-    finally:
-        await runtime.aclose()
-
-
 async def test_pi_send_refused_admission_is_rejected_and_never_delivered() -> None:
     peer = ScriptedPiPeer(
         responses={
@@ -132,6 +111,9 @@ async def test_pi_send_fast_settle_still_accepts_the_durable_turn_id() -> None:
         receipt = await runtime.send(operation_id="send-fast", prompt="hello")
         assert receipt.result is DeliveryResult.ACCEPTED
         assert receipt.native_turn_id == "turn-fast"
+        method, params = peer.requests[-1]
+        assert method == "pi.control.send"
+        assert params["native_session_id"] == SESSION_A
         assert (await runtime.snapshot()).native_turn_id == "turn-fast"
         assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
     finally:

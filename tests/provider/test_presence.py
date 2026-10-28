@@ -8,8 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.claude_screens import CLAUDE_APPROVAL, CLAUDE_IDLE
 from tests.support.codex_screens import CODEX_APPROVAL, CODEX_IDLE
-from tests.support.paths import fixture
+from tests.support.opencode_screens import (
+    OPENCODE_APPROVAL,
+    OPENCODE_IDLE,
+    OPENCODE_QUESTION,
+)
 from tests.support.provider_presence import (
     Clock,
     Registry,
@@ -18,6 +23,7 @@ from tests.support.provider_presence import (
     result,
 )
 from tests.support.provider_records import provider_record
+from tests.support.vibe_screens import VIBE_APPROVAL, VIBE_IDLE, VIBE_QUESTION
 from theater import paths
 from theater.daemon.observer import Observer, QuietClock
 from theater.daemon.presence import PresenceMonitor, PresenceState
@@ -560,11 +566,21 @@ async def test_refresh_forgets_evidence_of_participants_no_longer_live(provider_
     assert monitor.observed_at is None  # cached screens and evidence were released
 
 
-def _screen_for(harness: str, kind: str, screens) -> str:
-    """Codex's screens are synthetic; other harnesses have recorded captures."""
-    if harness == "codex":
-        return CODEX_IDLE if kind == "idle" else CODEX_APPROVAL
-    return (screens / f"{harness}_{kind}.txt").read_text()
+def _screen_for(harness: str, kind: str) -> str:
+    """Every harness's screens are synthetic marker screens."""
+    screens = {
+        ("claude", "idle"): CLAUDE_IDLE,
+        ("claude", "approval"): CLAUDE_APPROVAL,
+        ("codex", "idle"): CODEX_IDLE,
+        ("codex", "approval"): CODEX_APPROVAL,
+        ("opencode", "idle"): OPENCODE_IDLE,
+        ("opencode", "approval"): OPENCODE_APPROVAL,
+        ("opencode", "question"): OPENCODE_QUESTION,
+        ("vibe", "idle"): VIBE_IDLE,
+        ("vibe", "approval"): VIBE_APPROVAL,
+        ("vibe", "question"): VIBE_QUESTION,
+    }
+    return screens[(harness, kind)]
 
 
 @pytest.mark.parametrize(
@@ -579,7 +595,6 @@ async def test_provider_screen_input_requests_follow_the_harness_classifier(
     terminal = terminal_provider.bind(daemon, participant.id, command=harness)
     terminal_provider.presence[terminal] = "present"
     observer = get_harness(harness).observer
-    screens = fixture("screens")
     client = FrontendClient(paths.socket_path(), client_id="approval-display-test")
     try:
         follow = StateSynchronizer(client)
@@ -588,7 +603,7 @@ async def test_provider_screen_input_requests_follow_the_harness_classifier(
             expected = phase if observer.has_screen else Status.IDLE
             if observer.has_screen:
                 kind = dialog if phase is Status.AWAITING_INPUT else "idle"
-                screen = _screen_for(harness, kind, screens)
+                screen = _screen_for(harness, kind)
             else:
                 state = "awaiting input" if phase is Status.AWAITING_INPUT else "idle"
                 screen = f"theater: {state}"

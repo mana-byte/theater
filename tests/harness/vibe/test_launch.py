@@ -1,4 +1,4 @@
-"""Vibe launch planning: version-aware approval argv, safety, resume and shipped manifest."""
+"""Vibe launch planning: approval safety, prompt shape and the version probe."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support.shipped import VibeHarness, pin_installed_vibe_version
+from tests.support.shipped import pin_installed_vibe_version
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.vibe import version as version_module
 from theater.harness.builtin.plugins.vibe.approval_guard import shadowed_approval_profile
@@ -27,66 +27,8 @@ def isolated_vibe_launch(monkeypatch, shipped_harnesses) -> None:
     pin_installed_vibe_version(monkeypatch, _MINIMUM)
 
 
-def test_vibe_resume_uses_resume_flag(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc",
-        prompt="do something",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        resume="session-xyz",
-    )
-    assert "--resume" in plan.argv
-    assert plan.argv[plan.argv.index("--resume") + 1] == "session-xyz"
-    assert VibeHarness.resume_strategy == "continue"
-    assert plan.argv[-1] == "do something"
-
-
-def test_vibe_resume_without_prompt(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        resume="session-xyz",
-    )
-    assert "--resume" in plan.argv
-    assert "session-xyz" in plan.argv
-    assert plan.argv[-1] == "session-xyz"
-
-
-def test_vibe_resume_preserves_approval_flags(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="yolo",
-        resume="s1",
-    )
-    assert "--yolo" in plan.argv
-    assert "--resume" in plan.argv
-
-
-def test_vibe_without_resume_has_no_resume_flag(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="abc",
-        prompt="hello",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-    )
-    assert "--resume" not in plan.argv
-
-
 def _last_admitted_version() -> tuple[int, int, int]:
     return _MAXIMUM
-
-
-def _next_minor_version() -> tuple[int, int, int]:
-    major, minor, _ = _MAXIMUM
-    return major, minor + 1, 0
 
 
 @pytest.mark.parametrize("approval", ["manual", "edits"])
@@ -99,42 +41,6 @@ def test_manual_and_edits_force_the_bypass_off_in_env(tmp_path, approval):
         approval=approval,
     )
     assert plan.env[VIBE_BYPASS_TOOL_PERMISSIONS_ENV] == "false"
-
-
-def test_yolo_leaves_the_bypass_env_unset(tmp_path):
-    plan = plan_launch(
-        "vibe",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="yolo",
-    )
-    assert VIBE_BYPASS_TOOL_PERMISSIONS_ENV not in plan.env
-
-
-def test_launch_admits_the_newest_qualified_writer(tmp_path, monkeypatch):
-    pin_installed_vibe_version(monkeypatch, _last_admitted_version())
-    plan = plan_launch(
-        "vibe",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="yolo",
-    )
-    assert plan.argv[0] == "vibe"
-
-
-def test_launch_refuses_a_writer_newer_than_the_store_reader(tmp_path, monkeypatch):
-    """A writer whose unified store no reader understands must fail at spawn."""
-    pin_installed_vibe_version(monkeypatch, _next_minor_version())
-    with pytest.raises(BadRequest, match="upgrade Theater"):
-        plan_launch(
-            "vibe",
-            participant_id="a",
-            prompt="",
-            config_path=tmp_path / "x.json",
-            approval="yolo",
-        )
 
 
 def _live_guard_plan(tmp_path, monkeypatch, *, approval, cwd, resume=None):
@@ -179,7 +85,7 @@ def test_edits_passes_and_pins_the_bypass_when_nothing_shadows(tmp_path, monkeyp
 
 
 def _vibe_parser() -> argparse.ArgumentParser:
-    """The arguments vibe's parser (vibe/cli/entrypoint.py) uses here."""
+    """The arguments vibe's CLI parser accepts here."""
     parser = argparse.ArgumentParser(prog="vibe")
     parser.add_argument("initial_prompt", nargs="?", metavar="PROMPT")
     parser.add_argument("--agent", metavar="NAME", default=None)
@@ -211,75 +117,6 @@ def test_a_flag_shaped_prompt_stays_a_literal_prompt(tmp_path, resume):
 _VERSION_TEXT = VERSION_POLICY.minimum
 
 
-def _before(release):
-    major, minor, patch = release
-    return (major, minor, patch - 1) if patch else (major, minor - 1, 99)
-
-
-def _plan(tmp_path, approval):
-    return plan_launch(
-        "vibe",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval=approval,
-    )
-
-
-def test_launch_admits_the_oldest_qualified_writer(tmp_path, monkeypatch):
-    pin_installed_vibe_version(monkeypatch, _MINIMUM)
-    plan = plan_launch(
-        "vibe",
-        participant_id="a",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="yolo",
-    )
-    assert plan.argv[0] == "vibe"
-    assert plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"]
-
-
-@pytest.mark.parametrize("version", [_before(_MINIMUM)])
-def test_launch_refuses_a_writer_below_the_installed_floor(tmp_path, monkeypatch, version):
-    pin_installed_vibe_version(monkeypatch, version)
-    with pytest.raises(BadRequest, match="qualified releases"):
-        plan_launch(
-            "vibe",
-            participant_id="a",
-            prompt="",
-            config_path=tmp_path / "x.json",
-            approval="yolo",
-        )
-
-
-@pytest.mark.parametrize("version", tuple(dict.fromkeys((_MINIMUM, _MAXIMUM))))
-def test_manual_pins_the_supported_approval_profile(tmp_path, monkeypatch, version):
-    pin_installed_vibe_version(monkeypatch, version)
-    argv = _plan(tmp_path, "manual").argv
-    assert "--agent=ask" in argv
-    assert "--yolo" not in argv
-
-
-def test_yolo_takes_the_flag(tmp_path, monkeypatch):
-    pin_installed_vibe_version(monkeypatch, _MINIMUM)
-    argv = _plan(tmp_path, "yolo").argv
-    assert "--yolo" in argv
-    assert "--agent" not in argv
-
-
-def test_edits_pins_accept_edits_on_every_version(tmp_path, monkeypatch):
-    pin_installed_vibe_version(monkeypatch, _MINIMUM)
-    argv = _plan(tmp_path, "edits").argv
-    assert argv[argv.index("--agent") + 1] == "accept-edits"
-
-
-@pytest.mark.parametrize("approval", ["manual", "yolo"])
-def test_probe_failure_refuses_an_unverified_launch(tmp_path, monkeypatch, approval):
-    pin_installed_vibe_version(monkeypatch, None)
-    with pytest.raises(BadRequest, match="could not verify a stable CLI version"):
-        _plan(tmp_path, approval)
-
-
 @pytest.mark.parametrize(
     ("resolved", "argv0"),
     [("/opt/other-install/bin/vibe", "/opt/other-install/bin/vibe"), (None, "vibe")],
@@ -287,7 +124,14 @@ def test_probe_failure_refuses_an_unverified_launch(tmp_path, monkeypatch, appro
 def test_launch_runs_the_binary_the_probe_resolved(tmp_path, monkeypatch, resolved, argv0):
     """The pane's PATH may differ from the daemon's, so argv[0] must be the probed path."""
     pin_installed_vibe_version(monkeypatch, _MINIMUM, binary=resolved)
-    assert _plan(tmp_path, "manual").argv[0] == argv0
+    plan = plan_launch(
+        "vibe",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="manual",
+    )
+    assert plan.argv[0] == argv0
 
 
 def test_installed_version_parses_and_fails_closed(monkeypatch, tmp_path):

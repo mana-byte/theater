@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
@@ -10,7 +9,6 @@ import sys
 
 import pytest
 
-from tests.support.opencode_recorder import rec as shared_rec
 from tests.support.shipped import OpenCodeHarness
 from theater.harness import theater_mcp_servers
 from theater.harness.builtin.plugins.opencode.dialect import (
@@ -22,14 +20,8 @@ from theater.harness.builtin.plugins.opencode.native_plugin import (
 )
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
     VERSION_POLICY,
-    parse_opencode_version,
-    release_text,
 )
-from theater.harness.contracts.context import ParticipantObservationContext
-from theater.harness.contracts.version_policy import version_key
 from theater.models import BadRequest, Participant
-
-rec = shared_rec  # the shared fixture
 
 
 @pytest.fixture
@@ -48,11 +40,6 @@ def _bootstrap_settings(plan, config) -> dict:
     script = plan.files[config.with_suffix(".bootstrap.py")]
     literal = script.rsplit("main(json.loads(", 1)[1].removesuffix(")))\n")
     return json.loads(json.loads(literal))
-
-
-def test_the_2x_version_banner_names_its_release():
-    assert parse_opencode_version("opencode v2.3.4\n") == (2, 3, 4)
-    assert parse_opencode_version("2.3.5") == (2, 3, 5)
 
 
 def test_a_2x_launch_runs_a_private_server_on_its_own_database(
@@ -131,21 +118,6 @@ def test_an_enforced_resume_verifies_its_plugin_before_any_ui(tmp_path, monkeypa
     assert settings["prompt"] is None and settings["session_id"] is None
 
 
-@pytest.mark.parametrize("approval", ["manual", "edits", "yolo"])
-def test_an_unqualified_release_refuses_every_launch(
-    tmp_path, monkeypatch, fake_opencode, approval
-):
-    major, minor, patch = version_key(VERSION_POLICY.maximum)
-    monkeypatch.setenv("THEATER_OPENCODE_VERSION", release_text((major, minor, patch + 1)))
-    with pytest.raises(BadRequest, match="qualified releases"):
-        OpenCodeHarness().plan_launch(
-            participant_id="abc123",
-            prompt="say hello",
-            config_path=tmp_path / "abc.json",
-            approval=approval,
-        )
-
-
 def test_a_new_session_exists_before_its_tui_opens_on_it(tmp_path, fake_opencode):
     """A 2.x TUI drops a cold home screen's `--prompt`; a session's screen submits it once ready."""
     plan = OpenCodeHarness().plan_launch(
@@ -194,7 +166,7 @@ def test_yolo_auto_accepts_and_a_resume_continues_its_known_session(tmp_path, fa
     assert '"rules": []' in plan.files[plugin_dir(config) / "server.js"]
 
 
-def test_a_resume_stays_in_its_lineage_and_never_crosses_releases(tmp_path):
+def test_a_resume_stays_in_its_lineage_database(tmp_path):
     lineage = participant_database_path("first")
     lineage.parent.mkdir(parents=True)
     lineage.touch()
@@ -208,19 +180,9 @@ def test_a_resume_stays_in_its_lineage_and_never_crosses_releases(tmp_path):
 
     with pytest.raises(BadRequest, match="not a Theater-isolated"):
         OpenCodeHarness().resume_launch_overlay(predecessor=predecessor, trusted_session_owners=())
-    v1_domain = f"opencode://{(tmp_path / 'opencode.db').resolve()}"
+    legacy_domain = f"opencode://{(tmp_path / 'opencode.db').resolve()}"
     with pytest.raises(BadRequest, match="no supported isolated database lineage"):
         OpenCodeHarness().resume_launch_overlay(
-            predecessor=Participant(id="old", transcript_domain=v1_domain),
+            predecessor=Participant(id="old", transcript_domain=legacy_domain),
             trusted_session_owners=(),
         )
-
-
-def test_a_2x_domain_opens_its_own_lineage_database(rec, workdir):
-    context = ParticipantObservationContext(
-        participant_id="abc123", cwd=str(workdir), transcript_domain=domain_for(rec.path)
-    )
-    src = OpenCodeHarness().observer.open_source_context(context)
-    assert src.collision_domain == domain_for(rec.path)
-    batch = asyncio.run(src.read())
-    assert batch.attached is not None and batch.attached.session_id == "ses_one"

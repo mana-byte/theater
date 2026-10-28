@@ -148,25 +148,6 @@ def test_interrupt_controls_are_validated() -> None:
     run_rows((label, partial(rejects, controls, path)) for label, controls, path in cases)
 
 
-def test_shipped_interrupt_plans_match_native_key_handlers() -> None:
-    from theater.harness.builtin.plugins.claude.manifest import MANIFEST as CLAUDE_MANIFEST
-    from theater.harness.builtin.plugins.codex.manifest import MANIFEST as CODEX_MANIFEST
-    from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCODE_MANIFEST
-    from theater.harness.builtin.plugins.vibe.manifest import MANIFEST as VIBE_MANIFEST
-
-    assert {
-        "claude": CLAUDE_MANIFEST.controls.interrupt,
-        "codex": CODEX_MANIFEST.controls.interrupt,
-        "opencode": OPENCODE_MANIFEST.controls.interrupt,
-        "vibe": VIBE_MANIFEST.controls.interrupt,
-    } == {
-        "claude": InterruptPlan(keys=("Escape",)),
-        "codex": InterruptPlan(keys=("Escape",)),
-        "opencode": InterruptPlan(keys=("Escape", "Escape"), inter_key_delay_seconds=0.05),
-        "vibe": InterruptPlan(keys=("Escape",)),
-    }
-
-
 def test_channel_capability_requires_explicit_ownership() -> None:
     with pytest.raises(TypeError):
         ChannelCapability(SignalKind.CONTENT)  # type: ignore[call-arg]

@@ -20,7 +20,7 @@ _ADD_FILE_PATCH = "*** Begin Patch\n*** Add File: {path}\n+{nonce}\n*** End Patc
 
 
 def _catalog_entry(slug: str) -> dict[str, object]:
-    """The fewest fields Codex 0.163 parses; an uncatalogued model gets no apply_patch tool."""
+    """The fewest fields the stock CLI parses; an uncatalogued model gets no apply_patch tool."""
     return {
         "slug": slug,
         "display_name": slug,
