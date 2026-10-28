@@ -110,3 +110,23 @@ def test_frontend_contract_has_no_private_imports() -> None:
 def test_raw_client_uses_only_stdlib_imports() -> None:
     imports = set(_imports(ROOT / "tests" / "support" / "raw_client.py"))
     assert not {name for name in imports if name.startswith(("theater", "jsonschema"))}
+
+
+def test_root_conftest_takes_every_autouse_fixture_from_isolation() -> None:
+    conftest = ROOT / "tests" / "conftest.py"
+    tree = ast.parse(conftest.read_text(), filename=str(conftest))
+    star_imports = [
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and [alias.name for alias in node.names] == ["*"]
+    ]
+    autouse = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        for decorator in node.decorator_list
+        if isinstance(decorator, ast.Call)
+        and any(keyword.arg == "autouse" for keyword in decorator.keywords)
+    ]
+    assert "tests.support.isolation" in star_imports
+    assert autouse == [], "autouse fixtures belong in tests/support/isolation.py"
