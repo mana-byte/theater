@@ -173,12 +173,16 @@ class NativeDeliveryControls(ControlHost):
         # tmux-fallback, eligible only for exact evidence or snapshot reconciliation.
         self._settle_from_receipt(operation_id, receipt, execution_barrier=True)
         if receipt.result is DeliveryResult.UNKNOWN and snapshot.native_session_id is not None:
+            # Receipt code and session lead: CI keeps only a 200-character clip of this line.
             logger.warning(
-                "delivery of %s to %s stayed uncertain (turn %s); no retry, "
-                "no tmux fallback — evidence or the snapshot is the only path",
+                "delivery of %s to %s stayed uncertain (code %s, session %s, turn %s): %s; "
+                "no retry, no tmux fallback — evidence or the snapshot is the only path",
                 operation_id,
                 participant_id,
+                receipt.error_code,
+                snapshot.native_session_id,
                 receipt.native_turn_id,
+                receipt.error,
             )
         self._count_unknown_delivery(kind, CONTROL_UNKNOWN_RECEIPT_UNKNOWN)
         self._schedule_maintenance(participant_id)
