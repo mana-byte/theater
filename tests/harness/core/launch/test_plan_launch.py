@@ -267,8 +267,8 @@ def test_codex_approval_modes_set_both_axes(tmp_path, approval, expected):
     assert all(flag in plan.argv for flag in expected)
 
 
-def test_codex_model_reaches_the_legacy_flag(tmp_path):
-    """The live native-runtime path does not exercise Codex's legacy `--model` flag."""
+def test_codex_model_and_effort_reach_the_legacy_flags(tmp_path):
+    """The live native-runtime path does not exercise Codex's legacy model and effort flags."""
     plan = plan_launch(
         "codex",
         participant_id="a",
@@ -276,8 +276,10 @@ def test_codex_model_reaches_the_legacy_flag(tmp_path):
         config_path=tmp_path / "x.json",
         approval="manual",
         model="gpt-5",
+        reasoning_effort="high",
     )
     assert plan.argv[plan.argv.index("--model") :][:2] == ["--model", "gpt-5"]
+    assert "model_reasoning_effort=high" in plan.argv
 
 
 def test_claude_launch_adds_receipt_hooks_without_editing_user_settings(tmp_path, monkeypatch):

@@ -210,8 +210,10 @@ def test_a_provisioning_plugin_offers_what_its_declared_capabilities_need(
     assert not support.reasoning_effort or len(provisioned.efforts) >= 2, (
         "effort selection needs two efforts"
     )
+    # Resolve both sides: a lexical check lets a '..' segment or a symlink escape.
+    allowed = (home.resolve(), work.resolve())
     assert all(
-        path.is_relative_to(home) or path.is_relative_to(work) for path in provisioned.files
+        any(path.resolve().is_relative_to(root) for root in allowed) for path in provisioned.files
     ), "provisioning writes only inside the given home or workdir"
     mentions = [*(str(path) for path in provisioned.files), *provisioned.files.values()]
     assert all(str(link) not in mention for mention in mentions), (
