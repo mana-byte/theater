@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from tests.support.claude_screens import CLAUDE_APPROVAL, CLAUDE_IDLE, CLAUDE_TRUST
 from tests.support.claude_seal import claude_marker, claude_record
 from tests.support.parse_rig import read_screen
 from tests.support.shipped import ClaudeCodeObserver
@@ -179,17 +180,19 @@ def test_claude_api_errors_become_error_events():
     assert status_after(events[0]) is Status.IDLE
 
 
-def test_claude_approval_fixture_classifies_as_approval_with_high_confidence():
-    capture = read_screen("claude_approval.txt")
-    reading = ClaudeCodeObserver().screen_reading(capture)
+def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
+    """The `Esc to cancel` footer frames every permission dialog shape: the
+    write and bash dialogs ask different questions but share this footer."""
+    reading = ClaudeCodeObserver().screen_reading(CLAUDE_APPROVAL)
     assert reading.kind is ScreenKind.APPROVAL
     assert reading.confidence is ScreenConfidence.HIGH
 
 
-def test_claude_idle_fixture_classifies_as_prompt():
-    capture = read_screen("claude_idle.txt")
-    reading = ClaudeCodeObserver().screen_reading(capture)
+def test_claude_idle_footer_classifies_as_prompt():
+    """The shortcut hint is the idle evidence when no bare composer line shows."""
+    reading = ClaudeCodeObserver().screen_reading(CLAUDE_IDLE)
     assert reading.kind is ScreenKind.PROMPT
+    assert reading.confidence is ScreenConfidence.HIGH
 
 
 def test_claude_agents_footer_fixture_classifies_as_prompt():
@@ -299,44 +302,15 @@ def test_claude_working_accept_edits_footer_wins_over_agents_footer():
 
 
 # A working screen read as a prompt finishes the caller's await mid-turn. Claude and vibe keep a
-# prompt-like line on screen all turn, so the idle fixture alone cannot prove the matcher
-# discriminates; these tests pin the other side.
-def test_claude_working_fixture_classifies_as_working_not_prompt():
-    """The permission-mode indicator is on screen during a turn as well.
-
-    `manual mode on` is drawn in the footer whether claude is idle or working,
-    so a matcher keyed on it reads a working screen as a prompt. The
-    discriminating segment is `esc to interrupt` / `? for shortcuts`.
-    """
-    capture = read_screen("claude_working.txt")
-    assert "manual mode on" in capture  # the non-discriminating indicator
-    reading = ClaudeCodeObserver().screen_reading(capture)
-    assert reading.kind is ScreenKind.WORKING
-    assert reading.confidence is ScreenConfidence.HIGH
-
-
-def test_claude_bash_approval_fixture_classifies_as_approval():
-    """A second dialog shape, to show the marker is chrome and not one phrase.
-
-    The write-permission dialog and the bash-permission dialog ask different
-    questions and offer different options; both are framed by the same
-    `Esc to cancel` footer.
-    """
-    capture = read_screen("claude_approval_bash.txt")
-    reading = ClaudeCodeObserver().screen_reading(capture)
-    assert reading.kind is ScreenKind.APPROVAL
-    assert reading.confidence is ScreenConfidence.HIGH
-
-
-def test_claude_trust_fixture_classifies_as_trust_with_high_confidence():
+# prompt-like line on screen all turn; the inline marker-precedence tests pin the other side.
+def test_claude_trust_dialog_classifies_as_trust_with_high_confidence():
     """The workspace-trust onboarding dialog has no approval footer.
 
     Without a dedicated ``TRUST`` arm it falls through to ``UNKNOWN``: the
     reducer leaves the status untouched and the send gate lets keystrokes
     through into a trust prompt, which can accept trust no human granted.
     """
-    capture = read_screen("claude_trust.txt")
-    reading = ClaudeCodeObserver().screen_reading(capture)
+    reading = ClaudeCodeObserver().screen_reading(CLAUDE_TRUST)
     assert reading.kind is ScreenKind.TRUST
     assert reading.confidence is ScreenConfidence.HIGH
 
