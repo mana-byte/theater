@@ -44,6 +44,11 @@ ANSWER_B = public_message("asst-b", "assistant", "ANSWER B", turn_id="turn-b")
 
 ANSWER_A_ALTERED = public_message("asst-a", "assistant", "ANSWER A CHANGED", turn_id="turn-a")
 
+# A turn whose pre-agent hook is pending: the session turns busy while latestTurn
+# still shows the previous turn's end, so an injected turn can already be active.
+PRE_AGENT_ACTIVE = turn_doc([USER_A, ANSWER_A], "turn-a", "completed")
+PRE_AGENT_ACTIVE["session"]["status"] = {"type": "running"}
+
 
 def turn_doc_with_input(
     entries: list[dict[str, Any]], turn_id: str, status: str, input_entry_id: str
@@ -105,7 +110,8 @@ def _b_folds_away(
     shutil.rmtree(store.generation_dir(GEN1))
     shutil.rmtree(store.generation_dir(GEN2))
     for sequence in range(1, base + 2):
-        (store.session_root / "journal" / f"{sequence:016d}.jsonl").unlink()
+        # One journal file per publish: a folded generation can leave this range sparse.
+        (store.session_root / "journal" / f"{sequence:016d}.jsonl").unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize("extra_publishes", [0, 1])
@@ -166,6 +172,7 @@ def _current_state(case: str) -> dict[str, Any]:
     "case",
     [
         "previous turn in_progress",
+        "pre-agent turn already active",
         "injected turn's answer entry",
         "input entry id reused",
         "input entry names the answer",
@@ -186,6 +193,23 @@ def test_an_unprovable_gap_fails_closed_and_names_its_facts(
         source = _attach_acknowledged(store, turn_doc([USER_A, ANSWER_A], "turn-a", "in_progress"))
         base = 0
         settled = turn_doc([USER_A, ANSWER_A], "turn-a", "in_progress")
+    elif case == "pre-agent turn already active":
+        source = attached_to_running_a(store)
+        store.publish(
+            generation=GEN1,
+            snapshot_sequence=0,
+            state=RUNNING_A,
+            watermark=1,
+            journal=[
+                A_ENDS,
+                # The pre-agent start publish: busy session, latestTurn still A's end.
+                ("projection_advanced", {"watermark": 3, "snapshot": PRE_AGENT_ACTIVE}),
+            ],
+        )
+        asyncio.run(source.read())
+        source.acknowledge_source_checkpoint()
+        base = 2
+        settled = PRE_AGENT_ACTIVE
     else:
         source = attached_to_running_a(store)
         store.publish(
@@ -206,6 +230,8 @@ def test_an_unprovable_gap_fails_closed_and_names_its_facts(
         current_watermark={
             "too many publishes in the gap": 7,
             "watermark gap too small": 3,
+            # Acknowledged after C's pre-agent start publish: three publishes left.
+            "pre-agent turn already active": 6,
         }.get(case),
     )
 

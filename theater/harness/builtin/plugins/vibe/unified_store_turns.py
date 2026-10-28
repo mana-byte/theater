@@ -155,10 +155,13 @@ def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreVie
     once per journaled publish, and every turn, injected or not, spans at least two
     publishes — its start input, then the input that carries its terminal
     observation — so a gap of two or three publishes fits the later turn and nothing
-    else. With no other turn possible, the later turn's own entries must be the only
-    history change and its input entry new."""
+    else, provided no turn was already active behind the previous view: a turn whose
+    pre-agent hook is pending changes the session to busy without touching
+    latestTurn. With no other turn possible, the later turn's own entries must be
+    the only history change and its input entry new."""
 
     from .unified_history import _entries
+    from .unified_source import _BUSY_SESSIONS  # local: the source imports this module
 
     previous_id, previous_status = turn_key(latest_turn(previous.snapshot))
     later = latest_turn(current.snapshot)
@@ -172,6 +175,14 @@ def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreVie
         or later_status not in _ENDED_TURNS
     ):
         return False
+    previous_session = previous.snapshot.get("session")
+    previous_session_status = (
+        previous_session.get("status", {}).get("type")
+        if isinstance(previous_session, dict)
+        else None
+    )
+    if not isinstance(previous_session_status, str) or previous_session_status in _BUSY_SESSIONS:
+        return False  # a turn can already be active behind a terminal latestTurn
     if not 2 <= current.watermark - previous.watermark <= 3:
         return False  # the gap cannot be exactly this turn's start and end: another could fit
     old_entries = _entries(previous)
