@@ -8,11 +8,11 @@ from theater.harness.contracts.version_policy import VersionPolicy, version_key
 
 
 def test_inclusive_bounds_exclusions_and_numeric_ordering():
-    policy = VersionPolicy("0.84.4", "1.4.0", ("0.85.0",))
-    assert all(policy.admits(version) for version in ("0.84.4", "0.84.10", "0.85.1", "1.4.0"))
-    assert not any(policy.admits(version) for version in ("0.84.3", "0.85.0", "1.4.1"))
+    policy = VersionPolicy("1.2.3", "2.0.0", ("1.5.0",))
+    assert all(policy.admits(version) for version in ("1.2.3", "1.2.10", "1.5.1", "2.0.0"))
+    assert not any(policy.admits(version) for version in ("1.2.2", "1.5.0", "2.0.1"))
     assert version_key("12.0.103") == (12, 0, 103)
-    assert policy.to_json() == {"min": "0.84.4", "max": "1.4.0", "excluded": ["0.85.0"]}
+    assert policy.to_json() == {"min": "1.2.3", "max": "2.0.0", "excluded": ["1.5.0"]}
     assert VersionPolicy.from_json(policy.to_json()) == policy
     with pytest.raises(FrozenInstanceError):
         policy.minimum = "0.0.0"
@@ -103,9 +103,9 @@ def test_load_rejects_ambiguous_or_invalid_json(tmp_path, text):
 
 def test_load_reads_a_single_release_policy(tmp_path):
     path = tmp_path / "compatibility.json"
-    path.write_text('{"min":"3.0.2","max":"3.0.2","excluded":[]}\n')
+    path.write_text('{"min":"5.5.5","max":"5.5.5","excluded":[]}\n')
     policy = VersionPolicy.load(path)
-    assert policy.admits("3.0.2") and not policy.admits("3.0.3")
+    assert policy.admits("5.5.5") and not policy.admits("5.5.6")
     assert list(policy.to_json()) == ["min", "max", "excluded"]
 
 

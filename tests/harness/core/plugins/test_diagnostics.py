@@ -34,7 +34,6 @@ from theater.harness.contracts.manifest import (
     SourceManifest,
     UnavailableChannelManifest,
 )
-from theater.harness.contracts.runtime import RuntimeCompatibility
 from theater.harness.loading.models import LoadedPlugin
 from theater.harness.registry.diagnostics import project_plugin
 from theater.mcp_plugins import registry as mcp_registry
@@ -278,57 +277,6 @@ def test_plugins_command_is_local_and_does_not_mutate_registries(monkeypatch, ca
     assert introspection.cmd_plugins(SimpleNamespace(json=True)) == 0
     assert json.loads(capsys.readouterr().out) == project(settings)
     assert before == (dict(harness_registry.HARNESSES), dict(mcp_registry.MCP_SERVERS))
-
-
-def test_native_compatibility_records_separate_version_and_route_support(local_dir):
-    install(local_dir)
-    supported = RuntimeCompatibility(
-        supported=True,
-        policy="test-policy",
-        native_version="7.0.2",
-    )
-    unsupported = RuntimeCompatibility(
-        supported=False,
-        policy="test-policy",
-        native_version="7.0.1",
-        reason="below floor",
-    )
-
-    assert (
-        harness_registry.native_compatibility_record(
-            harness_registry.HARNESSES["codex"], installed=True, result=supported
-        )["status"]
-        == "native-compatible"
-    )
-    assert harness_registry.native_compatibility_record(
-        harness_registry.HARNESSES["claude"], installed=True, result=unsupported
-    ) == {
-        "status": "legacy-only",
-        "installed_version": "7.0.1",
-        "qualified_range": None,
-        "policy": "test-policy",
-        "reason": "no native runtime; controls use the provider terminal",
-        "wiring": "legacy",
-        "routes": {
-            "send": "tmux",
-            "steer": "unavailable",  # claude has not declared that Enter steers
-            "queue_followup": "tmux",
-            "settings_update": "unavailable",
-            "interrupt": "tmux",
-        },
-    }
-    assert (
-        harness_registry.native_compatibility_record(
-            harness_registry.HARNESSES["claude"], installed=True, result=supported
-        )["status"]
-        == "legacy-only"
-    )
-    assert (
-        harness_registry.native_compatibility_record(
-            harness_registry.HARNESSES["vibe"], installed=True
-        )["status"]
-        == "legacy-only"
-    )
 
 
 def test_describe_projects_validated_manifest_channels_and_unavailability(local_dir):

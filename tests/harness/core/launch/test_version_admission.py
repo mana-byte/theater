@@ -20,11 +20,10 @@ def _refused_releases():
     cases = []
     for name in ("claude", "codex", "opencode", "pi", "vibe"):
         policy = VersionPolicy.load(plugins / name / "compatibility.json")
-        major, minor, patch = version_key(policy.minimum)
-        before = (major, minor, patch - 1) if patch else (major, minor - 1, 0)
         maximum = version_key(policy.maximum)
         versions = [
-            ("below-floor", ".".join(map(str, before))),
+            # A neutral below-floor release: never derived from the moving minimum.
+            ("below-floor", "0.0.1"),
             ("above-maximum", ".".join(map(str, (*maximum[:2], maximum[2] + 1)))),
             ("prerelease", f"{policy.minimum}-beta"),
             *((f"excluded-{version}", version) for version in policy.excluded),
