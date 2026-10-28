@@ -327,7 +327,7 @@ async def _launch_native_sequence(
         except Exception as exc:
             # The launch knows its own spawn job; any refusal of its initial
             # prompt must crash it, never leave it to an empty-result rescue.
-            _crash_undelivered_spawn_job(store, pid, exc)
+            _crash_undelivered_spawn_job(spawner, store, pid, exc)
             raise
         if not store.set_runtime_lifecycle(
             pid,
@@ -573,23 +573,30 @@ async def _launch_native_terminal_fenced(
     return attached
 
 
-def _crash_undelivered_spawn_job(store, pid: str, exc: Exception) -> None:
+def _crash_undelivered_spawn_job(spawner, store, pid: str, exc: Exception) -> None:
     """Crash this launch's spawn job when its initial prompt was refused.
 
     Only a RUNNING job with no control operation is touched: a RESERVED or later
     operation means transmission may have begun, and its receipt, evidence and
-    reconciliation machinery own every later outcome.
+    reconciliation machinery own every later outcome. The canonical
+    ``JobManager.finish`` preserves the response contract and wakes awaiters
+    and terminal listeners; the bare store write is only the fallback for a
+    spawner composed without a JobManager.
     """
     job = store.get_job(pid)
     if job is None or job.state != JobState.RUNNING:
         return
     if store.control_operations_for_job(pid):
         return
+    error_code = getattr(exc, "code", None) or "dispatch_failed"
+    if spawner.jobs is not None:
+        spawner.jobs.finish(pid, state=JobState.CRASHED, result=str(exc), error_code=error_code)
+        return
     store.finish_job(
         pid,
         state=JobState.CRASHED,
         result=str(exc),
-        error_code=getattr(exc, "code", None) or "dispatch_failed",
+        error_code=error_code,
         finished_at=now(),
     )
 

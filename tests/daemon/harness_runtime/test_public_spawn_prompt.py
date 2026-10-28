@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 
 import pytest
@@ -12,6 +13,7 @@ from tests.support.native_lifecycle import (
     teardown_backend,
 )
 from tests.support.waiting import settle_operations
+from theater.daemon.spawning import private_operations
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -192,6 +194,63 @@ async def test_refused_preflight_crashes_the_spawn_job(
         assert "preflight refusal" in (job.result or "")
         assert job.error_code == "bad_request"
         assert d.store.control_operations_for_job(pid) == []
+    finally:
+        for p in spawned:
+            await teardown_backend(d, p)
+        await d.aclose()
+
+
+async def test_refused_structured_spawn_keeps_contract_and_wakes_the_current_waiter(
+    native_rig, terminal_provider, tmp_path
+) -> None:
+    """A refused structured spawn finishes through JobManager, not a bare store write."""
+    harness = _SendRefusingHarness()
+    d = await native_daemon(native_rig.io, harness, terminal_provider)
+    spawned = []
+    notified: list[str] = []
+    d.jobs.add_terminal_listener(notified.append)
+    about_to_send = asyncio.Event()
+    real_send = d.spawner.controls.send
+    captured: dict[str, str] = {}
+
+    async def gated_send(pid, **kwargs):
+        captured.setdefault("pid", pid)
+        about_to_send.set()
+        await asyncio.sleep(0)
+        return await real_send(pid, **kwargs)
+
+    d.spawner.controls.send = gated_send
+    try:
+        # The structured contract reaches a spawn only through the private RPC
+        # route; the public spawn schema has no response_format field.
+        spawn_task = asyncio.create_task(
+            private_operations.spawn(
+                d,
+                {
+                    "harness": "native-fixture",
+                    "approval": "manual",
+                    "cwd": str(tmp_path),
+                    "prompt": "do the task",
+                    "response_format": {"type": "object"},
+                },
+            )
+        )
+        await asyncio.wait_for(about_to_send.wait(), timeout=10)
+        pid = captured["pid"]
+        # A waiter registered before the refusal must wake on the crash
+        # itself; wait_for only bounds a hang, not the expected wake.
+        waiter = asyncio.create_task(d.jobs.await_jobs([pid], max_wait=30))
+        await asyncio.sleep(0)
+        await spawn_task
+        (job,) = await asyncio.wait_for(waiter, timeout=5)
+        spawned.append(pid)
+
+        assert job.state == JobState.CRASHED
+        assert "does not support send" in (job.result or "")
+        assert job.error_code == "bad_request"
+        # The canonical finish preserves the declared response contract.
+        assert job.response_format == '{"type":"object"}'
+        assert notified == [pid]
     finally:
         for p in spawned:
             await teardown_backend(d, p)
