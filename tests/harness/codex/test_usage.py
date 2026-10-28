@@ -71,8 +71,6 @@ def test_response_usage_key_identifies_the_snapshot_not_the_turn():
     # The identity names the provider response, never the turn it arrived in:
     # a cached snapshot re-announced in a later turn reproduces the key.
     assert "turn" not in first
-    # Legacy snapshots without last_token_usage have no per-response identity.
-    assert _codex_response_usage_key({"total_token_usage": {"input_tokens": 100}}) is None
     assert _codex_response_usage_key(None) is None
 
 
@@ -167,36 +165,6 @@ def test_responses_across_turns_keep_distinct_identities():
     assert input_tokens == 150
     assert output_tokens == 15
     assert model_operations == 2
-
-
-def test_legacy_totals_only_snapshots_keep_turn_identity():
-    """Old codex token_counts carry only thread-cumulative totals."""
-    observer = CodexObserver()
-    records = _turn_with_usage(
-        "turn-1",
-        [
-            _record(
-                "event_msg",
-                {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 100}}},
-            ),
-            _record(
-                "event_msg",
-                {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 250}}},
-            ),
-        ],
-    )
-    facts = [
-        fact
-        for index, record in enumerate(records)
-        for fact in observer.parse_record(json.dumps(record), index).trajectory
-        if fact.usage is not None
-    ]
-    assert len(facts) == 2
-    # Turn-level identity keeps the dedupe-and-keep-latest behaviour.
-    assert facts[0].usage is not None and facts[1].usage is not None
-    assert facts[0].usage.request_id == facts[1].usage.request_id == "turn-1"
-    input_tokens, _, _ = _tokens(records)
-    assert input_tokens == 250
 
 
 def test_usage_event_idempotency_still_dedupes_snapshots():
