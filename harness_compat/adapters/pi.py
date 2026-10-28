@@ -8,7 +8,7 @@ from typing import Any
 
 from .. import github
 from ..contract import InstallFailed, Sandbox
-from . import npm
+from . import _npm
 
 _PACKAGE = "@earendil-works/pi-coding-agent"
 
@@ -21,7 +21,7 @@ class PiAdapter:
 
     def install(self, sb: Sandbox, version: str) -> Path:
         spec = f"{_PACKAGE}@{version}"
-        npm.install(sb, sb.bin_dir, [spec])
+        _npm.install(sb, sb.bin_dir, [spec])
         package_root = sb.bin_dir / "node_modules" / "@earendil-works" / "pi-coding-agent"
         try:
             document: dict[str, Any] = json.loads(
@@ -35,7 +35,7 @@ class PiAdapter:
             raise InstallFailed(
                 f"installed Pi {version} has no valid pi package bin: {exc}"
             ) from exc
-        return npm.expose(sb, "pi", target)
+        return _npm.expose(sb, "pi", target)
 
 
 ADAPTER = PiAdapter()

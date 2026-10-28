@@ -33,14 +33,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Select harnesses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      harnesses: ${{ steps.plan.outputs.harnesses }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        run: |
+          harnesses="$(python3 -m harness_compat plan)"
+          echo "harnesses=$harnesses" >> "$GITHUB_OUTPUT"
+
   canaries:
     name: Canaries ${{ matrix.harness }}
+    needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        harness: [claude, codex, opencode, pi, vibe]
+        harness: ${{ fromJSON(needs.plan.outputs.harnesses) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

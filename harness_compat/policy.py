@@ -10,10 +10,8 @@ from pathlib import Path
 from theater.version_policy import VersionPolicy, version_key
 
 from . import git
-from .adapters import ADAPTER_NAMES
+from .adapters import ADAPTER_NAMES, PLUGINS
 from .contract import Result
-
-PLUGINS = Path("theater/harness/builtin/plugins")
 
 
 class PolicyChangeError(ValueError):

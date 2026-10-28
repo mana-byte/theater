@@ -14,7 +14,7 @@ qualification targets.
 | Path | Purpose |
 | --- | --- |
 | `*.py` | The pipeline, run as `python3 -m harness_compat <command>` |
-| `adapters/` | One per harness: how to discover and install its releases |
+| `adapters/` | One per shipped plugin, named after its folder: how to discover and install its releases; `_*.py` are shared helpers |
 | `conformance/` | Completeness and guard tests; `live/` holds the live suite, `canaries/` the canaries |
 | `support/` | The live suite's rig and process stack, obligations, coverage registry, declaration walker, tool and channel oracles, process table, mutations and probe sidecar (`compat_probe/`) |
 | `unit/` | Tests of the pipeline |
