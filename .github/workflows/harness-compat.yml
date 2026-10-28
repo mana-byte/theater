@@ -6,11 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       harness:
-        description: Harness whose newer releases should be tested
+        description: Harness whose newer releases should be tested (a plugin folder name, or all)
         required: true
         default: all
-        type: choice
-        options: [all, claude, codex, opencode, pi, vibe]
+        type: string
   pull_request:
 
 permissions:
@@ -116,59 +115,19 @@ jobs:
       - name: Test every newer release and publish each completed outcome
         run: timeout --signal=INT --kill-after=5m 320m .venv/bin/python -m harness_compat run "$HARNESS" --budget-minutes 310 --max-range "$MAX_RANGE"
 
-  # Each affected harness gets its own fan-out and shard matrix, so one harness's discovery
-  # failure or window size never shapes another harness's verify jobs.
-  verify-claude:
-    name: Verify claude
+  # Each affected harness calls the verify workflow on its own, so one harness's discovery failure
+  # or window size never shapes another harness's verify jobs.
+  verify:
+    name: Verify ${{ matrix.harness }}
     needs: [static-checks, plan]
-    if: github.event_name == 'pull_request' && contains(needs.plan.outputs.harnesses, '"claude"')
+    if: github.event_name == 'pull_request' && needs.plan.outputs.harnesses != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: ${{ fromJSON(needs.plan.outputs.harnesses) }}
     uses: ./.github/workflows/harness-compat-verify.yml
     with:
-      harness: claude
-      base: ${{ needs.plan.outputs.base }}
-      routine: ${{ needs.plan.outputs.routine == 'true' }}
-      max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
-
-  verify-codex:
-    name: Verify codex
-    needs: [static-checks, plan]
-    if: github.event_name == 'pull_request' && contains(needs.plan.outputs.harnesses, '"codex"')
-    uses: ./.github/workflows/harness-compat-verify.yml
-    with:
-      harness: codex
-      base: ${{ needs.plan.outputs.base }}
-      routine: ${{ needs.plan.outputs.routine == 'true' }}
-      max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
-
-  verify-opencode:
-    name: Verify opencode
-    needs: [static-checks, plan]
-    if: github.event_name == 'pull_request' && contains(needs.plan.outputs.harnesses, '"opencode"')
-    uses: ./.github/workflows/harness-compat-verify.yml
-    with:
-      harness: opencode
-      base: ${{ needs.plan.outputs.base }}
-      routine: ${{ needs.plan.outputs.routine == 'true' }}
-      max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
-
-  verify-pi:
-    name: Verify pi
-    needs: [static-checks, plan]
-    if: github.event_name == 'pull_request' && contains(needs.plan.outputs.harnesses, '"pi"')
-    uses: ./.github/workflows/harness-compat-verify.yml
-    with:
-      harness: pi
-      base: ${{ needs.plan.outputs.base }}
-      routine: ${{ needs.plan.outputs.routine == 'true' }}
-      max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
-
-  verify-vibe:
-    name: Verify vibe
-    needs: [static-checks, plan]
-    if: github.event_name == 'pull_request' && contains(needs.plan.outputs.harnesses, '"vibe"')
-    uses: ./.github/workflows/harness-compat-verify.yml
-    with:
-      harness: vibe
+      harness: ${{ matrix.harness }}
       base: ${{ needs.plan.outputs.base }}
       routine: ${{ needs.plan.outputs.routine == 'true' }}
       max_range: ${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}
@@ -177,15 +136,7 @@ jobs:
   # reports and decides nothing, so its own failure never fails the run.
   failures:
     name: Failures
-    needs:
-      - static-checks
-      - plan
-      - qualify
-      - verify-claude
-      - verify-codex
-      - verify-opencode
-      - verify-pi
-      - verify-vibe
+    needs: [static-checks, plan, qualify, verify]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10

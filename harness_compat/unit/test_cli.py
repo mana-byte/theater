@@ -334,7 +334,7 @@ def test_workflow_plan_selects_requested_or_all_harnesses(
     assert _main(monkeypatch, repo, "plan", "codex") == 0
     assert json.loads(capsys.readouterr().out) == ["codex"]
     assert _main(monkeypatch, repo, "plan") == 0
-    assert len(json.loads(capsys.readouterr().out)) == 5
+    assert json.loads(capsys.readouterr().out) == list(cli.ADAPTER_NAMES)
 
 
 def test_canary_entry_point_is_for_workflow_self_checks(

@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from harness_compat import github
-from harness_compat.adapters import ADAPTER_NAMES, codex_release, load_adapter, npm
+from harness_compat import adapters, github
+from harness_compat.adapters import ADAPTER_NAMES, _codex_release, _npm, load_adapter
 from harness_compat.adapters import codex as codex_adapter
 from harness_compat.adapters import vibe as vibe_adapter
 from harness_compat.contract import InstallFailed
-from harness_compat.policy import load_policy, policy_relative
+from harness_compat.policy import load_policy
 from harness_compat.sandbox import make_sandbox
 from tests.support.paths import REPO_ROOT
 
@@ -29,12 +29,11 @@ def _done(returncode: int = 0, stdout: str = "", stderr: str = "") -> subprocess
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
 
-def test_the_adapters_are_the_shipped_plugins_each_with_a_policy() -> None:
-    assert ADAPTER_NAMES == ("claude", "codex", "opencode", "pi", "vibe")
+def test_every_shipped_plugin_has_one_adapter_of_its_name_and_a_policy() -> None:
+    modules = {path.stem for path in Path(adapters.__file__).parent.glob("[!_]*.py")}
+    assert modules == set(ADAPTER_NAMES)
     for name in ADAPTER_NAMES:
-        adapter = load_adapter(name)
-        assert adapter.name == name
-        assert (REPO_ROOT / policy_relative(name).parent / "manifest.py").is_file()
+        assert load_adapter(name).name == name
         assert load_policy(REPO_ROOT, name).minimum
 
 
@@ -86,7 +85,7 @@ def _fake_npm(
         files(command)
         return _done(returncode, stderr="E404 not found" if returncode else "")
 
-    monkeypatch.setattr(npm, "run_group", run)
+    monkeypatch.setattr(_npm, "run_group", run)
     return calls
 
 
@@ -243,7 +242,7 @@ def test_codex_install_fetches_the_exact_release_into_the_sandbox(
         seen.append((version, dest, env))
         return dest / "codex"
 
-    monkeypatch.setattr(codex_release, "fetch", fetch)
+    monkeypatch.setattr(_codex_release, "fetch", fetch)
     monkeypatch.setenv("GITHUB_TOKEN", "digest-token")
 
     with make_sandbox("codex") as sb:
@@ -253,14 +252,16 @@ def test_codex_install_fetches_the_exact_release_into_the_sandbox(
         assert "GITHUB_TOKEN" not in sb.env, "the CLI under test never sees the runner's token"
 
 
-@pytest.mark.parametrize("error", [codex_release.FetchError("asset missing"), OSError("disk full")])
+@pytest.mark.parametrize(
+    "error", [_codex_release.FetchError("asset missing"), OSError("disk full")]
+)
 def test_a_codex_fetch_that_fails_is_an_install_failure(
     monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     def fetch(version: str, dest: Path, env: dict) -> Path:
         raise error
 
-    monkeypatch.setattr(codex_release, "fetch", fetch)
+    monkeypatch.setattr(_codex_release, "fetch", fetch)
 
     with make_sandbox("codex") as sb, pytest.raises(InstallFailed, match=str(error)):
         load_adapter("codex").install(sb, "0.164.0")
@@ -277,7 +278,7 @@ def _tar(path: Path, member: str) -> Path:
 def test_the_release_archive_is_unpacked_to_an_executable_codex(tmp_path: Path) -> None:
     archive = _tar(tmp_path / "codex-x.tar.gz", "codex-aarch64-apple-darwin")
 
-    binary = codex_release._unpack(archive, tmp_path)
+    binary = _codex_release._unpack(archive, tmp_path)
 
     assert binary == tmp_path / "codex" and binary.stat().st_mode & stat.S_IXUSR
 
@@ -287,14 +288,14 @@ def test_a_zip_release_is_unpacked_too(tmp_path: Path) -> None:
     with zipfile.ZipFile(archive, "w") as bundle:
         bundle.writestr("codex", "#!/bin/sh\n")
 
-    assert codex_release._unpack(archive, tmp_path).read_text() == "#!/bin/sh\n"
+    assert _codex_release._unpack(archive, tmp_path).read_text() == "#!/bin/sh\n"
 
 
 def test_an_archive_without_a_codex_binary_is_refused(tmp_path: Path) -> None:
     archive = _tar(tmp_path / "codex-x.tar.gz", "README")
 
-    with pytest.raises(codex_release.FetchError, match="contains no codex binary"):
-        codex_release._unpack(archive, tmp_path)
+    with pytest.raises(_codex_release.FetchError, match="contains no codex binary"):
+        _codex_release._unpack(archive, tmp_path)
 
 
 def _fake_download(
@@ -304,9 +305,11 @@ def _fake_download(
     def download(tag: str, asset: str, dest: Path, env: dict) -> Path:
         return archive
 
-    monkeypatch.setattr(codex_release, "asset_name", lambda: "asset.tar.gz")
-    monkeypatch.setattr(codex_release, "_download", download)
-    monkeypatch.setattr(codex_release, "_published_digest", lambda tag, asset, dest, env: published)
+    monkeypatch.setattr(_codex_release, "asset_name", lambda: "asset.tar.gz")
+    monkeypatch.setattr(_codex_release, "_download", download)
+    monkeypatch.setattr(
+        _codex_release, "_published_digest", lambda tag, asset, dest, env: published
+    )
 
 
 def test_a_digest_mismatch_refuses_an_unverified_binary(
@@ -314,8 +317,8 @@ def test_a_digest_mismatch_refuses_an_unverified_binary(
 ) -> None:
     _fake_download(monkeypatch, _tar(tmp_path / "asset.tar.gz", "codex"), published="0" * 64)
 
-    with pytest.raises(codex_release.FetchError, match="does not match the digest"):
-        codex_release.fetch("0.164.0", tmp_path / "dest", {})
+    with pytest.raises(_codex_release.FetchError, match="does not match the digest"):
+        _codex_release.fetch("0.164.0", tmp_path / "dest", {})
 
 
 @pytest.mark.parametrize("matches", [True, None])
@@ -323,10 +326,10 @@ def test_a_matching_or_unpublished_digest_unpacks_the_binary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, matches: bool | None
 ) -> None:
     archive = _tar(tmp_path / "asset.tar.gz", "codex")
-    published = codex_release.sha256_of(archive) if matches else None
+    published = _codex_release.sha256_of(archive) if matches else None
     _fake_download(monkeypatch, archive, published=published)
 
-    binary = codex_release.fetch("0.164.0", tmp_path / "dest", {})
+    binary = _codex_release.fetch("0.164.0", tmp_path / "dest", {})
 
     assert binary == tmp_path / "dest" / "codex" and binary.is_file()
 
@@ -344,11 +347,11 @@ def test_the_download_falls_back_from_curl_to_gh(
             (tmp_path / "asset.tar.gz").write_text("x")
         return _done(1 if command[0] == "curl" else 0, stderr="404")
 
-    monkeypatch.setattr(codex_release, "_run", run)
-    monkeypatch.setattr(codex_release.shutil, "which", lambda name, path=None: f"/bin/{name}")
+    monkeypatch.setattr(_codex_release, "_run", run)
+    monkeypatch.setattr(_codex_release.shutil, "which", lambda name, path=None: f"/bin/{name}")
 
     assert (
-        codex_release._download("rust-v1", "asset.tar.gz", tmp_path, {})
+        _codex_release._download("rust-v1", "asset.tar.gz", tmp_path, {})
         == tmp_path / "asset.tar.gz"
     )
     assert tried == ["curl", "gh"]
@@ -357,18 +360,18 @@ def test_the_download_falls_back_from_curl_to_gh(
 def test_the_download_names_every_failure_or_the_missing_tools(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(codex_release.shutil, "which", lambda name, path=None: None)
-    with pytest.raises(codex_release.FetchError, match="neither curl nor gh"):
-        codex_release._download("rust-v1", "asset.tar.gz", tmp_path, {})
+    monkeypatch.setattr(_codex_release.shutil, "which", lambda name, path=None: None)
+    with pytest.raises(_codex_release.FetchError, match="neither curl nor gh"):
+        _codex_release._download("rust-v1", "asset.tar.gz", tmp_path, {})
 
-    monkeypatch.setattr(codex_release.shutil, "which", lambda name, path=None: f"/bin/{name}")
-    monkeypatch.setattr(codex_release, "_run", lambda *a, **k: _done(22, stderr="HTTP 404"))
-    with pytest.raises(codex_release.FetchError, match=r"curl failed \(22\).*gh failed \(22\)"):
-        codex_release._download("rust-v1", "asset.tar.gz", tmp_path, {})
+    monkeypatch.setattr(_codex_release.shutil, "which", lambda name, path=None: f"/bin/{name}")
+    monkeypatch.setattr(_codex_release, "_run", lambda *a, **k: _done(22, stderr="HTTP 404"))
+    with pytest.raises(_codex_release.FetchError, match=r"curl failed \(22\).*gh failed \(22\)"):
+        _codex_release._download("rust-v1", "asset.tar.gz", tmp_path, {})
 
 
 def test_an_unmapped_platform_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(codex_release.platform, "system", lambda: "Plan9")
+    monkeypatch.setattr(_codex_release.platform, "system", lambda: "Plan9")
 
-    with pytest.raises(codex_release.FetchError, match="no codex release asset"):
-        codex_release.asset_name()
+    with pytest.raises(_codex_release.FetchError, match="no codex release asset"):
+        _codex_release.asset_name()

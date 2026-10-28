@@ -12,7 +12,7 @@ from pathlib import Path
 from .. import github
 from ..contract import InstallFailed, Sandbox
 from ..process import run_group
-from . import codex_release
+from . import _codex_release
 
 _TAG_PREFIX = "rust-v"
 
@@ -35,7 +35,7 @@ def _public_git_tags() -> list[str]:
                 "credential.helper=",
                 "ls-remote",
                 "--tags",
-                f"https://github.com/{codex_release.REPO}.git",
+                f"https://github.com/{_codex_release.REPO}.git",
             ],
             cwd=Path(home),
             env=env,
@@ -58,7 +58,7 @@ class CodexAdapter:
 
     def discover(self) -> list[str]:
         try:
-            return github.github_release_versions(codex_release.REPO, tag_prefix=_TAG_PREFIX)
+            return github.github_release_versions(_codex_release.REPO, tag_prefix=_TAG_PREFIX)
         except urllib.error.URLError:
             return _public_git_tags()
 
@@ -66,8 +66,8 @@ class CodexAdapter:
         # The runner's token lets the digest check query the API; the CLI under test never sees it.
         tokens = {key: os.environ[key] for key in ("GH_TOKEN", "GITHUB_TOKEN") if key in os.environ}
         try:
-            return codex_release.fetch(version, sb.bin_dir, {**sb.env, **tokens})
-        except (codex_release.FetchError, OSError, tarfile.TarError, zipfile.BadZipFile) as error:
+            return _codex_release.fetch(version, sb.bin_dir, {**sb.env, **tokens})
+        except (_codex_release.FetchError, OSError, tarfile.TarError, zipfile.BadZipFile) as error:
             raise InstallFailed(f"Codex {version} download failed: {error}") from error
 
 

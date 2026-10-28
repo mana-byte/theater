@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import PurePath
 from typing import Any
 
@@ -13,8 +14,6 @@ from harness_compat.policy import policy_relative
 from tests.support.paths import REPO_ROOT
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
-
-VERIFY_CALLS = ("verify-claude", "verify-codex", "verify-opencode", "verify-pi", "verify-vibe")
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -60,15 +59,36 @@ def test_dispatch_selects_a_harness_and_scripts_discover_the_versions() -> None:
     compat = _load("harness-compat.yml")
     inputs = compat["on"]["workflow_dispatch"]["inputs"]
     assert set(inputs) == {"harness"}
-    assert inputs["harness"]["options"] == ["all", *ADAPTER_NAMES]
+    # Free text: `plan` rejects a name no plugin folder carries.
+    assert inputs["harness"]["type"] == "string" and inputs["harness"]["default"] == "all"
     assert 'args=(plan "$REQUESTED_HARNESS")' in compat["jobs"]["plan"]["steps"][-1]["run"]
+
+
+@pytest.mark.parametrize(
+    "name", sorted(path.name for path in WORKFLOWS.glob("harness-compat*.yml"))
+)
+def test_no_workflow_names_a_harness(name: str) -> None:
+    # Harnesses come from the plugin folders through `plan`: adding one edits no workflow.
+    names = re.findall(rf"\b(?:{'|'.join(ADAPTER_NAMES)})\b", yaml.safe_dump(_load(name)))
+    assert names == []
+
+
+def test_matrices_come_from_the_plan() -> None:
+    compat = _load("harness-compat.yml")
+    canaries = _load("harness-compat-canaries.yml")
+    matrix = "${{ fromJSON(needs.plan.outputs.harnesses) }}"
+    for job in (compat["jobs"]["qualify"], compat["jobs"]["verify"], canaries["jobs"]["canaries"]):
+        assert job["strategy"]["matrix"]["harness"] == matrix
+    # A PR that touches no harness plans none, and a matrix over nothing fails.
+    assert "needs.plan.outputs.harnesses != '[]'" in compat["jobs"]["verify"]["if"]
+    assert "python3 -m harness_compat plan" in canaries["jobs"]["plan"]["steps"][-1]["run"]
 
 
 def test_pr_jobs_are_read_only_and_have_no_automation_secret() -> None:
     compat = _load("harness-compat.yml")
     assert compat["permissions"] == {"contents": "read"}
     assert compat["on"]["pull_request"] is None
-    for name in ("static-checks", "plan", *VERIFY_CALLS):
+    for name in ("static-checks", "plan", "verify"):
         job = compat["jobs"][name]
         assert job.get("permissions", compat["permissions"]) == {"contents": "read"}
         assert "secrets.HARNESS_COMPAT" not in yaml.safe_dump(job)
@@ -119,11 +139,11 @@ def test_routine_pr_checks_use_the_base_and_stop_at_the_proposed_policy() -> Non
     assert 'base="$(git rev-parse HEAD^1)"' in plan_run
     assert "routine=false" in plan_run and "routine=true" in plan_run
     assert 'echo "routine=$routine" >> "$GITHUB_OUTPUT"' in plan_run
-    for name in VERIFY_CALLS:
-        call = compat["jobs"][name]
-        assert call["uses"] == "./.github/workflows/harness-compat-verify.yml"
-        assert call["with"]["base"] == "${{ needs.plan.outputs.base }}"
-        assert call["with"]["routine"] == "${{ needs.plan.outputs.routine == 'true' }}"
+    call = compat["jobs"]["verify"]
+    assert call["uses"] == "./.github/workflows/harness-compat-verify.yml"
+    assert call["with"]["harness"] == "${{ matrix.harness }}"
+    assert call["with"]["base"] == "${{ needs.plan.outputs.base }}"
+    assert call["with"]["routine"] == "${{ needs.plan.outputs.routine == 'true' }}"
     verify = reusable["jobs"]["verify"]["steps"][-1]["run"]
     assert 'args=(verify "$HARNESS" --base "$BASE" --releases "$VERSIONS")' in verify
     assert "--routine" in verify and "$ROUTINE" in verify
@@ -136,8 +156,7 @@ def test_the_floor_range_is_a_repo_variable_wired_into_run_and_verify() -> None:
     compat = _load("harness-compat.yml")
     reusable = _load("harness-compat-verify.yml")
     expression = "${{ vars.HARNESS_COMPAT_MAX_RANGE || '10' }}"
-    for name in VERIFY_CALLS:
-        assert compat["jobs"][name]["with"]["max_range"] == expression
+    assert compat["jobs"]["verify"]["with"]["max_range"] == expression
     assert reusable["on"]["workflow_call"]["inputs"]["max_range"]["required"] is True
     qualify = compat["jobs"]["qualify"]
     assert qualify["env"]["MAX_RANGE"] == expression
@@ -150,9 +169,7 @@ def test_the_floor_range_is_a_repo_variable_wired_into_run_and_verify() -> None:
 def test_verify_check_names_are_short_and_show_the_version_range() -> None:
     # Check names read "<caller> / <called job>": "Verify codex / Shards" and
     # "Verify codex / 1.4.0-1.7.0" — the shard job name is the range it tests.
-    compat = _load("harness-compat.yml")
-    for name in VERIFY_CALLS:
-        assert compat["jobs"][name]["name"] == f"Verify {name.removeprefix('verify-')}"
+    assert _load("harness-compat.yml")["jobs"]["verify"]["name"] == "Verify ${{ matrix.harness }}"
     reusable = _load("harness-compat-verify.yml")
     assert reusable["jobs"]["fanout"]["name"] == "Shards"
     assert reusable["jobs"]["verify"]["name"] == "${{ matrix.range }}"
@@ -230,7 +247,6 @@ def test_untrusted_values_are_passed_as_environment_data() -> None:
 def test_canaries_are_workflow_self_checks_for_each_plugin() -> None:
     workflow = _load("harness-compat-canaries.yml")
     job = workflow["jobs"]["canaries"]
-    assert job["strategy"]["matrix"]["harness"] == list(ADAPTER_NAMES)
     assert 'harness_compat canaries "$HARNESS"' in job["steps"][-1]["run"]
     paths = workflow["on"]["pull_request"]["paths"]
     assert "tests/support/**" in paths
