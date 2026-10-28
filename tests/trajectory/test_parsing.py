@@ -62,11 +62,13 @@ def test_malformed_and_non_object_lines_are_empty(observer_type):
         assert observer.parse_record(line, index) == ParsedRecord()
 
 
-def test_cost_provenance_tracks_reported_adapter_values() -> None:
-    codex = _codex_usage({}, {"usage": {"input_tokens": 1, "cost_usd": 0.2}})
+def test_cost_provenance_tracks_each_adapter_values() -> None:
+    # Codex never reports a cost: its usage payloads carry token counts only.
+    codex = _codex_usage({}, {"usage": {"input_tokens": 1}})
     opencode = opencode_plugin._opencode_usage({"tokens": {"input": 1}, "cost": 0.3})
 
-    assert codex is not None and codex.cost_provenance is CostProvenance.REPORTED
+    assert codex is not None
+    assert codex.cost_usd is None and codex.cost_provenance is CostProvenance.UNKNOWN
     assert opencode is not None and opencode.cost_provenance is CostProvenance.REPORTED
 
 

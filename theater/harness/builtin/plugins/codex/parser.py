@@ -19,13 +19,9 @@ from theater.harness.base import (
 )
 from theater.harness.contracts.trajectory import ParsedRecord
 from theater.harness.normalization.timing import iso_epoch as _epoch
-from theater.harness.normalization.usage import reported_cost
 from theater.harness.normalization.values import (
     decode_json_record,
     revision_from,
-)
-from theater.harness.normalization.values import (
-    finite_float as _trajectory_float,
 )
 from theater.harness.normalization.values import (
     nonnegative_int as _usage_int,
@@ -145,7 +141,7 @@ class CodexParserMixin:
         elif kind == "event_msg" and payload.get("type") == CODEX_THREAD_SETTINGS_EVENT_TYPE:
             settings = payload.get("thread_settings")
         if isinstance(settings, dict):
-            model = settings.get("model") or settings.get("model_name")
+            model = settings.get("model")
             if isinstance(model, str) and model:
                 self._last_model = model
             provider = settings.get(CODEX_MODEL_PROVIDER_ID_KEY) or settings.get(
@@ -429,13 +425,9 @@ class CodexParserMixin:
         )
         totals = tuple(_usage_int(total.get(field)) for field in fields)
         latest = tuple(_usage_int(last.get(field)) for field in fields)
-        model = info.get("model") or info.get("model_name") or self._last_model
+        model = info.get("model") or self._last_model
         model = model or None if isinstance(model, str) else None
         input_tokens, cache_read, cache_write, output_tokens, reasoning = latest
-        cost = _trajectory_float(
-            last.get("cost_usd") if "cost_usd" in last else last.get("costUSD")
-        )
-        cost, cost_provenance = reported_cost(cost, strict_positive=False)
         usage = TokenUsage(
             model=model,
             provider=self._last_provider,
@@ -444,8 +436,6 @@ class CodexParserMixin:
             cache_creation_input_tokens=cache_write,
             cache_read_input_tokens=cache_read,
             reasoning_output_tokens=reasoning,
-            cost_usd=cost,
-            cost_provenance=cost_provenance,
             idempotency_key="codex:" + ":".join(str(value) for value in totals + latest),
         )
         if (
