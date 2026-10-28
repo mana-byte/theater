@@ -247,9 +247,7 @@ async def test_session_ids_are_bounded_path_tokens(
 async def test_request_body_is_bounded_before_connect(server: HttpFake, token_file: Path) -> None:
     client = _client(server, token_file)
     with pytest.raises(OpenCodeHttpError) as raised:
-        await client.prompt(
-            "ses_one", message_id="msg_one", text="x" * 1_048_577, delivery="queue"
-        )
+        await client.prompt("ses_one", message_id="msg_one", text="x" * 1_048_577, delivery="queue")
     assert raised.value.written is False
     assert server.requests == []
 
