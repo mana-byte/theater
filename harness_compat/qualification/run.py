@@ -9,10 +9,10 @@ from pathlib import Path
 
 from theater.version_policy import VersionPolicy, version_key
 
+from ..contract import Adapter, Check, Result
+from ..diagnostics import clip_diagnostic, exception_detail
+from ..policy import load_policy
 from .cleanup import CleanupFailed
-from .contract import Adapter, Check, Result
-from .diagnostics import clip_diagnostic, exception_detail
-from .policy import load_policy
 from .qualify import qualify_release
 
 Qualifier = Callable[[Path, Adapter, str], Result]

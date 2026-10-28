@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from harness_compat.contract import MockToolCall, RecordedRequest, ToolShape
-from harness_compat.provisioning import McpDiscovery
+from harness_compat.mock.provisioning import McpDiscovery
 from harness_compat.support.tool_effects import (
     Effect,
     _mark,

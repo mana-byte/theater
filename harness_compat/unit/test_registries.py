@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from harness_compat import github
+from harness_compat.adapters import _registries
 
 
 def _release(tag: str, **flags: bool) -> dict:
@@ -15,7 +15,7 @@ def _release(tag: str, **flags: bool) -> dict:
 
 
 def test_only_canonical_stable_releases_survive_ascending_and_unique() -> None:
-    found = github.stable_ascending(
+    found = _registries.stable_ascending(
         ["1.10.0", "1.2.0", "1.2.0", "1.2.0-beta.1", "01.2.3", "v1.0.0", "2.0", "0.9.9"]
     )
 
@@ -40,9 +40,9 @@ def test_every_github_release_page_is_read(monkeypatch: pytest.MonkeyPatch) -> N
         asked.append(page)
         return json.dumps(pages[page])
 
-    monkeypatch.setattr(github, "_get", get)
+    monkeypatch.setattr(_registries, "_get", get)
 
-    found = github.github_release_versions("openai/codex", tag_prefix="rust-v")
+    found = _registries.github_release_versions("openai/codex", tag_prefix="rust-v")
 
     assert asked == [1, 2, 3]
     assert len(found) == 201 and found[0] == "0.0.0" and found[-1] == "2.0.0"
@@ -60,9 +60,9 @@ def test_pypi_keeps_yanked_and_unavailable_stable_releases(
             "1.4.0rc1": [{"yanked": False}],
         }
     }
-    monkeypatch.setattr(github, "_get", lambda url, headers=None: json.dumps(document))
+    monkeypatch.setattr(_registries, "_get", lambda url, headers=None: json.dumps(document))
 
-    assert github.pypi_versions("mistral-vibe") == ["1.0.0", "1.1.0", "1.2.0", "1.3.0"]
+    assert _registries.pypi_versions("mistral-vibe") == ["1.0.0", "1.1.0", "1.2.0", "1.3.0"]
 
 
 def test_npm_scoped_packages_are_queried_with_their_scope(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,9 +72,9 @@ def test_npm_scoped_packages_are_queried_with_their_scope(monkeypatch: pytest.Mo
         urls.append(url)
         return json.dumps({"versions": {"2.0.1": {}, "2.0.0-rc.1": {}}})
 
-    monkeypatch.setattr(github, "_get", get)
+    monkeypatch.setattr(_registries, "_get", get)
 
-    assert github.npm_versions("@opencode/cli") == ["2.0.1"]
+    assert _registries.npm_versions("@opencode/cli") == ["2.0.1"]
     assert urls == ["https://registry.npmjs.org/@opencode%2Fcli"]
 
 
@@ -97,11 +97,11 @@ def test_the_token_is_sent_to_the_github_api_and_nowhere_else(
         sent.append((request.full_url, dict(request.header_items())))  # type: ignore[attr-defined]
         return Response()
 
-    monkeypatch.setattr(github.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(_registries.urllib.request, "urlopen", urlopen)
     monkeypatch.setenv("GITHUB_TOKEN", "secret")
 
-    github._get("https://api.github.com/repos/o/r/releases")
-    github._get("https://registry.npmjs.org/pkg")
+    _registries._get("https://api.github.com/repos/o/r/releases")
+    _registries._get("https://registry.npmjs.org/pkg")
 
     assert sent[0][1]["Authorization"] == "Bearer secret"
     assert "Authorization" not in sent[1][1]
@@ -130,10 +130,10 @@ def test_a_dropped_transfer_is_retried_but_a_persistent_one_still_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     response = _Dropping(drops=2)
-    monkeypatch.setattr(github.urllib.request, "urlopen", lambda request, timeout: response)
+    monkeypatch.setattr(_registries.urllib.request, "urlopen", lambda request, timeout: response)
 
-    assert github._get("https://api.github.com/repos/o/r/releases") == "[]"
+    assert _registries._get("https://api.github.com/repos/o/r/releases") == "[]"
 
-    response.drops = github._ATTEMPTS
+    response.drops = _registries._ATTEMPTS
     with pytest.raises(http.client.IncompleteRead):
-        github._get("https://api.github.com/repos/o/r/releases")
+        _registries._get("https://api.github.com/repos/o/r/releases")

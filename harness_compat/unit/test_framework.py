@@ -14,14 +14,9 @@ import pytest
 
 from harness_compat.contract import Check
 from harness_compat.diagnostics import clip_diagnostic
-from harness_compat.framework import _suite_check, python_path, run_pytest
-from harness_compat.process import (
-    SANDBOX_ENV,
-    new_token,
-    owned_pids,
-    run_group,
-)
-from harness_compat.sandbox import make_sandbox
+from harness_compat.qualification.framework import _suite_check, python_path, run_pytest
+from harness_compat.qualification.process import SANDBOX_ENV, new_token, owned_pids, run_group
+from harness_compat.qualification.sandbox import make_sandbox
 
 
 def test_run_pytest_maps_skips_and_failures(tmp_path: Path) -> None:
@@ -109,7 +104,7 @@ def test_a_non_clean_pytest_exit_cannot_pass_despite_all_passing_cases(tmp_path,
         xml.write_text('<testsuite><testcase name="test_ok"/></testsuite>')
         return subprocess.CompletedProcess(argv, 1, "session completion failed", "")
 
-    monkeypatch.setattr("harness_compat.framework.run_group", run)
+    monkeypatch.setattr("harness_compat.qualification.framework.run_group", run)
     check = run_pytest(tmp_path, "test_x.py", env={})
     assert check.status == "error" and "pytest exit 1" in check.detail
 
@@ -142,7 +137,7 @@ def test_sandbox_keeps_unix_socket_paths_short(
         long_root.mkdir()
         return str(long_root)
 
-    monkeypatch.setattr("harness_compat.sandbox.tempfile.mkdtemp", long_temp)
+    monkeypatch.setattr("harness_compat.qualification.sandbox.tempfile.mkdtemp", long_temp)
     with (
         pytest.raises(RuntimeError, match="tmux AF_UNIX socket path is too long"),
         make_sandbox("codex"),

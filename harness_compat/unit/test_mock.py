@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from harness_compat.contract import MOCK_REPLY, MockReply, MockToolCall
-from harness_compat.mock import MockServer
+from harness_compat.mock.server import MockServer
 
 
 def test_plugin_acknowledgements_never_consume_a_model_reply(tmp_path: Path) -> None:

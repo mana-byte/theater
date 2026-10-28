@@ -10,11 +10,10 @@ import urllib.error
 import zipfile
 from pathlib import Path
 
-from .. import github
 from ..contract import InstallFailed, Sandbox
-from ..process import run_group
-from ..provisioning import CompatManifest, NativeEdit, ProvisionContext, Provisioned
-from . import _codex_release
+from ..mock.provisioning import CompatManifest, NativeEdit, ProvisionContext, Provisioned
+from ..qualification.process import run_group
+from . import _codex_release, _registries
 
 #: Used when the run names no logical models; two are needed to prove a selection takes effect.
 _DEFAULT_MODELS = ("mock-a", "mock-b")
@@ -121,7 +120,7 @@ def _public_git_tags() -> list[str]:
         raise RuntimeError(f"Codex public tags unavailable: {done.stderr[-400:]}")
     prefix = f"refs/tags/{_TAG_PREFIX}"
     tags = (line.partition("\t")[2] for line in done.stdout.splitlines())
-    versions = github.stable_ascending(
+    versions = _registries.stable_ascending(
         tag.removeprefix(prefix) for tag in tags if tag.startswith(prefix)
     )
     if not versions:
@@ -135,7 +134,7 @@ class CodexAdapter:
 
     def discover(self) -> list[str]:
         try:
-            return github.github_release_versions(_codex_release.REPO, tag_prefix=_TAG_PREFIX)
+            return _registries.github_release_versions(_codex_release.REPO, tag_prefix=_TAG_PREFIX)
         except urllib.error.URLError:
             return _public_git_tags()
 

@@ -19,7 +19,7 @@ from typing import IO, Literal, overload
 
 from theater.constants.harness import HARNESS_COMPAT_SANDBOX_ENV as SANDBOX_ENV  # noqa: F401
 
-from .contract import CleanupFailed
+from ..contract import CleanupFailed
 
 RUN_ENV = "HARNESS_COMPAT_RUN"
 _GRACE_SECONDS = 5.0

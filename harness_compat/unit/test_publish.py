@@ -11,14 +11,9 @@ import pytest
 from harness_compat.contract import Check, Result
 from harness_compat.diagnostics import exception_detail
 from harness_compat.git import git
+from harness_compat.github.publish import file_issues, issue_body, issue_title, publish
 from harness_compat.policy import PolicyChangeError, load_policy, write_policy
-from harness_compat.publish import (
-    file_issues,
-    issue_body,
-    issue_title,
-    publish,
-)
-from harness_compat.run import Run
+from harness_compat.qualification.run import Run
 from harness_compat.support.compat_github import POLICY_PATH, CompatGithub, assert_gh_flags
 from theater.harness.contracts.version_policy import VersionPolicy
 

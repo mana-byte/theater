@@ -36,11 +36,11 @@ from harness_compat.contract import (
     MockReply,
     RecordedRequest,
 )
-from harness_compat.framework import python_path
-from harness_compat.mock import MockServer
-from harness_compat.process import RUN_ENV, SANDBOX_ENV
-from harness_compat.provisioning import CompatManifest, ProvisionContext, Provisioned
-from harness_compat.sandbox import sandbox_environment
+from harness_compat.mock.provisioning import CompatManifest, ProvisionContext, Provisioned
+from harness_compat.mock.server import MockServer
+from harness_compat.qualification.framework import python_path
+from harness_compat.qualification.process import RUN_ENV, SANDBOX_ENV
+from harness_compat.qualification.sandbox import sandbox_environment
 from harness_compat.support import mutations
 from harness_compat.support.live_stack import BOOT_SECONDS, Stack
 from tests.support.paths import REPO_ROOT

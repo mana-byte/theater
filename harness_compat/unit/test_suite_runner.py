@@ -15,8 +15,8 @@ from harness_compat.contract import (
     SuiteDocumentError,
     SuiteRow,
 )
-from harness_compat.sandbox import make_sandbox
-from harness_compat.suite_runner import _load, reconcile, suite_environment, verdict
+from harness_compat.qualification.sandbox import make_sandbox
+from harness_compat.qualification.suite_runner import _load, reconcile, suite_environment, verdict
 
 SUITE = Check("harness_compat/conformance/live", "pass", "10 passed")
 

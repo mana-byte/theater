@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from .contract import Result
-from .diagnostics import FAILURE_DETAIL_CHARS, clip_diagnostic
-from .run import Run
+from ..contract import Result
+from ..diagnostics import FAILURE_DETAIL_CHARS, clip_diagnostic
+from ..qualification.run import Run
 
 _DETAIL_LIMIT = 160
 #: Frame the ledger so a reader of a raw log, or the workflow's failures job, can cut it out whole.

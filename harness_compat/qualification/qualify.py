@@ -8,11 +8,11 @@ from pathlib import Path
 
 from theater.version_policy import version_key
 
+from ..contract import Adapter, Check, InstallFailed, Result, Sandbox
+from ..diagnostics import clip_diagnostic, exception_detail
+from ..policy import admit_only, load_policy
 from .cleanup import CleanupFailed
 from .codecopy import code_copy
-from .contract import Adapter, Check, InstallFailed, Result, Sandbox
-from .diagnostics import clip_diagnostic, exception_detail
-from .policy import admit_only, load_policy
 from .sandbox import make_sandbox
 from .suite_runner import installed_version, run_suite, verdict
 

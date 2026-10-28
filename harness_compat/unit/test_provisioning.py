@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from harness_compat.provisioning import (
+from harness_compat.mock.provisioning import (
     TOOL_NAME_MAX_CHARS,
     TOOL_PAYLOAD_MAX_CHARS,
     CompatManifest,

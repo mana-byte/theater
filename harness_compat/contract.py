@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
-    from .provisioning import CompatManifest
+    from .mock.provisioning import CompatManifest
 
 #: red records a contract assertion failure; inconclusive/tooling do not establish a binary defect.
 Verdict = Literal["green", "red", "inconclusive", "tooling"]

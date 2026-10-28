@@ -11,8 +11,8 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .contract import Check, CheckStatus
-from .diagnostics import clean_diagnostic, clip_diagnostic
+from ..contract import Check, CheckStatus
+from ..diagnostics import clean_diagnostic, clip_diagnostic
 from .process import run_group
 
 _DETAIL_LIMIT = 600

@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from harness_compat import attention
-from harness_compat.codecopy import code_copy
 from harness_compat.git import git
-from harness_compat.run import Run
+from harness_compat.github import attention
+from harness_compat.qualification.codecopy import code_copy
+from harness_compat.qualification.run import Run
 from harness_compat.support.compat_github import assert_gh_flags
 from tests.support.paths import REPO_ROOT
 

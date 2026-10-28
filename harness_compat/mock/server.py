@@ -16,7 +16,7 @@ from types import TracebackType
 from typing import Any
 from urllib.parse import urlsplit
 
-from .contract import (
+from ..contract import (
     MOCK_REPLY,
     Hold,
     MockProtocol,

@@ -14,7 +14,7 @@ from harness_compat.contract import (
     SUITE_ENV_VERSION,
     SuiteDocument,
 )
-from harness_compat.process import SANDBOX_ENV
+from harness_compat.qualification.process import SANDBOX_ENV
 from tests.support.paths import REPO_ROOT
 
 pytest_plugins = ["pytester"]

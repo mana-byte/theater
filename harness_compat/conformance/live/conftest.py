@@ -18,7 +18,7 @@ import pytest
 from harness_compat.adapters import load_adapter
 from harness_compat.contract import SuiteDocument, SuiteRow
 from harness_compat.diagnostics import FAILURE_DETAIL_CHARS
-from harness_compat.process import SANDBOX_ENV
+from harness_compat.qualification.process import SANDBOX_ENV
 from harness_compat.support.live_rig import LiveRig, LiveSession, assert_isolated, evidence_dir_for
 from harness_compat.support.log_excerpt import log_excerpt
 from harness_compat.support.obligations import (

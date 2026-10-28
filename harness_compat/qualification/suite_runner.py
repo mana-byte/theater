@@ -17,7 +17,7 @@ from pathlib import Path
 
 from theater.version_policy import version_key
 
-from .contract import (
+from ..contract import (
     SUITE_ENV_BINARY,
     SUITE_ENV_EVIDENCE_DIR,
     SUITE_ENV_HARNESS,
@@ -31,7 +31,7 @@ from .contract import (
     SuiteRow,
     Verdict,
 )
-from .diagnostics import FAILURE_DETAIL_CHARS, clip_diagnostic
+from ..diagnostics import FAILURE_DETAIL_CHARS, clip_diagnostic
 from .framework import run_pytest
 from .process import run_group
 from .sandbox import make_sandbox

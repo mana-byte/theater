@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 
-from ..provisioning import CompatManifest, McpDiscovery, NativeEdit, ProvisionContext, Provisioned
+from ..mock.provisioning import (
+    CompatManifest,
+    McpDiscovery,
+    NativeEdit,
+    ProvisionContext,
+    Provisioned,
+)
 from ._npm import NpmAdapter
 
 _DEFAULT_MODELS = ("mock-a", "mock-b")

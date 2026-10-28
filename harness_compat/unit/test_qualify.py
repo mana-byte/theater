@@ -12,14 +12,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from harness_compat import qualify
-from harness_compat.cleanup import CleanupFailed
-from harness_compat.codecopy import UnsafeCopy, code_copy
 from harness_compat.contract import Check, InstallFailed, Sandbox
 from harness_compat.policy import load_policy
-from harness_compat.run import run_harness
-from harness_compat.sandbox import make_sandbox
-from harness_compat.suite_runner import SuiteReport, run_suite, verdict
+from harness_compat.qualification import qualify
+from harness_compat.qualification.cleanup import CleanupFailed
+from harness_compat.qualification.codecopy import UnsafeCopy, code_copy
+from harness_compat.qualification.run import run_harness
+from harness_compat.qualification.sandbox import make_sandbox
+from harness_compat.qualification.suite_runner import SuiteReport, run_suite, verdict
 from theater.harness.contracts.version_policy import VersionPolicy
 
 Git = Callable[..., str]

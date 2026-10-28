@@ -14,10 +14,10 @@ from typing import Any
 
 from theater.version_policy import VersionPolicy, version_key
 
-from . import git
-from .contract import Result
-from .diagnostics import FAILURE_DETAIL_CHARS
-from .policy import (
+from .. import git
+from ..contract import Result
+from ..diagnostics import FAILURE_DETAIL_CHARS
+from ..policy import (
     PolicyChangeError,
     PublicationPlan,
     check_change,
@@ -27,7 +27,7 @@ from .policy import (
     plan_publication,
     policy_relative,
 )
-from .run import Run
+from ..qualification.run import Run
 from .summary import failing_checks
 
 Gh = Callable[..., str]
