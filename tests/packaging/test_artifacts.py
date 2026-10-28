@@ -73,6 +73,8 @@ def _assert_theater_contents(artifacts: Iterable[Path]) -> None:
             "theater/frontend/schemas/methods.json",
             "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts",
             "theater/harness/builtin/plugins/pi/pi_startup_filter.cjs",
+            "theater/harness/builtin/plugins/opencode/assets/native_plugin.js",
+            "theater/harness/builtin/plugins/opencode/assets/tui_recovery.js",
             "theater/pricing/model_prices.json",
             "theater/mcp_plugins/builtin/beads/skills/hierarchy/PLAY.toml",
             "theater/skills/builtin/pair/PLAY.toml",

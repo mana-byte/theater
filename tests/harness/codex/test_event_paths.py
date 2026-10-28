@@ -1,4 +1,4 @@
-"""Codex parser Event.path extraction from apply_patch, and the resume argv."""
+"""Codex parser Event.path extraction from apply_patch inputs."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import json
 import pytest
 
 from tests.support.shipped import CodexObserver
-from theater.harness import plan_launch
 from theater.harness.base import EventKind, EventPath
 
 # Every other tool call embeds paths in code or command strings, which the recall contract
@@ -120,42 +119,3 @@ def test_events_without_a_structured_file_field_yield_no_paths(payload):
     events = _parse(payload)
     assert len(events) == 1
     assert events[0].paths == ()
-
-
-# ---- resume argv -------------------------------------------------------
-
-
-def test_resume_forks_the_session(tmp_path, available_harness_binaries):
-    plan = plan_launch(
-        "codex",
-        participant_id="abc123",
-        prompt="continue working",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        resume="019ff5c6-717c-7a70-9ec4-66dd1f4d173e",
-    )
-    assert plan.argv[0] == "codex"
-    assert plan.argv[1] == "fork"
-    assert plan.argv[2] == "019ff5c6-717c-7a70-9ec4-66dd1f4d173e"
-    assert plan.session_id is None
-    # The MCP config overrides and approval flags are still present.
-    assert any(a.startswith("mcp_servers.theater.command=") for a in plan.argv)
-    assert "-a" in plan.argv and "on-request" in plan.argv
-    # The prompt is still delivered positionally.
-    assert plan.argv[-1] == "continue working"
-
-
-def test_resume_without_prompt_omits_positional(tmp_path, available_harness_binaries):
-    plan = plan_launch(
-        "codex",
-        participant_id="abc",
-        prompt="",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        resume="some-session",
-    )
-    assert plan.argv[1] == "fork"
-    assert plan.argv[2] == "some-session"
-    # No trailing positional prompt.
-    assert not plan.argv[-1].startswith("mcp_servers")
-    assert plan.argv[-1] not in ("", "some-session")

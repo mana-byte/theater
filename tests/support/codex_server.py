@@ -31,8 +31,8 @@ CWD = "/repo"
 GENERATION = 7
 
 
-# Release the fake backend reports: the current installed baseline.
-CAPTURED_CODEX_RELEASE = VERSION_POLICY.minimum
+# Release the scripted backend reports: always the qualified floor, never a capture of one.
+SCRIPTED_CODEX_RELEASE = VERSION_POLICY.minimum
 
 
 class RequestFailure(Exception):
@@ -85,7 +85,7 @@ class ScriptedCodexServer:
         if method == "initialize":
             return {
                 "userAgent": (
-                    f"theater/{CAPTURED_CODEX_RELEASE} (macos; arm64) xterm (theater; 1.0)"
+                    f"theater/{SCRIPTED_CODEX_RELEASE} (macos; arm64) xterm (theater; 1.0)"
                 ),
                 "codexHome": "/isolated/codex-home",
                 "platformFamily": "unix",
@@ -145,7 +145,7 @@ class ScriptedCodexConnection(RuntimeConnection):
                 and "initialTurnsPage" not in result
                 and isinstance(result.get("thread"), Mapping)
             ):
-                # Mirror stock 0.154: full turns and initialTurnsPage are separate fields.
+                # Mirror the stock CLI: full turns and initialTurnsPage are separate fields.
                 thread = dict(result["thread"])
                 turns = thread.get("turns", [])
                 page = list(reversed(turns[-2:])) if isinstance(turns, list) else []
@@ -223,7 +223,7 @@ def thread_started(
                 "id": thread_id,
                 "cwd": cwd,
                 "ephemeral": ephemeral,
-                "cliVersion": CAPTURED_CODEX_RELEASE,
+                "cliVersion": SCRIPTED_CODEX_RELEASE,
                 "status": {"type": status},
             }
         },

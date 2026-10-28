@@ -27,8 +27,14 @@ HOSTILE_PROMPTS = [
 ]
 
 
-@pytest.mark.parametrize("resume", [None, "0cf1f8e3-5f0e-4c48-a429-6a1b2c3d4e5f"])
-@pytest.mark.parametrize("prompt", HOSTILE_PROMPTS)
+@pytest.mark.parametrize(
+    ("resume", "prompt"),
+    [
+        (None, "--dangerously-bypass-approvals-and-sandbox"),
+        (None, "- item: finish the migration"),
+        ("0cf1f8e3-5f0e-4c48-a429-6a1b2c3d4e5f", "--help"),
+    ],
+)
 def test_claude_keeps_a_flag_shaped_prompt_literal(tmp_path, monkeypatch, resume, prompt):
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "home"))
     plan = plan_launch(

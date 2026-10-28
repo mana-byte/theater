@@ -369,7 +369,7 @@ def test_runtime_binding_binds_generation_not_cwd() -> None:
 
 
 def test_runtime_compatibility_policy_is_bounded_name() -> None:
-    assert RuntimeCompatibility(supported=True, policy="codex-0.154-verified").supported
+    assert RuntimeCompatibility(supported=True, policy="codex-99.0.0-verified").supported
     with pytest.raises(ValueError, match="policy"):
         RuntimeCompatibility(supported=True, policy="not a name!")
 

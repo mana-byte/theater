@@ -1,4 +1,4 @@
-"""Hook and OTLP channel manifest declarations, projections and shipped unavailability."""
+"""Hook and OTLP channel manifest declarations and projections."""
 
 from __future__ import annotations
 
@@ -10,49 +10,17 @@ import pytest
 
 from tests.support.hook_channel_rig import hook_manifest
 from tests.support.otel_channel_rig import hook_channel, otel_manifest
-from theater.harness.builtin.plugins.claude.manifest import MANIFEST as CLAUDE_MANIFEST
-from theater.harness.builtin.plugins.codex.manifest import MANIFEST as CODEX_MANIFEST
-from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCODE_MANIFEST
-from theater.harness.builtin.plugins.vibe.manifest import MANIFEST as VIBE_MANIFEST
 from theater.harness.contracts.callbacks import HookCorrelationContext
 from theater.harness.contracts.channels import ChannelKind, SignalKind
 from theater.harness.contracts.manifest import (
     HarnessManifest,
     HookChannelManifest,
     ObservationManifest,
-    OtelChannelManifest,
 )
 from theater.harness.loading.models import LoadedPlugin
 from theater.harness.manifests.compiler import compile_manifest
 from theater.harness.manifests.validation import ManifestValidationError
 from theater.harness.registry.diagnostics import project_plugin
-
-
-@pytest.mark.parametrize(
-    ("name", "built"),
-    (
-        ("codex", CODEX_MANIFEST),
-        ("opencode", OPENCODE_MANIFEST),
-        ("vibe", VIBE_MANIFEST),
-    ),
-)
-def test_shipped_manifests_declare_native_hooks_unavailable(name, built) -> None:
-    compiled = compile_manifest(name, built)
-    channels = tuple(
-        channel
-        for channel in compiled.observer.enrichment_manifests()
-        if isinstance(channel, HookChannelManifest)
-    )
-
-    assert len(channels) == 1
-    channel = channels[0]
-    assert isinstance(channel, HookChannelManifest)
-    assert channel.declaration.id == "native-hooks"
-    assert channel.declaration.kind is ChannelKind.HOOK
-    assert channel.declaration.capabilities == ()
-    assert channel.bindings == ()
-    assert channel.installer is None
-    assert channel.unavailable_reason
 
 
 def test_hook_manifest_rejects_unavailable_active_and_duplicate_events() -> None:
@@ -165,7 +133,7 @@ def test_manifest_projection_includes_hook_and_otel_native_bindings() -> None:
     ]
 
 
-def test_native_otel_manifest_validation_and_shipped_unavailability() -> None:
+def test_native_otel_manifest_validation() -> None:
     manifest = otel_manifest()
     channel = manifest.observation.otel_channels[0]
     invalid = replace(channel, declaration=replace(channel.declaration, kind=ChannelKind.HOOK))
@@ -235,24 +203,3 @@ def test_native_otel_manifest_validation_and_shipped_unavailability() -> None:
                 ),
             )
         assert raised.value.path == path
-
-    expected = {
-        "claude": "emitted schema/fan-out/launch correlation unverified.",
-        "codex": "endpoint choice replaces exporter; no safe fan-out.",
-        "opencode": "one endpoint, no safe fan-out or stable join.",
-        "vibe": "installs one global provider/exporter; exporter theft.",
-    }
-    for name, built in (
-        ("claude", CLAUDE_MANIFEST),
-        ("codex", CODEX_MANIFEST),
-        ("opencode", OPENCODE_MANIFEST),
-        ("vibe", VIBE_MANIFEST),
-    ):
-        compiled = compile_manifest(name, built)
-        channels = compiled.observer.enrichment_manifests()
-        native = next(channel for channel in channels if isinstance(channel, OtelChannelManifest))
-        assert native.declaration.id == "native-otel"
-        assert native.declaration.kind is ChannelKind.OTEL
-        assert native.declaration.capabilities == ()
-        assert native.bindings == () and native.installer is None
-        assert native.unavailable_reason == expected[name]

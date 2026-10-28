@@ -1228,9 +1228,10 @@ class FrontendBridge {
 		let source: FrontendRunSource = "unknown";
 		try {
 			const entries = current.ctx.sessionManager.getEntries();
-			// Pi 0.86.0+ persists transcript-backed system messages (the
-			// session's prompt and later prompt patches) before the trigger
-			// entry; skip them while the chain stays rooted at the prior leaf.
+			// Newer Pi releases persist transcript-backed system messages
+			// (the session's prompt and later prompt patches) before the
+			// trigger entry; skip them while the chain stays rooted at the
+			// prior leaf.
 			type Entry = {
 				id?: unknown;
 				parentId?: unknown;

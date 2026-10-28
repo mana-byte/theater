@@ -173,25 +173,36 @@ def test_enabling_mcp_rendering_adds_the_mcp_obligations() -> None:
     assert added == {"mcp:gated", "mcp:call", "mcp:refusal"}
 
 
+@pytest.mark.parametrize("models", [(), ("mock-a", "mock-b")], ids=["fallback", "served"])
 @pytest.mark.parametrize("name", SHIPPED)
 def test_a_provisioning_plugin_offers_what_its_declared_capabilities_need(
-    name: str, tmp_path: Path
+    name: str, tmp_path: Path, models: tuple[str, ...]
 ) -> None:
     harness = HARNESSES[name]
     if harness.compat is None:
         pytest.skip(f"{name} declares no compat manifest yet")
+    work = tmp_path / "work"
+    work.mkdir()
+    link = tmp_path / "link"
+    # An explicit symlink: Linux CI tmp is not one, so a missing resolve() is invisible without it.
+    link.symlink_to(work)
+    home = tmp_path / "home"
     context = ProvisionContext(
         sandbox_root=tmp_path,
-        home=tmp_path / "home",
-        config_dir=tmp_path / "home" / ".config",
-        workdir=tmp_path / "work",
+        home=home,
+        config_dir=home / ".config",
+        workdir=link,
         mock_urls={protocol: f"http://127.0.0.1:1/{protocol}" for protocol in COMPAT_PROTOCOLS},
         binary=tmp_path / name,
         version="1.2.3",
-        models=("mock-a", "mock-b"),
+        models=models,
     )
 
+    sandbox = set(tmp_path.rglob("*"))
     provisioned = harness.compat.provision(context)
+    assert set(tmp_path.rglob("*")) == sandbox, (
+        "provisioning declares files; it writes nothing itself"
+    )
 
     support = harness.launch_parameter_support
     assert provisioned.protocol in COMPAT_PROTOCOLS
@@ -199,8 +210,14 @@ def test_a_provisioning_plugin_offers_what_its_declared_capabilities_need(
     assert not support.reasoning_effort or len(provisioned.efforts) >= 2, (
         "effort selection needs two efforts"
     )
-    assert all(path.is_relative_to(tmp_path) for path in provisioned.files), (
-        "provisioning writes only inside the sandbox"
+    # Resolve both sides: a lexical check lets a '..' segment or a symlink escape.
+    allowed = (home.resolve(), work.resolve())
+    assert all(
+        any(path.resolve().is_relative_to(root) for root in allowed) for path in provisioned.files
+    ), "provisioning writes only inside the given home or workdir"
+    mentions = [*(str(path) for path in provisioned.files), *provisioned.files.values()]
+    assert all(str(link) not in mention for mention in mentions), (
+        "a file naming the workdir must use its resolved path"
     )
 
 

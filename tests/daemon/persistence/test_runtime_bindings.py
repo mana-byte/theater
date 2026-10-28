@@ -56,9 +56,9 @@ def test_identity_persists_before_initial_dispatch(store: Store) -> None:
             backend_generation=1,
             native_session_id="thread-1",
             protocol="websocket-jsonrpc",
-            protocol_version="0.154.0",
-            native_version="0.154.0",
-            compatibility_policy="codex-0.154-verified",
+            protocol_version="0.0.1",
+            native_version="0.0.1",
+            compatibility_policy="codex-verified",
             updated_at=120.0,
             connection=conn,
         )
