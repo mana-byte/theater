@@ -10,10 +10,6 @@ from theater.harness.builtin.plugins.opencode import (
     tui_recovery,
 )
 
-# shortcut: the pinned tui.js bytes outlive the deleted byte-detectors until the
-# TUI-recovery ledger PR reworks that rendering
-_DIGESTS = {"tui.js": "ffbf3da0e4f393c3901d8126c79ceeda7aff7e87bbfe87e29979687878c42e2f"}
-
 
 def test_native_settings_are_not_reexpanded() -> None:
     rendered = native_plugin.render_native_plugin(
