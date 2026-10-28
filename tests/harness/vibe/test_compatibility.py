@@ -12,27 +12,18 @@ from theater.harness.builtin.plugins.vibe.compatibility import (
     vibe_qualified_range_text,
 )
 from theater.harness.contracts.runtime import RuntimeProbeContext
-from theater.harness.contracts.version_policy import version_key
 
-
-def _version(parts: tuple[int, int, int]) -> str:
-    return ".".join(map(str, parts))
-
-
-_MINIMUM = version_key(VERSION_POLICY.minimum)
-_BELOW = (0, 0, 1)
 _REFUSAL = f"Vibe harness support requires {vibe_qualified_range_text()}"
 
 
 @pytest.mark.parametrize(
-    ("sample", "supported", "reason"),
+    ("version", "supported", "reason"),
     [
-        (_BELOW, False, _REFUSAL),
-        (_MINIMUM, True, None),
+        ("0.0.1", False, _REFUSAL),
+        (VERSION_POLICY.minimum, True, None),
     ],
 )
-def test_vibe_version_parse_table(sample, supported, reason, monkeypatch):
-    version = _version(sample)
+def test_vibe_version_parse_table(version, supported, reason, monkeypatch):
     monkeypatch.setattr(
         "theater.harness.builtin.plugins.vibe.compatibility.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=f"vibe {version}"),

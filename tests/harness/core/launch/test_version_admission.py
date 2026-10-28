@@ -24,22 +24,20 @@ def _refused_releases():
         maximum = version_key(policy.maximum)
         versions = [
             # A neutral below-floor release: never derived from the moving minimum.
-            ("below-floor", "0.0.1", re.escape(policy.range_text)),
-            (
-                "above-maximum",
-                ".".join(map(str, (*maximum[:2], maximum[2] + 1))),
-                re.escape(policy.range_text),
-            ),
+            ("below-floor", "0.0.1"),
+            ("above-maximum", ".".join(map(str, (*maximum[:2], maximum[2] + 1)))),
             # A prerelease banner is refused as unstable, never as out of range.
-            ("prerelease", f"{policy.minimum}-beta", r"stable|usable"),
-            *(
-                (f"excluded-{version}", version, re.escape(policy.range_text))
-                for version in policy.excluded
-            ),
+            ("prerelease", f"{policy.minimum}-beta"),
+            *((f"excluded-{version}", version) for version in policy.excluded),
         ]
         cases.extend(
-            pytest.param(name, version, expected, id=f"{name}-{label}")
-            for label, version, expected in versions
+            pytest.param(
+                name,
+                version,
+                r"stable|usable" if label == "prerelease" else re.escape(policy.range_text),
+                id=f"{name}-{label}",
+            )
+            for label, version in versions
         )
     return cases
 
@@ -70,7 +68,5 @@ def test_unqualified_cli_is_refused_on_every_provider_launch(
     context = LaunchContext(
         "participant", "hello", tmp_path / "mcp.json", "manual", binary=str(binary)
     )
-    with pytest.raises(BadRequest) as excinfo:
+    with pytest.raises(BadRequest, match=expected):
         planner(context)
-    # Pin the reason so an unrelated approval error can never satisfy a row.
-    assert re.search(expected, str(excinfo.value))
