@@ -38,5 +38,7 @@ async def _launches_with_an_initial_prompt(live) -> None:
     job = await live.job(participant)
 
     assert job.state == "done", job.error
+    # A rescued job is done with salvaged interim text; only a seen turn end finishes cleanly.
+    assert job.error is None, job.error
     assert nonce in str(job.result)
     assert len(live.turns(prompt)) == 1
