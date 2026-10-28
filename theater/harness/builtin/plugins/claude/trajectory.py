@@ -507,10 +507,12 @@ class ClaudeTrajectory:
             usage: TrajectoryUsage | None = None,
             failure: TrajectoryFailure | None = None,
             details: Sequence[DetailField] = (),
+            revision: int | None = None,
         ) -> None:
             facts.append(
                 _claude_build(
                     kind=kind,
+                    revision=revision if revision is not None else 0,
                     summary=_safe_trajectory_text(summary),
                     status=status,
                     lane_override=lane,
