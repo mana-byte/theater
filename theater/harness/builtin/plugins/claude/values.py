@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from theater.harness.normalization.values import revision_from
 from theater.harness.normalization.values import (
     trajectory_identifier as _trajectory_id,
 )
@@ -17,12 +16,6 @@ def _claude_mcp_identity(value: object) -> tuple[str, str] | None:
     server_id = _trajectory_id(server)
     tool_id = _trajectory_id(tool)
     return (server_id, tool_id) if server_id is not None and tool_id is not None else None
-
-
-def _claude_revision(record: dict) -> int:
-    message = record.get("message")
-    values = [record, message] if isinstance(message, dict) else [record]
-    return revision_from(*values)
 
 
 def _claude_block_native_id(

@@ -55,7 +55,6 @@ from .usage import _claude_trajectory_usage
 from .values import (
     _claude_block_native_id,
     _claude_mcp_identity,
-    _claude_revision,
 )
 
 _claude_build = fact_builder(source="claude", identifier=_trajectory_id)
@@ -508,7 +507,6 @@ class ClaudeTrajectory:
             usage: TrajectoryUsage | None = None,
             failure: TrajectoryFailure | None = None,
             details: Sequence[DetailField] = (),
-            revision: int | None = None,
         ) -> None:
             facts.append(
                 _claude_build(
@@ -517,7 +515,6 @@ class ClaudeTrajectory:
                     status=status,
                     lane_override=lane,
                     native_id=native_id,
-                    revision=revision if revision is not None else _claude_revision(record),
                     raw_index=index,
                     event_ordinal=len(facts),
                     turn_id=turn,

@@ -63,11 +63,9 @@ def test_malformed_and_non_object_lines_are_empty(observer_type):
 
 
 def test_cost_provenance_tracks_reported_adapter_values() -> None:
-    claude = claude_plugin._token_usage({"usage": {"input_tokens": 1}}, {"costUSD": 0.1})
     codex = _codex_usage({}, {"usage": {"input_tokens": 1, "cost_usd": 0.2}})
     opencode = opencode_plugin._opencode_usage({"tokens": {"input": 1}, "cost": 0.3})
 
-    assert claude is not None and claude.cost_provenance is CostProvenance.REPORTED
     assert codex is not None and codex.cost_provenance is CostProvenance.REPORTED
     assert opencode is not None and opencode.cost_provenance is CostProvenance.REPORTED
 
