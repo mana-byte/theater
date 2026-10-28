@@ -248,9 +248,7 @@ def pr_body(
     return (
         f"{harness} policy: `{old.range_text}` to `{proposal.range_text}`\n\n"
         f"Floor: newest {max_range} releases in range (max-range={max_range}); the Nix full "
-        "profile may ship older CLIs until flake.lock is bumped.\n"
-        "Code only the releases below the new floor needed is deleted afterwards: see "
-        "docs/harness-compat.md (After a floor raise).\n\n"
+        "profile may ship older CLIs until flake.lock is bumped.\n\n"
         f"Run: {run_url}\n"
         + ("\nExcluded versions:\n" + "\n".join(exclusions) + "\n" if exclusions else "")
         + ("\nRelated version issues:\n" + "\n".join(related) + "\n" if related else "")

@@ -76,10 +76,10 @@ fresh container; the default-server proof creates and destroys that container's 
   CLI releases that passed qualification. Fixtures are synthetic: a capture is stamped with a
   release that leaves the window within days.
 - A test never names a CLI release inside or below a plugin's window and never computes "one below
-  the floor" from a version digit (a minimum of 1.0.0 has no 1.0.-1). Use `VERSION_POLICY.minimum`
-  and `maximum` as they are, a neutral extreme (`0.0.1`, `99.0.0`) or the maximum's next patch;
-  the boundaries are proven once, in `tests/harness/core/test_version_policy.py`. The release that
-  exposed a bug belongs in the commit message.
+  the floor" from a version digit. Use `VERSION_POLICY.minimum` and `maximum` as they are, a neutral
+  extreme (`0.0.1`, `99.0.0`) or the maximum's next patch; the boundaries are proven once, in
+  `tests/harness/core/test_version_policy.py`. The release that exposed a bug belongs in the
+  commit message.
 - Every module opens with a one-line docstring stating its subject.
 
 ## The live conformance suite

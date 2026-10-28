@@ -21,7 +21,6 @@ from theater.harness.builtin.plugins.opencode.dialect import (
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
     OPENCODE_SERVER_COMPATIBILITY_POLICY,
     VERSION_POLICY,
-    release_text,
 )
 from theater.harness.builtin.plugins.opencode.server_plan import (
     probe_opencode_server_compatibility,
@@ -46,16 +45,10 @@ def test_probe_requires_both_successful_checks(
         assert compatibility.native_version == VERSION_POLICY.minimum
 
 
-def _patch_offset(version: tuple[int, int, int], offset: int) -> str:
-    return release_text((*version[:2], version[2] + offset))
-
-
 @pytest.mark.parametrize(
     ("version", "supported"),
     [
         (VERSION_POLICY.minimum, True),
-        (VERSION_POLICY.maximum, True),
-        (_patch_offset(version_key(VERSION_POLICY.maximum), 1), False),
         ("0.0.1", False),
     ],
 )

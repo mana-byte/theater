@@ -147,12 +147,11 @@ needs it.
 
 A raise ships in a routine ceiling PR: one JSON line, nothing else. Whatever only the releases below
 the new min needed is deleted afterwards, in a separate code PR kept inside `plugins/<harness>/` and
-`tests/harness/<harness>/` so that only that harness's shards run. Each row dies together with its
-code; add a row when code is written for specific releases. Run `nix flake update nixpkgs-tools`
-when the Nix full profile matters.
+`tests/harness/<harness>/` so that only that harness's shards run. Add a row when code is written
+for specific releases; the row dies with its code.
 
 | Dies when min ≥ | Harness | Shape | Delete |
 | --- | --- | --- | --- |
 | 2.0.19 | opencode | `--prompt` races a cold server on a new session | `launch.py` `_open_new_session` and `_CREATE_THEN_EXEC`, the `test_launch_plan.py` tests that pin them; after a live launch with an initial prompt passes on the new window |
 | 2.0.21 | opencode | OpenTUI viewport clipping | `tui_recovery.py`, `assets/tui_recovery.js`, the `tui.js` entry in `native_plugin.py`, their tests and the note above |
-| 2.2.0 | opencode | plugin source is `server.js` (2.1.4 and older) | the `server.js` arm of `classify_plugin_state` and its fixtures |
+| 2.2.0 | opencode | plugin source is `server.js` (2.1.4 and older) | the `generated` file member of the source-path set in `classify_plugin_state` (`approval.py`) and its fixtures |

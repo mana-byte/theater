@@ -10,8 +10,7 @@ from .. import github
 from ..contract import InstallFailed, Sandbox
 from ..process import run_group
 
-#: Qualification must not depend on the runner's default interpreter (3.0.0 required `>=3.14`;
-#: later releases declare `>=3.12`).
+#: Pinned so qualification does not depend on the runner's default interpreter.
 _PYTHON = "3.14"
 
 
