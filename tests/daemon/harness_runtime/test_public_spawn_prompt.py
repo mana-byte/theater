@@ -210,13 +210,14 @@ async def test_refused_structured_spawn_keeps_contract_and_wakes_the_current_wai
     notified: list[str] = []
     d.jobs.add_terminal_listener(notified.append)
     about_to_send = asyncio.Event()
+    release_send = asyncio.Event()
     real_send = d.spawner.controls.send
     captured: dict[str, str] = {}
 
     async def gated_send(pid, **kwargs):
         captured.setdefault("pid", pid)
         about_to_send.set()
-        await asyncio.sleep(0)
+        await release_send.wait()
         return await real_send(pid, **kwargs)
 
     d.spawner.controls.send = gated_send
@@ -237,11 +238,16 @@ async def test_refused_structured_spawn_keeps_contract_and_wakes_the_current_wai
         )
         await asyncio.wait_for(about_to_send.wait(), timeout=10)
         pid = captured["pid"]
-        # A waiter registered before the refusal must wake on the crash
-        # itself; wait_for only bounds a hang, not the expected wake.
+        # The send stays gated shut, so the job is still RUNNING: one yield
+        # parks await_jobs on the job's event, and not-done proves it is
+        # waiting on the event itself, not short-circuiting on a terminal job.
         waiter = asyncio.create_task(d.jobs.await_jobs([pid], max_wait=30))
         await asyncio.sleep(0)
+        assert not waiter.done()
+        release_send.set()
         await spawn_task
+        # The parked waiter must wake on the crash itself; wait_for only
+        # bounds a hang, not the expected wake.
         (job,) = await asyncio.wait_for(waiter, timeout=5)
         spawned.append(pid)
 

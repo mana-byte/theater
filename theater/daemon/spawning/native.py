@@ -199,10 +199,16 @@ async def _launch_native_sequence(
         operation_id=None if reservation.provider is None else reservation.provider.operation_id,
     )
 
-    if spawner.runtime_manager is None or spawner.controls is None or spawner.runtime_io is None:
+    if (
+        spawner.runtime_manager is None
+        or spawner.controls is None
+        or spawner.runtime_io is None
+        or spawner.jobs is None
+    ):
         raise BadRequest(
             f"native wiring for {pid!r} requires the daemon runtime manager, "
-            "I/O, and control service; this spawner was composed without them"
+            "I/O, control service, and job manager; this spawner was composed "
+            "without them"
         )
 
     # ---- 2. detached backend ------------------------------------------
@@ -580,24 +586,18 @@ def _crash_undelivered_spawn_job(spawner, store, pid: str, exc: Exception) -> No
     operation means transmission may have begun, and its receipt, evidence and
     reconciliation machinery own every later outcome. The canonical
     ``JobManager.finish`` preserves the response contract and wakes awaiters
-    and terminal listeners; the bare store write is only the fallback for a
-    spawner composed without a JobManager.
+    and terminal listeners.
     """
     job = store.get_job(pid)
     if job is None or job.state != JobState.RUNNING:
         return
     if store.control_operations_for_job(pid):
         return
-    error_code = getattr(exc, "code", None) or "dispatch_failed"
-    if spawner.jobs is not None:
-        spawner.jobs.finish(pid, state=JobState.CRASHED, result=str(exc), error_code=error_code)
-        return
-    store.finish_job(
+    spawner.jobs.finish(
         pid,
         state=JobState.CRASHED,
         result=str(exc),
-        error_code=error_code,
-        finished_at=now(),
+        error_code=getattr(exc, "code", None) or "dispatch_failed",
     )
 
 
