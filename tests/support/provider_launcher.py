@@ -86,8 +86,6 @@ async def provider_process(
         "TMUX": "/private/tmp/tmux-501/default,123,0",
         "TMUX_PANE": "%99",
         "TMUX_TMPDIR": "/private/tmp",
-        "CLAUDE_CODE_MESSAGING_SOCKET": "/control/claude.sock",
-        "CLAUDE_CODE_MESSAGING_TOKEN": "control-token",
     }
     inherited.pop("PYTHONHOME", None)
     inherited.pop("PYTHONPATH", None)

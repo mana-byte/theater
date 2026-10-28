@@ -45,12 +45,9 @@ _CONTROL_ENVIRONMENT = frozenset(
         "PYTHONHOME",
         "PYTHONPATH",
         "THEATER_ID",
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
         "OPENCODE_CONFIG",
         "OPENCODE_DB",
         "OPENCODE_SERVER_PASSWORD",
-        "OPENCODE_TUI_CONFIG",
         "VIBE_MCP_SERVERS",
     }
 )
@@ -646,9 +643,7 @@ def isolated_environment(base: Mapping[str, str], root: Path) -> dict[str, str]:
     environment = {
         name: value
         for name, value in base.items()
-        if name not in _CONTROL_ENVIRONMENT
-        and not name.startswith("THEATER_")
-        and not name.startswith("CLAUDE_CODE_MESSAGING_")
+        if name not in _CONTROL_ENVIRONMENT and not name.startswith("THEATER_")
     }
     theater_home = root / "theater"
     tmux_root = root / "tmux"

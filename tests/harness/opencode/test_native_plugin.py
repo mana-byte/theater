@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-import secrets
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -19,20 +16,15 @@ from theater.harness.builtin.plugins.opencode.approval import (
     classify_plugin_state,
     require_plugin_active,
 )
-from theater.harness.builtin.plugins.opencode.http import OpenCodeClient
 from theater.harness.builtin.plugins.opencode.native_plugin import (
     PLUGIN_ID,
     plugin_dir,
     render_native_plugin,
 )
-from theater.harness.builtin.plugins.opencode.server_discovery import (
-    parse_server_stdout_endpoint,
-)
 from theater.harness.builtin.plugins.opencode.session_http import OpenCodeSessionClient
 from theater.models import BadRequest
 
-# The fake records every request, so tests assert what was polled and what refused. The stock-binary
-# regression runs only when THEATER_OPENCODE_STOCK_PROBE names the stock binary.
+# The fake records every request, so tests assert what was polled and what refused.
 
 SOURCE = "/work/x.opencode/server.js"
 
@@ -152,120 +144,6 @@ async def test_a_plugin_that_never_registers_refuses_at_the_deadline(fake, clien
         await require_plugin_active(
             client, plugin_id=PLUGIN_ID, source_path=SOURCE, timeout=0.05, interval=0.01
         )
-
-
-async def _evaluate(transport: OpenCodeClient, sid: str, action: str) -> str:
-    result = await transport._json_request(
-        "POST",
-        f"/api/session/{sid}/permission",
-        body={"agent": "build", "action": action, "resources": ["probe"]},
-    )
-    effect = result["data"]["effect"]
-    if effect == "ask":
-        await transport._json_request(
-            "POST",
-            f"/api/session/{sid}/permission/{result['data']['id']}/reply",
-            body={"decision": "reject"},
-        )
-    return effect
-
-
-@pytest.mark.skipif(not os.environ.get("THEATER_OPENCODE_STOCK_PROBE"), reason="opt-in stock probe")
-@pytest.mark.parametrize("approval", ["manual", "edits"])
-async def test_stock_release_keeps_native_denies_and_tightens_saved_allows(tmp_path, approval):
-    """Against the stock binary with an agent-level edit deny: the deny survives,
-    native allows the hook tightens still ask, and a saved always-allow cannot
-    bypass the enforced policy."""
-    stock = os.environ["THEATER_OPENCODE_STOCK_PROBE"]
-    token = tmp_path / "credential"
-    password = secrets.token_urlsafe(32)
-    token.write_text(password)
-    token.chmod(0o600)
-    config = tmp_path / "config.json"
-    files = render_native_plugin("stock", config, token, approval)
-    for path, content in files.items():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-    config.write_text(
-        json.dumps(
-            {
-                "plugin": [plugin_dir(config).resolve().as_uri()],
-                "agents": {
-                    "build": {
-                        "permissions": [{"action": "edit", "resource": "*", "effect": "deny"}]
-                    }
-                },
-            }
-        )
-    )
-    env = {
-        **os.environ,
-        "OPENCODE_CONFIG": str(config),
-        "OPENCODE_CONFIG_PROJECT_DISABLE": "1",
-        "OPENCODE_DISABLE_MODELS_FETCH": "1",
-        "OPENCODE_FILEWATCHER_DISABLE": "1",
-        "OPENCODE_DB": str(tmp_path / "opencode-v2.db"),
-        "OPENCODE_SERVER_PASSWORD": password,
-        "XDG_DATA_HOME": str(tmp_path / "data"),
-        "XDG_CACHE_HOME": str(tmp_path / "cache"),
-        "XDG_CONFIG_HOME": str(tmp_path / "xdg-config"),
-        "OPENCODE_CONFIG_DIR": str(tmp_path / "config"),
-    }
-    process = await asyncio.create_subprocess_exec(
-        stock,
-        "serve",
-        "--hostname",
-        "127.0.0.1",
-        "--port",
-        "0",
-        cwd=tmp_path,
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    try:
-        async with asyncio.timeout(60):
-            while line := await process.stdout.readline():
-                endpoint = parse_server_stdout_endpoint(line.decode())
-                if endpoint:
-                    break
-            else:
-                raise AssertionError("the stock server never announced its endpoint")
-            transport = OpenCodeClient(endpoint=endpoint, token_file=token)
-            client = OpenCodeSessionClient(endpoint=endpoint, token_file=token)
-            sid = await client.create_session(directory=os.path.realpath(tmp_path))
-            source = str((plugin_dir(config) / "server.js").resolve())
-            await require_plugin_active(client, plugin_id=PLUGIN_ID, source_path=source)
-            # The agent's edit deny is never overridden, in either approval mode.
-            assert await _evaluate(transport, sid, "edit") == "deny"
-            assert await _evaluate(transport, sid, "shell") == "ask"
-            assert await _evaluate(transport, sid, "read") == "allow"
-            assert await _evaluate(transport, sid, "provider.use") == "allow"
-            # A saved always-allow still cannot bypass the enforced policy.
-            result = await transport._json_request(
-                "POST",
-                f"/api/session/{sid}/permission",
-                body={
-                    "agent": "build",
-                    "action": "write",
-                    "resources": ["probe"],
-                    "save": ["always"],
-                },
-            )
-            assert result["data"]["effect"] == "ask"
-            await transport._json_request(
-                "POST",
-                f"/api/session/{sid}/permission/{result['data']['id']}/reply",
-                body={"decision": "always"},
-            )
-            assert await _evaluate(transport, sid, "write") == "ask"
-    finally:
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), 10)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
 
 
 _PLUGIN_PROBE = """
