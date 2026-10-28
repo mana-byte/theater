@@ -126,6 +126,11 @@ class FinalAnswerSeal:
         self._deferred = None
         self.skipped_history = False
 
+    def guard_history(self) -> None:
+        """From now on a record stamped before the launch is copied history: never a live turn."""
+        if self._launched_at is not None:
+            self._guard_history = True
+
     def observe(
         self, record: dict, ts: float | None = None, *, index: int | None = None
     ) -> str | None:

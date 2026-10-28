@@ -247,6 +247,73 @@ async def test_a_copied_answer_cannot_complete_a_resumed_job(tmp_path, registry,
         await reader.aclose()
 
 
+@pytest.mark.parametrize("written", [3, 43], ids=["before-history", "mid-turn"])
+async def test_history_copied_in_after_the_attach_never_answers_a_resumed_job(
+    tmp_path, registry, written
+):
+    """Claude creates a fork's file first, then copies the history in with the first turn.
+
+    An attach inside that gap must not let the copy count as live turns: written=3 crashes the
+    job on unmatched turns, written=43 ends a half-read turn with no heard text, answering it.
+    """
+    headers = [
+        json.dumps({"type": name}) for name in ("mode", "permission-mode", "file-history-snapshot")
+    ]
+    history, parent = [], None
+    for number in range(33):
+        user, answer, marker = f"old_user{number}", f"old_answer{number}", f"old_marker{number}"
+        history += [
+            claude_record(user, parent, "user", message={"content": f"old{number}"}),
+            claude_fragment(answer, user, {"type": "text", "text": f"OLD{number}"}, f"m{number}"),
+            claude_marker(marker, answer),
+        ]
+        parent = marker
+    history = [
+        json.dumps({**json.loads(line), "timestamp": "2026-01-01T00:00:00Z"}) for line in history
+    ]
+    current = [
+        claude_record("new_user", parent, "user", message={"content": "new"}),
+        claude_fragment("new_answer", "new_user", {"type": "text", "text": "NEW"}, "m_new"),
+        claude_marker("new_marker", "new_answer"),
+    ]
+    lines = [
+        *headers,
+        *history,
+        *(
+            json.dumps({**json.loads(line), "timestamp": "2026-01-01T00:00:05Z"})
+            for line in current
+        ),
+    ]
+    root = tmp_path / "projects"
+    path = root / "project" / f"{SESSION}.jsonl"
+    path.parent.mkdir(parents=True)
+    _write(path, lines[:written])
+    reader = ClaudeCodeObserver(root=root).open_source_for(
+        participant_id="claude",
+        cwd=str(tmp_path),
+        session_id=SESSION,
+        session_provenance=TranscriptProvenance.EXACT,
+        after=LAUNCHED,
+    )
+    reader.admit_exact_location(location=str(path), session_id=SESSION)
+    participant = registry.create_spawned(harness="claude", cwd=str(tmp_path))
+    jobs = JobManager(registry.store)
+    jobs.create(
+        handle="resume", caller_id="caller", target_id=participant.id, kind="send", prompt="new"
+    )
+    daemon = Observer(registry, harnesses={}, jobs=jobs)
+    clock, turns = QuietClock(), TurnAccumulator()
+    try:
+        attached = await reader.read()
+        assert daemon._accept_attachment(participant.id, reader, attached)
+        _write(path, lines[written:], append=True)
+        while reader.offset < path.stat().st_size:
+            apply_batch(daemon, participant.id, await reader.read(), clock, turns, source=reader)
+        assert (jobs.get("resume").state, jobs.get("resume").result) == (JobState.DONE, "NEW")
+    finally:
+        await reader.aclose()
+
+
 async def _assert_recovery(reader, path, daemon, participant_id, timing):
     _write(path, claude_fork(700, attachments=True)[-3:], append=True)
     assert (await reader.read()).error_code == TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
