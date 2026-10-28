@@ -288,7 +288,6 @@ class ClaudeTrajectory:
     ) -> None:
         block_type = block.get("type")
         native_id = _claude_block_native_id(block, message_id, record_id, block_index)
-        parent_call_id = _trajectory_id(block.get("parent_call_id") or block.get("parentCallId"))
         if block_type == "text":
             add(
                 TrajectoryKind.ASSISTANT,
@@ -305,11 +304,9 @@ class ClaudeTrajectory:
                 block, native_id, message_turn, message_status, request, timing, add
             )
         elif block_type in ("tool_use", "server_tool_use"):
-            self._tool_use_block_fact(block, native_id, parent_call_id, message_turn, request, add)
+            self._tool_use_block_fact(block, native_id, message_turn, request, add)
         elif block_type == "tool_result":
-            self._tool_result_block_fact(
-                block, native_id, parent_call_id, message_turn, add, explicit_turn=True
-            )
+            self._tool_result_block_fact(block, native_id, message_turn, add, explicit_turn=True)
 
     @staticmethod
     def _thinking_block_fact(
@@ -340,7 +337,6 @@ class ClaudeTrajectory:
     def _tool_use_block_fact(
         block: dict,
         native_id: str | None,
-        parent_call_id: str | None,
         message_turn: str | None,
         request: str | None,
         add: FactAdder,
@@ -364,7 +360,6 @@ class ClaudeTrajectory:
             turn=message_turn,
             request=request,
             call_id=call_id,
-            parent_call_id=parent_call_id,
             mcp_server=mcp_server,
             mcp_tool=mcp_tool,
             details=details,
@@ -374,7 +369,6 @@ class ClaudeTrajectory:
         self,
         block: dict,
         native_id: str | None,
-        parent_call_id: str | None,
         message_turn: str | None,
         add: FactAdder,
         *,
@@ -417,7 +411,7 @@ class ClaudeTrajectory:
                 status=result_status,
                 turn=message_turn,
                 call_id=call_id,
-                parent_call_id=parent_call_id or call_id,
+                parent_call_id=call_id,
                 mcp_server=mcp_server,
                 mcp_tool=mcp_tool,
                 failure=failure,
@@ -431,7 +425,7 @@ class ClaudeTrajectory:
                 native_id=native_id,
                 status=result_status,
                 call_id=call_id,
-                parent_call_id=parent_call_id or call_id,
+                parent_call_id=call_id,
                 mcp_server=mcp_server,
                 mcp_tool=mcp_tool,
                 failure=failure,
@@ -464,12 +458,7 @@ class ClaudeTrajectory:
                     status=_trajectory_status(block.get("status"), user_status),
                 )
             elif block_type == "tool_result":
-                parent_call_id = _trajectory_id(
-                    block.get("parent_call_id") or block.get("parentCallId")
-                )
-                self._tool_result_block_fact(
-                    block, native_id, parent_call_id, None, add, explicit_turn=False
-                )
+                self._tool_result_block_fact(block, native_id, None, add, explicit_turn=False)
         if not facts and (isinstance(content, str) or record_id is not None):
             add(
                 TrajectoryKind.USER,
