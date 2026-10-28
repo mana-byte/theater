@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .unified_projection import _string
 from .unified_store_io import _reject_symlink_components
 from .unified_store_loading import _read_journal_detail, _session_root
 from .unified_store_types import (
@@ -158,7 +159,8 @@ def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreVie
     else, provided no turn was already active behind the previous view: a turn whose
     pre-agent hook is pending changes the session to busy without touching
     latestTurn. With no other turn possible, the later turn's own entries must be
-    the only history change and its input entry new."""
+    the only history change and its input entry new; every id the proof leans on
+    must be a real nonempty string, or the store proves nothing."""
 
     from .unified_history import _entries
     from .unified_source import _BUSY_SESSIONS  # local: the source imports this module
@@ -167,14 +169,14 @@ def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreVie
     later = latest_turn(current.snapshot)
     later_id, later_status = turn_key(later)
     if (
-        previous_id is None
+        _string(previous_id) is None
         or later is None
-        or later_id is None
+        or _string(later_id) is None
         or previous_id == later_id
         or previous_status not in _ENDED_TURNS
         or later_status not in _ENDED_TURNS
     ):
-        return False
+        return False  # a turn id that is not a real string cannot name the turn that ended
     previous_session = previous.snapshot.get("session")
     previous_session_status = (
         previous_session.get("status", {}).get("type")
@@ -192,9 +194,9 @@ def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreVie
     appended = new_entries[len(old_entries) :]
     if any(entry.get("turnId") != later_id for entry in appended):
         return False
-    input_entry_id = later.get("inputEntryId")
+    input_entry_id = _string(later.get("inputEntryId"))
     return (
-        isinstance(input_entry_id, str)
+        input_entry_id is not None
         and not any(entry.get("id") == input_entry_id for entry in old_entries)
         and any(
             entry.get("id") == input_entry_id

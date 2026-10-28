@@ -155,6 +155,12 @@ def _current_state(case: str) -> dict[str, Any]:
         input_entry_id = "user-a"
     elif case == "input entry names the answer":
         input_entry_id = "asst-b"
+    elif case == "current turn id is not a string":
+        # The whole current shape carries the numeric id, so only the id check rejects it.
+        history = [USER_A, ANSWER_A, {**USER_B, "turnId": 2}, {**ANSWER_B, "turnId": 2}]
+    elif case == "input entry id empty":
+        input_entry_id = ""
+        history = [USER_A, ANSWER_A, {**USER_B, "id": ""}, ANSWER_B]
     elif case == "appended entry without a turnId":
         history = [USER_A, ANSWER_A, UNTAGGED_EFFECT, USER_B, ANSWER_B]
     elif case == "previous entry removed":
@@ -165,17 +171,23 @@ def _current_state(case: str) -> dict[str, Any]:
         input_entry_id = "user-a"
     if case == "latestTurn missing":
         return make_state(history)
-    return turn_doc_with_input(history, "turn-b", "completed", input_entry_id)
+    state = turn_doc_with_input(history, "turn-b", "completed", input_entry_id)
+    if case == "current turn id is not a string":
+        state["latestTurn"]["id"] = 2
+    return state
 
 
 @pytest.mark.parametrize(
     "case",
     [
         "previous turn in_progress",
+        "previous turn id empty",
         "pre-agent turn already active",
         "injected turn's answer entry",
         "input entry id reused",
         "input entry names the answer",
+        "current turn id is not a string",
+        "input entry id empty",
         "input entry not new",
         "appended entry without a turnId",
         "too many publishes in the gap",
@@ -193,6 +205,10 @@ def test_an_unprovable_gap_fails_closed_and_names_its_facts(
         source = _attach_acknowledged(store, turn_doc([USER_A, ANSWER_A], "turn-a", "in_progress"))
         base = 0
         settled = turn_doc([USER_A, ANSWER_A], "turn-a", "in_progress")
+    elif case == "previous turn id empty":
+        source = _attach_acknowledged(store, turn_doc([USER_A, ANSWER_A], "", "completed"))
+        base = 0
+        settled = turn_doc([USER_A, ANSWER_A], "", "completed")
     elif case == "pre-agent turn already active":
         source = attached_to_running_a(store)
         store.publish(
@@ -245,6 +261,8 @@ def test_an_unprovable_gap_fails_closed_and_names_its_facts(
     assert warnings, "an unprovable gap must log the warning"
     expected_turns = {
         "previous turn in_progress": "turns turn-a/in_progress -> turn-b/completed",
+        "previous turn id empty": "turns /completed -> turn-b/completed",
+        "current turn id is not a string": "turns turn-a/completed -> 2/completed",
         "latestTurn missing": "turns turn-a/completed -> None/None",
     }.get(case, "turns turn-a/completed -> turn-b/completed")
     assert expected_turns in warnings[0]
