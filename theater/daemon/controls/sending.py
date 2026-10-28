@@ -12,12 +12,14 @@ from theater.daemon.controls._common import (
     CONTROL_DELIVERY_QUEUED,
     NativeControlPreparation,
     _delivery_label,
+    _error_code_of,
     prepare_native_control,
 )
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.busy import BusyOperation
 from theater.daemon.controls.provider_delivery import ProviderPresenceDeferred
 from theater.daemon.controls.routing import ControlRoute
+from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
@@ -259,6 +261,31 @@ class SendControls(ControlHost):
                 prompt=request.prompt,
                 response_format=request.response_format,
             )
+        if initial_dispatch:
+            # Past reuse validation this is provably the spawn's own initial
+            # prompt; a refusal that reserved no operation would otherwise
+            # leave the job to be salvaged done with an empty result.
+            try:
+                return await self._dispatch_native(request, runtime, reserved, job)
+            except Exception as exc:
+                if job is not None and not self._store.control_operations_for_job(job.handle):
+                    self._jobs.finish(
+                        job.handle,
+                        state=JobState.CRASHED,
+                        result=str(exc),
+                        error_code=_error_code_of(exc),
+                    )
+                raise
+        return await self._dispatch_native(request, runtime, reserved, job)
+
+    async def _dispatch_native(
+        self,
+        request: _SendRequest,
+        runtime: HarnessRuntime | None,
+        reserved: ControlOperation | None,
+        job: Job | None,
+    ) -> tuple[Job, str, str]:
+        participant_id = request.participant_id
         prepared = await prepare_native_control(
             self,
             runtime,
@@ -268,7 +295,7 @@ class SendControls(ControlHost):
                 required_capability=RuntimeCapability.SEND,
                 action=ACTION_SEND,
                 refusal_label=ACTION_SEND,
-                initial_dispatch=initial_dispatch,
+                initial_dispatch=request.job_handle is not None,
             ),
         )
         snapshot = prepared.snapshot
