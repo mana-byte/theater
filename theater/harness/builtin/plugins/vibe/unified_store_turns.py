@@ -154,9 +154,9 @@ def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreVie
     one (Vibe's /retry), and it skips the user entry. The watermark can: it advances
     once per journaled publish, and every turn, injected or not, spans at least two
     publishes — its start input, then the input that carries its terminal
-    observation — so a gap of at most three publishes fits no second turn. With no
-    other turn possible, the later turn's own entries must be the only history
-    change and its input entry new."""
+    observation — so a gap of two or three publishes fits the later turn and nothing
+    else. With no other turn possible, the later turn's own entries must be the only
+    history change and its input entry new."""
 
     from .unified_history import _entries
 
@@ -172,8 +172,8 @@ def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreVie
         or later_status not in _ENDED_TURNS
     ):
         return False
-    if not 0 < current.watermark - previous.watermark <= 3:
-        return False  # too many publishes: an invisible injected turn could fit in the gap
+    if not 2 <= current.watermark - previous.watermark <= 3:
+        return False  # the gap cannot be exactly this turn's start and end: another could fit
     old_entries = _entries(previous)
     new_entries = _entries(current)
     if new_entries[: len(old_entries)] != old_entries:

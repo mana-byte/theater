@@ -172,6 +172,7 @@ def _current_state(case: str) -> dict[str, Any]:
         "input entry not new",
         "appended entry without a turnId",
         "too many publishes in the gap",
+        "watermark gap too small",
         "previous entry removed",
         "previous entry altered",
         "latestTurn missing",
@@ -200,7 +201,12 @@ def test_an_unprovable_gap_fails_closed_and_names_its_facts(
         base=base,
         settled=settled,
         current=_current_state(case),
-        current_watermark=7 if case == "too many publishes in the gap" else None,
+        # A consistent gap is exactly B's two publishes; smaller means the count itself
+        # is broken, larger leaves room for an invisible injected turn.
+        current_watermark={
+            "too many publishes in the gap": 7,
+            "watermark gap too small": 3,
+        }.get(case),
     )
 
     batch = asyncio.run(source.read())
