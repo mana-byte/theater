@@ -25,8 +25,14 @@ from .trajectory import (
 )
 
 _TERMINAL_EFFECT_STATES = frozenset({"completed", "failed", "cancelled", "skipped"})
-_WRITE_EFFECT_KINDS = frozenset({"file_edit", "file_write"})
-_READ_EFFECT_KINDS = frozenset({"file_read", "file_search"})
+# Vibe 3.x persists builtin file tools as generic tool effects; the path key
+# comes from each tool's runtime arguments, never from the effect kind.
+_TOOL_PATH_KEYS = {
+    "file_system.read_file": ("read", "path"),
+    "file_system.write_file": ("write", "path"),
+    "file_system.edit": ("write", "file_path"),
+    "file_system.search_replace": ("write", "file_path"),
+}
 
 
 def _string(value: object) -> str | None:
@@ -91,28 +97,20 @@ def _entry_status(entry: dict) -> TrajectoryStatus:
 
 
 def _effect_paths(detail: dict, cwd: str | None) -> tuple[EventPath, ...]:
-    kind = detail.get("kind")
+    mode_and_key = _TOOL_PATH_KEYS.get(_string(detail.get("toolName")) or "")
+    if mode_and_key is None:
+        return ()
+    mode, key = mode_and_key
     arguments = detail.get("input")
     if not isinstance(arguments, dict):
         return ()
-    raw = next(
-        (
-            arguments.get(key)
-            for key in ("filePath", "file_path", "path")
-            if isinstance(arguments.get(key), str) and arguments.get(key)
-        ),
-        None,
-    )
+    raw = _string(arguments.get(key))
     if raw is None:
         return ()
     path = _relativise(raw, cwd)
     if path is None:
         return ()
-    if kind in _WRITE_EFFECT_KINDS:
-        return (EventPath(path=path, mode="write"),)
-    if kind in _READ_EFFECT_KINDS:
-        return (EventPath(path=path, mode="read"),)
-    return ()
+    return (EventPath(path=path, mode=mode),)
 
 
 def _mcp_identity(tool_name: str | None, detail: dict) -> tuple[str, str] | None:

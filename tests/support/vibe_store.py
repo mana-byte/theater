@@ -279,10 +279,17 @@ def public_message(
 
 def public_effect(child_session_id: str | None = None) -> dict[str, Any]:
     detail: dict[str, Any] = {
-        "kind": "file_write",
-        "toolName": "write_file",
-        "input": {"filePath": "/tmp/work/result.txt", "content": "done"},
-        "display": {"statusText": "Writing result.txt"},
+        "kind": "tool",
+        "toolName": "file_system.write_file",
+        "input": {"path": "/tmp/work/result.txt", "content": "done"},
+        "display": {
+            "summary": "file_system.write_file",
+            "verb": "Running",
+            "message": "file_system.write_file",
+            "settledVerb": "Ran",
+            "settledMessage": "file_system.write_file",
+            "statusText": "Running file_system.write_file",
+        },
     }
     if child_session_id is not None:
         detail = {
@@ -301,7 +308,7 @@ def public_effect(child_session_id: str | None = None) -> dict[str, Any]:
         "updatedAt": 2_200,
         "generationStatus": "completed",
         "relatedEntryId": None,
-        "title": "write_file" if child_session_id is None else "subagent",
+        "title": "file_system.write_file" if child_session_id is None else "subagent",
         "detail": detail,
         "state": {
             "status": "completed",
