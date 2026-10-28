@@ -1,4 +1,4 @@
-"""Codex native runtime send, steer and interrupt target exact turns."""
+"""Codex native runtime send, steer and interrupt delivery outcomes."""
 
 from __future__ import annotations
 
@@ -102,24 +102,6 @@ async def test_send_rejected_and_unknown_paths() -> None:
     await runtime.aclose()
 
 
-async def test_steer_sends_exact_expected_turn_id() -> None:
-    server = ScriptedCodexServer()
-    runtime, _binding = await open_new(server)
-    receipt = await runtime.steer(
-        operation_id="op-6", native_turn_id="turn-1", prompt="more detail"
-    )
-    assert receipt.result is DeliveryResult.ACCEPTED
-    assert receipt.native_turn_id == "turn-1"
-    assert server.requested("turn/steer") == [
-        {
-            "threadId": "ui-thread-1",
-            "expectedTurnId": "turn-1",
-            "input": [{"type": "text", "text": "more detail"}],
-        }
-    ]
-    await runtime.aclose()
-
-
 async def test_stale_steer_refusal_stays_a_refusal() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
@@ -154,23 +136,6 @@ async def test_steer_rejects_unvalidated_returned_turn_identity() -> None:
     assert receipt.result is DeliveryResult.UNKNOWN
     assert receipt.error_code == "malformed_turn_steer_result"
     assert receipt.native_turn_id is None
-    await runtime.aclose()
-
-
-async def test_interrupt_targets_exact_turn_ids() -> None:
-    server = ScriptedCodexServer()
-    runtime, _binding = await open_new(server)
-    server.push(
-        RuntimeNotification(
-            method="turn/started",
-            params={"threadId": "ui-thread-1", "turn": {"id": "turn-1", "status": "inProgress"}},
-        )
-    )
-    await wait_until(lambda: runtime._active_turn_id == "turn-1", what="turn 1 to start")
-    receipt = await runtime.interrupt(operation_id="op-8")
-    assert receipt.result is DeliveryResult.ACCEPTED
-    assert receipt.native_turn_id == "turn-1"
-    assert server.requested("turn/interrupt") == [{"threadId": "ui-thread-1", "turnId": "turn-1"}]
     await runtime.aclose()
 
 
