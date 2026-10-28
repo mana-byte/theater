@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -10,21 +9,12 @@ from enum import Enum
 from .constants import (
     SEAL_MAX_HOPS,
     SEAL_MESSAGE_LIMIT,
-    SEAL_MIN_VERSION,
     SEAL_NODE_LIMIT,
     SEAL_TEXT_BYTES_LIMIT,
 )
 
-_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
-
 #: Unsealed reasons caused by a record the chain needs not being read yet: retry as more arrive.
 _RETRYABLE = frozenset({"unknown_parent", "incomplete_message"})
-
-
-def seal_supported(record: dict) -> bool:
-    """Whether this record's CLI version is verified to write the marker; unknown fails closed."""
-    match = _VERSION.match(str(record.get("version") or ""))
-    return match is not None and tuple(int(part) for part in match.groups()) >= SEAL_MIN_VERSION
 
 
 @dataclass(frozen=True, slots=True)

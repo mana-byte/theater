@@ -219,10 +219,12 @@ def test_unsupported_versions_and_sidechains_never_seal():
     text = {"type": "text", "text": "answer"}
     old = ClaudeCodeObserver()
     lines = [
-        json.dumps({"type": "assistant", "message": {"stop_reason": "end_turn", "content": [b]}})
-        for b in (thinking, text)
+        claude_record("u0", None, "user", message={"role": "user", "content": "go"}),
+        claude_fragment("t1", "u0", thinking, "msg_think"),
+        claude_fragment("t2", "t1", text, "msg_text"),
+        claude_marker("m", "t2"),
     ]
-    # No marker contract below the verified floor: only the text-bearing fragment can end a turn.
+    # A thinking-only fragment never ends a turn; only the marker names the answer that does.
     assert [e.text for e in _boundaries(old, lines)] == ["answer"]
 
     side = [
