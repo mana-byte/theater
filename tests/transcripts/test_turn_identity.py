@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from tests.support.codex_rollout_items import parse_rollout, rollout_events, rollout_record
 from tests.support.observation import apply_batch
 from tests.support.opencode_recorder import Recorder, text
 from tests.support.paths import FIXTURES
@@ -46,21 +47,13 @@ def test_codex_reports_the_turn_id_it_stamps_on_both_ends():
     at all — the only harness of the four that gives us that outright.
     """
     records = [
-        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-1"}},
-        {
-            "type": "event_msg",
-            "payload": {
-                "type": "task_complete",
-                "turn_id": "turn-1",
-                "last_agent_message": "done",
-            },
-        },
+        rollout_record("event_msg", {"type": "task_started", "turn_id": "turn-1"}),
+        rollout_record(
+            "event_msg",
+            {"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "done"},
+        ),
     ]
-    events = [
-        event
-        for index, record in enumerate(records)
-        for event in CodexObserver().parse(json.dumps(record), index)
-    ]
+    events = rollout_events(parse_rollout(CodexObserver(), records))
     ends = boundaries(events)
 
     assert len(ends) == 1

@@ -458,14 +458,18 @@ def test_failed_mcp_item_reports_the_error_path():
 
 def test_file_change_item_reports_apply_patch_paths():
     observer = CodexObserver()
+    item = file_change_item("patch-1")
+    item["changes"] = {
+        "/repo/src/main.py": {"type": "update", "move_path": "/repo/src/moved.py"},
+        "/repo/src/new.py": {"type": "add", "content": "x = 1\n"},
+        "/repo/src/gone.py": {"type": "delete"},
+        "/outside/secret.py": {"type": "delete"},
+        "../escape.py": {"type": "add"},
+        "/repo/not-a-change": {"type": "unknown"},
+    }
     records = [
         session_meta(),
-        item_completed(
-            "turn-a",
-            file_change_item("patch-1"),
-            started_ms=1789040008000,
-            completed_ms=1789040009000,
-        ),
+        item_completed("turn-a", item, started_ms=1789040008000, completed_ms=1789040009000),
     ]
     parsed = parse_rollout(observer, records)
     events = rollout_events(parsed)
@@ -473,7 +477,12 @@ def test_file_change_item_reports_apply_patch_paths():
     patch_events = [e for e in events if e.tool_name == "apply_patch"]
     assert len(patch_events) == 1
     assert patch_events[0].kind is EventKind.TOOL_CALL
-    assert [(p.path, p.mode) for p in patch_events[0].paths] == [("theater/new.py", "write")]
+    assert [(p.path, p.mode) for p in patch_events[0].paths] == [
+        ("src/main.py", "write"),
+        ("src/moved.py", "write"),
+        ("src/new.py", "write"),
+        ("src/gone.py", "write"),
+    ]
 
     facts = rollout_facts(parsed)
     call_fact = next(f for f in facts if f.kind is TrajectoryKind.TOOL_CALL)
