@@ -820,9 +820,13 @@ segments no longer cover — an expired checkpoint says so on its attachment
 itself — is reported as `complete=False`, and the observer fails closed:
 delivered jobs crash `completion_unverified` rather than take another turn's
 answer, before any checkpoint advances. The fact repeats until a batch carrying
-it is applied and acknowledged. One exception is proven: matching `latestTurn`
+it is applied and acknowledged. Two exceptions are proven: matching `latestTurn`
 ids in both views mean no other turn ended in between (Vibe keeps only two
-journals), and that turn's end stands on the current view alone. A journal that
+journals), and that turn's end stands on the current view alone. And when the
+previous turn was already terminal, the new turn is terminal, every new or
+changed history entry carries the new turn's id and its input entry is new in
+the current view, the gap held that one turn alone, and its end stands on the
+current view alone. A journal that
 moves backwards is rejected: the
 acknowledged point and its open turn stand. Replaying is safe only because a
 Vibe provider steer is refused: Enter there queues a separate turn.

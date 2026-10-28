@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .unified_projection import entry_fingerprint
 from .unified_store_io import _reject_symlink_components
 from .unified_store_loading import _read_journal_detail, _session_root
 from .unified_store_types import (
@@ -119,22 +120,64 @@ def turn_changes_between(
         since=latest_turn(previous.snapshot),
     )
     if changes is None:
-        turn_id = turn_key(latest_turn(previous.snapshot))[0]
+        previous_turn = latest_turn(previous.snapshot)
+        current_turn = latest_turn(current.snapshot)
+        turn_id = turn_key(previous_turn)[0]
         # Vibe folds after every turn; one shared turn id in both views proves no other ran.
-        if turn_id is not None and turn_id == turn_key(latest_turn(current.snapshot))[0]:
+        if turn_id is not None and turn_id == turn_key(current_turn)[0]:
+            return ()
+        if _sole_later_turn_proven(previous, current):
             return ()
         try:
             retained = [int(path.stem) for path in _segments(session_root)]
         except (OSError, UnifiedStoreError):
             retained = []
         logger.warning(
-            "vibe %s: turn ends in sequences %d..%d are not replayable; retained journals: %s",
+            "vibe %s: sequences %d..%d not replayable; retained journals %s; turns %s/%s -> %s/%s",
             current.session_id,
             previous.sequence + 1,
             current.sequence,
             retained,
+            *turn_key(previous_turn),
+            *turn_key(current_turn),
         )
     return changes
+
+
+def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreView) -> bool:
+    """Prove from the two views alone that one new turn ran and ended in the gap.
+
+    Any other turn would leave a history entry tagged with its own id, so the new
+    turn's entries must be the only history change and its input entry new."""
+
+    from .unified_history import _entries
+    from .unified_source import _TERMINAL_TURNS  # local: the source imports this module
+
+    previous_id, previous_status = turn_key(latest_turn(previous.snapshot))
+    later = latest_turn(current.snapshot)
+    later_id, later_status = turn_key(later)
+    if (
+        previous_id is None
+        or later_id is None
+        or previous_id == later_id
+        or previous_status not in _TERMINAL_TURNS
+        or later_status not in _TERMINAL_TURNS
+    ):
+        return False
+    old_entries = _entries(previous)
+    new_entries = _entries(current)
+    if len(new_entries) < len(old_entries) or any(
+        entry_fingerprint(before) != entry_fingerprint(after)
+        for before, after in zip(old_entries, new_entries, strict=False)
+    ):
+        return False  # history moved backwards, lost or altered: another turn could hide there
+    appended = new_entries[len(old_entries) :]
+    if any(entry.get("turnId") != later_id for entry in appended):
+        return False
+    input_entry_id = later.get("inputEntryId")
+    return isinstance(input_entry_id, str) and any(
+        entry.get("id") == input_entry_id for entry in appended
+    )
 
 
 def _segments(session_root: Path) -> list[Path]:

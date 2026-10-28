@@ -495,7 +495,7 @@ def test_turn_ends_across_several_generations_replay_every_retained_segment(
     )
     if not retained:
         assert any(
-            record.levelname == "WARNING" and "retained journals: [1, 5]" in record.getMessage()
+            record.levelname == "WARNING" and "retained journals [1, 5]" in record.getMessage()
             for record in caplog.records
         )
         source.rollback_source_checkpoint()
