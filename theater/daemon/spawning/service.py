@@ -75,7 +75,6 @@ class Spawner:
         controls=None,
         live_hub=None,
         workspace_service=None,
-        jobs=None,
     ):
         self.registry = registry
         self.otel_runtime = otel_runtime
@@ -91,10 +90,6 @@ class Spawner:
         # bound. ``None`` keeps a spawner composed without observation live.
         self.live_hub = live_hub
         self.workspace_service = workspace_service
-        # The JobManager owns the canonical terminal lifecycle; a refused
-        # initial prompt must finish its spawn job through it, never a bare
-        # store write that drops the response contract and sleeps awaiters.
-        self.jobs = jobs
 
     async def prepare_provider_launch(
         self,

@@ -190,7 +190,6 @@ class Daemon:
                 controls=self.controls,
                 live_hub=self.observer.live,
                 workspace_service=self.workspace_service,
-                jobs=self.jobs,
             )
             # Disconnect recovery: the manager owns one health monitor per runtime; the daemon's
             # callback recovers the exact persisted binding. Injected only once every collaborator

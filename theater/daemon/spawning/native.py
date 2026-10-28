@@ -40,7 +40,7 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
     SessionOpenMode,
 )
-from theater.models import BadRequest, JobState, Participant, TheaterError, new_id, now
+from theater.models import BadRequest, Participant, TheaterError, new_id, now
 from theater.observability.catalog import LIFECYCLE_STAGE
 
 logger = logging.getLogger("theater.spawner")
@@ -199,16 +199,10 @@ async def _launch_native_sequence(
         operation_id=None if reservation.provider is None else reservation.provider.operation_id,
     )
 
-    if (
-        spawner.runtime_manager is None
-        or spawner.controls is None
-        or spawner.runtime_io is None
-        or spawner.jobs is None
-    ):
+    if spawner.runtime_manager is None or spawner.controls is None or spawner.runtime_io is None:
         raise BadRequest(
             f"native wiring for {pid!r} requires the daemon runtime manager, "
-            "I/O, control service, and job manager; this spawner was composed "
-            "without them"
+            "I/O, and control service; this spawner was composed without them"
         )
 
     # ---- 2. detached backend ------------------------------------------
@@ -322,19 +316,13 @@ async def _launch_native_sequence(
         # participant id) to the native terminal evidence the runtime will
         # report, so no second send job exists.
         attempt.dispatch_started = True
-        try:
-            await spawner.controls.send(
-                pid,
-                caller_id=req.parent_id or "cli",
-                prompt=req.prompt,
-                response_format=req.response_format,
-                job_handle=pid,
-            )
-        except Exception as exc:
-            # The launch knows its own spawn job; any refusal of its initial
-            # prompt must crash it, never leave it to an empty-result rescue.
-            _crash_undelivered_spawn_job(spawner, store, pid, exc)
-            raise
+        await spawner.controls.send(
+            pid,
+            caller_id=req.parent_id or "cli",
+            prompt=req.prompt,
+            response_format=req.response_format,
+            job_handle=pid,
+        )
         if not store.set_runtime_lifecycle(
             pid,
             RuntimeLifecyclePhase.ACTIVE,
@@ -577,28 +565,6 @@ async def _launch_native_terminal_fenced(
         raise
     attempt.dispatch_started = False
     return attached
-
-
-def _crash_undelivered_spawn_job(spawner, store, pid: str, exc: Exception) -> None:
-    """Crash this launch's spawn job when its initial prompt was refused.
-
-    Only a RUNNING job with no control operation is touched: a RESERVED or later
-    operation means transmission may have begun, and its receipt, evidence and
-    reconciliation machinery own every later outcome. The canonical
-    ``JobManager.finish`` preserves the response contract and wakes awaiters
-    and terminal listeners.
-    """
-    job = store.get_job(pid)
-    if job is None or job.state != JobState.RUNNING:
-        return
-    if store.control_operations_for_job(pid):
-        return
-    spawner.jobs.finish(
-        pid,
-        state=JobState.CRASHED,
-        result=str(exc),
-        error_code=getattr(exc, "code", None) or "dispatch_failed",
-    )
 
 
 def _dispatch_may_have_begun(store, participant_id: str) -> bool:

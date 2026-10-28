@@ -30,15 +30,9 @@ from theater.models import (
 )
 
 
-@pytest.mark.parametrize("refused_prompt", [False, True])
-async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(  # noqa: PLR0915
-    tmp_path: Path, refused_prompt: bool
+async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(
+    tmp_path: Path,
 ) -> None:
-    """Accepted-creation reconciliation binds the terminal and never rewrites the job.
-
-    The spawn job may already be crashed with its initial-prompt refusal; the
-    accepted creation receipt proves only the terminal, so the refusal survives.
-    """
     path = tmp_path / "provider-create-recovery.db"
     store = Store(path)
     with store.write_unit() as unit:
@@ -115,13 +109,11 @@ async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(  # 
                 target_id="participant-a",
                 kind="spawn",
                 prompt="work",
-                state=JobState.CRASHED.value if refused_prompt else JobState.RUNNING.value,
-                result=(
-                    "participant 'participant-a' does not support send" if refused_prompt else None
-                ),
-                error_code="bad_request" if refused_prompt else None,
+                state=JobState.RUNNING.value,
+                result=None,
+                error_code=None,
                 created_at=timestamp,
-                finished_at=timestamp if refused_prompt else None,
+                finished_at=None,
                 actor_client_id="operator-a",
             ),
             connection=unit.connection,
@@ -206,13 +198,6 @@ async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(  # 
         "workspace-a", holder_kind="participant", holder_id="participant-a"
     )
     assert usage is not None
-    job = reopened.get_job("participant-a")
-    if refused_prompt:
-        assert job.state == JobState.CRASHED
-        assert job.error_code == "bad_request"
-        assert "does not support send" in (job.result or "")
-    else:
-        assert job.state == JobState.RUNNING
     await recovered.aclose()
     reopened.close()
 
