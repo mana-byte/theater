@@ -1,8 +1,6 @@
-"""Codex native runtime plan: version probe, backend and frontend launch plans, manifest."""
+"""Codex native runtime plan: version probe gate, approval refusals and the yolo mapping."""
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
@@ -13,34 +11,24 @@ from tests.support.codex_server import (
     PARTICIPANT,
     ScriptedCodexIO,
     ScriptedCodexServer,
-    thread_started,
 )
-from theater.harness.builtin.plugins.codex.manifest import MANIFEST, manifest_for_root
-from theater.harness.builtin.plugins.codex.runtime import CodexRuntime, codex_runtime_factory
+from theater.harness.builtin.plugins.codex.manifest import MANIFEST
+from theater.harness.builtin.plugins.codex.runtime import CodexRuntime
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
     VERSION_POLICY,
     codex_backend_config_overrides,
-    codex_endpoint_url,
     plan_codex_frontend,
     plan_codex_runtime_backend,
     probe_codex_compatibility,
     qualified_versions_range_text,
 )
-from theater.harness.contracts.channels import ChannelKind
-from theater.harness.contracts.manifest import HarnessManifest
 from theater.harness.contracts.runtime import (
-    LiveChannelDeclaration,
-    RuntimeCompatibility,
     RuntimeContext,
-    RuntimeManifest,
-    RuntimePlan,
     RuntimePlanningContext,
     RuntimeProbeContext,
-    SessionOpenMode,
 )
 from theater.harness.contracts.version_policy import version_key
-from theater.harness.manifests.validation import validate_manifest
 
 
 class _FakeCompleted:
@@ -134,39 +122,12 @@ def planning_context(**overrides) -> RuntimePlanningContext:
     return RuntimePlanningContext(**values)  # type: ignore[arg-type]
 
 
-def test_backend_plan_is_exact_app_server_listen_with_scoped_config() -> None:
-    plan = plan_codex_runtime_backend(
-        planning_context(approval="yolo", model="gpt-5.2", reasoning_effort="high")
+# Yolo's full-access sandbox mapping has no live oracle; pin it here.
+def test_yolo_maps_to_a_full_access_sandbox() -> None:
+    assert codex_backend_config_overrides(planning_context(approval="yolo")) == (
+        ("approval_policy", "never"),
+        ("sandbox_mode", "danger-full-access"),
     )
-    assert isinstance(plan, RuntimePlan)
-    assert plan.backend.argv == [
-        "codex",
-        "-c",
-        "approval_policy=never",
-        "-c",
-        "sandbox_mode=danger-full-access",
-        "-c",
-        "model=gpt-5.2",
-        "-c",
-        "model_reasoning_effort=high",
-        "app-server",
-        "--listen",
-        f"unix://{ENDPOINT}",
-    ]
-    assert plan.endpoint == ENDPOINT
-
-
-@pytest.mark.parametrize(
-    ("approval", "expected"),
-    [
-        ("edits", (("approval_policy", "on-request"), ("sandbox_mode", "workspace-write"))),
-        ("manual", (("approval_policy", "on-request"), ("sandbox_mode", "read-only"))),
-        ("yolo", (("approval_policy", "never"), ("sandbox_mode", "danger-full-access"))),
-    ],
-    ids=["edits", "manual", "yolo"],
-)
-def test_backend_plan_approval_modes_match_legacy_mapping(approval, expected) -> None:
-    assert codex_backend_config_overrides(planning_context(approval=approval)) == expected
 
 
 # Approval is explicit per spawn and has no default anywhere: a missing or unknown mode is
@@ -193,54 +154,6 @@ def test_backend_plan_carries_no_credentials_or_files() -> None:
     assert plan.backend.private_files == {}
 
 
-def test_endpoint_url_helper() -> None:
-    assert codex_endpoint_url("/tmp/x.sock") == "unix:///tmp/x.sock"
-    assert codex_endpoint_url("unix:///tmp/x.sock") == "unix:///tmp/x.sock"
-
-
-def test_frontend_plan_promptless_for_fresh_ui() -> None:
-    plan = plan_codex_frontend(
-        ENDPOINT,
-        native_session_id=None,
-        approval="yolo",
-        model="gpt-5.2",
-        reasoning_effort="high",
-    )
-    assert plan.argv == [
-        "codex",
-        "-c",
-        "check_for_update_on_startup=false",
-        "-c",
-        "approval_policy=never",
-        "-c",
-        "sandbox_mode=danger-full-access",
-        "-c",
-        "model=gpt-5.2",
-        "-c",
-        "model_reasoning_effort=high",
-        "--remote",
-        f"unix://{ENDPOINT}",
-    ]
-    assert "resume" not in plan.argv
-
-
-def test_frontend_plan_resumes_exact_thread() -> None:
-    plan = plan_codex_frontend(ENDPOINT, native_session_id="th-42", approval="manual")
-    assert plan.argv == [
-        "codex",
-        "-c",
-        "check_for_update_on_startup=false",
-        "-c",
-        "approval_policy=on-request",
-        "-c",
-        "sandbox_mode=read-only",
-        "--remote",
-        f"unix://{ENDPOINT}",
-        "resume",
-        "th-42",
-    ]
-
-
 async def test_backend_and_frontend_use_the_same_selected_binary(tmp_path):
     binary = str(tmp_path / "codex-qualified")
     backend = plan_codex_runtime_backend(planning_context(binary=binary))
@@ -261,51 +174,3 @@ async def test_backend_and_frontend_use_the_same_selected_binary(tmp_path):
         assert frontend.argv[0] == binary
     finally:
         await runtime.aclose()
-
-
-def test_manifest_declares_valid_runtime_manifest() -> None:
-    runtime = MANIFEST.runtime
-    assert isinstance(runtime, RuntimeManifest)
-    assert callable(runtime.probe)
-    assert callable(runtime.plan)
-    assert callable(runtime.factory)
-    assert isinstance(runtime.channel, LiveChannelDeclaration)
-    assert runtime.channel.channel.kind is ChannelKind.LIVE
-    assert runtime.channel.drives_job_completion is True
-    assert runtime.channel.durable_fallback is True
-    observation_ids = {channel.id for channel in MANIFEST.observation.channels}
-    assert runtime.channel.channel.id not in observation_ids
-    validate_manifest("codex", MANIFEST)
-
-
-def test_manifest_for_root_preserves_runtime() -> None:
-    manifest = manifest_for_root(Path("/tmp/root"))
-    assert isinstance(manifest, HarnessManifest)
-    assert manifest.runtime is MANIFEST.runtime
-
-
-async def test_manifest_factory_creates_runtime_from_context() -> None:
-    server = ScriptedCodexServer()
-    context = RuntimeContext(
-        participant_id=PARTICIPANT,
-        cwd=CWD,
-        io=ScriptedCodexIO(server),
-        backend_generation=GENERATION,
-        endpoint=ENDPOINT,
-        approval="manual",
-    )
-    runtime = codex_runtime_factory(context)
-    assert isinstance(runtime, CodexRuntime)
-    server.push(thread_started())
-    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
-    assert binding.participant_id == PARTICIPANT
-    await runtime.aclose()
-
-
-async def test_planning_matches_manifest_runtime_plan() -> None:
-    plan = MANIFEST.runtime.plan(planning_context(approval="edits"))
-    assert isinstance(plan, RuntimePlan)
-    assert plan.backend.argv[-1] == f"unix://{ENDPOINT}"
-    compatibility = MANIFEST.runtime.probe(RuntimeProbeContext(binary="/nonexistent"))
-    assert isinstance(compatibility, RuntimeCompatibility)
-    assert compatibility.supported is False

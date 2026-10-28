@@ -113,8 +113,8 @@ def test_harness_availability_shows_native_qualification():
                 "error": None,
                 "native_compatibility": {
                     "status": "outside-qualified-range",
-                    "installed_version": "0.158.0",
-                    "qualified_range": "==0.154.0",
+                    "installed_version": "1.2.3",
+                    "qualified_range": "==1.9.9",
                     "wiring": "legacy",
                     "routes": {
                         "send": "tmux",
@@ -130,7 +130,7 @@ def test_harness_availability_shows_native_qualification():
                 "error": None,
                 "native_compatibility": {
                     "status": "native-compatible",
-                    "installed_version": "2.0.18",
+                    "installed_version": "2.3.4",
                     "qualified_range": None,
                     "wiring": "native",
                     "routes": {
@@ -146,7 +146,7 @@ def test_harness_availability_shows_native_qualification():
                 "error": None,
                 "native_compatibility": {
                     "status": "native-compatible",
-                    "installed_version": "0.84.4",
+                    "installed_version": "3.4.5",
                     "qualified_range": None,
                     "wiring": "native",
                     "routes": {
@@ -162,7 +162,7 @@ def test_harness_availability_shows_native_qualification():
                 "error": None,
                 "native_compatibility": {
                     "status": "legacy-only",
-                    "installed_version": "2.25.8",
+                    "installed_version": "4.5.6",
                     "qualified_range": None,
                     "wiring": "legacy",
                     "routes": {
@@ -176,13 +176,13 @@ def test_harness_availability_shows_native_qualification():
     )
 
     assert str(content) == (
-        "✓ codex 0.158.0 — legacy · native needs ==0.154.0\n"
+        "✓ codex 1.2.3 — legacy · native needs ==1.9.9\n"
         "    send tmux · steer tmux · interrupt tmux\n"
-        "✓ opencode 2.0.18 — native\n"
+        "✓ opencode 2.3.4 — native\n"
         "    send native · steer native · interrupt tmux\n"
-        "✓ pi β 0.84.4 — native\n"
+        "✓ pi β 3.4.5 — native\n"
         "    send native · steer unavailable · interrupt native\n"
-        "✓ vibe 2.25.8 — legacy\n"
+        "✓ vibe 4.5.6 — legacy\n"
         "    send tmux · steer tmux · interrupt tmux"
     )
     styles = {span.style for span in content.spans}
@@ -192,13 +192,13 @@ def test_harness_availability_shows_native_qualification():
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("==0.154.0", "==0.154.0"),
-        (">=2.1.248", ">=2.1.248"),
+        ("==1.9.9", "==1.9.9"),
+        (">=9.8.7", ">=9.8.7"),
         (">=1.18.29,<1.18.30", "1.18.29"),
-        (">=2.0.18,<2.1.0", "2.0.18–2.0.x"),
+        (">=9.1.8,<9.2.0", "9.1.8–9.1.x"),
         (">=3.4.5,<3.4.6 || >=4.0.1,<4.1.0", "3.4.5 · 4.0.1–4.0.x"),
         (">=1.2.3,<1.2.5", "1.2.3–1.2.4"),
-        (">=0.153.0,<=0.159.1", "0.153.0–0.159.1"),
+        (">=9.8.7,<=9.8.9", "9.8.7–9.8.9"),
         (">=5.6.2,<5.7.1 || >=6.2.3,<6.3.0", "5.6.2–5.7.0 · 6.2.3–6.2.x"),
         (">=1.18.29,<1.19", ">=1.18.29,<1.19"),
         ("nonsense", "nonsense"),
@@ -220,12 +220,12 @@ def test_pretty_qualifier_range_compacts_only_recognisable_pairs(raw, expected):
                 "error": None,
                 "native_compatibility": {
                     "status": "native-compatible",
-                    "installed_version": "0.154.0",
-                    "qualified_range": "==0.154.0",
+                    "installed_version": "1.2.3",
+                    "qualified_range": "==1.2.3",
                     "wiring": "native",
                 },
             },
-            "✓ codex 0.154.0 — native · qualified ==0.154.0",
+            "✓ codex 1.2.3 — native · qualified ==1.2.3",
         ),
         (
             {
@@ -234,7 +234,7 @@ def test_pretty_qualifier_range_compacts_only_recognisable_pairs(raw, expected):
                 "error": None,
                 "native_compatibility": {
                     "status": "native-compatible",
-                    "installed_version": "2.0.18",
+                    "installed_version": "2.3.4",
                     "qualified_range": None,
                     "wiring": None,
                     "routes": {
@@ -245,7 +245,7 @@ def test_pretty_qualifier_range_compacts_only_recognisable_pairs(raw, expected):
                     },
                 },
             },
-            "✓ opencode 2.0.18 — native\n"
+            "✓ opencode 2.3.4 — native\n"
             "    send native · steer unavailable · interrupt native · settings native",
         ),
         (

@@ -22,6 +22,7 @@ def _refused_releases():
         policy = VersionPolicy.load(plugins / name / "compatibility.json")
         maximum = version_key(policy.maximum)
         versions = [
+            # A neutral below-floor release: never derived from the moving minimum.
             ("below-floor", "0.0.1"),
             ("above-maximum", ".".join(map(str, (*maximum[:2], maximum[2] + 1)))),
             ("prerelease", f"{policy.minimum}-beta"),

@@ -311,7 +311,7 @@ class CodexRuntimeEvents(CodexRuntimeHost):
             result=result_text,
             completeness=completeness_final,
             provenance=provenance,
-            # Codex 0.159 may attach error text to an interrupted turn; only a failure is coded.
+            # The CLI may attach error text to an interrupted turn; only a failure is coded.
             error_code="turn_failed"
             if error is not None and terminal is NativeTurnTerminal.FAILED
             else None,

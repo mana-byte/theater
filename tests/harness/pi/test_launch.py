@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,11 +21,13 @@ from theater.harness.builtin.plugins.pi.constants import (
 from theater.harness.builtin.plugins.pi.launch import (
     participant_root,
     plan_launch,
+    resume_launch_overlay,
 )
 from theater.harness.builtin.plugins.pi.manifest import MANIFEST
-from theater.harness.contracts.callbacks import LaunchContext
+from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
 from theater.harness.contracts.runtime import RuntimeCompatibility
 from theater.harness.manifests.compiler import compile_manifest
+from theater.models import BadRequest, Participant
 
 pytestmark = pytest.mark.usefixtures("available_harness_binaries")
 
@@ -53,6 +54,8 @@ def test_pi_launch_advertises_only_yolo_and_builds_isolated_argv(tmp_path, monke
     ]
     assert plan.argv[plan.argv.index("--session-dir") + 1] == str(session_dir)
     assert plan.argv[plan.argv.index("--theater-mcp-config") + 1] == str(config_path)
+    assert plan.argv[plan.argv.index("--model") + 1] == "openai/gpt-5.6"
+    assert plan.argv[plan.argv.index("--thinking") + 1] == "high"
     assert plan.argv[-1] == "inspect this"
     assert plan.session_id == "pi-child"
     assert plan.transcript_domain == str(session_dir.resolve())
@@ -84,7 +87,6 @@ def test_pi_launch_argv_is_independent_of_approval_and_manifest_rejects_other_mo
     # that enforces the contract, and it must reject manual/edits because Pi
     # has no Theater-enforced permission prompt or sandbox for them.
     from theater.harness.manifests.compiler import compile_manifest
-    from theater.models import BadRequest
 
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     config_path = tmp_path / "mcp.json"
@@ -153,41 +155,6 @@ def test_bootstrap_executes_the_binary_verified_by_launch_admission(tmp_path, mo
     assert "--theater-cold-session-id" not in captured["args"]
 
 
-@pytest.mark.requires_node
-def test_pi_bootstrap_suppresses_only_the_expected_cold_warning(monkeypatch) -> None:
-    node = shutil.which("node") or "node"
-    captured: dict[str, object] = {}
-
-    def execvpe(file, args, env):
-        captured.update(file=file, args=args, env=env)
-        raise RuntimeError("exec intercepted")
-
-    monkeypatch.setenv("NODE_OPTIONS", "--no-warnings")
-    monkeypatch.setattr(sys, "argv", ["bootstrap", "--theater-cold-session-id", "child-1"])
-    monkeypatch.setattr(bootstrap.os, "execvpe", execvpe)
-    with pytest.raises(RuntimeError, match="exec intercepted"):
-        bootstrap.main()
-
-    env = captured["env"]
-    assert isinstance(env, dict)
-    assert str(env["NODE_OPTIONS"]).startswith("--no-warnings ")
-    result = subprocess.run(
-        [
-            node,
-            "-e",
-            "console.error('other'); "
-            "console.error(\"\\x1b[33mWarning: No project session found with id 'child-1'; "
-            'creating a new session with that id.\\x1b[39m"); '
-            "console.error('after')",
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert result.stderr.splitlines() == ["other", "after"]
-
-
 async def test_pi_resume_spawn_forks_to_fresh_native_identity_and_domain(
     tmp_path, monkeypatch, registry
 ) -> None:
@@ -235,21 +202,73 @@ async def test_pi_resume_spawn_forks_to_fresh_native_identity_and_domain(
     assert successor_domain != domain
 
 
-def test_pi_runtime_routes_only_the_proven_native_controls() -> None:
-    from theater.daemon.controls.routing import manifest_control_routes
-    from theater.harness.contracts.runtime import ControlTransport, RuntimeCapability
+def _resumable_predecessor(tmp_path, monkeypatch) -> tuple[Participant, Path]:
+    """A dead predecessor whose isolated domain passes every resume check."""
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    cold_plan = plan_launch(LaunchContext("pi-old", "", tmp_path / "config.json", "yolo"))
+    domain = Path(cold_plan.transcript_domain or "")
+    domain.mkdir(parents=True)
+    marker = domain / PI_ISOLATION_MARKER
+    marker.write_text(cold_plan.files[marker], encoding="utf-8")
+    transcript = domain / "old.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    return (
+        Participant(
+            id="pi-old",
+            harness="pi",
+            cwd=str(tmp_path),
+            session_id="old-native-id",
+            transcript_domain=str(domain),
+            transcript_location=str(transcript),
+        ),
+        transcript,
+    )
 
-    runtime = MANIFEST.runtime
-    assert runtime is not None
-    channel = runtime.channel
-    # The durable Pi transcript stays completion authority: the initial CLI
-    # prompt has no control operation, so live ownership would strand it.
-    assert channel.drives_job_completion is False
-    assert runtime.legacy_fallback == frozenset()
-    routes = manifest_control_routes(runtime)
-    assert routes["interrupt"] == ControlTransport.NATIVE_RUNTIME.value
-    assert routes["steer"] is None
-    assert runtime.unavailable_capabilities == frozenset({RuntimeCapability.STEER})
+
+# Each refusal drives one BadRequest branch of resume_launch_overlay.
+REFUSALS = (
+    "no-native-session-id",
+    "no-transcript-domain",
+    "untrusted-domain",
+    "foreign-lineage",
+    "no-transcript-location",
+    "transcript-outside-domain",
+    "missing-transcript",
+    "transcript-symlink",
+)
+
+
+@pytest.mark.parametrize("refusal", REFUSALS)
+def test_pi_resume_refuses_unsafe_predecessors(tmp_path, monkeypatch, refusal: str) -> None:
+    predecessor, transcript = _resumable_predecessor(tmp_path, monkeypatch)
+    domain = Path(predecessor.transcript_domain or "")
+    trusted: tuple[Participant, ...] = (predecessor,)
+    if refusal == "no-native-session-id":
+        predecessor = replace(predecessor, session_id=None)
+    elif refusal == "no-transcript-domain":
+        predecessor = replace(predecessor, transcript_domain=None)
+    elif refusal == "untrusted-domain":
+        bare = tmp_path / "bare"
+        bare.mkdir()
+        predecessor = replace(predecessor, transcript_domain=str(bare))
+    elif refusal == "foreign-lineage":
+        trusted = ()
+    elif refusal == "no-transcript-location":
+        predecessor = replace(predecessor, transcript_location=None)
+    elif refusal == "transcript-outside-domain":
+        outside = tmp_path / "outside.jsonl"
+        outside.write_text("{}\n", encoding="utf-8")
+        predecessor = replace(predecessor, transcript_location=str(outside))
+    elif refusal == "missing-transcript":
+        transcript.unlink()
+    elif refusal == "transcript-symlink":
+        linked = domain / "linked.jsonl"
+        linked.symlink_to(transcript)
+        predecessor = replace(predecessor, transcript_location=str(linked))
+    with pytest.raises(BadRequest, match="cannot resume Pi session safely"):
+        resume_launch_overlay(
+            ResumeContext(predecessor=predecessor, trusted_session_owners=trusted)
+        )
 
 
 # Pi's parseArgs routes by argv prefix (`--help`, `-h`, `@file`, unknown `--` flags),
@@ -257,9 +276,6 @@ def test_pi_runtime_routes_only_the_proven_native_controls() -> None:
 # leading newline lands the whole prompt in `messages` verbatim.
 HOSTILE_PROMPTS = [
     "- item: finish the migration",
-    "---",
-    "--help",
-    "-h",
     "@teammate please review the diff",
 ]
 

@@ -4,22 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
 from tests.support.pi_transcripts import append, message_record, session_record
-from theater.harness.builtin.plugins.pi.constants import (
-    PI_ISOLATION_MARKER,
-)
-from theater.harness.builtin.plugins.pi.launch import (
-    participant_root,
-    plan_launch,
-    resume_launch_overlay,
-)
 from theater.harness.builtin.plugins.pi.observer import PiObserver
-from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
-from theater.models import Participant, Status
 from theater.trajectory.enums import (
     TrajectoryKind,
     TrajectoryStatus,
@@ -284,10 +273,7 @@ def test_pi_history_seed_io_error_is_source_unavailable(tmp_path, monkeypatch) -
     assert failed.error_code == "transcript_source_unavailable"
 
 
-@pytest.mark.usefixtures("available_harness_binaries")
-def test_pi_history_reader_keeps_live_turn_context_and_resume_forks_into_new_session_dir(
-    tmp_path, monkeypatch
-) -> None:
+def test_pi_history_reader_keeps_live_turn_context(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     workdir = tmp_path / "work"
     workdir.mkdir()
@@ -315,43 +301,3 @@ def test_pi_history_reader_keeps_live_turn_context_and_resume_forks_into_new_ses
     )
     live = asyncio.run(source.read())
     assert live.events[0].turn_id == "user-1"
-
-    cold_plan = plan_launch(LaunchContext("predecessor", "", tmp_path / "config.json", "yolo"))
-    domain = Path(cold_plan.transcript_domain or "")
-    domain.mkdir(parents=True)
-    marker = domain / PI_ISOLATION_MARKER
-    marker.write_text(cold_plan.files[marker], encoding="utf-8")
-    predecessor_transcript = domain / "native-id.jsonl"
-    append(predecessor_transcript, session_record(session_id="native-id", cwd=workdir))
-    predecessor = Participant(
-        id="predecessor",
-        harness="pi",
-        cwd=str(workdir),
-        session_id="native-id",
-        transcript_domain=str(domain),
-        transcript_location=str(predecessor_transcript),
-        session_correlation="exact",
-        status=Status.DEAD,
-    )
-    overlay = resume_launch_overlay(
-        ResumeContext(predecessor=predecessor, trusted_session_owners=(predecessor,))
-    )
-    resumed = plan_launch(
-        LaunchContext(
-            "successor",
-            "continue",
-            tmp_path / "resume.json",
-            "yolo",
-            resume=overlay.resume_reference,
-        )
-    )
-
-    successor_domain = participant_root("successor")
-    assert resumed.session_id == "successor"
-    assert resumed.argv[resumed.argv.index("--session-dir") + 1] == str(successor_domain)
-    assert resumed.argv[resumed.argv.index("--fork") + 1] == str(predecessor_transcript.resolve())
-    assert resumed.transcript_domain == str(successor_domain.resolve())
-    assert successor_domain / PI_ISOLATION_MARKER in resumed.files
-    assert overlay.resume_reference == str(predecessor_transcript.resolve())
-    assert overlay.transcript_domain is None
-    assert overlay.cwd == str(workdir)

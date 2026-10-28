@@ -19,9 +19,9 @@ from .constants import (
     WORKING_MARKER,
 )
 
-# Permission-mode footer family, from the claude-code 2.1.220 bundle (external
-# evidence): each symbol renders with only its own indicators, so impossible
-# pairings (⏸ bypass permissions) stay out of the family.
+# Permission-mode footer family (external evidence): each symbol renders with
+# only its own indicators, so impossible pairings (⏸ bypass permissions) stay
+# out of the family.
 _MODE_LINE_PAIRS = (
     ("⏸", ("plan mode", "manual mode")),
     ("⏵⏵", ("accept edits", "bypass permissions", "don't ask", "auto mode")),

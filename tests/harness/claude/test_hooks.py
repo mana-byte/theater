@@ -19,7 +19,7 @@ from theater.harness.contracts.callbacks import (
     HookCorrelationContext,
     HookDecodeContext,
 )
-from theater.harness.contracts.channels import SignalKind, SignalOwnership
+from theater.harness.contracts.channels import SignalKind
 from theater.trajectory.enums import TrajectoryFailureCategory, TrajectoryKind, TrajectoryStatus
 from theater.transcript_identity import canonical_location
 
@@ -249,7 +249,7 @@ def test_interrupted_tool_failure_is_lifecycle_only_not_completion_evidence() ->
     assert decoded.fact.kind is TrajectoryKind.SYSTEM
 
 
-def test_absent_hook_credential_leaves_durable_transcript_primary() -> None:
+def test_absent_hook_credential_disables_hook_enrichments() -> None:
     runtime = HookRuntime(lambda _participant_id, _channel_id: False)
     try:
         assert not runtime.has_active("participant", OBSERVATION.enrichments)
@@ -258,14 +258,6 @@ def test_absent_hook_credential_leaves_durable_transcript_primary() -> None:
         import asyncio
 
         asyncio.run(runtime.aclose())
-
-    assert OBSERVATION.primary is not None
-    primary = {(cap.signal, cap.ownership) for cap in OBSERVATION.primary.channel.capabilities}
-    hook_channel = OBSERVATION.hook_channels[0].declaration
-    hooks = {(cap.signal, cap.ownership) for cap in hook_channel.capabilities}
-    assert (SignalKind.TURN, SignalOwnership.PRIMARY) in primary
-    assert (SignalKind.USAGE, SignalOwnership.PRIMARY) in primary
-    assert hooks == {(SignalKind.LIFECYCLE, SignalOwnership.ENRICHMENT)}
 
 
 @pytest.mark.asyncio

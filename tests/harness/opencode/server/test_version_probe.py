@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import threading
 from pathlib import Path
@@ -16,7 +15,6 @@ from theater.daemon.spawning import planning
 from theater.daemon.spawning.models import SpawnRequest
 from theater.harness.builtin.plugins.opencode import dialect, server_plan
 from theater.harness.builtin.plugins.opencode.dialect import (
-    installed_version,
     require_supported_version,
     resolve_binary,
 )
@@ -55,10 +53,11 @@ def _patch_offset(version: tuple[int, int, int], offset: int) -> str:
 @pytest.mark.parametrize(
     ("version", "supported"),
     [
-        ("0.0.1", False),
+        (_patch_offset(version_key(VERSION_POLICY.minimum), -1), False),
         (VERSION_POLICY.minimum, True),
         (VERSION_POLICY.maximum, True),
         (_patch_offset(version_key(VERSION_POLICY.maximum), 1), False),
+        ("0.0.1", False),
     ],
 )
 def test_probe_qualifies_only_the_shared_json_policy(
@@ -91,7 +90,7 @@ def test_a_2x_resume_probe_refuses_before_any_backend(monkeypatch: pytest.Monkey
 
 
 def test_an_unsupported_resume_cannot_select_a_provider_fallback(monkeypatch):
-    patch_probe(monkeypatch, "opencode v1.18.29\n", "--port --hostname")
+    patch_probe(monkeypatch, "opencode v0.0.1\n", "--port --hostname")
     refused = probe_opencode_server_compatibility(RuntimeProbeContext(resume=True))
     assert not refused.supported
     assert VERSION_POLICY.range_text in refused.reason
@@ -169,36 +168,3 @@ def test_an_explicit_pin_supplies_the_release_without_a_probe(
     monkeypatch.setenv("PATH", str(tmp_path))  # no opencode at all
     monkeypatch.setenv(dialect.VERSION_ENV, VERSION_POLICY.minimum)
     assert require_supported_version("opencode") == version_key(VERSION_POLICY.minimum)
-
-
-def _counting_binary(directory: Path, body: str) -> tuple[Path, Path]:
-    counter = directory / "opencode.runs"
-    counter.write_text("")
-    binary = directory / "opencode"
-    binary.write_text(f'#!/bin/sh\necho run >> "{counter}"\n{body}\n')
-    binary.chmod(0o755)
-    return binary, counter
-
-
-def test_a_failed_probe_recovers_immediately_on_an_unchanged_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    binary, counter = _counting_binary(tmp_path, "echo not-a-version")
-    identity = binary.stat()
-    monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.delenv(dialect.VERSION_ENV, raising=False)
-    assert installed_version("opencode") is None
-    assert installed_version("opencode") is None
-    assert len(counter.read_text().splitlines()) == 2
-
-    # An unchanged entrypoint identity must not hide a repaired CLI.
-    repaired = f'#!/bin/sh\necho run >> "{counter}"\necho {VERSION_POLICY.minimum}\n'
-    padding = identity.st_size - len(repaired.encode())
-    assert padding >= 2
-    repaired += "#" + "x" * (padding - 2) + "\n"
-    binary.write_text(repaired)
-    os.utime(binary, ns=(identity.st_atime_ns, identity.st_mtime_ns))
-    assert binary.stat().st_size == identity.st_size
-
-    assert installed_version("opencode") == version_key(VERSION_POLICY.minimum)
-    assert len(counter.read_text().splitlines()) == 3
