@@ -6,22 +6,17 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .unified_projection import _string
 from .unified_store_io import _reject_symlink_components
 from .unified_store_loading import _read_journal_detail, _session_root
 from .unified_store_types import (
     _DELTA_RECORD_TYPES,
     _JOURNAL_PATH_PATTERN,
-    _TURN_STATUSES,
     UnifiedStoreError,
     UnifiedStoreView,
     _JournalRecord,
 )
 
 logger = logging.getLogger("theater.harness.vibe")
-
-#: Turn statuses that reached an end; ``in_progress`` is the only one that has not.
-_ENDED_TURNS = _TURN_STATUSES - {"in_progress"}
 
 #: Turn changes kept for one read; more than this cannot be replayed whole and is reported unknown.
 TURN_CHANGES_MAX = 1024
@@ -124,87 +119,30 @@ def turn_changes_between(
         since=latest_turn(previous.snapshot),
     )
     if changes is None:
-        previous_turn = latest_turn(previous.snapshot)
-        current_turn = latest_turn(current.snapshot)
-        turn_id = turn_key(previous_turn)[0]
+        turn_id = turn_key(latest_turn(previous.snapshot))[0]
         # Vibe folds after every turn; one shared turn id in both views proves no other ran.
-        if turn_id is not None and turn_id == turn_key(current_turn)[0]:
+        if turn_id is not None and turn_id == turn_key(latest_turn(current.snapshot))[0]:
             return ()
-        if _sole_later_turn_proven(previous, current):
+        from .unified_source import _turn_state  # local: the source imports this module
+
+        # Every turn publishes its start and its end: with no work open in either view,
+        # a gap of at most three publishes holds only the current view's turn.
+        if current.watermark - previous.watermark <= 3 and not (
+            _turn_state(previous).open or _turn_state(current).open
+        ):
             return ()
         try:
             retained = [int(path.stem) for path in _segments(session_root)]
         except (OSError, UnifiedStoreError):
             retained = []
         logger.warning(
-            "vibe %s: sequences %d..%d not replayable; retained journals %s; turns %s/%s -> %s/%s",
+            "vibe %s: turn ends in sequences %d..%d are not replayable; retained journals: %s",
             current.session_id,
             previous.sequence + 1,
             current.sequence,
             retained,
-            *turn_key(previous_turn),
-            *turn_key(current_turn),
         )
     return changes
-
-
-def _sole_later_turn_proven(previous: UnifiedStoreView, current: UnifiedStoreView) -> bool:
-    """Prove from the two views alone that no turn but the later one ran in the gap.
-
-    History cannot rule out a turn that typed no entry: only injected input starts
-    one (Vibe's /retry), and it skips the user entry. The watermark can: it advances
-    once per journaled publish, and every turn, injected or not, spans at least two
-    publishes — its start input, then the input that carries its terminal
-    observation — so a gap of two or three publishes fits the later turn and nothing
-    else, provided no turn was already active behind the previous view: a turn whose
-    pre-agent hook is pending changes the session to busy without touching
-    latestTurn. With no other turn possible, the later turn's own entries must be
-    the only history change and its input entry new; every id the proof leans on
-    must be a real nonempty string, or the store proves nothing."""
-
-    from .unified_history import _entries
-    from .unified_source import _BUSY_SESSIONS  # local: the source imports this module
-
-    previous_id, previous_status = turn_key(latest_turn(previous.snapshot))
-    later = latest_turn(current.snapshot)
-    later_id, later_status = turn_key(later)
-    if (
-        _string(previous_id) is None
-        or later is None
-        or _string(later_id) is None
-        or previous_id == later_id
-        or previous_status not in _ENDED_TURNS
-        or later_status not in _ENDED_TURNS
-    ):
-        return False  # a turn id that is not a real string cannot name the turn that ended
-    previous_session = previous.snapshot.get("session")
-    previous_session_status = (
-        previous_session.get("status", {}).get("type")
-        if isinstance(previous_session, dict)
-        else None
-    )
-    if not isinstance(previous_session_status, str) or previous_session_status in _BUSY_SESSIONS:
-        return False  # a turn can already be active behind a terminal latestTurn
-    if not 2 <= current.watermark - previous.watermark <= 3:
-        return False  # the gap cannot be exactly this turn's start and end: another could fit
-    old_entries = _entries(previous)
-    new_entries = _entries(current)
-    if new_entries[: len(old_entries)] != old_entries:
-        return False  # history moved backwards, lost or altered: another turn could hide there
-    appended = new_entries[len(old_entries) :]
-    if any(entry.get("turnId") != later_id for entry in appended):
-        return False
-    input_entry_id = _string(later.get("inputEntryId"))
-    return (
-        input_entry_id is not None
-        and not any(entry.get("id") == input_entry_id for entry in old_entries)
-        and any(
-            entry.get("id") == input_entry_id
-            and entry.get("type") == "message"
-            and entry.get("role") == "user"
-            for entry in appended
-        )
-    )
 
 
 def _segments(session_root: Path) -> list[Path]:

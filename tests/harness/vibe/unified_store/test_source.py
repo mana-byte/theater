@@ -424,6 +424,54 @@ def test_one_turn_id_proves_its_end_after_its_journal_is_collected(store: Store)
     ]
 
 
+@pytest.mark.parametrize(
+    ("gap", "previous_busy", "current_open", "complete"),
+    [
+        (2, False, False, True),
+        (4, False, False, False),
+        (2, True, False, False),
+        (3, False, True, False),
+    ],
+)
+def test_a_short_closed_gap_holds_only_the_current_views_turn(
+    store: Store, gap: int, previous_busy: bool, current_open: bool, complete: bool
+) -> None:
+    """No work open in either view and a gap of three publishes: no other turn can fit."""
+    settled = turn_doc([USER_A, ANSWER_A], "turn-a", "completed")
+    previous = turn_doc([USER_A, ANSWER_A], "turn-a", "completed")
+    if previous_busy:  # a pending pre-agent hook turns the session busy behind a terminal turn
+        previous["session"]["status"] = {"type": "running"}
+    store.publish(generation=GEN1, snapshot_sequence=0, state=previous, watermark=1)
+    source = VibeObserver(root=store.session_root.parent.parent).open_source(cwd="/tmp/work")
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+
+    end = 1 + gap  # the watermark the current view reaches
+    records = [turn_record(end, "turn-b", "in_progress", USER_B)]
+    if not current_open:
+        records = [
+            turn_record(end - 1, "turn-b", "in_progress", USER_B),
+            turn_record(end, "turn-b", "completed", ANSWER_B),
+        ]
+    store.publish(
+        generation=GEN2,
+        snapshot_sequence=1,
+        state=settled,
+        watermark=end - 1,
+        journal=records,
+    )
+    (store.session_root / "journal" / f"{1:016d}.jsonl").unlink()
+
+    batch = asyncio.run(source.read())
+    assert batch.turn_state is not None and batch.turn_state.complete is complete
+    if complete:
+        assert ends(batch) == [
+            (EventKind.USER, "job B prompt", "turn-b", False),
+            (EventKind.ASSISTANT, "ANSWER B", "turn-b", True),
+        ]
+
+
 def test_a_restored_checkpoint_replays_the_turn_ends_behind_it(store: Store) -> None:
     """A restart resumes from its checkpoint; A's end, folded after it, must still be read."""
     checkpoint = attached_to_running_a(store).source_checkpoint()
@@ -495,7 +543,7 @@ def test_turn_ends_across_several_generations_replay_every_retained_segment(
     )
     if not retained:
         assert any(
-            record.levelname == "WARNING" and "retained journals [1, 5]" in record.getMessage()
+            record.levelname == "WARNING" and "retained journals: [1, 5]" in record.getMessage()
             for record in caplog.records
         )
         source.rollback_source_checkpoint()
