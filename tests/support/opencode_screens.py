@@ -1,6 +1,6 @@
 """Synthetic OpenCode screens built only from markers the supported binary renders."""
 
-#: Idle composer footer (feature-plugins/prompt/footer.tsx, v2.2.0).
+#: Idle composer footer (feature-plugins/prompt/footer.tsx).
 OPENCODE_IDLE = "shift+tab agents  ctrl+p commands"
 
 #: Working composer footer hint (component/prompt/index.tsx).

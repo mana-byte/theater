@@ -1,6 +1,6 @@
 """Synthetic Claude screens built only from markers the supported binary renders."""
 
-#: Idle footer hint (claude 2.1.296–2.1.311 captures); the composer line above it.
+#: Idle footer hint; the composer line sits above it.
 CLAUDE_IDLE = "? for shortcuts"
 
 #: Permission dialog footer, shared by the write and bash dialog shapes.
