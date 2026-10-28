@@ -439,8 +439,7 @@ class SpawnAdmission(ParticipantLaunchHost):
     ) -> Job:
         job = Job(
             handle=participant_id,
-            # A parentless spawn's initial prompt is system-originated by the
-            # spawn itself, and the native dispatch sends it as caller 'cli'.
+            # The native initial dispatch sends as parent_id or "cli"; the caller guard requires equality.
             caller_id=parent_id or "cli",
             target_id=participant_id,
             kind="spawn",
