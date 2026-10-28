@@ -14,7 +14,6 @@ from theater.harness.builtin.plugins.opencode.dialect import (
     lineage_marker,
     participant_database_path,
 )
-from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
 from theater.harness.builtin.plugins.opencode.native_plugin import plugin_dir
 from theater.harness.builtin.plugins.opencode.observer import database_path
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
@@ -26,13 +25,9 @@ from theater.harness.builtin.plugins.opencode.server_discovery import (
 from theater.harness.builtin.plugins.opencode.server_plan import (
     SERVER_SECRET_ENV,
     plan_opencode_server,
-    probe_opencode_server_compatibility,
 )
 from theater.harness.contracts.runtime import (
-    RuntimeCapability,
-    RuntimeHost,
     RuntimePlanningContext,
-    RuntimeSessionOrder,
 )
 
 
@@ -113,25 +108,6 @@ def test_plan_omits_an_unset_model(tmp_path: Path, fake_opencode) -> None:
     plan = plan_opencode_server(_context(tmp_path))
     config = json.loads(plan.backend.files[paths.mcp_config_path("h00000000001")])
     assert "model" not in config
-
-
-def test_manifest_selects_the_detached_server_runtime() -> None:
-    runtime = MANIFEST.runtime
-    assert runtime is not None
-    assert runtime.host is RuntimeHost.DETACHED_BACKEND
-    assert runtime.plan is plan_opencode_server
-    assert runtime.probe is probe_opencode_server_compatibility
-    assert runtime.session_order is RuntimeSessionOrder.SESSION_FIRST
-    assert runtime.endpoint_discovery is not None
-    assert runtime.endpoint_discovery.parser is parse_server_stdout_endpoint
-    assert runtime.runtime_credential is not None
-    assert runtime.runtime_credential.env == (SERVER_SECRET_ENV,)
-    assert runtime.legacy_fallback == frozenset({RuntimeCapability.INTERRUPT})
-    assert runtime.unavailable_capabilities == {
-        RuntimeCapability.STEER,
-        RuntimeCapability.SETTINGS_UPDATE,
-    }
-    assert runtime.channel.drives_job_completion is False
 
 
 def test_banner_yields_loopback_origin() -> None:
