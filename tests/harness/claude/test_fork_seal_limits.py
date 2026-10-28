@@ -247,43 +247,14 @@ async def test_a_copied_answer_cannot_complete_a_resumed_job(tmp_path, registry,
         await reader.aclose()
 
 
-@pytest.mark.parametrize("written", [3, 43], ids=["before-history", "mid-turn"])
+@pytest.mark.parametrize("written", [0, 40], ids=["before-history", "mid-turn"])
 async def test_history_copied_in_after_the_attach_never_answers_a_resumed_job(
     tmp_path, registry, written
 ):
-    """Claude creates a fork's file first, then copies the history in with the first turn.
-
-    An attach inside that gap must not let the copy count as live turns: written=3 crashes the
-    job on unmatched turns, written=43 ends a half-read turn with no heard text, answering it.
-    """
-    headers = [
-        json.dumps({"type": name}) for name in ("mode", "permission-mode", "file-history-snapshot")
-    ]
-    history, parent = [], None
-    for number in range(33):
-        user, answer, marker = f"old_user{number}", f"old_answer{number}", f"old_marker{number}"
-        history += [
-            claude_record(user, parent, "user", message={"content": f"old{number}"}),
-            claude_fragment(answer, user, {"type": "text", "text": f"OLD{number}"}, f"m{number}"),
-            claude_marker(marker, answer),
-        ]
-        parent = marker
-    history = [
-        json.dumps({**json.loads(line), "timestamp": "2026-01-01T00:00:00Z"}) for line in history
-    ]
-    current = [
-        claude_record("new_user", parent, "user", message={"content": "new"}),
-        claude_fragment("new_answer", "new_user", {"type": "text", "text": "NEW"}, "m_new"),
-        claude_marker("new_marker", "new_answer"),
-    ]
-    lines = [
-        *headers,
-        *history,
-        *(
-            json.dumps({**json.loads(line), "timestamp": "2026-01-01T00:00:05Z"})
-            for line in current
-        ),
-    ]
+    """Claude creates a fork's file, then copies the history in ahead of the first turn."""
+    fork = claude_fork(33)
+    # 2.1.312 causal order: history, then prompt, answer, marker.
+    lines = [fork[0], *fork[3:], *fork[1:3]]
     root = tmp_path / "projects"
     path = root / "project" / f"{SESSION}.jsonl"
     path.parent.mkdir(parents=True)
