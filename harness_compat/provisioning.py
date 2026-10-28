@@ -1,4 +1,4 @@
-"""Optional qualification declarations: how to run one stock CLI hermetically against a mock."""
+"""How an adapter runs its stock CLI hermetically against the mock model."""
 
 from __future__ import annotations
 
@@ -9,14 +9,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import ClassVar, Literal, Protocol
+from typing import ClassVar, Protocol, get_args
 
-from theater.harness.contracts.values import freeze_json_mapping
+from .contract import MockProtocol
 
-#: Wire protocols the qualification mock speaks; ``openai-chat`` is Chat Completions.
-COMPAT_PROTOCOLS = ("anthropic", "openai-chat", "openai-responses")
-
-type CompatProtocol = Literal["anthropic", "openai-chat", "openai-responses"]
+#: Bounds of a scripted tool call: the tool's name, and its payload with the tokens unexpanded.
+TOOL_NAME_MAX_CHARS = 128
+TOOL_PAYLOAD_MAX_CHARS = 16_384
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +43,7 @@ class ProvisionContext:
 class Provisioned:
     """What makes the stock CLI talk to the mock: nothing else may change its launch."""
 
-    protocol: CompatProtocol
+    protocol: MockProtocol
     #: Additions to the CLI environment: endpoint, dummy credential, update/telemetry opt-outs.
     env: Mapping[str, str] = MappingProxyType({})
     #: Absolute config, catalog and onboarding or trust pre-seeding files.
@@ -55,8 +54,8 @@ class Provisioned:
     efforts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.protocol not in COMPAT_PROTOCOLS:
-            raise ValueError(f"protocol must be one of {', '.join(COMPAT_PROTOCOLS)}")
+        if self.protocol not in get_args(MockProtocol):
+            raise ValueError(f"protocol must be one of {', '.join(get_args(MockProtocol))}")
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
         object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
         object.__setattr__(self, "models", tuple(self.models))
@@ -72,10 +71,24 @@ class ToolTemplate:
     payload: str | Mapping[str, object]
     #: The only tokens the payload may carry; everything else is literal.
     TOKENS: ClassVar[tuple[str, ...]] = ()
+    #: The tokens without which the call cannot do its job.
+    REQUIRED: ClassVar[tuple[str, ...]] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.payload, Mapping):
-            object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
+            object.__setattr__(self, "payload", _freeze(self.payload))
+        kind = type(self).__name__
+        if not self.name.strip() or len(self.name) > TOOL_NAME_MAX_CHARS:
+            raise ValueError(
+                f"{kind} name must be non-blank and at most {TOOL_NAME_MAX_CHARS} chars"
+            )
+        if isinstance(self.payload, str) and not self.payload.strip():
+            raise ValueError(f"{kind} payload must not be blank")
+        if self.size > TOOL_PAYLOAD_MAX_CHARS:
+            raise ValueError(f"{kind} payload must be at most {TOOL_PAYLOAD_MAX_CHARS} characters")
+        for token in self.REQUIRED:
+            if token not in self.placeholders:
+                raise ValueError(f"{kind} payload must reference the {{{token}}} placeholder")
 
     @property
     def placeholders(self) -> frozenset[str]:
@@ -102,6 +115,7 @@ class NativeEdit(ToolTemplate):
     """The CLI's own file-write tool, and a payload that makes it write one scratch file."""
 
     TOKENS: ClassVar[tuple[str, ...]] = ("path", "nonce")
+    REQUIRED: ClassVar[tuple[str, ...]] = ("path",)
 
     def render(self, *, path: str, nonce: str) -> str | Mapping[str, object]:
         return self._render({"path": path, "nonce": nonce})
@@ -116,6 +130,7 @@ class McpCall(ToolTemplate):
     """
 
     TOKENS: ClassVar[tuple[str, ...]] = ("server", "tool", "arguments")
+    REQUIRED: ClassVar[tuple[str, ...]] = ("tool", "arguments")
 
     def render(
         self, *, server: str, tool: str, arguments: Mapping[str, object]
@@ -132,9 +147,19 @@ class McpDiscovery(ToolTemplate):
     """
 
     TOKENS: ClassVar[tuple[str, ...]] = ("server", "tool")
+    REQUIRED: ClassVar[tuple[str, ...]] = ("tool",)
 
     def render(self, *, server: str, tool: str) -> str | Mapping[str, object]:
         return self._render({"server": server, "tool": tool})
+
+
+def _freeze(value: object) -> object:
+    """Objects read-only, arrays tuples: Theater's own freeze would import all its dependencies."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze(item) for item in value)
+    return value
 
 
 @functools.cache
@@ -184,21 +209,16 @@ class CompatManifest:
     mcp_call: McpCall | None = None
     #: Only when the CLI offers an MCP tool after a search for it.
     mcp_discovery: McpDiscovery | None = None
-    #: Extra generic mutations whose effects this plugin's provisioning cannot mask.
+    #: Extra generic mutations whose effects this harness's provisioning cannot mask.
     canaries: tuple[str, ...] = ()
     #: Non-model HTTP routes the mock acknowledges with 204, without consuming a reply.
     acknowledged_routes: tuple[tuple[str, str], ...] = ()
 
-
-__all__ = [
-    "COMPAT_PROTOCOLS",
-    "CompatManifest",
-    "CompatProtocol",
-    "McpCall",
-    "McpDiscovery",
-    "NativeEdit",
-    "ProvisionContext",
-    "Provisioned",
-    "Provisioner",
-    "ToolTemplate",
-]
+    def __post_init__(self) -> None:
+        if len(set(self.canaries)) != len(self.canaries):
+            raise ValueError("canaries must name each mutation once")
+        for method, path in self.acknowledged_routes:
+            if method not in {"GET", "POST"} or not path.startswith("/"):
+                raise ValueError(
+                    f"acknowledged route {method} {path} needs GET or POST and a /path"
+                )

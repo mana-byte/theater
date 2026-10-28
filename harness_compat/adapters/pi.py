@@ -1,4 +1,4 @@
-"""Pi: stable releases and the exact stock package installed from npm."""
+"""Pi: the exact stock package installed from npm, provisioned against the mock model."""
 
 from __future__ import annotations
 
@@ -8,13 +8,66 @@ from typing import Any
 
 from .. import github
 from ..contract import InstallFailed, Sandbox
+from ..provisioning import CompatManifest, ProvisionContext, Provisioned
 from . import _npm
+
+#: Used when the run names no logical models; two are needed to prove a selection takes effect.
+_DEFAULT_MODELS = ("mock-a", "mock-b")
+_PROVIDER = "mockprov"
+
+#: Two harness-native efforts the CLI maps to different wire values.
+_EFFORTS = ("low", "high")
+
+
+def provision(context: ProvisionContext) -> Provisioned:
+    """A custom provider serving each logical model from the mock over OpenAI completions."""
+    models = context.models or _DEFAULT_MODELS
+    agent_dir = context.home / ".pi" / "agent"
+    # Custom provider: baseUrl is the mock, a literal apiKey makes the models selectable.
+    catalog = {
+        "providers": {
+            _PROVIDER: {
+                "baseUrl": context.mock_urls["openai-chat"],
+                "api": "openai-completions",
+                "apiKey": "mock-key",
+                # Pi sends a reasoning effort only for a model declared as reasoning-capable.
+                "models": [{"id": name, "reasoning": True} for name in models],
+            }
+        }
+    }
+    # Start on the mock provider, trust the workdir so the TUI never prompts, stay offline.
+    settings = {
+        "defaultProvider": _PROVIDER,
+        "defaultModel": models[0],
+        "defaultProjectTrust": "always",
+        "quietStartup": True,
+        "enableInstallTelemetry": False,
+        "enableAnalytics": False,
+    }
+    # Pi canonicalises cwd with realpath before the trust lookup.
+    trust = {str(context.workdir.resolve()): True}
+    return Provisioned(
+        protocol="openai-chat",
+        env={"PI_CODING_AGENT_DIR": str(agent_dir)},
+        files={
+            agent_dir / "models.json": json.dumps(catalog, indent=2) + "\n",
+            agent_dir / "settings.json": json.dumps(settings, indent=2) + "\n",
+            agent_dir / "trust.json": json.dumps(trust, indent=2) + "\n",
+        },
+        models=models,
+        efforts=_EFFORTS,
+    )
+
+
+COMPAT = CompatManifest(provision=provision)
+
 
 _PACKAGE = "@earendil-works/pi-coding-agent"
 
 
 class PiAdapter:
     name = "pi"
+    compat = COMPAT
 
     def discover(self) -> list[str]:
         return github.npm_versions(_PACKAGE)

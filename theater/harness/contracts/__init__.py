@@ -60,17 +60,6 @@ from theater.harness.contracts.channels import (
     SignalKind,
     SignalOwnership,
 )
-from theater.harness.contracts.compat import (
-    COMPAT_PROTOCOLS,
-    CompatManifest,
-    CompatProtocol,
-    McpCall,
-    McpDiscovery,
-    NativeEdit,
-    ProvisionContext,
-    Provisioned,
-    Provisioner,
-)
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.events import (
     Event,
@@ -187,7 +176,6 @@ from theater.harness.contracts.values import freeze_json_mapping
 __all__ = [
     "APPROVALS",
     "BATCH_TERMINAL_EVIDENCE_MAX",
-    "COMPAT_PROTOCOLS",
     "MANIFEST_API_VERSION",
     "PLUGIN_API_VERSION",
     "Batch",
@@ -200,8 +188,6 @@ __all__ = [
     "ChannelHealth",
     "ChannelHealthState",
     "ChannelKind",
-    "CompatManifest",
-    "CompatProtocol",
     "ConnectionHealth",
     "ControlDeliveryPhase",
     "ControlKind",
@@ -239,8 +225,6 @@ __all__ = [
     "LaunchPlanner",
     "LineageManifest",
     "LiveChannelDeclaration",
-    "McpCall",
-    "McpDiscovery",
     "McpForegroundWait",
     "McpRenderContext",
     "McpRenderOverlay",
@@ -253,7 +237,6 @@ __all__ = [
     "NativeChildrenContext",
     "NativeChildrenReader",
     "NativeCompatibilityManifest",
-    "NativeEdit",
     "NativeHumanInteraction",
     "NativeInteractionKind",
     "NativeRequestId",
@@ -279,9 +262,6 @@ __all__ = [
     "OtelSignalDecoder",
     "ParsedRecord",
     "ParticipantObservationContext",
-    "ProvisionContext",
-    "Provisioned",
-    "Provisioner",
     "ReceiptValidationContext",
     "ReceiptValidator",
     "ResultCompleteness",

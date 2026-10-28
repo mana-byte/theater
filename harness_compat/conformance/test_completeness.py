@@ -7,10 +7,13 @@ import enum
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import pytest
 
+from harness_compat.adapters import load_adapter
+from harness_compat.contract import MockProtocol
+from harness_compat.provisioning import ProvisionContext
 from harness_compat.support.coverage import COVERAGE, NoLive
 from harness_compat.support.declarations import declarations
 from harness_compat.support.mutations import MUTATIONS
@@ -18,7 +21,6 @@ from harness_compat.support.obligations import FAMILIES, document, required
 from tests.support.manifest_rig import manifest, plan
 from theater.harness import HARNESSES
 from theater.harness.builtin import plugin_dir
-from theater.harness.contracts.compat import COMPAT_PROTOCOLS, ProvisionContext
 from theater.harness.contracts.manifest import (
     ControlManifest,
     InterruptPlan,
@@ -67,7 +69,7 @@ def test_a_shipped_harness_derives_obligations_only_from_what_it_declares(name: 
     )
     assert any(item.startswith("mcp:") for item in derived) is harness.supports_mcp_rendering
     assert any(item.startswith("edit:") for item in derived) is (
-        harness.compat is not None and harness.compat.native_edit is not None
+        load_adapter(name).compat.native_edit is not None
     )
     assert "turn:prompt" in derived
     assert "launch:prompt" in derived
@@ -93,10 +95,8 @@ def test_the_shipped_plugins_are_all_discovered() -> None:
 
 
 @pytest.mark.parametrize("name", SHIPPED)
-def test_plugin_canaries_exist_in_the_generic_catalogue(name: str) -> None:
-    compat = HARNESSES[name].compat
-    assert compat is not None
-    assert set(compat.canaries) <= {mutation.name for mutation in MUTATIONS}
+def test_adapter_canaries_exist_in_the_generic_catalogue(name: str) -> None:
+    assert set(load_adapter(name).compat.canaries) <= {mutation.name for mutation in MUTATIONS}
 
 
 def test_every_declaration_a_manifest_can_make_is_mapped_or_exempted() -> None:
@@ -176,12 +176,10 @@ def test_enabling_mcp_rendering_adds_the_mcp_obligations() -> None:
 
 @pytest.mark.parametrize("models", [(), ("mock-a", "mock-b")], ids=["fallback", "served"])
 @pytest.mark.parametrize("name", SHIPPED)
-def test_a_provisioning_plugin_offers_what_its_declared_capabilities_need(
+def test_an_adapter_provisions_what_its_plugin_declares(
     name: str, tmp_path: Path, models: tuple[str, ...]
 ) -> None:
-    harness = HARNESSES[name]
-    if harness.compat is None:
-        pytest.skip(f"{name} declares no compat manifest yet")
+    compat = load_adapter(name).compat
     work = tmp_path / "work"
     work.mkdir()
     link = tmp_path / "link"
@@ -193,20 +191,22 @@ def test_a_provisioning_plugin_offers_what_its_declared_capabilities_need(
         home=home,
         config_dir=home / ".config",
         workdir=link,
-        mock_urls={protocol: f"http://127.0.0.1:1/{protocol}" for protocol in COMPAT_PROTOCOLS},
+        mock_urls={
+            protocol: f"http://127.0.0.1:1/{protocol}" for protocol in get_args(MockProtocol)
+        },
         binary=tmp_path / name,
         version="1.2.3",
         models=models,
     )
 
     sandbox = set(tmp_path.rglob("*"))
-    provisioned = harness.compat.provision(context)
+    provisioned = compat.provision(context)
     assert set(tmp_path.rglob("*")) == sandbox, (
         "provisioning declares files; it writes nothing itself"
     )
 
-    support = harness.launch_parameter_support
-    assert provisioned.protocol in COMPAT_PROTOCOLS
+    support = HARNESSES[name].launch_parameter_support
+    assert provisioned.protocol in get_args(MockProtocol)
     assert not support.model or len(provisioned.models) >= 2, "model selection needs two models"
     assert not support.reasoning_effort or len(provisioned.efforts) >= 2, (
         "effort selection needs two efforts"

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from harness_compat.adapters import load_adapter
 from harness_compat.contract import SuiteDocument, SuiteRow
 from harness_compat.diagnostics import FAILURE_DETAIL_CHARS
 from harness_compat.process import SANDBOX_ENV
@@ -46,6 +47,7 @@ install.install(
     local_dir=Path(tempfile.mkdtemp(prefix="p", dir=SESSION.sandbox_root)),
 )
 HARNESS: Harness = harness_registry.HARNESSES[SESSION.harness]
+COMPAT = load_adapter(SESSION.harness).compat
 REQUIRED = required(HARNESS)
 (SESSION.evidence_dir / "required.json").write_text(
     json.dumps(document(SESSION.harness, SESSION.version, REQUIRED).to_json(), indent=2),
@@ -174,5 +176,7 @@ async def live(request: pytest.FixtureRequest, harness: Harness) -> AsyncIterato
         "obligation"
     )
     variant = obligation.variant if isinstance(obligation, Obligation) else None
-    async with LiveRig.open(SESSION, harness, label=request.node.name, variant=variant) as rig:
+    async with LiveRig.open(
+        SESSION, harness, COMPAT, label=request.node.name, variant=variant
+    ) as rig:
         yield rig

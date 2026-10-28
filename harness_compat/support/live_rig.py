@@ -39,13 +39,13 @@ from harness_compat.contract import (
 from harness_compat.framework import python_path
 from harness_compat.mock import MockServer
 from harness_compat.process import RUN_ENV, SANDBOX_ENV
+from harness_compat.provisioning import CompatManifest, ProvisionContext, Provisioned
 from harness_compat.sandbox import sandbox_environment
 from harness_compat.support import mutations
 from harness_compat.support.live_stack import BOOT_SECONDS, Stack
 from tests.support.paths import REPO_ROOT
 from theater.frontend import FrontendClient
 from theater.frontend.dto import Controls, Job, Participant
-from theater.harness.contracts.compat import ProvisionContext, Provisioned
 from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.observation import ScreenKind, ScreenReading
 
@@ -221,6 +221,7 @@ class LiveRig:
 
     session: LiveSession
     harness: Harness
+    compat: CompatManifest
     stack: Stack
     provisioned: Provisioned
     mock: MockServer
@@ -246,10 +247,14 @@ class LiveRig:
     @classmethod
     @asynccontextmanager
     async def open(
-        cls, session: LiveSession, harness: Harness, *, label: str, variant: str | None = None
+        cls,
+        session: LiveSession,
+        harness: Harness,
+        compat: CompatManifest,
+        *,
+        label: str,
+        variant: str | None = None,
     ) -> AsyncIterator[LiveRig]:
-        if harness.compat is None:
-            raise RuntimeError(f"harness {session.harness!r} declares no compat manifest")
         label = _slug(label)
         root = session.sandbox_root / f"l{next(_ROOMS)}"
         workdir, marker_dir = root / "w", root / "m"
@@ -261,11 +266,13 @@ class LiveRig:
             mock = MockServer(
                 session.evidence_dir / f"{label}.requests.jsonl",
                 models=LOGICAL_MODELS,
-                acknowledged_routes=harness.compat.acknowledged_routes,
+                acknowledged_routes=compat.acknowledged_routes,
             )
             mock.start()
             cleanup.callback(mock.stop)
-            provisioned, env = _prepare(session, harness, root, workdir, marker_dir, mock, variant)
+            provisioned, env = _prepare(
+                session, harness, compat, root, workdir, marker_dir, mock, variant
+            )
             stack = Stack(root, env)
             cleanup.callback(stack.stop)
             cleanup.callback(stack.capture, evidence)
@@ -274,6 +281,7 @@ class LiveRig:
             rig = cls(
                 session,
                 harness,
+                compat,
                 stack,
                 provisioned,
                 mock,
@@ -619,6 +627,7 @@ class LiveRig:
 def _prepare(
     session: LiveSession,
     harness: Harness,
+    compat: CompatManifest,
     root: Path,
     workdir: Path,
     marker_dir: Path,
@@ -630,8 +639,7 @@ def _prepare(
     The CLI's provisioning, Theater's own config, the probe sidecar and, for a canary or a variant,
     the mutation of the plugin; every file lands inside the sandbox.
     """
-    assert harness.compat is not None
-    provisioned = harness.compat.provision(
+    provisioned = compat.provision(
         ProvisionContext(
             sandbox_root=root,
             home=root / "h",

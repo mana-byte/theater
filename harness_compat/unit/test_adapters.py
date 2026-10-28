@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
+import sys
 import tarfile
 import urllib.error
 import zipfile
@@ -17,10 +19,12 @@ from harness_compat import adapters, github
 from harness_compat.adapters import ADAPTER_NAMES, _codex_release, _npm, load_adapter
 from harness_compat.adapters import codex as codex_adapter
 from harness_compat.adapters import vibe as vibe_adapter
+from harness_compat.codecopy import code_copy
 from harness_compat.contract import InstallFailed
 from harness_compat.policy import load_policy
 from harness_compat.sandbox import make_sandbox
 from tests.support.paths import REPO_ROOT
+from theater.harness import HARNESSES
 
 Run = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -33,8 +37,29 @@ def test_every_shipped_plugin_has_one_adapter_of_its_name_and_a_policy() -> None
     modules = {path.stem for path in Path(adapters.__file__).parent.glob("[!_]*.py")}
     assert modules == set(ADAPTER_NAMES)
     for name in ADAPTER_NAMES:
-        assert load_adapter(name).name == name
+        adapter = load_adapter(name)
+        assert adapter.name == name
         assert load_policy(REPO_ROOT, name).minimum
+        # The edit scenarios gate and run the native edit under the plugin's edits approval.
+        approvals = HARNESSES[name].launch_parameter_support.approvals
+        assert adapter.compat.native_edit is None or "edits" in approvals
+
+
+def test_every_adapter_loads_without_project_dependencies_or_site_packages() -> None:
+    # The verify fan-out discovers releases with the runner's python3, before any install.
+    load_all = "from harness_compat.adapters import ADAPTER_NAMES, load_adapter\n" + (
+        "for name in ADAPTER_NAMES:\n    load_adapter(name)"
+    )
+    with code_copy(REPO_ROOT) as tree:
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", load_all],
+            cwd=tree,
+            env={**os.environ, "PYTHONPATH": str(tree), "PYTHONDONTWRITEBYTECODE": "1"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert result.returncode == 0, result.stderr
 
 
 def _registry(monkeypatch: pytest.MonkeyPatch, **versions: list[str]) -> list[str]:

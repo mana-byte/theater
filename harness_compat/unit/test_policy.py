@@ -322,6 +322,17 @@ def test_a_plugin_edit_selects_its_harness_for_a_retest_not_only_a_policy_edit(
     assert changed_gates(repo, "main") == []
 
 
+def test_an_adapter_edit_selects_only_its_harness(repo: Path, git: Git) -> None:
+    git(repo, "checkout", "-q", "-b", "topic")
+    adapter = repo / "harness_compat/adapters/codex.py"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("x = 1\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "provisioning")
+
+    assert affected_harnesses(repo, "main") == ["codex"]
+
+
 def test_edits_outside_every_plugin_select_no_harness(repo: Path, git: Git) -> None:
     git(repo, "checkout", "-q", "-b", "topic")
     (repo / "tracked.txt").write_text("edited\n", encoding="utf-8")
@@ -337,6 +348,7 @@ def test_edits_outside_every_plugin_select_no_harness(repo: Path, git: Git) -> N
         "theater/harness/builtin/plugins/__init__.py",
         "packages/regie/src/regie/bridge.py",
         "harness_compat/qualify.py",
+        "harness_compat/adapters/_npm.py",
         "harness_compat/support/live_rig.py",
         "tests/support/isolation.py",
         "pyproject.toml",

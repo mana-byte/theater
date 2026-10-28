@@ -87,6 +87,7 @@ def _rig(
     rig = LiveRig(
         session,
         cast(Any, None),
+        cast(Any, None),
         Stack(tmp_path, {"TMUX_TMPDIR": str(tmp_path / "t")}),
         cast(Any, None),
         mock,
@@ -635,8 +636,8 @@ class _Parts:
 
 def _open(tmp_path: Path):
     session = LiveSession("acme", Path("acme"), "1", tmp_path, tmp_path / "e", "token")
-    harness = SimpleNamespace(compat=SimpleNamespace(acknowledged_routes=()))
-    return LiveRig.open(session, cast(Any, harness), label="scenario")
+    compat = SimpleNamespace(acknowledged_routes=())
+    return LiveRig.open(session, cast(Any, SimpleNamespace()), cast(Any, compat), label="scenario")
 
 
 @pytest.mark.parametrize(

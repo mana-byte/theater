@@ -1,4 +1,4 @@
-"""Every declaration a harness manifest can make, enumerated from its types.
+"""Every declaration a harness manifest and its adapter's provisioning can make, from their types.
 
 A declaration is a dataclass field (``Type.field``) or one alternative of a field whose type is
 a ``Literal`` or an ``Enum`` (``Type.field=VALUE``). The live suite must map each to a scenario
@@ -14,13 +14,14 @@ from collections import abc
 from collections.abc import Iterator
 from typing import Any, Literal, get_args, get_origin, get_type_hints
 
+from harness_compat.provisioning import CompatManifest
 from theater.harness.contracts.manifest import HarnessManifest
 
 
-def declarations(root: type = HarnessManifest) -> frozenset[str]:
-    """Walk ``root`` and every dataclass reachable through its field types, each type once."""
+def declarations(*roots: type) -> frozenset[str]:
+    """Walk ``roots`` (by default both manifests) and every dataclass their fields reach, once."""
     found: set[str] = set()
-    pending: list[type] = [root]
+    pending: list[type] = list(roots or (HarnessManifest, CompatManifest))
     visited: set[type] = set()
     while pending:
         current = pending.pop()

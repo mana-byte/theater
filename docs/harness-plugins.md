@@ -529,7 +529,7 @@ A classifier's reading is conservative evidence: `PROMPT`, `WORKING`, `APPROVAL`
 confidence; unknown is the safe answer when it cannot distinguish a prompt from
 a sensitive modal.
 
-## Qualification (`compat`)
+## Qualification
 
 Shipped plugins keep their inclusive `min`, `max` and `excluded` in a compact, one-line
 `compatibility.json`. Runtime gates use the public `VersionPolicy` reader/predicate; the daily
@@ -538,61 +538,9 @@ max. Only qualified ceiling increases get automated PRs, carrying required exclu
 admitting failed releases. Failures get reused harness/version issues; failure-only sweeps create
 no PR and generic workflow-error issues are forbidden. See [`harness-compat.md`](harness-compat.md).
 
-`HarnessManifest.compat` is optional and read only by the compatibility suite,
-never at runtime. The suite derives every scenario from the rest of the
-manifest; `compat` supplies only what cannot be derived, so a plugin declares
-no scenarios, assertions, skips or proof callbacks.
-
-`CompatManifest.provision(context) -> Provisioned` is pure. It receives a
-`ProvisionContext` (sandbox directories, the mock model's base URL per protocol,
-the binary and its version, and the logical model names the run will request)
-and returns the `Provisioned` values that make the stock CLI use the mock:
-
-- `protocol`: `"anthropic"`, `"openai-chat"` (Chat Completions) or
-  `"openai-responses"`;
-- `env`: endpoint, dummy credential, update and telemetry opt-outs;
-- `files`: absolute config, model-catalog and onboarding or trust pre-seeding;
-- `models`: selectors the CLI accepts for the logical names, routed to the mock;
-- `efforts`: harness-native effort values worth sampling.
-
-`CompatManifest.acknowledged_routes` declares optional `(method, path)` pairs for non-model
-side channels. The mock returns 204 for them without consuming a scripted reply; they cannot
-replace model protocol routes.
-
-Provisioning must not replace launch argv, approval policy or receipt commands;
-production launch planning always wins. Every line of it is endpoint, credential,
-model catalog or onboarding and trust setup: a retry policy, a disabled agent or
-any other change to stock behaviour is not provisioning.
-
-`CompatManifest.native_edit` is optional and valid only when
-`launch.approvals` includes `edits`. `NativeEdit(name, payload)` names the CLI's
-own file-write tool and a payload that makes it write one scratch file: a JSON
-object or freeform text (for grammar-based tools such as a patch). The payload
-must contain the `{path}` placeholder and may contain `{nonce}`; those two
-tokens are substituted in one pass and nothing else is interpolated. The suite
-checks the scripted call against the schema the CLI actually offered the tool
-with; a call that does not fit (an argument a closed schema does not declare, a
-missing required one) means the recipe is stale for that release, and the run is
-inconclusive rather than red. One static recipe cannot serve two release lines
-that name an argument differently, so declare the line the suite can prove.
-
-`CompatManifest.mcp_call` is optional and needed only when the model cannot call
-an MCP tool under its own name, for example when MCP tools sit behind a script
-runner. `McpCall(name, payload)` names the tool the model calls
-and a payload that invokes one MCP tool; it must contain `{tool}` and
-`{arguments}` and may contain `{server}`, substituted in one pass (`{arguments}`
-as its JSON text). Without it the suite finds the MCP tool among the tool names
-the model was offered by suffix match.
-
-`CompatManifest.mcp_discovery` is optional and needed only when the CLI offers an MCP
-tool after a search for it (a tool search). `McpDiscovery(name, payload)` names the
-search tool and a payload that loads one MCP tool; it must contain `{tool}` and may
-contain `{server}`. The suite runs it before the tool's own call, which it then makes by the
-name the CLI offers afterwards (or through `mcp_call`).
-
-`CompatManifest.canaries` names extra generic mutations that this plugin's provisioning cannot
-mask. The mutation implementations and assertions stay in the shared suite. These tooling checks
-run separately from release qualification; no shared code branches on a harness name.
+Qualification provisioning is not part of a plugin: each shipped harness has one adapter,
+`harness_compat/adapters/<name>.py`, that discovers and installs the CLI's releases and declares its
+`CompatManifest`. See [Adapters](harness-compat.md#adapters).
 
 ## Optional signal enrichment
 
@@ -1106,7 +1054,7 @@ binary that changed between probe and connect fails closed.
 Each shipped plugin reads its inclusive bounds and excluded releases from `compatibility.json`.
 The [compatibility pipeline](harness-compat.md) tests every stable release above committed max
 and proposes one JSON line. Probe or runtime changes need matching manifest-derived
-live scenarios; adapters under `harness_compat/adapters/` only discover and install CLIs.
+live scenarios; adapters under `harness_compat/adapters/` discover, install and provision CLIs.
 
 Settings are separately gated: a runtime must not emulate `update_settings`
 by storing values that might apply to an unrelated future turn. Report

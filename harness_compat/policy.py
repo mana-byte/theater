@@ -215,8 +215,13 @@ def changed_gates(root: Path, base: str) -> list[str]:
     return [name for name in ADAPTER_NAMES if policy_relative(name).as_posix() in changed]
 
 
+def _belongs(path: str, name: str) -> bool:
+    """Whether ``path`` is harness ``name``'s alone: in its plugin folder or its adapter module."""
+    return Path(path).is_relative_to(PLUGINS / name) or path == f"harness_compat/adapters/{name}.py"
+
+
 def affected_harnesses(root: Path, base: str) -> list[str]:
-    """Plugin changes select that harness; shared code, dependencies or suite changes select all."""
+    """A harness's plugin or adapter selects it; shared code, dependencies or suite select all."""
     changed = git.diff_names(root, base)
     shared_files = {"Makefile", "pyproject.toml", "uv.lock"}
     shared_prefixes = (
@@ -229,14 +234,10 @@ def affected_harnesses(root: Path, base: str) -> list[str]:
     if any(
         path in shared_files or path.startswith(shared_prefixes)
         for path in changed
-        if not any(Path(path).is_relative_to(PLUGINS / name) for name in ADAPTER_NAMES)
+        if not any(_belongs(path, name) for name in ADAPTER_NAMES)
     ):
         return list(ADAPTER_NAMES)
-    return [
-        name
-        for name in ADAPTER_NAMES
-        if any(Path(path).is_relative_to(PLUGINS / name) for path in changed)
-    ]
+    return [name for name in ADAPTER_NAMES if any(_belongs(path, name) for path in changed)]
 
 
 def check_routine_change(root: Path, base: str) -> str:

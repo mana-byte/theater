@@ -1351,7 +1351,7 @@ theater/
 │   └── migrations/     alembic env + versions/
 ├── harness/
 │   ├── contracts/      immutable manifests, typed callbacks, harness/source/observation facts;
-│   │                   compat.py is the optional qualification manifest; version_policy.py reads JSON gates
+│   │                   version_policy.py reads JSON gates
 │   ├── manifests/      manifest compiler, validation, and reusable strategies
 │   ├── loading/        named-directory discovery and isolated package imports
 │   ├── channels/       CompositeSource, HybridSource, bounded hooks, and inbound native OTel
@@ -1373,9 +1373,9 @@ daemon, the real Régie bridge and a stock CLI against a mock model server, driv
 `theater.frontend`; its pipeline uses only the public version-policy contract to read each plugin's
 `compatibility.json`, installs one supplied release and runs the suite in a disposable code copy,
 home and pytest subprocess. Results stay in memory; required/inventory documents and CLI state
-are deleted with the sandbox. A plugin contributes the
-optional `HarnessManifest.compat` (`provision`, `native_edit`, `mcp_call`, `mcp_discovery`, `canaries`): it is read by the suite and
-never at runtime, and every scenario is derived from the rest of the manifest. See
+are deleted with the sandbox. Each harness's adapter in `harness_compat/adapters/` contributes a
+`CompatManifest` (`provision`, `native_edit`, `mcp_call`, `mcp_discovery`, `canaries`): the plugin
+carries none, and every scenario is derived from the plugin's manifest. See
 [`harness-compat.md`](harness-compat.md).
 
 The modular refactor decomposed the daemon's monolithic observer, methods,

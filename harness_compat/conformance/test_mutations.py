@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from harness_compat.adapters import load_adapter
 from harness_compat.support.mutations import (
     ANY,
     MUTATIONS,
@@ -210,11 +211,11 @@ def test_a_manifest_without_a_native_runtime_is_mutated_through_its_legacy_plann
     assert mutated.runtime is None and mutated.launch.planner is not plan
 
 
-def test_canary_applicability_is_declared_by_the_plugin() -> None:
+def test_canary_applicability_is_declared_by_the_adapter() -> None:
     env = next(item for item in MUTATIONS if item.name == "launch-env-dropped")
     files = next(item for item in MUTATIONS if item.name == "launch-files-dropped")
-    vibe = HARNESSES["vibe"].compat.canaries
-    claude = HARNESSES["claude"].compat.canaries
+    vibe = load_adapter("vibe").compat.canaries
+    claude = load_adapter("claude").compat.canaries
 
     assert applicable(env, (), vibe) and not applicable(env, (), claude)
     assert applicable(files, (), claude) and not applicable(files, (), vibe)

@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
-from collections.abc import Mapping
 from typing import NoReturn
 
 from theater.constants.core import HARNESS_NAME
@@ -13,8 +12,6 @@ from theater.constants.harness import (
     HARNESS_APPROVAL_POLICIES,
     HARNESS_CHANNEL_ID_MAX_CHARS,
     HARNESS_CHANNEL_IDENTIFIER_MAX_CHARS,
-    HARNESS_COMPAT_TOOL_NAME_MAX_CHARS,
-    HARNESS_COMPAT_TOOL_PAYLOAD_MAX_CHARS,
     HARNESS_HOOK_IDENTIFIER_MAX_CHARS,
     HARNESS_HOOK_MAX_PAYLOAD_BYTES,
     HARNESS_HOOK_MAX_QUEUE,
@@ -41,13 +38,6 @@ from theater.harness.contracts.channels import (
     OtelSignal,
     SignalKind,
     SignalOwnership,
-)
-from theater.harness.contracts.compat import (
-    CompatManifest,
-    McpCall,
-    McpDiscovery,
-    NativeEdit,
-    ToolTemplate,
 )
 from theater.harness.contracts.manifest import (
     ControlManifest,
@@ -124,7 +114,6 @@ def validate_manifest(name: str, manifest: HarnessManifest) -> None:
     _validate_observation(name, manifest.observation)
     _validate_runtime(name, manifest)
     _validate_native_compatibility(name, manifest.native_compatibility)
-    _validate_compat(name, manifest)
     _validate_models(name, manifest.models)
     _validate_mcp(name, manifest.mcp)
 
@@ -843,80 +832,6 @@ def _validate_native_compatibility(name: str, value: object) -> None:
     _validate_text(name, "native_compatibility.qualified_range", value.qualified_range)
     if not callable(value.probe):
         _fail(name, "native_compatibility.probe", "must be callable")
-
-
-def _validate_compat(name: str, manifest: HarnessManifest) -> None:
-    compat = manifest.compat
-    if compat is None:
-        return
-    if not isinstance(compat, CompatManifest):
-        _fail(name, "compat", f"expected CompatManifest or null, got {type(compat).__name__}")
-    if not callable(compat.provision):
-        _fail(name, "compat.provision", "must be callable")
-    if not isinstance(compat.canaries, tuple):
-        _fail(name, "compat.canaries", "must be a tuple of mutation names")
-    for canary in compat.canaries:
-        _validate_text(name, "compat.canaries", canary)
-    if len(set(compat.canaries)) != len(compat.canaries):
-        _fail(name, "compat.canaries", "mutation names must be unique")
-    _validate_acknowledged_routes(name, compat.acknowledged_routes)
-    if compat.native_edit is not None:
-        if "edits" not in manifest.launch.approvals:
-            _fail(name, "compat.native_edit", "requires launch.approvals to include 'edits'")
-        _validate_tool_template(name, "compat.native_edit", compat.native_edit, NativeEdit, "path")
-    if compat.mcp_call is not None:
-        _validate_tool_template(
-            name, "compat.mcp_call", compat.mcp_call, McpCall, "tool", "arguments"
-        )
-    if compat.mcp_discovery is not None:
-        _validate_tool_template(
-            name, "compat.mcp_discovery", compat.mcp_discovery, McpDiscovery, "tool"
-        )
-
-
-def _validate_acknowledged_routes(name: str, routes: object) -> None:
-    if not isinstance(routes, tuple):
-        _fail(name, "compat.acknowledged_routes", "must be a tuple of (method, path) pairs")
-    for route in routes:
-        if not isinstance(route, tuple) or len(route) != 2:
-            _fail(name, "compat.acknowledged_routes", "must contain (method, path) pairs")
-        method, path = route
-        _validate_text(name, "compat.acknowledged_routes.method", method)
-        _validate_text(name, "compat.acknowledged_routes.path", path)
-        if method not in {"GET", "POST"} or not path.startswith("/"):
-            _fail(name, "compat.acknowledged_routes", "requires GET/POST and an absolute URL path")
-
-
-def _validate_tool_template(
-    name: str, path: str, template: object, kind: type[ToolTemplate], *required: str
-) -> None:
-    if not isinstance(template, kind):
-        _fail(name, path, f"expected {kind.__name__} or null, got {type(template).__name__}")
-    _validate_text(name, f"{path}.name", template.name)
-    if len(template.name) > HARNESS_COMPAT_TOOL_NAME_MAX_CHARS:
-        _fail(
-            name,
-            f"{path}.name",
-            f"must be at most {HARNESS_COMPAT_TOOL_NAME_MAX_CHARS} characters",
-        )
-    payload_path = f"{path}.payload"
-    payload = template.payload
-    if isinstance(payload, str):
-        if not payload.strip():
-            _fail(name, payload_path, "must not be blank")
-    elif not isinstance(payload, Mapping):
-        _fail(
-            name, payload_path, f"must be a string or a JSON object, got {type(payload).__name__}"
-        )
-    if template.size > HARNESS_COMPAT_TOOL_PAYLOAD_MAX_CHARS:
-        _fail(
-            name,
-            payload_path,
-            f"must be at most {HARNESS_COMPAT_TOOL_PAYLOAD_MAX_CHARS} characters",
-        )
-    for token in required:
-        if token not in template.placeholders:
-            _fail(name, payload_path, f"must reference the {{{token}}} placeholder")
 
 
 def _validate_models(name: str, models: object) -> None:
