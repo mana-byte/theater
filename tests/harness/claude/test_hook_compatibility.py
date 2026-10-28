@@ -13,9 +13,7 @@ from theater.daemon.spawning.hook_compatibility import probe_hook_channels
 from theater.daemon.spawning.planning import install_hook_plan
 from theater.harness.builtin.plugins.claude.compatibility import (
     VERSION_POLICY,
-    claude_messaging_range_text,
     probe_claude_hooks,
-    probe_claude_native_compatibility,
 )
 from theater.harness.contracts.callbacks import HookInstallOverlay
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind, HookBinding
@@ -148,35 +146,6 @@ def _cli_version(parts: tuple[int, int, int]) -> str:
 
 
 _MINIMUM = version_key(VERSION_POLICY.minimum)
-_MAXIMUM = version_key(VERSION_POLICY.maximum)
-
-
-@pytest.mark.parametrize(
-    ("sample", "supported"),
-    [
-        pytest.param((*_MINIMUM[:2], _MINIMUM[2] - 1), False, id="below-minimum"),
-        pytest.param(_MINIMUM, True, id="minimum"),
-        pytest.param((*_MINIMUM[:2], _MINIMUM[2] + 1), True, id="next-patch"),
-        pytest.param(_MAXIMUM, True, id="maximum"),
-        pytest.param(
-            (*_MAXIMUM[:2], _MAXIMUM[2] + 1),
-            False,
-            id="hook-above-max",
-        ),
-    ],
-)
-def test_claude_hook_version_range(sample, supported, monkeypatch):
-    version = _cli_version(sample)
-    monkeypatch.setattr(
-        "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=version),
-    )
-    result = probe_claude_hooks(RuntimeProbeContext())
-    assert result.supported is supported
-    assert result.policy == f"claude-hooks-{VERSION_POLICY.minimum}-compatible"
-    assert result.reason == (
-        None if supported else f"Claude support requires {VERSION_POLICY.range_text}"
-    )
 
 
 @pytest.mark.parametrize("version", ["unknown", f"{_cli_version(_MINIMUM)}-beta", "02.1.296"])
@@ -187,29 +156,4 @@ def test_claude_hook_rejects_malformed_version(version, monkeypatch):
     )
     assert probe_claude_hooks(RuntimeProbeContext()).reason == (
         "Claude did not report a stable CLI version"
-    )
-
-
-@pytest.mark.parametrize(
-    ("sample", "supported"),
-    [
-        ((*_MINIMUM[:2], _MINIMUM[2] - 1), False),
-        (_MINIMUM, True),
-        (_MAXIMUM, True),
-        ((*_MAXIMUM[:2], _MAXIMUM[2] + 1), False),
-        ((_MAXIMUM[0] + 1, 0, 0), False),
-    ],
-)
-def test_claude_messaging_uses_the_same_bounded_policy(sample, supported, monkeypatch):
-    version = _cli_version(sample)
-    monkeypatch.setattr(
-        "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=version),
-    )
-    result = probe_claude_native_compatibility(RuntimeProbeContext())
-    assert result.supported is supported
-    assert result.native_version == ".".join(map(str, sample))
-    assert result.policy == (f"claude-messaging-native-controls-{VERSION_POLICY.minimum}")
-    assert result.reason == (
-        None if supported else f"Claude support requires {claude_messaging_range_text()}"
     )

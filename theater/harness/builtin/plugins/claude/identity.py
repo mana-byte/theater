@@ -336,17 +336,16 @@ class ClaudeIdentity:
         cwd: str | None,
         expected_session_id: str | None,
     ) -> TranscriptCandidate:
-        session_id = _hook_string(payload, "session_id", "sessionId")
-        transcript_path = _hook_string(payload, "transcript_path", "transcriptPath")
+        session_id = _hook_string(payload, "session_id")
+        transcript_path = _hook_string(payload, "transcript_path")
         if session_id is None:
             raise ValueError(
-                "claude receipt payload is missing session_id (or sessionId); "
-                "the lifecycle hook must provide it"
+                "claude receipt payload is missing session_id; the lifecycle hook must provide it"
             )
         if transcript_path is None:
             raise ValueError(
-                "claude receipt payload is missing transcript_path "
-                "(or transcriptPath); the lifecycle hook must provide it"
+                "claude receipt payload is missing transcript_path; "
+                "the lifecycle hook must provide it"
             )
         if not isinstance(self.root, Path):
             raise ValueError(  # noqa: TRY004 – rejection is always ValueError per design

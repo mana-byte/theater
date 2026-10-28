@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from theater.harness.contracts.callbacks import (
-    NativeChildrenContext,
     OperatorCandidateContext,
     ReceiptValidationContext,
     ScreenContext,
     TranscriptCandidatesContext,
 )
 from theater.harness.contracts.context import ParticipantObservationContext
-from theater.harness.contracts.launch import NativeChild
 from theater.harness.contracts.observation import ScreenReading
 from theater.harness.contracts.source import Source, TranscriptCandidate
 
@@ -50,7 +48,3 @@ def operator_candidate_admitter(
         domain=context.domain,
         after=context.after,
     )
-
-
-def native_children(context: NativeChildrenContext) -> list[NativeChild]:
-    return ClaudeCodeObserver().native_children(context.transcript)

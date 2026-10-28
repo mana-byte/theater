@@ -6,12 +6,37 @@ import json
 
 import pytest
 
-from tests.support.parse_rig import events_for
-from tests.support.paths import FIXTURES
+from tests.support.claude_seal import claude_record
 from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from theater.harness import EventKind
 from theater.harness.base import MAX_TEXT, Event
 from theater.harness.observation import HarnessObserver, ScreenConfidence, ScreenKind, ScreenReading
+
+
+def _claude_lines() -> list[str]:
+    """A claude turn whose every record carries an ISO-8601 UTC timestamp."""
+    return [
+        claude_record(
+            "u0",
+            None,
+            "user",
+            timestamp="2026-06-24T18:26:15.348Z",
+            message={"role": "user", "content": "go"},
+        ),
+        claude_record(
+            "a1",
+            "u0",
+            timestamp="2026-06-24T18:26:16.100Z",
+            message={
+                "id": "m1",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "hi"}],
+            },
+        ),
+        claude_record(
+            "k", "a1", "system", subtype="turn_duration", timestamp="2026-06-24T18:26:16.500Z"
+        ),
+    ]
 
 
 def test_answer_final_requires_a_boundary():
@@ -20,26 +45,26 @@ def test_answer_final_requires_a_boundary():
 
 
 @pytest.mark.parametrize(
-    ("observer", "fixture", "first_ts"),
+    ("observer", "lines", "first_ts"),
     [
-        pytest.param(ClaudeCodeObserver(), "claude_code.jsonl", 1782325575.348, id="claude"),
+        pytest.param(ClaudeCodeObserver(), _claude_lines(), 1782325575.348, id="claude"),
     ],
 )
-def test_records_carry_their_own_timestamp(observer, fixture, first_ts):
-    events = events_for(observer, FIXTURES / fixture)
+def test_records_carry_their_own_timestamp(observer, lines, first_ts):
+    events = [e for i, line in enumerate(lines) for e in observer.parse(line, i)]
     assert all(e.ts is not None for e in events)
     # ISO-8601 with a Z suffix, parsed as UTC rather than local time.
     assert events[0].ts == pytest.approx(first_ts, abs=0.01)
 
 
 @pytest.mark.parametrize(
-    ("observer", "fixture", "raw_indexes"),
+    ("observer", "lines", "raw_indexes"),
     [
-        pytest.param(ClaudeCodeObserver(), "claude_code.jsonl", [0, 1, 2, 3, 4, 5, 6], id="claude"),
+        pytest.param(ClaudeCodeObserver(), _claude_lines(), [0, 1, 2], id="claude"),
     ],
 )
-def test_raw_index_tracks_the_source_record(observer, fixture, raw_indexes):
-    events = events_for(observer, FIXTURES / fixture)
+def test_raw_index_tracks_the_source_record(observer, lines, raw_indexes):
+    events = [e for i, line in enumerate(lines) for e in observer.parse(line, i)]
     assert [e.raw_index for e in events] == raw_indexes
 
 

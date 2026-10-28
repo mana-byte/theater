@@ -6,20 +6,106 @@ import json
 
 import pytest
 
-from tests.support.parse_rig import events_for, read_screen
-from tests.support.paths import FIXTURES
+from tests.support.claude_seal import claude_marker, claude_record
+from tests.support.parse_rig import read_screen
 from tests.support.shipped import ClaudeCodeObserver
 from theater.harness import EventKind, status_after
 from theater.harness.observation import ScreenConfidence, ScreenKind
 from theater.models import Status
 
-# Fixtures are structurally faithful slices of real transcripts: keys and discriminators kept, free
-# text replaced by placeholders. claude_code.jsonl is one whole turn: user, thinking, text,
-# tool_use, tool_result, thinking, text(end_turn), system.
+# One whole turn: user, thinking, text, tool_use, tool_result, thinking, text(end_turn), marker.
+
+
+def _turn_lines() -> list[str]:
+    usage = {
+        "input_tokens": 3,
+        "cache_creation_input_tokens": 28144,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 221,
+    }
+    return [
+        claude_record("u0", None, "user", message={"role": "user", "content": "read a.txt"}),
+        claude_record(
+            "a1",
+            "u0",
+            message={
+                "id": "msg_a",
+                "stop_reason": "tool_use",
+                "usage": usage,
+                "content": [{"type": "thinking", "thinking": "hm"}],
+            },
+        ),
+        claude_record(
+            "a2",
+            "a1",
+            message={
+                "id": "msg_a",
+                "stop_reason": "tool_use",
+                "usage": usage,
+                "content": [{"type": "text", "text": "let me read it"}],
+            },
+        ),
+        claude_record(
+            "a3",
+            "a2",
+            message={
+                "id": "msg_a",
+                "stop_reason": "tool_use",
+                "usage": usage,
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Read",
+                        "input": {"file_path": "a.txt"},
+                    }
+                ],
+            },
+        ),
+        claude_record(
+            "u1",
+            "a3",
+            "user",
+            message={
+                "role": "user",
+                "content": [{"tool_use_id": "t1", "type": "tool_result", "content": "ok"}],
+            },
+        ),
+        claude_record(
+            "b1",
+            "u1",
+            message={
+                "id": "msg_b",
+                "stop_reason": "tool_use",
+                "usage": {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 38875,
+                    "output_tokens": 3081,
+                },
+                "content": [{"type": "thinking", "thinking": "hm"}],
+            },
+        ),
+        claude_record(
+            "b2",
+            "b1",
+            message={
+                "id": "msg_c",
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 305,
+                    "output_tokens": 166,
+                },
+                "content": [{"type": "text", "text": "done"}],
+            },
+        ),
+        claude_marker("m", "b2"),
+    ]
 
 
 def test_claude_turn_parses_to_the_expected_event_sequence():
-    events = events_for(ClaudeCodeObserver(), FIXTURES / "claude_code.jsonl")
+    observer = ClaudeCodeObserver()
+    events = [event for i, line in enumerate(_turn_lines()) for event in observer.parse(line, i)]
 
     assert [e.kind for e in events] == [
         EventKind.USER,
@@ -29,11 +115,11 @@ def test_claude_turn_parses_to_the_expected_event_sequence():
         EventKind.TOOL_RESULT,
         EventKind.ASSISTANT,
         EventKind.ASSISTANT,
+        EventKind.ASSISTANT,
     ]
-    assert len(events) == 7
     assert events[3].tool_name == "Read"
     assert events[-1].turn_end is True
-    assert [e.turn_end for e in events[:-1]] == [False] * 6
+    assert [e.turn_end for e in events[:-1]] == [False] * 7
 
     repeated = [events[i].usage for i in (1, 2, 3)]
     assert all(item is not None for item in repeated)
@@ -59,15 +145,24 @@ def test_a_thinking_only_record_never_ends_the_turn():
     [("tool_use", False), (None, False), ("end_turn", True), ("max_tokens", True)],
 )
 def test_claude_turn_end_rule(stop_reason, ends):
-    record = {
-        "type": "assistant",
-        "message": {
-            "stop_reason": stop_reason,
-            "content": [{"type": "text", "text": "hi"}],
-        },
-    }
-    events = ClaudeCodeObserver().parse(json.dumps(record), 0)
-    assert events[0].turn_end is ends
+    lines = [
+        claude_record("u0", None, "user", message={"role": "user", "content": "go"}),
+        claude_record(
+            "a1",
+            "u0",
+            message={
+                "id": "m1",
+                "stop_reason": stop_reason,
+                "content": [{"type": "text", "text": "hi"}],
+            },
+        ),
+    ]
+    # Only a turn that ended gets a marker; end_turn is proven by it, the others by their stop.
+    if stop_reason == "end_turn":
+        lines.append(claude_marker("k", "a1"))
+    observer = ClaudeCodeObserver()
+    events = [event for i, line in enumerate(lines) for event in observer.parse(line, i)]
+    assert events[-1].turn_end is ends
 
 
 def test_claude_api_errors_become_error_events():

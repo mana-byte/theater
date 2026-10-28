@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -10,21 +9,12 @@ from enum import Enum
 from .constants import (
     SEAL_MAX_HOPS,
     SEAL_MESSAGE_LIMIT,
-    SEAL_MIN_VERSION,
     SEAL_NODE_LIMIT,
     SEAL_TEXT_BYTES_LIMIT,
 )
 
-_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
-
 #: Unsealed reasons caused by a record the chain needs not being read yet: retry as more arrive.
 _RETRYABLE = frozenset({"unknown_parent", "incomplete_message"})
-
-
-def seal_supported(record: dict) -> bool:
-    """Whether this record's CLI version is verified to write the marker; unknown fails closed."""
-    match = _VERSION.match(str(record.get("version") or ""))
-    return match is not None and tuple(int(part) for part in match.groups()) >= SEAL_MIN_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +33,6 @@ class Unsealed:
 class _Node:
     parent: str | None
     message_id: str | None
-    sidechain: bool = False
     ts: float | None = None
     #: Attachment-like: nothing of an answer, so it may sit between a prompt and its answer.
     bare: bool = False
@@ -72,10 +61,9 @@ class _Deferred:
 
 
 def is_prompt(record: dict) -> bool:
-    """A main-thread user turn with text of its own: not a tool result, injected or summary text."""
+    """A user turn with text of its own: not a tool result, injected or summary text."""
     if (
         record.get("type") != "user"
-        or record.get("isSidechain") is True
         or record.get("isMeta") is True
         or record.get("isCompactSummary") is True
     ):
@@ -97,11 +85,10 @@ def _completes_safely(record: dict) -> bool:
     """Only a bare attachment-like record may finish a held marker.
 
     Anything that carries its own terminal event or could be a fragment of the answer
-    (assistant, user, system, sidechain, or message-bearing) must drop it instead.
+    (assistant, user, system, or message-bearing) must drop it instead.
     """
     return (
         record.get("type") not in ("assistant", "user", "system")
-        and record.get("isSidechain") is not True
         and FinalAnswerSeal._message_id(record) is None
     )
 
@@ -170,7 +157,6 @@ class FinalAnswerSeal:
         node = _Node(
             parent if isinstance(parent, str) else None,
             message_id,
-            record.get("isSidechain") is True,
             ts,
             _completes_safely(record),
         )
@@ -310,8 +296,6 @@ class FinalAnswerSeal:
             node = self._nodes.get(current) if current is not None else None
             if node is None:
                 return Unsealed("unknown_parent")
-            if node.sidechain:
-                return Unsealed("sidechain")
             if node.message_id is not None and current is not None:
                 return current, node.message_id, node
             current = node.parent
@@ -477,7 +461,6 @@ class FinalAnswerSeal:
             isinstance(prompt, str)
             and prompt_node is not None
             and self._is_local(prompt_node.ts)
-            and not prompt_node.sidechain
             and isinstance(found, tuple)
             and self._chain_to_prompt(parent, found[2].ts, prompt) is _Chain.REACHED
         )
@@ -500,7 +483,7 @@ class FinalAnswerSeal:
             link = self._nodes.get(current) if isinstance(current, str) else None
             if link is None:
                 return _Chain.UNREAD if isinstance(current, str) else _Chain.BROKEN
-            if link.sidechain or not self._is_local(link.ts):
+            if not self._is_local(link.ts):
                 return _Chain.BROKEN
             if link.message_id != message_id and not link.bare:
                 return _Chain.BROKEN  # an earlier fragment of the message itself is no break
@@ -537,8 +520,6 @@ class FinalAnswerSeal:
                 return False
             if node.message_id != message_id:
                 return True
-            if node.sidechain:
-                return False
             uuid = parent
         return False
 

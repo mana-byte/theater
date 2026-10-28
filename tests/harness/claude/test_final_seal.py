@@ -105,9 +105,6 @@ _ANSWER = claude_fragment("a1", "late", {"type": "text", "text": "done"})
 _ATTACH = claude_record("att1", "a1", "attachment")
 _MARKER = claude_marker("mk", "att1")
 _LATE = claude_record("late", "u0", "attachment")
-_SIDE = claude_record(
-    "side", "u0", message={"id": "sm", "stop_reason": "end_turn", "content": []}, isSidechain=True
-)
 _SEAL_CASES = {
     # The intended fix: hold the marker, seal once its late parent arrives.
     "late_attachment_seals_once": ([_USER, _ANSWER, _ATTACH, _MARKER, _LATE], ["done"]),
@@ -139,8 +136,6 @@ _SEAL_CASES = {
         ],
         [],
     ),
-    # A main-thread marker whose parent is an unread sidechain assistant must never seal it.
-    "sidechain_parent_drops": ([_USER, claude_marker("mk", "side"), _SIDE], []),
     # A late record that carries its own terminal event (a system error) drops the held marker
     # and emits only its own boundary — never two (its error plus the stale answer).
     "late_system_error_drops": (
@@ -214,25 +209,18 @@ def test_a_resolving_record_keeps_its_own_baseline_events() -> None:
     assert parsed.trajectory_events is None  # the record's own events are not suppressed
 
 
-def test_unsupported_versions_and_sidechains_never_seal():
+def test_a_thinking_only_fragment_never_ends_the_turn_the_marker_seals_the_text():
     thinking = {"type": "thinking", "thinking": "hm"}
     text = {"type": "text", "text": "answer"}
     old = ClaudeCodeObserver()
     lines = [
-        json.dumps({"type": "assistant", "message": {"stop_reason": "end_turn", "content": [b]}})
-        for b in (thinking, text)
+        claude_record("u0", None, "user", message={"role": "user", "content": "go"}),
+        claude_fragment("t1", "u0", thinking, "msg_think"),
+        claude_fragment("t2", "t1", text, "msg_text"),
+        claude_marker("m", "t2"),
     ]
-    # No marker contract below the verified floor: only the text-bearing fragment can end a turn.
+    # A thinking-only fragment never ends a turn; only the marker names the answer that does.
     assert [e.text for e in _boundaries(old, lines)] == ["answer"]
-
-    side = [
-        claude_record(uuid, parent, isSidechain=True, message=body)
-        for uuid, parent, body in (
-            ("s1", None, {"id": "m", "stop_reason": "end_turn", "content": [text]}),
-        )
-    ]
-    side.append(claude_record("s2", "s1", "system", subtype="turn_duration", isSidechain=True))
-    assert _boundaries(ClaudeCodeObserver(), side) == []
 
 
 # The session was launched at second 3: what is stamped earlier is history copied from a fork.
@@ -320,12 +308,6 @@ def test_nothing_is_history_without_a_launch_time():
         pytest.param(lambda: claude_record("untimed", "old_user", "user"), id="untimed"),
         pytest.param(  # a later fragment of the held message
             lambda: _answer("frag", "old_user", "FIRST", "msg_new", 4), id="same-message-fragment"
-        ),
-        pytest.param(
-            lambda: _stamped(
-                claude_record("side", "old_user", isSidechain=True, message={"id": "s"}), 4
-            ),
-            id="sidechain",
         ),
         pytest.param(
             lambda: _stamped(claude_record("err", "old_user", "system", level="error"), 4),
@@ -494,14 +476,6 @@ def test_a_prompt_stamped_before_the_launch_that_follows_the_held_marker_drops_i
 @pytest.mark.parametrize(
     "prompt",
     [
-        pytest.param(
-            lambda: _stamped(
-                claude_record("new_user", "old_marker", "user", message={"content": "x"}),
-                4,
-                isSidechain=True,
-            ),
-            id="sidechain",
-        ),
         pytest.param(lambda: _prompt("new_user", "old_marker", "  ", 4), id="blank"),
         pytest.param(lambda: claude_record("new_user", "old_marker", "user"), id="untimed-no-text"),
         pytest.param(  # nothing says it was written by this session
@@ -586,9 +560,6 @@ def test_an_unrelated_attachment_does_not_stop_a_turn_waiting_for_its_chain():
         pytest.param(lambda: _prompt("att1", "new_user", "typed", 6), id="prompt"),
         pytest.param(  # a reply is a fragment of an answer, never a link to one
             lambda: _answer("att1", "new_user", "MORE", "msg_more", 6), id="reply"
-        ),
-        pytest.param(
-            lambda: _stamped(claude_record("att1", "new_user", isSidechain=True), 6), id="sidechain"
         ),
         pytest.param(  # nothing says this session wrote it
             lambda: _stamped(claude_record("att1", "new_user", "attachment"), 1), id="before-launch"

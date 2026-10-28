@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.claude_seal import claude_marker, claude_record
 from tests.support.shipped import ClaudeCodeHarness
 from theater import paths
 from theater.daemon.spawning.planning import install_hook_plan
@@ -274,15 +275,20 @@ def test_the_config_written_alongside_names_this_participant(tmp_path):
 
 def test_a_timestamp_claude_did_not_write_leaves_the_event_unstamped(observer):
     """The observer stamps its own time; a wrong one would reorder the feed."""
-    record = {
-        "type": "assistant",
-        "timestamp": "the day before yesterday",
-        "message": {
-            "id": "m1",
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": "hi"}],
-        },
-    }
-    (event,) = observer.parse(json.dumps(record), 0)
-    assert event.ts is None
-    assert event.turn_end
+    lines = [
+        claude_record("u0", None, "user", message={"role": "user", "content": "go"}),
+        claude_record(
+            "a1",
+            "u0",
+            timestamp="the day before yesterday",
+            message={
+                "id": "m1",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "hi"}],
+            },
+        ),
+        claude_marker("k", "a1"),
+    ]
+    events = [event for i, line in enumerate(lines) for event in observer.parse(line, i)]
+    assert all(event.ts is None for event in events)
+    assert events[-1].turn_end

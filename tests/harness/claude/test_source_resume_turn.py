@@ -238,7 +238,6 @@ async def _assert_offline_turn_after_restart(
         {"timestamp": None},
         {"timestamp": BEFORE},
         {"sessionId": "another-session"},
-        {"isSidechain": True},
     ],
 )
 def test_live_turn_requires_launch_local_main_thread_evidence(extra):

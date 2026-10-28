@@ -10,7 +10,7 @@ from tests.support.codex_rollout_items import parse_rollout, rollout_events, rol
 from tests.support.observation import apply_batch
 from tests.support.opencode_recorder import Recorder, text
 from tests.support.paths import FIXTURES
-from tests.support.shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
+from tests.support.shipped import CodexObserver, OpenCodeObserver, VibeObserver
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     _ANSWERED_TURNS,
@@ -58,25 +58,6 @@ def test_codex_reports_the_turn_id_it_stamps_on_both_ends():
 
     assert len(ends) == 1
     assert ends[0].turn_id == "turn-1"
-
-
-def test_claude_reports_the_message_id_the_split_records_share():
-    """One message, several records, one id.
-
-    `message.id` is what the duplicate boundary records have in common, so it
-    is the only field that can be used to recognise the duplicate. The record
-    `uuid` differs per record and would name each half a separate turn.
-    """
-    events = events_for(ClaudeCodeObserver(), FIXTURES / "turn_claude.jsonl")
-    ends = boundaries(events)
-
-    records = [
-        json.loads(line) for line in (FIXTURES / "turn_claude.jsonl").read_text().splitlines()
-    ]
-    assistant = next(r for r in records if r.get("type") == "assistant")
-
-    assert len(ends) == 1
-    assert ends[0].turn_id == assistant["message"]["id"]
 
 
 def test_vibe_uses_the_user_message_id_as_its_turn_identity():

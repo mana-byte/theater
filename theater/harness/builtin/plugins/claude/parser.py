@@ -13,7 +13,7 @@ from theater.harness.normalization.timing import iso_epoch as _epoch
 from theater.harness.normalization.values import decode_json_record
 
 from .constants import _READ_TOOLS, _WRITE_TOOLS
-from .seal import FinalAnswerSeal, Sealed, seal_supported
+from .seal import FinalAnswerSeal, Sealed
 from .usage import _token_usage
 from .values import _relativise
 
@@ -144,9 +144,8 @@ class ClaudeParser:
     ) -> list[Event]:
         _clip = clipper(clip_text)
         stop = message.get("stop_reason")
-        sidechain = record.get("isSidechain") is True
-        turn_end = stop is not None and stop != "tool_use" and not sidechain
-        final_candidate = turn_end and stop == "end_turn" and seal_supported(record)
+        turn_end = stop is not None and stop != "tool_use"
+        final_candidate = turn_end and stop == "end_turn"
         tid = message.get("id") or record.get("requestId")
         tid = tid if isinstance(tid, str) and tid else None
         cwd = record.get("cwd")
@@ -192,23 +191,17 @@ class ClaudeParser:
                     usage=usage,
                 )
             )
-        if sidechain:
-            return out
         if final_candidate:
             self._seal.expect_marker(tid)
         elif turn_end and out and _carries_answer(out[-1]):
             # Fail closed: a thinking-only or blank fragment is never a boundary.
             out[-1] = replace(out[-1], turn_end=True)
-            if clip_text and stop == "end_turn":
-                _report_seal("unavailable", "unsupported_version")
         return out
 
     def _seal_boundary(
         self, record: dict, ts: float | None, index: int, *, clip_text: bool
     ) -> list[Event]:
         """One terminal event when the chain proves the message, else hold the marker for later."""
-        if record.get("isSidechain") is True or not seal_supported(record):
-            return []
         outcome = self._seal.resolve_or_defer(record, ts, index)
         if isinstance(outcome, Sealed):
             return self._boundary_event(outcome, ts, index, clip_text=clip_text)
@@ -304,7 +297,7 @@ def _carries_answer(event: Event) -> bool:
 
 def _report_seal(state: str, reason: str) -> None:
     """One low-volume, OTLP-bridged log per live completion: sealed or unavailable, and why."""
-    degraded = state != "sealed" and reason != "unsupported_version"
+    degraded = state != "sealed"
     logger.log(
         logging.WARNING if degraded else logging.INFO,
         "claude completion %s (%s)",
