@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
-from pathlib import Path
 from typing import BinaryIO
 
 from theater.constants.trajectory import (
     TRAJECTORY_MCP_CALL_CONTEXT_LIMIT,
     TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
 )
-from theater.harness.base import NativeChild
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.normalization.facts import FactAdder, fact_builder, tool_failure
 from theater.harness.normalization.timing import iso_epoch as _epoch
@@ -606,27 +603,3 @@ class ClaudeTrajectory:
                 details=tuple(system_details),
             )
         return facts
-
-    def native_children(self, transcript: Path) -> list[NativeChild]:
-        seen: set[str] = set()
-        out: list[NativeChild] = []
-        try:
-            with transcript.open(encoding="utf-8", errors="replace") as fh:
-                for raw in fh:
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(record, dict) or not record.get("isSidechain"):
-                        continue
-                    root = record.get("parentUuid") or record.get("uuid")
-                    if not root or root in seen:
-                        continue
-                    seen.add(root)
-                    out.append(NativeChild(session_id=root, agent="task"))
-        except OSError:
-            return []
-        return out
