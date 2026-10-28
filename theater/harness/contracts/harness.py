@@ -17,7 +17,6 @@ from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.models import BadRequest
 
 if TYPE_CHECKING:
-    from theater.harness.contracts.compat import CompatManifest
     from theater.harness.contracts.manifest import (
         ControlManifest,
         McpForegroundWait,
@@ -76,8 +75,6 @@ class Harness(ABC):
     #: harnesses and sources gain no mandatory methods.
     runtime: RuntimeManifest | None = None
     native_compatibility: NativeCompatibilityManifest | None = None
-    #: Optional hermetic-run recipe read only by the compatibility suite.
-    compat: CompatManifest | None = None
 
     # ---- launching ------------------------------------------------------
 

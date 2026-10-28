@@ -15,7 +15,6 @@ from theater.harness.contracts.manifest import (
     NativeCompatibilityManifest,
 )
 
-from .compat import COMPAT
 from .compatibility import claude_messaging_range_text, probe_claude_native_compatibility
 from .constants import (
     CLAUDE_MCP_AUTO_BACKGROUND_DEFAULT_MS,
@@ -32,7 +31,6 @@ MANIFEST = HarnessManifest(
     icon="✻",
     aliases=("claude_code", "claude-code", "Claude", "ClaudeCode"),
     launch=LAUNCH,
-    compat=COMPAT,
     observation=OBSERVATION,
     controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
     mcp=McpRenderingManifest(

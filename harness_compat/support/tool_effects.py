@@ -47,7 +47,7 @@ class Effect:
 
 def edit_effect(live: LiveRig) -> Effect:
     """The harness's own file-write tool, aimed at a scratch file inside the workdir."""
-    edit = live.harness.compat.native_edit
+    edit = live.compat.native_edit
     assert edit is not None
     nonce = f"EDIT-{uuid.uuid4().hex[:8]}"
     target = live.workdir.resolve() / f"{nonce}.txt"
@@ -175,7 +175,7 @@ async def _mcp_call(
     offered, name = await _offered(live, participant, server, tool)
     if name is None:
         violation(f"the model was never offered exactly one tool for {server}.{tool}: {offered}")
-    declared = live.harness.compat.mcp_call
+    declared = live.compat.mcp_call
     if declared is None:
         return MockToolCall(name, arguments)
     return MockToolCall(name, declared.render(server=server, tool=tool, arguments=arguments))
@@ -189,7 +189,7 @@ async def _offered(
     A CLI that offers MCP tools only after a search is made to run it first; the request that
     follows the search is the one that offers what it loaded.
     """
-    discovery = live.harness.compat.mcp_discovery
+    discovery = live.compat.mcp_discovery
     for attempt in range(_OFFER_ATTEMPTS):
         prompt = f"Warm up {attempt}"
         if discovery is not None:
@@ -214,7 +214,7 @@ async def _offered(
 
 def _reaching(live: LiveRig, offered: tuple[str, ...], tool: str) -> str | None:
     """The tool the model calls to reach ``tool``: the declared runner, else a suffix match."""
-    declared = live.harness.compat.mcp_call
+    declared = live.compat.mcp_call
     if declared is not None:
         return declared.name if declared.name in offered else None
     matches = [name for name in offered if name.endswith(tool)]

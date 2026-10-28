@@ -1,10 +1,11 @@
-"""What a harness plugin declares that the live suite must prove, derived from its manifest."""
+"""What a harness declares that the live suite must prove, derived from its manifest and adapter."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from harness_compat.adapters import ADAPTER_NAMES, load_adapter
 from harness_compat.contract import SuiteDocument, SuiteRow
 from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.manifest import HookChannelManifest, OtelChannelManifest
@@ -98,7 +99,8 @@ def _mcp(harness: Harness) -> tuple[str, ...]:
 
 
 def _edit(harness: Harness) -> tuple[str, ...]:
-    if harness.compat is None or harness.compat.native_edit is None:
+    # The recipe is the adapter's: a harness without one has no native edit to prove.
+    if harness.name not in ADAPTER_NAMES or load_adapter(harness.name).compat.native_edit is None:
         return ()
     return _gating(harness, {"gated": "manual", "runs": "edits"})
 

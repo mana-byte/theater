@@ -36,7 +36,6 @@ from theater.harness.contracts.runtime import (
 )
 from theater.harness.transcript import file_stream_floor
 
-from .compat import COMPAT
 from .constants import PI_BINARY
 from .frontend import install_pi_frontend
 from .launch import plan_launch, resume_launch_overlay
@@ -144,7 +143,6 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
             legacy_fallback=frozenset(),
             unavailable_capabilities=frozenset({RuntimeCapability.STEER}),
         ),
-        compat=COMPAT,
     )
 
 

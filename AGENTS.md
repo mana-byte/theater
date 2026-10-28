@@ -240,6 +240,11 @@ cannot be expressed in config. Full guide:
 [`docs/harness-plugins.md`](docs/harness-plugins.md). `theater harnesses`
 reports what loaded and why anything was rejected.
 
+A shipped plugin also needs one adapter, `harness_compat/adapters/<name>.py`, for release
+qualification: how to discover and install the CLI's releases and how to provision it against the
+mock model ([`docs/harness-compat.md`](docs/harness-compat.md), "Adapters"). No workflow names a
+harness; CI fails until the plugin and its adapter both exist.
+
 ## Changing a version gate or native wiring
 
 Every shipped plugin reads its inclusive `min`, `max` and `excluded` from its own
@@ -283,14 +288,15 @@ Treat the policy and the daily [compatibility pipeline](docs/harness-compat.md) 
   stay in Actions; never create generic workflow-error issues. PR runs remain read-only.
   Check the implementation with `uv run pytest harness_compat tests/harness/<h>`.
 
-A plugin may also export an optional `compat=CompatManifest(provision, native_edit, mcp_call, mcp_discovery, canaries)` (see
-`docs/harness-plugins.md`, "Qualification"). It is read only by the live conformance suite, never at
-runtime; `provision` must stay endpoint, credential, catalog and onboarding setup. Scenarios are derived
-from the rest of the manifest, so a new manifest capability needs a mapping in
-`harness_compat/support/coverage.py` (the completeness test fails until it has one) and, if it is provable,
-a scenario family. Extra generic mutation choices belong in the plugin's `compat.canaries`, not
-in shared harness-name branches. Canaries check the suite separately from release qualification.
-Non-model mock routes belong in `compat.acknowledged_routes`; they never consume scripted replies.
+Each harness's adapter carries its `compat=CompatManifest(provision, native_edit, mcp_call,
+mcp_discovery, canaries)` (see `docs/harness-compat.md`, "Adapters"); plugins carry none. It is read
+only by the live conformance suite, never at runtime; `provision` must stay endpoint, credential,
+catalog and onboarding setup. Scenarios are derived from the plugin's manifest, so a new manifest
+capability needs a mapping in `harness_compat/support/coverage.py` (the completeness test fails
+until it has one) and, if it is provable, a scenario family. Extra generic mutation choices belong
+in the adapter's `compat.canaries`, not in shared harness-name branches. Canaries check the suite
+separately from release qualification. Non-model mock routes belong in
+`compat.acknowledged_routes`; they never consume scripted replies.
 
 ## When adding a skill
 

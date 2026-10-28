@@ -10,6 +10,7 @@ from pathlib import Path
 from .. import github
 from ..contract import InstallFailed, Sandbox
 from ..process import run_group
+from ..provisioning import CompatManifest
 
 _TIMEOUT_SECONDS = 600
 
@@ -18,6 +19,7 @@ _TIMEOUT_SECONDS = 600
 class NpmAdapter:
     name: str
     package: str
+    compat: CompatManifest
 
     def discover(self) -> list[str]:
         return github.npm_versions(self.package)

@@ -34,7 +34,6 @@ from theater.harness.contracts.manifest import (
 from theater.harness.contracts.source import StreamPoint
 from theater.harness.transcript import file_stream_floor
 
-from .compat import COMPAT
 from .compatibility import probe_vibe_compatibility, vibe_qualified_range_text
 from .launch import discover_models, plan_launch, resume_launch_overlay
 from .mcp import render_mcp_servers
@@ -156,7 +155,6 @@ def manifest_for_roots(
             qualified_range=vibe_qualified_range_text(),
             probe=probe_vibe_compatibility,
         ),
-        compat=COMPAT,
     )
 
 

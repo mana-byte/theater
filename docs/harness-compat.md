@@ -111,8 +111,8 @@ a red check or run instead of an issue and an exclusion.
 selected plugin's production manifest and exercise a real daemon, Régie provider, private tmux
 server and stock CLI through public contracts against a scripted local model.
 
-Harness-specific onboarding, endpoints, dummy credentials and tool syntax live in the plugin's
-`CompatManifest`. Canary declarations also live there; shared scenarios, assertions and mutations
+Harness-specific onboarding, endpoints, dummy credentials and tool syntax live in the adapter's
+`CompatManifest` (see [Adapters](#adapters)). Canary declarations also live there; shared scenarios, assertions and mutations
 are generic. Canaries check suite sensitivity separately, weekly and when wiring changes. A
 canary run that leaves a needed obligation inconclusive (`error`) is repeated once; a miss never is.
 
@@ -126,6 +126,75 @@ timeouts, non-clean subprocess exits and cleanup failures cannot authorize a pas
 Cleanup waits for owned processes before deleting data; already-missing child files are harmless.
 A cleanup failure retains completed checks and the actual error, stops the sweep, and cannot pass.
 Distinct parser, safety/recovery and SDK regressions remain supplementary.
+
+## Adapters
+
+Each shipped plugin has one adapter, `harness_compat/adapters/<name>.py`: the adapter names are the
+plugin folders that hold a `manifest.py`, and a unit test holds the two sets equal. Its `ADAPTER`
+declares how to `discover()` the stable releases, how to `install()` exactly one of them into a
+sandbox, and its `compat` (`CompatManifest`). Modules starting with `_` are shared helpers.
+
+Adding a harness takes its plugin, with a one-line `compatibility.json`, and its adapter; a new kind
+of manifest declaration also needs a scenario family or a reasoned exemption in
+`harness_compat/support/coverage.py`. No workflow names a harness: `plan` derives every matrix from
+the adapters, and a change to one adapter re-verifies only that harness.
+
+`compat` is read only by the live suite, never at runtime. The suite derives every scenario from
+the plugin's manifest; `compat` supplies only what cannot be derived, so an adapter declares no
+scenarios, assertions, skips or proof callbacks. Constructing a `CompatManifest` or a tool template
+refuses a missing placeholder, an oversized name or payload, a repeated canary and a malformed
+acknowledged route.
+
+`CompatManifest.provision(context) -> Provisioned` is pure. It receives a
+`ProvisionContext` (sandbox directories, the mock model's base URL per protocol,
+the binary and its version, and the logical model names the run will request)
+and returns the `Provisioned` values that make the stock CLI use the mock:
+
+- `protocol`: `"anthropic"`, `"openai-chat"` (Chat Completions) or
+  `"openai-responses"`;
+- `env`: endpoint, dummy credential, update and telemetry opt-outs;
+- `files`: absolute config, model-catalog and onboarding or trust pre-seeding;
+- `models`: selectors the CLI accepts for the logical names, routed to the mock;
+- `efforts`: harness-native effort values worth sampling.
+
+`CompatManifest.acknowledged_routes` declares optional `(method, path)` pairs for non-model
+side channels. The mock returns 204 for them without consuming a scripted reply; they cannot
+replace model protocol routes.
+
+Provisioning must not replace launch argv, approval policy or receipt commands;
+production launch planning always wins. Every line of it is endpoint, credential,
+model catalog or onboarding and trust setup: a retry policy, a disabled agent or
+any other change to stock behaviour is not provisioning.
+
+`CompatManifest.native_edit` is optional and valid only when the plugin's
+`launch.approvals` includes `edits` (a unit test checks every adapter). `NativeEdit(name, payload)` names the CLI's
+own file-write tool and a payload that makes it write one scratch file: a JSON
+object or freeform text (for grammar-based tools such as a patch). The payload
+must contain the `{path}` placeholder and may contain `{nonce}`; those two
+tokens are substituted in one pass and nothing else is interpolated. The suite
+checks the scripted call against the schema the CLI actually offered the tool
+with; a call that does not fit (an argument a closed schema does not declare, a
+missing required one) means the recipe is stale for that release, and the run is
+inconclusive rather than red. One static recipe cannot serve two release lines
+that name an argument differently, so declare the line the suite can prove.
+
+`CompatManifest.mcp_call` is optional and needed only when the model cannot call
+an MCP tool under its own name, for example when MCP tools sit behind a script
+runner. `McpCall(name, payload)` names the tool the model calls
+and a payload that invokes one MCP tool; it must contain `{tool}` and
+`{arguments}` and may contain `{server}`, substituted in one pass (`{arguments}`
+as its JSON text). Without it the suite finds the MCP tool among the tool names
+the model was offered by suffix match.
+
+`CompatManifest.mcp_discovery` is optional and needed only when the CLI offers an MCP
+tool after a search for it (a tool search). `McpDiscovery(name, payload)` names the
+search tool and a payload that loads one MCP tool; it must contain `{tool}` and may
+contain `{server}`. The suite runs it before the tool's own call, which it then makes by the
+name the CLI offers afterwards (or through `mcp_call`).
+
+`CompatManifest.canaries` names extra generic mutations that this adapter's provisioning cannot
+mask. The mutation implementations and assertions stay in the shared suite. These tooling checks
+run separately from release qualification; no shared code branches on a harness name.
 
 ## Remaining suite limits
 
@@ -146,9 +215,9 @@ needs it.
 ## After a floor raise
 
 A raise ships in a routine ceiling PR: one JSON line, nothing else. Whatever only the releases below
-the new min needed is deleted afterwards, in a separate code PR kept inside `plugins/<harness>/` and
-`tests/harness/<harness>/` so that only that harness's shards run. Add a row when code is written
-for specific releases; the row dies with its code.
+the new min needed is deleted afterwards, in a separate code PR kept inside `plugins/<harness>/`,
+`harness_compat/adapters/<harness>.py` and `tests/harness/<harness>/` so that only that harness's
+shards run. Add a row when code is written for specific releases; the row dies with its code.
 
 | Dies when min ≥ | Harness | Shape | Delete |
 | --- | --- | --- | --- |

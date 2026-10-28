@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    from .provisioning import CompatManifest
 
 #: red records a contract assertion failure; inconclusive/tooling do not establish a binary defect.
 Verdict = Literal["green", "red", "inconclusive", "tooling"]
@@ -236,10 +239,12 @@ class Sandbox:
 
 
 class Adapter(Protocol):
-    """One harness's upstream release channel; ``adapters/<name>.py`` exports one ``ADAPTER``."""
+    """A harness's release channel and provisioning; ``adapters/<name>.py`` exports one."""
 
     #: The canonical plugin name: ``theater/harness/builtin/plugins/<name>``.
     name: str
+    #: How the live suite points this harness's stock CLI at the mock model.
+    compat: CompatManifest
 
     def discover(self) -> list[str]:
         """Every stable upstream release, ascending."""

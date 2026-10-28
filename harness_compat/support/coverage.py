@@ -52,7 +52,6 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "HarnessManifest.observation",
         "ObservationManifest.screen",
         "ScreenManifest.classifier",
-        "HarnessManifest.compat",
         "CompatManifest.provision",
     ),
     # --- turn: a prompt becomes a done job with the scripted answer and a bound transcript

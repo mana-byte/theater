@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from harness_compat.adapters import load_adapter
 from harness_compat.canaries import ENV_BINARY, ENV_ENABLE, ENV_HARNESS
 from harness_compat.codecopy import code_copy
 from harness_compat.contract import SUITE_ENV_MUTATION, Check
@@ -84,9 +85,7 @@ def _checks(report: SuiteReport) -> dict[str, Check]:
 @pytest.mark.parametrize("name", SHIPPED)
 def test_the_suite_notices_a_deliberately_broken_plugin(name: str, mutation: Mutation) -> None:
     harness = HARNESSES[name]
-    if harness.compat is None:
-        pytest.skip(f"{name} declares no compat manifest yet")
-    expected = applicable(mutation, required(harness), harness.compat.canaries)
+    expected = applicable(mutation, required(harness), load_adapter(name).compat.canaries)
     if not expected:
         pytest.skip(f"{mutation.name} breaks nothing this harness declares")
     binary = _binary(name, harness.binary)

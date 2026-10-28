@@ -249,7 +249,6 @@ class _CompiledHarness(Harness):
         self.controls = manifest.controls
         self.runtime = manifest.runtime
         self.native_compatibility = manifest.native_compatibility
-        self.compat = manifest.compat
         self.resume_takes_prompt = manifest.launch.resume_takes_prompt
         self.resume_strategy = manifest.launch.resume_strategy
         self.launch_parameter_support = LaunchParameterSupport(

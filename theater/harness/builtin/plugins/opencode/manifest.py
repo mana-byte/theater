@@ -38,7 +38,6 @@ from theater.harness.contracts.runtime import (
     RuntimeSessionOrder,
 )
 
-from .compat import COMPAT
 from .launch import discover_models, plan_launch, resume_launch_overlay
 from .observer import (
     OpenCodeObserver,
@@ -160,7 +159,6 @@ MANIFEST = HarnessManifest(
             }
         ),
     ),
-    compat=COMPAT,
 )
 
 

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from harness_compat.contract import MockToolCall, RecordedRequest, ToolShape
+from harness_compat.provisioning import McpDiscovery
 from harness_compat.support.tool_effects import (
     Effect,
     _mark,
@@ -18,7 +19,6 @@ from harness_compat.support.tool_effects import (
     expect_gated,
     expect_runs,
 )
-from theater.harness.contracts.compat import McpDiscovery
 from theater.harness.contracts.observation import ScreenKind
 
 
@@ -169,9 +169,7 @@ async def test_a_declared_search_runs_first_and_the_request_after_it_is_the_offe
             self.queued: list[Any] = []
             self.mock = SimpleNamespace(requests=())
             discovery = McpDiscovery("ToolSearch", {"query": "select:mcp__{server}__{tool}"})
-            self.harness = SimpleNamespace(
-                compat=SimpleNamespace(mcp_discovery=discovery, mcp_call=None)
-            )
+            self.compat = SimpleNamespace(mcp_discovery=discovery, mcp_call=None)
 
         def queue(self, reply: Any) -> None:
             self.queued.append(reply)
