@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.claude_seal import claude_record
 from tests.support.paths import FIXTURES
 from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
@@ -570,14 +571,56 @@ def test_supported_plugins_expose_only_stable_request_identity() -> None:
 
 
 def test_claude_requests_share_the_enclosing_user_turn() -> None:
-    facts = _fixture_facts(ClaudeCodeObserver(), "claude_code.jsonl")
+    lines = [
+        claude_record(
+            "u0", None, "user", promptId="turn-1", message={"role": "user", "content": "go"}
+        ),
+        claude_record(
+            "a1",
+            "u0",
+            promptId="turn-1",
+            requestId="req-1",
+            message={
+                "id": "m1",
+                "stop_reason": "tool_use",
+                "content": [{"type": "text", "text": "a"}],
+            },
+        ),
+        claude_record(
+            "a2",
+            "a1",
+            promptId="turn-1",
+            requestId="req-2",
+            message={
+                "id": "m2",
+                "stop_reason": "tool_use",
+                "content": [{"type": "text", "text": "b"}],
+            },
+        ),
+        claude_record(
+            "a3",
+            "a2",
+            promptId="turn-1",
+            requestId="req-3",
+            message={
+                "id": "m3",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "c"}],
+            },
+        ),
+    ]
+    facts = [
+        fact
+        for index, line in enumerate(lines)
+        for fact in ClaudeCodeObserver().parse_record(line, index).trajectory
+    ]
     records = tuple(
         fact_to_record(fact, participant_id="participant", source_epoch="epoch") for fact in facts
     )
     requests = requests_for_records(records)
 
     assert len(requests) == 3
-    assert {request.turn_id for request in requests} == {"a7775170-45d7-466e-a032-2fa95ae88013"}
+    assert {request.turn_id for request in requests} == {"turn-1"}
 
 
 def test_overview_counts_the_same_canonical_requests() -> None:
