@@ -451,8 +451,6 @@ class PiParserMixin:
         if compaction fails); ``settled`` emits one synthetic ``turn_end`` without
         duplicating text, usage, or facts.
         """
-        if phase == "compaction-will-retry":
-            return ParsedRecord()
         if phase != "settled":
             return ParsedRecord()
         if not self._pending_terminal:
