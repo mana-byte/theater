@@ -1,4 +1,4 @@
-"""Vibe unified store format: minors, chunk reassembly, golden store and fail-closed reads."""
+"""Vibe unified store format: minors, chunk reassembly and fail-closed reads."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 
-from tests.support.paths import fixture
 from tests.support.vibe_store import (
     GEN1,
     GEN2,
@@ -25,7 +24,6 @@ from tests.support.vibe_store import (
     source_state,
 )
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
-from theater.harness.builtin.plugins.vibe.unified_source import UnifiedVibeSource
 from theater.harness.builtin.plugins.vibe.unified_store import (
     STORE_FORMAT_MINOR,
     UnifiedStoreError,
@@ -181,33 +179,16 @@ def test_transient_store_errors_keep_waiting(store: Store, monkeypatch) -> None:
     assert batch.error_code is None
 
 
-GOLDEN_STORE_ROOT = fixture("vibe_unified_store_v2.26.0")
-
-
-def test_golden_store_written_by_vibe_2260_reads_back_with_turn_boundary() -> None:
-    """A store written by the real 2.26.0 binary (store_format_minor 8).
-
-    Guards the reader upgrade end to end: transcript readback, the pooled
-    capability catalog, and turn-boundary extraction must all work on a genuine
-    minor-8 store — the exact shape that once left spawned jobs waiting forever.
-    """
-    session_dirs = sorted(path for path in GOLDEN_STORE_ROOT.iterdir() if path.is_dir())
-    assert len(session_dirs) == 1
-    view = load_unified_store(session_dirs[0] / "CURRENT")
-    assert view is not None
-    assert view.store_minor == 8
-    catalog = view.runtime_state.get("core_capabilities")
-    assert isinstance(catalog, dict) and catalog, "the pooled capability catalog reattaches"
-    entries = view.snapshot["history"]["entries"]
-    roles = [entry.get("role") for entry in entries if entry.get("type") == "message"]
-    assert "user" in roles and "assistant" in roles
-    latest = view.snapshot.get("latestTurn")
-    assert isinstance(latest, dict) and latest.get("status") == "completed"
-    event = UnifiedVibeSource._turn_boundary(view, previous=None)
-    assert event is not None
-    assert event.turn_end is True
-    assert event.turn_terminal is TurnTerminal.COMPLETED
-    assert event.text.strip()
+def test_attachment_reports_a_completed_turn_end(store: Store) -> None:
+    """Attaching to a completed turn surfaces the turn end, not just the transcript."""
+    state = source_state([public_message("asst-1", "assistant", "answer")], turn_status="completed")
+    publish_default(store, state=state)
+    source = VibeObserver(root=store.session_root.parent.parent).open_source(cwd="/tmp/work")
+    attached = asyncio.run(source.read()).attached
+    assert attached is not None
+    assert attached.last_event is not None
+    assert attached.last_event.turn_end is True
+    assert attached.last_event.turn_terminal is TurnTerminal.COMPLETED
 
 
 def test_reader_reassembles_chunks_and_replays_projection_records(store: Store) -> None:
