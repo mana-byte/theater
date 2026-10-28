@@ -40,7 +40,7 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
     SessionOpenMode,
 )
-from theater.models import BadRequest, Participant, TheaterError, new_id, now
+from theater.models import BadRequest, JobState, Participant, TheaterError, new_id, now
 from theater.observability.catalog import LIFECYCLE_STAGE
 
 logger = logging.getLogger("theater.spawner")
@@ -316,13 +316,19 @@ async def _launch_native_sequence(
         # participant id) to the native terminal evidence the runtime will
         # report, so no second send job exists.
         attempt.dispatch_started = True
-        await spawner.controls.send(
-            pid,
-            caller_id=req.parent_id or "cli",
-            prompt=req.prompt,
-            response_format=req.response_format,
-            job_handle=pid,
-        )
+        try:
+            await spawner.controls.send(
+                pid,
+                caller_id=req.parent_id or "cli",
+                prompt=req.prompt,
+                response_format=req.response_format,
+                job_handle=pid,
+            )
+        except Exception as exc:
+            # The launch knows its own spawn job; any refusal of its initial
+            # prompt must crash it, never leave it to an empty-result rescue.
+            _crash_undelivered_spawn_job(store, pid, exc)
+            raise
         if not store.set_runtime_lifecycle(
             pid,
             RuntimeLifecyclePhase.ACTIVE,
@@ -565,6 +571,27 @@ async def _launch_native_terminal_fenced(
         raise
     attempt.dispatch_started = False
     return attached
+
+
+def _crash_undelivered_spawn_job(store, pid: str, exc: Exception) -> None:
+    """Crash this launch's spawn job when its initial prompt was refused.
+
+    Only a RUNNING job with no control operation is touched: a RESERVED or later
+    operation means transmission may have begun, and its receipt, evidence and
+    reconciliation machinery own every later outcome.
+    """
+    job = store.get_job(pid)
+    if job is None or job.state != JobState.RUNNING:
+        return
+    if store.control_operations_for_job(pid):
+        return
+    store.finish_job(
+        pid,
+        state=JobState.CRASHED,
+        result=str(exc),
+        error_code=getattr(exc, "code", None) or "dispatch_failed",
+        finished_at=now(),
+    )
 
 
 def _dispatch_may_have_begun(store, participant_id: str) -> bool:

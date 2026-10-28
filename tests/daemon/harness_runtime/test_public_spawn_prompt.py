@@ -15,11 +15,12 @@ from tests.support.waiting import settle_operations
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
+    ControlDeliveryPhase,
     DeliveryResult,
     RuntimeCapability,
     RuntimeSessionOrder,
 )
-from theater.models import JobState
+from theater.models import BadRequest, JobState
 
 pytestmark = pytest.mark.usefixtures("native_harness_binary")
 
@@ -41,7 +42,7 @@ class _SendRefusingHarness(NativeFixtureHarness):
 
 
 class _UncertainDispatchHarness(NativeFixtureHarness):
-    """A native fixture whose backend write is lost, so the delivery is uncertain."""
+    """A native fixture whose backend write is lost, recording its one attempt."""
 
     def _manifest(self):
         manifest = super()._manifest()
@@ -50,6 +51,7 @@ class _UncertainDispatchHarness(NativeFixtureHarness):
             runtime = manifest.factory(context)
 
             async def send(*, operation_id, prompt):
+                self.events.append(("send", prompt))
                 raise ConnectionError("the backend write was lost")
 
             runtime.send = send
@@ -151,11 +153,45 @@ async def test_uncertain_initial_dispatch_never_becomes_a_refusal(
         pid = accepted["participant_id"]
         spawned.append(pid)
 
+        # Exactly one attempt, never retransmitted: its single operation stays
+        # dispatched for reconciliation (maintenance may clear the barrier off an
+        # idle snapshot), and the job is never crashed.
+        assert [e for e in harness.events if e[0] == "send"] == [("send", "do the task")]
         job = d.store.get_job(pid)
         assert job.state == JobState.RUNNING
-        # One uncertain operation, never settled as a refusal and never replayed.
         (operation,) = d.store.control_operations_for_job(pid)
+        assert operation.delivery_phase is ControlDeliveryPhase.DISPATCHED
         assert operation.delivery_result is None
+    finally:
+        for p in spawned:
+            await teardown_backend(d, p)
+        await d.aclose()
+
+
+async def test_refused_preflight_crashes_the_spawn_job(
+    native_rig, terminal_provider, tmp_path
+) -> None:
+    """A send-preflight refusal fires before the send body; the launch still ends loud."""
+    d = await native_daemon(native_rig.io, native_rig.harness, terminal_provider)
+    spawned = []
+    try:
+
+        async def refuse(participant_id: str) -> None:
+            raise BadRequest("preflight refusal: the transcript is unreadable")
+
+        d.controls._gates = replace(d.controls._gates, send_preflight=refuse)
+        accepted = await _public_spawn(
+            d, key="preflight-refused", prompt="do the task", cwd=tmp_path
+        )
+        await settle_operations(d)
+        pid = accepted["participant_id"]
+        spawned.append(pid)
+
+        job = d.store.get_job(pid)
+        assert job.state == JobState.CRASHED
+        assert "preflight refusal" in (job.result or "")
+        assert job.error_code == "bad_request"
+        assert d.store.control_operations_for_job(pid) == []
     finally:
         for p in spawned:
             await teardown_backend(d, p)

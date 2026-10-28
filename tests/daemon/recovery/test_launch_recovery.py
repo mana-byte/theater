@@ -30,9 +30,15 @@ from theater.models import (
 )
 
 
-async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(
-    tmp_path: Path,
+@pytest.mark.parametrize("refused_prompt", [False, True])
+async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(  # noqa: PLR0915
+    tmp_path: Path, refused_prompt: bool
 ) -> None:
+    """Accepted-creation reconciliation binds the terminal and never rewrites the job.
+
+    The spawn job may already be crashed with its initial-prompt refusal; the
+    accepted creation receipt proves only the terminal, so the refusal survives.
+    """
     path = tmp_path / "provider-create-recovery.db"
     store = Store(path)
     with store.write_unit() as unit:
@@ -109,11 +115,13 @@ async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(
                 target_id="participant-a",
                 kind="spawn",
                 prompt="work",
-                state=JobState.RUNNING.value,
-                result=None,
-                error_code=None,
+                state=JobState.CRASHED.value if refused_prompt else JobState.RUNNING.value,
+                result=(
+                    "participant 'participant-a' does not support send" if refused_prompt else None
+                ),
+                error_code="bad_request" if refused_prompt else None,
                 created_at=timestamp,
-                finished_at=None,
+                finished_at=timestamp if refused_prompt else None,
                 actor_client_id="operator-a",
             ),
             connection=unit.connection,
@@ -198,6 +206,13 @@ async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(
         "workspace-a", holder_kind="participant", holder_id="participant-a"
     )
     assert usage is not None
+    job = reopened.get_job("participant-a")
+    if refused_prompt:
+        assert job.state == JobState.CRASHED
+        assert job.error_code == "bad_request"
+        assert "does not support send" in (job.result or "")
+    else:
+        assert job.state == JobState.RUNNING
     await recovered.aclose()
     reopened.close()
 
@@ -411,103 +426,3 @@ async def test_restart_atomically_fails_never_dispatched_launch_and_releases_res
     assert reopened.get_job("participant-dispatched").state == JobState.RUNNING
     assert reopened.workspaces.get_usage("usage-dispatched").released_at is None
     reopened.close()
-
-
-async def test_accepted_creation_receipt_reconciliation_keeps_a_crashed_spawn_job(
-    tmp_path: Path,
-) -> None:
-    """Reconciling the terminal an accepted spawn created never rewrites its crashed job.
-
-    The spawn's initial prompt was refused before any operation was reserved, so the
-    job crashed with the refusal while the public operation stayed uncertain; the
-    provider's accepted creation receipt settles only the operation and the binding.
-    """
-    store = Store(tmp_path / "crashed-spawn.db")
-    timestamp = 10.0
-    with store.write_unit() as unit:
-        store.providers.register(provider_record(), connection=unit.connection)
-        store.upsert_participant(
-            Participant(id="participant-a", harness="codex", cwd="/tmp/work"),
-            connection=unit.connection,
-        )
-    service = provider_service(store)
-    generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
-    with store.write_unit() as unit:
-        store.operations.create(
-            PublicOperationRecord(
-                operation_id="operation-create",
-                kind="spawn",
-                actor_client_id="operator-a",
-                actor_participant_id=None,
-                target_ids=("participant-a",),
-                state="uncertain",
-                phase="terminal_create_outcome_unknown",
-                job_handle="participant-a",
-                dispatch_provider_id="provider-a",
-                dispatch_provider_generation=generation,
-                created_at=timestamp,
-                updated_at=timestamp,
-                error_code="bad_request",
-                error={"code": "bad_request", "message": "does not support send"},
-            ),
-            connection=unit.connection,
-        )
-        store.operations.reserve_launch(
-            LaunchReservationRecord(
-                operation_id="operation-create",
-                participant_id="participant-a",
-                provider_id="provider-a",
-                workspace_usage_id=None,
-                adapter="codex",
-                phase="terminal_create_dispatched",
-                launch_facts={"provider_generation": generation},
-                artifact_refs=(),
-                dispatch_marker=f"generation:{generation}",
-                created_at=timestamp,
-                updated_at=timestamp,
-            ),
-            connection=unit.connection,
-        )
-        store.create_job(
-            Job(
-                handle="participant-a",
-                caller_id="cli",
-                target_id="participant-a",
-                kind="spawn",
-                prompt="work",
-                state=JobState.CRASHED.value,
-                result="participant 'participant-a' does not support send",
-                error_code="bad_request",
-                created_at=timestamp,
-                finished_at=timestamp,
-                actor_client_id="operator-a",
-            ),
-            connection=unit.connection,
-        )
-    report = service.report(
-        "provider-a",
-        generation,
-        1,
-        {
-            "terminals": [terminal_identity(generation, launch_id="operation-create")],
-            "complete": True,
-            "receipts": [
-                {
-                    "operation_id": "operation-create",
-                    "launch_id": "operation-create",
-                    "provider_generation": generation,
-                    "outcome": "accepted",
-                    "terminal": terminal_identity(generation, launch_id="operation-create"),
-                }
-            ],
-        },
-    )
-    assert report["reconciled_operation_ids"] == ["operation-create"]
-    assert store.operations.get("operation-create").state == "succeeded"
-    assert store.terminal_bindings.get("participant-a") is not None
-    job = store.get_job("participant-a")
-    assert job.state == JobState.CRASHED
-    assert job.error_code == "bad_request"
-    assert "does not support send" in (job.result or "")
-    await service.aclose()
-    store.close()
