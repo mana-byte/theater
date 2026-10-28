@@ -247,6 +247,44 @@ async def test_a_copied_answer_cannot_complete_a_resumed_job(tmp_path, registry,
         await reader.aclose()
 
 
+@pytest.mark.parametrize("written", [0, 40], ids=["before-history", "mid-turn"])
+async def test_history_copied_in_after_the_attach_never_answers_a_resumed_job(
+    tmp_path, registry, written
+):
+    """Claude creates a fork's file, then copies the history in ahead of the first turn."""
+    fork = claude_fork(33)
+    # Causal order: the history, then the fork's prompt, answer and marker.
+    lines = [fork[0], *fork[3:], *fork[1:3]]
+    root = tmp_path / "projects"
+    path = root / "project" / f"{SESSION}.jsonl"
+    path.parent.mkdir(parents=True)
+    _write(path, lines[:written])
+    reader = ClaudeCodeObserver(root=root).open_source_for(
+        participant_id="claude",
+        cwd=str(tmp_path),
+        session_id=SESSION,
+        session_provenance=TranscriptProvenance.EXACT,
+        after=LAUNCHED,
+    )
+    reader.admit_exact_location(location=str(path), session_id=SESSION)
+    participant = registry.create_spawned(harness="claude", cwd=str(tmp_path))
+    jobs = JobManager(registry.store)
+    jobs.create(
+        handle="resume", caller_id="caller", target_id=participant.id, kind="send", prompt="new"
+    )
+    daemon = Observer(registry, harnesses={}, jobs=jobs)
+    clock, turns = QuietClock(), TurnAccumulator()
+    try:
+        attached = await reader.read()
+        assert daemon._accept_attachment(participant.id, reader, attached)
+        _write(path, lines[written:], append=True)
+        while reader.offset < path.stat().st_size:
+            apply_batch(daemon, participant.id, await reader.read(), clock, turns, source=reader)
+        assert (jobs.get("resume").state, jobs.get("resume").result) == (JobState.DONE, "NEW")
+    finally:
+        await reader.aclose()
+
+
 async def _assert_recovery(reader, path, daemon, participant_id, timing):
     _write(path, claude_fork(700, attachments=True)[-3:], append=True)
     assert (await reader.read()).error_code == TRANSCRIPT_SOURCE_UNAVAILABLE_CODE

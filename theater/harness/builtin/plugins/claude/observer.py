@@ -55,6 +55,9 @@ class ClaudeCodeObserver(
         """Drop cross-record seal state when the source signals the line stream restarted."""
         self._seal.reset(history_guard=history_guard)
 
+    def guard_history(self) -> None:
+        self._seal.guard_history()
+
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
         return self.open_source_for(
             participant_id=context.participant_id,

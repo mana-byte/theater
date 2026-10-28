@@ -171,6 +171,9 @@ class _ClaudeSource(TranscriptSource):
     def commit_attachment(self) -> None:
         super().commit_attachment()
         self._live_after = None
+        # A fork's file exists before its history is copied in: what the attach scan did not see
+        # may still be copy, and copied history is never a live turn.
+        self._observer.guard_history()
 
     def bind_wakeup(self, wakeup) -> None:
         super().bind_wakeup(wakeup)
