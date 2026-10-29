@@ -22,19 +22,21 @@ def transcript_tail(location: str | None, *, launched_at: float | None, records:
 
 
 def _token(line: str, launched_at: float | None) -> str | None:
-    """None for a metadata line (no ``uuid``): it is no part of the conversation's causal chain."""
+    """None for a metadata line (no ``uuid``/``id``): not part of the causal chain."""
     try:
         record = json.loads(line)
     except ValueError:
         return "?"
     if not isinstance(record, dict):
         return "?"
-    if not record.get("uuid"):
+    identifier = record.get("uuid", record.get("id"))
+    if not identifier:
         return None
     attachment = record.get("attachment")
     detail = attachment.get("type") if isinstance(attachment, dict) else record.get("subtype")
     kind = "/".join(str(part) for part in (record.get("type"), detail) if part)
-    token = f"{kind or '?'} {_short(record.get('uuid'))}<{_short(record.get('parentUuid'))}"
+    parent = record.get("parentUuid", record.get("parentId"))
+    token = f"{kind or '?'} {_short(identifier)}<{_short(parent)}"
     written = _epoch(record.get("timestamp"))
     if written is not None and launched_at is not None:
         token += f" @{written - launched_at:+.1f}s"
