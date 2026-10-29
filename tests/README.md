@@ -79,6 +79,9 @@ fresh container; the default-server proof creates and destroys that container's 
   `tests/harness/core/test_version_policy.py`. The release that exposed a bug belongs in the
   commit message.
 - Every module opens with a one-line docstring stating its subject.
+- A failed setup/call phase gets a `Theater failure context` report section (orchestration DB
+  dump, provider state, recent node ids, daemon log tail) from `tests/support/failure_context.py`,
+  registered by the root `conftest.py`.
 
 ## Harness compatibility
 
