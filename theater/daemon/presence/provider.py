@@ -314,6 +314,7 @@ class ProviderPresenceSource:
                 participant_id,
                 binding,
                 f"provider-inspect-failed:{type(exc).__name__}",
+                exc=exc,
             )
             return
         if epoch != (
@@ -479,8 +480,24 @@ class ProviderPresenceSource:
             )
             return False
 
-    def _unknown(self, participant_id: str, binding: TerminalBindingRecord, reason: str) -> None:
+    def _unknown(
+        self,
+        participant_id: str,
+        binding: TerminalBindingRecord,
+        reason: str,
+        *,
+        exc: BaseException | None = None,
+    ) -> None:
         prior = self._observations.get(participant_id)
+        if prior is None or prior.reason != reason:  # log the transition, not every refresh
+            logger.warning(
+                "presence unknown for %s: %s (terminal %s, provider generation %s)",
+                participant_id,
+                reason,
+                binding.terminal_id,
+                binding.provider_generation,
+                exc_info=exc,
+            )
         presence_revision = (
             prior.presence_revision
             if prior is not None and prior.binding_key == binding.route_key
