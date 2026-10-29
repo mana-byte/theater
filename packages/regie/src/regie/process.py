@@ -7,6 +7,7 @@ import contextlib
 import errno
 import fcntl
 import json
+import logging
 import os
 import secrets
 import shlex
@@ -30,6 +31,8 @@ from theater.frontend import (
     RequestTimedOut,
     TransportConnectionError,
 )
+
+logger = logging.getLogger("regie")
 
 _DEFAULT_START_TIMEOUT = 10.0
 #: A loaded machine can need longer than a connect or stop to bring up the bridge's provider.
@@ -76,8 +79,10 @@ class BridgeProcessStatus:
     build: str | None = None
 
     @classmethod
-    def stopped(cls, detail: str | None = None) -> BridgeProcessStatus:
-        return cls(running=False, connection_state="stopped", detail=detail)
+    def stopped(
+        cls, detail: str | None = None, *, pid: int | None = None, token: str | None = None
+    ) -> BridgeProcessStatus:
+        return cls(running=False, connection_state="stopped", pid=pid, detail=detail, token=token)
 
 
 class _FileLock:
@@ -481,6 +486,7 @@ async def _serve_bridge(
             loop.add_signal_handler(signal_value, stop.set)
     task: asyncio.Task[None] | None = None
     exit_code = 0
+    detail: str | None = None
     try:
         bridge = TmuxBridge(
             BridgeConfig(
@@ -521,13 +527,16 @@ async def _serve_bridge(
         await task
     except Exception as exc:
         exit_code = 1
+        detail = f"{type(exc).__name__}: {exc}"[:1024]
+        # No traceback: it can echo the provider credential; the status file stores the same text.
+        logger.warning("bridge worker failed: %s", detail)
         _write_status(
             paths.bridge_status_path,
             BridgeProcessStatus(
                 running=True,
                 connection_state="failed",
                 pid=os.getpid(),
-                detail=f"{type(exc).__name__}: {exc}"[:1024],
+                detail=detail,
                 token=token,
                 build=_BUILD,
             ),
@@ -536,7 +545,11 @@ async def _serve_bridge(
         if task is not None and not task.done():
             await bridge.close()
             await task
-        _write_status(paths.bridge_status_path, BridgeProcessStatus.stopped())
+        # _wait_ready only accepts a status carrying this worker's pid+token.
+        _write_status(
+            paths.bridge_status_path,
+            BridgeProcessStatus.stopped(detail, pid=os.getpid(), token=token),
+        )
         paths.bridge_pid_path.unlink(missing_ok=True)
         lease.release()
     return exit_code
