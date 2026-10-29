@@ -634,7 +634,7 @@ class JobManager:
                 "error_code": error_code,
             },
         )
-        logger.info("job %s finished: %s", handle, state)
+        logger.info("job %s finished: %s code=%s", handle, state, error_code)
         return self.store.get_job(handle)
 
     def _finish_in_unit(
@@ -703,7 +703,10 @@ class JobManager:
             connection=connection,
         )
         after_commit(connection, lambda: self._wake(handle))
-        after_commit(connection, lambda: logger.info("job %s finished: %s", handle, state))
+        after_commit(
+            connection,
+            lambda: logger.info("job %s finished: %s code=%s", handle, state, error_code),
+        )
         return self.store.get_job(handle, connection=connection)
 
     def _wake(self, handle: str) -> None:
@@ -730,7 +733,7 @@ class JobManager:
                 "error_code": job.error_code,
             },
         )
-        logger.info("job %s finished: %s", job.handle, job.state)
+        logger.info("job %s finished: %s code=%s", job.handle, job.state, job.error_code)
 
     def _structured_values(
         self,

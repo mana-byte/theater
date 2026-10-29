@@ -205,7 +205,7 @@ class PresenceMonitor:
             before = self._published_states.get(participant_id)
             self._published_states[participant_id] = PresenceState.UNKNOWN
             if before is not PresenceState.UNKNOWN:
-                self._publish_change(participant_id)
+                self._publish_change(participant_id, before)
         if invalidated_terminals is None:
             self._wake.set()
         else:
@@ -334,7 +334,7 @@ class PresenceMonitor:
         if published is not observed and not self._stopping:
             self._bump_revision()
             self._published_states[participant_id] = observed
-            self._publish_change(participant_id)
+            self._publish_change(participant_id, published)
         await self._provider.refresh((participant,), screen_max_bytes=screen_max_bytes)
         if not self._stopping:
             after = self.snapshot(participant_id).state
@@ -342,9 +342,17 @@ class PresenceMonitor:
             self._published_states[participant_id] = after
             if before is not after:
                 self._bump_revision()
-                self._publish_change(participant_id)
+                self._publish_change(participant_id, before)
 
-    def _publish_change(self, participant_id: str) -> None:
+    def _publish_change(self, participant_id: str, before: PresenceState | None) -> None:
+        logger.info(
+            "presence %s %s -> %s reason=%s rev=%d",
+            participant_id,
+            before or PresenceState.UNKNOWN,
+            self._published_states[participant_id],
+            self.snapshot(participant_id).reason,
+            self._revision,
+        )
         self._publisher.publish(participant_id)
 
     def _emit_change(self, participant_id: str) -> None:
