@@ -11,6 +11,7 @@ from theater.version_policy import version_key
 from ..contract import Adapter, Check, InstallFailed, Result, Sandbox
 from ..diagnostics import clip_diagnostic, exception_detail
 from ..policy import admit_only, load_policy
+from ..support.evidence_block import print_blocks
 from .cleanup import CleanupFailed
 from .codecopy import code_copy
 from .sandbox import make_sandbox
@@ -39,14 +40,18 @@ def qualify_binary(
         with code_copy(root) as tree:
             if not load_policy(tree, name).admits(version):
                 admit_only(tree, name, version)
-            report = run_suite(
-                tree,
-                sb,
-                harness=name,
-                binary=binary,
-                version=version,
-                pytest_args=pytest_args,
-            )
+            try:
+                report = run_suite(
+                    tree,
+                    sb,
+                    harness=name,
+                    binary=binary,
+                    version=version,
+                    pytest_args=pytest_args,
+                )
+            finally:
+                # The sandbox is deleted on return, so print the suite's evidence blocks here.
+                print_blocks(sb.evidence_dir / "blocks")
             checks = report.checks
     except CleanupFailed as exc:
         exc.checks = checks or exc.checks

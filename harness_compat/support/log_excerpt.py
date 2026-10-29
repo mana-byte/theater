@@ -10,6 +10,8 @@ _RECORDS = 3
 _TAIL_BYTES = 64 * 1024
 _STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} ")
 _PROBLEM = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} (WARNING|ERROR|CRITICAL)\s+(.*)$")
+#: The always-on unpriced-mock warning is not a failure cause; it must not lead an excerpt.
+_NOISE_LOGGER = "theater.pricing.estimation "
 
 
 def log_excerpt(evidence: Path, *, limit: int = EXCERPT_CHARS) -> str:
@@ -51,7 +53,11 @@ def _problems(lines: list[str]) -> list[str]:
     for line in lines:
         if _STAMP.match(line):
             problem = _PROBLEM.match(line)
-            current = [f"{problem[1]} {problem[2]}"[:200], ""] if problem else None
+            current = (
+                None
+                if problem is None or problem[2].startswith(_NOISE_LOGGER)
+                else [f"{problem[1]} {problem[2]}"[:200], ""]
+            )
             if current is not None:
                 records.append(current)
         elif current is not None and line.strip():

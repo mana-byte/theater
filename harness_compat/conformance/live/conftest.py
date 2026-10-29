@@ -19,6 +19,7 @@ from harness_compat.adapters import load_adapter
 from harness_compat.contract import SuiteDocument, SuiteRow
 from harness_compat.diagnostics import FAILURE_DETAIL_CHARS
 from harness_compat.qualification.process import SANDBOX_ENV
+from harness_compat.support.evidence_block import write_block
 from harness_compat.support.live_rig import LiveRig, LiveSession, assert_isolated, evidence_dir_for
 from harness_compat.support.log_excerpt import log_excerpt
 from harness_compat.support.obligations import (
@@ -57,6 +58,7 @@ REQUIRED = required(HARNESS)
 _BY_NODE: dict[str, Obligation] = {}
 _PHASES: dict[str, dict[str, str]] = {}
 _DETAILS: dict[str, str] = {}
+_CAUSES: dict[str, str] = {}
 _DETAIL_CHARS = 400
 
 
@@ -113,21 +115,39 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     _PHASES.setdefault(obligation.id, {})[report.when or "call"] = outcome
     if report.outcome != "passed":
         _DETAILS.setdefault(obligation.id, _detail(report))
+        _CAUSES.setdefault(obligation.id, _cause_text(report))
     if report.when == "teardown" and obligation.id in _DETAILS:
         # Teardown reports after the fixture finalizers, so the stack's logs are on disk by now.
-        excerpt = log_excerpt(evidence_dir_for(SESSION, report.nodeid.rsplit("::", 1)[-1]))
+        cell = evidence_dir_for(SESSION, report.nodeid.rsplit("::", 1)[-1])
+        excerpt = log_excerpt(cell)
         if excerpt:
             joined = f"{excerpt} || {_DETAILS[obligation.id]}"
             _DETAILS[obligation.id] = joined[:FAILURE_DETAIL_CHARS]
+        # The sandbox dies before the pipeline prints; qualify.py prints the block file.
+        write_block(
+            SESSION.evidence_dir / "blocks",
+            harness=SESSION.harness,
+            version=SESSION.version,
+            cell=obligation.id,
+            outcome=_outcome(_PHASES.get(obligation.id, {})) or "error",
+            cause=_CAUSES.get(obligation.id, _DETAILS[obligation.id]),
+            evidence=cell,
+        )
 
 
 def _detail(report: pytest.TestReport) -> str:
     """The first failing line a human needs, from a failure, an error or a skip reason."""
+    return " ".join(_cause_text(report).splitlines())[:_DETAIL_CHARS]
+
+
+def _cause_text(report: pytest.TestReport) -> str:
+    """The failure's E-lines (or skip reason), one per line, for the evidence block."""
     if report.skipped and isinstance(report.longrepr, tuple):
-        return str(report.longrepr[2])[:_DETAIL_CHARS]
+        return str(report.longrepr[2])
     lines = [line.strip() for line in report.longreprtext.splitlines() if line.strip()]
     causes = [line.removeprefix("E").strip() for line in lines if line.startswith("E ")]
-    return " ".join(causes or lines[-3:])[:_DETAIL_CHARS]
+    # Without "E " lines the first line is the header; the last lines are only a pane dump.
+    return "\n".join(causes or lines[:1])
 
 
 def _outcome(phases: dict[str, str]) -> str | None:
