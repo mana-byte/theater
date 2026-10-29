@@ -43,6 +43,7 @@ from harness_compat.qualification.process import RUN_ENV, SANDBOX_ENV
 from harness_compat.qualification.sandbox import sandbox_environment
 from harness_compat.support import mutations
 from harness_compat.support.live_stack import BOOT_SECONDS, Stack
+from harness_compat.support.transcript_tail import transcript_tail
 from tests.support.paths import REPO_ROOT
 from theater.frontend import FrontendClient
 from theater.frontend.dto import Controls, Job, Participant
@@ -160,6 +161,8 @@ def hermetic_environment(
     return {
         **env,
         "LANG": "en_US.UTF-8",
+        # The daemon defaults --log-level from this; the bridge passes no flag.
+        "THEATER_LOG_LEVEL": "DEBUG",
         "THEATER_HOME": str(root / "th"),
         **extra,
         "PYTHONPATH": python_path(REPO_ROOT),
@@ -229,6 +232,7 @@ class LiveRig:
     workdir: Path
     marker_dir: Path
     label: str
+    _last_job: Job | None = None
 
     @property
     def protocol(self) -> MockProtocol:
@@ -292,11 +296,34 @@ class LiveRig:
             )
             cleanup.push_async_callback(rig._close_client)
             await rig.client.connect()
+            # Runs before the stack stops, so the daemon usually still answers at teardown.
+            cleanup.push_async_callback(rig._write_facts, evidence)
             yield rig
 
     async def _close_client(self) -> None:
         with contextlib.suppress(Exception):  # the daemon may already have dropped it
             await self.client.close()
+
+    async def _write_facts(self, evidence: Path) -> None:
+        """Job, participant and transcript facts for the cell's evidence block."""
+        lines: list[str] = []
+        if self._last_job is not None:
+            job = self._last_job
+            code = job.error.code if job.error is not None else None
+            lines.append(f"job {job.handle} state={job.state} error={code}")
+        with contextlib.suppress(Exception):  # the daemon may already have dropped the client
+            for item in (await self.client.participants.list()).value.items:
+                lines.append(
+                    f"participant {item.participant_id} status={item.status} "
+                    f"presence={item.presence}"
+                )
+                identity = item.transcript_identity
+                if identity is not None:
+                    tail = transcript_tail(identity.location, launched_at=item.created_at)
+                    lines += [f"transcript: {part}" for part in tail.split(" | ")]
+        with contextlib.suppress(OSError):
+            evidence.mkdir(parents=True, exist_ok=True)
+            (evidence / "rig.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # -- driving the participant through the public SDK ---------------------------------------
 
@@ -510,6 +537,7 @@ class LiveRig:
             job = (await self.client.jobs.await_([handle], wait_seconds=slice_seconds)).value.jobs[
                 0
             ]
+            self._last_job = job
             if job.state != "running":
                 if job.state == "crashed" and job.error and job.error.code == "human_present":
                     # Nobody is attached to the rig: this is a presence flap, not the CLI's fault.

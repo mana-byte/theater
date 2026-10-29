@@ -127,6 +127,12 @@ Cleanup waits for owned processes before deleting data; already-missing child fi
 A cleanup failure retains completed checks and the actual error, stops the sweep, and cannot pass.
 Distinct parser, safety/recovery and SDK regressions remain supplementary.
 
+A failed live cell also leaves an evidence block: at teardown the suite writes
+`e/blocks/<cell>.txt` — cause first, then job/transcript facts, daemon and bridge log tails, raw
+stderr and pane lines, scrubbed of ANSI/control bytes and tokens and capped at 12 KB per cell and
+96 KB per release — and the qualification prints those blocks into the job log before the sandbox
+is deleted. Blocks are log output only: never report details, never artifacts.
+
 ## Adapters
 
 Each shipped plugin has one adapter, `harness_compat/adapters/<name>.py`: the adapter names are the
