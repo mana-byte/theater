@@ -125,6 +125,14 @@ async def test_hook_transport_credentials_bounds_decode_and_cleanup(  # noqa: PL
     record_launch_identity(participant, plan, daemon.registry)
     write_plan_files(plan)
     credential = plan.channel_credentials[0]
+    wakes = []
+    wake = daemon.observer.live.wake
+
+    def record_wake(participant_id):
+        wakes.append(participant_id)
+        wake(participant_id)
+
+    monkeypatch.setattr(daemon.observer.live, "wake", record_wake)
     assert stat.S_IMODE(credential.token_path.stat().st_mode) == 0o600
     assert credential.token not in (credential.token_path.with_name("native-hook.json")).read_text()
     assert plan.env["ACME_HOOK_CONFIG"].endswith("native-hook.json")
@@ -163,6 +171,7 @@ async def test_hook_transport_credentials_bounds_decode_and_cleanup(  # noqa: PL
         assert duplicate == {"ok": True, "duplicate": True, "dropped": False}
         assert native_duplicate == {"ok": True, "duplicate": False, "dropped": False}
         assert overflow == {"ok": True, "duplicate": False, "dropped": True}
+        assert wakes == [participant.id, participant.id]
         rows = await client.call("harnesses")
         row = next(row for row in rows if row["name"] == "acme")
         runtime = row["runtime"]
@@ -218,6 +227,7 @@ async def test_hook_transport_credentials_bounds_decode_and_cleanup(  # noqa: PL
         await source.read()
         assert hook_source.channel_health().state.value == "degraded"
 
+        accepted_wakes = list(wakes)
         with pytest.raises(RemoteError, match="credential is invalid"):
             await hook_event(client, pid=participant.id, token="forged", native_id="x")
         with pytest.raises(RemoteError, match="non-empty string"):
@@ -292,6 +302,7 @@ async def test_hook_transport_credentials_bounds_decode_and_cleanup(  # noqa: PL
                 event="unknown",
                 payload={"native_id": "x"},
             )
+        assert wakes == accepted_wakes
 
         daemon.registry.mark_dead(participant.id)
         assert not credential.token_path.exists()

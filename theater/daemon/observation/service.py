@@ -371,6 +371,8 @@ class Observer(
             context.source.rollback_source_checkpoint()
 
     async def _prepare_iteration(self, context: _WatchContext) -> bool:
+        if context.wake is not None:
+            context.wake.consume()
         pid = context.pid
         if pid in self._attachments._reset_watch_state:
             self._attachments._reset_watch_state.discard(pid)
@@ -391,8 +393,6 @@ class Observer(
         return True
 
     async def _read_watch_batch(self, context: _WatchContext, iteration: _WatchIteration) -> Batch:
-        if context.wake is not None:
-            context.wake.consume()
         batch = await self._read_source(context.pid, context.source)
         iteration.batch = batch
         self._measure_observation_gap(context, batch)

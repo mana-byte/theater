@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.support.tables import run_rows_async
+from theater.daemon.observation.live import LiveObservationHub
 from theater.daemon.rpc import hooks as hooks_mod
 from theater.models import BadRequest, Status
 from theater.protocol import RemoteError
@@ -119,7 +120,9 @@ def _hook_daemon(token: str):
     )
     daemon = SimpleNamespace(
         store=Store(),
-        observer=SimpleNamespace(harnesses={"vibe": SimpleNamespace(observer=object())}),
+        observer=SimpleNamespace(
+            harnesses={"vibe": SimpleNamespace(observer=object())}, live=LiveObservationHub()
+        ),
         hook_runtime=Runtime(),
     )
     return daemon, channel
@@ -127,6 +130,7 @@ def _hook_daemon(token: str):
 
 async def test_hook_token_rejects_non_ascii_but_accepts_ascii(monkeypatch):
     daemon, channel = _hook_daemon("token")
+    wake = daemon.observer.live.wake_signal("p")
     monkeypatch.setattr(hooks_mod, "_hook_channel", lambda _observer, _id: channel)
     params = {
         "id": "p",
@@ -137,8 +141,10 @@ async def test_hook_token_rejects_non_ascii_but_accepts_ascii(monkeypatch):
 
     with pytest.raises(BadRequest, match="credential is invalid"):
         await hooks_mod._harness_event(daemon, {**params, "token": "tökén"})
+    assert not wake.is_set()
     assert await hooks_mod._harness_event(daemon, {**params, "token": "token"}) == {
         "ok": True,
         "duplicate": False,
         "dropped": False,
     }
+    assert wake.is_set()
