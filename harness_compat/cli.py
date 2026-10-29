@@ -148,7 +148,25 @@ def _verify(args: argparse.Namespace, root: Path) -> int:
     outside = sorted(set(releases) - set(window), key=version_key)
     if outside:
         raise ValueError(f"the shard releases {', '.join(outside)} are outside the PR window")
-    run = run_harness(root, load_adapter(args.harness), releases=releases)
+    adapter = load_adapter(args.harness)
+    run = run_harness(root, adapter, releases=releases)
+    if len(run.results) == len(releases):
+        undecided = [result.version for result in run.results if result.verdict == "inconclusive"]
+        if undecided:
+            # One inconclusive attempt is environmental (a slow runner, a presence
+            # flap); only a second one fails the shard, mirroring the canary rerun.
+            print(f"compat:rerun {', '.join(undecided)} after an inconclusive attempt", flush=True)
+            retry = run_harness(root, adapter, releases=undecided)
+            merged = {result.version: result for result in run.results}
+            merged.update({result.version: result for result in retry.results})
+            run = Run(
+                run.harness,
+                run.policy,
+                run.releases,
+                tuple(merged[version] for version in releases),
+                (*run.errors, *retry.errors),
+                discovered=run.discovered,
+            )
     print(render_run(run))
     if run.errors or len(run.results) != len(releases):
         return 2

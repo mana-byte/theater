@@ -398,6 +398,59 @@ def test_verify_refuses_a_shard_list_outside_the_pr_window(
     assert "the shard releases 1.9.0 are outside the PR window" in capsys.readouterr().err
 
 
+def _attempts(monkeypatch: pytest.MonkeyPatch, releases: list[str], outcomes) -> dict[str, int]:
+    """Script `qualify` per attempt count; `outcomes` maps version to verdict or callable."""
+    asked: dict[str, int] = {}
+    monkeypatch.setattr(cli, "load_adapter", lambda _: _Adapter(releases))
+
+    def qualify(root, adapter, version):
+        asked[version] = asked.get(version, 0) + 1
+        outcome = outcomes[version]
+        verdict = outcome(asked[version]) if callable(outcome) else outcome
+        checks = (
+            (Check("launch", "error", "job still running after 90s"),)
+            if verdict == "inconclusive"
+            else ()
+        )
+        return Result(adapter.name, version, verdict, checks)
+
+    monkeypatch.setattr(
+        cli,
+        "run_harness",
+        lambda root, adapter, **kwargs: run_harness(root, adapter, qualify=qualify, **kwargs),
+    )
+    return asked
+
+
+def test_verify_reruns_an_inconclusive_release_once(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    asked = _attempts(
+        monkeypatch,
+        ["1.0.0", "1.1.0", "1.2.0", "1.3.0"],
+        {
+            "1.0.0": "green",
+            "1.1.0": lambda attempt: "inconclusive" if attempt == 1 else "green",
+            "1.2.0": "green",
+        },
+    )
+    assert _main(monkeypatch, repo, "verify", "claude", "--base", "main") == 0
+    assert asked == {"1.0.0": 1, "1.1.0": 2, "1.2.0": 1}
+    assert "compat:rerun 1.1.0 after an inconclusive attempt" in capsys.readouterr().out
+
+
+def test_verify_fails_when_a_release_stays_inconclusive_after_the_rerun(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _attempts(
+        monkeypatch,
+        ["1.0.0", "1.1.0", "1.2.0", "1.3.0"],
+        {"1.0.0": "green", "1.1.0": "inconclusive", "1.2.0": "green"},
+    )
+    assert _main(monkeypatch, repo, "verify", "claude", "--base", "main") == 2
+    assert asked == {"1.0.0": 1, "1.1.0": 2, "1.2.0": 1}
+
+
 def test_run_passes_the_sweep_time_budget_to_the_runner(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

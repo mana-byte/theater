@@ -63,7 +63,9 @@ reads and reports: its own failure never fails the run, so keep it out of requir
 A completed daily sweep succeeds when testing and publication finish reliably, even when candidates
 are red. Their version verdicts remain red and those versions stay unqualified. Incomplete runs,
 inconclusive/tooling outcomes and publication failures fail the workflow. PR admission checks stay
-strict; a successful sweep never establishes compatibility for a failed candidate.
+strict; a successful sweep never establishes compatibility for a failed candidate. A verify shard
+that completes with an inconclusive release repeats just those releases once; only a second
+inconclusive attempt fails the shard.
 
 When the discovered range holds more than N releases, publication also raises min to the oldest
 release of the newest N (never an excluded one); exclusions below the new floor are pruned, the
