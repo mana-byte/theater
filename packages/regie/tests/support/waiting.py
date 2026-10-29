@@ -4,7 +4,31 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from regie.widgets import ParticipantTree
+from textual.css.query import NoMatches
 from textual.pilot import Pilot
+
+#: Tree text lines shown in a timeout message; diagnostic only, never a decision.
+_MAX_TREE_LINES = 28
+
+
+def _failure(pilot: Pilot, waited: str) -> str:
+    """What a timeout reports: the public participant-tree state, when there is one."""
+    app = getattr(pilot, "app", None)
+    tree_state = ""
+    if app is not None:
+        try:
+            tree = app.query_one(ParticipantTree)
+        except NoMatches:
+            tree = None
+        if tree is not None:
+            rows = "\n".join(str(line[0]) for line in tree.tree_lines)
+            shown = "\n".join(rows.splitlines()[:_MAX_TREE_LINES])
+            tree_state = (
+                f"tree: participant_ids={tree.participant_ids!r} "
+                f"selected_key={tree.selected_key!r}\n{shown}"
+            )
+    return f"{waited}\n{tree_state}"
 
 
 async def wait_until(pilot: Pilot, condition: Callable[[], bool], timeout: float = 30.0) -> None:
@@ -18,7 +42,7 @@ async def wait_until(pilot: Pilot, condition: Callable[[], bool], timeout: float
         if condition():
             return
         await pilot.pause(0.02)
-    assert condition(), f"condition not met within {timeout}s"
+    assert condition(), _failure(pilot, f"condition not met within {timeout}s")
 
 
 async def press_until(
@@ -29,4 +53,4 @@ async def press_until(
         if condition():
             return
         await pilot.press(key)
-    assert condition(), f"{key!r} x{limit} never made it so"
+    assert condition(), _failure(pilot, f"{key!r} x{limit} never made it so")
