@@ -118,10 +118,10 @@ class StartupLoading(_AppBase):
                     logger.debug("local harness catalog unavailable: %s", fallback_exc)
                     return False
                 if self._view_active:
-                    self.query_one(WelcomeDashboard).show_catalog(self._installed_harnesses)
+                    self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
                 return False
             if self._view_active:
-                self.query_one(WelcomeDashboard).show_catalog(self._installed_harnesses)
+                self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
             return True
 
     @property

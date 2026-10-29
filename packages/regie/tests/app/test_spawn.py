@@ -365,4 +365,5 @@ async def test_harnesses_without_an_executable_are_not_offered(
         assert all(entry.name != "pi" for entry in app._installed_harnesses)
         assert app.icon_for_harness("codex") == "◈"  # the full catalog still names icons
         rows = app.query_one(WelcomeDashboard)._harnesses or []
-        assert [row["name"] for row in rows] == ["codex"]
+        # the dashboard lists the full catalog so missing harnesses show their install range
+        assert [row["name"] for row in rows] == ["codex", "pi"]

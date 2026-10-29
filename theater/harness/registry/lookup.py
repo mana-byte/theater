@@ -155,7 +155,6 @@ def native_compatibility_record(
         status = "native-compatible"
     reason = None if result is None else result.reason
     if runtimeless and installed:
-        qualified_range = None
         reason = _RUNTIMELESS_REASON
     if error is not None:
         reason = _probe_failure_reason(error)

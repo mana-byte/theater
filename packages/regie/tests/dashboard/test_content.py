@@ -42,12 +42,16 @@ def test_harness_availability_uses_compact_marks_and_muted_failures():
             {"name": "broken", "installed": True, "error": "import failed"},
         ]
     )
-    assert str(content) == "✓ codex\n✗ vibe\n✗ broken — import failed"
+    assert str(content) == (
+        "? codex   compatibility unknown\n✗ vibe    not installed\n✗ broken  import failed"
+    )
     assert [span.style for span in content.spans] == [
-        "$success",
-        "$text-muted",
-        "$text-muted",
         "$warning dim",
+        "$warning dim",
+        "$text-muted",
+        "$text-muted",
+        "$text-muted",
+        "$text-muted",
     ]
 
 
@@ -100,8 +104,8 @@ def test_dashboard_catalog_requires_installation_and_compatibility_not_provider_
 def test_pi_harness_availability_shows_beta_flag():
     content = harness_availability_content([{"name": "pi", "installed": True, "error": None}])
 
-    assert str(content) == "✓ pi β"
-    assert [span.style for span in content.spans] == ["$success", "$warning dim"]
+    assert str(content) == "? pi β  compatibility unknown"
+    assert [span.style for span in content.spans] == ["$warning dim", "$warning dim"]
 
 
 def test_harness_availability_shows_native_qualification():
@@ -115,13 +119,6 @@ def test_harness_availability_shows_native_qualification():
                     "status": "outside-qualified-range",
                     "installed_version": "1.2.3",
                     "qualified_range": "==1.9.9",
-                    "wiring": "legacy",
-                    "routes": {
-                        "send": "tmux",
-                        "steer": "tmux",
-                        "queue_followup": "tmux",
-                        "interrupt": "tmux",
-                    },
                 },
             },
             {
@@ -132,12 +129,6 @@ def test_harness_availability_shows_native_qualification():
                     "status": "native-compatible",
                     "installed_version": "2.3.4",
                     "qualified_range": None,
-                    "wiring": "native",
-                    "routes": {
-                        "send": "native",
-                        "steer": "native",
-                        "interrupt": "tmux",
-                    },
                 },
             },
             {
@@ -147,13 +138,7 @@ def test_harness_availability_shows_native_qualification():
                 "native_compatibility": {
                     "status": "native-compatible",
                     "installed_version": "3.4.5",
-                    "qualified_range": None,
-                    "wiring": "native",
-                    "routes": {
-                        "send": "native",
-                        "steer": "unavailable",
-                        "interrupt": "native",
-                    },
+                    "qualified_range": ">=0.84.4,<=1.4.0 excluding 0.85.0",
                 },
             },
             {
@@ -164,29 +149,19 @@ def test_harness_availability_shows_native_qualification():
                     "status": "legacy-only",
                     "installed_version": "4.5.6",
                     "qualified_range": None,
-                    "wiring": "legacy",
-                    "routes": {
-                        "send": "tmux",
-                        "steer": "tmux",
-                        "interrupt": "tmux",
-                    },
                 },
             },
         ]
     )
 
     assert str(content) == (
-        "✓ codex 1.2.3 — legacy · native needs ==1.9.9\n"
-        "    send tmux · steer tmux · interrupt tmux\n"
-        "✓ opencode 2.3.4 — native\n"
-        "    send native · steer native · interrupt tmux\n"
-        "✓ pi β 3.4.5 — native\n"
-        "    send native · steer unavailable · interrupt native\n"
-        "✓ vibe 4.5.6 — legacy\n"
-        "    send tmux · steer tmux · interrupt tmux"
+        "! codex 1.2.3     upgrade to ==1.9.9\n"
+        "✓ opencode 2.3.4  qualified\n"
+        "✓ pi β 3.4.5      qualified 0.84.4–1.4.0 excl. 0.85.0\n"
+        "– vibe 4.5.6      legacy"
     )
     styles = {span.style for span in content.spans}
-    assert {"$success", "$warning", "$success dim", "$warning dim", "$text-muted"} <= styles
+    assert {"$success", "$warning", "$text-muted"} <= styles
 
 
 @pytest.mark.parametrize(
@@ -199,6 +174,7 @@ def test_harness_availability_shows_native_qualification():
         (">=3.4.5,<3.4.6 || >=4.0.1,<4.1.0", "3.4.5 · 4.0.1–4.0.x"),
         (">=1.2.3,<1.2.5", "1.2.3–1.2.4"),
         (">=9.8.7,<=9.8.9", "9.8.7–9.8.9"),
+        (">=0.84.4,<=1.4.0 excluding 0.85.0", "0.84.4–1.4.0 excl. 0.85.0"),
         (">=5.6.2,<5.7.1 || >=6.2.3,<6.3.0", "5.6.2–5.7.0 · 6.2.3–6.2.x"),
         (">=1.18.29,<1.19", ">=1.18.29,<1.19"),
         ("nonsense", "nonsense"),
@@ -222,10 +198,9 @@ def test_pretty_qualifier_range_compacts_only_recognisable_pairs(raw, expected):
                     "status": "native-compatible",
                     "installed_version": "1.2.3",
                     "qualified_range": "==1.2.3",
-                    "wiring": "native",
                 },
             },
-            "✓ codex 1.2.3 — native · qualified ==1.2.3",
+            "✓ codex 1.2.3  qualified ==1.2.3",
         ),
         (
             {
@@ -236,17 +211,9 @@ def test_pretty_qualifier_range_compacts_only_recognisable_pairs(raw, expected):
                     "status": "native-compatible",
                     "installed_version": "2.3.4",
                     "qualified_range": None,
-                    "wiring": None,
-                    "routes": {
-                        "send": "native",
-                        "steer": "unavailable",
-                        "interrupt": "native",
-                        "settings_update": "native",
-                    },
                 },
             },
-            "✓ opencode 2.3.4 — native\n"
-            "    send native · steer unavailable · interrupt native · settings native",
+            "✓ opencode 2.3.4  qualified",
         ),
         (
             {
@@ -259,11 +226,23 @@ def test_pretty_qualifier_range_compacts_only_recognisable_pairs(raw, expected):
                     "reason": "x" * 80,
                 },
             },
-            "✓ old — legacy · compatibility unknown (" + "x" * 59 + "…)",
+            "? old  unknown (" + "x" * 59 + "…)",
         ),
         (
             {"name": "pi", "installed": False, "error": "executable not found"},
-            "✗ pi β — executable not found",
+            "✗ pi β  executable not found",
+        ),
+        (
+            {
+                "name": "codex",
+                "installed": False,
+                "error": "executable not found",
+                "native_compatibility": {
+                    "status": "not-installed",
+                    "qualified_range": ">=0.163.0,<=0.165.0",
+                },
+            },
+            "✗ codex  install 0.163.0–0.165.0",
         ),
     ],
 )
