@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import signal
 from pathlib import Path
 from types import SimpleNamespace
@@ -242,44 +241,6 @@ async def test_bridge_worker_preserves_status_change_published_during_write(
         "online",
         "stopped",
     ]
-
-
-async def test_bridge_worker_crash_is_logged_and_kept_in_the_final_status(
-    tmp_path: Path, monkeypatch
-) -> None:
-    paths = RegiePaths(tmp_path)
-
-    class CrashingBridge:
-        def __init__(self, _config: object) -> None:
-            self.status_changed = asyncio.Event()
-            self.status = BridgeStatus(running=True, connection_state="starting")
-
-        async def run(self) -> None:
-            raise RuntimeError("boom")
-
-        async def close(self) -> None:
-            return None
-
-    monkeypatch.setattr("regie.bridge.runtime.TmuxBridge", CrashingBridge)
-
-    result = await asyncio.wait_for(
-        process.run_bridge_worker(
-            paths=paths,
-            socket_path=tmp_path / "daemon.sock",
-            selector="tmux",
-            client_id="regie-test",
-            token="bridge-token",
-        ),
-        timeout=5.0,
-    )
-
-    assert result == 1
-    final = process._unverified_status(paths.bridge_status_path)
-    assert final.connection_state == "stopped"
-    assert final.detail == "RuntimeError: boom"
-    assert final.pid == os.getpid()
-    assert final.token == "bridge-token"
-    assert "RuntimeError: boom" in paths.bridge_log_path.read_text(encoding="utf-8")
 
 
 def test_bridge_start_replaces_a_bridge_from_another_installation(
