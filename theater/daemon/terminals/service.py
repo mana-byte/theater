@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -34,6 +35,8 @@ from theater.models import (
     new_id,
     now,
 )
+
+logger = logging.getLogger("theater.daemon.terminals")
 
 
 class ProviderReportInvalid(TheaterError):
@@ -464,6 +467,14 @@ class TerminalProviderService:
             current = self._store.terminal_bindings.get(expected.participant_id)
             # Only identity fences: a concurrent report re-confirming the binding is not a change.
             if current is None or current.route_key != expected.route_key:
+                logger.warning(
+                    "terminal binding changed during inspect of %s/%s: expected route %s, "
+                    "current route %s",
+                    provider_id,
+                    terminal_id,
+                    expected.route_key,
+                    None if current is None else current.route_key,
+                )
                 raise TerminalIdentityMismatch(provider_id, terminal_id, "binding_changed")
         terminal = result["terminal"]
         revision = result["report_revision"]
