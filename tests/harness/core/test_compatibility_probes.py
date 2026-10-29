@@ -16,6 +16,7 @@ from theater import harness as harness_registry
 from theater import proc, timing
 from theater.daemon.harness_runtime.compatibility import CompatibilityProbeCache
 from theater.daemon.worktrees.repository import _git
+from theater.harness.builtin.plugins.claude.compatibility import claude_messaging_range_text
 from theater.harness.builtin.plugins.codex.runtime_plan import qualified_versions_range_text
 from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
 from theater.observability import tracing
@@ -79,6 +80,15 @@ def test_an_uninstalled_harness_reports_no_wiring_or_routes():
     assert record["status"] == "not-installed"
     assert record["wiring"] is None
     assert record["routes"] is None
+
+
+def test_a_runtimeless_harness_keeps_its_declared_range():
+    record = harness_registry.native_compatibility_record(
+        harness_registry.HARNESSES["claude"], installed=True, result=_SUPPORTED
+    )
+    assert record["status"] == "legacy-only"
+    assert record["qualified_range"] == claude_messaging_range_text()
+    assert record["reason"] == "no native runtime; controls use the provider terminal"
 
 
 async def test_harnesses_surfaces_a_probe_exception_as_unknown(client, daemon, monkeypatch, caplog):

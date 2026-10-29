@@ -17,13 +17,6 @@ from regie.ui_constants import (
     REGIE_DASHBOARD_HARNESS_AVAILABLE_STYLE,
     REGIE_DASHBOARD_HARNESS_UNAVAILABLE_GLYPH,
     REGIE_DASHBOARD_HARNESS_UNAVAILABLE_STYLE,
-    REGIE_DASHBOARD_HARNESS_VERSION_STYLE,
-    REGIE_DASHBOARD_ROUTE_LABEL_STYLE,
-    REGIE_DASHBOARD_ROUTE_NATIVE_STYLE,
-    REGIE_DASHBOARD_ROUTE_SEPARATOR,
-    REGIE_DASHBOARD_ROUTE_TMUX_STYLE,
-    REGIE_DASHBOARD_ROUTE_UNAVAILABLE_STYLE,
-    REGIE_DASHBOARD_ROUTES_INDENT,
     REGIE_DASHBOARD_SENTENCES,
     REGIE_DASHBOARD_TIP_CURSOR_STYLE,
     REGIE_DASHBOARD_TIP_HEADING_STYLE,
@@ -32,19 +25,18 @@ from regie.ui_constants import (
 )
 
 _COMPATIBILITY_STATUS_STYLES = {
-    "native-compatible": "$success dim",
+    "native-compatible": REGIE_DASHBOARD_HARNESS_AVAILABLE_STYLE,
     "outside-qualified-range": "$warning",
     "legacy-only": "$text-muted",
     "unknown": "$warning dim",
 }
 
-_COMPATIBILITY_DETAIL_STYLES = {
-    "native-compatible": "$success dim",
-    "outside-qualified-range": "$warning dim",
-    "unknown": "$warning dim",
+_STATUS_GLYPHS = {
+    "native-compatible": REGIE_DASHBOARD_HARNESS_AVAILABLE_GLYPH,
+    "outside-qualified-range": "!",
+    "legacy-only": "–",
+    "unknown": "?",
 }
-
-_ROUTE_KEYS = ("send", "steer", "interrupt")
 
 _BOUND_PAIR = re.compile(r"^>=(\d[\d.]*),(<=?)(\d[\d.]*)$")
 
@@ -135,112 +127,81 @@ def pretty_qualifier_range(raw: object) -> str:
     """Pretty-print a qualifier range; unrecognised shapes pass through raw."""
     if not isinstance(raw, str) or not raw.strip():
         return ""
-    compacted = [_compact_bound_pair(segment.strip()) for segment in raw.split("||")]
+    text, _, excluded = raw.partition(" excluding ")
+    compacted = [_compact_bound_pair(segment.strip()) for segment in text.split("||")]
     if any(segment is None for segment in compacted):
         return raw
-    return " · ".join(segment for segment in compacted if isinstance(segment, str))
+    pretty = " · ".join(segment for segment in compacted if isinstance(segment, str))
+    if excluded.strip():
+        pretty += f" excl. {excluded.strip()}"
+    return pretty
 
 
-def _compatibility_detail(compatibility: dict) -> str:
-    status = compatibility.get("status")
-    if not isinstance(status, str) or status not in _COMPATIBILITY_STATUS_STYLES:
-        status = "unknown"
-    if status == "unknown":
-        detail = "compatibility unknown"
-        reason = compatibility.get("reason")
-        if isinstance(reason, str) and reason.strip():
-            clipped = _clip_line(reason.strip(), REGIE_DASHBOARD_COMPAT_REASON_MAX)
-            detail = f"{detail} ({clipped})"
-        return detail
-    pretty = pretty_qualifier_range(compatibility.get("qualified_range"))
-    if not pretty:
-        return ""
-    clipped = _clip_line(pretty, REGIE_DASHBOARD_COMPAT_RANGE_MAX)
-    if status == "outside-qualified-range":
-        return f"native needs {clipped}"
+def _status_label(status: str, compatibility: dict) -> str:
+    """One bounded label per status; the qualified range is compacted, never raw."""
+    pretty = _clip_line(
+        pretty_qualifier_range(compatibility.get("qualified_range")),
+        REGIE_DASHBOARD_COMPAT_RANGE_MAX,
+    )
     if status == "native-compatible":
-        return f"qualified {clipped}"
-    return ""
-
-
-def _route_word(value: object) -> StyledPart:
-    if value == "native":
-        return ("native", REGIE_DASHBOARD_ROUTE_NATIVE_STYLE)
-    if value == "tmux":
-        return ("tmux", REGIE_DASHBOARD_ROUTE_TMUX_STYLE)
-    return ("unavailable", REGIE_DASHBOARD_ROUTE_UNAVAILABLE_STYLE)
-
-
-def _route_line_parts(routes: dict) -> list[StyledPart]:
-    """Indented per-control route line; missing or malformed routes read unavailable."""
-    parts: list[StyledPart] = ["\n", REGIE_DASHBOARD_ROUTES_INDENT]
-    for index, key in enumerate(_ROUTE_KEYS):
-        if index:
-            parts.append(REGIE_DASHBOARD_ROUTE_SEPARATOR)
-        parts.append((f"{key} ", REGIE_DASHBOARD_ROUTE_LABEL_STYLE))
-        parts.append(_route_word(routes.get(key)))
-    if routes.get("settings_update") == "native":
-        parts.append(REGIE_DASHBOARD_ROUTE_SEPARATOR)
-        parts.append(("settings ", REGIE_DASHBOARD_ROUTE_LABEL_STYLE))
-        parts.append(("native", REGIE_DASHBOARD_ROUTE_NATIVE_STYLE))
-    return parts
-
-
-def _compatibility_parts(compatibility: dict) -> list[StyledPart]:
-    """One `— wiring · detail` suffix plus the indented routes line."""
-    status = compatibility.get("status")
-    if not isinstance(status, str) or status not in _COMPATIBILITY_STATUS_STYLES:
-        status = "unknown"
-    wiring = compatibility.get("wiring")
-    if wiring not in ("native", "legacy"):
-        wiring = "native" if status == "native-compatible" else "legacy"
-    parts: list[StyledPart] = []
-    version = compatibility.get("installed_version")
-    if status != "unknown" and isinstance(version, str) and version:
-        parts.append((f" {version}", REGIE_DASHBOARD_HARNESS_VERSION_STYLE))
-    parts.append((f" — {wiring}", _COMPATIBILITY_STATUS_STYLES[status]))
-    detail = _compatibility_detail(compatibility)
-    if detail:
-        parts.append((f" · {detail}", _COMPATIBILITY_DETAIL_STYLES[status]))
-    routes = compatibility.get("routes")
-    if isinstance(routes, dict):
-        parts.extend(_route_line_parts(routes))
-    return parts
+        return f"qualified {pretty}" if pretty else "qualified"
+    if status == "outside-qualified-range":
+        return f"upgrade to {pretty}" if pretty else "outside qualified range"
+    if status == "legacy-only":
+        return pretty or "legacy"
+    reason = compatibility.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        clipped = _clip_line(reason.strip(), REGIE_DASHBOARD_COMPAT_REASON_MAX)
+        return f"unknown ({clipped})"
+    return "compatibility unknown"
 
 
 def harness_availability_content(rows: list[dict] | None) -> Content:
-    """Render one compact availability line per plugged-in harness."""
+    """Render one aligned status line per harness: mark, name, version, then label."""
     source = [] if rows is None else rows
-    parts: list[StyledPart] = []
+    entries: list[tuple[str, str, str]] = []
     for row in source:
         name = str(row.get("name") or "").strip()
         if not name:
             continue
-        if parts:
-            parts.append("\n")
+        compatibility = row.get("native_compatibility")
+        compatibility = compatibility if isinstance(compatibility, dict) else {}
         advertised = row.get("available")
         available = (
             advertised
             if isinstance(advertised, bool)
             else bool(row.get("installed", True)) and not row.get("error")
         )
-        glyph = (
-            REGIE_DASHBOARD_HARNESS_AVAILABLE_GLYPH
-            if available
-            else REGIE_DASHBOARD_HARNESS_UNAVAILABLE_GLYPH
-        )
-        style = (
-            REGIE_DASHBOARD_HARNESS_AVAILABLE_STYLE
-            if available
-            else REGIE_DASHBOARD_HARNESS_UNAVAILABLE_STYLE
-        )
-        parts.append((f"{glyph} {name}", style))
-        if name == "pi":
-            parts.append((" β", "$warning dim"))
-        compatibility = row.get("native_compatibility")
-        if available and isinstance(compatibility, dict):
-            parts.extend(_compatibility_parts(compatibility))
-        error = row.get("error")
-        if not available and isinstance(error, str) and error:
-            parts.append((f" — {error}", "$warning dim"))
+        beta = " β" if name == "pi" else ""
+        if not available:
+            pretty = _clip_line(
+                pretty_qualifier_range(compatibility.get("qualified_range")),
+                REGIE_DASHBOARD_COMPAT_RANGE_MAX,
+            )
+            error = row.get("error")
+            if pretty:
+                label = f"install {pretty}"
+            elif isinstance(error, str) and error:
+                label = error
+            else:
+                label = "not installed"
+            left = f"{REGIE_DASHBOARD_HARNESS_UNAVAILABLE_GLYPH} {name}{beta}"
+            entries.append((left, label, REGIE_DASHBOARD_HARNESS_UNAVAILABLE_STYLE))
+            continue
+        status = compatibility.get("status")
+        if not isinstance(status, str) or status not in _COMPATIBILITY_STATUS_STYLES:
+            status = "unknown"
+        style = _COMPATIBILITY_STATUS_STYLES[status]
+        version = compatibility.get("installed_version")
+        left = f"{_STATUS_GLYPHS[status]} {name}{beta}"
+        if isinstance(version, str) and version:
+            left += f" {version}"
+        entries.append((left, _status_label(status, compatibility), style))
+    width = max((len(left) for left, _, _ in entries), default=0)
+    parts: list[StyledPart] = []
+    for index, (left, label, style) in enumerate(entries):
+        if index:
+            parts.append("\n")
+        parts.append((left.ljust(width), style))
+        parts.append((f"  {label}", style))
     return Content.assemble(*parts) if parts else Content.assemble("")
