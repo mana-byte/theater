@@ -77,6 +77,7 @@ class CompletionTracker:
         delivered = self.store.completion_candidate_jobs_for_target(pid, connection=connection)
         job = delivered[0] if delivered else None
         if job is None:
+            logger.debug("turn at %s ended with no candidate job", pid)
             return
         if not answers_prompt(heard, job.prompt):
             missed = self._count_miss(job.handle, connection)

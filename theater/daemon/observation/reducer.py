@@ -501,6 +501,12 @@ class Reducer:
             async with pinned_fn(pid, batch):
                 accepted = not untrusted_refresh and accept_attachment_fn(pid, source, batch)
                 progressed = accepted and apply_fn(pid, batch, clock, turns)
+            logger.debug(
+                "%s relocate refresh quiet=%.1fs progressed=%s",
+                pid,
+                clock.quiet_for(now),
+                progressed,
+            )
             if progressed:
                 await on_progress_fn(pid, observer, batch, clock)
                 return

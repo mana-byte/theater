@@ -185,6 +185,7 @@ class DispatchControls(ControlHost):
                 error=f"queued job {head.job_handle!r} is no longer running",
                 updated_at=self._clock(),
             )
+            logger.warning("queued %s dropped: job %s missing", head.operation_id, head.job_handle)
             return QueueDispatchOutcome(failed=((head.job_handle or "", "job_missing"),))
         caller_id = job.caller_id
         if caller_id is None:

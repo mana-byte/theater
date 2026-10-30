@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -15,6 +16,8 @@ from theater.harness.contracts.runtime import (
     RuntimeCapability,
 )
 from theater.models import Busy, JobState, StaleTarget
+
+logger = logging.getLogger("theater.daemon.controls")
 
 DELIVERY_UNKNOWN_ERROR_CODE = "delivery_unknown"
 SEND_REJECTED_ERROR_CODE = "send_rejected"
@@ -266,6 +269,9 @@ class ProviderControlDelivery:
         if result is DeliveryResult.UNKNOWN:
             self._count_unknown(kind, "ack_lost")
         self._notify_settled(operation_id)
+        logger.debug(
+            "control %s settled %s code=%s kind=%s", operation_id, result, error_code, kind
+        )
 
     def defer_presence(self, operation_id: str, *, error: str) -> None:
         """Keep a proved unsent prompt awaitable under its original job handle."""
