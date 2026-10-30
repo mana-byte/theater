@@ -1,7 +1,7 @@
 """Race-safe observer wakeups with a polling fallback.
 
-The consumer clears before reading, so a wake during a read is never lost; the poll timeout
-keeps pre-live behaviour when nobody wakes. Imports nothing from ``theater.daemon``.
+The consumer clears before processing, so arrivals during preparation or reading are never lost.
+The poll timeout preserves polling when nobody wakes. Imports nothing from ``theater.daemon``.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ class WakeupSignal:
         return self._event.is_set()
 
     def consume(self) -> bool:
-        """Clear the signal and report whether it was set; call immediately before reading."""
+        """Clear the signal at iteration start, before retry guards or reads."""
         was_set = self._event.is_set()
         self._event.clear()
         return was_set

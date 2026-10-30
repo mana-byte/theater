@@ -114,6 +114,72 @@ def relocation_watch(registry, source, sink, *, awaiting=999.0):
     return observer, context
 
 
+@pytest.mark.parametrize("guard", ["checkpoint", "evidence", "quarantine"])
+async def test_pending_wake_is_consumed_before_guard_retries(registry, monkeypatch, guard):
+    source = CheckpointEvidenceSource(Batch())
+
+    async def sink(_pid, *, backend_generation, outcome):
+        raise RuntimeError("evidence store unavailable")
+
+    observer, context = relocation_watch(registry, source, sink)
+    observer.poll, observer.search = 0.25, 0.75
+    context.wake = observer.live.wake_signal("p1")
+    sleeps = []
+
+    async def record_sleep(seconds, wake):
+        sleeps.append(seconds)
+        assert not wake.is_set(), "a consumed hint must not short-circuit retry backoff"
+
+    monkeypatch.setattr(observer, "_sleep", record_sleep)
+    if guard in {"checkpoint", "evidence"}:
+        source.pending = "cursor-1"
+    if guard == "checkpoint":
+
+        def failing_checkpoint(*args, **kwargs):
+            raise RuntimeError("checkpoint store unavailable")
+
+        monkeypatch.setattr(observer.store, "set_source_checkpoint", failing_checkpoint)
+    elif guard == "evidence":
+        source.held = (outcome("turn-1", "session-1"),)
+        observer._retain_terminal_evidence(
+            "p1", source, Batch(terminal_evidence=source.held), context.registration
+        )
+    else:
+        monkeypatch.setattr(observer, "transcript_identity_lost", lambda _pid: True)
+
+    context.wake.wake()
+    for _ in range(3):
+        assert await observer._prepare_iteration(context) is False
+    assert sleeps == [observer.search if guard == "quarantine" else observer.poll] * 3
+
+
+@pytest.mark.parametrize("arrival", ["preparation", "read"])
+async def test_wake_arriving_during_an_iteration_survives_its_read(registry, monkeypatch, arrival):
+    source = CountingBatchSource()
+    observer, context = relocation_watch(registry, source, None)
+    context.wake = observer.live.wake_signal("p1")
+
+    if arrival == "preparation":
+
+        async def flush(_pid):
+            context.wake.wake()
+            return True
+
+        monkeypatch.setattr(observer, "_flush_pending_evidence", flush)
+    else:
+        read = source.read
+
+        async def arriving_read():
+            context.wake.wake()
+            return await read()
+
+        monkeypatch.setattr(source, "read", arriving_read)
+
+    assert await observer._prepare_iteration(context)
+    await observer._read_watch_batch(context, _WatchIteration(next_poll=observer.poll))
+    assert context.wake.is_set(), "an arrival after preparation must request another iteration"
+
+
 async def test_relocated_evidence_routes_from_the_production_watch(registry):
     evidence = outcome("turn-1", "session-1")
     source = RelocatingEvidenceSource(evidence)

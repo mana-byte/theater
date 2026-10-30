@@ -132,6 +132,8 @@ async def _harness_event(daemon, params: dict) -> dict:
         native_id=native_id,
         admission_identity=identity,
     )
+    if not result.duplicate and not result.dropped:
+        daemon.observer.live.wake(request.pid)
     _publish_hook_event(daemon, request, result)
     return {"ok": True, "duplicate": result.duplicate, "dropped": result.dropped}
 
