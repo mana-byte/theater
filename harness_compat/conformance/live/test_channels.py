@@ -7,6 +7,8 @@ The event oracle joins the hook bus's admitted native id to its projected trajec
 
 from __future__ import annotations
 
+import asyncio
+import json
 import shlex
 import time
 import uuid
@@ -56,48 +58,7 @@ async def test_a_channel_delivers_its_declared_facts(live, obligation):
     )
     await live.ready(participant)
     if event:
-        assert obligation.detail in live.compat.hook_events, (
-            f"the adapter has no stimulus for declared hook {obligation.detail}"
-        )
-        probe = live.compat.hook_events[obligation.detail]
-        release = live.workdir / f".hook-release-{uuid.uuid4().hex}"
-        call_id = None if probe is None else f"hook_probe_{uuid.uuid4().hex}"
-        call = (
-            MockToolCall(probe.name, probe.render(release=shlex.quote(str(release))), call_id)
-            if probe is not None
-            else None
-        )
-        final = f"HOOK-{uuid.uuid4().hex}"
-        if call is not None:
-            live.queue(MockReply("hook probe", tool_calls=(call,)))
-        live.queue(MockReply(final))
-        prompt = f"Run the scripted probe, then reply {final}"
-
-        async def check_recipe():
-            if call is not None:
-                check_tool_fit(live, prompt, call)
-
-        async with capture_channel_facts(live.client, participant) as page:
-            turn_started_at = time.time()
-            handle = await live.submit(participant, prompt)
-            try:
-                await expect_channel_facts(
-                    live.client,
-                    participant,
-                    channel,
-                    page,
-                    call_id,
-                    event=event,
-                    turn_started_at=turn_started_at,
-                    evidence=live.session.evidence_dir / f"{live.label}.channels.json",
-                    guard=check_recipe,
-                )
-            finally:
-                if probe is not None and "release" in probe.placeholders:
-                    release.touch()
-            job = await live.job(handle, guard=check_recipe)
-            await check_recipe()
-            assert job.state == "done" and final in str(job.result), job.error
+        await _event_probe(live, participant, channel, event, obligation.detail)
         return
     effect = await mcp_effect(live, participant)
     # The mock numbers calls within each reply; this turn scripts exactly one.
@@ -115,3 +76,118 @@ async def test_a_channel_delivers_its_declared_facts(live, obligation):
             turn_started_at=turn_started_at,
             evidence=live.session.evidence_dir / f"{live.label}.channels.json",
         )
+
+
+async def _event_probe(live, participant, channel, event, detail):
+    """Each event has its own oracle; the first plain event also proves FIFO completion."""
+    assert detail in live.compat.hook_events, (
+        f"the adapter has no stimulus for declared hook {detail}"
+    )
+    probe = live.compat.hook_events[detail]
+    release = live.workdir / f".hook-release-{uuid.uuid4().hex}"
+    call_id = None if probe is None else f"hook_probe_{uuid.uuid4().hex}"
+    call = (
+        MockToolCall(probe.name, probe.render(release=shlex.quote(str(release))), call_id)
+        if probe is not None
+        else None
+    )
+    final = f"HOOK-{uuid.uuid4().hex}"
+    if call is not None:
+        live.queue(MockReply("hook probe", tool_calls=(call,)))
+        live.queue(MockReply(final))
+    prompt = f"Run the scripted probe, then reply {final}"
+
+    async def check_recipe():
+        if call is not None:
+            check_tool_fit(live, prompt, call)
+
+    async with capture_channel_facts(live.client, participant) as page:
+        turn_started_at = time.time()
+
+        async def observed():
+            await expect_channel_facts(
+                live.client,
+                participant,
+                channel,
+                page,
+                call_id,
+                event=event,
+                turn_started_at=turn_started_at,
+                evidence=live.session.evidence_dir / f"{live.label}.channels.json",
+                guard=check_recipe,
+            )
+
+        if call is None and event == next(
+            binding.event
+            for binding in channel.bindings
+            if f"{channel.declaration.id}/{binding.event}" in live.compat.hook_events
+            and live.compat.hook_events[f"{channel.declaration.id}/{binding.event}"] is None
+        ):
+            job = await _queued_probe(live, participant, prompt, final)
+            await observed()
+        else:
+            if call is None:
+                live.queue(MockReply(final))
+            handle = await live.submit(participant, prompt)
+            try:
+                await observed()
+            finally:
+                if probe is not None and "release" in probe.placeholders:
+                    release.touch()
+            job = await live.job(handle, guard=check_recipe)
+        await check_recipe()
+        assert job.state == "done" and final in str(job.result), job.error
+
+
+async def _queued_probe(live, participant: str, prompt: str, final: str):
+    """Prove FIFO strict/plain jobs through actual provider, transcript and terminal awaits."""
+    original_prompt = f"Held original {uuid.uuid4().hex}"
+    strict_answer = {"status": "done", "summary": uuid.uuid4().hex, "blockers": []}
+    strict_prompt = f"Queued strict probe. Reply only {json.dumps(strict_answer)}"
+    held = await live.hold_turn(participant, original_prompt)
+    first_hold = live.hold()
+    try:
+        first = (
+            await live.client.controls.queue_followup(
+                participant,
+                strict_prompt,
+                idempotency_key=uuid.uuid4().hex,
+                response_format={"$theater": "delegate"},
+            )
+        ).value.job_handle
+        second = (
+            await live.client.controls.queue_followup(
+                participant, prompt, idempotency_key=uuid.uuid4().hex
+            )
+        ).value.job_handle
+        assert first is not None and second is not None and first != second
+        assert tuple((await live.controls(participant)).extra["queued"]) == (first, second)
+        assert not live.turns(strict_prompt) and not live.turns(prompt)
+        live.queue(MockReply(json.dumps(strict_answer), hold=first_hold))
+        live.queue(MockReply(final))
+        held.hold.release()
+        assert await asyncio.to_thread(first_hold.wait_reached, 60), "first followup never ran"
+        original = await live.job(held.handle)
+        assert original.state == "done" and original.finished_at is not None, original.error
+        assert (await live.client.jobs.get(first)).value.state == "running"
+        assert tuple((await live.controls(participant)).extra["queued"]) == (second,)
+        assert not live.turns(prompt), "second followup overtook the first job"
+        first_hold.release()
+        strict_job = await live.job(first)
+        plain_job = await live.job(second)
+        for handle, job in ((first, strict_job), (second, plain_job)):
+            assert job.handle == handle and job.target_id == participant
+            assert job.state == "done" and job.finished_at is not None, job.error
+            assert job.extra["await_reason"] in ("job_terminal", "presence_released")
+        assert strict_job.extra["structured_status"] == "parsed"
+        assert strict_job.to_wire()["result"] == strict_answer
+        assert plain_job.result == final
+        assert not (await live.controls(participant)).extra["queued"]
+        (root,) = live.turns(original_prompt)
+        (strict,) = live.turns(strict_prompt)
+        (plain,) = live.turns(prompt)
+        assert root.messages < strict.messages < plain.messages
+        return plain_job
+    finally:
+        held.hold.release()
+        first_hold.release()

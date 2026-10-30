@@ -604,9 +604,11 @@ logs, metrics, and spans.
 
 ### Current shipped state
 
-Claude, Codex, OpenCode, Pi, and Vibe explicitly declare richer hook and native
-OTel channels, but all are currently unavailable. Their durable transcript or
-database sources remain authoritative until safety and evidence gates pass.
+Claude's probed command hooks enrich tool observations and main-session
+`UserPromptSubmit`/`Stop` metadata. They preserve existing hooks and require trusted transcript
+identity; invocation IDs identify observations, never terminal answering turns. Input and
+completion retain their provider/transcript wiring. Claude's OTel channel and the other harnesses'
+hook/OTel channels remain unavailable; their durable sources retain ownership.
 Do not advertise an unimplemented native integration. Codex additionally ships
 a typed runtime manifest (a detached `codex app-server` backend with the stock
 native CLI UI attached to the same thread); its tested compatibility

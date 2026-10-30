@@ -67,7 +67,7 @@ COMPAT = CompatManifest(
     native_edit=NativeEdit("Write", {"file_path": "{path}", "content": "{nonce}\n"}),
     # Behind ANTHROPIC_BASE_URL (the mock) Claude defers MCP tools until a search loads one.
     mcp_discovery=McpDiscovery("ToolSearch", {"query": "select:mcp__{server}__{tool}"}),
-    canaries=("launch-files-dropped",),
+    canaries=("launch-files-dropped", "prompt-submit-hook-dropped", "stop-hook-dropped"),
     hook_events={
         "native-hooks/PreToolUse": HookProbe(
             "Bash",
@@ -75,6 +75,8 @@ COMPAT = CompatManifest(
         ),
         "native-hooks/PostToolUse": HookProbe("Bash", {"command": "printf compat-hook"}),
         "native-hooks/PostToolUseFailure": HookProbe("Bash", {"command": "exit 1"}),
+        "native-hooks/UserPromptSubmit": None,
+        "native-hooks/Stop": None,
     },
 )
 

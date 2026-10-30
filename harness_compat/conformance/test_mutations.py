@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 from pathlib import Path
 from textwrap import dedent
@@ -99,6 +100,46 @@ def _mutate(name: str, manifest):
     namespace: dict[str, Any] = {"replace": dataclasses.replace, "logging": logging}
     exec(dedent(mutation.source), namespace)
     return namespace["mutate"](manifest)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "event", "other"),
+    [
+        ("prompt-submit-hook-dropped", "UserPromptSubmit", "Stop"),
+        ("stop-hook-dropped", "Stop", "UserPromptSubmit"),
+    ],
+)
+def test_event_canary_drops_only_added_observation_preserving_receipts_and_user_hooks(
+    mutation, event, other, theater_home
+):
+    from theater import paths
+    from theater.harness.builtin.plugins.claude.hooks import native_hook_token_path
+    from theater.harness.builtin.plugins.claude.manifest import MANIFEST
+    from theater.harness.contracts.callbacks import HookInstallContext
+
+    before = {
+        "hooks": {
+            name: [{"hooks": [{"command": "existing", "type": "command"}]}]
+            for name in (event, other, "SessionStart")
+        }
+    }
+    path = paths.participant_launch_dir("p") / "claude.settings.json"
+    mutated = _mutate(mutation, MANIFEST).observation.hook_channels[0]
+    overlay = mutated.installer(
+        HookInstallContext(
+            participant_id="p",
+            channel_id="native-hooks",
+            token_file=native_hook_token_path("p"),
+            theater_executable="theater",
+            public_files={path: json.dumps(before)},
+        )
+    )
+    after = json.loads(overlay.replacements[path])["hooks"]
+    assert after[event] == before["hooks"][event]
+    assert after["SessionStart"] == before["hooks"]["SessionStart"]
+    assert after[other][0] == before["hooks"][other][0] and len(after[other]) == 2
+    assert len(after["PreToolUse"]) == 1
+    assert event in {binding.event for binding in mutated.bindings}
 
 
 def _with_native_runtime():

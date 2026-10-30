@@ -1,6 +1,6 @@
-"""Supported Claude Code tool-lifecycle hook bindings.
+"""Supported Claude Code passive tool and main-session hook bindings.
 
-Observation-only and async: a missing daemon or bad delivery never blocks Claude's tools.
+Observation-only and async: a missing daemon or bad delivery never blocks native work.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from .path_facts import has_session_stem, is_jsonl_transcript
 
 NATIVE_HOOK_CHANNEL = "native-hooks"
 CLAUDE_TOOL_HOOK_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
+CLAUDE_SESSION_HOOK_EVENTS = ("UserPromptSubmit", "Stop")
 
 type ClaudeHook = dict[str, object]
 type ClaudeHookEntry = dict[str, list[ClaudeHook]]
@@ -81,7 +82,7 @@ def native_hook_settings(participant_id: str) -> ClaudeSettings:
                     ]
                 }
             ]
-            for event in CLAUDE_TOOL_HOOK_EVENTS
+            for event in (*CLAUDE_TOOL_HOOK_EVENTS, *CLAUDE_SESSION_HOOK_EVENTS)
         }
     }
 
@@ -109,6 +110,18 @@ def install_native_hooks(context: HookInstallContext) -> HookInstallOverlay:
 def correlate_tool_hook(context: HookCorrelationContext) -> str:
     """Return one admitted stable identity for a tool lifecycle observation."""
     payload = context.payload
+    session_id, _ = _correlated_session(context)
+    tool_use_id = _require_identifier(payload, "tool_use_id")
+    native_id = trajectory_identifier(
+        f"claude-hook:{session_id}:{tool_use_id}", overflow_prefix="claude-hook"
+    )
+    if native_id is None:
+        raise ValueError("Claude hook session/tool identity is invalid")
+    return native_id
+
+
+def _correlated_session(context: HookCorrelationContext) -> tuple[str, str]:
+    payload = context.payload
     expected_session_id, expected_transcript_location = _trusted_identity(context)
     _require_event_name(payload, context.event)
     session_id = _require_identifier(payload, "session_id")
@@ -117,13 +130,58 @@ def correlate_tool_hook(context: HookCorrelationContext) -> str:
         raise ValueError("Claude hook session_id does not match the trusted session")
     if transcript_location != expected_transcript_location:
         raise ValueError("Claude hook transcript_path does not match the trusted transcript")
-    tool_use_id = _require_identifier(payload, "tool_use_id")
+    return session_id, transcript_location
+
+
+def correlate_session_hook(context: HookCorrelationContext) -> str:
+    """Bind one main-session invocation to an already trusted transcript."""
+    session_id, _ = _correlated_session(context)
+    return _session_native_id(context, session_id)
+
+
+def _session_native_id(context: HookCorrelationContext | HookDecodeContext, session_id: str) -> str:
+    if context.event not in CLAUDE_SESSION_HOOK_EVENTS or "agent_id" in context.payload:
+        raise ValueError("Claude lifecycle observation requires a main-session event")
+    invocation = trajectory_identifier(context.delivery_id)
+    if invocation is None:
+        raise ValueError("Claude lifecycle observation requires an invocation delivery_id")
     native_id = trajectory_identifier(
-        f"claude-hook:{session_id}:{tool_use_id}", overflow_prefix="claude-hook"
+        f"claude-hook:{session_id}:{context.event}:{invocation}", overflow_prefix="claude-hook"
     )
     if native_id is None:
-        raise ValueError("Claude hook session/tool identity is invalid")
+        raise ValueError("Claude lifecycle invocation identity is invalid")
     return native_id
+
+
+def decode_session_hook(context: HookDecodeContext) -> tuple[ChannelFact, ...]:
+    """Observe metadata only: a Stop can be blocked or leave background work running."""
+    payload = context.payload
+    _require_event_name(payload, context.event)
+    session_id = _require_identifier(payload, "session_id")
+    transcript_path = _require_transcript_for_session(payload, session_id)
+    if context.native_id != _session_native_id(context, session_id):
+        raise ValueError("Claude lifecycle native identity does not match its invocation")
+    details = [
+        trajectory_detail("hook_event", context.event, format=ContentFormat.TEXT),
+        trajectory_detail("session_id", session_id, format=ContentFormat.TEXT),
+        trajectory_detail("transcript_path", transcript_path, format=ContentFormat.PATH),
+    ]
+    prompt_id = _optional_identifier(payload, "prompt_id")
+    if prompt_id is not None:
+        details.append(trajectory_detail("prompt_id", prompt_id, format=ContentFormat.TEXT))
+    if context.event == "Stop":
+        active = payload.get("stop_hook_active")
+        if not isinstance(active, bool):
+            raise TypeError("Claude Stop stop_hook_active must be a boolean")
+        details.append(trajectory_detail("stop_hook_active", active, format=ContentFormat.JSON))
+    fact = TrajectoryFact(
+        kind=TrajectoryKind.SYSTEM,
+        source=_HOOK_SOURCE,
+        summary=f"Claude hook: {context.event}",
+        native_id=context.native_id,
+        details=tuple(details),
+    )
+    return (ChannelFact(SignalKind.LIFECYCLE, fact),)
 
 
 def decode_tool_hook(context: HookDecodeContext) -> tuple[ChannelFact, ...]:
@@ -298,9 +356,12 @@ def _optional_identifier(payload: Mapping[str, object], key: str) -> str | None:
 
 
 __all__ = [
+    "CLAUDE_SESSION_HOOK_EVENTS",
     "CLAUDE_TOOL_HOOK_EVENTS",
     "NATIVE_HOOK_CHANNEL",
+    "correlate_session_hook",
     "correlate_tool_hook",
+    "decode_session_hook",
     "decode_tool_hook",
     "install_native_hooks",
     "native_hook_settings",

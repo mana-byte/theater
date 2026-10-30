@@ -58,6 +58,121 @@ def _correlation_context(
     )
 
 
+def _decode_hook(payload, event, *, delivery_id="invocation"):
+    binding = _binding(event)
+    native_id = binding.correlation(_correlation_context(payload, event, delivery_id=delivery_id))
+    [decoded] = binding.decoder(
+        HookDecodeContext(
+            participant_id="participant",
+            channel_id=NATIVE_HOOK_CHANNEL,
+            event=event,
+            payload=payload,
+            native_id=native_id,
+            delivery_id=delivery_id,
+        )
+    )
+    return decoded
+
+
+_SESSION_HOOK_CASES = [("user_prompt_submit", "UserPromptSubmit"), ("stop", "Stop")]
+
+
+@pytest.mark.parametrize(("fixture_key", "event"), _SESSION_HOOK_CASES)
+def test_main_session_hook_observes_bounded_metadata_without_turn_or_answers(fixture_key, event):
+    payload = dict(captured_hooks()[fixture_key], agent_type="main-agent")
+    decoded = _decode_hook(payload, event)
+    fact = decoded.fact
+    assert decoded.signal is SignalKind.LIFECYCLE
+    assert fact.kind is TrajectoryKind.SYSTEM
+    assert fact.status is TrajectoryStatus.UNKNOWN and fact.turn_id is None
+    assert fact.native_id != payload["prompt_id"]
+    details = {detail.name: detail.preview.text for detail in fact.details}
+    assert details["hook_event"] == event and details["prompt_id"] == payload["prompt_id"]
+    assert not {"prompt", "last_assistant_message", "agent_type"}.intersection(details)
+    assert all(
+        str(payload.get(key)) not in fact.summary for key in ("prompt", "last_assistant_message")
+    )
+
+
+@pytest.mark.parametrize(("fixture_key", "event"), _SESSION_HOOK_CASES)
+@pytest.mark.parametrize("agent_id", [None, "", {}, [], 7, "subagent"])
+def test_main_session_hook_rejects_any_present_agent_id(fixture_key, event, agent_id):
+    payload = dict(captured_hooks()[fixture_key], agent_id=agent_id)
+    binding = _binding(event)
+    with pytest.raises(ValueError, match="main-session"):
+        binding.correlation(_correlation_context(payload, event, delivery_id="invocation"))
+    with pytest.raises(ValueError, match="main-session"):
+        binding.decoder(
+            HookDecodeContext(
+                participant_id="participant",
+                channel_id=NATIVE_HOOK_CHANNEL,
+                event=event,
+                payload=payload,
+                native_id="untrusted",
+                delivery_id="invocation",
+            )
+        )
+
+
+@pytest.mark.parametrize(("fixture_key", "event"), _SESSION_HOOK_CASES)
+def test_main_session_hook_requires_invocation_identity_and_rechecks_it(fixture_key, event):
+    payload = captured_hooks()[fixture_key]
+    binding = _binding(event)
+    with pytest.raises(ValueError, match="invocation delivery_id"):
+        binding.correlation(_correlation_context(payload, event))
+    with pytest.raises(ValueError, match="does not match its invocation"):
+        binding.decoder(
+            HookDecodeContext(
+                participant_id="participant",
+                channel_id=NATIVE_HOOK_CHANNEL,
+                event=event,
+                payload=payload,
+                native_id="other-invocation",
+                delivery_id="invocation",
+            )
+        )
+
+
+@pytest.mark.parametrize("active", [None, 1, "true"])
+def test_stop_rejects_malformed_repeat_metadata(active):
+    with pytest.raises(TypeError, match="must be a boolean"):
+        _decode_hook(dict(captured_hooks()["stop"], stop_hook_active=active), "Stop")
+
+
+def test_session_filter_preserves_existing_subagent_tool_hooks():
+    payload = dict(captured_hooks()["pre_tool_use"], agent_id="subagent", agent_type="worker")
+    assert _decode_hook(payload, "PreToolUse").fact.status is TrajectoryStatus.RUNNING
+
+
+async def test_repeated_blocked_stops_are_distinct_passive_invocations():
+    channel = OBSERVATION.hook_channels[0]
+    runtime = HookRuntime(lambda *_: True)
+    source = runtime.open_source(participant_id="participant", channel=channel)
+    try:
+        for delivery_id, active in [("stop-1", False), ("stop-2", True), ("stop-2", True)]:
+            payload = dict(captured_hooks()["stop"], stop_hook_active=active)
+            decoded = _decode_hook(payload, "Stop", delivery_id=delivery_id)
+            runtime.enqueue(
+                participant_id="participant",
+                channel=channel,
+                event="Stop",
+                payload=payload,
+                delivery_id=delivery_id,
+                native_id=decoded.fact.native_id,
+            )
+        batch = await source.read()
+        assert batch.events == () and batch.status is None and batch.terminal_evidence == ()
+        records = project_batch(batch, participant_id="participant", source_epoch="epoch")
+        assert len({record.native_id for record in records}) == 2
+        assert all(
+            record.status is TrajectoryStatus.UNKNOWN and record.turn_id is None
+            for record in records
+        )
+    finally:
+        await source.aclose()
+        await runtime.aclose()
+
+
 @pytest.mark.parametrize(
     ("fixture_key", "event", "status", "revision"),
     (
@@ -271,9 +386,8 @@ async def test_reordered_and_duplicate_lifecycle_hooks_settle_to_one_terminal_ob
     runtime = HookRuntime(lambda _participant_id, _channel_id: True)
     source = None
     try:
-        # Async Claude hooks have no native delivery id.  The same native
-        # session/tool identity makes a duplicate PreToolUse harmless, while a
-        # late PreToolUse cannot overwrite an already-observed terminal state.
+        # Invocation IDs differ; session/tool identity still coalesces repeated native events.
+        # A late PreToolUse cannot overwrite an already-observed terminal state.
         for event, payload, delivery_id in (
             ("PostToolUse", post, "post-first"),
             ("PreToolUse", pre, "pre-late"),

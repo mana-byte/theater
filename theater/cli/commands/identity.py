@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 from theater.cli.render import _candidate_line
 from theater.client import DaemonClient, call_sync
@@ -32,6 +33,7 @@ async def _send_transcript_receipt(args, *, token: str, payload: dict) -> None:
 
 
 async def _send_harness_event(args, *, token: str, payload: dict) -> None:
+    delivery_id = args.delivery_id if args.delivery_id is not None else uuid4().hex
     async with DaemonClient(autostart=False) as client:
         await client.call(
             "harness.event",
@@ -39,7 +41,7 @@ async def _send_harness_event(args, *, token: str, payload: dict) -> None:
             token=token,
             channel=args.channel,
             event=args.event,
-            delivery_id=args.delivery_id,
+            delivery_id=delivery_id,
             payload=payload,
         )
 

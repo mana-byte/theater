@@ -1165,8 +1165,12 @@ harness branch. Native environment constants belong to the plugin; see
 This inbound harness OTel channel is distinct from `theater/observability/`,
 which exports Theater's own daemon, CLI, and régie telemetry. Claude ships its
 native-hooks channel live — launch-local, probed before install, best-effort
-LIFECYCLE enrichment only, the durable transcript still primary. Codex, opencode,
-pi, and vibe declare richer hooks and native OTel explicitly and currently mark
+LIFECYCLE enrichment only, the durable transcript still primary. Its main-session
+`UserPromptSubmit` and `Stop` hooks carry bounded metadata under invocation delivery IDs;
+they require an already trusted session/transcript and reject any present `agent_id`.
+Prompt IDs cannot name answering turns: Stop may repeat, be blocked, or leave background work.
+Hooks wake observation, while provider checks authorize input and the transcript completes jobs.
+Codex, opencode, pi, and vibe declare richer hooks and native OTel explicitly and currently mark
 them unavailable; their durable transcript/database sources remain authoritative
 until safety and live-evidence gates pass.
 
@@ -1720,8 +1724,8 @@ a private per-participant connection or a passive frontend extension while
 the stock native CLI UI stays attached to the same live session. Codex uses
 the detached app-server; OpenCode uses an authenticated detached server with a
 stock attached UI. Pi uses its public extension for send, interrupt, lifecycle,
-and confirmed thinking updates. Claude adds correlated command-hook tool
-observations but retains legacy controls; Vibe stays legacy.
+and confirmed thinking updates. Claude adds passive tool and main-session command-hook
+observations but retains legacy controls and transcript completion; Vibe stays legacy.
 
 **MCP's constraint still holds.** MCP remains outbound-only (§1): a server
 still cannot wake an agent, and nothing here changes that. Native runtime

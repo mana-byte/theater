@@ -34,8 +34,11 @@ from .callbacks import (
 )
 from .compatibility import probe_claude_hooks
 from .hooks import (
+    CLAUDE_SESSION_HOOK_EVENTS,
     CLAUDE_TOOL_HOOK_EVENTS,
+    correlate_session_hook,
     correlate_tool_hook,
+    decode_session_hook,
     decode_tool_hook,
     install_native_hooks,
 )
@@ -66,11 +69,15 @@ _NATIVE_HOOKS = HookChannelManifest(
         HookBinding(
             event=event,
             signals=(SignalKind.LIFECYCLE,),
-            decoder=decode_tool_hook,
-            correlation=correlate_tool_hook,
+            decoder=decoder,
+            correlation=correlation,
             delivery=HookDeliveryMode.BEST_EFFORT,
         )
-        for event in CLAUDE_TOOL_HOOK_EVENTS
+        for events, decoder, correlation in (
+            (CLAUDE_TOOL_HOOK_EVENTS, decode_tool_hook, correlate_tool_hook),
+            (CLAUDE_SESSION_HOOK_EVENTS, decode_session_hook, correlate_session_hook),
+        )
+        for event in events
     ),
     installer=install_native_hooks,
     probe=probe_claude_hooks,

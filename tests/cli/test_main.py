@@ -366,7 +366,10 @@ def test_harness_event_forwards_opaque_object_without_autostart(monkeypatch, tmp
     assert seen["payload"] == {"native_id": "n-1"}
 
 
-def test_harness_event_sender_disables_daemon_autostart(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("delivery_id", [None, "supplied-invocation"])
+def test_harness_event_sender_disables_autostart_and_mints_only_missing_ids(
+    monkeypatch, tmp_path, delivery_id
+) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("secret\n")
     seen = {}
@@ -386,13 +389,19 @@ def test_harness_event_sender_disables_daemon_autostart(monkeypatch, tmp_path) -
             seen["params"] = params
 
     monkeypatch.setattr(identity, "DaemonClient", Client)
-    asyncio.run(
-        identity._send_harness_event(
-            _args(token_file), token="secret", payload={"native_id": "n-1"}
-        )
-    )
+    args = _args(token_file)
+    args.delivery_id = delivery_id
+    asyncio.run(identity._send_harness_event(args, token="secret", payload={"native_id": "n-1"}))
     assert seen["autostart"] is False
     assert seen["method"] == "harness.event"
+    first_id = seen["params"]["delivery_id"]
+    assert isinstance(first_id, str) and first_id
+    asyncio.run(identity._send_harness_event(args, token="secret", payload={"native_id": "n-1"}))
+    second_id = seen["params"]["delivery_id"]
+    if delivery_id is None:
+        assert first_id != second_id
+    else:
+        assert first_id == second_id == delivery_id
 
 
 def test_harness_event_rejects_invalid_utf8_quietly_or_strictly(monkeypatch, tmp_path) -> None:
