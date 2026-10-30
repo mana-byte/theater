@@ -63,12 +63,8 @@ def require_supported_version(binary: str = "opencode") -> tuple[int, int, int]:
             f"with {VERSION_ENV}."
         )
     rendered = release_text(version)
-    if not VERSION_POLICY.admits(rendered):
-        raise BadRequest(
-            f"{binary} on PATH is OpenCode {rendered}; qualified releases are "
-            f"{VERSION_POLICY.range_text}. "
-            "Install a supported release or put one first on PATH, then retry the spawn."
-        )
+    if refusal := VERSION_POLICY.refusal("OpenCode", rendered):
+        raise BadRequest(f"{binary} on PATH: {refusal}, then retry the spawn.")
     return version
 
 

@@ -68,6 +68,24 @@ class VersionPolicy:
             text += " excluding " + ", ".join(self.excluded)
         return text
 
+    def refusal(self, name: str, version: str) -> str | None:
+        """Why ``name`` ``version`` is refused and which upgrade fixes it; None when admitted."""
+        if self.admits(version):
+            return None
+        try:
+            older = version_key(version) < version_key(self.minimum)
+        except ValueError:
+            why, fix = "is not a stable release", "install a stable release"
+        else:
+            if version in self.excluded:
+                why, fix = "is excluded", f"install another {name} release"
+            elif older:
+                why, fix = "is too old", f"upgrade {name} to >={self.minimum}"
+            else:
+                why, fix = "is too new", f"upgrade Theater or install {name} <={self.maximum}"
+        # Agents relay the fix: the install is the user's, never theirs to change.
+        return f"{name} {version} {why} (qualified range {self.range_text}); tell the user to {fix}"
+
     def to_json(self) -> dict[str, object]:
         return {"min": self.minimum, "max": self.maximum, "excluded": list(self.excluded)}
 

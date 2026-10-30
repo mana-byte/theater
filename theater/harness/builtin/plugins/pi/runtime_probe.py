@@ -11,18 +11,16 @@ from theater.harness.contracts.version_policy import version_key
 from .constants import PI_BINARY
 from .runtime_constants import (
     _VERSION_TOKEN,
-    PI_FRONTEND_QUALIFIED_RANGE,
     PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY,
     PI_FRONTEND_RUNTIME_PROBE_TIMEOUT_SECONDS,
     VERSION_POLICY,
 )
 
 
-def _unsupported_probe(reason: str, *, version: str | None = None) -> RuntimeCompatibility:
+def _unsupported_probe(reason: str) -> RuntimeCompatibility:
     return RuntimeCompatibility(
         supported=False,
         policy=PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY,
-        native_version=version,
         reason=f"{reason}; install a qualified release or upgrade Theater",
     )
 
@@ -49,14 +47,10 @@ def probe_pi_frontend_compatibility(context: RuntimeProbeContext) -> RuntimeComp
         version_key(version)
     except ValueError:
         return _unsupported_probe("Pi --version did not report a stable release")
-    if not VERSION_POLICY.admits(version):
-        return _unsupported_probe(
-            f"Pi {version} is outside the qualified range {PI_FRONTEND_QUALIFIED_RANGE} "
-            "(excluded releases did not pass qualification)",
-            version=version,
-        )
+    refusal = VERSION_POLICY.refusal("Pi", version)
     return RuntimeCompatibility(
-        supported=True,
+        supported=refusal is None,
         policy=PI_FRONTEND_RUNTIME_COMPATIBILITY_POLICY,
         native_version=version,
+        reason=refusal,
     )

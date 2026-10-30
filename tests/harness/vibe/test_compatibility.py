@@ -13,7 +13,10 @@ from theater.harness.builtin.plugins.vibe.compatibility import (
 )
 from theater.harness.contracts.runtime import RuntimeProbeContext
 
-_REFUSAL = f"Vibe harness support requires {vibe_qualified_range_text()}"
+_REFUSAL = (
+    f"Vibe 0.0.1 is too old (qualified range {vibe_qualified_range_text()}); "
+    f"tell the user to upgrade Vibe to >={VERSION_POLICY.minimum}"
+)
 
 
 @pytest.mark.parametrize(

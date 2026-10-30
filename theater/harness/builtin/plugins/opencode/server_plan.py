@@ -112,15 +112,12 @@ def probe_opencode_server_compatibility(context: RuntimeProbeContext) -> Runtime
     if version is None:
         return _unsupported("opencode --version did not report a usable release")
     rendered = release_text(version)
-    if not VERSION_POLICY.admits(rendered):
+    if refusal := VERSION_POLICY.refusal("OpenCode", rendered):
         return RuntimeCompatibility(
             supported=False,
             policy=OPENCODE_SERVER_COMPATIBILITY_POLICY,
             native_version=rendered,
-            reason=(
-                "OpenCode release is outside the server-topology compatibility "
-                f"range; qualified releases are {VERSION_POLICY.range_text}"
-            ),
+            reason=refusal,
         )
     if context.resume:
         # The provider route owns the predecessor's lineage database.

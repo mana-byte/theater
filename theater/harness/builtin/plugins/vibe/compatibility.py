@@ -16,7 +16,7 @@ _POLICY = f"vibe-harness-{VERSION_POLICY.minimum}-compatible"
 
 
 def vibe_qualified_range_text() -> str:
-    """The human-readable qualified Vibe range, shared by the probe and launch."""
+    """The human-readable qualified Vibe range the manifest advertises."""
     return VERSION_POLICY.range_text
 
 
@@ -44,9 +44,7 @@ def probe_vibe_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibili
         supported=supported,
         policy=_POLICY,
         native_version=version,
-        reason=(
-            None if supported else f"Vibe harness support requires {vibe_qualified_range_text()}"
-        ),
+        reason=VERSION_POLICY.refusal("Vibe", version),
     )
 
 
